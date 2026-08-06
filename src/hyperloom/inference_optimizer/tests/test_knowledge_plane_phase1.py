@@ -23,6 +23,7 @@ from hyperloom.orchestrator.knowledge.config import (
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
 from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import (
+    GbrainRemoteError,
     GbrainRemoteRecipeClient,
 )
 from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_store import (
@@ -387,6 +388,55 @@ def test_remote_failure_is_observable_and_audited(tmp_path: Path) -> None:
     assert audits[-1]["success"] is False
     assert audits[-1]["mode"] == "remote"
     assert audits[-1]["backend"] == "gbrain"
+
+
+class _FailingSelectedRemoteStore:
+    backend_name = "gbrain"
+    enabled = True
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def get_recipe(self, **_kwargs):
+        raise GbrainRemoteError("injected selected-store read failure")
+
+    def search(self, **_kwargs):
+        raise GbrainRemoteError("injected selected-store search failure")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_selected_remote_read_failures_degrade_and_emit_audit() -> None:
+    audits: list[dict] = []
+    failures: list[tuple[str, Exception]] = []
+    store = _FailingSelectedRemoteStore()
+    kb = RecipeKB(
+        local=store,
+        mode="remote",
+        backend_name="gbrain",
+        audit_hook=audits.append,
+        on_remote_failure=lambda method, exc: failures.append((method, exc)),
+    )
+
+    assert kb.get_recipe(canonical_id="inference:m:h:f:mt:a:v:p") is None
+    assert kb.search(label_match={"model": "m"}) == []
+
+    assert [method for method, _exc in failures] == ["get_recipe", "search"]
+    assert [event["resolution"] for event in audits] == [
+        "remote_error",
+        "remote_error",
+    ]
+    assert all(event["mode"] == "remote" and event["hit"] is False for event in audits)
+
+
+def test_close_releases_selected_remote_store() -> None:
+    store = _FailingSelectedRemoteStore()
+    kb = RecipeKB(local=store, mode="remote", backend_name="gbrain")
+
+    kb.close()
+
+    assert store.closed is True
 
 
 def test_remote_store_champion_merge_is_monotonic_and_paired(tmp_path: Path) -> None:

@@ -92,6 +92,20 @@ def _entity(value: Any) -> str:
     return slug
 
 
+def _legacy_entity(value: Any) -> str:
+    """Return the pre-Phase-1 entity slug used by existing remote KG nodes."""
+    return str(value or "").strip().replace(" ", "_").replace("/", "_").lower()
+
+
+def _entity_aliases(value: Any) -> tuple[str, ...]:
+    """Return current and legacy slugs, preserving order and uniqueness."""
+    aliases: list[str] = []
+    for candidate in (_entity(value), _legacy_entity(value)):
+        if candidate and candidate not in aliases:
+            aliases.append(candidate)
+    return tuple(aliases)
+
+
 def _as_set(value: Any) -> set[str]:
     """Coerce a scalar / pipe-string / iterable of entities to a norm set.
 
@@ -113,7 +127,12 @@ def _as_set(value: Any) -> set[str]:
         items = value
     else:
         items = [value]
-    return {_entity(item) for item in items if str(item or "").strip()}
+    return {
+        alias
+        for item in items
+        if str(item or "").strip()
+        for alias in _entity_aliases(item)
+    }
 
 
 def _parse_props(raw: str | None) -> dict[str, str]:
@@ -512,13 +531,13 @@ class KGClient:
         """Return outgoing edges for ``slug`` (best-effort)."""
         if self._mcp is None or not slug:
             return []
-        return self._as_edges(self._mcp.call("get_links", {"slug": _entity(slug)}))
+        return self._as_edges(self._mcp.call("get_links", {"slug": slug}))
 
     def _get_backlinks(self, slug: str) -> list[dict[str, Any]]:
         """Return incoming edges for ``slug`` (best-effort)."""
         if self._mcp is None or not slug:
             return []
-        return self._as_edges(self._mcp.call("get_backlinks", {"slug": _entity(slug)}))
+        return self._as_edges(self._mcp.call("get_backlinks", {"slug": slug}))
 
     def _node_exists(self, slug: str) -> bool:
         """Return ``True`` when a page for ``slug`` exists."""
@@ -764,9 +783,16 @@ class KGClient:
         start = _entity(start_entity)
         pred_set = _as_set(predicate_filter)
 
-        edges = self._as_edges(
-            self._mcp.call("traverse_graph", {"slug": start, "depth": depth, "direction": native_dir})
-        )
+        edges = [
+            edge
+            for alias in _entity_aliases(start_entity)
+            for edge in self._as_edges(
+                self._mcp.call(
+                    "traverse_graph",
+                    {"slug": alias, "depth": depth, "direction": native_dir},
+                )
+            )
+        ]
 
         out: list[GraphNode] = []
         seen: set[tuple[str, str, int]] = set()
