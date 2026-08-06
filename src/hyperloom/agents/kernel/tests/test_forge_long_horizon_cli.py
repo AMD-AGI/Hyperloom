@@ -68,6 +68,10 @@ def _published_manifest(commit_hash: str, **overrides) -> dict:
         "correctness_passed": True,
         "baseline_wall_ms": 3.0,
         "best_wall_ms": 2.0,
+        "mean_case_speedup": 1.5,
+        "search_start_mean_case_speedup": 1.0,
+        "total_improved": True,
+        "incremental_improved": True,
         "iteration": 2,
         "snr_db": 42.0,
     }
@@ -84,6 +88,10 @@ def _checkpoint(base_commit: str, best_commit: str, **overrides) -> dict:
         "best_commit": best_commit,
         "baseline_ms": 3.0,
         "best_ms": 1.5,
+        "mean_case_speedup": 2.0,
+        "search_start_mean_case_speedup": 1.0,
+        "total_improved": True,
+        "incremental_improved": True,
         "validation_passed": True,
         "case_coverage": [],
     }
@@ -95,6 +103,28 @@ def _stub_submit_environment(monkeypatch) -> None:
     """Neutralize everything submit does outside the loop/recovery contract."""
     monkeypatch.setenv("FORGE_BASELINE_GATE", "0")
     monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+
+
+def test_observed_regression_score_is_preserved_for_diagnostics():
+    observed = forge_submit._observed_mean_case_result_fields(
+        {
+            "mean_case_speedup": 0.95,
+            "search_start_mean_case_speedup": 1.0,
+        }
+    )
+
+    assert observed == (0.95, 1.0, False, False)
+
+
+def test_regression_is_not_a_valid_recovery_best():
+    fields = forge_submit._mean_case_result_fields(
+        {
+            "mean_case_speedup": 0.95,
+            "search_start_mean_case_speedup": 1.0,
+        }
+    )
+
+    assert fields is None
 
 
 def test_all_kernel_sources_are_remapped_into_prepared_worktree(tmp_path):
@@ -214,11 +244,15 @@ def test_warm_start_best_is_exported_without_a_later_keep(tmp_path, monkeypatch)
         warm_commit = _git(workspace, "rev-parse", "HEAD")
         captured["warm_commit"] = warm_commit
         structured = {
-            "baseline_ms": 0.8,
+            "baseline_ms": 1.2,
             "pristine_baseline_ms": 1.0,
-            "search_start_ms": 0.8,
-            "best_ms": 0.8,
+            "search_start_ms": 1.2,
+            "best_ms": 1.2,
+            "mean_case_speedup": 1.25,
+            "search_start_mean_case_speedup": 1.25,
             "improved": True,
+            "total_improved": True,
+            "incremental_improved": False,
             "improved_during_search": False,
             "best_commit": warm_commit,
             "kb_experience": {
@@ -227,23 +261,27 @@ def test_warm_start_best_is_exported_without_a_later_keep(tmp_path, monkeypatch)
                     "applied": True,
                     "validation_passed": True,
                     "pristine_ms": 1.0,
-                    "keep_baseline_ms": 0.8,
+                    "keep_baseline_ms": 1.2,
                     "best_commit": warm_commit,
                 }
             },
         }
         return forge_submit.ForgeLoopOutcome(
-            baseline_ms=0.8,
-            best_ms=0.8,
+            baseline_ms=1.2,
+            best_ms=1.2,
             improved=True,
             output="warm start applied; no later KEEP",
             error=RuntimeError("forge-loop exited after warm-start validation"),
             timed_out=False,
             checkpoint=None,
             pristine_baseline_ms=1.0,
-            search_start_ms=0.8,
+            search_start_ms=1.2,
             improved_during_search=False,
             structured_result=structured,
+            mean_case_speedup=1.25,
+            search_start_mean_case_speedup=1.25,
+            total_improved=True,
+            incremental_improved=False,
         )
 
     _stub_submit_environment(monkeypatch)
@@ -272,10 +310,16 @@ def test_warm_start_best_is_exported_without_a_later_keep(tmp_path, monkeypatch)
     assert result["best_commit"] == captured["warm_commit"]
     assert result["kb_experience"]["read"]["applied"] is True
     assert result["pristine_baseline_ms"] == 1.0
-    assert result["search_start_ms"] == 0.8
-    assert result["best_ms"] == 0.8
+    assert result["search_start_ms"] == 1.2
+    assert result["best_ms"] == 1.2
+    assert result["mean_case_speedup"] == 1.25
+    assert result["total_improved"] is True
+    assert result["incremental_improved"] is False
     assert result["improved"] is True
     assert result["improved_during_search"] is False
+    assert "[micro_speedup] 1.2500x" in (
+        output_dir / "optimization_report.md"
+    ).read_text()
     assert (output_dir / "optimized_versions" / "v1_forge.py").read_text() == (
         "WARM_START_BEST\n"
     )
@@ -528,7 +572,14 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
 
         def communicate(self, timeout=None):
             captured["communicate_timeout"] = timeout
-            payload = {"baseline_ms": 2.0, "best_ms": 1.0, "improved": True}
+            payload = {
+                "baseline_ms": 2.0,
+                "best_ms": 1.0,
+                "mean_case_speedup": 2.0,
+                "search_start_mean_case_speedup": 1.0,
+                "total_improved": True,
+                "incremental_improved": True,
+            }
             return f"__FORGE_RESULT__{json.dumps(payload)}__FORGE_RESULT__", ""
 
     def fake_popen(command, **kwargs):
@@ -579,11 +630,17 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         "search_start_ms",
         "improved_during_search",
         "structured_result",
+        "mean_case_speedup",
+        "search_start_mean_case_speedup",
+        "total_improved",
+        "incremental_improved",
     )
     assert (outcome.baseline_ms, outcome.best_ms, outcome.improved) == (2.0, 1.0, True)
     assert outcome.error is None
     assert outcome.timed_out is False
     assert outcome.checkpoint is None
+    assert outcome.mean_case_speedup == 2.0
+    assert outcome.total_improved is True
 
     command = captured["command"]
     assert command[:5] == [
@@ -1862,7 +1919,7 @@ def test_same_iteration_recovery_conflict_resolves_wholly_to_the_manifest(
     # best_ms=1.5 (a 2.0x claim) is not merged in behind the manifest's commit.
     report = (output_dir / "optimization_report.md").read_text()
     assert "[micro_speedup] 1.5000x" in report
-    assert "baseline_ms=3.0000 best_ms=2.0000" in report
+    assert "baseline_ms=3.0000 selected_ms=2.0000" in report
     assert "2.0000x" not in report
     assert "best_ms=1.5000" not in report
 
