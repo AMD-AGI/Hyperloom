@@ -255,8 +255,8 @@ def _props_to_context(properties: dict[str, Any] | None) -> str:
 
     gbrain edges carry no structured properties — only a free-text
     ``context``. We encode the property map as compact JSON so the reader
-    can faithfully reconstruct it. Empty-valued properties are dropped to
-    match the mirror writer (``kg_links.props_to_context``).
+    can faithfully reconstruct it. Empty-valued properties are dropped;
+    :func:`_context_to_props` is the inverse used on the read path.
 
     Args:
         properties: The fact property map (``None`` yields ``"{}"``).

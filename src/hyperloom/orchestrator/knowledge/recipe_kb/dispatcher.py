@@ -25,10 +25,10 @@ _REMOTE_LABELS: dict[str, str] = {
 
 def _labels_from_canonical_id(canonical_id: str) -> dict[str, str]:
     """Decode a canonical_id into the 7-key ``label_match`` dict the
-    ``/recipes/search`` route expects.
+    ``search`` calls expect.
 
     The seven cid segments are already slug-clean, so they map 1:1 to the
-    label values the server matches on.
+    label values the store matches on.
 
     Args:
         canonical_id (str): Canonical recipe identity to decode.
@@ -256,9 +256,9 @@ class RecipeKB:
     def _remote_active(self) -> bool:
         """``True`` iff the remote client exists and is enabled.
 
-        Healthcheck is intentionally NOT issued here — we trust the per-call
-        retry budget to detect an unhealthy service; adding a separate ping
-        doubles RTT for every read.
+        Healthcheck is intentionally NOT issued here — a failed read already
+        raises :class:`RemoteRecipeClientError` and falls through to local,
+        and a separate ping would double RTT for every read.
 
         Returns:
             bool: ``True`` iff a remote client exists and is enabled.
@@ -578,9 +578,9 @@ class RecipeKB:
     ) -> dict[str, Any] | None:
         """Read a recipe row.
 
-        Remote uses the single ``/recipes/search`` route: the 7-tuple decoded
-        from ``canonical_id`` is passed as ``label_match`` and the central
-        kb-service decides exact-vs-relative match + ranking.
+        Remote first tries the slug-based ``get_recipe`` fast path; on a miss
+        it falls back to ``search`` with the 7-tuple decoded from
+        ``canonical_id`` as ``label_match``. Ranking is done client-side.
 
         ``prefer`` (workload-similarity hints) does NOT change the ``required``
         (7-tuple) filter; it only reranks candidates so the closest-workload

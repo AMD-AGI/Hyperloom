@@ -232,6 +232,8 @@ def _patch_stack_validation_internals(monkeypatch, *, new_tput: float, revert_st
         return {"status": revert_status}
 
     class _FakeBaselineExecutor:
+        default_timeout_sec = baseline_mod.BASELINE_DEFAULT_TIMEOUT_SEC
+
         def __init__(self, *, session_dir):
             self.session_dir = session_dir
 
@@ -778,6 +780,25 @@ async def test_enqueue_internal_sweep_task_omits_empty_strings(coord):
 
 
 @pytest.mark.asyncio
+async def test_enqueue_internal_sweep_task_carries_the_arg_mode_controls(coord):
+    """A ``replace`` current_best reaches the sweep, which assembles variants from it.
+
+    ``_build_grid`` honours ``base_args_mode`` / ``base_remove_args``, so omitting
+    them made the sweep append onto flags the champion had deliberately replaced.
+    """
+    coord.shared_state.current_best = {
+        "tput": 1000.0,
+        "extra_server_args": "--mla 1",
+        "remove_args": ["--chunked-prefill-size"],
+        "args_mode": "replace",
+    }
+    task = await coord._enqueue_internal_sweep_task(reason="phase_entry")
+    assert task.params["base_extra_args"] == "--mla 1"
+    assert task.params["base_remove_args"] == ["--chunked-prefill-size"]
+    assert task.params["base_args_mode"] == "replace"
+
+
+@pytest.mark.asyncio
 async def test_enqueue_internal_sweep_task_recipe_kb_recipe_propagates(coord):
     """Recipe-driven grid surfaces as source='recipe_kb' on the task."""
     coord.shared_state.warm_start_recipe = {
@@ -1217,6 +1238,56 @@ def test_sweep_singleton_bypass_flag_lets_operator_force_second_sweep():
         },
         intent_kind="delegate",
     )
+
+
+# 6a. PolicyGate baseline_phase_singleton rule
+class _BaselineSingletonState:
+    """SharedState stand-in carrying just the field the ``baseline_phase_singleton`` rule reads."""
+
+    def __init__(self, baseline_tput: float = 0.0):
+        self.baseline_tput = baseline_tput
+
+
+def test_baseline_singleton_denies_once_anchor_is_established():
+    """Both channels refuse a repeat baseline after baseline_tput turns positive."""
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
+
+    gate = _make_policy_gate(shared_state=_BaselineSingletonState(2195.86))
+
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate._validate_baseline_singleton(
+            payload={"action_name": "baseline", "params": {}},
+        )
+    assert excinfo.value.rule == "baseline_phase_singleton"
+    assert "PRELUDE is done with baseline" in (excinfo.value.hint or "")
+
+
+def test_baseline_singleton_inert_before_the_anchor_exists():
+    """PRELUDE must still be able to reach baseline_tput > 0."""
+    gate = _make_policy_gate(shared_state=_BaselineSingletonState(0.0))
+    gate._validate_baseline_singleton(
+        payload={"action_name": "baseline", "params": {}},
+    )
+
+
+def test_baseline_singleton_inert_when_shared_state_is_none():
+    gate = _make_policy_gate(shared_state=None)
+    gate._validate_baseline_singleton(
+        payload={"action_name": "baseline"},
+    )
+
+
+def test_baseline_singleton_bypass_flag_is_rejected():
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
+
+    gate = _make_policy_gate(shared_state=_BaselineSingletonState(2195.86))
+    with pytest.raises(PolicyDenied):
+        gate._validate_baseline_singleton(
+            payload={
+                "action_name": "baseline",
+                "params": {"bypass_baseline_singleton": True},
+            },
+        )
 
 
 # 6b. End-to-end through full validate_intent (delegate / propose_action)

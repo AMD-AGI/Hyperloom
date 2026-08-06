@@ -2,12 +2,12 @@
 
 Lets you drive the Quark PTQ skill chain from a natural-language prompt
 without going through ``inference_optimizer``. The prompt is fed to the
-Claude Agent SDK, which loads ``quantization_agent/SKILL.md`` as the
+Claude Agent SDK, which loads ``hyperloom/agents/quantization/SKILL.md`` as the
 runtime contract and invokes the Quark skills end-to-end.
 
-Example::
+Example (or use the ``quantization-agent`` console script)::
 
-    python -m quantization_agent.cli \\
+    python -m hyperloom.agents.quantization.cli \\
         --prompt "Quantize Qwen/Qwen3-0.5B to fp8 (kv_cache also fp8, exclude lm_head)" \\
         --workspace /scratch/qwen3-0.5b-ws \\
         --quark-root /scratch/kewang/workspace/Quark \\
@@ -19,7 +19,9 @@ Exit codes:
     0   success or partial (model usable; partial means audit/eval gap)
     1   failed (model unusable or MUST-validate violation)
     2   argparse / input validation error
-    3   operator-rejected checkpoint (interactive 'n' on retry / eval gap)
+
+An operator-rejected checkpoint has no dedicated code: it lands as ``partial``
+(0) or ``failed`` (1) with the reason in ``assessment.notes``.
 """
 
 from __future__ import annotations

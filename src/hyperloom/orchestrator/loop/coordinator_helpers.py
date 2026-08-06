@@ -625,6 +625,83 @@ def _geak_revalidation_decision(
     return "validated"
 
 
+def _geak_result_has_material(
+    result: Any,
+    *,
+    prev_best_flags: str = "",
+    prev_best_envs: Any = None,
+) -> bool:
+    """Decide whether a GEAK result carries a material optimization product.
+
+    FOR THE 2b REVALIDATION CALL SITE ONLY (writeback ``geak_fallback`` path).
+    Guards the 2b promote path against pure passthrough noise: when GEAK ships
+    no kernel/head/overlay/patch AND echoes the pre-KERNEL current_best config
+    back unchanged, a rebench that beats current_best is measurement variance,
+    not a kernel gain.
+
+    Material means ANY of:
+      * ``accepted_kernels`` has a non-empty entry (kernel rewrites);
+      * ``accepted_heads`` has a non-empty entry (attention-head optimizations);
+      * ``final_overlay`` non-empty (authored-kernel overlay dir);
+      * ``final_patch`` non-empty (source patch);
+      * ``accepted_config`` is present with a non-empty flags/env that differs
+        from the pre-KERNEL current_best config (a kernel enabled via a config
+        switch, e.g. an ASM-GEMM env flag). A missing or all-empty
+        ``accepted_config`` is NEVER material: an empty config that merely
+        differs from a non-empty current_best would otherwise promote and wipe
+        the existing config.
+
+    An empty/absent result cannot be judged here and returns ``True``; the sole
+    2b call site disambiguates it (a pre-existing ``geak_e2e`` stack entry means
+    a resume revalidation of an already-material win, otherwise no material).
+
+    Args:
+        result: The normalized GEAK ``geak_result`` blob.
+        prev_best_flags: Pre-KERNEL current_best ``extra_server_args``.
+        prev_best_envs: Pre-KERNEL current_best ``extra_envs`` mapping.
+
+    Returns:
+        ``True`` when a material product exists (or cannot be judged); else
+        ``False``.
+    """
+    from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
+        canonical_fingerprint,
+    )
+
+    def _has_nonempty(entries: Any) -> bool:
+        # A list whose items are all empty/blank (e.g. ``[""]``) is not material.
+        if not isinstance(entries, (list, tuple, set)):
+            return bool(entries)
+        return any(str(e).strip() for e in entries)
+
+    if not isinstance(result, dict) or not result:
+        return True
+    if _has_nonempty(result.get("accepted_kernels")):
+        return True
+    if _has_nonempty(result.get("accepted_heads")):
+        return True
+    if str(result.get("final_overlay") or "").strip():
+        return True
+    if str(result.get("final_patch") or "").strip():
+        return True
+    accepted_cfg = result.get("accepted_config") or {}
+    accepted_flags = str(accepted_cfg.get("flags") or "").strip()
+    parsed_envs, extra_flags = _split_env_and_flags(str(accepted_cfg.get("env") or ""))
+    if extra_flags:
+        accepted_flags = (accepted_flags + " " + extra_flags).strip()
+    # A missing / all-empty accepted_config carries no config optimization; a
+    # bare fingerprint mismatch against a non-empty current_best is NOT material
+    # (promoting it would wipe the existing config to empty).
+    if not accepted_flags and not parsed_envs:
+        return False
+    got_fp = canonical_fingerprint(accepted_flags, parsed_envs)
+    prev_fp = canonical_fingerprint(
+        str(prev_best_flags or ""),
+        dict(prev_best_envs or {}),
+    )
+    return got_fp != prev_fp
+
+
 def _normalize_geak_overlay_dir(overlay: str) -> str:
     """Normalize a GEAK ``final_overlay`` path to the loadable overlay dir.
 

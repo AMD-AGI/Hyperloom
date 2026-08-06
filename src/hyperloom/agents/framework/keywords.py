@@ -4,8 +4,10 @@
 """Smart keyword extraction from free-form gap descriptions. Pure-Python.
 
 Returns a sorted, deduplicated list of: (1) words matching the curated
-ROCm/LLM technical-term whitelist, (2) CamelCase identifiers (e.g.
-AsyncLLMEngine), (3) fallback to the first few 3+ letter words.
+ROCm/LLM technical-term whitelist, (2) simple CamelCase identifiers (e.g.
+``FlashAttention``, ``PagedAttention``; runs of consecutive capitals such as
+``AsyncLLMEngine`` or ``CUDAGraph`` are NOT matched), (3) fallback to the
+first few 3+ letter words.
 """
 
 from __future__ import annotations

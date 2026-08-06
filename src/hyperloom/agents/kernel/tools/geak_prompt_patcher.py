@@ -122,7 +122,10 @@ def ensure_geak_prompt_patched() -> tuple[bool, str]:
 
 
 def main() -> int:
-    """Run the patcher as a CLI entry point for ``install.sh``.
+    """Run the patcher as a manual CLI entry point.
+
+    No in-tree caller invokes this: ``install.sh`` stopped running the patcher,
+    so the module is reachable only by hand or from tests.
 
     Exits 0 unless the patch fails and
     ``$HYPERLOOM_GEAK_PROMPT_PATCH_REQUIRED == 1``.

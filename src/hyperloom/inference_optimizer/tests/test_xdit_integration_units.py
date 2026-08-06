@@ -6,7 +6,8 @@
 Covers the cross-cutting contracts for xDiT: the framework registry, the
 server-args env resolver, the do-not-set blacklist + compatibility filter, the
 scriptable quality gate, scriptable measurement validity, the per-framework
-YAML resolvers, and the explore cold-start grid.
+YAML resolvers, the explore cold-start grid, the roofline snapshot units and
+their latency sidecar, the TraceLens arch spec, and scriptable trace health.
 """
 
 from __future__ import annotations

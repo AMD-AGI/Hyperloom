@@ -224,6 +224,57 @@ def test_validate_dispatched_task_internal_profile_skips_delegate_body(tmp_path,
     gate.validate_dispatched_task("profile", {"reason": "watermark_refresh"})
 
 
+@pytest.mark.asyncio
+async def test_dispatched_tracked_enablement_revalidation_bypasses_baseline_singleton(tmp_path, monkeypatch):
+    sub = _runner_with_policy(tmp_path, monkeypatch)
+    state = sub.shared_state
+    assert isinstance(state, SharedState)
+    state.baseline_tput = 1000.0
+    executed = {"ran": False}
+
+    async def _stub(_ctx) -> dict:
+        executed["ran"] = True
+        return {"status": "ok"}
+
+    sub.register_executor("baseline", _stub)
+    task = await sub.tasks.create(
+        kind="baseline",
+        params={"reason": "enablement_eval_revalidation"},
+        idempotency_key="enablement-revalidation",
+    )
+    state.enablement.revalidation_task_id = task.task_id
+
+    result = await sub.run_task(task)
+
+    assert result.state == "succeeded"
+    assert executed["ran"] is True
+
+
+@pytest.mark.asyncio
+async def test_dispatched_baseline_singleton_bypass_is_denied(tmp_path, monkeypatch):
+    sub = _runner_with_policy(tmp_path, monkeypatch)
+    state = sub.shared_state
+    assert isinstance(state, SharedState)
+    state.baseline_tput = 1000.0
+    executed = {"ran": False}
+
+    async def _stub(_ctx) -> dict:
+        executed["ran"] = True
+        return {"status": "ok"}
+
+    sub.register_executor("baseline", _stub)
+    task = await sub.tasks.create(
+        kind="baseline",
+        params={"bypass_baseline_singleton": True},
+        idempotency_key="rejected-rebaseline",
+    )
+
+    result = await sub.run_task(task)
+
+    assert result.state == "failed"
+    assert executed["ran"] is False
+
+
 def test_validate_dispatched_task_skips_phase_incompatible(tmp_path, monkeypatch):
     gate, _sd = _gate(tmp_path, monkeypatch, strict_phase=True)
     state = gate.shared_state
@@ -520,3 +571,27 @@ async def test_killed_running_task_keeps_its_result(tmp_path, monkeypatch):
     assert res.result == {"produced": "work"}
     updated = await sub.tasks.get(task.task_id)
     assert updated.state == "cancelled"
+
+
+def test_enablement_round_in_flight_denies_baseline(tmp_path, monkeypatch):
+    gate, _ = _gate(tmp_path, monkeypatch)
+    gate.shared_state.enablement.inflight_task_id = "spec-abc"
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"action_name": "baseline", "params": {}},
+    )
+    with pytest.raises(PolicyDenied) as exc_info:
+        gate.validate_intent("orchestration", intent)
+    assert exc_info.value.rule == "enablement_round_in_flight"
+    assert "spec-abc" in str(exc_info.value)
+
+
+def test_enablement_round_in_flight_allows_after_cleared(tmp_path, monkeypatch):
+    gate, _ = _gate(tmp_path, monkeypatch)
+    gate.shared_state.enablement.inflight_task_id = ""
+    # baseline_tput == 0 means baseline_phase_singleton also does not fire
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"action_name": "baseline", "params": {}},
+    )
+    gate.validate_intent("orchestration", intent)

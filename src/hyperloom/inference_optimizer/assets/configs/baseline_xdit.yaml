@@ -49,7 +49,13 @@ benchmark:
     # diverge per-image and can only be validated distributionally (FID), which is
     # not yet wired up here. These reach the wrapper via env; the wrapper writes
     # quality_gate.{passed,lpips,ssim,mse} and _accuracy_gate maps passed->1.0.
-    XDIT_QUALITY_REF: ""           # reference image path; empty = gate skipped
+    # Reference image path — informational only: the materializer reads
+    # $XDIT_QUALITY_REF from the process env, not this key, and overwrites
+    # both REF and REF_WRITE. Empty auto-derives
+    # <session_dir>/storage/quality_ref/baseline.png: baseline WRITES it,
+    # every other variant COMPARES against it. The gate is skipped only on
+    # profile / roofline runs.
+    XDIT_QUALITY_REF: ""
     XDIT_QUALITY_LPIPS_MAX: 0.15
     XDIT_QUALITY_SSIM_MIN: 0.85
     XDIT_QUALITY_MSE_MAX: 0.006

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared safe-JSON helpers (canonical ``_json_io``). Stdlib-only."""
+"""Shared safe-JSON helpers (canonical ``hyperloom.common.jsonio``). Stdlib-only."""
 
 from __future__ import annotations
 

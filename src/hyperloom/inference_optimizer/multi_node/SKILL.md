@@ -50,9 +50,9 @@ deploy idle (`mn-idle.sh` → sshd + block); `restart-server` SSHes in to
 relaunch `infera.engine.{sglang,vllm}`, so the aiter JIT cache survives
 restarts. No `bootstrap` / `verify` step. Benchmarks target the **Infera
 frontend `:8000`** (`state.service_url`), never sglang rank-0.
-* Image must carry the sshd layer (`docker/infera/Dockerfile.sshd`); sshd runs
-  on `$MN_SSH_PORT` (base **2233**, not 22 — avoids colliding with node sshd
-  on :2222). Under hostNetwork each GPU role binds a distinct port —
+* Image must carry the sshd layer (`mn-sshd-init.sh`, started by `mn-idle.sh`);
+  sshd runs on `$MN_SSH_PORT` (base **2233**, not 22 — avoids colliding with
+  node sshd on :2222). Under hostNetwork each GPU role binds a distinct port —
   prefill/worker `2233+N`, decode `2243+N` (via `LWS_WORKER_INDEX`) — so
   co-located roles don't collide.
 * **Aggregated** (default): `serviceRoles=[frontend, worker]`,
@@ -224,7 +224,9 @@ in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
   LocalProbe only sees sandbox-local resources, so on multi-node every probe
   (`ray_head_dead`, `local_server_unreachable`, `gpu_memory_leaked`, …) is a
   false positive. The CLI forces `--robustness-mock` (heartbeat-only; warns only
-  if `--robustness-agent` was explicit). Shell-level health monitoring
+  if `--robustness-agent` was explicit) — unless a robustness server is
+  configured (`--robustness-server-url` / `$ROBUSTNESS_SERVER_URL`), which keeps
+  the agent backend on its cluster-wide signal. Shell-level health monitoring
   (`optimizer_runs/robustness_monitor.sh`, auto-resume on terminal
   `stop_reason`) is unaffected.
 
@@ -261,9 +263,10 @@ in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
   sandbox, so using it here looks like a clean result and rules nothing out.
 * **Variant aborts with no benchmark output** → read `failed_variants` in the
   round's `<action>_attempts.extras`, or the per-variant `abort_reason.json`
-  under `${USER_DATA_PATH}/runs/<action>/<task>/<variant>/` (`error_class` +
-  error tail).
-* **Launcher-flag rejection** → a `backends` grid variant whose CLI flag isn't
+  under `<session_dir>/runs/<action>/<task_id>/variant_<NN>_<name>/`
+  (`error_class` + error tail); `session_dir` is the per-run timestamped dir
+  (`$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`), not `$USER_DATA_PATH` itself.
+* **Launcher-flag rejection** → an explore grid variant whose CLI flag isn't
   on the current image fails at argparse. Probe the launcher from a GPU pod
   (`sglang.launch_server --help` / `vllm serve --help`) and `--skip-variants`
   the missing ones; drop the skip when the probe shows the flag again. Do not

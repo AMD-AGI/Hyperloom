@@ -389,7 +389,7 @@ def test_materialize_config_with_envs_clamp_respects_env_override(
     tmp_path,
     monkeypatch,
 ):
-    """When the operator sets ``$TP`` the clamp still fires; ``DISABLE_TP_CLAMP=1`` is the documented bypass for a deliberate oversubscribed launch."""
+    """When the operator sets ``$TP`` the clamp still fires; ``INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP=1`` is the documented bypass for a deliberate oversubscribed launch."""
     base = tmp_path / "base.yaml"
     _write_yaml_with_tp(base, tp=1)
     out = tmp_path / "out"
@@ -646,7 +646,9 @@ def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(tmp_p
     assert captured["cfg"]["benchmark"]["model"] == "/path/models/PrimeIntellect-Qwen3-1.7B"
 
 
-def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
+def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAFE_API_KEY", "must-not-reach-benchmark")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
     base = tmp_path / "base.yaml"
     _write_yaml(base)
     output_dir = tmp_path / "ws"
@@ -677,6 +679,8 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
     # benchmark_script so the cold-start double-run is not eligible and the
     # single-round path runs directly in output_dir.
     assert captured["env"]["RESULT_DIR"] == str(output_dir)
+    assert "SAFE_API_KEY" not in captured["env"]
+    assert "OPENAI_API_KEY" not in captured["env"]
 
 
 def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):

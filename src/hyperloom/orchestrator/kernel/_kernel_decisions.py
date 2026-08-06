@@ -581,6 +581,9 @@ def record_kernel_integrate_result(
         "is_fault": is_fault,
         "new_tput": result.get("new_tput"),
         "gain_pct": result.get("gain_pct"),
+        "accuracy": result.get("accuracy"),
+        "accuracy_pass": result.get("accuracy_pass"),
+        "decision_reason": result.get("decision_reason"),
         "workspace": result.get("workspace"),
         "report_path": result.get("report_path"),
         "ts": _now_iso(),
@@ -730,10 +733,14 @@ def record_kernel_integrate_result(
 
 
 def record_kernel_opt(state, result: dict[str, Any]) -> None:
-    """Capture kernel_optimization_handler result for the next Orch turn; empty kernel_id no-op, non-KEEP can't overwrite a pending KEEP, retires kernel_id (r24 guard) after >= max_partial PARTIALs (INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL).
+    """Capture the ``run_optimization`` handler result for the next Orch turn.
+
+    Empty ``kernel_id`` is a no-op, a non-KEEP cannot overwrite a pending KEEP,
+    and a ``kernel_id`` is retired after >= ``max_partial`` PARTIALs
+    (``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL``).
 
     Args:
-        result (dict[str, Any]): The kernel_optimization_handler result
+        result (dict[str, Any]): The ``run_optimization`` handler result
             envelope; non-dicts and empty ``kernel_id`` are no-ops.
     """
     if not isinstance(result, dict):
@@ -1093,7 +1100,8 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     # still retires immediately below, but infra failures get a retry.
     max_failures = resolve_kernel_opt_max_failures()
 
-    # High-impact infra-retry (flag-gated, default off). An infra non-finish
+    # High-impact infra-retry (HL_HONEST_E2E umbrella, default ON; opt out with
+    # HL_HONEST_E2E=0 or HL_INFRA_RETRY_HIGH_IMPACT=0). An infra non-finish
     # (timeout / preprocess / agent-crash; no verdict) means the attempt didn't
     # finish, not that the kernel can't be improved. Give a high-GPU%-share
     # kernel more attempts to COMPLETE rather than retiring it as a REVERT would.
@@ -1402,10 +1410,11 @@ def has_keep_pending_integrate(state) -> bool:
 
 
 def kernel_opt_attempts_count(state) -> int:
-    """Number of distinct kernels with recorded kernel_opt attempts.
+    """Number of distinct kernel tasks with recorded kernel_opt attempts.
 
     Returns:
-        int: The size of the ``kernel_opt_attempts`` ledger.
+        int: The size of the ``kernel_opt_task_attempts`` ledger (one entry
+            per stable task identity, not per ordinal kernel_id).
     """
     _ensure_kernel_task_state(state)
     return len(state.kernel_opt_task_attempts or {})

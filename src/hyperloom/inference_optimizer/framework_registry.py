@@ -3,8 +3,8 @@
 
 """Single source of truth for inference-framework capabilities.
 
-A *framework* is one serving/execution backend a session optimizes
-(``sglang`` / ``vllm`` / ``atom`` / ``xdit``). This module centralizes the
+A *framework* is one serving/execution backend a session optimizes (see the
+``FRAMEWORKS`` table below for the current set). This module centralizes the
 allowed set and per-framework behavior (extra-args env name, repo URL,
 server-reuse eligibility) so adding a framework is a single-table edit.
 

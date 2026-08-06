@@ -124,6 +124,9 @@ def _patch_winners_history(
 ) -> list[dict[str, Any]]:
     """Fix ``backend_winners_history`` data gaps: fall back to session ``baseline_tput`` for a 0 ``base_tput`` and compute missing per-winner ``gain_pct``.
 
+    Effectively a no-op today: the only call site passes an empty list, since
+    the ``state.backend_winners_history`` source field no longer exists.
+
     Args:
         rows (list[Any]): Raw ``backend_winners_history`` rows.
         baseline_tput (float | None): Session baseline throughput used to

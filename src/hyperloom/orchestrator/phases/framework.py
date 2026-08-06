@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
+from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
+from ..state.shared_state import inject_stack_base_params, resolve_grading_anchor_tput
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -33,19 +35,6 @@ from .base import PhaseHandler
 log = _logging.getLogger(__name__)
 
 # Watchdog grace period (in coordinator ticks) before an in-flight enablement
-# round whose specialist has finished — but which never produced a rearm — is
-# counted as a stall. Generous enough not to race a just-completed specialist
-# whose integrate proposal is about to be emitted, small enough that a genuinely
-# stuck flag self-heals within a few minutes rather than spinning to wall-clock.
-_ENABLEMENT_WATCHDOG_GRACE_TICKS: int = 20
-# Hard backstop: past this many ticks since dispatch, an in-flight enablement
-# round whose specialist has finished is counted as a stall unconditionally —
-# even if an integrate_patch proposal is still pending (dropped / never
-# executed). Larger than the soft grace so a normally-progressing integrate has
-# ample room to resolve first.
-_ENABLEMENT_WATCHDOG_HARD_TICKS: int = 60
-
-
 def _derive_gpu_arch(gpu_type: str) -> str:
     """Map a gpu_type label to an explicit GFX arch (never silent fallback)."""
     _MAP = {
@@ -122,14 +111,14 @@ def _enablement_carrier_params(state: Any) -> dict[str, Any]:
 
     Empty for boot-origin enablement so the boot path is unchanged.
     """
-    origin = str(getattr(state, "enablement_origin", "") or "")
+    origin = str(state.enablement.origin or "")
     if not origin:
         return {}
     out: dict[str, Any] = {
         "enablement_origin": origin,
-        "enablement_accuracy_floor": float(getattr(state, "enablement_accuracy_floor", 0.0) or 0.0),
+        "enablement_accuracy_floor": float(state.enablement.accuracy_floor or 0.0),
     }
-    cfg = str(getattr(state, "enablement_probe_config_path", "") or "")
+    cfg = str(state.enablement.probe_config_path or "")
     if cfg:
         out["enablement_probe_config_path"] = cfg
     return out
@@ -1138,7 +1127,7 @@ class FrameworkPhase(PhaseHandler):
             k = attempt % n
             candidate_refs = candidate_refs[k:] + candidate_refs[:k]
         # Persist so _maybe_escalate_to_targeted_build can pick the top candidate.
-        state.enablement_candidate_refs = list(candidate_refs)
+        state.enablement.candidate_refs = list(candidate_refs)
         source_context = self._read_enablement_source_context(signature)
         # For a weight-init failure, fold the checkpoint's ground-truth per-layer
         # weight inventory into the mandate so the loop self-corrects each retry.
@@ -1153,14 +1142,14 @@ class FrameworkPhase(PhaseHandler):
         )
         # Progressing patches from prior rounds, re-applied as a base before this
         # round's patch (serial-gap stacking); author a fix composing on top.
-        base_patches = [str(p) for p in (getattr(state, "enablement_kept_patches", None) or [])]
+        base_patches = [str(p) for p in (state.enablement.kept_patches or [])]
         # Only prior rounds' *actually-applied* setup commands (recorded by the
         # specialist and replayed by integrate_patch) stack as a base. No install
         # command is ever auto-seeded here: an unpinned upgrade of the shared
         # serving venv is unsafe (CUDA-wheel clobber of ROCm vLLM/torch,
         # transformers-major skew) and environment/build acquisition is owned by
         # the isolated targeted-build path + the specialist's own setup_commands.
-        base_setup = [str(c) for c in (getattr(state, "enablement_setup_commands", None) or [])]
+        base_setup = [str(c) for c in (state.enablement.setup_commands or [])]
         notes = mandate.task_description
         if base_patches or base_setup:
             progress_bits = []
@@ -1238,13 +1227,13 @@ class FrameworkPhase(PhaseHandler):
             params_out["runtime_candidate"] = runtime_candidate
         # Re-activate a prior KEEP'd attempt runtime so serial stacking runs on
         # the same runtime the last round promoted.
-        kept_action = getattr(state, "enablement_kept_stack_action", None)
+        kept_action = state.enablement.kept_stack_action
         if isinstance(kept_action, dict) and kept_action and "runtime_candidate" not in params_out:
             params_out["runtime_candidate"] = kept_action
         if localization_candidate is not None:
             params_out["localization_candidate"] = localization_candidate
         # Inject the last targeted-build failure into the mandate.
-        last_build_failure = getattr(state, "enablement_last_build_failure", None) or {}
+        last_build_failure = state.enablement.last_build_failure or {}
         if isinstance(last_build_failure, dict) and last_build_failure:
             fc = str(last_build_failure.get("failure_class") or "")
             fs = str(last_build_failure.get("failure_summary") or "")
@@ -1511,9 +1500,8 @@ class FrameworkPhase(PhaseHandler):
         * ``enablement_succeeded`` — terminal: a prior attempt was KEPT.
         * ``enablement_validation_pending`` — an eval-origin KEEP is awaiting
           genuine-baseline revalidation; authoring is paused until it resolves.
-        * ``enablement_dispatched`` — an authoring attempt is in flight; cleared
-          on REVERT by :meth:`_maybe_rearm_enablement` so the next tick retries
-          with the next bridging candidate (``enablement_attempts`` rotates it).
+        * ``inflight_task_id`` — a round is still resolving (specialist task or
+          the integrate that consumes its deliverable); derived, never stored.
         * run deadline passed — stop dispatching new work near the close.
 
         A non-blank log is always dispatched (the specialist repairs from the raw
@@ -1526,33 +1514,24 @@ class FrameworkPhase(PhaseHandler):
         from ..actions.executors._accuracy_gate import eval_enablement_allowed, launch_enablement_allowed
 
         state = self.shared_state
-        origin = str(getattr(state, "enablement_origin", "") or "")
+        origin = str(state.enablement.origin or "")
         admitted = eval_enablement_allowed(state) if origin == "eval" else launch_enablement_allowed(state)
         if not admitted:
             return ""
-        if bool(getattr(state, "enablement_succeeded", False)):
+        if bool(state.enablement.succeeded):
             return ""
-        if bool(getattr(state, "enablement_validation_pending", False)):
+        if bool(state.enablement.validation_pending):
             # A KEEP'd eval-origin patch is awaiting genuine-baseline revalidation;
             # do not dispatch another authoring round until that resolves.
             return ""
-        if bool(getattr(state, "enablement_dispatched", False)):
-            # Watchdog: an enablement round is marked in-flight. If it has
-            # silently finished without ever calling _maybe_rearm_enablement
-            # (e.g. an approved-but-empty deliverable that routed to plain
-            # baseline retries, or any other path that never yields an integrate
-            # result), enablement_dispatched would stay stuck True forever and
-            # the run could never reach enablement_stalled. Detect the stuck flag
-            # and count the round as a stall so the loop keeps advancing.
-            if self._enablement_round_silently_finished():
-                self._maybe_rearm_enablement(
-                    {"enablement": True, "status": "reverted", "reason": "round_finished_without_rearm"}
-                )
-                # Fall through: if the rearm cleared the guard (not at stall cap),
-                # a fresh round can be dispatched below this tick.
-                if bool(getattr(state, "enablement_dispatched", False)) or bool(getattr(state, "stop_reason", "")):
-                    return ""
-            else:
+        if state.enablement.inflight_task_id:
+            if await self._enablement_in_flight():
+                return ""
+            # Round ended without calling _maybe_rearm_enablement — count as stall.
+            self._maybe_rearm_enablement(
+                {"enablement": True, "status": "reverted", "reason": "round_finished_without_rearm"}
+            )
+            if state.stop_reason:
                 return ""
         if float(getattr(state, "baseline_tput", 0.0) or 0.0) > 0:
             return ""
@@ -1562,8 +1541,8 @@ class FrameworkPhase(PhaseHandler):
         deadline = getattr(self, "_run_deadline", None)
         if deadline is not None and time.monotonic() >= float(deadline):
             return ""
-        launch_log = str(getattr(state, "enablement_launch_log", "") or "")
-        attempt = int(getattr(state, "enablement_attempts", 0) or 0)
+        launch_log = str(state.enablement.launch_log or "")
+        attempt = int(state.enablement.attempts or 0)
         params = self._build_enablement_specialist_params(launch_log, attempt=attempt)
         if params is None:
             # A non-blank UNKNOWN log is recorded for human review, once per log.
@@ -1613,10 +1592,8 @@ class FrameworkPhase(PhaseHandler):
             lease_ttl_sec=ttl,
         )
         spec_tid = str(getattr(spec_task, "task_id", "") or "")
-        state.enablement_dispatched = True
-        state.enablement_attempts = attempt + 1
-        state.enablement_inflight_task_id = spec_tid
-        state.enablement_dispatch_tick = int(getattr(state, "tick", 0) or 0)
+        state.enablement.attempts = attempt + 1
+        state.enablement.inflight_task_id = spec_tid
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
@@ -1629,71 +1606,35 @@ class FrameworkPhase(PhaseHandler):
         )
         return spec_tid
 
-    def _enablement_round_silently_finished(self) -> bool:
-        """True when an in-flight enablement round has ended without a rearm.
+    async def _enablement_in_flight(self) -> bool:
+        """True while the current enablement round has not settled.
 
-        A round is considered silently finished when ALL hold:
-        - the dispatched specialist has written its ``specialist_done.json``
-          (authoring is over), and
-        - a grace period of ticks has elapsed since dispatch (so we never race a
-          just-completed specialist whose integrate proposal is about to be
-          emitted), and
-        - no enablement ``integrate_patch`` proposal for this task is still
-          pending review, and
-        - no task is currently running.
-
-        This is the phase-independent backstop for every code path that finishes
-        an enablement round without calling :meth:`_maybe_rearm_enablement`
-        (approved-but-empty deliverables routed to baseline retries, dropped
-        proposals, etc.). Fully guarded: any error returns ``False`` (never
-        force a false stall).
+        A round spans the authoring specialist AND the ``integrate_patch`` that
+        consumes its deliverable; the specialist goes terminal a tick before the
+        Critic sees the integrate proposal, so its task state alone is not enough.
         """
-        state = self.shared_state
-        try:
-            if not bool(getattr(state, "enablement_dispatched", False)):
-                return False
-            # NB: use an explicit None-check, not ``or -1`` — a legitimate
-            # dispatch tick of 0 is falsy and would be corrupted to -1.
-            _raw_dt = getattr(state, "enablement_dispatch_tick", -1)
-            dispatch_tick = int(_raw_dt if _raw_dt is not None else -1)
-            cur_tick = int(getattr(state, "tick", 0) or 0)
-            tid = str(getattr(state, "enablement_inflight_task_id", "") or "")
-            if not tid:
-                # No recorded task id (older state / dispatch without id): fall
-                # back to a pure grace-tick check so we still self-heal.
-                return dispatch_tick >= 0 and (cur_tick - dispatch_tick) >= _ENABLEMENT_WATCHDOG_GRACE_TICKS
-            if dispatch_tick < 0 or (cur_tick - dispatch_tick) < _ENABLEMENT_WATCHDOG_GRACE_TICKS:
-                return False
-            # Specialist must have finished authoring.
-            done_path = self.session_dir / "runs" / "specialist" / tid / "specialist_done.json"
-            if not done_path.exists():
-                return False
-            # A pending enablement integrate_patch proposal for this task means the
-            # round may still resolve normally — but only honor that within a
-            # bounded window: an integrate proposal that has sat pending for the
-            # full HARD grace never rearmed (dropped / stuck), so the watchdog
-            # still fires. Below HARD grace, defer to the in-flight proposal.
-            if (cur_tick - dispatch_tick) < _ENABLEMENT_WATCHDOG_HARD_TICKS:
-                for p in (getattr(self.state, "pending_proposals", None) or {}).values():
-                    try:
-                        if getattr(p, "action_name", "") != "integrate_patch":
-                            continue
-                        pl = getattr(p, "payload", {}) or {}
-                        if (pl.get("params") or {}).get("specialist_task_id") == tid:
-                            return False
-                    except Exception:  # noqa: BLE001 — defensive
-                        continue
-            log.info(
-                "ENABLEMENT watchdog: in-flight round task=%s finished without a rearm "
-                "(tick %d, dispatched %d); counting as a stall",
-                tid,
-                cur_tick,
-                dispatch_tick,
-            )
-            return True
-        except Exception:  # noqa: BLE001 — watchdog must never wedge the loop
-            log.debug("enablement watchdog check failed", exc_info=True)
+        from ..state.task_registry import TaskNotFound
+
+        tid = self.shared_state.enablement.inflight_task_id
+        if not tid:
             return False
+        try:
+            spec = await self.tasks.get(tid)
+        except TaskNotFound:
+            spec = None
+        if spec is not None and spec.state in ("queued", "running"):
+            return True
+        # Undecided proposal keeps the round open; once ruled, approve lands the
+        # task matched below and reject rearms directly, so it cannot defer forever.
+        for p in self.state.pending_proposals.values():
+            if p.action_name != "integrate_patch" or p.decided:
+                continue
+            if (p.payload.get("params") or {}).get("specialist_task_id") == tid:
+                return True
+        for t in (await self.tasks.queued()) + (await self.tasks.running()):
+            if t.kind == "integrate_patch" and t.params.get("specialist_task_id") == tid:
+                return True
+        return False
 
     async def _maybe_record_enablement_human_review(self, launch_log: str) -> None:
         """Record a one-shot ``needs_human_review`` for an UNKNOWN launch failure.
@@ -1719,10 +1660,10 @@ class FrameworkPhase(PhaseHandler):
             return
         digest = hashlib.sha1(text.encode("utf-8", errors="replace"), usedforsecurity=False).hexdigest()
         state = self.shared_state
-        seen = getattr(state, "enablement_human_review_logged", None)
+        seen = state.enablement.human_review_logged
         if not isinstance(seen, list):
             seen = []
-            state.enablement_human_review_logged = seen
+            state.enablement.human_review_logged = seen
         if digest in seen:
             return
         seen.append(digest)
@@ -1790,16 +1731,16 @@ class FrameworkPhase(PhaseHandler):
         # a real specialist round (targeted_build rearm rows carry no such id).
         _spec_tid = str(res.get("specialist_task_id") or "").strip()
         if _spec_tid:
-            state.enablement_last_specialist_task_id = _spec_tid
+            state.enablement.last_specialist_task_id = _spec_tid
 
         def _stack_setup_commands() -> None:
             """Append this round's applied setup commands to the durable stack."""
-            cur = list(getattr(state, "enablement_setup_commands", None) or [])
+            cur = list(state.enablement.setup_commands or [])
             for c in res.get("setup_commands_applied") or []:
                 sc = str(c)
                 if sc and sc not in cur:
                     cur.append(sc)
-            state.enablement_setup_commands = cur
+            state.enablement.setup_commands = cur
 
         def _reset_baseline_failure_backstop() -> None:
             """Clear the baseline-failure counters on enablement forward progress.
@@ -1819,21 +1760,21 @@ class FrameworkPhase(PhaseHandler):
             survive rearm."""
             action = res.get("enablement_kept_stack_action")
             if isinstance(action, dict) and action:
-                state.enablement_kept_stack_action = action
+                state.enablement.kept_stack_action = action
             runtime = res.get("enablement_active_runtime")
             if isinstance(runtime, dict) and runtime:
-                state.enablement_active_runtime = runtime
+                state.enablement.active_runtime = runtime
                 # Retain the attempt-runtime record (cap at 5 newest).
-                records = list(getattr(state, "enablement_attempt_runtimes", None) or [])
+                records = list(state.enablement.attempt_runtimes or [])
                 records.append(runtime)
-                state.enablement_attempt_runtimes = records[-5:]
+                state.enablement.attempt_runtimes = records[-5:]
             # Record the localized closure manifest so it is not re-fetched on
             # the next round.
             manifest = res.get("enablement_localization_manifest")
             if isinstance(manifest, dict) and manifest:
-                existing = list(getattr(state, "enablement_localization_manifest", None) or [])
+                existing = list(state.enablement.localization_manifest or [])
                 existing.append(manifest)
-                state.enablement_localization_manifest = existing
+                state.enablement.localization_manifest = existing
 
         if status == "kept":
             _reset_baseline_failure_backstop()
@@ -1843,54 +1784,47 @@ class FrameworkPhase(PhaseHandler):
             # the revalidation baseline re-runs the identical effective config.
             accepted_cfg = str(res.get("enablement_accepted_config_path") or "").strip()
             if accepted_cfg:
-                state.enablement_accepted_config_path = accepted_cfg
-            if str(getattr(state, "enablement_origin", "") or "") == "eval":
+                state.enablement.accepted_config_path = accepted_cfg
+            if str(state.enablement.origin or "") == "eval":
                 # eval-origin: the patch boots and re-passed accuracy in the gate,
                 # but tput/accuracy only become official once a GENUINE baseline
                 # promotes. Hold succeeded; open the revalidation window. Keep the
                 # stall streak so repeated KEEP->revalidation-fail cycles still
                 # reach the stall cap.
-                state.enablement_validation_pending = True
-                state.enablement_dispatched = False
+                state.enablement.validation_pending = True
                 # Increment generation so the new window gets a fresh idempotency
                 # key and cannot reuse a prior terminal TaskRegistry row.
-                state.enablement_revalidation_generation = (
-                    int(getattr(state, "enablement_revalidation_generation", 0) or 0) + 1
+                state.enablement.revalidation_generation = (
+                    int(state.enablement.revalidation_generation or 0) + 1
                 )
-                state.enablement_revalidation_task_id = ""
+                state.enablement.revalidation_task_id = ""
             else:
-                state.enablement_succeeded = True
-                state.enablement_stall_streak = 0
+                state.enablement.succeeded = True
+                state.enablement.stall_streak = 0
         elif status == "advanced" or bool(res.get("advanced")):
             # Forward progress on a serial enablement: stack the progressing
             # patches + setup commands and pivot to the newly-revealed gap.
-            kept = list(getattr(state, "enablement_kept_patches", None) or [])
+            kept = list(state.enablement.kept_patches or [])
             for p in res.get("patches_applied") or []:
                 sp = str(p)
                 if sp and sp not in kept:
                     kept.append(sp)
-            state.enablement_kept_patches = kept
+            state.enablement.kept_patches = kept
             _stack_setup_commands()
             _stack_kept_runtime()
             new_log = str(res.get("enablement_launch_log") or "").strip()
             if new_log:
-                state.enablement_launch_log = new_log
-            state.enablement_stall_streak = 0
+                state.enablement.launch_log = new_log
+            state.enablement.stall_streak = 0
             _reset_baseline_failure_backstop()
-            state.enablement_dispatched = False
         else:
             # No progress: count toward the stall cap.
-            state.enablement_stall_streak = int(getattr(state, "enablement_stall_streak", 0) or 0) + 1
-            if state.enablement_stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
+            state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
+            if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
                 state.set_stop_reason("enablement_stalled")
                 stop_set = "enablement_stalled"
-            else:
-                state.enablement_dispatched = False
-        # Whenever the in-flight guard is cleared (or the run is stopping), drop
-        # the watchdog bookkeeping so a stale task id can't mis-fire next round.
-        if not bool(getattr(state, "enablement_dispatched", False)) or stop_set:
-            state.enablement_inflight_task_id = ""
-            state.enablement_dispatch_tick = -1
+        # A rearm always ends the round.
+        state.enablement.inflight_task_id = ""
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
@@ -1899,11 +1833,11 @@ class FrameworkPhase(PhaseHandler):
             "ENABLEMENT: rearm from integrate status=%s succeeded=%s advanced=%s "
             "stacked=%d stall_streak=%d next_attempt=%d%s",
             status,
-            bool(getattr(state, "enablement_succeeded", False)),
+            bool(state.enablement.succeeded),
             status == "advanced" or bool(res.get("advanced")),
-            len(getattr(state, "enablement_kept_patches", None) or []),
-            int(getattr(state, "enablement_stall_streak", 0) or 0),
-            int(getattr(state, "enablement_attempts", 0) or 0),
+            len(state.enablement.kept_patches or []),
+            int(state.enablement.stall_streak or 0),
+            int(state.enablement.attempts or 0),
             f" stop_reason={stop_set}" if stop_set else "",
         )
 
@@ -2250,7 +2184,7 @@ class FrameworkPhase(PhaseHandler):
         """Canonical FRAMEWORK candidate dedup/progress key (see ``candidate_key``).
 
         Thin wrapper over
-        :func:`framework_agent_artifacts.candidate_key` so every candidate
+        :func:`~hyperloom.orchestrator.framework.artifacts.candidate_key` so every candidate
         selection / dedup / progress-row / idempotency site derives the key
         from one place (``candidate_id or pr_url or ref``). Prevents the
         asymmetry where a candidate carrying only a ``pr_url`` failed to dedup
@@ -3668,7 +3602,7 @@ class FrameworkPhase(PhaseHandler):
         params = {
             "candidate": candidate,
             "batch_id": candidate.get("batch_id") or "",
-            "base_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
+            "base_tput": resolve_grading_anchor_tput(state),
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
             # Source patches require the accuracy gate for KEEP.
             "require_accuracy_for_keep": True,
@@ -4316,7 +4250,7 @@ class FrameworkPhase(PhaseHandler):
             # Ref and repo_url come from the existing stack action when present;
             # otherwise the top discovery candidate for the component is used;
             # empty ref falls back to tag-descending autoselect.
-            existing_stack = getattr(state, "enablement_kept_stack_action", None) or {}
+            existing_stack = state.enablement.kept_stack_action or {}
             repo_url = str(existing_stack.get("repo_url") or "").strip()
             ref = str(existing_stack.get("ref") or "").strip()
 
@@ -4354,7 +4288,7 @@ class FrameworkPhase(PhaseHandler):
                 }
                 hints = _component_hints.get(component, ())
                 default_repo = repo_url or ""
-                for _cand in list(getattr(state, "enablement_candidate_refs", None) or []):
+                for _cand in list(state.enablement.candidate_refs or []):
                     _repo, _ref, _pr_url = resolve_build_ref(str(_cand), default_repo)
                     if not _ref:
                         continue
@@ -4427,14 +4361,14 @@ class FrameworkPhase(PhaseHandler):
         import os as _os
 
         state = self.shared_state
-        marker_task_id = str(getattr(state, "enablement_last_specialist_task_id", "") or "").strip()
+        marker_task_id = str(state.enablement.last_specialist_task_id or "").strip()
         task_id = str(task_id or marker_task_id).strip()
         if not task_id:
             return
 
         def _consume_marker() -> None:
             if marker_task_id == task_id:
-                state.enablement_last_specialist_task_id = ""
+                state.enablement.last_specialist_task_id = ""
 
         try:
             if _os.environ.get("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "").strip() == "1":
@@ -4554,13 +4488,13 @@ class FrameworkPhase(PhaseHandler):
             task_id = str(getattr(task, "task_id", "") or "")
             # Skip rows already accounted for (tracked by enablement_build_manifest).
             state = self.shared_state
-            manifest = list(getattr(state, "enablement_build_manifest", None) or [])
+            manifest = list(state.enablement.build_manifest or [])
             seen_ids = {str(m.get("task_id") or "") for m in manifest if isinstance(m, dict)}
             if task_id in seen_ids:
                 return
             # Mark as seen immediately so we don't process the same row twice.
             manifest.append({"task_id": task_id, "routed": True})
-            state.enablement_build_manifest = manifest
+            state.enablement.build_manifest = manifest
 
             fc = ""
             if task.state == "succeeded":
@@ -4598,7 +4532,7 @@ class FrameworkPhase(PhaseHandler):
                 if isinstance(last_ev, dict):
                     fc = str(last_ev.get("evidence", {}).get("failure_class") or "")
 
-            lbf = getattr(state, "enablement_last_build_failure", None) or {}
+            lbf = state.enablement.last_build_failure or {}
             if not fc and isinstance(lbf, dict):
                 fc = str(lbf.get("failure_class") or "")
 
@@ -4607,7 +4541,7 @@ class FrameworkPhase(PhaseHandler):
             # has not been seen before (novel), reverted when it is a repeat.
             time_classes = frozenset({"timeout", "preflight_budget", "preflight_disk", "preflight_toolchain"})
             if fc in time_classes:
-                new_log = str(getattr(state, "enablement_launch_log", "") or "")
+                new_log = str(state.enablement.launch_log or "")
                 res = {
                     "enablement": True,
                     "status": "advanced",
@@ -4621,14 +4555,14 @@ class FrameworkPhase(PhaseHandler):
                 task_params = getattr(task, "params", None) or {}
                 _action = _TBA.from_state(task_params)
                 _key = list(_bnk(_action))
-                ledger = list(getattr(state, "enablement_build_novelty", None) or [])
+                ledger = list(state.enablement.build_novelty or [])
                 is_repeat = any(entry == _key for entry in ledger if isinstance(entry, list))
                 ledger.append(_key)
-                state.enablement_build_novelty = ledger[-20:]
+                state.enablement.build_novelty = ledger[-20:]
                 if is_repeat:
                     res = {"enablement": True, "status": "reverted"}
                 else:
-                    new_log = str(getattr(state, "enablement_launch_log", "") or "")
+                    new_log = str(state.enablement.launch_log or "")
                     res = {
                         "enablement": True,
                         "status": "advanced",
@@ -4660,7 +4594,7 @@ class FrameworkPhase(PhaseHandler):
 
         state = self.shared_state
         runtime_override = br.runtime.to_runtime_override()
-        launch_log = str(getattr(state, "enablement_launch_log", "") or "")
+        launch_log = str(state.enablement.launch_log or "")
         before_sig = classify_failure(launch_log).to_dict()
         params: dict[str, Any] = {
             "enablement": True,
@@ -4674,7 +4608,7 @@ class FrameworkPhase(PhaseHandler):
         }
         # Prefer the eval-origin probe config so the re-run keeps the original
         # workload/eval contract; fall back to the promoted baseline config.
-        cfg = str(getattr(state, "enablement_probe_config_path", "") or "") or str(
+        cfg = str(state.enablement.probe_config_path or "") or str(
             getattr(state, "baseline_config_path", "") or ""
         )
         if cfg:
@@ -4705,11 +4639,11 @@ class FrameworkPhase(PhaseHandler):
         contract. Idempotent and one-at-a-time.
         """
         state = self.shared_state
-        if not bool(getattr(state, "enablement_validation_pending", False)):
+        if not bool(state.enablement.validation_pending):
             return ""
         # If we already have a tracked revalidation task that is still alive, do
         # not create another one.
-        tracked_tid = str(getattr(state, "enablement_revalidation_task_id", "") or "").strip()
+        tracked_tid = str(state.enablement.revalidation_task_id or "").strip()
         if tracked_tid:
             try:
                 for t in (*await self.tasks.queued(), *await self.tasks.running()):
@@ -4719,21 +4653,21 @@ class FrameworkPhase(PhaseHandler):
                 pass
         params: dict[str, Any] = {
             "source": "coordinator_internal",
-            "reason": "enablement_eval_revalidation",
+            "reason": ENABLEMENT_REVALIDATION_REASON,
             "disable_run_eval": False,
             **_enablement_carrier_params(state),
         }
         # Prefer the accepted (post-fix) config so revalidation uses the same
         # effective config the KEEP'd candidate ran; fall back to the trigger
         # probe config only when no accepted config was recorded.
-        accepted_cfg = str(getattr(state, "enablement_accepted_config_path", "") or "").strip()
-        probe_cfg = str(getattr(state, "enablement_probe_config_path", "") or "").strip()
+        accepted_cfg = str(state.enablement.accepted_config_path or "").strip()
+        probe_cfg = str(state.enablement.probe_config_path or "").strip()
         cfg = accepted_cfg or probe_cfg
         if cfg:
             params["config_path"] = cfg
         # Carry the active runtime override so the revalidation baseline runs
         # under the same framework runtime as the KEEP'd candidate.
-        active_rt = getattr(state, "enablement_active_runtime", None) or {}
+        active_rt = state.enablement.active_runtime or {}
         if isinstance(active_rt, dict) and active_rt:
             from ..framework.stack_actions import FrameworkRuntime
 
@@ -4743,7 +4677,7 @@ class FrameworkPhase(PhaseHandler):
                 params["runtime_override"] = rt_override
         # Use generation in the idempotency key so each revalidation window gets
         # a fresh row even when a prior window's row is in a terminal state.
-        gen = int(getattr(state, "enablement_revalidation_generation", 0) or 0)
+        gen = int(state.enablement.revalidation_generation or 0)
         task, _existing = await self.tasks.create_or_return_existing(
             kind="baseline",
             params=params,
@@ -4751,8 +4685,8 @@ class FrameworkPhase(PhaseHandler):
         )
         task_id = str(getattr(task, "task_id", "") or "")
         # Persist the task_id so _promote_baseline can verify identity.
-        if task_id and task_id != str(getattr(state, "enablement_revalidation_task_id", "") or ""):
-            state.enablement_revalidation_task_id = task_id
+        if task_id and task_id != str(state.enablement.revalidation_task_id or ""):
+            state.enablement.revalidation_task_id = task_id
             try:
                 state.save(self.session_dir)
             except Exception:  # noqa: BLE001 — defensive
@@ -4799,13 +4733,13 @@ class FrameworkPhase(PhaseHandler):
         task: "Task",
         result: Any,
     ) -> None:
-        """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK progress ledger (else the gain is invisible). Attributed to the latest batch; only kept/reverted rows.
+        """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK progress ledger (else the gain is invisible). Attributed to the latest batch; every terminal status is recorded (empty/in-progress statuses and lane-owned ``apply_failed`` retries are skipped).
 
         Args:
             task: The integrate_patch task carrying the FRAMEWORK authoring
                 provenance markers.
-            result: The task result; only ``kept``/``reverted`` statuses are
-                recorded.
+            result: The task result; any non-empty terminal status is recorded
+                except ``apply_failed`` on a perf lane, which the retry loop owns.
         """
         params = getattr(task, "params", None) or {}
         if not bool(params.get("framework_agent_authoring")):
@@ -5219,32 +5153,7 @@ class FrameworkPhase(PhaseHandler):
         }
         if state.baseline_config_path:
             params["config_path"] = state.baseline_config_path
-        cb = state.current_best or {}
-        if isinstance(cb, dict):
-            cb_args = str(cb.get("extra_server_args") or "")
-            if cb_args:
-                params["base_extra_args"] = cb_args
-            _raw_remove = cb.get("remove_args")
-            _raw_unset = cb.get("unset_envs")
-            cb_remove = (
-                [_raw_remove]
-                if isinstance(_raw_remove, str) and _raw_remove.strip()
-                else [str(v) for v in (_raw_remove or []) if str(v).strip()]
-            )
-            cb_unset = (
-                [_raw_unset]
-                if isinstance(_raw_unset, str) and _raw_unset.strip()
-                else [str(v) for v in (_raw_unset or []) if str(v).strip()]
-            )
-            if cb_remove:
-                params["base_remove_args"] = cb_remove
-            if cb_unset:
-                params["base_unset_envs"] = cb_unset
-            if str(cb.get("args_mode") or "").strip().lower() == "replace":
-                params["base_args_mode"] = "replace"
-        base_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
-        if base_tput:
-            params["base_tput"] = base_tput
+        inject_stack_base_params(params, state, anchor=True)
         last_bl = state.last_baseline or {}
         if isinstance(last_bl, dict):
             bs = str(last_bl.get("benchmark_script") or "").strip()
@@ -5342,88 +5251,13 @@ class FrameworkPhase(PhaseHandler):
             v = 0
         return v if v > 0 else self._FRAMEWORK_CONFIG_MAX_ROUNDS
 
-    def _framework_config_new_variants(
-        self,
-        grid: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Drop grid variants already in the ``explore_search`` tested ledger.
-
-        This is what lets the deterministic (source-fed) lane terminate: once a
-        round's variants land in ``tested`` the next round sees no new work.
-
-        Args:
-            grid: Candidate variant dicts (ExploreExecutor grid schema).
-
-        Returns:
-            The subset of ``grid`` whose canonical fingerprint is not yet in
-            ``explore_search['tested']``.
-        """
-        from ..actions.executors._canonical_fingerprint import canonical_fingerprint
-
-        tested: dict[str, Any] = {}
-        es = getattr(self.shared_state, "explore_search", None)
-        if isinstance(es, dict) and isinstance(es.get("tested"), dict):
-            tested = es["tested"]
-        cb = getattr(self.shared_state, "current_best", None) or {}
-        base_remove_args: list[str] = []
-        base_unset_envs: list[str] = []
-        if isinstance(cb, dict):
-            raw_remove = cb.get("remove_args")
-            raw_unset = cb.get("unset_envs")
-            base_remove_args = (
-                [raw_remove]
-                if isinstance(raw_remove, str) and raw_remove.strip()
-                else [str(v) for v in (raw_remove or []) if str(v).strip()]
-            )
-            base_unset_envs = (
-                [raw_unset]
-                if isinstance(raw_unset, str) and raw_unset.strip()
-                else [str(v) for v in (raw_unset or []) if str(v).strip()]
-            )
-        out: list[dict[str, Any]] = []
-        for v in grid or []:
-            if not isinstance(v, dict):
-                continue
-            v_remove = v.get("remove_args")
-            v_unset = v.get("unset_envs")
-            remove_args = list(
-                dict.fromkeys(
-                    base_remove_args
-                    + (
-                        [v_remove]
-                        if isinstance(v_remove, str) and v_remove.strip()
-                        else [str(x) for x in (v_remove or []) if str(x).strip()]
-                    )
-                )
-            )
-            unset_envs = list(
-                dict.fromkeys(
-                    base_unset_envs
-                    + (
-                        [v_unset]
-                        if isinstance(v_unset, str) and v_unset.strip()
-                        else [str(x) for x in (v_unset or []) if str(x).strip()]
-                    )
-                )
-            )
-            fp = canonical_fingerprint(
-                str(v.get("extra_args") or v.get("extra_server_args") or ""),
-                dict(v.get("extra_envs") or {}),
-                remove_args=remove_args,
-                unset_envs=unset_envs,
-                args_mode=str(v.get("args_mode") or "append"),
-            )
-            if fp in tested:
-                continue
-            out.append(v)
-        return out
-
     def _finish_framework_config_lane(self, *, reason: str) -> None:
         """Mark the FRAMEWORK config-exploration subphase done and persist.
 
         Args:
-            reason: Why the lane finished (``no_new_candidates`` / ``max_rounds``
-                / ``dispatch_skipped``).
+            reason: Why the lane finished (``no_candidates`` /
+                ``generation_empty`` / ``dispatch_skipped`` /
+                ``phase_budget_exhausted`` / ``max_rounds``).
         """
         state = self.shared_state
         state.framework_config_lane_state = "done"
@@ -5718,7 +5552,7 @@ class FrameworkPhase(PhaseHandler):
                 log.exception("framework_config: save after generation dispatch failed")
             return True
         # Generation unavailable: fall back to the deterministic default grid.
-        new_variants = self._framework_config_new_variants(self._build_framework_config_grid())
+        new_variants = self._build_framework_config_grid()
         if not new_variants:
             self._finish_framework_config_lane(reason="no_candidates")
             return False
@@ -5807,7 +5641,7 @@ class FrameworkPhase(PhaseHandler):
             pending = list(getattr(state, "framework_config_pending_grid", None) or [])
             state.framework_config_pending_grid = []
             round_no = int(getattr(state, "framework_config_lane_round", 0) or 0)
-            new_variants = self._framework_config_new_variants(self._build_framework_config_grid(explicit_grid=pending))
+            new_variants = self._build_framework_config_grid(explicit_grid=pending)
             if not new_variants:
                 self._finish_framework_config_lane(reason="generation_empty")
                 return False

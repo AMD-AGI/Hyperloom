@@ -7,8 +7,9 @@
   ``min_pending_ticks`` consecutive ticks (cluster quota ledger wedged).
 * **F2 ``geak_budget_starvation``** — same kernel_id's GEAK attempt SIGTERM'd across
   ``min_geak_sigterm_attempts`` rows; budget too short for ``select_patch``.
-* **F5 ``kernel_opt_no_progress``** — ``min_kernels_with_no_progress`` kernel_ids land
-  all backend attempts on PARTIAL/REVERT (no KEEP); prune kernel_opt toward params/sweep.
+* **F5 ``kernel_opt_no_progress``** — ``min_kernels_with_no_progress`` kernel_ids where
+  no backend attempt reached a >=1.2x microbench speedup and no integrate row recorded a
+  KEEP decision (>=2 distinct backends tried); prune kernel_opt toward params/sweep.
 """
 
 from __future__ import annotations
@@ -43,8 +44,8 @@ class KernelPipelineConfig:
     min_pending_ticks: int = 3
     # F2 — same kernel_id has GEAK backend SIGTERM'd this many times.
     min_geak_sigterm_attempts: int = 2
-    # F5 — kernel_ids with no PARTIAL→KEEP progression across the
-    # recent oob_attempts window.
+    # F5 — kernel_ids with no >=1.2x microbench speedup and no KEEP integrate
+    # decision across the recent oob_attempts window.
     min_kernels_with_no_progress: int = 3
 
 
@@ -239,11 +240,13 @@ def _kernel_opt_no_progress_symptoms(
     data: SourceData,
     cfg: KernelPipelineConfig,
 ) -> list[Symptom]:
-    """Identify kernels where every backend attempt landed at
-    PARTIAL/REVERT (no KEEP) across the recent attempt window.
+    """Identify kernels where no backend attempt reached a >=1.2x microbench
+    speedup and no integrate row recorded a KEEP decision.
 
     Only kernels with at least two distinct backends attempted count, so
     one-shot kernels that haven't had time to fail are not flagged.
+    ``oob_attempts`` rows carry no decision field, so the speedup threshold is
+    the only per-attempt progress signal.
 
     Args:
         data (SourceData): Collected source data including the decision-audit
@@ -264,7 +267,7 @@ def _kernel_opt_no_progress_symptoms(
     if not isinstance(attempts, list) and not isinstance(integrate, list):
         return []
 
-    # Roll up per kernel; ``has_keep`` only on a positive speedup OR a KEEP decision.
+    # Roll up per kernel; ``has_keep`` needs a microbench speedup >= 1.2x OR a KEEP decision.
     rollups: dict[str, dict[str, Any]] = {}
     if isinstance(attempts, list):
         for entry in attempts:

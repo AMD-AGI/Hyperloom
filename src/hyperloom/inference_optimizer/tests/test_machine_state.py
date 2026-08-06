@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for phase_state pure helpers: escalate hints, budget normalization,
+"""Coverage for machine_state pure helpers: escalate hints, budget normalization,
 time/budget remaining math, post-prelude target, and history-row builder."""
 
 from __future__ import annotations

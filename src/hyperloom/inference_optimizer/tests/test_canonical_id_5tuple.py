@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the 5-tuple recipe-snapshot canonical_id derivation."""
+"""Tests for the 7-tuple recipe-snapshot canonical_id derivation."""
 
 from __future__ import annotations
 

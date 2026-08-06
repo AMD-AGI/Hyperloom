@@ -12,9 +12,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from hyperloom.common.env_safety import scrub_benchmark_process_env
+
 log = logging.getLogger(__name__)
 
-# Sentinel returncodes (distinct from -909..-912 watchdog sentinels).
+# Ray-side sentinel returncodes. -912 is also used by
+# ``_subprocess_kill.AGENTX_PREFLIGHT_RETURNCODE``.
 _ACTOR_TIMEOUT_RC: int = -912
 _RAY_ACTOR_DIED_RC: int = -913
 
@@ -188,8 +191,19 @@ def _serving_actor_body() -> Any:
         def __init__(self) -> None:
             self._mgr = ManagedServerProcess()
 
-        def start(self, cmd, *, env=None, cwd=None, log_path=None) -> int:
+        def start(
+            self,
+            cmd,
+            *,
+            env=None,
+            cwd=None,
+            log_path=None,
+            scrub_benchmark_env=False,
+        ) -> int:
             """Launch the serving subprocess; Ray has set visible devices.
+
+            GPU specialist actors retain control-plane credentials by default;
+            benchmark serving ranks opt into scrubbing at their call site.
 
             Returns:
                 The launched pid.
@@ -199,6 +213,8 @@ def _serving_actor_body() -> Any:
                 if key in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
                     continue
                 merged[key] = value
+            if scrub_benchmark_env:
+                scrub_benchmark_process_env(merged)
             return self._mgr.start(cmd, env=merged, cwd=cwd, log_path=log_path)
 
         def run_blocking(
@@ -276,7 +292,7 @@ def make_serving_actor(num_gpus: float, *, serving_slot: bool = True):
 
 
 def make_gpu_specialist_actor(num_gpus: float, *, serving_slot: bool = False):
-    """Create a GpuSpecialistActor handle holding ``num_gpus`` (+ optional ``serving_slot``)."""
+    """Create a ServingActor handle for a GPU specialist, holding ``num_gpus`` (+ optional ``serving_slot``)."""
     actor_cls: Any = _serving_actor_body()
     resources = {"serving_slot": 1} if serving_slot else None
     return actor_cls.options(num_gpus=num_gpus, resources=resources).remote()
@@ -803,6 +819,7 @@ class ServingGroupManager:
                         env=(envs[i] if envs else None),
                         cwd=(cwds[i] if cwds else None),
                         log_path=(log_paths[i] if log_paths else None),
+                        scrub_benchmark_env=True,
                     )
                 )
             )

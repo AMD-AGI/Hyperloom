@@ -281,8 +281,8 @@ class InMemoryKBClient:
 
         New keys insert a fresh row; existing keys merge summary/metadata/edges
         (partial merge) and only raise importance, never lower it (importance
-        protection). Scope normalisation that alters a value surfaces a
-        ``scope_value_normalized`` warning.
+        protection). Scope values are trimmed and lower-cased; in practice only
+        a ``None`` value surfaces a ``scope_value_normalized`` warning.
 
         Args:
             payload (dict[str, Any]): Must contain ``scope``, ``kind``,

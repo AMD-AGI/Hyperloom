@@ -94,7 +94,7 @@ class Intent:
 
 @dataclass
 class IntentEnvelope:
-    """A list of :class:`Intent` items + envelope metadata."""
+    """A list of :class:`Intent` items; serialises to ``{"intents": [...]}``."""
 
     intents: list[Intent] = field(default_factory=list)
 

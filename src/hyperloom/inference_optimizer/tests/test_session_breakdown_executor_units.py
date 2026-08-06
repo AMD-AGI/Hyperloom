@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``orchestrator.action_executors.session_breakdown``."""
+"""Unit tests for ``orchestrator.actions.executors.session_breakdown``."""
 
 from __future__ import annotations
 

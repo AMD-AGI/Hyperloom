@@ -13,15 +13,19 @@ One JSON file per session lives at::
 with a flat namespaced layout::
 
     {
-      "gpu_leak":      {"consecutive_hits": 2},
-      "ray_pending":   {"consecutive_hits": 1},
-      "aiter_jit":     {"last_so_count": 173, "last_build_count": 4, "build_count_streak_ticks": 0},
-      "progress":      {"gain_history": [0.0, 0.1, 0.2, ...]},
-      "preflight":     {"fired_fingerprint": [...], "fired_mtime": 1700000000.0},
-      "external_deps": {"tracelens_cli_fired": true},
-      "action_ladder": {"last_emitted": {"key|tuple": 17, ...}},
-      "rca_throttle":  {"last_called_unix": {"key|tuple": 1700000003.5, ...}}
+      "gpu_leak":                 {"consecutive_hits": 2},
+      "ray_pending":              {"consecutive_hits": 1, "last_pending": 3},
+      "aiter_jit":                {"last_so_count": 173, "last_build_count": 4, "stale_build_streak": 0},
+      "progress":                 {"gain_history": [0.0, 0.1, 0.2, ...]},
+      "preflight_model_gpu_fit":  {"fired_fingerprint": [...]},
+      "preflight_amdahl":         {"fired_mtime": 1700000000.0},
+      "tracelens_cli_latch":      {"fired": true},
+      "action_ladder":            {"last_emitted": {"key|tuple": 17, ...}},
+      "rca_throttle":             {"last_called_unix": {"key|tuple": 1700000003.5, ...}}
     }
+
+Slot names are owned by ``SignalSpec.state_view_key`` in
+:mod:`signals.classifier` plus the two ``view()`` calls in :mod:`factory`.
 
 Owners hold a thin :class:`DetectorStateView` handle exposing ``load() /
 save(dict)`` against their own slot. The store flushes atomically via

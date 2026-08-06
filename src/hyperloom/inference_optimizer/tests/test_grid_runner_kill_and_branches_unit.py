@@ -329,3 +329,37 @@ async def test_run_grid_invalid_measurement_branch(tmp_path, monkeypatch):
         "benchmark_report_invalid_metric",
         "benchmark_report_missing",
     }
+
+
+@pytest.mark.asyncio
+async def test_server_dead_surfaces_log_excerpt(tmp_path, monkeypatch):
+    """server_log_death_excerpt is used when a seeded server.log exists."""
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+    out_root = tmp_path / "out"
+
+    def _dead(magpie_python, config_path, output_dir, **_k):
+        slog = Path(output_dir) / "server.log"
+        slog.parent.mkdir(parents=True, exist_ok=True)
+        slog.write_text(
+            "Worker init started\n"
+            "mla_gluon[bh16bn128] requires batch_size=1, got 512\n"
+            "Engine core initialization failed.\n"
+            "Traceback follows\n"
+        )
+        return gr.SERVER_DEAD_RETURNCODE, "", ""
+
+    monkeypatch.setattr(gr, "_run_magpie", _dead)
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("fp8_kv")],
+        output_root=out_root,
+        variant_timeout_sec=5,
+    )
+    r = results[0]
+    assert r.status == "failed"
+    assert r.error_class == "server_init_dead"
+    assert "mla_gluon" in (r.error or ""), "excerpt should mention mla_gluon"
+    assert r.server_log_path is not None
+    assert r.server_log_path.endswith("server.log")

@@ -246,10 +246,36 @@ async def test_run_conversational_session_capture(monkeypatch):
 # ---- run(): no-intent raises ----------------------------------------------
 async def test_run_no_intent_raises():
     msg = _Msg(content=[TextBlock("just text")], result="hi")
-    b = _backend()
+    b = _backend(capture_turn_diagnostics=True)
     b.sdk_query_factory = _query([msg])
     with pytest.raises(NoIntentEmitted):
         await b.run("hi")
+    diag = b.get_turn_diagnostic()
+    assert diag["outcome"] == "no_intent"
+    assert diag["raw_text"] == "hi"
+    assert diag["messages"] == [{"type": "_Msg", "result": "hi"}]
+
+
+async def test_run_skips_diagnostics_when_not_requested():
+    msg = _Msg(content=[TextBlock("just text")], result="hi")
+    b = _backend()
+    b.sdk_query_factory = _query([msg])
+    await b.run("hi", allow_no_intent=True)
+    assert b.get_turn_diagnostic() == {}
+
+
+# ---- gateway endpoint identifier -----------------------------------------
+def test_gateway_endpoint_drops_url_userinfo(monkeypatch):
+    """The diagnostic is appended to an on-disk trace, and a base URL of the
+    form ``https://user:key@gw/...`` puts the key in netloc."""
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://user:s3cret@gw.example.com:8443/api/v1")
+    assert _backend()._gateway_endpoint_identifier() == "gw.example.com"
+
+
+def test_gateway_endpoint_is_none_without_a_base_url(monkeypatch):
+    for var in ("ANTHROPIC_BASE_URL", "DEEPSEEK_BASE_URL", "OPENAI_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+    assert _backend()._gateway_endpoint_identifier() is None
 
 
 # ---- _invoke_and_collect: error-result-success tolerance ------------------

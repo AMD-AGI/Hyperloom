@@ -10,8 +10,8 @@
 #   scripts/build_wheel.sh --publish
 #
 # Publishing uses `gh` (which reuses the host's GitHub auth) and uploads the
-# built wheel as a release asset with --clobber. The Hyperloom repo is
-# private/internal, so the asset is only downloadable with authentication.
+# built wheel as a release asset with --clobber. The Hyperloom repo is public,
+# so the uploaded asset is downloadable without authentication.
 
 set -euo pipefail
 
@@ -75,16 +75,23 @@ PY
 [ -n "${VERSION}" ] || die "could not read version from pyproject.toml"
 log "package version: ${VERSION}"
 
-# Default release tag is v<major.minor> (matches the existing v0.8 releases).
+# Default release tag is v<major.minor>; pass --tag for releases whose tag
+# carries a patch/pre-release suffix.
 if [ -z "${TAG}" ]; then
   _major_minor="$(printf '%s' "${VERSION}" | cut -d. -f1-2)"
   TAG="v${_major_minor}"
 fi
 
 # --- Build ---
+# pip builds in-tree, and setuptools re-attaches a directory excluded from
+# packages.find as package data of its parent when a stale SOURCES.txt lists it.
+STALE_ARTIFACTS=("${REPO_ROOT}/build" "${REPO_ROOT}"/src/*.egg-info)
 if [ "${DRY_RUN}" -eq 1 ]; then
+  log "would clean: ${STALE_ARTIFACTS[*]}"
   log "would build: ${PYTHON} -m pip wheel --no-deps --no-build-isolation -w ${OUT_DIR} ${REPO_ROOT}"
 else
+  log "cleaning stale build artifacts"
+  rm -rf "${STALE_ARTIFACTS[@]}"
   log "building wheel into ${OUT_DIR}"
   "${PYTHON}" -m pip wheel --no-deps --no-build-isolation -w "${OUT_DIR}" "${REPO_ROOT}"
 fi
@@ -95,6 +102,19 @@ if [ "${DRY_RUN}" -eq 0 ]; then
   [ -f "${WHEEL}" ] || WHEEL="$(ls -1t "${OUT_DIR}"/hyperloom_inference_optimizer-*.whl 2>/dev/null | head -1 || true)"
   [ -n "${WHEEL}" ] && [ -f "${WHEEL}" ] || die "built wheel not found in ${OUT_DIR}"
   log "built: ${WHEEL}"
+fi
+
+# --- Verify ---
+# The wheel is the only place a mis-declared or re-attached file is visible, so
+# check the artifact rather than trusting the tree to have been clean.
+CHECKER="${REPO_ROOT}/scripts/check_wheel_contents.py"
+if [ "${DRY_RUN}" -eq 1 ]; then
+  log "would verify: ${PYTHON} ${CHECKER} <wheel>"
+else
+  "${PYTHON}" -c 'import sys, importlib; importlib.import_module("tomllib" if sys.version_info >= (3, 11) else "tomli")' 2>/dev/null \
+    || die "wheel verification needs tomllib (python>=3.11) or tomli; run: ${PYTHON} -m pip install tomli"
+  log "verifying wheel contents"
+  "${PYTHON}" "${CHECKER}" "${WHEEL}" || die "wheel contents check failed for ${WHEEL##*/}"
 fi
 
 # --- Publish (opt-in) ---

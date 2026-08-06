@@ -139,7 +139,7 @@ def test_runtime_extended_override_keys():
 
 
 def test_runtime_extended_override_omitted_when_empty():
-    """An attempt-runtime produces the exact same override as before (back-compat)."""
+    """A runtime without the additive build fields omits them entirely (back-compat)."""
     rt = FrameworkRuntime(bin_path="/s/venv/bin", python_path="/s/venv/bin/python", venv_root="/s/venv")
     ov = rt.to_runtime_override()
     for key in ("pythonpath_prefixes", "ld_library_path_prefix", "runtime_env", "entrypoint_bin_dir",

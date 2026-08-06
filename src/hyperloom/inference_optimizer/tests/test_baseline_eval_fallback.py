@@ -741,6 +741,7 @@ from hyperloom.orchestrator.actions.executors._accuracy_gate import (  # noqa: E
     BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
     EVAL_KIND_ACCURACY_BELOW_FLOOR,
     EVAL_KIND_ACCURACY_UNAVAILABLE,
+    EVAL_KIND_GENERATION_PATHOLOGY,
 )
 
 
@@ -791,6 +792,32 @@ def test_eval_enablement_zero_accuracy_below_floor(monkeypatch):
     assert reason == ""
     assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_ACCURACY_BELOW_FLOOR
     assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] == 0.0
+
+
+def test_eval_enablement_probe_reports_generation_pathology(monkeypatch):
+    """A tripped probe changes what a ~0 score means: the eval was cut short
+    because the model never stopped generating, not because it answered and got
+    them wrong. Without this the specialist is handed a bare ``accuracy=0.0``
+    and goes looking for a quality regression that never happened.
+    """
+    result = {
+        "status": "succeeded",
+        "accuracy": 0.0,
+        "run_eval_disabled": False,
+        "eval_probe": {
+            "kind": EVAL_KIND_GENERATION_PATHOLOGY,
+            "observed_samples": 128,
+            "cap_hits": 128,
+            "max_completion_tokens_seen": 16384,
+        },
+    }
+    reason = _route(monkeypatch, "sglang", result)
+    assert reason == ""
+    assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_GENERATION_PATHOLOGY
+    assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] == 0.0
+    evidence = result[BASELINE_EVAL_EVIDENCE_KEY]
+    assert "128/128" in evidence
+    assert "16384" in evidence
 
 
 def test_eval_enablement_positive_below_floor(monkeypatch):

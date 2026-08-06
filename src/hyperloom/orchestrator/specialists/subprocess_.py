@@ -246,8 +246,10 @@ class SpecialistSubprocessResult:
 
     process_log_path: str = ""
     patches: list[str] = field(default_factory=list)
-    """Worktree-relative patch paths discovered under
-    ``runs/specialist/<task_id>/worktree/patches/``."""
+    """Full filesystem paths of patch files discovered under
+    ``<worktree>/patches/`` and ``<workspace>/patches/`` (absolute, since both
+    roots are session-absolute). Consumers read and sandbox-check these
+    directly — do not join them onto a base."""
 
     usage: dict[str, Any] | None = None
     """Token usage recovered from the Claude CLI ``stream-json`` log. Carries
@@ -449,16 +451,20 @@ class SpecialistSubprocessDispatcher:
                 worktree setup failed; the dispatcher still spawns claude
                 but the agent has no write-isolated tree, only
                 ``--add-dir <workspace>``).
-            worktree_base (Path | None): The base checkout the worktree was
-                branched off (used by callers for teardown).
+            worktree_base (Path | None): Base checkout the worktree was
+                branched off. Unused here; the runner uses it as the clean
+                base for patch git-grounding.
             system_prompt (str): System prompt assembled by
                 :func:`specialist_prompt_builder.build_specialist_prompts`.
             user_prompt (str): User prompt from the same builder.
             allowed_tools (tuple[str, ...]): Per-task tool whitelist
                 (post-:meth:`SpecialistRunner._resolve_tools`).
-            max_turns (int): Hard cap on LLM turns; multiplied by the
-                config's ``per_turn_max_seconds`` for the legacy wall-clock
-                ceiling (used only when ``wall_budget_sec`` is not supplied).
+            max_turns (int): Turn budget. This dispatcher never enforces it
+                mechanically — no ``--max-turns`` flag is passed to the claude
+                CLI (the cap reaches the specialist only as advisory prompt
+                text baked into ``system_prompt``). Its sole effect here is the
+                ``max_turns × per_turn_max_seconds`` fallback wall-clock
+                ceiling, used when ``wall_budget_sec`` is not supplied.
             gpu_ids (tuple[int, ...]): GPU ids to expose to the subprocess.
             wall_budget_sec (float | None): WS1 explicit wall-clock budget
                 (seconds). When provided it overrides the
@@ -821,7 +827,8 @@ class SpecialistSubprocessDispatcher:
 
         Each tick checks (in order): a done-file at any candidate path
         (graceful exit with a short grace window), natural process exit,
-        heartbeat staleness, and the hard wall-clock cap. Stale / timed-out
+        activity staleness (heartbeat.json OR process.log), and the hard
+        wall-clock cap. Stale / timed-out
         runs are killed via :meth:`_kill`. Partial checkpoints written along
         the way are forwarded to ``progress_cb`` as they change.
 
@@ -829,9 +836,11 @@ class SpecialistSubprocessDispatcher:
             proc (Any): The running claude subprocess — a ``subprocess.Popen``
                 (local) or a :class:`_RayLeaseProcess` (Ray GPU-specialist
                 actor). Only ``poll`` / ``returncode`` / ``pid`` are used.
-            workspace (Path): Task workspace (reserved for context).
+            workspace (Path): Task workspace; supplies the ``process.log``
+                whose mtime is the second liveness signal.
             done_files (tuple[Path, ...]): Candidate done-file paths to poll.
-            heartbeat_file (Path): Heartbeat file whose mtime gauges liveness.
+            heartbeat_file (Path): Heartbeat file whose mtime is one of the two
+                activity signals ORed together for the liveness check.
             max_seconds (float): Hard wall-clock ceiling for the run.
             started (float): ``time.monotonic()`` value at spawn time.
             partial_files (tuple[Path, ...]): Candidate partial-checkpoint

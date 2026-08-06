@@ -3,8 +3,13 @@
 
 """Configuration for the Robustness Agent.
 
-Claw v2 cannot inject env vars, so config is auto-detected: session_dir,
-robustness-server endpoint, and LLM endpoint (OPENAI_BASE_URL / SAFE_API_KEY).
+Env-first with auto-detection fallbacks: session_dir (``SESSION_DIR``), the
+robustness-server endpoint (``ROBUSTNESS_SERVER_URL``) and the LLM endpoint /
+credentials (``OPENAI_BASE_URL`` / ``SAFE_API_KEY``, plus Anthropic and
+DeepSeek variants) fall back to probing well-known paths and endpoints when
+unset. ``ROBUSTNESS_DISABLE_LOCAL_PROBE``,
+``ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS`` and ``ROBUSTNESS_NODES`` are env-only
+with fixed defaults.
 """
 
 from __future__ import annotations
@@ -295,9 +300,8 @@ class Config:
     async def discover(cls) -> "Config":
         """Auto-detect all configuration from the runtime environment.
 
-        Discovers the session directory, probes the robust-analyzer and
-        robustness-server endpoints, and reads LLM credentials from the
-        sandbox environment.
+        Discovers the session directory, probes the robustness-server
+        endpoint, and reads LLM credentials from the sandbox environment.
 
         Returns:
             Config: A new instance populated with the discovered values.

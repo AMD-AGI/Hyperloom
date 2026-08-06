@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator-side thin client for the framework-agent
-``fa phase-discover`` subcommand.
+"""Coordinator-side thin client for the framework-agent ``fa phase-*``
+subcommands.
 
-The only framework-agent entry point wired into the Coordinator pump:
-returns a batch of candidate PRs; the Critic gate + ``FrameworkAgentExecutor``
-handle the rest. Invoked via ``asyncio.to_thread`` so the reactor never
-blocks; failures degrade to empty / ``RuntimeError`` that the pump absorbs.
+Wraps ``fa phase-discover`` (returns a batch of candidate PRs; the Critic gate
++ ``FrameworkAgentExecutor`` handle the rest) and ``fa phase-audit`` (returns
+the semantic-audit verdict for one candidate). Both are invoked via
+``asyncio.to_thread`` so the reactor never blocks; failures degrade to empty /
+``RuntimeError`` that the pump absorbs.
 """
 
 from __future__ import annotations

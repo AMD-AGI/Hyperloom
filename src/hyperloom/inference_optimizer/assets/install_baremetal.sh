@@ -28,7 +28,7 @@ DOTENV="${REPO_ROOT}/.env"
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
 
 HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
-HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.0.0a2}"
+HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.0.0a3}"
 ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 
@@ -89,8 +89,9 @@ Options:
   --install-framework FW Install a missing bare-metal framework layer.
                          Supported: none, sglang, vllm. Default: none.
   --framework-env MODE   Install target for framework packages: shared or
-                         isolated. Default: shared. Use isolated for vLLM to
-                         avoid replacing the shared ROCm torch stack.
+                         isolated. Default: shared, except vLLM which defaults
+                         to isolated so it never replaces the shared ROCm
+                         torch stack.
   --vllm-venv-root PATH  Isolated vLLM venv path (default:
                          /opt/hyperloom/vllm-venv).
   --require-frameworks   Treat a missing requested framework as fatal
@@ -106,8 +107,8 @@ prompt (TTY + not --yes). Configure Anthropic
 (DEEPSEEK_API_KEY, optional DEEPSEEK_BASE_URL), matching runtime credential
 rules.
 Env overrides honored: REPO_ROOT,
-USER_DATA_PATH, HYPERLOOM_RUNTIME_DIR, HYPERLOOM_DEPS_ROOT / HYPERLOOM_CACHE_DIR,
-PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON, TRACELENS_INTERNAL_ROOT,
+USER_DATA_PATH, HYPERLOOM_DEPS_ROOT / HYPERLOOM_CACHE_DIR,
+PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON,
 SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_ROCM_PYPI_VERSION,
 SGLANG_ROCM_EXTRA, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
 LD_LIBRARY_PATH, VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX,

@@ -10,16 +10,22 @@ having the exporter re-walk artifacts later.
 Every helper is best-effort: all failures are swallowed (logged at debug).
 Payloads are shaped to the matching ``schema.py`` TypedDict.
 
-Coverage in this module (state-owned sections; single owner = Coordinator):
+Coverage in this module, in four groups:
 
-* ``session`` / ``workload`` / ``final`` / ``explore_search`` / ``sweep``
-  -- singletons snapshotted from in-memory state at each persist.
-* ``optimization_stack`` / ``roofline`` -- event items keyed by a stable id
-  (idempotent).
-* ``phase_timeline`` -- one event per recorded action attempt.
+* Coordinator state snapshots -- ``session`` / ``workload`` / ``final`` /
+  ``explore_search`` / ``sweep`` singletons, plus ``optimization_stack`` /
+  ``roofline`` items keyed by a stable id and one ``phase_timeline`` event
+  per recorded action attempt.
+* Kernel-agent lifecycle (``PRODUCER_KERNEL_AGENT``) -- discovery ->
+  dispatch -> backend result -> micro/E2E, plus GEAK and GEMM-tuning
+  invocations.
+* Critic / robustness items (producers ``critic`` / ``robustness``), read
+  from the agent workdir before pruning.
+* The canonical v4 entity/event streams (subject / operation / measurement /
+  adoption / artifact / trace_event / phase_transition / run_snapshot).
 
-File-born sections are produced by other processes/executors and are
-instrumented at those sites separately.
+Several recorders here read just-written agent artifacts from disk. The
+authoritative public surface is the re-export list in ``recorder/__init__``.
 """
 
 from __future__ import annotations
@@ -644,7 +650,9 @@ def record_phase_event(
     tick: int = 0,
     producer: str = PRODUCER_COORDINATOR,
 ) -> None:
-    """Record one ``phase_timeline`` event from a ``record_action_attempt`` entry.
+    """Record one ``phase_timeline`` event from a ``record_action_attempt``
+    entry, and mirror the same attempt into the canonical v4 streams via
+    ``_mirror_action_v4``.
 
     Args:
         session_dir (Path | str | None): the session directory; a falsy value is
@@ -652,6 +660,13 @@ def record_phase_event(
         action (str): the action name the event is keyed by.
         entry (dict[str, Any]): the ``record_action_attempt`` entry to project
             into a phase_timeline payload.
+        result (Mapping[str, Any] | None): the settled action result, mirrored
+            into v4 only.
+        phase (str): phase label for the v4 mirror; falls back to
+            ``entry["phase"]`` when empty.
+        macro_cycle (int): macro cycle for the v4 mirror.
+        tick (int): used to synthesize an operation identity when the entry
+            carries no task_id or round key.
         producer (str): the breakdown producer label (defaults to the
             Coordinator).
     """

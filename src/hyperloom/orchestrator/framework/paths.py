@@ -4,9 +4,10 @@
 """Framework source-root resolution for PolicyGate and flag discovery.
 
 Centralises probe order across container layouts (``/sgl-workspace/...``,
-``/app/ATOM/atom``, site/dist-packages) so PolicyGate, AST discovery,
-install.sh, and ``apply_kernel_patch`` all agree. First-class frameworks:
-atom, sglang, vllm; aiter is in the allowlist as a shared kernel library.
+``/app/ATOM/atom``, ``/app/xDiT``, site/dist-packages) so PolicyGate, AST
+discovery, install.sh, and ``apply_kernel_patch`` all agree. First-class
+frameworks: atom, sglang, vllm, xdit (``xfuser`` package); aiter is in the
+allowlist as a shared kernel library.
 """
 
 from __future__ import annotations

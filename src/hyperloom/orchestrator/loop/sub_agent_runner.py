@@ -3,11 +3,10 @@
 
 """SubAgentRunner
 
-Receives ``delegate{action_name, params}`` intents (after PolicyGate),
-materializes them into ``tasks`` rows, and dispatches the work.
-
-Dispatches to deterministic Python ``ActionRunner`` executors, looked up
-via ``EXECUTOR_REGISTRY[task.kind]``.
+Runs one already-queued ``tasks`` row: acquires its lanes, replays PolicyGate
+at dispatch, invokes the deterministic Python ``ActionRunner`` executor
+registered for ``task.kind`` in ``self.executor_registry``, and transitions the
+row to its terminal state.
 """
 
 from __future__ import annotations
@@ -215,6 +214,7 @@ class SubAgentRunner:
                 self.policy.validate_dispatched_task(
                     task.kind,
                     dict(task.params or {}),
+                    task_id=task.task_id,
                 )
             except PolicyDenied as denied:
                 await self._transition_resilient(

@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the high-GPU-time ``other``-bucket candidate recovery.
+"""Tests for the high-GPU-time missing-candidate recovery fallback.
 
 Hyperloom builds candidates only from analysis.md reasoning-candidate (P-item)
-blocks; TraceLens never emits such a block for a kernel filed under the
-un-roofline'd ``other`` category. The fallback recovers it from the per-op
-ranking sidecar so it flows through classify_patchability and reaches GEAK.
+blocks, and TraceLens emits no such block for some hot kernels — notably ones
+filed under the un-roofline'd ``other`` category. The fallback recovers any
+high-GPU-time op missing from analysis.md, whatever its category, from the
+per-op ranking sidecar so it flows through classify_patchability and reaches
+GEAK.
 """
 
 from __future__ import annotations

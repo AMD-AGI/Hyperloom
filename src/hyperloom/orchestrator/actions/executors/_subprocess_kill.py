@@ -251,9 +251,10 @@ _SERVER_READY_MARKERS: tuple[str, ...] = (
     "The server is fired up and ready to roll",
 )
 
-# Generation-progress markers: the periodic decode-throughput lines. Reported by
-# the scanner for diagnostics; the stall gate itself keys on raw log activity
-# (any new bytes) — see :func:`_communicate_with_soft_deadline`.
+# Generation-progress markers: the periodic decode-throughput lines. Scanned and
+# returned by ``_scan_logs_increment`` but currently unconsumed — the stall gate
+# keys on raw log activity (any new bytes); see
+# :func:`_communicate_with_soft_deadline`.
 _SERVER_PROGRESS_MARKERS: tuple[str, ...] = (
     "gen throughput (token/s):",  # sglang
     "Avg generation throughput:",  # vLLM
@@ -465,8 +466,8 @@ def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
     """Return a short ``server.log`` excerpt around the first terminal
     engine/worker-init marker, or ``None`` when no fatal marker is present.
 
-    Baseline / profile failure classification calls this to surface the real
-    server-side root cause — e.g. vLLM's ``RuntimeError: Engine core
+    Baseline / profile / explore failure classification calls this to surface
+    the real server-side root cause — e.g. vLLM's ``RuntimeError: Engine core
     initialization failed`` — instead of the Magpie wrapper's generic
     stdout/stderr tail. The excerpt keeps a couple of lines of context around
     the marker. Best-effort: a missing / unreadable log returns ``None``.
@@ -964,4 +965,5 @@ __all__ = [
     "kill_my_spawned_server",
     "new_session_kwargs",
     "run_with_session_kill",
+    "server_log_death_excerpt",
 ]

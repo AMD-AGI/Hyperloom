@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for policy.py pure helpers + PolicyGate path/freeform helpers:
+"""Coverage for policy/gate.py pure helpers + PolicyGate path/freeform helpers:
 presence checks, GPU-count probing, lane ceilings, path allowlists, and the
 free-form task-description guard."""
 

@@ -6,7 +6,7 @@
 Hosts (Coordinator, smoke harness, operator tooling) drive the reactor
 through a single subprocess command::
 
-    python -m robustness_agent.runtime.cli tick \\
+    python -m hyperloom.agents.robustness.runtime.cli tick \\
         --request request.json [--out emit.json]
 
 ``request.json`` carries the same fields the critic-agent runtime

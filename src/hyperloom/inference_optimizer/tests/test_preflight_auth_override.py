@@ -4,7 +4,10 @@
 """Regression tests for direct-gateway auth setup in ``_preflight``.
 
 Pins the direct-gateway contract: base URLs are resolved for split/single
-entrypoints and key aliases are fanned out from ``SAFE API key``.
+entrypoints and key aliases are fanned out from ``SAFE API key``. Also covers
+the surrounding preflight steps — dependency ensures (SDKs, Ray, bench-serving),
+orchestration-model validation against the gateway catalog, the IR-3 KB/PR
+probe, and the framework env guard.
 """
 
 from __future__ import annotations
@@ -1484,7 +1487,7 @@ def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(
         args.codex_model = args.claude_model
 
     # The OpenAI/Codex side derives the /Unified/v1 chat-completions base from
-    # the single Anthropic-compatible gateway (was previously the raw /anthropic).
+    # the single Anthropic-compatible gateway.
     assert resolved == ("https://llm.example.invalid/anthropic", "https://llm.example.invalid/Unified/v1")
     assert cli._codex_model_should_follow_claude() is False
     assert args.codex_model == "claude-sonnet-5"

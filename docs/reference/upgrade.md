@@ -161,11 +161,12 @@ controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
 
 ### Schema compatibility
 
-`session_breakdown.json` currently emits either
-`hyperloom.session_breakdown.v2` or `hyperloom.session_breakdown.v3.0`
-depending on the aggregation path. The `v3.0` file is additive and
-wire-compatible for `v2` consumers that tolerate unknown fields. Consumers must
-not gate on exact string equality; accept the v2/v3 family as described in
+`session_breakdown.json` emits `hyperloom.session_breakdown.v5.0`. V5 is a
+breaking cutover for optimization results: adopted optimizations are reported
+only through `optimizations`, and the `optimization_stack`, `attribution`, GEAK
+invocation, Forge invocation, and GEMM-tuning projections are no longer
+emitted. Consumers reading archived v2 / v3 / v4 documents need a downstream
+migration, as described in
 [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
 
 ---

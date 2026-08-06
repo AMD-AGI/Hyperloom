@@ -83,9 +83,10 @@ def _apply_remote(
         and compile status.
 
     Raises:
-        FileNotFoundError: If ``target_path`` does not exist on the pod.
-        ValueError: If ``patch_b64`` is not valid base64, or if a ``.py``
-            target fails to compile (it is auto-reverted first).
+        ValueError: If ``target_path`` does not exist or resolves outside the
+            framework patch roots, ``backup_dir`` is outside the kernel backup
+            root, ``patch_b64`` is not valid base64, or a ``.py`` target fails
+            to compile (it is auto-reverted first).
     """
     host = socket.gethostname()
     target = Path(target_path)

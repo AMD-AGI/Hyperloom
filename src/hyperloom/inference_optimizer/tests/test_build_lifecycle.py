@@ -71,7 +71,7 @@ async def test_enqueue_then_build_succeeds(build_coord, build_lifecycle):
     assert tid
     succeeded, failed = await _drain(build_lifecycle)
     assert succeeded and not failed
-    assert build_coord.shared_state.enablement_build_manifest
+    assert build_coord.shared_state.enablement.build_manifest
     assert build_coord.shared_state.pending_targeted_build == {}
     holders = await build_coord.locks.lane_holders()
     assert holders == {} or "build_lane" not in holders
@@ -104,7 +104,7 @@ async def test_nonzero_build_fails_and_records_failure(build_coord, build_lifecy
     await build_lifecycle.enqueue_targeted_build(_action([sys.executable, "-c", "import sys; sys.exit(2)"]))
     succeeded, failed = await _drain(build_lifecycle)
     assert failed and not succeeded
-    lbf = build_coord.shared_state.enablement_last_build_failure
+    lbf = build_coord.shared_state.enablement.last_build_failure
     assert lbf["failure_class"] == "compile_error"
 
 
@@ -114,7 +114,7 @@ async def test_timeout_kills_and_marks_failed(build_coord, build_lifecycle):
     await build_lifecycle.enqueue_targeted_build(action)
     succeeded, failed = await _drain(build_lifecycle, ticks=400)
     assert failed and not succeeded
-    assert build_coord.shared_state.enablement_last_build_failure["failure_class"] == "timeout"
+    assert build_coord.shared_state.enablement.last_build_failure["failure_class"] == "timeout"
     holders = await build_coord.locks.lane_holders()
     assert holders.get("build_lane", 0) in (0, None) or "build_lane" not in holders
 
@@ -315,7 +315,7 @@ async def test_resume_kills_orphan_and_clears_sentinel(resume_coord):
     )
     assert fix["task_id"] == task.task_id
     assert resume_coord.shared_state.pending_targeted_build == {}
-    assert resume_coord.shared_state.enablement_last_build_failure["failure_class"] == "timeout"
+    assert resume_coord.shared_state.enablement.last_build_failure["failure_class"] == "timeout"
     reclaimed = await resume_coord.tasks.get(task.task_id)
     assert reclaimed.state == "failed"
     assert not attempt_root.exists()

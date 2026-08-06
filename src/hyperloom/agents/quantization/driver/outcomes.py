@@ -6,10 +6,11 @@ the narrative success tag ``eval_gap_accepted`` and the upstream-mutation
 sentinel ``upstream_change_required`` (the resolution #30 takes when the LLM
 diagnoses that the fix would require editing files under ``quark_root``).
 
-The IDs here are the **vocabulary** that ``_assessment.classify_attempt``
+The IDs here are the **vocabulary** that ``assessment.classify_attempt``
 emits and that ``Assessment.final`` / ``Assessment.attempts`` carry to the
 caller. Category sets (``AUTO_RECOVER`` / ``AUTO_FAIL`` / ``ASK``) drive the
-retry-loop branching in ``_retry.run_with_retries``.
+retry-loop branching in ``retry._decide_next_step`` (called from
+``retry.quantize_via_prompt``).
 """
 
 from __future__ import annotations
@@ -76,7 +77,9 @@ class OutcomeId(StrEnum):
 
     # SDK / catch-all
     sdk_runtime_error = "sdk_runtime_error"  # #24  Auto-fail
-    unclassified_failure = "unclassified_failure"  # #30  Auto-recover* (runtime-classified)
+    # #30  catch-all, runtime-classified; retried like ASK (see the
+    # ASK_RETRYABLE branch in retry._decide_next_step, SKILL.md section 8)
+    unclassified_failure = "unclassified_failure"
 
     # Narrative / derived tags (not in the 30-row table):
     #   eval_gap_accepted — success with gap within threshold

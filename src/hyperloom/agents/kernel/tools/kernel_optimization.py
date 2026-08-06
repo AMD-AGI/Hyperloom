@@ -387,7 +387,7 @@ def _match_benchmark_for_kernel(
     Scans :data:`_BENCHMARK_PATTERNS` in priority order; the first matching
     kernel-name regex hoists that family's bench files to the front (earlier
     patterns win). No match preserves the original order. Prevents picking an
-    off-topic benchmark (e.g. fmha → test_pa.py stalling GEAK Step-5).
+    off-topic benchmark (e.g. fmha → test_pa.py stalling the benchmark step).
 
     Args:
         kernel_name: The kernel name to match patterns against.
@@ -451,14 +451,15 @@ def _render_geak_test_command(
     num_gpus: int,
     timeout_sec: int,
 ) -> str:
-    """Render the ``--test-command`` GEAK receives, with timeout + match.
+    """Render the ``test_command`` handed to the Forge submitter, with timeout
+    + match.
 
     Picks the first existing ``test_*.py`` / ``bench*.py`` from the
     semantically-ordered bench list, prefixes ``timeout <N>``, and wraps
     multi-GPU collectives in ``torchrun --nproc_per_node=<num_gpus>`` so
-    GEAK's subprocess can ``init_process_group`` correctly. Returns ``""``
-    when no usable benchmark exists; the caller leaves
-    ``--test-command`` blank so GEAK falls back to its own discovery.
+    the subprocess can ``init_process_group`` correctly. Returns ``""``
+    when no usable benchmark exists; Forge then falls back to its own
+    autogen / task-preparer driver generation.
 
     Args:
         kernel_name (str): Kernel name used to order benchmark candidates.
@@ -1225,10 +1226,10 @@ def _format_impact_range(
 def _build_extra_context_block(candidate: dict[str, Any]) -> str:
     """Render authoritative workload context for the candidate, if supplied.
 
-    Returns ``""`` when ``extra_dispatch_context`` is absent. When present (set by
-    the driver's ``--enrich`` mode), it injects the real serving config
-    (ISL/OSL/ctx/conc/TP), E2E/Amdahl framing, neighbouring-kernel/fusion cues and
-    resolved roofline specifics so harness-gen can pin the true decode shapes.
+    Returns ``""`` unless a caller has pre-attached ``extra_dispatch_context``
+    to the candidate (no in-tree producer today). When present it is injected
+    verbatim as authoritative workload context (serving config, E2E/Amdahl
+    framing, roofline specifics) so harness-gen can pin the true decode shapes.
 
     Args:
         candidate: The kernel candidate dict, optionally carrying
@@ -1528,6 +1529,7 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
         "input_dtypes": input_dtypes or [],
         "output_dtypes": candidate.get("output_dtypes") or [],
         "backend": candidate.get("backend") or candidate.get("framework"),
+        "runtime_backend": str(candidate.get("runtime_backend") or ""),
         "runtime_args": runtime_args,
         "runtime_flags": runtime_flags,
         "env_vars": candidate.get("env_vars") or {},
@@ -2083,7 +2085,10 @@ def invoke_backend(
     gpu_ids, elapsed_s, cmd, optimized_path (optional), cli_workspace (forge).
 
     Args:
-        backend (str): Backend name to run (e.g. ``geak``, ``forge``).
+        backend (str): Backend name to run; only ``forge`` is supported (any
+            other value returns an unknown-backend result with returncode 2).
+            ``geak`` is a whole-pipeline phase delegate, not a value accepted
+            here.
         prompt_file (Path): File containing the rendered optimization prompt.
         source_file (str): Path to the kernel source to be rewritten.
         args (argparse.Namespace): Parsed CLI args carrying backend settings.
@@ -2295,6 +2300,15 @@ def run_attempt(
             changed_files = result.get("changed_files")
             if isinstance(changed_files, list):
                 backend_paths["forge_changed_files"] = json.dumps(changed_files)
+            for result_key, backend_key in (
+                ("best_manifest", "forge_best_manifest"),
+                ("canonical_patch_path", "forge_canonical_patch"),
+                ("canonical_files_root", "forge_canonical_files_root"),
+                ("forge_workspace", "forge_workspace"),
+            ):
+                value = str(result.get(result_key) or "")
+                if value:
+                    backend_paths[backend_key] = value
         out_dir = result.get("output_dir") if isinstance(result, dict) else ""
         if out_dir:
             backend_paths["output_dir"] = out_dir
@@ -2331,7 +2345,7 @@ def run_attempt(
                     backend_paths["partial_report"] = str(report)
                 forge_patch = opt_dir / "forge.patch"
                 if forge_patch.is_file():
-                    backend_paths["forge_patch"] = str(forge_patch)
+                    backend_paths.setdefault("forge_patch", str(forge_patch))
             # Rescue: surface fresh ~/optimized_versions/ files when the
             # workspace's dir is empty.
             home_opt = Path("/home/user/optimized_versions")
@@ -2497,7 +2511,8 @@ def _read_text_file(path: str | Path, *, errors: str | None = "replace") -> str 
 def _extract_speedup_from_report(report_path: str | Path) -> float | None:
     """Scan an external ``optimization_report.md`` for a speedup figure.
 
-    Uses a median-of-top-3 to dodge cherry-picked best-shape numbers.
+    Averages the top-3 reported speedups to dampen cherry-picked best-shape
+    numbers.
 
     Args:
         report_path: Path to the optimization report.
@@ -2521,7 +2536,6 @@ def _extract_speedup_from_report(report_path: str | Path) -> float | None:
                 continue
     if not found:
         return None
-    # Median-of-top-3 to dodge cherry-picked best-shape numbers.
     found.sort(reverse=True)
     top = found[:3]
     return round(sum(top) / len(top), 4)
@@ -2982,7 +2996,7 @@ def build_patch_snapshot(
         dst.parent.mkdir(parents=True, exist_ok=True)
         sourced = False
         # 1) worktree ground-truth file at the same relative path.
-        if worktree is not None and kernel_repo:
+        if worktree is not None:
             cand = worktree / rel
             if cand.is_file() or cand.is_symlink():
                 try:
@@ -3016,6 +3030,106 @@ def build_patch_snapshot(
         "patch_path": str(patch_path),
         "repo_root": str(kernel_repo or ""),
     }
+
+
+def prepare_deploy_patch(
+    patch_path: str,
+    *,
+    output_path: Path,
+) -> str:
+    """Remove generated Python cache entries from a source deployment patch."""
+    import apply_kernel_patch as _akp
+
+    try:
+        patch_text = Path(patch_path).read_text(
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return ""
+    if re.search(r"(?m)^diff --git ", patch_text):
+        blocks = [
+            block
+            for block in re.split(r"(?m)^(?=diff --git )", patch_text)
+            if block.strip()
+        ]
+    else:
+        blocks = [
+            block
+            for block in re.split(r"(?m)^(?=--- )", patch_text)
+            if block.strip()
+        ]
+    kept: list[str] = []
+    for block in blocks:
+        try:
+            descriptors = _akp.parse_patch_manifest(block)
+        except ValueError:
+            return ""
+        generated = any(
+            "__pycache__" in Path(str(desc.get("path") or "")).parts
+            or Path(str(desc.get("path") or "")).suffix.lower()
+            in {".pyc", ".pyo"}
+            for desc in descriptors
+        )
+        if not generated:
+            kept.append(block)
+    if not kept:
+        return ""
+    deploy_text = "".join(kept)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(deploy_text, encoding="utf-8")
+    return str(output_path)
+
+
+def resolve_deploy_repo_root(
+    target_file: str,
+    descriptors: list[dict[str, Any]],
+    *,
+    explicit_root: str = "",
+) -> str:
+    """Resolve the consumer repo root for repo-relative patch paths.
+
+    Producer worktree paths are not portable to installed framework trees.
+    Resolve against an explicit root when supplied; otherwise walk ancestors
+    of the traced absolute source and require exactly one root whose existing
+    preimage files match every non-new patch entry.
+    """
+
+    def _matches(root: Path, *, require_preimage: bool) -> bool:
+        checked = 0
+        for desc in descriptors:
+            rel = Path(str(desc.get("path") or ""))
+            if (
+                not rel.parts
+                or rel.is_absolute()
+                or ".." in rel.parts
+            ):
+                return False
+            if desc.get("is_new") and desc.get("op") == "write":
+                continue
+            checked += 1
+            if not (root / rel).exists():
+                return False
+        return checked > 0 or not require_preimage
+
+    if explicit_root:
+        root = Path(explicit_root).resolve()
+        if root.is_dir() and _matches(root, require_preimage=False):
+            return str(root)
+
+    if not target_file:
+        return ""
+    try:
+        target = Path(target_file).resolve()
+    except OSError:
+        return ""
+    matches: list[Path] = []
+    for root in target.parents:
+        if _matches(root, require_preimage=True):
+            matches.append(root)
+    if len(matches) != 1:
+        return ""
+    return str(matches[0])
 
 
 def _select_source_artifact(
@@ -3179,14 +3293,27 @@ def build_verification(
                 break
         if winning_patch and Path(winning_patch).is_file():
             snap_out = (run_dir or Path(winning_patch).parent) / f"{best.get('attempt_id', 'attempt')}_deploy_snapshot"
+            deploy_patch = prepare_deploy_patch(
+                winning_patch,
+                output_path=snap_out.parent
+                / f"{best.get('attempt_id', 'attempt')}_deploy.patch",
+            )
             # Prefer the retained forge workspace: it is the live tree the patch
             # was produced against, so it carries every file the diff touches.
             # Fall back to the exported artifact copies, which outlive a workspace
             # that has already been reaped. Both are probed with is_dir() so a
             # stale path falls through instead of yielding an empty snapshot.
             snapshot_worktree = None
+            canonical_files_root = str(
+                bp.get("forge_canonical_files_root") or ""
+            )
             forge_workspace = str(bp.get("forge_workspace") or "")
-            if forge_workspace and Path(forge_workspace).is_dir():
+            if (
+                canonical_files_root
+                and Path(canonical_files_root).is_dir()
+            ):
+                snapshot_worktree = Path(canonical_files_root)
+            elif forge_workspace and Path(forge_workspace).is_dir():
                 snapshot_worktree = Path(forge_workspace)
             else:
                 for root_key in ("output_dir", "cli_workspace"):
@@ -3199,27 +3326,46 @@ def build_verification(
                     if files_root is not None and files_root.is_dir():
                         snapshot_worktree = files_root
                         break
-            snap = build_patch_snapshot(
-                winning_patch,
-                worktree=snapshot_worktree,
-                kernel_repo=kernel_repo,
-                clean_base=kernel_repo,
-                out_dir=snap_out,
+            snap = (
+                build_patch_snapshot(
+                    deploy_patch,
+                    worktree=snapshot_worktree,
+                    kernel_repo=kernel_repo,
+                    clean_base=kernel_repo,
+                    out_dir=snap_out,
+                )
+                if deploy_patch
+                else None
             )
             if snap is not None:
-                deploy_snapshot_dir = snap["snapshot_dir"]
-                deploy_patch_path = snap["patch_path"]
-                deploy_repo_root = snap.get("repo_root", "")
                 descriptors = list(snap.get("descriptors") or [])
-                best_artifact_bundle = {
-                    "type": "patch_snapshot",
-                    "snapshot_dir": deploy_snapshot_dir,
-                    "patch_path": deploy_patch_path,
-                    "repo_root": deploy_repo_root,
-                    "descriptors": descriptors,
-                    "write_paths": [d["path"] for d in descriptors if d.get("op") == "write" and d.get("path")],
-                    "delete_paths": [d["path"] for d in descriptors if d.get("op") == "delete" and d.get("path")],
-                }
+                deploy_repo_root = resolve_deploy_repo_root(
+                    target_file,
+                    descriptors,
+                    explicit_root=str(snap.get("repo_root") or ""),
+                )
+                if deploy_repo_root:
+                    deploy_snapshot_dir = snap["snapshot_dir"]
+                    deploy_patch_path = snap["patch_path"]
+                    best_artifact_bundle = {
+                        "type": "patch_snapshot",
+                        "producer": "kernelforge",
+                        "producer_manifest": str(
+                            bp.get("forge_best_manifest") or ""
+                        ),
+                        "snapshot_dir": deploy_snapshot_dir,
+                        "patch_path": deploy_patch_path,
+                        "repo_root": deploy_repo_root,
+                        "descriptors": descriptors,
+                        "write_paths": [d["path"] for d in descriptors if d.get("op") == "write" and d.get("path")],
+                        "delete_paths": [d["path"] for d in descriptors if d.get("op") == "delete" and d.get("path")],
+                    }
+            if not best_artifact_bundle:
+                artifact_valid = False
+                artifact_error = (
+                    "Forge produced a patch, but its complete snapshot or "
+                    "consumer repo root could not be resolved"
+                )
     correctness_signal = getattr(args, "correctness_passed", None)
     correctness_source = "cli_override" if correctness_signal is not None else "missing"
     if correctness_signal is None and best is not None:

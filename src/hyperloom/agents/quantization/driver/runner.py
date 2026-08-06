@@ -90,7 +90,7 @@ def _iter_message_text(message: Any) -> Iterable[str]:
 
 
 def resolve_skill_path(package_root: Path | None = None) -> Path:
-    """Return the on-disk path of ``quantization_agent/SKILL.md``.
+    """Return the on-disk path of the quantization agent's ``SKILL.md``.
 
     Resolution is centralized here so callers don't hardcode the layout.
 

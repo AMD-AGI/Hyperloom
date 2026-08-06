@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the small helpers inside ``kernel_request_handlers``."""
+"""Unit tests for the small helpers inside ``kernel.request_handlers``."""
 
 from __future__ import annotations
 

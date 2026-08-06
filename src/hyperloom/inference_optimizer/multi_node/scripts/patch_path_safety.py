@@ -14,7 +14,8 @@ from pathlib import Path
 
 _DEFAULT_KERNEL_BACKUP_ROOT = "/var/kernel_patch_backups"
 
-# Static roots aligned with orchestrator.framework_paths patch fallbacks.
+# Superset of orchestrator.framework.paths._STATIC_PATCH_FALLBACK_ROOTS
+# (adds the /sgl-workspace/* image roots).
 _DEFAULT_PATCH_TARGET_ROOTS: tuple[str, ...] = (
     "/sgl-workspace/aiter/",
     "/sgl-workspace/sglang/",

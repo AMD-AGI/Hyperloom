@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CLOSE phase five-step sequencer tests."""
+"""CLOSE phase seven-step sequencer tests."""
 
 from __future__ import annotations
 
@@ -97,7 +97,7 @@ class _StubTaskRegistry:
 
 
 class _StubRecipeKB:
-    """Recipe KB double for the CLOSE NDJSON drain step."""
+    """Recipe KB double for the CLOSE fact-finalize step and the T4 hook."""
 
     enabled: bool = True
 

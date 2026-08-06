@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for framework_agent.models.* dataclasses. Hermetic - exercises only ``from_dict`` / derived properties; no I/O."""
+"""Tests for hyperloom.agents.framework.models.* dataclasses. Hermetic - exercises only ``from_dict`` / derived properties; no I/O."""
 
 from __future__ import annotations
 

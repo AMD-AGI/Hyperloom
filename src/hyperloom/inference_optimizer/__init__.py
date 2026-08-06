@@ -6,7 +6,9 @@
 Roles:
 
 * Orchestration — proposes actions, delegates sub-agents, REQUESTs Kernel
-* Kernel        — owns 5 deep-kernel actions, responder-only via REQUEST/RESPONSE
+* Kernel        — owns the deep-kernel actions
+  (protocol/action_surfaces.py::KERNEL_AGENT_OWNED_ACTIONS), responder-only
+  via REQUEST/RESPONSE
 * Critic        — reviews proposals (approve/reject/redirect/advise), owns KB
 * Robustness    — always-on health monitoring, RCA, recovery, scheduling police
 """

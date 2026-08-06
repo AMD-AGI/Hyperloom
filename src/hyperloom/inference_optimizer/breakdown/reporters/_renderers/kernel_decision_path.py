@@ -3,7 +3,9 @@
 
 """Kernel decision-path renderer — per-kid causal chain grouped per kernel id.
 
-Fail-soft: skips silently when ``kernel_decision_path`` is absent (older JSONs).
+Fail-soft: skips when ``kernel_decision_path`` is absent. No producer in this
+tree emits that field today, so the section is skipped unless an external tool
+injects it.
 """
 
 from __future__ import annotations
@@ -43,8 +45,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     """Render the per-kernel causal decision path as grouped blocks.
 
     Each kernel id gets a block showing its ``trace_analyze →
-    kernel_opt → integrate → validate_stack`` step chain plus a funnel
-    summary fact. Skipped silently when the field is absent (older JSON).
+    kernel_opt → integrate`` step chain plus a funnel summary fact. Skipped
+    when the field is absent, which is currently every session.
 
     Args:
         breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
