@@ -167,6 +167,24 @@ class TestResolvePatchTargetRoots:
         assert not any("flydsl" in root.lower() for root in allowlist)
 
 
+class TestFlydslExtraSourceDirs:
+    def test_lists_only_roots_that_exist(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("FLYDSL_ROOT", str(tmp_path / "missing"))
+        assert fp.flydsl_extra_source_dirs() == ""
+
+        real = tmp_path / "flydsl"
+        real.mkdir()
+        monkeypatch.setenv("FLYDSL_ROOT", str(real))
+        assert fp.flydsl_extra_source_dirs() == str(real)
+
+    def test_preserves_an_operator_supplied_value(self, monkeypatch, tmp_path):
+        real = tmp_path / "flydsl"
+        real.mkdir()
+        monkeypatch.setenv("FLYDSL_ROOT", str(real))
+        monkeypatch.setenv("FLYDSL_EXTRA_SOURCE_DIRS", "/custom/dir")
+        assert fp.flydsl_extra_source_dirs() == f"/custom/dir:{real}"
+
+
 class TestProbeFrameworkSourceRootsForEnv:
     def test_returns_existing_dirs_only(self, tmp_path, monkeypatch):
         present = tmp_path / "fake_root"
