@@ -357,14 +357,6 @@ def test_mission_summary_surfaces_resume_pending_revalidation():
     assert "recheck current stack" in text
 
 
-def test_dead_c_robustness_md_prune_branch_family_list():
-    """The Robustness ``prune_branch`` family list drops retired ``validate_stack`` / ``backends`` / ``params`` and keeps ``explore``."""
-    from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
-
-    fragment = (asset_system_prompts_dir() / "robustness.md").read_text(encoding="utf-8")
-    prune_rows = [ln for ln in fragment.splitlines() if ln.strip().startswith("| `prune_branch")]
-    assert prune_rows, "prune_branch table row missing from robustness.md"
-    row = prune_rows[0]
-    for retired in ("validate_stack", "backends", "params"):
-        assert retired not in row, f"prune_branch family list still advertises retired {retired!r}"
-    assert "explore" in row
+# The Robustness prune_branch family list used to live in robustness.md, which was
+# loaded every tick and discarded by the backend. The role is prompt-driven no
+# longer, so the file is gone and test_agent_roles_and_policy asserts it stays gone.
