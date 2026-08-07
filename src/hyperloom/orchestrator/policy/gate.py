@@ -569,8 +569,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # Bounded rollback ring of prior good orchestration_memory records;
         # Coordinator-only writer, locked in lock-step with its parent.
         "orchestration_memory_history",
-        # FRAMEWORK per-repo discovery budget; set once, locked.
-        "framework_max_candidates",
         # Advisory model-architecture profile from the SKILL launcher; locked.
         "model_arch",
         # Architecture-identity tags from config.json; locked against pollution.

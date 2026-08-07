@@ -174,8 +174,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "orchestration_memory",
         # Bounded rollback ring of prior good orchestration_memory records.
         "orchestration_memory_history",
-        # FRAMEWORK per-repo discovery budget.
-        "framework_max_candidates",
         # Advisory model-architecture profile.
         "model_arch",
         # Architecture-identity tags from config.json.
