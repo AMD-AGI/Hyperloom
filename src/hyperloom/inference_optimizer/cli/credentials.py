@@ -323,8 +323,8 @@ def _reject_cross_provider_pairing() -> None:
     whose only endpoint would come from the other provider.
 
     Reads the *raw* environment, before :func:`_resolve_llm_endpoints` fills in
-    any implied endpoint. Official provider keys may omit their own
-    ``*_BASE_URL`` while the other side is unconfigured.
+    any implied endpoint. A key that implies its own official endpoint may omit
+    its ``*_BASE_URL``, so official-key pairings across both sides are legal.
     """
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
@@ -363,7 +363,9 @@ def _reject_cross_provider_pairing() -> None:
             "an Anthropic-side key is configured without ANTHROPIC_BASE_URL, "
             "while the OpenAI side points at OPENAI_BASE_URL"
         )
-    elif anthropic_endpoint and openai_key and not openai_url:
+    elif anthropic_url and openai_key and not openai_url:
+        # Only an explicit ANTHROPIC_BASE_URL signals a gateway-shaped deploy
+        # whose OPENAI_API_KEY is likely a gateway key missing its own URL.
         offender = (
             "OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the "
             "Anthropic side points at ANTHROPIC_BASE_URL"

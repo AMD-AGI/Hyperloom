@@ -1160,7 +1160,9 @@ resolve_credentials() {
     _x_conflict="ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an OPENAI_API_KEY is configured"
   elif [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "$_x_akey" ] && [ -z "$_x_aend" ]; then
     _x_conflict="an Anthropic-side key is configured without ANTHROPIC_BASE_URL, while the OpenAI side points at OPENAI_BASE_URL"
-  elif [ -n "$_x_aend" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
+  # Only an explicit ANTHROPIC_BASE_URL signals a gateway-shaped deploy whose
+  # OPENAI_API_KEY is likely a gateway key missing its own URL.
+  elif [ -n "$anthropic_url" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
     _x_conflict="OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the Anthropic side points at ANTHROPIC_BASE_URL"
   fi
   if [ -n "$_x_conflict" ]; then
