@@ -18,15 +18,22 @@
 # "DeepSeek-V4-Flash-0731 ATOM Bug Fixes (gfx942).md" and
 # ~/git/instinct-agent-bench/docs/model-profiles/deepseek-v4-flash-0731-atom-native.md.
 #
-# Also bakes in the mitigation from the companion note "... ATOM-Native Hang
-# -- hipBLASLt GlobalSplitU Livelock (gfx942).md": sustained concurrent load
-# against ATOM-native serving on gfx942 can livelock in a Tensile/hipBLASLt
-# GEMM kernel (not an ATOM/aiter/NCCL bug). Every `docker exec` in this
-# container inherits TENSILE_SOLUTION_SELECTION_METHOD=2 (Stream-K kernel
-# selection instead of the default GlobalSplitU-heavy path) because it's set
-# at container-run time, not per-launch. Do not set ATOM_USE_TRITON_MOE=0 --
-# gfx942 has no native aiter FP4 MoE kernel and it crashes immediately; this
-# script sets it to 1 explicitly (ATOM's own default on gfx94x anyway).
+# Sets ATOM_USE_TRITON_MOE=1 explicitly (ATOM's own default on gfx94x
+# anyway) -- do not set it to 0, gfx942 has no native aiter FP4 MoE kernel
+# and it crashes immediately.
+#
+# TENSILE_SOLUTION_SELECTION_METHOD is deliberately NOT set by default. The
+# companion note "... ATOM-Native Hang -- hipBLASLt GlobalSplitU Livelock
+# (gfx942).md" found that sustained concurrent load against
+# DeepSeek-V4-Flash-0731 specifically could livelock in a Tensile/hipBLASLt
+# GEMM kernel (not an ATOM/aiter/NCCL bug), and that
+# TENSILE_SOLUTION_SELECTION_METHOD=2 (Stream-K kernel selection instead of
+# the default GlobalSplitU-heavy path) works around it. That workaround is
+# scoped to the GEMM shapes this model hits -- Stream-K is not universally
+# faster, so forcing it for every workload could just as easily regress
+# performance elsewhere. Set TENSILE_SOLUTION_SELECTION_METHOD yourself (see
+# env overrides below) only if you hit the same livelock symptom, rather
+# than assuming any MI300X ATOM workload needs it.
 #
 # Usage:
 #   scripts/atom_fork_docker_setup.sh
@@ -38,6 +45,7 @@
 #   AITER_FORK_PATH=$HOME/git/aiter
 #   HF_HOME_HOST=/data/hf_home
 #   HYPERLOOM_SHM_SIZE=64g
+#   TENSILE_SOLUTION_SELECTION_METHOD= (unset by default; workload-specific, see above)
 #
 # After this script completes, the container is ready for the Hyperloom
 # `--framework atom` optimize path (see docs/how-to or the
@@ -68,26 +76,31 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   die "container '${CONTAINER_NAME}' already exists; docker rm -f ${CONTAINER_NAME} first (or set HYPERLOOM_CONTAINER_NAME)"
 fi
 
+DOCKER_RUN_ARGS=(
+  -d
+  --name "${CONTAINER_NAME}"
+  --shm-size "${SHM_SIZE}"
+  --entrypoint tail
+  --device /dev/kfd
+  --device /dev/dri
+  --group-add video
+  --network host
+  --ipc host
+  --security-opt seccomp=unconfined
+  --cap-add=SYS_PTRACE
+  -e HF_HOME=/data/hf_home
+  -e AITER_LOG_LEVEL=WARNING
+  -e ATOM_USE_TRITON_MOE=1
+  -v "${REPO_ROOT}:${REPO_ROOT}"
+  -v "${HF_HOME_HOST}:/data/hf_home"
+)
+if [ -n "${TENSILE_SOLUTION_SELECTION_METHOD:-}" ]; then
+  log "TENSILE_SOLUTION_SELECTION_METHOD=${TENSILE_SOLUTION_SELECTION_METHOD} set explicitly; baking into container env"
+  DOCKER_RUN_ARGS+=(-e "TENSILE_SOLUTION_SELECTION_METHOD=${TENSILE_SOLUTION_SELECTION_METHOD}")
+fi
+
 log "starting container '${CONTAINER_NAME}' from ${IMAGE}"
-docker run -d \
-  --name "${CONTAINER_NAME}" \
-  --shm-size "${SHM_SIZE}" \
-  --entrypoint tail \
-  --device /dev/kfd \
-  --device /dev/dri \
-  --group-add video \
-  --network host \
-  --ipc host \
-  --security-opt seccomp=unconfined \
-  --cap-add=SYS_PTRACE \
-  -e HF_HOME=/data/hf_home \
-  -e AITER_LOG_LEVEL=WARNING \
-  -e TENSILE_SOLUTION_SELECTION_METHOD=2 \
-  -e ATOM_USE_TRITON_MOE=1 \
-  -v "${REPO_ROOT}:${REPO_ROOT}" \
-  -v "${HF_HOME_HOST}:/data/hf_home" \
-  "${IMAGE}" \
-  -f /dev/null
+docker run "${DOCKER_RUN_ARGS[@]}" "${IMAGE}" -f /dev/null
 
 log "copying ${ATOM_FORK_PATH} -> ${CONTAINER_NAME}:/opt/ATOM-src"
 docker cp "${ATOM_FORK_PATH}" "${CONTAINER_NAME}:/opt/ATOM-src"
