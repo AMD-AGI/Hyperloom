@@ -576,6 +576,8 @@ def test_signal_registry_order_is_pinned():
         "gpu_leak",
         "cluster_fault",
         "budget",
+        "phase_budget",
+        "conversation_progress",
         "aiter_jit",
         "progress",
         "repeated_payload",
@@ -591,13 +593,13 @@ def test_signal_registry_order_is_pinned():
     ]
 
 
-def test_budget_is_the_only_configless_source_data_row():
-    """Only ``evaluate_budget_signals`` skips SourceData; encode that so the
-    ``needs_source_data`` flag can't silently flip for another row."""
+def test_context_only_signal_rows():
+    """Signals that read only ReactorContext (no SourceData) are enumerated here.
+    Update this set deliberately when adding context-only signals."""
     from hyperloom.agents.robustness.signals.classifier import _SIGNAL_REGISTRY
 
     no_data = {spec.name for spec in _SIGNAL_REGISTRY if spec.evaluator is not None and not spec.needs_source_data}
-    assert no_data == {"budget"}
+    assert no_data == {"budget", "phase_budget", "conversation_progress"}
 
 
 def test_kernel_pipeline_config_slot_feeds_two_rows():

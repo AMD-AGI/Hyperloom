@@ -34,7 +34,7 @@ side_effects:
   - reads_server
   - writes_results
 preferred_backend: claude
-preferred_model: claude-opus-4-7
+preferred_model: claude-opus-5
 max_turns: 4
 lease_ttl_sec: 3600
 description: "Apply specialist worktree patches to framework_source_roots, restart server, run throughput + accuracy gate, KEEP or REVERT. Deterministic executor for EXPLORE and FRAMEWORK_AGENT; also serves the enablement launch-only build probe and framework-agent authoring lanes."

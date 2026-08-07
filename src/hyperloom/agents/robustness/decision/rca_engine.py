@@ -17,6 +17,8 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 
 import httpx
@@ -180,12 +182,17 @@ class RcaThrottle:
         self._persist()
 
 
-_SYSTEM_PROMPT = """\
-You are a Hyperloom robustness reactor RCA assistant. Given one symptom and \
-its evidence, write a concise root-cause summary in <= 6 sentences. \
-Focus on actionable remediation hints and observable evidence. If the \
-evidence is insufficient, reply exactly with: insufficient evidence.
-"""
+_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "rca.md"
+
+
+@lru_cache(maxsize=1)
+def load_rca_system_prompt() -> str:
+    """Read the RCA system prompt shipped as package data.
+
+    Returns:
+        str: The prompt text.
+    """
+    return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 
 
 @dataclass
@@ -200,7 +207,7 @@ class LlmRcaEngine:
 
     base_url: str
     api_key: str
-    model: str = "claude-opus-4-8"
+    model: str = "claude-opus-5"
     timeout_s: float = 8.0
     max_chars: int = 1500
     throttle: RcaThrottle | None = None
@@ -339,7 +346,7 @@ class LlmRcaEngine:
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": load_rca_system_prompt()},
                 {"role": "user", "content": prompt},
             ],
         }
@@ -422,7 +429,7 @@ class AnthropicRcaEngine(LlmRcaEngine):
         prompt = _build_user_prompt(symptom)
         payload = {
             "model": self.model,
-            "system": _SYSTEM_PROMPT,
+            "system": load_rca_system_prompt(),
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 600,
             "temperature": 0.2,
@@ -625,4 +632,5 @@ __all__ = [
     "RcaEngine",
     "RcaThrottle",
     "RcaThrottleConfig",
+    "load_rca_system_prompt",
 ]

@@ -531,18 +531,17 @@ def test_policy_path_outside_session_dir_denied(tmp_path):
 def test_policy_source_file_trusted_scope_passes(tmp_path):
     gate = _gate(tmp_path)
     intent = Intent(
-        type=IntentType.RESPONSE,
+        type=IntentType.REQUEST,
         payload={
-            "in_reply_to": "m-1",
-            "kind": "trace_analyze_done",
-            "result": {
-                "hot_kernels": [
-                    {"kernel_id": "k1", "source_file": "/sgl-workspace/aiter/csrc/attn.cu"},
-                ],
+            "target_agent": "kernel_agent",
+            "kind": "run_optimization",
+            "params": {
+                "kernel_id": "k1",
+                "source_file": "/sgl-workspace/aiter/csrc/attn.cu",
             },
         },
     )
-    gate.validate_intent("kernel_agent", intent)
+    gate.validate_intent("orchestration", intent)
 
 
 def test_policy_source_file_any_installed_package_passes(tmp_path, monkeypatch):
@@ -553,32 +552,31 @@ def test_policy_source_file_any_installed_package_passes(tmp_path, monkeypatch):
     monkeypatch.setattr(policy_gate, "resolve_source_file_allowlist", lambda: (f"{packages}/",))
     gate = _gate(tmp_path)
     intent = Intent(
-        type=IntentType.RESPONSE,
+        type=IntentType.REQUEST,
         payload={
-            "in_reply_to": "m-1",
-            "kind": "trace_analyze_done",
-            "result": {"hot_kernels": [{"kernel_id": "k1", "source_file": str(source)}]},
+            "target_agent": "kernel_agent",
+            "kind": "run_optimization",
+            "params": {"kernel_id": "k1", "source_file": str(source)},
         },
     )
-    gate.validate_intent("kernel_agent", intent)
+    gate.validate_intent("orchestration", intent)
 
 
 def test_policy_source_file_outside_trusted_scope_denied(tmp_path):
     gate = _gate(tmp_path)
     intent = Intent(
-        type=IntentType.RESPONSE,
+        type=IntentType.REQUEST,
         payload={
-            "in_reply_to": "m-1",
-            "kind": "trace_analyze_done",
-            "result": {
-                "hot_kernels": [
-                    {"kernel_id": "k1", "source_file": "/random/path/attn.cu"},
-                ],
+            "target_agent": "kernel_agent",
+            "kind": "run_optimization",
+            "params": {
+                "kernel_id": "k1",
+                "source_file": "/random/path/attn.cu",
             },
         },
     )
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("kernel_agent", intent)
+        gate.validate_intent("orchestration", intent)
     assert exc.value.rule == "source_file_outside_trusted_scope"
 
 

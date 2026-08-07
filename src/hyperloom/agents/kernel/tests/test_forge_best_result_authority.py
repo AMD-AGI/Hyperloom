@@ -59,6 +59,10 @@ def _manifest(commit_hash: str, **overrides) -> dict:
         "correctness_passed": True,
         "baseline_wall_ms": 2.0,
         "best_wall_ms": 1.0,
+        "mean_case_speedup": 2.0,
+        "search_start_mean_case_speedup": 1.0,
+        "total_improved": True,
+        "incremental_improved": True,
         "speedup": 2.0,
         "iteration": 3,
         "snr_db": 45.0,
@@ -109,8 +113,8 @@ def test_missing_manifest_yields_no_evidence(repo):
     [
         pytest.param({"correctness_passed": False}, id="correctness_failed"),
         pytest.param({"schema_version": 2}, id="unknown_schema"),
-        pytest.param({"best_wall_ms": 3.0}, id="slower_than_baseline"),
-        pytest.param({"best_wall_ms": 2.0}, id="no_gain_over_baseline"),
+        pytest.param({"mean_case_speedup": 1.0}, id="no_mean_case_gain"),
+        pytest.param({"mean_case_speedup": None}, id="missing_mean_case_speedup"),
         pytest.param({"baseline_wall_ms": 0.0}, id="unusable_baseline"),
         pytest.param({"best_wall_ms": "fast"}, id="non_numeric_timing"),
     ],
@@ -128,6 +132,30 @@ def test_manifest_that_does_not_prove_a_win_is_rejected(repo, overrides):
         )
         is None
     )
+
+
+def test_manifest_accepts_non_monotonic_raw_wall(repo):
+    workspace, base_commit = repo
+    best_commit = _commit_improvement(workspace)
+    _publish(
+        workspace,
+        _manifest(
+            best_commit,
+            baseline_wall_ms=2.0,
+            best_wall_ms=3.0,
+            mean_case_speedup=1.5,
+        ),
+    )
+
+    validated = forge_submit._validated_forge_best_result(
+        forge_submit._read_forge_best_result(str(workspace)),
+        workspace=str(workspace),
+        base_commit=base_commit,
+    )
+
+    assert validated is not None
+    assert validated["mean_case_speedup"] == 1.5
+    assert validated["best_ms"] == 3.0
 
 
 def test_manifest_naming_an_unknown_commit_is_rejected(repo):

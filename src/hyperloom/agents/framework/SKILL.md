@@ -90,7 +90,7 @@ fa phase-audit --request req.json --out -
   - `already_*` is evidence-gated (downgraded to `unknown` without a concrete
     symbol/line hit).
 - **llm layer (opt-in, `use_llm=true`)**: single chat-completion refine; needs
-  `SAFE_API_KEY` + `OPENAI_BASE_URL`; best-effort; never authors patches.
+  `OPENAI_API_KEY` + `OPENAI_BASE_URL`; best-effort; never authors patches.
 
 ## Candidate refs feed the targeted build
 

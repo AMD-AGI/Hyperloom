@@ -117,7 +117,6 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     seed_target_analysis_marker(sd)
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "kernel_agent": MockBackend(ScriptedPlan(turns=[]), name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
@@ -450,7 +449,6 @@ async def _build_minimal_coord(tmp_path: Path, monkeypatch):
     idle_plan = ScriptedPlan(turns=[])
     backends = {
         "orchestration": MockBackend(idle_plan),
-        "kernel_agent": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
         "robustness": MockBackend(idle_plan),
     }

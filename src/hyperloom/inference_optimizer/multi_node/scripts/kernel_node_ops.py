@@ -42,6 +42,9 @@ from patch_path_safety import (  # noqa: E402
     assert_backup_dir_allowed,
     assert_revert_paths_allowed,
     assert_target_path_allowed,
+    finalize_patch_records,
+    invalidate_aiter_jit_build,
+    restore_aiter_jit_build,
 )
 
 _MAX_ARTIFACT_BYTES = 1 * 1024 * 1024
@@ -110,15 +113,35 @@ def _do_apply(a: argparse.Namespace) -> int:
         data = base64.b64decode(a.patch_b64.encode("ascii"))
     except Exception as exc:  # noqa: BLE001
         return _emit({"status": "failed", "host": host, "error": f"patch_b64 not valid base64: {exc!r}"})
-    atomic_write_bytes(target, data)
+    jit_build_dir = str(getattr(a, "jit_build_dir", "") or "")
+    jit_backup = invalidate_aiter_jit_build(
+        Path(jit_build_dir) if jit_build_dir else None,
+        bdir,
+        f"{_safe_name(a.kernel_id or target.stem)}_{host}_{int(time.time())}",
+    )
     compile_result: dict[str, Any] = {"status": "skipped", "reason": "non-py target"}
-    if target.suffix.lower() == ".py":
-        try:
+    try:
+        atomic_write_bytes(target, data)
+        if target.suffix.lower() == ".py":
             py_compile.compile(str(target), doraise=True)
             compile_result = {"status": "ok"}
-        except py_compile.PyCompileError as exc:
-            shutil.copy2(backup_path, target)
-            return _emit({"status": "failed", "host": host, "error": f"py_compile failed (auto-reverted): {exc.msg}"})
+    except py_compile.PyCompileError as exc:
+        shutil.copy2(backup_path, target)
+        restore_aiter_jit_build(jit_backup)
+        return _emit(
+            {
+                "status": "failed",
+                "host": host,
+                "error": (
+                    "py_compile failed (auto-reverted): "
+                    f"{exc.msg}"
+                ),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        shutil.copy2(backup_path, target)
+        restore_aiter_jit_build(jit_backup)
+        return _emit({"status": "failed", "host": host, "error": str(exc)})
     return _emit(
         {
             "status": "ok",
@@ -127,6 +150,7 @@ def _do_apply(a: argparse.Namespace) -> int:
             "backup_path": str(backup_path),
             "wrote_bytes": len(data),
             "compile": compile_result,
+            "jit_backup": jit_backup,
         }
     )
 
@@ -145,19 +169,89 @@ def _do_revert(a: argparse.Namespace) -> int:
         int: the process exit code from emitting the result.
     """
     host = socket.gethostname()
-    target = Path(a.target_path)
-    backup = Path(a.backup_path)
-    if not backup.is_file():
-        return _emit(
-            {"status": "noop_missing_backup", "host": host, "target_path": str(target), "backup_path": str(backup)}
-        )
+    records_json = getattr(a, "records_json", "") or ""
     try:
-        assert_revert_paths_allowed(target, backup)
-    except ValueError as exc:
+        records = json.loads(records_json or "[]")
+    except json.JSONDecodeError as exc:
+        return _emit(
+            {
+                "status": "failed",
+                "host": host,
+                "error": f"records_json is invalid: {exc}",
+                "restored_targets": [],
+            }
+        )
+    if (
+        not records_json
+        and getattr(a, "backup_path", "")
+        and not Path(a.backup_path).is_file()
+    ):
+        return _emit(
+            {
+                "status": "noop_missing_backup",
+                "host": host,
+                "target_path": str(getattr(a, "target_path", "")),
+                "backup_path": str(a.backup_path),
+            }
+        )
+    if not records and a.target_path and a.backup_path:
+        records = [
+            {
+                "target_path": a.target_path,
+                "backup_path": a.backup_path,
+            }
+        ]
+    if not records:
+        return _emit({"status": "failed", "host": host, "error": "empty revert records"})
+    restored: list[str] = []
+    jit_records: list[dict] = []
+    try:
+        for record in reversed(records):
+            target = Path(str(record.get("target_path") or ""))
+            backup = Path(str(record.get("backup_path") or ""))
+            if not backup.is_file():
+                raise FileNotFoundError(f"backup missing: {backup}")
+            assert_revert_paths_allowed(target, backup)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup, target)
+            restored.append(str(target))
+            jit_record = record.get("jit_backup")
+            if isinstance(jit_record, dict) and jit_record.get("status") in {"ok", "clean"}:
+                jit_records.append(jit_record)
+        jit_restore = {"status": "skipped", "reason": "no JIT backup"}
+        if jit_records:
+            first = jit_records[0]
+            if any(record != first for record in jit_records[1:]):
+                raise ValueError("conflicting JIT backup records")
+            jit_restore = restore_aiter_jit_build(first)
+    except Exception as exc:  # noqa: BLE001
+        return _emit(
+            {
+                "status": "failed",
+                "host": host,
+                "error": str(exc),
+                "restored_targets": restored,
+            }
+        )
+    return _emit(
+        {
+            "status": "restored",
+            "host": host,
+            "restored_targets": restored,
+            "jit_restore": jit_restore,
+        }
+    )
+
+
+def _do_finalize(a: argparse.Namespace) -> int:
+    """Delete backups for a transaction that has been accepted."""
+    host = socket.gethostname()
+    try:
+        records = json.loads(getattr(a, "records_json", "") or "[]")
+        result = finalize_patch_records(records)
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
         return _emit({"status": "failed", "host": host, "error": str(exc)})
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(backup, target)
-    return _emit({"status": "restored", "host": host, "target_path": str(target), "backup_path": str(backup)})
+    return _emit({"host": host, **result})
 
 
 def _do_bench(a: argparse.Namespace) -> int:
@@ -267,10 +361,15 @@ def main() -> int:
     ap.add_argument("--patch-b64", required=True)
     ap.add_argument("--backup-dir", required=True)
     ap.add_argument("--kernel-id", default="")
+    ap.add_argument("--jit-build-dir", default="")
 
     rp = sub.add_parser("revert")
-    rp.add_argument("--target-path", required=True)
-    rp.add_argument("--backup-path", required=True)
+    rp.add_argument("--target-path", default="")
+    rp.add_argument("--backup-path", default="")
+    rp.add_argument("--records-json", default="")
+
+    fp = sub.add_parser("finalize")
+    fp.add_argument("--records-json", required=True)
 
     bp = sub.add_parser("bench")
     bp.add_argument("--workspace", required=True)
@@ -284,6 +383,8 @@ def main() -> int:
         return _do_apply(a)
     if a.command == "revert":
         return _do_revert(a)
+    if a.command == "finalize":
+        return _do_finalize(a)
     if a.command == "bench":
         return _do_bench(a)
     p.print_help(sys.stderr)

@@ -201,6 +201,47 @@ async def test_scoring_call_writes_full_conversation_trace(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_failed_scoring_call_writes_an_error_row(tmp_path: Path):
+    """A model whose call blows up must still land in the ledger.
+
+    ``score()`` folds per-model exceptions into an ``errors`` map via
+    ``gather(return_exceptions=True)``, so without a row written inside
+    ``_score_one_model`` the failure never reaches the ledger or Langfuse — and
+    which model failed is the only thing that survives the fold.
+    """
+    session_dir = tmp_path / "SESSION"
+    session_dir.mkdir()
+
+    class _BoomClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        async def _create(self, **_kwargs):
+            raise RuntimeError("gateway 400")
+
+    scorer = ProposalScorer(
+        models=("claude-opus-4-7",),
+        client_factory=_BoomClient,
+        session_dir=session_dir,
+    )
+    out = await scorer.score(gap=_GAP, proposals=_PROPOSALS, task_id="spec-9")
+
+    # The scorer still degrades gracefully for its caller.
+    assert "claude-opus-4-7" in (out.get("errors") or {})
+
+    rows = [r for r in _read_jsonl(llm_calls_path(session_dir)) if r["component"] == "proposal_scorer"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["status"] == "error"
+    assert row["error_type"] == "RuntimeError"
+    assert "gateway 400" in row["error_message"]
+    assert row["model"] == "claude-opus-4-7"
+    assert row["task_id"] == "spec-9"
+    # Nothing was measured, so no counter may claim zero.
+    assert row["input_tokens"] is None and row["output_tokens"] is None
+
+
+@pytest.mark.asyncio
 async def test_scoring_without_session_dir_writes_no_trace(tmp_path: Path):
     """The default (tests / no full-trace) path writes no conversation file."""
     scorer = _make_scorer({"m1": _scores_json(("cuda_graph_bs_512", 7.0, "x"))})
@@ -280,8 +321,8 @@ def test_extract_scores_json_bare_and_fenced():
 
 def test_default_models_constant():
     assert DEFAULT_SCORER_MODELS == (
-        "claude-opus-4-8",
-        "gpt-5.5",
+        "claude-opus-5",
+        "gpt-5.6-sol",
         "dvue-aoai-005-Kimi-K2.6",
         "gemini/gemini-3.1-pro-preview",
     )

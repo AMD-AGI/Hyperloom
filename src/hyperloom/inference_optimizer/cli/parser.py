@@ -674,6 +674,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-allow-mm-text-fallback to fail-fast on text-coercible "
         "models too. Default: enabled.",
     )
+    # Retired with the kernel LLM role; accepted as no-ops so a launcher or
+    # operator template that still passes them does not exit 2. Nothing reads
+    # the dests. ``--kernel-prompt`` took a path, so it has to keep consuming
+    # one: as a store_true its value would land as a stray positional and
+    # argparse would exit 2 anyway, which is the failure this exists to avoid.
+    for _retired in ("--kernel-codex", "--kernel-claude"):
+        opt.add_argument(_retired, action="store_true", default=False, help=argparse.SUPPRESS)
+    opt.add_argument("--kernel-prompt", type=str, default=None, help=argparse.SUPPRESS)
     opt.add_argument(
         "--no-kernel",
         action="store_true",
@@ -694,6 +702,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "for a baseline -> kernel-only run, or to validate "
         "the current recipe via SWEEP without a serving-"
         "param search. Default: explore enabled.",
+    )
+    opt.add_argument(
+        "--no-eval",
+        action="store_true",
+        default=False,
+        help="Skip the accuracy eval everywhere. The baseline anchors on "
+        "throughput alone instead of halting on a missing accuracy "
+        "reference, and every candidate is graded on throughput only. "
+        "Useful for CI/CD tuning runs that care about performance and not "
+        "accuracy; the run is not accuracy-validated. Default: eval enabled.",
     )
     opt.add_argument(
         "--enable-framework-config-exploration",
@@ -767,26 +785,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "restores the historical behavior of exiting after "
         "DISCOVER_FAILURE_RETRY_LIMIT (3) empty/failed discoveries. Requires "
         "the authoring track (has no effect under diff-only mode).",
-    )
-    opt.add_argument(
-        "--kernel-codex",
-        action="store_true",
-        default=True,
-        help=(
-            "Use Codex for the Kernel-agent conversation backend (default — "
-            "faster). This does not select the forge kernel rewrite "
-            "ladder; use KERNEL_OPT_BACKEND_ORDER for that. Pass --kernel-claude "
-            "to switch the conversation backend."
-        ),
-    )
-    opt.add_argument(
-        "--kernel-claude",
-        action="store_false",
-        dest="kernel_codex",
-        help=(
-            "Use Claude for the Kernel-agent conversation backend. This does not "
-            "select the forge kernel rewrite ladder."
-        ),
     )
     # Critic backend selection; flags are aliases setting the same dest.
     opt.add_argument(
@@ -924,7 +922,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--orch-prompt", type=str, default=None, help="Override Orchestration system prompt (file path or inline)"
     )
     opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
-    opt.add_argument("--kernel-prompt", type=str, default=None, help="Override Kernel system prompt")
     opt.add_argument(
         "--local-kb-root",
         dest="local_kb_root",
@@ -1077,7 +1074,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "gates; rater identities are anonymized in the orchestration "
         "prompt). Only takes effect when --proposal-scoring is also "
         "passed (scoring is OFF by default); this flag alone does not "
-        "enable scoring. Default 'claude-opus-4-8,gpt-5.5,"
+        "enable scoring. Default 'claude-opus-5,gpt-5.6-sol,"
         "dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview'. "
         "Add a model by appending its slug. Empty list disables scoring "
         "even when enabled.",

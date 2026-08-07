@@ -170,7 +170,7 @@ count. Use both sources to extract every real shape.
 **Build `ALL_CONFIGS` — target exactly 10 configs:**
 
 When the caller merges multiple same-kernel candidates into a single
-`run_optimization` request (see `kernel-agent/SKILL.md` →
+`run_optimization` request (see `docs/conceptual/kernel-execution-path.md` →
 "Merging same-kernel candidates"), `candidate.input_shapes` already
 contains the union of TraceLens-observed shapes across all merged
 kernel_ids. The harness builder doesn't need to re-merge — it just

@@ -34,6 +34,7 @@ from .credentials import (
 from ..session.paths import (
     DEFAULT_SESSION_DIR,
     ENV_USER_DATA_PATH,
+    find_latest_per_session_dir,
     session_dir as _session_dir_resolve,
     workspace_root as _workspace_root_resolve,
 )
@@ -44,11 +45,21 @@ _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
     "OPENAI_CUSTOM_HEADERS",
-    "SAFE_API_KEY",
     "LLM_GATEWAY_KEY",
     "DEEPSEEK_BASE_URL",
     "GEAK_BASE_URL",
     "LLM_API_BASE",
+    # Legacy: not consumed anymore, still stripped if present.
+    "SAFE_API_KEY",
+)
+
+_ANTHROPIC_FALLBACK_KEYS: tuple[str, ...] = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_API_KEY",
 )
 
 
@@ -73,8 +84,8 @@ def _resolve_dotenv_file() -> Path | None:
     return None
 
 
-def _provider_only_mode_before_fallback() -> str:
-    """Detect explicit single-provider intent before installer env fallback runs."""
+def _provider_only_mode() -> str:
+    """Detect explicit single-provider intent from the current environment."""
     has_anthropic = bool(
         os.environ.get("ANTHROPIC_BASE_URL")
         or os.environ.get("ANTHROPIC_API_KEY")
@@ -83,7 +94,7 @@ def _provider_only_mode_before_fallback() -> str:
         or os.environ.get("DEEPSEEK_BASE_URL")
     )
     has_openai = bool(os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_KEY"))
-    has_gateway = bool(os.environ.get("SAFE_API_KEY") or os.environ.get("LLM_GATEWAY_KEY"))
+    has_gateway = bool(os.environ.get("LLM_GATEWAY_KEY"))
     if has_anthropic and not has_openai and not has_gateway:
         return "anthropic"
     if has_openai and not has_anthropic and not has_gateway:
@@ -92,10 +103,19 @@ def _provider_only_mode_before_fallback() -> str:
 
 
 def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | None]) -> None:
-    """Undo stale cross-provider credentials loaded from installer env fallback."""
-    if provider_mode != "anthropic":
+    """Undo cross-provider credentials injected by the installer env file.
+
+    Symmetric: a single-provider run keeps the other side exactly as the shell
+    and ``.env`` left it, so a stale installer env file cannot turn a valid
+    configuration into a mispaired one.
+    """
+    if provider_mode == "anthropic":
+        keys: tuple[str, ...] = _PROVIDER_FALLBACK_KEYS
+    elif provider_mode == "openai":
+        keys = _ANTHROPIC_FALLBACK_KEYS
+    else:
         return
-    for key in _PROVIDER_FALLBACK_KEYS:
+    for key in keys:
         original = snapshot.get(key)
         if original is None:
             os.environ.pop(key, None)
@@ -714,7 +734,34 @@ def _install_pinned_lm_eval(python_exe: str, pip_extra: list[str]) -> None:
         print(f"Preflight: WARNING — pinned lm_eval via {source} failed; falling back")
 
 
-def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
+def _resolved_eval_disabled(args: argparse.Namespace) -> bool:
+    """Effective ``--no-eval`` for this launch, flag or persisted.
+
+    Preflight runs before the ``--resume`` block reads ``state.json``, so a
+    resume that inherits the flag instead of re-passing it must be read here.
+
+    Args:
+        args (argparse.Namespace): The parsed ``optimize`` args.
+
+    Returns:
+        bool: ``True`` when no accuracy eval will run in this session.
+    """
+    if bool(getattr(args, "no_eval", False)):
+        return True
+    if not bool(getattr(args, "resume", False)):
+        return False
+    raw = str(getattr(args, "resume_from", "") or "").strip()
+    resumed = Path(raw).expanduser() if raw else find_latest_per_session_dir()
+    if resumed is None:
+        return False
+    try:
+        state = json.loads((resumed / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return bool(state.get("eval_disabled"))
+
+
+def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str], *, eval_disabled: bool = False) -> None:
     """Probe-then-install ``lm_eval`` in python_exe when the accuracy gate is on.
 
     ``install.sh`` defers ``lm_eval`` to InferenceX's ``benchmark_lib.sh`` runtime
@@ -723,7 +770,7 @@ def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
     never installed, the eval subprocess dies with ``No module named lm_eval``,
     and every ``RUN_EVAL=true`` baseline aborts with ``baseline_accuracy_failed``.
     Ensure it here (preflight runs for all paths) with the benchmark interpreter.
-    Skipped when RUN_EVAL is explicitly disabled (default is enabled).
+    Skipped under ``--no-eval`` or an explicitly disabled RUN_EVAL.
 
     Multi-node only. Single-node reaches lm_eval through ``run_eval`` ->
     InferenceX ``benchmark_lib.sh::run_lm_eval``, which installs the harness on
@@ -741,6 +788,7 @@ def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
     Args:
         python_exe (str): The interpreter that will run ``python -m lm_eval``.
         pip_extra (list[str]): Extra ``pip install`` arguments.
+        eval_disabled (bool): ``--no-eval``; skip the ensure entirely.
 
     Raises:
         subprocess.CalledProcessError: If the install fails. Preflight aborts
@@ -752,6 +800,8 @@ def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
 
     if not is_multi_node():
         return  # single-node: InferenceX installs lm_eval itself, see above
+    if eval_disabled:
+        return  # --no-eval: no eval anywhere, so the harness is never loaded
     run_eval = os.environ.get("RUN_EVAL")
     if run_eval is not None and run_eval.strip().lower() in _RUN_EVAL_FALSE_VALUES:
         return  # accuracy gate disabled; lm_eval not required
@@ -1269,11 +1319,14 @@ def _preflight(
         tuple[str, str] | None: ``(anthropic_base_url, openai_base_url)``, or
             ``None`` when neither base URL is configured.
     """
-    # Capture explicit single-provider intent before the installer env fallbacks
-    # run, then undo any cross-provider credentials they inject.
-    provider_mode = _provider_only_mode_before_fallback()
-    provider_snapshot = {key: os.environ.get(key) for key in _PROVIDER_FALLBACK_KEYS}
     _load_dotenv_fallback()
+    # ``.env`` is operator configuration, so both the single-provider intent and
+    # the restore baseline are taken after it loads. Only what the installer env
+    # file injects on top is undone below.
+    provider_mode = _provider_only_mode()
+    provider_snapshot = {
+        key: os.environ.get(key) for key in (*_PROVIDER_FALLBACK_KEYS, *_ANTHROPIC_FALLBACK_KEYS)
+    }
     _load_kernel_agent_env_fallback()
     _derive_runtime_paths()
     _restore_provider_only_mode(provider_mode, provider_snapshot)
@@ -1281,23 +1334,21 @@ def _preflight(
     # Fail fast on missing credentials after the fallback loaders.
     _validate_credentials()
 
-    # --- Auth alias export ---
-    # SAFE_API_KEY only fills gaps: a provider-specific key set for split
-    # entrypoints (OPENAI_API_KEY / ANTHROPIC_API_KEY) is kept.
-    safe_key = os.environ.get("SAFE_API_KEY", "")
-    if safe_key:
+    # --- Auth alias export (internal LLM aliases only) ---
+    # These aliases feed OpenAI-protocol consumers, so they are filled from the
+    # OpenAI-side key only and stay unset when that side is not configured. An
+    # explicitly set alias is kept, and the primary keys are never cross-filled.
+    # GEAK_API_KEY is not among them: GEAK runs on the Anthropic side, so an
+    # OpenAI-side value could not start it.
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    if openai_key:
         for alias in (
-            "OPENAI_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_API_KEY",
-            "DEEPSEEK_API_KEY",
-            "GEAK_API_KEY",
             "LLM_API_KEY",
             "AMD_LLM_API_KEY",
         ):
             if not os.environ.get(alias):
-                os.environ[alias] = safe_key
-                print(f"Preflight: filled {alias} from SAFE_API_KEY")
+                os.environ[alias] = openai_key
+                print(f"Preflight: filled {alias} from OPENAI_API_KEY")
     # --- Resolve install interpreters ---
     # Resolve the ACTIVE benchmark backend first so a bypass-only environment
     # (no Magpie / no /opt/venv) never routes installs through Magpie's
@@ -1345,13 +1396,11 @@ def _preflight(
             if prev != want:
                 os.environ[var] = want
                 print(f"Preflight: {var} {prev or '<unset>'} -> {want} (resolved endpoint)")
-        # Claude CLI primary key: prefer the explicit Anthropic-side key so a
-        # split-entrypoint deploy auths Claude with its own key; SAFE_API_KEY is the fallback.
+        # Claude CLI primary key: Anthropic-side credentials only.
         claude_primary_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
             or os.environ.get("DEEPSEEK_API_KEY", "")
-            or safe_key
         )
         _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
         if anthropic_url and not openai_url and not os.environ.get("GEAK_CLAUDE_MODEL"):
@@ -1359,17 +1408,20 @@ def _preflight(
                 os.environ.get("CLAUDE_MODEL", "").strip()
                 or os.environ.get("DEEPSEEK_MODEL", "").strip()
                 or ("deepseek-v4-pro" if os.environ.get("DEEPSEEK_API_KEY", "").strip() else "")
-                or "claude-opus-4-8"
+                or "claude-opus-5"
             )
             os.environ["GEAK_CLAUDE_MODEL"] = geak_claude_model
             print(f"Preflight: GEAK_CLAUDE_MODEL <unset> -> {geak_claude_model} (GEAKv4 Claude workflow)")
         resolved_urls = (anthropic_url, openai_url)
 
-        # GEAK / LLM_API_BASE default to the resolved OpenAI-compatible gateway
-        # URL, but an intentional operator override is preserved.
-        gateway_url = openai_url or anthropic_url
+        # LLM_API_BASE addresses an OpenAI-protocol endpoint, so it defaults to
+        # the resolved OpenAI-side URL and stays unset when that side is not
+        # configured. An intentional operator override is preserved. GEAK_BASE_URL
+        # is not defaulted here: GEAK runs on the Anthropic side, so an
+        # OpenAI-side endpoint could not start it.
+        gateway_url = openai_url
         if gateway_url:
-            for alias in ("GEAK_BASE_URL", "LLM_API_BASE"):
+            for alias in ("LLM_API_BASE",):
                 current = os.environ.get(alias, "").strip()
                 if current and current != gateway_url:
                     # A genuine operator override is preserved, but a leftover
@@ -1421,7 +1473,7 @@ def _preflight(
     # ``python -m lm_eval`` directly, with no InferenceX runtime shim to install
     # the harness, so every RUN_EVAL=true baseline there would otherwise abort
     # with baseline_accuracy_failed.
-    _ensure_lm_eval_dep(benchmark_python, pip_extra)
+    _ensure_lm_eval_dep(benchmark_python, pip_extra, eval_disabled=_resolved_eval_disabled(args))
 
     # 1d. Per-framework runtime deps declared in assets/framework_deps/. This is
     # the pass that covers the documented flow: install.sh runs before

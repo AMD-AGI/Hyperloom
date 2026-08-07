@@ -233,6 +233,12 @@ class TestEnablementReaders:
         assert ag.launch_enablement_allowed(state) is launch
         assert ag.eval_enablement_allowed(state) is eval_
 
+    @pytest.mark.parametrize("mode", ["eval", "all"])
+    def test_no_eval_closes_the_eval_lane_but_not_launch(self, mode):
+        state = SimpleNamespace(enablement_mode=mode, eval_disabled=True)
+        assert ag.eval_enablement_allowed(state) is False
+        assert ag.launch_enablement_allowed(state) is (mode == "all")
+
 
 class TestAccuracyValidator:
     @pytest.mark.parametrize(

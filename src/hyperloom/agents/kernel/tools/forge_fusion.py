@@ -38,23 +38,26 @@ sys.path.pop(0)
 
 RESULT_BEGIN = "FORGE_FUSION_RESULT_BEGIN"
 RESULT_END = "FORGE_FUSION_RESULT_END"
+
+# forge-fusion's manifest verdict for "discovery never reached the model", added in
+# manifest schema v2 alongside the ``error`` block. It is NOT a statement about the
+# kernel, so it must not be normalized into an optimization outcome -- see
+# _normalize_manifest.
+LLM_UNAVAILABLE_VERDICT = "llm_unavailable"
 DEFAULT_TIMEOUT_SEC = 7200
 
 
 def _inject_author_gateway_env() -> None:
-    """Seed the ``claude`` author subprocess's gateway auth from the OpenAI-proxy env.
+    """Seed the ``claude`` author subprocess's auth from the Anthropic-side env.
 
-    forge-fusion's ``author`` stage drives the ``claude`` CLI, which authenticates
-    via ``ANTHROPIC_*``. Hyperloom's session env only carries ``OPENAI_BASE_URL`` /
-    ``SAFE_API_KEY`` for the OpenAI-compatible LLM proxy, so derive the
-    ``ANTHROPIC_*`` equivalents here. Only fills what is absent; explicit operator
-    values always win.
+    forge-fusion's ``author`` stage drives the ``claude`` CLI, which
+    authenticates via ``ANTHROPIC_*``. Only the Anthropic side is used. With no
+    Anthropic-side credentials the stage is left unconfigured and fails with the
+    CLI's own auth error.
     """
-    openai_base = str(os.environ.get("OPENAI_BASE_URL") or "").strip()
-    if openai_base and not os.environ.get("ANTHROPIC_BASE_URL"):
-        # Strip trailing /v1 (claude appends its own).
-        os.environ["ANTHROPIC_BASE_URL"] = openai_base[:-3] if openai_base.endswith("/v1") else openai_base
-    token = str(os.environ.get("SAFE_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
+    token = str(
+        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN") or ""
+    ).strip()
     if token:
         os.environ.setdefault("ANTHROPIC_API_KEY", token)
         os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", token)
@@ -262,8 +265,39 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
 
     loop = m.get("fusion_loop") or {}
     val = m.get("validation") or {}
-    best = loop.get("best") or {}
     kept = bool(loop.get("kept") or val.get("kept"))
+
+    if str(m.get("verdict") or "").strip().lower() == LLM_UNAVAILABLE_VERDICT and not kept:
+        # forge-fusion never reached the model, so this run holds no opinion about the
+        # kernel. The default no-KEEP shape below would report it as
+        # ``complete``/``no_improvement``, which is wrong twice over: it records an
+        # outage as an optimization result, AND ``complete`` satisfies the KERNEL-entry
+        # idempotency gate (``_fusion_required_before_kernel_opt``), so one gateway
+        # blip would skip fusion for the whole remaining session and the model would
+        # never be fusion-optimized at all. The timeout shape below is the established
+        # way to say "infrastructure failed, this is retryable".
+        #
+        # Guarded on ``not kept`` so this can never discard a validated fusion. That
+        # combination should be impossible -- forge-fusion only overrides the verdict
+        # when discovery raised, in which case it proposed no recipes and the loop
+        # never ran -- but that invariant lives in another repo and nothing here can
+        # enforce it, while the cost of being wrong is throwing away a measured patch.
+        #
+        # ``result`` still carries its failed/REVERT/not-kept defaults from above, so
+        # only the outage's identity has to be added.
+        detail = m.get("error") if isinstance(m.get("error"), dict) else {}
+        kind = str(detail.get("kind") or "unknown")
+        attempts = detail.get("attempts")
+        tried = f" after {attempts} attempt(s)" if attempts else ""
+        message = str(detail.get("message") or "no detail reported")
+        result.update({
+            "verdict": LLM_UNAVAILABLE_VERDICT,
+            "error_class": LLM_UNAVAILABLE_VERDICT,
+            "error": f"forge-fusion never reached the LLM ({kind}{tried}): {message}"[:1500],
+        })
+        return result
+
+    best = loop.get("best") or {}
     speedup = best.get("kernel_speedup") or val.get("kernel_speedup")
     best_flags = str(loop.get("best_env_flag") or "").split()
     artifacts = m.get("artifacts") or {}

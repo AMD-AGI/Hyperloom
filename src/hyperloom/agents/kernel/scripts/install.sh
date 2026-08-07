@@ -274,21 +274,6 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
-# Single-gateway (AMD / LiteLLM-style) setup: only SAFE_API_KEY + OPENAI_BASE_URL
-# are configured. Mirror the CLI's _resolve_llm_endpoints(): the Anthropic base
-# is OPENAI_BASE_URL with a trailing /v1 stripped (the SDK re-appends it) and the
-# gateway key doubles as the Anthropic key. Explicit values always win.
-if [ -n "${SAFE_API_KEY:-}" ] && [ -n "${OPENAI_BASE_URL:-}" ]; then
-  if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
-    _gw_url="${OPENAI_BASE_URL%/}"
-    export ANTHROPIC_BASE_URL="${_gw_url%/v1}"
-    unset _gw_url
-    echo "[kernel-agent] derived ANTHROPIC_BASE_URL from OPENAI_BASE_URL (single gateway)"
-  fi
-  if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-    export ANTHROPIC_API_KEY="$SAFE_API_KEY"
-  fi
-fi
 # e2e whole-pipeline optimizer — Hyperloom calls it simply "geak" (formerly the
 # standalone PerfSkills repo / GEAK_v4). Its code lives IN GEAK (interface/run_e2e.py
 # + e2e_workflow/), tracked on the ``main`` branch. Hyperloom calls
@@ -306,7 +291,7 @@ if [ -z "${GEAK_ROOT:-}" ]; then
   GEAK_ROOT="${_open_source_root}/GEAK@${_GEAK_SHA}"
 fi
 GEAK_E2E_RUNNER="${GEAK_E2E_RUNNER:-${GEAK_ROOT}/interface/run_e2e.py}"
-GEAK_CLAUDE_MODEL_VAL="${GEAK_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-opus-4-8}}"
+GEAK_CLAUDE_MODEL_VAL="${GEAK_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-opus-5}}"
 if [ -z "${GEAK_CLAUDE_MODEL:-}" ] && [ -z "${CLAUDE_MODEL:-}" ] && [ -n "${DEEPSEEK_API_KEY:-${DEEPSEEK_BASE_URL:-}}" ]; then
   GEAK_CLAUDE_MODEL_VAL="${DEEPSEEK_MODEL:-deepseek-v4-pro}"
 fi
@@ -331,30 +316,10 @@ _ANTHROPIC_KEY_VAL="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
 _DEEPSEEK_BASE_URL_VAL="${DEEPSEEK_BASE_URL:-}"
 _DEEPSEEK_KEY_VAL="${DEEPSEEK_API_KEY:-}"
 _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic"
-# Pick a key that matches a supported endpoint.
-_key_for_endpoint() {
-  local url="$1"
-  if [ -n "$_ANTHROPIC_BASE_URL_VAL" ] && [ "$url" = "$_ANTHROPIC_BASE_URL_VAL" ]; then
-    printf '%s' "$_ANTHROPIC_KEY_VAL"; return 0
-  fi
-  if [ -n "$_DEEPSEEK_BASE_URL_VAL" ] && [ "$url" = "$_DEEPSEEK_BASE_URL_VAL" ]; then
-    printf '%s' "$_DEEPSEEK_KEY_VAL"; return 0
-  fi
-  if [ "$url" = "$_DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL" ]; then
-    printf '%s' "$_DEEPSEEK_KEY_VAL"; return 0
-  fi
-  printf '%s' "${DEEPSEEK_API_KEY:-${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}}"
-}
-# Legacy GEAK_BASE_URL/GEAK_API_KEY aliases for endpoint routing (#521).
-# GEAKv4 kernel optimization uses GEAK_CLAUDE_MODEL + Claude Code auth instead.
-GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${DEEPSEEK_BASE_URL:-${ANTHROPIC_BASE_URL:-${LLM_API_BASE:-}}}}"
-if [ -z "$GEAK_BASE_URL_VAL" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; then
-  GEAK_BASE_URL_VAL="${_DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL}"
-fi
-# Pair the GEAK key to its endpoint so a split deploy never sends the wrong
-# provider's key. Explicit GEAK_API_KEY still wins.
-GEAK_API_KEY_VAL="${GEAK_API_KEY:-$(_key_for_endpoint "$GEAK_BASE_URL_VAL")}"
-[ -n "$GEAK_API_KEY_VAL" ] || GEAK_API_KEY_VAL="${DEEPSEEK_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-}}}}}}"
+# GEAK_BASE_URL / GEAK_API_KEY are neither derived nor written here: GEAKv4 runs
+# on the Anthropic side via GEAK_CLAUDE_MODEL + Claude Code auth, and an operator
+# value reaches it from the environment. write_env_file removes both from the
+# shared .env so a stale entry cannot outlive this install.
 # install.sh always installs everything. A previous lazy
 # "install only the requested backend" scheme caused recurring
 # "missing dependency discovered at request time" issues, so the
@@ -453,17 +418,52 @@ verify_die() {
 # install without them cannot finish anyway. The only downgrade path
 # is --check-only / --dry-run, which is for introspection only and
 # does not actually install.
-preflight_validate_credentials() {
-  local missing=()
-  local has_url=0 has_key=0
-  { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_url=1
-  { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_key=1
-  [ "$has_url" -eq 0 ] && missing+=("ANTHROPIC_BASE_URL or DEEPSEEK_BASE_URL (DeepSeek may omit the URL), or SAFE_API_KEY + OPENAI_BASE_URL")
-  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, DEEPSEEK_API_KEY, or SAFE_API_KEY")
-  if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
-    log "credentials preflight: usable LLM base URL + key present"
+# Reject one provider's base URL paired with only the other provider's key.
+# DeepSeek serves its own Anthropic-compatible endpoint, so its key counts as one.
+preflight_reject_cross_provider() {
+  local a_key a_endpoint conflict=""
+  a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${DEEPSEEK_API_KEY:-}}}"
+  a_endpoint="${ANTHROPIC_BASE_URL:-}"
+  if [ -z "$a_endpoint" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+    a_endpoint="${DEEPSEEK_BASE_URL:-https://api.deepseek.com/anthropic}"
+  fi
+  if [ -n "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -n "$a_key" ]; then
+    conflict="OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an Anthropic-side key is configured"
+  elif [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ -z "$a_key" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
+    conflict="ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an OPENAI_API_KEY is configured"
+  elif [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "$a_key" ] && [ -z "$a_endpoint" ]; then
+    conflict="an Anthropic-side key is configured without ANTHROPIC_BASE_URL, while the OpenAI side points at OPENAI_BASE_URL"
+  elif [ -n "$a_endpoint" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
+    conflict="OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the Anthropic side points at ANTHROPIC_BASE_URL"
+  fi
+  [ -z "$conflict" ] && return 0
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    warn "conflicting LLM credentials: ${conflict}; continuing because --check-only / --dry-run is active."
     return 0
   fi
+  cat >&2 <<EOF
+[kernel-agent ERROR] Conflicting LLM credentials: ${conflict}.
+
+Hyperloom never borrows one provider's key or endpoint for the other. Give each
+side its own base URL and key, or drop the other provider's key.
+EOF
+  return 1
+}
+
+preflight_validate_credentials() {
+  local missing=()
+  local has_anthropic=0 has_openai=0
+  # Each side needs its own base URL and key; an unset side is fine.
+  { { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } &&
+    { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; }; } &&
+    has_anthropic=1
+  { [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; } && has_openai=1
+  preflight_reject_cross_provider || return 1
+  if [ "$has_anthropic" -eq 1 ] || [ "$has_openai" -eq 1 ]; then
+    log "credentials preflight: at least one self-consistent provider side present"
+    return 0
+  fi
+  missing+=("a self-consistent provider side: ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY (DeepSeek may omit the URL), or OPENAI_BASE_URL + OPENAI_API_KEY")
   local env_file_status
   if [ -f "$REPO_ROOT/.env" ]; then
     env_file_status="present"
@@ -1165,8 +1165,8 @@ write_env_file() {
   else
     remove_dotenv_var ANTHROPIC_API_KEY
   fi
-  remove_dotenv_var OPENAI_BASE_URL
-  remove_dotenv_var OPENAI_API_KEY
+  # Only the Anthropic / DeepSeek side is persisted here. The OpenAI-side entries
+  # in the shared .env are owned elsewhere and left untouched.
   if [ -n "${_deepseek_url}" ]; then
     upsert_dotenv_var DEEPSEEK_BASE_URL "$_deepseek_url"
   else
@@ -1178,6 +1178,7 @@ write_env_file() {
     remove_dotenv_var DEEPSEEK_API_KEY
   fi
   remove_dotenv_var ANTHROPIC_AUTH_TOKEN
+  # Legacy gateway key: not read, purged if present.
   remove_dotenv_var SAFE_API_KEY
   remove_dotenv_var AMD_LLM_API_KEY
   remove_dotenv_var LLM_GATEWAY_KEY

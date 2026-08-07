@@ -104,6 +104,8 @@ def _remote_is_gbrain(kb: Any) -> bool:
     Returns:
         ``True`` when the active remote is the gbrain adapter.
     """
+    if str(getattr(kb, "mode", "")).lower() == "remote":
+        return True
     remote = getattr(kb, "remote", None)
     return type(remote).__name__ == "GbrainRemoteRecipeClient"
 
@@ -269,7 +271,8 @@ def _kg_native_config_donor(
 ) -> Mapping[str, Any] | None:
     """Borrow a cross-model warm-replay donor from the native KG link-graph.
 
-    Active only when a NATIVE KG client (``GBRAIN_KG_NATIVE``) is reachable.
+    Active only when a native KG client is reachable. Local mode supplies one
+    automatically; remote mode retains the ``GBRAIN_KG_NATIVE`` gate.
     Returns a recipe-shaped donor synthesized from the strongest cross-model
     ``KNOB_IMPROVES`` edge for the target ``arch+precision`` (single_top), or
     ``None`` to fall back to the recipe-KB sibling search. Fully
@@ -1080,11 +1083,12 @@ def run_t0_anchor(
     if _fw_version:
         shared_state.framework_version = _fw_version
 
-    # Read-modify-write the local store so the stamp doesn't clobber fields.
+    # Read-modify-write the selected store's exact authority row so the stamp
+    # does not clobber fields or trigger a broad remote warm-start scan.
     try:
-        live = kb.local.get_recipe(canonical_id=cid) or {}
+        live = kb.get_authoritative_recipe(canonical_id=cid) or {}
     except Exception as exc:  # noqa: BLE001 — defensive
-        log.info("T0 anchor local get_recipe non-fatal failure: %s", exc)
+        log.info("T0 anchor authority get_recipe non-fatal failure: %s", exc)
         live = {}
 
     # Merge prior extras; new values win.
@@ -1226,8 +1230,8 @@ def run_t0_anchor(
         config_donor = warm_point
         config_donor_tier = "self"
         config_donor_conf = warm_conf
-    # KG-native cross-model donor (gated by GBRAIN_KG_NATIVE): prefer the
-    # strongest cross-model KNOB_IMPROVES edge; degrade to recipe-KB search.
+    # KG-native cross-model donor (automatic locally, GBRAIN_KG_NATIVE-gated
+    # remotely): prefer the strongest edge; degrade to recipe-KB search.
     if config_donor is None and warm_point:
         kg_donor = _kg_native_config_donor(
             architectures=_architectures_val if isinstance(_architectures_val, list) else None,

@@ -56,8 +56,8 @@ must be able to:
 - Create or resume a session directory,
 - Write `manifest.json`, `state.json`, `storage/coordinator.db`, action
   run workspaces, reports, and `session_breakdown.json`,
-- Route intents through the Orchestration, Kernel, Critic, and
-  Robustness roles,
+- Route intents through the Orchestration, Critic, and Robustness LLM roles,
+  and dispatch kernel work to programmatic Python handlers,
 - Produce a final report and a dashboard-consumable breakdown.
 
 Private helper names and internal prompt wording are not contracts. The
@@ -310,8 +310,7 @@ conversation, so reasoning continuity is preserved between ticks.
   its own prior attempts. Robustness additionally surfaces a
   conversation no-progress signal as an external circuit-breaker.
 
-The other three roles (Kernel, Critic, Robustness) remain reactive and
-stateless per tick.
+The other two roles (Critic, Robustness) remain reactive and stateless per tick.
 
 ## Feedback loops
 

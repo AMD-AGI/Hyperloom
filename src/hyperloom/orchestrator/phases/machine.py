@@ -9,6 +9,7 @@ import logging as _logging
 from typing import Any
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
+from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
 from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
@@ -94,14 +95,8 @@ class MachinePhase(PhaseHandler):
             )
 
     def _kernel_enabled(self) -> bool:
-        """Whether the kernel_agent role is registered and enabled.
-
-        Returns:
-            ``True`` if the kernel_agent role exists and the persisted
-            ``kernel_enabled`` flag is set.
-        """
-        # Mirror persisted kernel_enabled flag; --no-kernel removes the kernel_agent role.
-        return "kernel_agent" in self.role_registry and bool(self.shared_state.kernel_enabled)
+        """Whether kernel optimization is enabled for this run."""
+        return bool(self.shared_state.kernel_enabled)
 
     def _explore_enabled(self) -> bool:
         """Whether the EXPLORE phase is enabled for this run.
@@ -281,6 +276,12 @@ class MachinePhase(PhaseHandler):
             )
         except Exception:  # noqa: BLE001
             log.exception("Coordinator: phase-boundary checkpoint failed")
+        # Cache-safe here only because the checkpoint above already re-seeded
+        # the conversation, so the cached prefix is rebuilt regardless.
+        try:
+            self._reseed_orch_prompt_for_phase(to_phase)
+        except Exception:  # noqa: BLE001 — prompt scoping is best-effort
+            log.exception("Coordinator: phase-boundary prompt reseed failed")
 
         target = (to_phase or "").upper()
         if target == _phase_state.PHASE_FRAMEWORK_AGENT:
@@ -293,6 +294,38 @@ class MachinePhase(PhaseHandler):
             await self._on_enter_sweep(from_phase=from_phase)
         elif target == _phase_state.PHASE_CLOSE:
             await self._on_enter_close(from_phase=from_phase)
+
+    def _reseed_orch_prompt_for_phase(self, to_phase: str) -> bool:
+        """Re-scope the orchestration system prompt to the phase being entered.
+
+        Carries the current macro-cycle and cycle directive over unchanged; only
+        the phase scope moves. Snapshots the installed scope so the artefacts
+        record what each phase actually ran under. Skips a user-supplied
+        ``--orch-prompt``.
+
+        Args:
+            to_phase: The phase being entered.
+
+        Returns:
+            ``True`` when the override was rebuilt, else ``False``.
+        """
+        phase = (to_phase or "").strip().upper()
+        if not phase or getattr(self, "_orch_prompt_is_user_supplied", False):
+            return False
+        rebuild = getattr(self, "_rebuild_orch_prompt", None)
+        overrides = getattr(self, "system_prompt_overrides", None)
+        if rebuild is None or not isinstance(overrides, dict):
+            return False
+        state = self.shared_state
+        scoped = rebuild(
+            macro_cycle=state.macro_cycle,
+            cycle_directive=str(state.orchestration_memory.get("next_cycle_directive", "") or ""),
+            phase=phase,
+        )
+        overrides["orchestration"] = scoped
+        _write_prompt_snapshot(self.session_dir, "orchestration", scoped, phase=phase)
+        log.info("orchestration prompt re-scoped for phase=%s", phase)
+        return True
 
     def _record_phase_entry_evidence(self, **kvs: Any) -> None:
         """Merge ``kvs`` into the latest phase_history row's evidence dict (no-op when empty).

@@ -8,7 +8,6 @@ from __future__ import annotations
 from hashlib import sha1
 import logging as _logging
 import os
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +19,7 @@ from ..policy.gate import (
     SPECIALIST_FROM_AGENT_PREFIX,
 )
 from ..loop.sub_agent_runner import SubAgentResult
+from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
 from ..specialists.runner import SpecialistFailureType
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import Task
@@ -280,9 +280,10 @@ class ExplorePhase(PhaseHandler):
         """Rebuild the orchestration system prompt for the new macro-cycle.
 
         Injects the freshly-captured ``next_cycle_directive`` (or a deterministic
-        fallback) into a rebuilt prompt, mutates ``system_prompt_overrides``, and
-        records the directive in the ``cycle_directive_history`` ring. Skips a
-        user-supplied ``--orch-prompt``. Best-effort; returns True when reseeded.
+        fallback) into a rebuilt prompt, mutates ``system_prompt_overrides``,
+        snapshots the installed scope, and records the directive in the
+        ``cycle_directive_history`` ring. Skips a user-supplied
+        ``--orch-prompt``. Best-effort; returns True when reseeded.
         """
         if getattr(self, "_orch_prompt_is_user_supplied", False):
             return False
@@ -296,11 +297,12 @@ class ExplorePhase(PhaseHandler):
         if not directive:
             directive = self._cycle_directive_fallback()
             source = "deterministic"
-        new_prompt = rebuild(macro_cycle=cycle, cycle_directive=directive)
+        new_prompt = rebuild(macro_cycle=cycle, cycle_directive=directive, phase=state.phase)
         overrides = getattr(self, "system_prompt_overrides", None)
         if not isinstance(overrides, dict):
             return False
         overrides["orchestration"] = new_prompt
+        _write_prompt_snapshot(self.session_dir, "orchestration", new_prompt, phase=state.phase)
         history = list(getattr(state, "cycle_directive_history", []) or [])
         history.append(
             {
@@ -1071,6 +1073,40 @@ class ExplorePhase(PhaseHandler):
                             "severity": str(gap.get("severity") or ""),
                         }
 
+        if "baseline_tput" not in params:
+            _bt = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+            if _bt > 0:
+                params["baseline_tput"] = _bt
+        if "current_tput" not in params:
+            cb = getattr(state, "current_best", None)
+            _ct = float((cb.get("tput") if isinstance(cb, dict) else 0) or 0.0)
+            if _ct > 0:
+                params["current_tput"] = _ct
+        if "cumulative_gain_validated" not in params:
+            _cgv = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+            if _cgv != 0:
+                params["cumulative_gain_validated"] = _cgv
+        if "keep_threshold_pct" not in params:
+            try:
+                from ..phases.machine_state import decaying_keep_threshold_pct
+                from ..actions.executors._multi_node_env import is_multi_node
+
+                _kth = decaying_keep_threshold_pct(
+                    int(getattr(state, "macro_cycle", 0) or 0),
+                    multi_node=is_multi_node(),
+                )
+                params["keep_threshold_pct"] = _kth
+            except Exception:  # noqa: BLE001
+                pass
+        if "applied_stack" not in params:
+            _stack = list(getattr(state, "optimization_stack", None) or [])
+            if _stack:
+                params["applied_stack"] = [
+                    {"variant_name": str(e.get("variant_name") or ""), "gain_pct": float(e.get("gain_pct") or 0.0)}
+                    for e in _stack
+                    if isinstance(e, dict)
+                ]
+
         # Pack bottleneck signals into roofline_evidence for the specialist.
         # Hot kernels alone are enough: a trace whose quality gate withheld
         # analysis.md still names where device time goes.
@@ -1163,7 +1199,7 @@ class ExplorePhase(PhaseHandler):
             gaps.append(
                 {
                     "canonical_id": f"{anchor}#throughput_below_target",
-                    "symptom": (f"current_best is {target_gap:.1f}% short of --target-gain"),
+                    "symptom": (f"current_best is {target_gap:.1f}% short of the run objective target"),
                     "layer": "framework",
                     "severity": severity,
                     "domain_hint": "serving_specialist",

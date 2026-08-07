@@ -28,6 +28,7 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     _DOMAIN_FOCUS_TEMPLATES,
     _focus_framework_rewrite_specialist,
+    build_specialist_prompts,
 )
 from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAIN_KEYS,
@@ -389,34 +390,53 @@ def _dispatch(tmp_path: Path, framework: str, evidence: str = "") -> dict[str, A
     return stub.tasks.created[0]["params"]
 
 
+def _dispatched_prompt(tmp_path: Path, framework: str, evidence: str = "") -> str:
+    """Render what the specialist actually reads for a local-explore dispatch.
+
+    Asserting on the rendered prompt rather than on one param keeps these
+    invariants pinned wherever the text is carried from: static guidance lives
+    in the domain focus (system prompt), measured evidence rides in ``notes``
+    (user prompt), and the specialist reads both.
+    """
+    params = _dispatch(tmp_path, framework, evidence)
+    system, user = build_specialist_prompts(
+        SpecialistPromptInputs(
+            task_id="t-1",
+            domain=get_domain(str(params["domain"])),
+            gap_canonical_id=str(params.get("gap_canonical_id") or ""),
+            task_kind=str(params.get("task_kind") or ""),
+            notes=str(params.get("notes") or ""),
+            framework=str(params.get("framework") or ""),
+        )
+    )
+    return f"{system}\n{user}"
+
+
 def test_scriptable_dispatch_demands_a_switch_manifest(tmp_path):
     """The scriptable arm's mandate is a patch *plus* a manifest, not either/or.
 
     Making the manifest optional would leave the whole attribution and
     composition mechanism dependent on an LLM choosing to opt into it.
     """
-    params = _dispatch(tmp_path, "custom")
-    assert params["domain"] == DOMAIN_KEY
-    notes = params["notes"]
-    assert "framework_switches" in notes
-    assert "default-off environment switch" in notes
-    assert "depends_on" in notes and "enables" in notes
+    assert _dispatch(tmp_path, "custom")["domain"] == DOMAIN_KEY
+    prompt = _dispatched_prompt(tmp_path, "custom")
+    assert "framework_switches" in prompt
+    assert "default-off environment switch" in prompt
+    assert "depends_on" in prompt and "enables" in prompt
 
 
 def test_scriptable_dispatch_drops_the_serving_hot_path_language(tmp_path):
     """A pipeline with no scheduler must not be pointed at scheduling."""
-    notes = _dispatch(tmp_path, "custom")["notes"]
-    assert "KV-cache / scheduling" not in notes
-    assert "iterative loop" in notes
+    prompt = _dispatched_prompt(tmp_path, "custom")
+    assert "KV-cache / scheduling" not in prompt
+    assert "step-invariant" in prompt
 
 
 def test_serving_dispatch_is_unchanged(tmp_path):
-    """The serving arm keeps its domain, mandate and either/or deliverable."""
-    params = _dispatch(tmp_path, "sglang")
-    assert params["domain"] == "serving_specialist"
-    notes = params["notes"]
-    assert "MoE / FP8 / attention / GEMM / KV-cache / scheduling" in notes
-    assert "framework_switches" not in notes
+    """The serving arm keeps its domain and its own hot-path language."""
+    assert _dispatch(tmp_path, "sglang")["domain"] == "serving_specialist"
+    prompt = _dispatched_prompt(tmp_path, "sglang")
+    assert "framework_switches" not in prompt
 
 
 def test_scriptable_dispatch_inlines_the_measured_evidence(tmp_path):

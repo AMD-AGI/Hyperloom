@@ -332,7 +332,6 @@ async def test_local_probe_runs_health_probes(monkeypatch, tmp_path: Path):
 
     # Unset gateway env so the external-deps sub-probe doesn't add a /models request.
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
 
     cfg = lp.LocalProbeConfig(
         session_dir=None,
@@ -384,7 +383,6 @@ async def test_probe_gateway_health_uses_custom_subscription_header(monkeypatch)
     # OpenAI-side gateway probe reads OPENAI_CUSTOM_HEADERS (strict separation).
     monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sub-key")
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
-    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
 
     out = await _probe_gateway_health("https://llm.example.invalid/Unified/v1/models", 1.0)
 
@@ -418,7 +416,6 @@ async def test_probe_gateway_health_uses_provider_api_key(monkeypatch):
     monkeypatch.setattr(lp.httpx, "AsyncClient", _PatchedClient)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-token")
-    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
     monkeypatch.delenv("LLM_GATEWAY_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
     monkeypatch.delenv("OPENAI_CUSTOM_HEADERS", raising=False)

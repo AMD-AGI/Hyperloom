@@ -28,7 +28,7 @@ from hyperloom.common import io as _common_io
 from hyperloom.common.timeutil import now_iso
 
 from hyperloom.inference_optimizer.session.session_paths import runs_dir, specialist_intel_path
-from ..roles.base import BackendError
+from ..roles.base import BackendError, LLMCallFailed
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
@@ -48,7 +48,7 @@ from .subprocess_ import (
     _setup_worktree,
 )
 from . import patch_safety as _patch_safety
-from .profile import SpecialistProfile, resolve_specialist_profile
+from .profile import MODE_PATCH, SpecialistProfile, resolve_specialist_profile
 from ..loop.sub_agent_runner import RunnerContext
 from ..prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
@@ -127,6 +127,7 @@ _SECRET_ENV_NAMES: tuple[str, ...] = (
     "HYPERLOOM_PR_CI_GH_TOKEN",
     "LLM_API_KEY",
     "OPENAI_API_KEY",
+    # Legacy: not consumed anymore, still redacted if present.
     "SAFE_API_KEY",
 )
 _SECRET_ASSIGNMENT_RE = re.compile(
@@ -138,7 +139,8 @@ _SECRET_ASSIGNMENT_RE = re.compile(
 _AUTHORIZATION_RE = re.compile(r"(?i)\b(?P<prefix>authorization\s*:\s*(?:bearer\s+)?)(?P<value>[A-Za-z0-9._~+/=-]+)")
 _BEARER_RE = re.compile(r"(?i)\b(?P<prefix>bearer\s+)(?P<value>[A-Za-z0-9._~+/=-]+)")
 _TOKEN_VALUE_RES = (
-    re.compile(r"\bsk-[A-Za-z0-9_-]{3,}\b"),
+    # Keep in sync with env_safety.redact_secret_values().
+    re.compile(r"\b(?:ak|pk|sk)-[A-Za-z0-9_-]{3,}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{3,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{10,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
@@ -537,7 +539,7 @@ class SpecialistRunner:
         max_turns = int(params.get("max_turns") or self.default_max_turns)
         # Resolve by anchor first then key so a domain carrying the KB anchor matches its entry.
         domain = domain_for_tag(domain_key)
-        profile = resolve_specialist_profile(params)
+        profile = resolve_specialist_profile(params, domain=domain)
         task_description = str(params.get("task_description") or "").strip()
 
         workspace = self._resolve_workspace(ctx)
@@ -580,6 +582,7 @@ class SpecialistRunner:
         worktree, worktree_base, worktree_err = self._maybe_setup_worktree(
             ctx,
             workspace=workspace,
+            profile=profile,
         )
         if worktree_err:
             notes.append(f"worktree_setup_failed:{worktree_err}")
@@ -612,6 +615,10 @@ class SpecialistRunner:
                 source_hint_directories=tuple(params.get("source_hint_directories") or ()),
                 model_info=dict(params.get("model_info") or {}),
                 static_recon_checklist=str(params.get("static_recon_checklist") or ""),
+                enablement_source_context=str(params.get("enablement_source_context") or ""),
+                enablement_candidate_refs=tuple(
+                    str(r).strip() for r in (params.get("enablement_candidate_refs") or ()) if str(r).strip()
+                ),
                 gpu_type=str(params.get("gpu_type") or ""),
                 allocated_gpu_ids=allocated_gpu_ids,
                 tp=int(params.get("tp") or 0),
@@ -642,6 +649,15 @@ class SpecialistRunner:
                 # WS1 wall-clock budget so the specialist can self-throttle.
                 wall_budget_sec=float((ctx.extra or {}).get("wall_budget_sec") or 0.0),
                 started_at_iso=datetime.now(timezone.utc).isoformat(),
+                baseline_tput=float(params.get("baseline_tput") or 0.0),
+                current_tput=float(params.get("current_tput") or 0.0),
+                cumulative_gain_validated=float(params.get("cumulative_gain_validated") or 0.0),
+                keep_threshold_pct=float(params.get("keep_threshold_pct") or 0.0),
+                applied_stack=[e for e in (params.get("applied_stack") or []) if isinstance(e, dict)],
+                task_kind=str(params.get("task_kind") or ""),
+                prior_attempts=[e for e in (params.get("prior_attempts") or []) if isinstance(e, dict)],
+                pr_lead=dict(params.get("pr_lead") or {}),
+                exit_channel=("B" if self.subprocess_config is not None else "A"),
             )
 
         system_prompt, user_prompt = build_specialist_prompts(prompt_inputs)
@@ -742,6 +758,52 @@ class SpecialistRunner:
         except Exception:  # noqa: BLE001 — trace must never break the run
             log.debug(
                 "full-trace: specialist llm_call append failed for task_id=%s turn=%s",
+                task_id,
+                turn,
+                exc_info=True,
+            )
+
+    def _trace_specialist_llm_failure(
+        self,
+        *,
+        task_id: str,
+        turn: int,
+        error: BaseException,
+        latency_ms: int | None = None,
+        tick: int | None = None,
+        phase: str | None = None,
+    ) -> None:
+        """Append one ``status="error"`` row for a specialist turn that never returned.
+
+        The turn loop swallows a failed ``backend.run`` and breaks, so nothing
+        propagates to the Coordinator; without a row written here the failed
+        turn is invisible to the ledger and to Langfuse.
+
+        Args:
+            task_id: The specialist task id.
+            turn: The turn index that failed.
+            error: The exception that ended the turn.
+            latency_ms: Time spent before failing, when measured.
+            tick: Timeline tick for this turn, when known.
+            phase: Optimization phase for this turn, when known.
+        """
+        if self.session_dir is None:
+            return
+        try:
+            record = LLMCallRecord.for_failure(
+                session_id=self.session_dir.name,
+                component="specialist",
+                task_id=task_id,
+                turn=turn,
+                error=error,
+                latency_ms=latency_ms,
+                tick=tick,
+                phase=phase,
+            )
+            append_llm_call(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break the run
+            log.debug(
+                "full-trace: specialist llm_call failure append failed for task_id=%s turn=%s",
                 task_id,
                 turn,
                 exc_info=True,
@@ -913,6 +975,16 @@ class SpecialistRunner:
                         "error": str(exc),
                     },
                 )
+                if isinstance(exc, LLMCallFailed):
+                    _tick, _phase = self._ctx_tick_phase(ctx)
+                    self._trace_specialist_llm_failure(
+                        task_id=ctx.task.task_id,
+                        turn=turn_idx,
+                        error=exc,
+                        latency_ms=int((time.perf_counter() - _t0) * 1000),
+                        tick=_tick,
+                        phase=_phase,
+                    )
                 break
             except Exception as exc:  # noqa: BLE001 — defensive
                 backend_error = f"backend_unexpected:{exc!r}"
@@ -1380,6 +1452,7 @@ class SpecialistRunner:
         ctx: RunnerContext,
         *,
         workspace: Path | None,
+        profile: SpecialistProfile | None = None,
     ) -> tuple[Path | None, Path | None, str]:
         """Provision a per-task git worktree when in subprocess mode.
 
@@ -1389,6 +1462,7 @@ class SpecialistRunner:
         Args:
             ctx: The runner context for this specialist task.
             workspace: The task workspace the worktree is created under.
+            profile: Resolved dispatch profile; read-only mode skips worktree.
 
         Returns:
             A ``(worktree_dir, worktree_base, error)`` tuple; ``worktree_dir``
@@ -1396,15 +1470,14 @@ class SpecialistRunner:
         """
         if self.subprocess_config is None or workspace is None:
             return None, None, ""
-        params = ctx.task.params or {}
-        readonly = bool(params.get("readonly")) or (
-            str(params.get("domain") or "").strip() == "research_scout_specialist"
-        )
-        if readonly:
+        if profile is not None:
+            if profile.mode != MODE_PATCH:
+                return None, None, ""
+        elif bool((ctx.task.params or {}).get("readonly")):
             return None, None, ""
         base = _pick_worktree_base(
             self.subprocess_config.framework_source_roots,
-            preferred=_framework_checkout(str(params.get("framework") or "")),
+            preferred=_framework_checkout(str((ctx.task.params or {}).get("framework") or "")),
         )
         if base is None:
             return None, None, "no_git_framework_source_root"

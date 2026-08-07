@@ -1618,8 +1618,9 @@ class WritebackCollaborator:
             if self.recipe_kb is not None:
                 try:
                     cid = self._workload_canonical_id()
-                    # Read the LOCAL row (authoritative for writes) so the merge + guard compare against it.
-                    existing_row = self.recipe_kb.local.get_recipe(canonical_id=cid) or {}
+                    # Read exactly the selected store's authority row. Remote
+                    # mode must not enter warm-start search/list pagination.
+                    existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
                     existing_sessions: list[dict[str, Any]] = []
                     for row in existing_row.get("sessions") or []:
                         if not isinstance(row, dict):

@@ -869,6 +869,26 @@ def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float
     return max(0.0, now - started)
 
 
+def explore_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float | None:
+    """Return total Explore wall-clock seconds across all macro cycles.
+
+    Completed Explore segments are accumulated at every transition out of
+    EXPLORE. If the current phase is still EXPLORE, append the live segment at
+    read time so runtime telemetry remains current between transitions. Returns
+    ``None`` when a legacy resumed state has no trustworthy historical total.
+    """
+    raw_accumulated = getattr(state, "explore_elapsed_accum_s", 0.0)
+    if raw_accumulated is None:
+        return None
+    try:
+        accumulated = float(raw_accumulated or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if (getattr(state, "phase", "") or "").strip().upper() == PHASE_EXPLORE:
+        accumulated += phase_elapsed_seconds(state, now_unix=now_unix)
+    return max(0.0, accumulated)
+
+
 def _phase_budget_total_seconds(
     state: Any,
     *,
@@ -2545,8 +2565,21 @@ def record_phase_transition(
 
     now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
     now_unix = float(ts_unix if ts_unix is not None else _time.time())
+    from_phase = (state.phase or "").strip().upper()
+    if from_phase == PHASE_EXPLORE:
+        raw_accumulated = getattr(state, "explore_elapsed_accum_s", 0.0)
+        if raw_accumulated is not None:
+            try:
+                accumulated = float(raw_accumulated or 0.0)
+            except (TypeError, ValueError):
+                state.explore_elapsed_accum_s = None
+            else:
+                state.explore_elapsed_accum_s = accumulated + phase_elapsed_seconds(
+                    state,
+                    now_unix=now_unix,
+                )
     row = make_history_row(
-        from_phase=state.phase or "",
+        from_phase=from_phase,
         to_phase=to_phase,
         reason=reason,
         evidence=evidence,
@@ -2729,6 +2762,7 @@ __all__ = [
     "is_valid_stop_reason",
     "kernel_work_pending",
     "make_history_row",
+    "explore_elapsed_seconds",
     "normalize_budget_pct",
     "phase_budget_remaining_seconds",
     "phase_elapsed_seconds",

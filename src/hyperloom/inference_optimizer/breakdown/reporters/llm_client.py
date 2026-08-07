@@ -64,7 +64,7 @@ class OpenAIHttpClient:
 
     base_url: str
     api_key: str
-    model: str = "claude-sonnet-4-5"
+    model: str = "claude-opus-5"
     max_output_tokens: int = 1024
     timeout_sec: float = 60.0
 
@@ -96,7 +96,7 @@ class AnthropicHttpClient:
 
     base_url: str
     api_key: str
-    model: str = "claude-sonnet-4-5"
+    model: str = "claude-opus-5"
     max_output_tokens: int = 1024
     timeout_sec: float = 60.0
 
@@ -141,7 +141,7 @@ def build_client_from_env() -> Any | None:
     backend = (os.environ.get("HYPERLOOM_REPORT_LLM_BACKEND") or "none").lower()
     if backend in ("", "none", "off", "disabled"):
         return None
-    model = os.environ.get("HYPERLOOM_REPORT_MODEL") or "claude-sonnet-4-5"
+    model = os.environ.get("HYPERLOOM_REPORT_MODEL") or "claude-opus-5"
     try:
         max_tokens = int(os.environ.get("HYPERLOOM_REPORT_MAX_TOKENS") or "1024")
     except ValueError:
@@ -168,7 +168,6 @@ def build_client_from_env() -> Any | None:
         key = (
             os.environ.get("ANTHROPIC_API_KEY")
             or os.environ.get("CLAUDE_API_KEY")
-            or os.environ.get("PRIMUS_SAFE_API_KEY")
         )
         if not (base and key):
             log.warning(

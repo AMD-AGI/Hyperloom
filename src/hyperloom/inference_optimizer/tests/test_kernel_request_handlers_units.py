@@ -861,6 +861,74 @@ class TestForgeGemmHelperCoverage:
         assert result["backend"] == "forge"
 
     @pytest.mark.asyncio
+    async def test_vllm_block_fp8_prefers_traced_shapes_over_profile_capture(
+        self, tmp_path, monkeypatch
+    ):
+        """vLLM block-FP8 must tune the device-side traced shapes.
+
+        Decode steps replay inside a CUDA Graph, so they emit no Kineto op
+        events and the block-FP8 profile capture can only ever report prefill M
+        (it reported M=2095 alone on the session that then lost 18.45% E2E).
+        The TraceLens candidates carry the decode M, so they win and the capture
+        pass is not needed at all.
+        """
+        candidates = tmp_path / "kernel_candidates.json"
+        candidates.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "name": "aiter::gemm_a8w8_blockscale_ck",
+                            "input_shapes": [
+                                {"call_num": 1440, "shape": "(64,3072) fp8"},
+                                {"call_num": 1440, "shape": "(10240,3072) fp8"},
+                            ],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        state = SharedState(
+            precision="fp8",
+            framework="vllm",
+            model_path="/models/qwen",
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+            last_trace_analyze={"candidates_path": str(candidates)},
+        )
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_profile_shapes_are_fresh", lambda _state: True)
+
+        captured = {"ran": False}
+
+        async def _record_capture(**_kwargs):
+            captured["ran"] = True
+            return {"status": "failed"}
+
+        monkeypatch.setattr(krh, "_capture_vllm_tunableop_shapes", _record_capture)
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 1, "", ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        # task_id keeps the workspace deterministic (it otherwise falls back to
+        # a wall-clock suffix, which the assertion below could not re-derive).
+        payload = {"precision": "fp8", "quant_type": "blockscale", "task_id": "gemm-1"}
+        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        assert captured["ran"] is False, "profile capture ran despite traced shapes"
+        workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        written = json.loads(
+            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
+        )
+        shapes = json.loads(Path(written["shapes_json"]).read_text(encoding="utf-8"))
+        assert shapes == [{"M": 64, "N": 10240, "K": 3072}]
+
+    @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_tags_engine_forge(self, tmp_path, monkeypatch):
         """Forge runs must carry ``engine='forge'`` so the breakdown attributes them correctly."""
         state = SharedState(
@@ -3107,6 +3175,293 @@ class TestRunGemmTuningHandler:
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [
             {"M": 1024, "N": 34816, "K": 5120}
         ]
+
+    def test_extract_gemm_shapes_parses_per_tensor_input_shapes(self, tmp_path):
+        # Current TraceLens emits one entry per tensor ({"call_num": .., "shape":
+        # "(M,K) fp8"}) instead of a single <br>-joined string. The old parser
+        # skipped every such entry and returned no shapes, so GEMM tuning fell
+        # back to a lossy profile capture that recorded only a large prefill M
+        # and missed the throughput-dominant decode M (observed on
+        # Qwen3.5-122B-A10B-FP8: tuned M=2095 only -> -18.45% E2E).
+        candidates = tmp_path / "kernel_candidates.json"
+        candidates.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "name": "aiter::gemm_a8w8_blockscale_ck",
+                            "input_shapes": [
+                                {"call_num": 48, "shape": "(3126,512) fp8"},
+                                {"call_num": 48, "shape": "(3072,512) fp8"},
+                                {"call_num": 48, "shape": "(0,) fp32"},
+                            ],
+                        },
+                        {
+                            "name": "aiter::gemm_a8w8_blockscale_ck",
+                            "input_shapes": [
+                                {"call_num": 1440, "shape": "(64,3072) fp8"},
+                                {"call_num": 1440, "shape": "(10240,3072) fp8"},
+                                {"call_num": 1440, "shape": "(0,) fp32"},
+                            ],
+                        },
+                        {
+                            # Matrix-vector head: highest call count, but N==1 is
+                            # not a tunable GEMM tile and must be dropped.
+                            "name": "vllm::rocm_unquantized_gemm",
+                            "input_shapes": [
+                                {"call_num": 9999, "shape": "(64,3072) bf16"},
+                                {"call_num": 9999, "shape": "(1,3072) bf16"},
+                            ],
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        out = krh._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+
+        assert out, "per-tensor input_shapes yielded no GEMM shapes"
+        shapes = json.loads(Path(out).read_text(encoding="utf-8"))
+        # The decode shape is present (it was dropped entirely before) and, being
+        # the most-called, is tuned first when the tuner runs out of budget.
+        assert shapes == [
+            {"M": 64, "N": 10240, "K": 3072},
+            {"M": 3126, "N": 3072, "K": 512},
+        ]
+
+    @staticmethod
+    def _mixed_dtype_candidates(path: Path) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "name": "aiter::gemm_a8w8_blockscale_ck",
+                            "input_shapes": [
+                                {"call_num": 360, "shape": "(64,3072) fp8"},
+                                {"call_num": 360, "shape": "(8704,3072) fp8"},
+                            ],
+                        },
+                        {
+                            # BF16 router head: most-called, so without dtype
+                            # scoping it displaces the FP8 shape being tuned.
+                            "name": "vllm::rocm_unquantized_gemm",
+                            "input_shapes": [
+                                {"call_num": 1440, "shape": "(64,3072) bf16"},
+                                {"call_num": 1440, "shape": "(256,3072) bf16"},
+                            ],
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_extract_gemm_shapes_scopes_to_tuned_precision(self, tmp_path):
+        candidates = tmp_path / "kernel_candidates.json"
+        self._mixed_dtype_candidates(candidates)
+
+        out = krh._extract_gemm_shapes_from_candidates(
+            str(candidates), tmp_path, precision="fp8"
+        )
+
+        assert json.loads(Path(out).read_text(encoding="utf-8")) == [
+            {"M": 64, "N": 8704, "K": 3072}
+        ]
+
+    def test_extract_gemm_shapes_scopes_to_bf16_precision(self, tmp_path):
+        candidates = tmp_path / "kernel_candidates.json"
+        self._mixed_dtype_candidates(candidates)
+
+        out = krh._extract_gemm_shapes_from_candidates(
+            str(candidates), tmp_path, precision="bf16"
+        )
+
+        assert json.loads(Path(out).read_text(encoding="utf-8")) == [
+            {"M": 64, "N": 256, "K": 3072}
+        ]
+
+    def test_extract_gemm_shapes_keeps_every_dtype_without_precision(self, tmp_path):
+        candidates = tmp_path / "kernel_candidates.json"
+        self._mixed_dtype_candidates(candidates)
+
+        out = krh._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+
+        assert json.loads(Path(out).read_text(encoding="utf-8")) == [
+            {"M": 64, "N": 256, "K": 3072},
+            {"M": 64, "N": 8704, "K": 3072},
+        ]
+
+    @pytest.mark.parametrize(
+        ("precision", "traced"),
+        [
+            ("fp8", "fp8_e4m3"),
+            ("fp8", "e4m3fnuz"),
+            ("fp8", "torch.float8_e4m3fn"),
+            ("fp16", "f16"),          # what this repo's _TRACE_DTYPE_SUFFIX emits
+            ("bf16", "b16"),
+            ("mxfp4", "fp4x2"),
+            ("fp4", "mxfp4"),
+        ],
+    )
+    def test_extract_gemm_shapes_matches_dtype_aliases(self, tmp_path, precision, traced):
+        """A precision and a traced token spell the same dtype many ways; exact
+        string matching would drop shapes that do belong to the tuned family."""
+        candidates = tmp_path / "kernel_candidates.json"
+        candidates.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "name": "aiter::gemm",
+                            "input_shapes": [
+                                {"call_num": 8, "shape": f"(64,3072) {traced}"},
+                                {"call_num": 8, "shape": f"(8704,3072) {traced}"},
+                            ],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        out = krh._extract_gemm_shapes_from_candidates(
+            str(candidates), tmp_path, precision=precision
+        )
+
+        assert out, f"{precision!r} rejected the equivalent traced token {traced!r}"
+        assert json.loads(Path(out).read_text(encoding="utf-8")) == [
+            {"M": 64, "N": 8704, "K": 3072}
+        ]
+
+    def test_extract_gemm_shapes_keeps_the_highest_call_count(self, tmp_path):
+        """The same (M,N,K) can be reported by several kernels; the hot sighting
+        must win, otherwise a rare first one buries the real decode hotspot."""
+        candidates = tmp_path / "kernel_candidates.json"
+        candidates.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "name": "aiter::gemm_cold_first",
+                            "input_shapes": [
+                                {"call_num": 10, "shape": "(64,3072) fp8"},
+                                {"call_num": 10, "shape": "(8704,3072) fp8"},
+                            ],
+                        },
+                        {
+                            "name": "aiter::gemm_other",
+                            "input_shapes": [
+                                {"call_num": 100, "shape": "(64,3072) fp8"},
+                                {"call_num": 100, "shape": "(10240,3072) fp8"},
+                            ],
+                        },
+                        {
+                            "name": "aiter::gemm_same_shape_hot",
+                            "input_shapes": [
+                                {"call_num": 1000, "shape": "(64,3072) fp8"},
+                                {"call_num": 1000, "shape": "(8704,3072) fp8"},
+                            ],
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        out = krh._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+
+        assert json.loads(Path(out).read_text(encoding="utf-8")) == [
+            {"M": 64, "N": 8704, "K": 3072},   # 1000, not the first sighting's 10
+            {"M": 64, "N": 10240, "K": 3072},  # 100
+        ]
+
+    @pytest.mark.parametrize("sep", ["<br>", "<br/>", "<BR/>", "<BR>"])
+    def test_extract_gemm_shapes_accepts_legacy_separator_spellings(self, tmp_path, sep):
+        candidates = tmp_path / "kernel_candidates.json"
+        candidates.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "name": "aiter::gemm_a8w8_blockscale",
+                            "input_shapes": [
+                                {"shape": f"(1024, 5120) fp8{sep}(34816, 5120) fp8"}
+                            ],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        out = krh._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+
+        assert out, f"separator {sep!r} was not recognised"
+        assert json.loads(Path(out).read_text(encoding="utf-8")) == [
+            {"M": 1024, "N": 34816, "K": 5120}
+        ]
+
+    def test_resolve_forge_shapes_prefers_scoped_candidates_over_untyped_artifact(
+        self, tmp_path
+    ):
+        """A pre-rendered shapes artifact carries no dtype, so it must not win
+        over candidates that were actually scoped to the tuned precision."""
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        artifact = tmp_path / "shapes.json"  # recorded from the BF16 head
+        artifact.write_text(
+            json.dumps([{"M": 64, "N": 256, "K": 3072}]), encoding="utf-8"
+        )
+        candidates = tmp_path / "kernel_candidates.json"
+        candidates.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "name": "aiter::gemm_a8w8_blockscale_ck",
+                            "input_shapes": [
+                                {"call_num": 360, "shape": "(64,3072) fp8"},
+                                {"call_num": 360, "shape": "(8704,3072) fp8"},
+                            ],
+                        },
+                        {
+                            "name": "vllm::rocm_unquantized_gemm",
+                            "input_shapes": [
+                                {"call_num": 1440, "shape": "(64,3072) bf16"},
+                                {"call_num": 1440, "shape": "(256,3072) bf16"},
+                            ],
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        state = SharedState(
+            last_trace_analyze={
+                "shapes_json": str(artifact),
+                "candidates_path": str(candidates),
+            }
+        )
+
+        resolved = krh._resolve_forge_shapes(state, session_dir, precision="fp8")
+
+        assert json.loads(Path(resolved).read_text(encoding="utf-8")) == [
+            {"M": 64, "N": 8704, "K": 3072}
+        ]
+
+    def test_resolve_forge_shapes_still_uses_artifact_when_unscoped(self, tmp_path):
+        """Without a precision to scope by, the explicit artifact keeps priority."""
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        artifact = tmp_path / "shapes.json"
+        artifact.write_text(
+            json.dumps([{"M": 64, "N": 256, "K": 3072}]), encoding="utf-8"
+        )
+        state = SharedState(last_trace_analyze={"shapes_json": str(artifact)})
+
+        assert krh._resolve_forge_shapes(state, session_dir) == str(artifact)
 
 
 # _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs.

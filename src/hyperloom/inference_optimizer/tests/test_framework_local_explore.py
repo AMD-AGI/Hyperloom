@@ -252,9 +252,9 @@ def test_maybe_dispatch_local_explore_enabled_creates_specialist(tmp_path: Path)
     assert params["framework_local_explore"] is True
     assert params["framework_agent_candidate_id"] == "local_explore:0"
     assert params["domain"] == "serving_specialist"
-    # No upstream PR lead: the mandate is authored from live source.
-    assert "LOCAL-EXPLORATION" in params["notes"]
-    assert "installed package source" in params["notes"]
+    # Boilerplate is in _TASK_KIND_BRIEFS; notes is empty on a fresh dispatch.
+    assert params.get("task_kind") == "framework_local_explore"
+    assert params.get("notes", "") == ""
     # WebSearch/WebFetch available so the specialist can compare upstream latest.
     assert "WebSearch" in created["allowed_tools"]
     assert "WebFetch" in created["allowed_tools"]
@@ -445,3 +445,46 @@ def test_forward_enablement_carriers_boot_origin_noop():
     dst2 = {"config_path": "/keep.yaml"}
     _forward_enablement_carriers({"enablement_origin": ""}, dst2)
     assert dst2 == {"config_path": "/keep.yaml"}
+
+
+# --------------------------------------------------------------------------- #
+# Stage-3 guard: local_explore gap is registered and has a real canonical id
+# --------------------------------------------------------------------------- #
+def test_pseudo_candidate_gap_canonical_id_is_not_literal_local_explore():
+    """The pseudo-candidate must carry a per-candidate gap id, not the old
+    literal 'local_explore' string that prevented find_gap from matching."""
+    stub = _Stub(Path("/tmp/t"), authoring=True, local_explore=True)
+    pseudo = stub._make_local_explore_pseudo_candidate()
+    assert pseudo is not None
+    cid = pseudo["gap_canonical_id"]
+    assert cid != "local_explore", "gap_canonical_id must not be the bare literal 'local_explore'"
+    assert cid.startswith("gap.framework.local_explore."), (
+        f"expected gap.framework.local_explore.<id>, got {cid!r}"
+    )
+
+
+def test_local_explore_dispatch_registers_gap_on_real_state():
+    """upsert_gap is called during dispatch so find_gap resolves the new id."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    tmp = Path("/tmp")
+    shared = SharedState(session_id="test-le-gap")
+    stub = _Stub(tmp, authoring=True, local_explore=True)
+    # Patch in a real SharedState that supports upsert_gap.
+    stub.shared_state = shared
+    stub.state = shared
+    shared.framework_agent_authoring_enabled = True
+    shared.framework_local_explore_enabled = True
+    shared.framework_agent_batches = []
+    shared.framework_agent_phase_progress = []
+    shared.framework_agent_specialist_candidate_map = {}
+    shared.gaps = []
+
+    asyncio.run(stub._maybe_dispatch_local_explore(reason="discover_exhausted"))
+
+    assert len(stub.tasks.created) == 1
+    params = stub.tasks.created[0]["params"]
+    gap_cid = params["gap_canonical_id"]
+    resolved = shared.find_gap(gap_cid)
+    assert resolved is not None, f"find_gap({gap_cid!r}) returned None; gap was not registered"
+    assert resolved["layer"] == "framework"

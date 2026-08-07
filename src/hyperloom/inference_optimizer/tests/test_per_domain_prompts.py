@@ -248,6 +248,44 @@ def test_enablement_book_lives_in_user_not_system_prompt():
     assert "ENABLEMENT METHODOLOGY" in user
 
 
+def test_enablement_mandate_carries_the_dispatch_evidence():
+    """Source context and ranked refs discovered by the Coordinator reach the mandate.
+
+    The Coordinator computes both before dispatch; a mandate rendered without them
+    tells the agent to find a bridge while withholding the candidates already found
+    for it, and drops the checkpoint weight inventory a weight-init retry needs.
+    """
+    domain = get_domain("enablement_specialist")
+    assert domain is not None
+    weights = "CHECKPOINT WEIGHTS: model.layers.0.mlp.gate_up_proj.weight [8192, 4096]"
+    inp = SpecialistPromptInputs(
+        task_id="task-enablement-evidence",
+        domain=domain,
+        max_turns=4,
+        gap_canonical_id="gap.enablement.weight_init",
+        gap_symptom="KeyError: 'gate_up_proj' while loading weights",
+        gap_layer=domain.layer,
+        gap_evidence={"model": "Qwen/Qwen3-8B"},
+        framework="vllm",
+        enablement_source_context=weights,
+        enablement_candidate_refs=("ROCm/vllm#123", "vllm-project/vllm#456"),
+    )
+    _system, user = build_specialist_prompts(inp)
+    assert "SOURCE CONTEXT" in user
+    assert weights in user
+    assert "CANDIDATE BRIDGING" in user
+    assert "ROCm/vllm#123" in user
+    assert "vllm-project/vllm#456" in user
+
+
+def test_enablement_mandate_omits_evidence_headers_when_not_supplied():
+    """No dispatch evidence => no empty scaffolding, and the book still renders."""
+    _system, user = _build_split("enablement_specialist")
+    assert "## 1b. ENABLEMENT PLAYBOOK" in user
+    assert "SOURCE CONTEXT" not in user
+    assert "CANDIDATE BRIDGING" not in user
+
+
 def test_perf_specialist_prompt_unchanged_keeps_perf_context():
     """A perf domain still carries roofline / recipe / KG sections and no ladder book."""
     _system, user = _build_split("serving_specialist")
@@ -756,6 +794,20 @@ def test_prompt_builder_pr_monitor_unavailable_renders_explanatory_line():
     assert "unavailable" in usr_p
 
 
+def test_pr_monitor_section_lists_all_granted_tools():
+    """Every tool in PR_MONITOR_TOOL_NAMES must appear in the rendered §6."""
+    from hyperloom.orchestrator.policy.gate import PR_MONITOR_TOOL_NAMES
+
+    _sys, usr_p = _build_serving_prompt(task_id="tool-drift", pr_monitor_available=True)
+    prefix = "mcp__pr_monitor__"
+    for tool_full in PR_MONITOR_TOOL_NAMES:
+        short = tool_full[len(prefix):]
+        assert short in usr_p, (
+            f"Granted PR Monitor tool '{short}' is not advertised in §6 PR MONITOR. "
+            "Update _section_pr_feed in specialist_prompt_builder.py."
+        )
+
+
 # 7. SpecialistRunner — happy path + failure synth
 @pytest.mark.asyncio
 async def test_specialist_runner_happy_path(tmp_path):
@@ -1045,3 +1097,204 @@ def test_research_lane_capacity_is_core_state_field():
     assert "gpu_specialist_capacity" in CORE_STATE_FIELDS
     assert "specialist_rounds" in CORE_STATE_FIELDS
     assert "last_specialist" in CORE_STATE_FIELDS
+
+
+# --------------------------------------------------------------------------- #
+# Read-only specialists never receive the patch-authoring contract
+# --------------------------------------------------------------------------- #
+READONLY_DOMAIN_KEYS = (
+    "research_scout_specialist",
+    "static_recon_specialist",
+    "pr_intel_specialist",
+)
+
+# Every phrase that promises patch authoring, a worktree, or a GPU. A
+# research-mode dispatch is leased none of them.
+PATCH_CAPABILITY_PHRASES = (
+    "author source patches",
+    "optionally author patches",
+    "patches_written",
+    "artifacts_written",
+    "your own worktree",
+    "VISIBLE_DEVICES",
+)
+
+
+def test_readonly_domains_never_grant_patch_authoring():
+    """Read-only domains must not be told they may author patches anywhere in
+    the prompt — identity, iron rules, and output protocol alike."""
+    for key in READONLY_DOMAIN_KEYS:
+        system, user = build_specialist_prompts(
+            SpecialistPromptInputs(
+                task_id=f"task-{key}",
+                domain=get_domain(key),
+                max_turns=4,
+                mode="research",
+                gap_canonical_id=f"gap.{key}.test",
+                workspace_path=f"/ws/{key}",
+            )
+        )
+        whole = system + user
+        for phrase in PATCH_CAPABILITY_PHRASES:
+            assert phrase not in whole, f"{key} prompt leaks {phrase!r} to a read-only dispatch"
+
+
+def test_readonly_dispatch_states_the_read_only_boundary():
+    """The iron rule that replaces the staging grant must say so explicitly."""
+    system, _ = build_specialist_prompts(
+        SpecialistPromptInputs(
+            task_id="task-ro",
+            domain=get_domain("static_recon_specialist"),
+            max_turns=4,
+            mode="research",
+            workspace_path="/ws/ro",
+        )
+    )
+    assert "Read-only dispatch:" in system
+    assert "MUST NOT author" in system
+
+
+def test_cross_domain_research_dispatch_drops_patch_deliverable():
+    """Mode outranks scope: a read-only `domains` dispatch must not be promised
+    the coupled cross-domain patch."""
+    _, user = build_specialist_prompts(
+        SpecialistPromptInputs(
+            task_id="task-domains-ro",
+            domain=get_domain("pr_intel_specialist"),
+            max_turns=4,
+            scope="domains",
+            mode="research",
+            gap_canonical_id="gap.domains.test",
+            workspace_path="/ws/domains-ro",
+        )
+    )
+    assert "- deliverable: findings and up to 6 ranked config variants (read-only; no patch)" in user
+    assert "coupled patch" not in user
+
+
+def test_freeform_research_dispatch_drops_patch_deliverable():
+    """A bare freeform dispatch resolves to research mode, so its mandate must
+    not promise a patch deliverable."""
+    system, user = build_specialist_prompts(
+        SpecialistPromptInputs(
+            task_id="task-ff",
+            domain=get_domain("serving_specialist"),
+            max_turns=4,
+            scope="freeform",
+            mode="research",
+            task_description="look around",
+            workspace_path="/ws/ff",
+        )
+    )
+    whole = system + user
+    for phrase in PATCH_CAPABILITY_PHRASES:
+        assert phrase not in whole, f"freeform research prompt leaks {phrase!r}"
+
+
+def test_patch_mode_keeps_full_authoring_contract():
+    """The gating must not strip anything from a patch-capable dispatch."""
+    system, user = build_specialist_prompts(
+        SpecialistPromptInputs(
+            task_id="task-patch",
+            domain=get_domain("serving_specialist"),
+            max_turns=4,
+            mode="patch",
+            allocated_gpu_ids=[0, 1],
+            gap_canonical_id="gap.serving.test",
+            workspace_path="/ws/patch",
+        )
+    )
+    whole = system + user
+    for phrase in (
+        "author source patches",
+        "patches_written",
+        "artifacts_written",
+        "your own worktree",
+        "VISIBLE_DEVICES",
+    ):
+        assert phrase in whole, f"patch-mode prompt lost {phrase!r}"
+
+
+def test_patch_mode_without_gpu_keeps_the_authoring_clause():
+    """The no-GPU iron rule still offers patch authoring in patch mode; only
+    research mode drops it."""
+    kwargs = dict(
+        task_id="task-patch-cpu",
+        domain=get_domain("serving_specialist"),
+        max_turns=4,
+        allocated_gpu_ids=[],
+        workspace_path="/ws/patch-cpu",
+    )
+    patch_system, _ = build_specialist_prompts(SpecialistPromptInputs(mode="patch", **kwargs))
+    research_system, _ = build_specialist_prompts(SpecialistPromptInputs(mode="research", **kwargs))
+    assert "optionally author patches" in patch_system
+    assert "optionally author patches" not in research_system
+
+
+# --------------------------------------------------------------------------- #
+# Stage-2 guard: mandate section carries run-status when available
+# --------------------------------------------------------------------------- #
+def test_mandate_section_renders_run_status():
+    """§0 MANDATE must contain baseline, validated gain, and KEEP threshold
+    when those fields are non-zero."""
+    domain = get_domain("serving_specialist")
+    assert domain is not None
+    inp = SpecialistPromptInputs(
+        task_id="task-mandate",
+        domain=domain,
+        max_turns=4,
+        gap_canonical_id="gap.serving.test",
+        framework="vllm",
+        baseline_tput=6232.0,
+        current_tput=6848.5,
+        cumulative_gain_validated=9.89,
+        keep_threshold_pct=1.0,
+        applied_stack=[{"variant_name": "--kv-cache-dtype fp8_e4m3", "gain_pct": 5.99}],
+    )
+    _, user = build_specialist_prompts(inp)
+    assert "## 0. MANDATE" in user
+    assert "6232" in user
+    assert "9.89" in user or "+9.89" in user
+    assert "1.00%" in user or "1.0%" in user
+    assert "--kv-cache-dtype fp8_e4m3" in user
+
+
+# --------------------------------------------------------------------------- #
+# Stage-3 guard: enablement ladder book appears exactly once
+# --------------------------------------------------------------------------- #
+def test_enablement_ladder_rendered_exactly_once():
+    """ENABLEMENT METHODOLOGY must appear only in §1b, not also in §10."""
+    domain = get_domain("enablement_specialist")
+    assert domain is not None
+    inp = SpecialistPromptInputs(
+        task_id="task-enablement-dedup",
+        domain=domain,
+        max_turns=4,
+        gap_canonical_id="gap.enablement.unknown",
+        gap_symptom="vllm cannot launch ModelFoo: unknown",
+        gap_evidence={"model": "ModelFoo", "failure_kind": "unknown"},
+        framework="vllm",
+        # notes is empty (no stacked patches, no build failure)
+        notes="",
+    )
+    _, user = build_specialist_prompts(inp)
+    count = user.count("ENABLEMENT METHODOLOGY")
+    assert count == 1, f"Expected 'ENABLEMENT METHODOLOGY' exactly once, found {count}"
+
+
+# --------------------------------------------------------------------------- #
+# Stage-4 guard: KB-write iron rule is gone
+# --------------------------------------------------------------------------- #
+def test_kb_write_iron_rule_absent():
+    """Rule 3 (KB writes) is dead text — confirm it no longer appears."""
+    domain = get_domain("serving_specialist")
+    assert domain is not None
+    inp = SpecialistPromptInputs(
+        task_id="task-iron",
+        domain=domain,
+        max_turns=4,
+        gap_canonical_id="gap.serving.iron_rule",
+    )
+    system, _ = build_specialist_prompts(inp)
+    assert "RecipeKB.put_recipe" not in system
+    assert "NEVER** write to the Recipe KB" not in system
