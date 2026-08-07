@@ -75,8 +75,10 @@ def _clear_provider_env(monkeypatch) -> None:
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
+        "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")),
         "DEEPSEEK_BASE_URL",
         "DEEPSEEK_API_KEY",
+        "LLM_GATEWAY_KEY",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -97,13 +99,85 @@ def test_build_backends_anthropic_only_uses_native_critic_agent(monkeypatch) -> 
     assert "kernel_agent" not in b
 
 
-def test_build_backends_anthropic_only_degrades_to_claude_without_root(monkeypatch) -> None:
+def test_build_backends_anthropic_only_refuses_to_degrade_without_root(monkeypatch) -> None:
+    """Silently swapping the critic for bare tool-use would drop KB priors and
+    session memory with no signal, so a missing root is now an error."""
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
-    # Without critic_agent_root the critic degrades to Claude tool-use.
-    b = _build(critic_choice="agent", critic_agent_root=None)
-    assert b["critic"][0] == "claude"
+    with pytest.raises(ValueError, match="critic_agent_root"):
+        _build(critic_choice="agent", critic_agent_root=None)
+
+
+def test_build_backends_oauth_only_uses_anthropic_critic_protocol(monkeypatch) -> None:
+    """A subscription token alone is enough to route the review over the CLI."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")), "sk-ant-oat01-fake")
+    b = _build(critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
+    assert b["critic"][0] == "critic_agent"
+    assert b["critic"][1]["protocol"] == "anthropic"
+
+
+def test_build_backends_forced_anthropic_protocol_wins_over_dual_config(monkeypatch) -> None:
+    """With both sides configured, auto picks openai; the flag must override it."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    auto = _build(critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
+    assert auto["critic"][1]["protocol"] == "openai"
+    forced = _build(
+        critic_choice="agent",
+        critic_agent_root=Path("/tmp/critic"),
+        critic_protocol="anthropic",
+    )
+    assert forced["critic"][1]["protocol"] == "anthropic"
+
+
+def test_build_backends_forced_protocol_without_credential_fails(monkeypatch) -> None:
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    with pytest.raises(ValueError, match="CLAUDE_CODE_OAUTH_TOKEN"):
+        _build(
+            critic_choice="agent",
+            critic_agent_root=Path("/tmp/critic"),
+            critic_protocol="anthropic",
+        )
+
+
+def test_build_backends_forced_openai_protocol_accepts_gateway_key(monkeypatch) -> None:
+    """The review client resolves LLM_GATEWAY_KEY, so the flag must accept a
+    gateway-only host instead of rejecting a config that would have run."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    monkeypatch.setenv("LLM_GATEWAY_KEY", "ak-gateway-key")
+    b = _build(
+        critic_choice="agent",
+        critic_agent_root=Path("/tmp/critic"),
+        critic_protocol="openai",
+    )
+    assert b["critic"][1]["protocol"] == "openai"
+
+
+def test_build_backends_forced_openai_protocol_without_any_key_fails(monkeypatch) -> None:
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")), "sk-ant-oat01-fake")
+    with pytest.raises(ValueError, match="LLM_GATEWAY_KEY"):
+        _build(
+            critic_choice="agent",
+            critic_agent_root=Path("/tmp/critic"),
+            critic_protocol="openai",
+        )
+
+
+def test_build_backends_rejects_unknown_critic_protocol(monkeypatch) -> None:
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    with pytest.raises(ValueError, match="critic_protocol"):
+        _build(
+            critic_choice="agent",
+            critic_agent_root=Path("/tmp/critic"),
+            critic_protocol="bogus",
+        )
 
 
 def test_build_backends_deepseek_only_uses_openai_compatible_critic_agent(monkeypatch) -> None:

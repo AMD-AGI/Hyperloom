@@ -9,7 +9,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Iterable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -35,11 +35,69 @@ class OpenAIClientConfig:
         return kwargs
 
 
+# Subscription credential minted by ``claude setup-token``. Never synthesized
+# into the API-key vars; see ``claude_sdk_env_options``.
+CLAUDE_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+
+# Single source of truth for "what counts as an Anthropic-side credential",
+# highest precedence first. Mirrors the Claude CLI's own resolution: an API key
+# or gateway bearer token disables subscription (OAuth) mode entirely, so OAuth
+# is only live when both are unset. Detection sites derive from this tuple via
+# has_anthropic_credential(); adding a form here makes them all recognize it.
+ANTHROPIC_CREDENTIAL_ENV_ORDER: tuple[str, ...] = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    CLAUDE_OAUTH_TOKEN_ENV,
+)
+
+# The subset whose value may be copied into another credential var or persisted
+# to ~/.claude/config.json. Enumerated explicitly rather than derived by
+# subtraction: a newly recognized credential form must be reviewed before it may
+# be materialized, since anything that outranks a subscription token moves the
+# run onto API-credits billing. A test asserts this stays a subset that excludes
+# CLAUDE_OAUTH_TOKEN_ENV.
+ANTHROPIC_SYNTHESIZABLE_KEY_ENVS: tuple[str, ...] = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+)
+
+
+def _first_set_value(names: Iterable[str], source: Mapping[str, str]) -> str:
+    """First non-blank value among ``names``, in the order given."""
+    for name in names:
+        value = (source.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def has_anthropic_credential(env: Mapping[str, str] | None = None) -> bool:
+    """True when any Anthropic-side credential form is set."""
+    return bool(
+        _first_set_value(
+            ANTHROPIC_CREDENTIAL_ENV_ORDER,
+            env if env is not None else os.environ,
+        )
+    )
+
+
+def anthropic_synthesizable_key(env: Mapping[str, str] | None = None) -> str:
+    """Highest-precedence credential that may be copied elsewhere.
+
+    Returns "" when a subscription token is the only credential available, which
+    is what keeps OAuth out of API-key slots and out of config.json.
+    """
+    return _first_set_value(
+        ANTHROPIC_SYNTHESIZABLE_KEY_ENVS,
+        env if env is not None else os.environ,
+    )
+
 CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_CUSTOM_HEADERS",
+    CLAUDE_OAUTH_TOKEN_ENV,
     "DEEPSEEK_BASE_URL",
     "DEEPSEEK_API_KEY",
     "OPENAI_BASE_URL",
@@ -179,13 +237,10 @@ def claude_sdk_env_options(
     if "ANTHROPIC_BASE_URL" not in source and source.get("DEEPSEEK_API_KEY"):
         source["ANTHROPIC_BASE_URL"] = source.get("DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL
 
-    # Anthropic-side credentials only.
-    fallback_key = (
-        source.get("ANTHROPIC_AUTH_TOKEN")
-        or source.get("ANTHROPIC_API_KEY")
-        or source.get("DEEPSEEK_API_KEY")
-        or ""
-    )
+    # Anthropic-side credentials only, and only the synthesizable subset: an
+    # OAuth token copied into either API-key var would drop the CLI out of
+    # subscription mode and 401 the run.
+    fallback_key = anthropic_synthesizable_key(source) or (source.get("DEEPSEEK_API_KEY") or "").strip()
     if fallback_key:
         source.setdefault("ANTHROPIC_API_KEY", fallback_key)
         source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)

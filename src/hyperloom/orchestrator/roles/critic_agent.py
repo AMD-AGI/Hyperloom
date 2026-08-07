@@ -28,7 +28,6 @@ from hyperloom.common.llm_config import (
     LLMConfigError,
     apply_reasoning_effort,
     openai_client_kwargs,
-    parse_custom_headers,
 )
 from hyperloom.common.jsonio import extract_first_json_with_key
 from hyperloom.inference_optimizer.protocol.intent import (
@@ -40,6 +39,7 @@ from hyperloom.inference_optimizer.session.session_paths import allocate_turn_wo
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from .base import BackendError, BackendTurnResult, LLMCallFailed, build_chat_messages, parse_call_timeout_env
+from .claude import ClaudeBackend, _input_side_total
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
 
@@ -119,23 +119,6 @@ def _extract_review_json(text: str) -> dict[str, Any] | None:
     can only appear before it.
     """
     return extract_first_json_with_key(text, "review_verdicts", _BARE_JSON_RE, last=True)
-
-
-def _anthropic_text_from_content(content: Any) -> str:
-    """Concatenate the text blocks of an Anthropic Messages ``content`` array.
-
-    Args:
-        content: The ``content`` field of an Anthropic Messages response (a
-            list of ``{"type": ..., "text": ...}`` blocks), or anything else.
-
-    Returns:
-        The joined text of every ``type == "text"`` block, stripped; empty when
-        ``content`` is not a list or has no text blocks.
-    """
-    if not isinstance(content, list):
-        return ""
-    parts = [block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"]
-    return "".join(parts).strip()
 
 
 def _default_runtime_caller(call: RuntimeCall) -> None:
@@ -358,16 +341,13 @@ class CriticAgentBackend:
     action_verdict_policy: dict[str, str] = field(default_factory=dict)
     name: str = "critic-agent"
     # Review inference protocol. ``openai`` drives Codex chat.completions;
-    # ``anthropic`` drives the native Anthropic ``/v1/messages`` API.
+    # ``anthropic`` drives the Claude CLI via ClaudeBackend.
     protocol: Literal["openai", "anthropic"] = "openai"
     # Claude model id used when ``protocol == "anthropic"`` (falls back to
     # ``codex_model`` when unset).
     claude_model: str | None = None
-    # Anthropic transport (protocol == "anthropic"); resolved from env when
-    # empty. ``anthropic_client_factory`` injects a test client.
-    anthropic_base_url: str = ""
-    anthropic_api_key: str = ""
-    anthropic_client_factory: Callable[[], Any] | None = None
+    # Test seam for the protocol == "anthropic" review executor.
+    claude_backend_factory: Callable[[], Any] | None = None
 
     # ``_runtime_caller`` is assigned on the instance in __post_init__ (not as a
     # dataclass field) to avoid descriptor binding as a method.
@@ -437,7 +417,7 @@ class CriticAgentBackend:
             (self.claude_model or self.codex_model) if self.protocol == "anthropic" else self.codex_model
         )
         if self.protocol == "anthropic":
-            self._init_anthropic_client()
+            self._init_review_backend()
         elif self.codex_client_factory is not None:
             self._client = self.codex_client_factory()
         else:
@@ -498,62 +478,34 @@ class CriticAgentBackend:
             sorted(self._static_context.keys()),
         )
 
-    def _init_anthropic_client(self) -> None:
-        """Build the native Anthropic Messages client (protocol='anthropic').
+    def _init_review_backend(self) -> None:
+        """Build the Claude CLI review executor (protocol='anthropic').
 
-        An httpx client with ``x-api-key`` + ``anthropic-version`` headers,
-        resolving base URL / key from the fields or the ``ANTHROPIC_*`` env.
-        Optional ``ANTHROPIC_CUSTOM_HEADERS`` are merged in.
+        Delegating to :class:`ClaudeBackend` hands credential resolution back to
+        the CLI, which is what lets a Max/Pro subscription token work here.
 
         Raises:
-            BackendError: If httpx is unavailable or no Anthropic API key can
-                be resolved.
+            BackendError: If ``claude-agent-sdk`` is unavailable.
         """
-        if self.anthropic_client_factory is not None:
-            self._client = self.anthropic_client_factory()
-            return
+        factory = self.claude_backend_factory or self._default_claude_backend
         try:
-            import httpx
-        except ImportError as exc:  # pragma: no cover
-            raise BackendError("httpx not installed; required for the Anthropic critic-agent review path") from exc
-        base_url = (
-            (self.anthropic_base_url or os.environ.get("ANTHROPIC_BASE_URL", "") or "https://api.anthropic.com")
-            .strip()
-            .rstrip("/")
-        )
-        api_key = (
-            self.anthropic_api_key
-            or os.environ.get("ANTHROPIC_API_KEY", "")
-            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-        ).strip()
-        if not api_key:
+            self._client = factory()
+        except BackendError as exc:
             raise BackendError(
-                "CriticAgentBackend(protocol=anthropic) requires ANTHROPIC_API_KEY "
-                "or ANTHROPIC_AUTH_TOKEN for review reasoning"
-            )
-        connect_timeout_s = parse_call_timeout_env(
-            "CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S",
-            default=CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
-        )
-        rw_timeout_s = parse_call_timeout_env(
-            "CRITIC_AGENT_LLM_RW_TIMEOUT_S",
-            default=CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
-        )
-        headers = {
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        }
-        headers.update(parse_custom_headers(os.environ.get("ANTHROPIC_CUSTOM_HEADERS")))
-        self._client = httpx.AsyncClient(
-            base_url=base_url,
-            timeout=httpx.Timeout(
-                connect=connect_timeout_s,
-                read=rw_timeout_s,
-                write=rw_timeout_s,
-                pool=rw_timeout_s,
+                f"CriticAgentBackend(protocol=anthropic) requires claude-agent-sdk "
+                f"for review reasoning: {exc}"
+            ) from exc
+
+    def _default_claude_backend(self) -> ClaudeBackend:
+        """Single-turn, tool-free Claude executor for review reasoning."""
+        return ClaudeBackend(
+            model=self._review_model,
+            raw_completion=True,
+            conversational=False,
+            call_timeout_s=parse_call_timeout_env(
+                "CRITIC_AGENT_LLM_RW_TIMEOUT_S",
+                default=CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
             ),
-            headers=headers,
         )
 
     # Public API — Backend.run
@@ -984,9 +936,10 @@ class CriticAgentBackend:
             f"==== JUDGE BUNDLE ====\n{bundle_text}\n==== END JUDGE BUNDLE ====\n\n"
             f"{_REVIEW_OUTPUT_INSTRUCTIONS}"
         )
-        messages = build_chat_messages(system_prompt, user_prompt)
-
-        text, finish = await self._run_reasoning_loop(messages)
+        text, finish = await self._run_reasoning_loop(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
 
         # Mirror the full prompt + reply onto conversations.jsonl so the critic
         # turn is replayable. Best-effort; never raised into the review path.
@@ -1009,16 +962,19 @@ class CriticAgentBackend:
 
     async def _run_reasoning_loop(
         self,
-        messages: list[dict[str, Any]],
+        *,
+        system_prompt: str | None,
+        user_prompt: str,
     ) -> tuple[str, str | None]:
         """Issue one review inference call and return ``(text, finish_reason)``.
 
-        The critic reasons single-shot over the judge bundle (no tool use),
-        dispatching to the OpenAI/Codex or native Anthropic transport per
-        :attr:`protocol`.
+        The critic reasons single-shot over the judge bundle (no tool use).
+        Both prompt segments are passed through unmerged so each transport can
+        map them onto its own request shape.
 
         Args:
-            messages: The chat-completions message list (system + user).
+            system_prompt: The system instruction, or ``None``.
+            user_prompt: The judge bundle plus output instructions.
 
         Returns:
             A tuple of the reply text and the finish/stop reason.
@@ -1027,17 +983,26 @@ class CriticAgentBackend:
             BackendError: If the review API call fails.
         """
         if self.protocol == "anthropic":
-            return await self._run_anthropic_reasoning(messages)
-        return await self._run_openai_reasoning(messages)
+            return await self._run_anthropic_reasoning(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+        return await self._run_openai_reasoning(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
 
     async def _run_openai_reasoning(
         self,
-        messages: list[dict[str, Any]],
+        *,
+        system_prompt: str | None,
+        user_prompt: str,
     ) -> tuple[str, str | None]:
         """Issue one Codex chat-completions call and return ``(text, finish_reason)``.
 
         Args:
-            messages: The chat-completions message list (system + user).
+            system_prompt: The system instruction, or ``None``.
+            user_prompt: The judge bundle plus output instructions.
 
         Returns:
             A tuple of the reply text and the finish reason.
@@ -1047,7 +1012,7 @@ class CriticAgentBackend:
         """
         kwargs: dict[str, Any] = {
             "model": self._review_model,
-            "messages": messages,
+            "messages": build_chat_messages(system_prompt, user_prompt),
             "max_completion_tokens": CRITIC_AGENT_MAX_COMPLETION_TOKENS,
         }
         apply_reasoning_effort(kwargs)
@@ -1068,95 +1033,81 @@ class CriticAgentBackend:
 
     async def _run_anthropic_reasoning(
         self,
-        messages: list[dict[str, Any]],
+        *,
+        system_prompt: str | None,
+        user_prompt: str,
     ) -> tuple[str, str | None]:
-        """Issue one native Anthropic ``/v1/messages`` call.
+        """Issue one single-turn, tool-free Claude CLI call for the review.
 
-        Splits the OpenAI-style ``messages`` into a top-level ``system`` string
-        and the user/assistant turns Anthropic expects, POSTs a single request,
-        and extracts the concatenated text blocks. Token usage
-        (``input_tokens`` / ``output_tokens``) is folded into the same trace as
+        The CLI resolves its own credentials, so this path accepts an API key,
+        a gateway bearer token, or a Max/Pro subscription token alike. Token
+        counts arrive on the turn metadata and fold into the same trace row as
         the OpenAI path.
 
         Args:
-            messages: The chat-completions message list (system + user).
+            system_prompt: The system instruction, or ``None``.
+            user_prompt: The judge bundle plus output instructions.
 
         Returns:
-            A tuple of the reply text and the Anthropic ``stop_reason``.
+            A tuple of the reply text and the model's stop reason (e.g.
+            ``max_tokens``), keeping truncation visible as on the OpenAI path.
 
         Raises:
-            BackendError: If the Anthropic Messages API call fails or returns a
-                non-2xx status.
+            BackendError: If the Claude CLI call fails.
         """
-        system_text = "\n\n".join(str(m.get("content") or "") for m in messages if m.get("role") == "system").strip()
-        turns = [
-            {
-                "role": "assistant" if m.get("role") == "assistant" else "user",
-                "content": str(m.get("content") or ""),
-            }
-            for m in messages
-            if m.get("role") != "system"
-        ]
-        payload: dict[str, Any] = {
-            "model": self._review_model,
-            "messages": turns,
-            "max_tokens": CRITIC_AGENT_MAX_COMPLETION_TOKENS,
-        }
-        if system_text:
-            payload["system"] = system_text
-        usage_acc = {"input_tokens": 0, "output_tokens": 0}
         _t0 = time.perf_counter()
         try:
-            resp = await self._client.post("/v1/messages", json=payload)
+            result = await self._client.run(
+                user_prompt,
+                system_prompt=system_prompt,
+                tools=[],
+                max_turns=1,
+            )
+        except BackendError as exc:
+            # Already a LLMCallFailed/BackendError the retry and error-streak
+            # handling upstream understands; trace it, then let it through.
+            self._trace_llm_failure(exc, latency_ms=int((time.perf_counter() - _t0) * 1000))
+            raise
         except Exception as exc:  # noqa: BLE001
             raise self._llm_call_failed(
-                f"Anthropic API call failed (critic-agent reasoning): {exc!r}",
+                f"Claude CLI call failed (critic-agent reasoning): {exc!r}",
                 latency_ms=int((time.perf_counter() - _t0) * 1000),
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
-        status = int(getattr(resp, "status_code", 200) or 200)
-        if status >= 400:
-            body_txt = str(getattr(resp, "text", ""))[:200]
-            raise self._llm_call_failed(
-                f"Anthropic API call failed (critic-agent reasoning): status={status} body={body_txt}",
-                latency_ms=latency_ms,
-            )
-        try:
-            body = resp.json()
-        except ValueError as exc:
-            raise self._llm_call_failed(
-                f"Anthropic API returned non-JSON body (critic-agent reasoning): {exc!r}",
-                latency_ms=latency_ms,
-            ) from exc
-        self._accumulate_anthropic_usage(usage_acc, body.get("usage") if isinstance(body, dict) else None)
+        metadata = getattr(result, "metadata", None)
+        usage_acc = {"input_tokens": 0, "output_tokens": 0}
+        self._accumulate_claude_usage(usage_acc, metadata)
         self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms)
-        text = _anthropic_text_from_content(body.get("content") if isinstance(body, dict) else None)
-        stop_reason = body.get("stop_reason") if isinstance(body, dict) else None
-        return text, stop_reason
+        stop_reason = metadata.get("stop_reason") if isinstance(metadata, dict) else None
+        return (
+            getattr(result, "raw_text", "") or "",
+            stop_reason if isinstance(stop_reason, str) and stop_reason else None,
+        )
 
     @staticmethod
-    def _accumulate_anthropic_usage(
+    def _accumulate_claude_usage(
         acc: dict[str, int],
-        usage: Any,
+        metadata: Any,
     ) -> None:
-        """Fold one Anthropic ``usage`` block into the running token accumulator.
+        """Fold one ``BackendTurnResult.metadata`` block into the accumulator.
 
-        Anthropic reports ``input_tokens`` / ``output_tokens`` directly. Missing
-        / bad values contribute 0 so a malformed response never corrupts the sum.
+        Missing / bad values contribute 0 so a malformed turn never corrupts
+        the token sum.
+
+        The input side sums fresh, cache-read and cache-creation tokens, the
+        same accounting ``ClaudeBackend`` uses: the judge bundle repeats across
+        turns, so most of a critic call's input arrives as cache reads.
 
         Args:
             acc: The running accumulator with ``input_tokens`` /
                 ``output_tokens`` keys, updated in place.
-            usage: An Anthropic usage dict (or ``None``) to fold into ``acc``.
+            metadata: A turn metadata dict (or ``None``) to fold into ``acc``.
         """
-        if not isinstance(usage, dict):
+        if not isinstance(metadata, dict):
             return
+        acc["input_tokens"] += _input_side_total(metadata)
         try:
-            acc["input_tokens"] += int(usage.get("input_tokens", 0) or 0)
-        except (TypeError, ValueError):
-            pass
-        try:
-            acc["output_tokens"] += int(usage.get("output_tokens", 0) or 0)
+            acc["output_tokens"] += int(metadata.get("output_tokens", 0) or 0)
         except (TypeError, ValueError):
             pass
 
@@ -1269,6 +1220,21 @@ class CriticAgentBackend:
             The :class:`LLMCallFailed` for the caller to raise.
         """
         error = LLMCallFailed(message)
+        self._trace_llm_failure(error, latency_ms=latency_ms)
+        return error
+
+    def _trace_llm_failure(
+        self,
+        error: BaseException,
+        *,
+        latency_ms: int | None = None,
+    ) -> None:
+        """Append one ``llm_calls.jsonl`` row for a call that never returned.
+
+        Args:
+            error: The exception describing the failure.
+            latency_ms: Time spent before failing, when measured.
+        """
         try:
             record = LLMCallRecord.for_failure(
                 session_id=self.session_dir.name,
@@ -1286,7 +1252,6 @@ class CriticAgentBackend:
                 "full-trace: critic llm_call failure append failed",
                 exc_info=True,
             )
-        return error
 
     def _record_critic_conversation(
         self,

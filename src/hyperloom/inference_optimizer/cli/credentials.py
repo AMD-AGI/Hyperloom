@@ -17,6 +17,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hyperloom.common.llm_config import (
+    ANTHROPIC_SYNTHESIZABLE_KEY_ENVS,
+    CLAUDE_OAUTH_TOKEN_ENV,
+    has_anthropic_credential,
+)
+
 log = logging.getLogger(__name__)
 
 _OFFICIAL_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
@@ -197,8 +203,14 @@ def _is_deepseek_anthropic_url(value: str | None) -> bool:
     return parts.hostname == "api.deepseek.com" and parts.path.rstrip("/") == "/anthropic"
 
 
+def _has_claude_oauth_token() -> bool:
+    """True when a ``claude setup-token`` subscription credential is exported."""
+    return bool(os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip())
+
+
 def _has_explicit_anthropic_key() -> bool:
-    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    """True for any credential form in ``ANTHROPIC_CREDENTIAL_ENV_ORDER``."""
+    return has_anthropic_credential()
 
 
 def _has_explicit_deepseek_key() -> bool:
@@ -258,13 +270,22 @@ def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: s
             leaves any existing key untouched. Callers should pass the
             Anthropic-side key (``ANTHROPIC_API_KEY``) so a split-entrypoint
             deploy authenticates Claude with its own key rather than the shared
-            gateway key.
+            gateway key. A subscription OAuth token is rejected here.
         anthropic_base_url (str): The upstream gateway URL; blank is a no-op.
     """
     import json as _json
 
     if not anthropic_base_url:
         return
+    oauth_token = os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip()
+    if oauth_token and primary_api_key.strip() == oauth_token:
+        # primaryApiKey is an API-credits credential; persisting the subscription
+        # token here would move the run off the Max/Pro plan onto API billing.
+        print(
+            f"Preflight: refusing to write {CLAUDE_OAUTH_TOKEN_ENV} into "
+            "~/.claude/config.json primaryApiKey (subscription credential)"
+        )
+        primary_api_key = ""
     claude_config_path = Path.home() / ".claude" / "config.json"
     config_data: dict = {}
     if claude_config_path.exists():
@@ -309,18 +330,23 @@ def _reject_cross_provider_pairing() -> None:
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
     openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    anthropic_key = (
-        os.environ.get("ANTHROPIC_API_KEY", "").strip()
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
-        or deepseek_key
-    )
+    oauth_token = os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip()
+    # DeepSeek's key also authenticates the Anthropic-compatible side, so it
+    # joins the credential tuple here rather than replacing it.
+    anthropic_key = has_anthropic_credential() or bool(deepseek_key)
     # DeepSeek serves its own Anthropic-compatible endpoint, so its key carries an
-    # implied base URL.
-    anthropic_endpoint = anthropic_url or (
-        (os.environ.get("DEEPSEEK_BASE_URL", "").strip() or _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL)
-        if deepseek_key
-        else ""
-    )
+    # implied base URL. A subscription OAuth token likewise only validates against
+    # Anthropic itself, so it implies the official endpoint.
+    if anthropic_url:
+        anthropic_endpoint = anthropic_url
+    elif deepseek_key:
+        anthropic_endpoint = (
+            os.environ.get("DEEPSEEK_BASE_URL", "").strip() or _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL
+        )
+    elif oauth_token:
+        anthropic_endpoint = _OFFICIAL_ANTHROPIC_BASE_URL
+    else:
+        anthropic_endpoint = ""
     offender = ""
     if openai_url and not openai_key and anthropic_key:
         offender = (
@@ -363,33 +389,43 @@ def _reject_cross_provider_pairing() -> None:
     sys.exit(2)
 
 
+def _warn_on_shadowed_oauth_token() -> None:
+    """Warn when an API key will silently outrank the subscription token.
+
+    The Claude CLI prefers an API key over the OAuth token, so this combination
+    bills API credits even though the operator configured a subscription.
+    """
+    if not _has_claude_oauth_token():
+        return
+    shadowing = [name for name in ANTHROPIC_SYNTHESIZABLE_KEY_ENVS if os.environ.get(name, "").strip()]
+    if not shadowing:
+        return
+    print(
+        f"Preflight: WARNING — {CLAUDE_OAUTH_TOKEN_ENV} is set alongside "
+        f"{' and '.join(shadowing)}; the Claude CLI prefers the API key, so this run "
+        f"bills API credits rather than your subscription. Unset "
+        f"{' and '.join(shadowing)} to use the subscription.",
+        file=sys.stderr,
+    )
+
+
 def _validate_credentials() -> None:
     """Fail fast when no usable LLM endpoint/key is configured.
 
     Requires a base URL (``OPENAI_BASE_URL`` / ``ANTHROPIC_BASE_URL``, or an
-    official provider key that implies its default endpoint) plus at least one
-    key (``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` /
-    ``DEEPSEEK_API_KEY``). Split Anthropic/OpenAI entrypoints and single
+    official provider credential that implies its default endpoint) plus at
+    least one key (``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` /
+    ``ANTHROPIC_AUTH_TOKEN`` / ``DEEPSEEK_API_KEY`` /
+    ``CLAUDE_CODE_OAUTH_TOKEN``). Split Anthropic/OpenAI entrypoints and single
     gateways (same key under both provider env names) are both accepted.
     """
     _reject_cross_provider_pairing()
+    _warn_on_shadowed_oauth_token()
     anthropic_url, openai_url = _resolve_llm_endpoints()
-    has_key = bool(
-        os.environ.get("OPENAI_API_KEY")
-        or os.environ.get("ANTHROPIC_API_KEY")
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-        or os.environ.get("DEEPSEEK_API_KEY")
-    )
+    has_anthropic_side = has_anthropic_credential() or bool(os.environ.get("DEEPSEEK_API_KEY"))
+    has_key = bool(os.environ.get("OPENAI_API_KEY") or has_anthropic_side)
     has_usable_endpoint = bool(
-        (
-            anthropic_url
-            and (
-                os.environ.get("ANTHROPIC_API_KEY")
-                or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-                or os.environ.get("DEEPSEEK_API_KEY")
-            )
-        )
-        or (openai_url and os.environ.get("OPENAI_API_KEY"))
+        (anthropic_url and has_anthropic_side) or (openai_url and os.environ.get("OPENAI_API_KEY"))
     )
     if has_usable_endpoint and has_key:
         return
@@ -399,7 +435,8 @@ def _validate_credentials() -> None:
         missing.append("a usable endpoint/key pair")
     if not has_key:
         missing.append(
-            "an API key (OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / DEEPSEEK_API_KEY)"
+            "an API key (OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / "
+            "DEEPSEEK_API_KEY / CLAUDE_CODE_OAUTH_TOKEN)"
         )
     repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
     env_file = Path(repo_root) / ".env"
@@ -423,7 +460,11 @@ def _validate_credentials() -> None:
         "     Official provider keys may omit the matching *_BASE_URL.\n"
         "  4. DeepSeek Anthropic-compatible endpoint:\n"
         "       export DEEPSEEK_API_KEY=sk-xxx\n"
-        "       # optional: export DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic",
+        "       # optional: export DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic\n"
+        "  5. Claude Max/Pro subscription (no API credits; run `claude setup-token`):\n"
+        "       export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-xxx\n"
+        "       # leave ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN unset: either one\n"
+        "       # switches the Claude CLI off subscription mode.",
         file=sys.stderr,
     )
     sys.exit(2)

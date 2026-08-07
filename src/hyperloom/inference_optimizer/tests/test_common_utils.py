@@ -246,6 +246,22 @@ def test_credentials_validate_and_reset_claude_config(tmp_path: Path, monkeypatc
     credentials._reset_claude_config_to_upstream("ignored", "https://anthropic.example")
 
 
+def test_reset_claude_config_refuses_oauth_token_as_primary_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """primaryApiKey is API-credits billing; the subscription token must not land there."""
+    from hyperloom.inference_optimizer.cli import credentials
+
+    oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
+    monkeypatch.setenv(oauth_env, "sk-ant-oat01-fake")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    credentials._reset_claude_config_to_upstream("sk-ant-oat01-fake", "https://api.anthropic.com")
+
+    payload = json.loads((tmp_path / ".claude" / "config.json").read_text(encoding="utf-8"))
+    assert payload["primaryApiKey"] == ""
+    assert payload["customApiUrl"] == "https://api.anthropic.com"
+
+
 # ---------------------------------------------------------------------------
 # inference_optimizer.cli.recover
 # ---------------------------------------------------------------------------

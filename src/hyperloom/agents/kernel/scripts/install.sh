@@ -312,6 +312,9 @@ esac
 # base URL/key. DeepSeek uses the Anthropic-compatible endpoint and may omit
 # DEEPSEEK_BASE_URL because the runtime has a provider default.
 _ANTHROPIC_BASE_URL_VAL="${ANTHROPIC_BASE_URL:-}"
+# API-credits credentials only. CLAUDE_CODE_OAUTH_TOKEN must never reach this
+# variable: it feeds ~/.claude/config.json primaryApiKey, which would move a
+# subscription run onto API billing.
 _ANTHROPIC_KEY_VAL="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
 _DEEPSEEK_BASE_URL_VAL="${DEEPSEEK_BASE_URL:-}"
 _DEEPSEEK_KEY_VAL="${DEEPSEEK_API_KEY:-}"
@@ -422,10 +425,15 @@ verify_die() {
 # DeepSeek serves its own Anthropic-compatible endpoint, so its key counts as one.
 preflight_reject_cross_provider() {
   local a_key a_endpoint conflict=""
-  a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${DEEPSEEK_API_KEY:-}}}"
+  a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${DEEPSEEK_API_KEY:-${CLAUDE_CODE_OAUTH_TOKEN:-}}}}"
   a_endpoint="${ANTHROPIC_BASE_URL:-}"
   if [ -z "$a_endpoint" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; then
     a_endpoint="${DEEPSEEK_BASE_URL:-https://api.deepseek.com/anthropic}"
+  fi
+  # A subscription token only validates against Anthropic, so it implies the
+  # official endpoint the same way a DeepSeek key implies its own.
+  if [ -z "$a_endpoint" ] && [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    a_endpoint="https://api.anthropic.com"
   fi
   if [ -n "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -n "$a_key" ]; then
     conflict="OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an Anthropic-side key is configured"
@@ -457,6 +465,8 @@ preflight_validate_credentials() {
   { { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } &&
     { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; }; } &&
     has_anthropic=1
+  # A subscription token carries its own endpoint, so it is self-consistent alone.
+  [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && has_anthropic=1
   { [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; } && has_openai=1
   preflight_reject_cross_provider || return 1
   if [ "$has_anthropic" -eq 1 ] || [ "$has_openai" -eq 1 ]; then
@@ -491,7 +501,10 @@ Fix one of:
   2. DeepSeek:
        export DEEPSEEK_API_KEY=sk-...
        # optional: export DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic
-  3. Copy .env from a working worktree into this one:
+  3. Claude Max/Pro subscription (run \`claude setup-token\`):
+       export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+       # leave ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN unset
+  4. Copy .env from a working worktree into this one:
        cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
 EOF
   exit 2
@@ -1311,6 +1324,8 @@ ensure_forge_claude_cli() {
 }
 EOF
     chmod 600 /root/.claude/config.json
+  elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    log "subscription token in use; ~/.claude/config.json left alone (primaryApiKey would override it)"
   else
     warn "Anthropic/DeepSeek key not set; ~/.claude/config.json not written"
   fi

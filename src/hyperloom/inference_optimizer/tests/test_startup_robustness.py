@@ -16,6 +16,8 @@ from hyperloom.inference_optimizer.cli import credentials as cli_credentials
 from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 
+_OAUTH_ENV = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
+
 
 # _validate_credentials
 @pytest.fixture
@@ -28,6 +30,7 @@ def clean_creds_env(monkeypatch):
         "_".join(("ANTHROPIC", "AUTH", "TOKEN")),
         "_".join(("DEEPSEEK", "API", "KEY")),
         "DEEPSEEK_BASE_URL",
+        _OAUTH_ENV,
     ):
         monkeypatch.delenv(var, raising=False)
     return monkeypatch
@@ -74,6 +77,55 @@ def test_validate_credentials_passes_official_openai_key_only(clean_creds_env):
     """Official OpenAI SDK default endpoint works without OPENAI_BASE_URL."""
     clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
     cli_credentials._validate_credentials()
+
+
+def test_validate_credentials_passes_oauth_token_only(clean_creds_env):
+    """A Max/Pro subscription token alone is a complete Anthropic-side setup."""
+    clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")
+    cli_credentials._validate_credentials()
+
+
+def test_resolve_llm_endpoints_oauth_only_implies_official_anthropic(clean_creds_env):
+    """OAuth-only derives the official endpoint and leaves the OpenAI side empty."""
+    clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")
+    anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
+    assert anthropic_url == "https://api.anthropic.com"
+    assert openai_url == ""
+
+
+def test_validate_credentials_accepts_oauth_alongside_configured_openai_side(clean_creds_env):
+    """Subscription Anthropic side + fully configured OpenAI side is a legal pair."""
+    clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "ak-openai")
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    cli_credentials._validate_credentials()
+
+
+def test_validate_credentials_rejects_oauth_with_bare_openai_base_url(clean_creds_env, capsys):
+    """OAuth never vouches for the OpenAI side: its base URL still needs its own key."""
+    clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    with pytest.raises(SystemExit) as exc_info:
+        cli_credentials._validate_credentials()
+    assert exc_info.value.code == 2
+    assert "Conflicting LLM credentials" in capsys.readouterr().err
+
+
+def test_validate_credentials_warns_when_api_key_shadows_oauth(clean_creds_env, capsys):
+    """The Claude CLI prefers the API key, so the subscription would go unused."""
+    clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "sk-ant-api")
+    cli_credentials._validate_credentials()
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert _OAUTH_ENV in err
+    assert "_".join(("ANTHROPIC", "API", "KEY")) in err
+
+
+def test_validate_credentials_oauth_only_is_not_warned_about(clean_creds_env, capsys):
+    clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")
+    cli_credentials._validate_credentials()
+    assert "WARNING" not in capsys.readouterr().err
 
 
 def test_validate_credentials_exits_2_when_no_key(clean_creds_env, capsys):
@@ -229,31 +281,25 @@ def test_anthropic_only_critic_agent_runtime_needed(clean_creds_env):
     assert cli._critic_agent_runtime_needed("agent") is True
 
 
-def test_anthropic_intent_skips_critic_agent_even_after_openai_env_appears(clean_creds_env):
-    """Preflight may add stale/runtime OpenAI env, but captured Anthropic intent wins."""
+def test_critic_agent_runtime_always_needed_for_agent_choice(clean_creds_env):
+    """Preflight may add stale/runtime OpenAI env, but the runtime is required
+    either way: there is no longer a degraded critic that skips it."""
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-fake-token")
-    codex_follows_claude = cli._codex_model_should_follow_claude()
-    assert codex_follows_claude is True
+    assert cli._codex_model_should_follow_claude() is True
 
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://api.anthropic.com")
     clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "stale-openai-token")
 
-    assert (
-        cli._critic_agent_runtime_needed(
-            "agent",
-            codex_follows_claude=codex_follows_claude,
-        )
-        is False
-    )
+    assert cli._critic_agent_runtime_needed("agent") is True
 
 
-def test_build_backends_uses_claude_critic_when_codex_follows_claude(
+def test_build_backends_keeps_anthropic_critic_when_codex_follows_claude(
     clean_creds_env,
     monkeypatch,
     tmp_path,
 ):
-    """Stale OpenAI env after preflight must not force critic-agent/Codex."""
+    """Stale OpenAI env after preflight must not force critic-agent onto Codex."""
     from hyperloom.inference_optimizer.cli import backends as cli_backends
 
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
@@ -269,19 +315,27 @@ def test_build_backends_uses_claude_critic_when_codex_follows_claude(
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
+    class _FakeCriticAgent:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
     monkeypatch.setattr(cli_backends, "ClaudeBackend", _FakeClaude)
     monkeypatch.setattr(cli_backends, "CodexBackend", _FakeCodex)
+    monkeypatch.setattr(cli_backends, "CriticAgentBackend", _FakeCriticAgent)
 
     built = cli_backends._build_backends(
         claude_model="claude-opus-4-8",
         codex_model="stale-codex-model",
         critic_choice="agent",
         session_dir=tmp_path,
-        critic_agent_root=None,
+        critic_agent_root=tmp_path,
         codex_follows_claude=True,
     )
 
-    assert isinstance(built["critic"], _FakeClaude)
+    critic = built["critic"]
+    assert isinstance(critic, _FakeCriticAgent)
+    assert critic.kwargs["protocol"] == "anthropic"
+    assert critic.kwargs["claude_model"] == "claude-opus-4-8"
 
 
 def test_openai_only_critic_agent_runtime_needed(clean_creds_env):
