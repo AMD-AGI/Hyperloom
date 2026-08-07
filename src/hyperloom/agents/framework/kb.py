@@ -7,10 +7,11 @@ The KB splits in two. :func:`packaged_kb_root` is read-only seed data shipped
 in the wheel; :func:`mutable_kb_root` is the per-deployment partition this
 session reads and writes, and is the single owner of that path for both this
 module and the orchestrator's ``kb_writeback``. Both resolve at call time so
-tests can monkeypatch the environment. :func:`synthesize_findings` distils :class:`Finding` records
-into a markdown blob for ``contribute_to_kb``; the default path is pure-Python
-(zero deps), ``with_llm=True`` lazy-imports ``claude_agent_sdk``. Per-domain
-priority order is ``empirical_kb.md`` -> ``shared_pitfalls.md`` -> rest.
+tests can monkeypatch the environment. :func:`synthesize_findings` distils
+:class:`Finding` records into a markdown blob for ``contribute_to_kb``; the
+default path is pure-Python (zero deps), ``with_llm=True`` lazy-imports
+``claude_agent_sdk``. Per-domain priority order is ``empirical_kb.md`` ->
+``shared_pitfalls.md`` -> rest.
 """
 
 from __future__ import annotations
