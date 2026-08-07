@@ -239,19 +239,19 @@ async def test_record_audit_skip_not_applicable(coord: Coordinator, monkeypatch)
 # _collect_framework_agent_candidate_priors
 # --------------------------------------------------------------------------
 def test_collect_framework_agent_candidate_priors(coord: Coordinator) -> None:
-    coord.shared_state.framework_agent_critic_decisions = [
-        "not-a-dict",  # skipped via the continue branch
-        {"candidate_id": "c1", "verdict": "approve", "rationale": "looks good"},
-    ]
     coord.shared_state.framework_agent_phase_progress = [
+        "not-a-dict",  # skipped via the isinstance filter
         {"candidate_id": "c1", "status": "kept", "gain_pct": 3.2},
         {"candidate_id": "c2", "status": "in_flight"},  # non-terminal -> excluded
-        {"candidate_id": "c3", "status": "critic_denied"},
+        {"candidate_id": "c3", "status": "critic_denied", "rationale": "off the bottleneck"},
     ]
     priors = coord._collect_framework_agent_candidate_priors()
-    assert priors["recent_decisions"] == [{"candidate_id": "c1", "verdict": "approve", "rationale": "looks good"}]
     statuses = {o["status"] for o in priors["recent_outcomes"]}
     assert statuses == {"kept", "critic_denied"}
+    # The denial reason has to reach the Critic, or the priors carry the
+    # verdict without the argument behind it.
+    denied = next(o for o in priors["recent_outcomes"] if o["status"] == "critic_denied")
+    assert denied["rationale"] == "off the bottleneck"
 
 
 # --------------------------------------------------------------------------
