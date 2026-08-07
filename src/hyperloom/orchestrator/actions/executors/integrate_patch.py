@@ -72,6 +72,9 @@ log = logging.getLogger(__name__)
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0  # grid noise floor; KEEP is re-confirmed by a stack rebench
 DEFAULT_VARIANT_TIMEOUT_SEC = 7800
 _HYPERLOOM_AUTO_STASH_MSG = "hyperloom-auto-stash: preserving user changes before candidate run"
+# Deliberately shares no substring with the auto-stash tag: _find_hyperloom_auto_stash
+# matches by message, and a quarantined merge must never be picked up and popped back.
+_HYPERLOOM_QUARANTINE_STASH_MSG = "hyperloom-quarantine: unresolved merge cleared before candidate run"
 
 
 # Enablement environment-setup replay: allowlist of install-only command shapes.
@@ -768,6 +771,61 @@ def _find_hyperloom_auto_stash(framework_root: Path) -> str:
     return ""
 
 
+def _git_quarantine_unmerged(framework_root: Path, paths: list[str]) -> tuple[bool, str]:
+    """Bank unresolved-merge paths in a stash entry that is never popped back.
+
+    ``git stash`` refuses to run at all while the index carries unmerged
+    entries, so they are staged first — staging is what marks a conflict
+    resolved — and the working-tree content, conflict markers and all, is what
+    gets banked. Recover it with ``git stash list | grep hyperloom-quarantine``.
+
+    Emptying the index is not the same as ending the merge: ``MERGE_HEAD``
+    outlives both the staging and the stash, and while it stands the next
+    ``git commit`` is a *merge* commit. A KEEP would then carry a second parent
+    and silently claim the whole of the other side as accepted work, which is
+    the one thing "every KEEP is a commit, so HEAD is the accepted stack"
+    cannot survive. ``git merge --quit`` forgets the merge without touching the
+    index or the working tree.
+
+    Args:
+        framework_root (Path): The framework repo.
+        paths (list[str]): Repo-relative paths in an unresolved merge state.
+
+    Returns:
+        tuple[bool, str]: ``(ok, error)``; ``error`` is empty on success.
+    """
+    add = _run_git_cp(["-C", str(framework_root), "add", "--", *paths], timeout=60.0)
+    if add is None:
+        return False, "git add failed"
+    if add.returncode != 0:
+        return False, f"git add rc={add.returncode}: {add.stderr.strip()}"
+    cp = _run_git_cp(
+        [
+            "-C",
+            str(framework_root),
+            "stash",
+            "push",
+            "-m",
+            _HYPERLOOM_QUARANTINE_STASH_MSG,
+            "--",
+            *paths,
+        ],
+        timeout=60.0,
+    )
+    if cp is None:
+        return False, "git stash push failed"
+    if cp.returncode != 0:
+        return False, f"git stash push rc={cp.returncode}: {cp.stderr.strip()}"
+    quit_cp = _run_git_cp(["-C", str(framework_root), "merge", "--quit"], timeout=30.0)
+    if quit_cp is None or quit_cp.returncode != 0:
+        # Nothing was banked that a later revert cannot reach, but leaving
+        # MERGE_HEAD standing would mislabel the next KEEP, so refuse rather
+        # than proceed on a repo that is still mid-merge.
+        detail = "git merge --quit failed" if quit_cp is None else quit_cp.stderr.strip()
+        return False, f"merge state could not be cleared: {detail}"
+    return True, ""
+
+
 def _git_unmerged_paths(framework_root: Path) -> list[str]:
     """Return repo-relative paths left in an unresolved merge state, if any."""
     cp = _run_git_cp(["-C", str(framework_root), "ls-files", "-u", "--full-name"], timeout=30.0)
@@ -838,22 +896,28 @@ def _git_stash_if_dirty(framework_root: Path) -> tuple[str, str]:
         return "clean", ""
     if not cp.stdout.strip():
         return "clean", ""
-    # An unresolved merge is wreckage from an earlier cycle, not user state:
-    # git refuses to stash while it stands, so every later candidate would abort
-    # here forever. Restore those paths to HEAD and carry on.
+    # git refuses to stash while an unresolved merge stands, so every later
+    # candidate would abort here forever. Clear it — but bank the content
+    # instead of overwriting it. Usually this is wreckage from an earlier cycle;
+    # nothing here can prove that, and a merge the operator started themselves
+    # is not ours to throw away. Quarantine keeps both cases recoverable at the
+    # cost of one stash entry. It is deliberately not the auto-stash tag, so it
+    # is never popped back: restoring conflict markers into the source is what
+    # made every benchmark fail to parse the model.
     unmerged = _git_unmerged_paths(framework_root)
     if unmerged:
-        ok, err = _git_restore_to_head(framework_root, unmerged)
+        ok, err = _git_quarantine_unmerged(framework_root, unmerged)
         log.warning(
-            "integrate_patch: %s had %d path(s) left in an unresolved merge by an "
-            "earlier cycle (%s); restored to HEAD%s",
+            "integrate_patch: %s had %d path(s) in an unresolved merge (%s); "
+            "moved to a '%s' stash entry%s",
             framework_root,
             len(unmerged),
             ", ".join(unmerged[:5]),
+            _HYPERLOOM_QUARANTINE_STASH_MSG,
             "" if ok else f" FAILED: {err}",
         )
         if not ok:
-            return "failed", f"unresolved merge could not be restored: {err}"
+            return "failed", f"unresolved merge could not be quarantined: {err}"
         cp = _run_git_cp(["-C", str(framework_root), "status", "--porcelain"], timeout=30.0)
         if cp is None:
             return "failed", "git status check failed"
