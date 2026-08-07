@@ -1174,6 +1174,74 @@ def test_validate_claude_model_split_entry_auth_error_refuses(monkeypatch):
     assert exc.value.code == 2
 
 
+def test_catalog_probe_retries_the_other_side_only_when_a_route_is_missing(monkeypatch, capsys):
+    """A dual-protocol gateway lists its models on the OpenAI side only.
+
+    The Anthropic side answers 404 for /models, which is the sentinel rather
+    than None -- so the candidate loop has to keep going on the sentinel, or the
+    catalog is never read and every model stays unverified until the first call.
+    """
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "sk-ds")
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "sk-ds")
+
+    probed: list[str] = []
+
+    def _probe(*, base_url, api_key):
+        probed.append(base_url)
+        if base_url.endswith("/anthropic"):
+            return cli._CATALOG_NO_MODELS_ENDPOINT
+        return {"deepseek-v4-pro", "deepseek-v4-flash"}
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _probe)
+    args = _make_args(claude_model="deepseek-v4-pro")
+
+    catalog = cli._validate_and_resolve_claude_model(args, None)
+
+    assert probed == ["https://api.deepseek.com/anthropic", "https://api.deepseek.com/v1"]
+    assert catalog == {"deepseek-v4-pro", "deepseek-v4-flash"}
+    assert args.claude_model == "deepseek-v4-pro"
+    # Confirmed against a real catalog rather than waved through with a warning.
+    out = capsys.readouterr().out.lower()
+    assert "confirmed in gateway catalog" in out
+    assert "cannot verify" not in out
+
+
+def test_catalog_probe_does_not_retry_the_other_side_when_a_gateway_is_flaky(monkeypatch, capsys):
+    """An unreachable Anthropic side must degrade, not get answered by OpenAI.
+
+    A 5xx / auth / timeout returns None, not the missing-route sentinel. Probing
+    the OpenAI side then answers a Claude question with an OpenAI catalog, and
+    every allowlisted Claude id would fail against it -- turning a transient
+    gateway blip into a hard exit.
+    """
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.amd.example/Anthropic")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.amd.example/Unified/v1")
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "ak-x")
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "ak-x")
+
+    probed: list[str] = []
+
+    def _probe(*, base_url, api_key):
+        probed.append(base_url)
+        if base_url.endswith("/Anthropic"):
+            return None
+        return {"gpt-5.6-sol"}
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _probe)
+    args = _make_args(claude_model="claude-opus-5")
+
+    assert cli._validate_and_resolve_claude_model(args, None) is None
+    assert probed == ["https://llm.amd.example/Anthropic"]
+    assert args.claude_model == "claude-opus-5"
+    assert "cannot verify" in capsys.readouterr().out.lower()
+
+
 def test_validate_claude_model_custom_model_warns_when_catalog_unreachable(monkeypatch, capsys):
     """ALLOW_CUSTOM=1 + catalog unreachable → WARN and proceed (no sys.exit)."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)

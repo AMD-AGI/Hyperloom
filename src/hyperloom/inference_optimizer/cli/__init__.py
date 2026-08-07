@@ -750,12 +750,11 @@ def _validate_and_resolve_claude_model(
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
         # OpenAI-side key only.
         openai_key = os.environ.get("OPENAI_API_KEY", "")
-        # The Claude catalog must come from the Anthropic side. Fall back to the
-        # OpenAI side only when both sides are the same gateway: identical URLs,
-        # or one host serving each protocol on its own path. A dual-protocol
-        # gateway lists its models on the OpenAI side only, so without that
-        # second candidate the catalog can never be read and every model would
-        # go unverified until the first LLM call.
+        # The Claude catalog must come from the Anthropic side. The OpenAI side
+        # is offered as a second candidate only when both sides are the same
+        # gateway -- identical URLs, or one host serving each protocol on its
+        # own path -- and the loop below only reaches it when the first side
+        # turns out to have no /models route at all.
         candidates: list[tuple[str, str]] = []
         if _claude_model_should_follow_codex():
             if openai_url:
@@ -776,7 +775,13 @@ def _validate_and_resolve_claude_model(
                 continue
             seen_urls.add(cand_url)
             catalog_ids = _probe_llm_catalog(base_url=cand_url, api_key=cand_key)
-            if catalog_ids is not None:
+            # A missing /models route is the only answer worth re-asking on the
+            # other side, and only because a dual-protocol gateway lists its
+            # models there. An unreachable side (None) means the gateway is
+            # flaky rather than route-less: probing the OpenAI side would then
+            # answer a Claude question with an OpenAI catalog and fail every
+            # allowlisted id, so stop and let the caller degrade to its WARN.
+            if catalog_ids is not _CATALOG_NO_MODELS_ENDPOINT:
                 break
 
     if catalog_ids is _CATALOG_NO_MODELS_ENDPOINT:
