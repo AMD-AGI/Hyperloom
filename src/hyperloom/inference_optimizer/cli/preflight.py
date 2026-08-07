@@ -22,7 +22,11 @@ from hyperloom.common.env_safety import (
     is_allowed_dotenv_key,
     is_allowed_kernel_agent_env_key,
 )
-from hyperloom.common.llm_config import LEGACY_DEEPSEEK_ENV_KEYS, deepseek_compat_env
+from hyperloom.common.llm_config import (
+    LEGACY_DEEPSEEK_ENV_KEYS,
+    deepseek_compat_env,
+    provider_model_defaults,
+)
 
 from .credentials import (
     _is_stale_proxy_url,
@@ -118,14 +122,19 @@ def _normalize_legacy_deepseek_env() -> None:
     downstream sees just the two protocol sides.
     """
     updates = deepseek_compat_env()
-    if not updates:
-        return
-    for key, value in updates.items():
+    if updates:
+        for key, value in updates.items():
+            os.environ[key] = value
+        print(
+            "Preflight: DEEPSEEK_* is deprecated; normalized to "
+            f"{', '.join(sorted(updates))}. Re-run setup to migrate your .env."
+        )
+    # A gateway that serves only its own models supplies the model ids too.
+    # Exported (not just resolved) so subprocesses, GEAKv4 and the kernel-agent
+    # installer inherit them instead of falling back to an AMD Claude id.
+    for key, value in provider_model_defaults().items():
         os.environ[key] = value
-    print(
-        "Preflight: DEEPSEEK_* is deprecated; normalized to "
-        f"{', '.join(sorted(updates))}. Re-run setup to migrate your .env."
-    )
+        print(f"Preflight: {key} <unset> -> {value} (implied by the configured gateway)")
 
 
 def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | None]) -> None:

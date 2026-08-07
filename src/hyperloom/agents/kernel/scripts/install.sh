@@ -530,6 +530,9 @@ Fix one of:
        export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
        export OPENAI_BASE_URL=https://api.deepseek.com/v1
        export ANTHROPIC_API_KEY=sk-...  OPENAI_API_KEY=sk-...
+     A gateway serving only its own models also needs the model ids. Known
+     hosts default themselves; otherwise set CLAUDE_MODEL (Anthropic side)
+     and CODEX_MODEL (OpenAI side).
   3. Copy .env from a working worktree into this one:
        cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
 EOF
