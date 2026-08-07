@@ -1607,6 +1607,30 @@ def _minimal_judge_bundle() -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
+async def test_anthropic_protocol_surfaces_stop_reason_as_finish_reason(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+):
+    """A reply cut off at the token cap must be distinguishable from one the
+    model simply formatted wrong; both otherwise parse to zero verdicts."""
+    truncated = BackendTurnResult(
+        raw_text='{"review_verdicts": [{"target_proposal',
+        metadata={"input_tokens": 9, "output_tokens": 4096, "stop_reason": "max_tokens"},
+    )
+    backend, _ = _make_anthropic_backend(
+        fake_critic_root,
+        fake_session_dir,
+        results=[truncated],
+        judge_bundle=_minimal_judge_bundle(),
+    )
+
+    res = await backend.run("prompt", system_prompt="critic system")
+
+    assert [i for i in res.intents if i.type == IntentType.REVIEW_VERDICT] == []
+    assert res.metadata["finish_reason"] == "max_tokens"
+
+
+@pytest.mark.asyncio
 async def test_anthropic_protocol_propagates_llm_call_failed_and_traces_it(
     fake_critic_root: Path,
     fake_session_dir: Path,
@@ -1681,3 +1705,19 @@ def test_accumulate_claude_usage_folds_tokens_and_tolerates_garbage():
     CriticAgentBackend._accumulate_claude_usage(acc, {"input_tokens": "x", "output_tokens": None})
     CriticAgentBackend._accumulate_claude_usage(acc, None)
     assert acc == {"input_tokens": 3, "output_tokens": 4}
+
+
+def test_accumulate_claude_usage_counts_cached_input_tokens():
+    """The judge bundle repeats across turns, so most of the input side arrives
+    as cache reads; counting only ``input_tokens`` under-reports every call."""
+    acc = {"input_tokens": 0, "output_tokens": 0}
+    CriticAgentBackend._accumulate_claude_usage(
+        acc,
+        {
+            "input_tokens": 12,
+            "cache_read_input_tokens": 4000,
+            "cache_creation_input_tokens": 300,
+            "output_tokens": 500,
+        },
+    )
+    assert acc == {"input_tokens": 4312, "output_tokens": 500}

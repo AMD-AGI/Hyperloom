@@ -78,6 +78,7 @@ def _clear_provider_env(monkeypatch) -> None:
         "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")),
         "DEEPSEEK_BASE_URL",
         "DEEPSEEK_API_KEY",
+        "LLM_GATEWAY_KEY",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -140,6 +141,31 @@ def test_build_backends_forced_protocol_without_credential_fails(monkeypatch) ->
             critic_choice="agent",
             critic_agent_root=Path("/tmp/critic"),
             critic_protocol="anthropic",
+        )
+
+
+def test_build_backends_forced_openai_protocol_accepts_gateway_key(monkeypatch) -> None:
+    """The review client resolves LLM_GATEWAY_KEY, so the flag must accept a
+    gateway-only host instead of rejecting a config that would have run."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    monkeypatch.setenv("LLM_GATEWAY_KEY", "ak-gateway-key")
+    b = _build(
+        critic_choice="agent",
+        critic_agent_root=Path("/tmp/critic"),
+        critic_protocol="openai",
+    )
+    assert b["critic"][1]["protocol"] == "openai"
+
+
+def test_build_backends_forced_openai_protocol_without_any_key_fails(monkeypatch) -> None:
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")), "sk-ant-oat01-fake")
+    with pytest.raises(ValueError, match="LLM_GATEWAY_KEY"):
+        _build(
+            critic_choice="agent",
+            critic_agent_root=Path("/tmp/critic"),
+            critic_protocol="openai",
         )
 
 

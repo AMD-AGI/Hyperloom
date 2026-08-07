@@ -39,7 +39,7 @@ from hyperloom.inference_optimizer.session.session_paths import allocate_turn_wo
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from .base import BackendError, BackendTurnResult, LLMCallFailed, build_chat_messages, parse_call_timeout_env
-from .claude import ClaudeBackend
+from .claude import ClaudeBackend, _input_side_total
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
 
@@ -1049,8 +1049,8 @@ class CriticAgentBackend:
             user_prompt: The judge bundle plus output instructions.
 
         Returns:
-            A tuple of the reply text and ``None`` (the SDK reports no stop
-            reason).
+            A tuple of the reply text and the model's stop reason (e.g.
+            ``max_tokens``), keeping truncation visible as on the OpenAI path.
 
         Raises:
             BackendError: If the Claude CLI call fails.
@@ -1074,10 +1074,15 @@ class CriticAgentBackend:
                 latency_ms=int((time.perf_counter() - _t0) * 1000),
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
+        metadata = getattr(result, "metadata", None)
         usage_acc = {"input_tokens": 0, "output_tokens": 0}
-        self._accumulate_claude_usage(usage_acc, getattr(result, "metadata", None))
+        self._accumulate_claude_usage(usage_acc, metadata)
         self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms)
-        return getattr(result, "raw_text", "") or "", None
+        stop_reason = metadata.get("stop_reason") if isinstance(metadata, dict) else None
+        return (
+            getattr(result, "raw_text", "") or "",
+            stop_reason if isinstance(stop_reason, str) and stop_reason else None,
+        )
 
     @staticmethod
     def _accumulate_claude_usage(
@@ -1089,6 +1094,10 @@ class CriticAgentBackend:
         Missing / bad values contribute 0 so a malformed turn never corrupts
         the token sum.
 
+        The input side sums fresh, cache-read and cache-creation tokens, the
+        same accounting ``ClaudeBackend`` uses: the judge bundle repeats across
+        turns, so most of a critic call's input arrives as cache reads.
+
         Args:
             acc: The running accumulator with ``input_tokens`` /
                 ``output_tokens`` keys, updated in place.
@@ -1096,11 +1105,11 @@ class CriticAgentBackend:
         """
         if not isinstance(metadata, dict):
             return
-        for key in ("input_tokens", "output_tokens"):
-            try:
-                acc[key] += int(metadata.get(key, 0) or 0)
-            except (TypeError, ValueError):
-                pass
+        acc["input_tokens"] += _input_side_total(metadata)
+        try:
+            acc["output_tokens"] += int(metadata.get("output_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            pass
 
     @staticmethod
     def _accumulate_usage(
