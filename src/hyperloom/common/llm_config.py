@@ -35,11 +35,25 @@ class OpenAIClientConfig:
         return kwargs
 
 
+# Anthropic-side credential env vars, highest precedence first. Mirrors the
+# Claude CLI's own resolution: an API key or gateway bearer token disables
+# subscription (OAuth) mode entirely, so OAuth is only live when both are unset.
+ANTHROPIC_CREDENTIAL_ENV_ORDER: tuple[str, ...] = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+)
+
+# Subscription credential minted by ``claude setup-token``. Never synthesized
+# into the API-key vars; see ``claude_sdk_env_options``.
+CLAUDE_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+
 CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_CUSTOM_HEADERS",
+    CLAUDE_OAUTH_TOKEN_ENV,
     "DEEPSEEK_BASE_URL",
     "DEEPSEEK_API_KEY",
     "OPENAI_BASE_URL",
@@ -179,7 +193,9 @@ def claude_sdk_env_options(
     if "ANTHROPIC_BASE_URL" not in source and source.get("DEEPSEEK_API_KEY"):
         source["ANTHROPIC_BASE_URL"] = source.get("DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL
 
-    # Anthropic-side credentials only.
+    # Anthropic-side credentials only. CLAUDE_CODE_OAUTH_TOKEN is deliberately
+    # excluded: the CLI drops out of subscription mode whenever either API-key
+    # var is set, so synthesizing it here would 401 the run.
     fallback_key = (
         source.get("ANTHROPIC_AUTH_TOKEN")
         or source.get("ANTHROPIC_API_KEY")
