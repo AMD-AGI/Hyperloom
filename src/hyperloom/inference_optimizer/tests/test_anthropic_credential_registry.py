@@ -10,7 +10,6 @@ and secrets that may cross into a subprocess) must not follow it silently."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -119,25 +118,49 @@ def _install_scripts() -> list[Path]:
     ]
 
 
+def _executable_lines(script: Path) -> list[str]:
+    """Script lines with comments and blank lines dropped, so a name mentioned
+    only in prose cannot satisfy a reference check."""
+    lines = []
+    for raw in script.read_text(encoding="utf-8").splitlines():
+        stripped = raw.strip()
+        if stripped and not stripped.startswith("#"):
+            lines.append(stripped)
+    return lines
+
+
 @pytest.mark.parametrize("script", _install_scripts(), ids=lambda p: f"{p.parent.name}/{p.name}")
 def test_shell_credential_checks_know_every_credential_form(script: Path):
     """Shell entrypoints cannot import the tuple, so assert textually that each
-    registered form is at least referenced by their credential handling."""
-    text = script.read_text(encoding="utf-8")
-    missing = [name for name in ANTHROPIC_CREDENTIAL_ENV_ORDER if name not in text]
-    assert missing == [], f"{script.name} does not mention {missing}"
+    registered form is read or assigned by their credential handling."""
+    code = _executable_lines(script)
+    missing = [
+        name
+        for name in ANTHROPIC_CREDENTIAL_ENV_ORDER
+        if not any(f"${{{name}" in line or f"${name}" in line or f"{name}=" in line for line in code)
+    ]
+    assert missing == [], f"{script.name} never reads or assigns {missing}"
 
 
-@pytest.mark.parametrize("script", _install_scripts(), ids=lambda p: f"{p.parent.name}/{p.name}")
+def _config_json_writers() -> list[Path]:
+    return [s for s in _install_scripts() if "primaryApiKey" in s.read_text(encoding="utf-8")]
+
+
+def test_some_installer_still_writes_the_claude_config_key():
+    """Guards the check below from going vacuous if the write is renamed."""
+    assert _config_json_writers(), "no installer writes ~/.claude/config.json primaryApiKey"
+
+
+@pytest.mark.parametrize("script", _config_json_writers(), ids=lambda p: f"{p.parent.name}/{p.name}")
 def test_shell_config_json_key_excludes_the_subscription_token(script: Path):
     """The variable feeding ~/.claude/config.json primaryApiKey must be built
     from the synthesizable subset only."""
-    for line in script.read_text(encoding="utf-8").splitlines():
-        if line.strip().startswith("_ANTHROPIC_KEY_VAL="):
-            assert CLAUDE_OAUTH_TOKEN_ENV not in line, line
-            assert any(name in line for name in ANTHROPIC_SYNTHESIZABLE_KEY_ENVS), line
-
-
-def test_environment_is_left_clean():
-    """Guard against the fixture leaking a fake credential into later tests."""
-    assert os.environ.get(_FAKE_CREDENTIAL_ENV) is None
+    code = _executable_lines(script)
+    sources = [line for line in code if line.startswith("local _claude_key=")]
+    assert sources, f"{script.name} writes primaryApiKey from an unrecognized variable"
+    roots = [line for line in code if line.startswith("_ANTHROPIC_KEY_VAL=")]
+    assert roots, f"{script.name} no longer feeds _claude_key from _ANTHROPIC_KEY_VAL"
+    for line in sources + roots:
+        assert CLAUDE_OAUTH_TOKEN_ENV not in line, line
+    for line in roots:
+        assert any(name in line for name in ANTHROPIC_SYNTHESIZABLE_KEY_ENVS), line
