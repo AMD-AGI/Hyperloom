@@ -1334,18 +1334,23 @@ def _row_to_candidate(
     args = record.get("args", "").replace("<br>", "\n").strip()
     shapes = [s.strip() for s in args.split("\n") if s.strip() and s.strip() not in {"-", "—"}]
     kernel_path = record.get("kernel path", "").strip()
-    if kernel_path in {"-", "—"}:
+    # Share the launcher placeholder vocabulary so a sentinel such as TraceLens'
+    # "Not found" cannot survive as a fake source_file (see the constant).
+    if kernel_path.lower() in _LAUNCHER_PATH_PLACEHOLDERS:
         kernel_path = ""
     # Device kernel symbol(s) used to disambiguate dispatch ops; keep the full
     # list and use the first for matching. Placeholders normalize to "".
     device_kernel_names = _parse_kernel_name_cell(record.get("kernel name", ""))
     device_kernel_name = device_kernel_names[0] if device_kernel_names else ""
-    # Promote a framework-relative launcher path to its absolute on-disk source.
-    resolved_source_file = kernel_path
+    # Store only the path in source_file; line/function annotations have their
+    # own fields and otherwise make extension-based routing see an unknown file.
+    resolved_source_file, resolved_line, resolved_func = _parse_launcher_path(
+        kernel_path
+    )
     if kernel_path:
         resolved = _resolve_launcher_to_abs_source(kernel_path)
         if resolved is not None:
-            resolved_source_file, _resolved_line, _resolved_func = resolved
+            resolved_source_file, resolved_line, resolved_func = resolved
     time_ms = _safe_float(record.get("time (ms)"))
     percent_e2e = _safe_float(record.get("%e2e"))
     count_val = _safe_float(record.get("count"), 1.0)
@@ -1367,6 +1372,8 @@ def _row_to_candidate(
         "duration_us": time_ms * 1000.0,
         "call_count": int(count_val) if count_val else 0,
         "source_file": resolved_source_file,
+        "source_line": resolved_line,
+        "source_function": resolved_func or "",
         # Raw Kernel Path kept so aggregation's AST resolution survives the source_file overwrite.
         "tracelens_launcher_path": kernel_path,
         # Device kernel symbol for dispatch resolution; "" when absent.
@@ -1559,6 +1566,11 @@ _LAUNCHER_PATH_RE = re.compile(
     r"(?P<path>.+?)\((?P<line>\d+)\)\s*:\s*(?P<func>[A-Za-z_][A-Za-z0-9_]*)\s*$",
 )
 # Placeholders for unresolved Kernel Paths; must not survive parsing.
+# ``not found`` is TraceLens' own sentinel for an unresolved launcher: it lands
+# in ``other_metrics.json`` whenever ``_find_entry_point`` cannot locate the op
+# in the call stack (every Synthetic Op), and the report agent copies it
+# verbatim into the Kernel Path cell. Letting it through makes it a truthy
+# ``source_file`` that silently skips the grep fallback downstream.
 _LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset(
     {
         "",
@@ -1567,6 +1579,9 @@ _LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset(
         "–",
         "n/a",
         "none",
+        "not found",
+        "not_found",
+        "notfound",
         "null",
         "tbd",
         "unknown",
@@ -1730,16 +1745,16 @@ def _resolve_launcher_to_abs_source(
         kernel_path: The TraceLens launcher-path to resolve.
 
     Returns:
-        An ``(abs_file, line, function_name)`` tuple only when the file
-        exists, else ``None`` (a conservative miss defers to the caller's grep
-        locator).
+        An ``(abs_file, line, function_name)`` tuple for an absolute path or a
+        resolvable framework-relative file, else ``None``.
     """
     raw_path, line, func = _parse_launcher_path(kernel_path)
     if not raw_path:
         return None
     if os.path.isabs(raw_path):
-        # Already absolute — None signals "no rewrite needed".
-        return None
+        # Keep container-resident paths even when this analysis host cannot stat
+        # them; the caller still needs the annotation split into separate fields.
+        return raw_path, line, func
     head = raw_path.split("/", 1)[0]
     if not head or head.startswith("."):
         return None

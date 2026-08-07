@@ -4232,6 +4232,7 @@ class TestBuildTraceAnalyzeCmd:
 
     def _common(self, monkeypatch, tmp_path):
         monkeypatch.delenv("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", raising=False)
+        monkeypatch.delenv("MODEL_PATH", raising=False)
         monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path("/tools") / name)
         state = SharedState()
         return state, tmp_path / "sess"
@@ -4285,6 +4286,32 @@ class TestBuildTraceAnalyzeCmd:
         ]
         assert steady == ""
 
+    def test_sglang_cmd_forwards_model_context(self, monkeypatch, tmp_path):
+        """Non-scriptable analysis receives model config and precision context."""
+        state, session_dir = self._common(monkeypatch, tmp_path)
+        state.model_path = "/models/sglang-model"
+        state.precision = "fp8"
+        state.baseline_config_path = "/session/materialized.yaml"
+        cmd, _steady = krh._build_trace_analyze_cmd(
+            {"trace_input": "/t/trace"},
+            session_dir=session_dir,
+            state=state,
+            workspace_path="/ws",
+            trace_input="/t/trace",
+            tracelens_root=Path("/tl"),
+            is_bypass=False,
+            scriptable=False,
+            workload={"precision": "mxfp8"},
+            model_name="MiniMax",
+            framework="sglang",
+            target_platform="MI355X",
+            analysis_mode="default",
+            analysis_route="agent",
+        )
+        assert cmd[cmd.index("--model-path") + 1] == "/models/sglang-model"
+        assert cmd[cmd.index("--precision") + 1] == "fp8"
+        assert cmd[cmd.index("--runtime-config") + 1] == "/session/materialized.yaml"
+
     def test_bypass_scriptable_cmd(self, monkeypatch, tmp_path):
         state, session_dir = self._common(monkeypatch, tmp_path)
         state.model_path = "/models/flux"
@@ -4322,6 +4349,7 @@ class TestBuildTraceAnalyzeCmd:
         assert "--split-conc" not in cmd
         # bypass takes no analysis-route flag.
         assert "--analysis-route" not in cmd
+        assert "--runtime-config" not in cmd
         assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "auto"
         assert cmd[-1] == "--dry-run"
         assert steady == "auto"
