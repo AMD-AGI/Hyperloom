@@ -119,6 +119,28 @@ def test_registry_get_unknown_returns_none(registry):
     assert registry.get("does_not_exist") is None
 
 
+@pytest.mark.parametrize("action_name", ["framework_agent", "integrate_patch"])
+def test_action_registry_lease_covers_bench_timeout(registry, action_name):
+    """The lease must outlast the bench timeout the executor already grants itself.
+
+    ``reclaim_expired_running`` measures ``now - updated_at``, and ``updated_at``
+    only advances on a state transition — nothing refreshes it while the task
+    runs. The lease is therefore a total wall-clock budget, so a lease shorter
+    than ``DEFAULT_VARIANT_TIMEOUT_SEC`` marks a healthy task ``failed`` and
+    releases its lanes while its benchmark is still on the GPU, letting the next
+    task restart the server underneath it.
+
+    The margin on top covers the clone, the source rebuild and the accuracy eval
+    that bracket the bench; those are not separately bounded, so this asserts
+    only the part that is a hard contradiction between two declarations.
+    """
+    from hyperloom.orchestrator.actions.executors.integrate_patch import DEFAULT_VARIANT_TIMEOUT_SEC
+
+    meta = registry.get(action_name)
+    assert meta is not None
+    assert meta.lease_ttl_sec >= DEFAULT_VARIANT_TIMEOUT_SEC
+
+
 def test_registry_load_missing_dir_raises(tmp_path):
     bogus = ActionRegistry(actions_dir=tmp_path / "nope")
     with pytest.raises(ActionRegistryError, match="not found"):
