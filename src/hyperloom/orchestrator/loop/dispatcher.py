@@ -931,6 +931,7 @@ class DispatcherCollaborator:
                         self._record_framework_agent_authoring_empty_outcome(
                             task=task,
                             done_payload=done_payload,
+                            run_error=str(result.error or ""),
                         )
                     except Exception:  # noqa: BLE001 — defensive
                         log.exception(
