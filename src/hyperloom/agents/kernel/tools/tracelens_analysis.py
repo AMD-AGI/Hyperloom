@@ -64,6 +64,7 @@ from _paths import workspace_root
 # Idle-gate threshold + high-idle warning: shared single source of truth so the
 # TraceLens and bypass routes gate on identical semantics.
 from _idle_gate import (
+    build_graph_under_recorded_warning as _build_graph_under_recorded_warning,
     build_high_idle_warning as _build_high_idle_warning,
     resolve_idle_pct_threshold,
 )
@@ -758,6 +759,64 @@ def _evaluate_high_idle_gate(idle_pct: float | None, report_path: Path) -> tuple
         threshold_pct=threshold,
         report_path=report_path,
     )
+
+
+def _graph_coverage_from_raw_trace(trace_path: str | Path | None) -> dict[str, Any]:
+    """Return the bypass reader's ``graph_coverage`` for the raw trace, or ``{}``.
+
+    Reuses the tested ``_bypass_trace_reader.analyze_trace`` graph-launch
+    detection so the TraceLens route can tell a cuda/HIP-graph under-recorded
+    capture (profiler activity-buffer overflow → only ~1 of N replays recorded →
+    inflated idle%) apart from a genuinely idle/launch-bound workload. Best
+    effort: any failure returns ``{}`` so the caller falls back to the plain
+    idle gate (never worse than today).
+    """
+    if not trace_path:
+        return {}
+    try:
+        import _bypass_trace_reader as _reader
+
+        analyze = _reader.analyze_trace(str(trace_path), top_k=0, emit_launches=True)
+        cov = analyze.get("graph_coverage") if isinstance(analyze, dict) else None
+        return cov if isinstance(cov, dict) else {}
+    except Exception:  # noqa: BLE001 - guard is advisory; never block on it
+        return {}
+
+
+def _evaluate_idle_gate_with_graph_guard(
+    idle_pct: float | None,
+    report_path: Path,
+    trace_path: str | Path | None,
+) -> tuple[float, dict[str, Any] | None, dict[str, Any] | None]:
+    """Idle gate that first honors graph under-recording.
+
+    A cuda/HIP-graph trace that under-records replays reports an unreliable
+    (inflated) idle%, so gating candidates on it wrongly suppresses the whole
+    hot-kernel list on a workload that is actually compute-bound (the exact
+    failure the bypass route already guards against via
+    ``bypass_graph_under_recorded``). When under-recording is detected we skip
+    the high-idle suppression and surface the graph-under-recorded warning
+    instead; otherwise the plain idle gate applies unchanged.
+
+    Returns:
+        ``(threshold, high_idle_warning, graph_under_recorded_warning)`` where at
+        most one of the two warnings is non-``None``.
+    """
+    threshold = resolve_idle_pct_threshold()
+    if idle_pct is None or idle_pct <= threshold:
+        return threshold, None, None
+    cov = _graph_coverage_from_raw_trace(trace_path)
+    if cov.get("graph_under_recorded"):
+        return (
+            threshold,
+            None,
+            _build_graph_under_recorded_warning(
+                graph_launch_count=int(cov.get("graph_launch_count", 0) or 0),
+                idle_pct=float(idle_pct),
+            ),
+        )
+    _, high_idle_warning = _evaluate_high_idle_gate(idle_pct, report_path)
+    return threshold, high_idle_warning, None
 
 
 def _build_trace_split_warning(
@@ -6354,10 +6413,21 @@ def main() -> int:
                 idle_pct_value = _extract_idle_pct_from_gpu_timeline(
                     tracelens_dir,
                 )
-                idle_pct_threshold, high_idle_warning = _evaluate_high_idle_gate(
-                    idle_pct_value,
-                    tracelens_dir / "analysis.md",
+                idle_pct_threshold, high_idle_warning, graph_under_recorded_warning = (
+                    _evaluate_idle_gate_with_graph_guard(
+                        idle_pct_value,
+                        tracelens_dir / "analysis.md",
+                        cli_trace_path,
+                    )
                 )
+                if graph_under_recorded_warning is not None:
+                    trace_health_warnings.append(graph_under_recorded_warning)
+                    append_log(
+                        log_path,
+                        "deterministic: high idle% is a graph under-recording "
+                        "artifact (profiler captured ~1 of N graph replays); "
+                        "skipping the idle gate and keeping hot_kernels[].",
+                    )
                 if high_idle_warning is not None:
                     assert idle_pct_value is not None
                     agent_candidates = []
@@ -6453,10 +6523,21 @@ def main() -> int:
                     idle_pct_value = extract_idle_pct_from_analysis_md(
                         skill_result.report_path,
                     )
-                    idle_pct_threshold, high_idle_warning = _evaluate_high_idle_gate(
-                        idle_pct_value,
-                        skill_result.report_path,
+                    idle_pct_threshold, high_idle_warning, graph_under_recorded_warning = (
+                        _evaluate_idle_gate_with_graph_guard(
+                            idle_pct_value,
+                            skill_result.report_path,
+                            cli_trace_path,
+                        )
                     )
+                    if graph_under_recorded_warning is not None:
+                        trace_health_warnings.append(graph_under_recorded_warning)
+                        append_log(
+                            log_path,
+                            "TraceLens high idle% is a graph under-recording "
+                            "artifact (profiler captured ~1 of N graph replays); "
+                            "skipping the idle gate and keeping hot_kernels[].",
+                        )
                     if high_idle_warning is not None:
                         assert idle_pct_value is not None
                         agent_candidates = []
