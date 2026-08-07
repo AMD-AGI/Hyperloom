@@ -38,12 +38,18 @@ class TestResolveKbRoot:
         monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "io-kb"))
         assert kb._resolve_kb_root() == tmp_path / "io-kb"
 
-    def test_defaults_to_the_workspace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """With no override the KB lives under the operator workspace."""
+    def test_defaults_to_its_own_workspace_subdirectory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With no override the KB lives in its own directory under the workspace.
+
+        Not ``<workspace>/kb``: the recipe KB owns that, and ``list_domains``
+        treats every directory under this root as a framework domain.
+        """
         monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
         monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
-        assert kb._resolve_kb_root() == tmp_path / "workspace" / "kb"
+        assert kb._resolve_kb_root() == tmp_path / "workspace" / "framework-kb"
 
     def test_withdrawn_override_fails_loudly(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """A run still setting the reader-only override is stopped, not redirected.
@@ -64,7 +70,7 @@ class TestResolveKbRoot:
         monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
         monkeypatch.setenv("FRAMEWORK_AGENT_ROOT", str(tmp_path / "skill"))
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
-        assert kb._resolve_kb_root() == tmp_path / "workspace" / "kb"
+        assert kb._resolve_kb_root() == tmp_path / "workspace" / "framework-kb"
 
 
 class TestListAndMatch:

@@ -86,6 +86,32 @@ def test_lessons_writer_and_reader_resolve_the_same_file(
     assert fa_kb.packaged_kb_root() not in writer.parents
 
 
+def test_framework_kb_does_not_share_a_root_with_the_recipe_kb(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The two KBs must not resolve to the same directory.
+
+    ``list_domains`` reports every directory under the framework KB root as a
+    domain, and the recipe KB lays a deep tree under its own root, so pointing
+    both at ``<workspace>/kb`` makes recipe directories surface as framework
+    domains and puts two unrelated writers in one namespace.
+    """
+    from hyperloom.agents.framework import kb as fa_kb
+    from hyperloom.inference_optimizer.cli.kb import _resolve_local_kb_root
+
+    for name in ("INFERENCE_OPTIMIZER_FA_KB_PATH", "FRAMEWORK_AGENT_KB_DIR", "HYPERLOOM_LOCAL_KB_ROOT", "KNOWLEDGE_LOCAL_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
+
+    framework_root = fa_kb.mutable_kb_root()
+    recipe_root = _resolve_local_kb_root(SimpleNamespace(local_kb_root=None))
+
+    assert framework_root != recipe_root
+    assert recipe_root not in framework_root.parents
+    assert framework_root not in recipe_root.parents
+
+
 def test_iter_message_text_handles_all_shapes() -> None:
     assert list(_iter_message_text("hello")) == ["hello"]
     assert list(_iter_message_text(SimpleNamespace(text="t"))) == ["t"]
