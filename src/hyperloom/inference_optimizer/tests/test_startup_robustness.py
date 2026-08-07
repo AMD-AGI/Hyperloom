@@ -111,6 +111,23 @@ def test_validate_credentials_rejects_oauth_with_bare_openai_base_url(clean_cred
     assert "Conflicting LLM credentials" in capsys.readouterr().err
 
 
+def test_validate_credentials_warns_when_api_key_shadows_oauth(clean_creds_env, capsys):
+    """The Claude CLI prefers the API key, so the subscription would go unused."""
+    clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "sk-ant-api")
+    cli_credentials._validate_credentials()
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert _OAUTH_ENV in err
+    assert "_".join(("ANTHROPIC", "API", "KEY")) in err
+
+
+def test_validate_credentials_oauth_only_is_not_warned_about(clean_creds_env, capsys):
+    clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")
+    cli_credentials._validate_credentials()
+    assert "WARNING" not in capsys.readouterr().err
+
+
 def test_validate_credentials_exits_2_when_no_key(clean_creds_env, capsys):
     """A base URL without any key is rejected."""
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")

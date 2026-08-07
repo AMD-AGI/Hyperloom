@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.llm_config import parse_custom_headers
+from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV, parse_custom_headers
 from .executors import (
     _build_specialist_executor,
     _register_executors,
@@ -604,6 +604,21 @@ def _claude_model_should_follow_codex() -> bool:
     return _official_openai_only()
 
 
+def _catalog_probe_has_no_credential() -> bool:
+    """True when a Claude subscription token is the only credential available.
+
+    The catalog probe is a bearer-authenticated ``GET <base>/models``; a
+    subscription token is not accepted there, so probing would only produce a
+    misleading auth failure.
+    """
+    if not os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip():
+        return False
+    return not any(
+        os.environ.get(name, "").strip()
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DEEPSEEK_API_KEY", "OPENAI_API_KEY")
+    )
+
+
 def _custom_orch_model_allowed() -> bool:
     """Whether orchestration may use a model outside the AMD Claude allowlist.
 
@@ -697,6 +712,14 @@ def _validate_and_resolve_claude_model(
     # host outright (single probe, no fallback).
     catalog_ids: set[str] | frozenset[str] | None = None
     override_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
+    if not override_url and _catalog_probe_has_no_credential():
+        # The static allowlist gate above already ran; this is the only check the
+        # probe would have added, so proceed with the operator's id.
+        print(
+            f"Preflight: catalog probe skipped: oauth-only credential ({CLAUDE_OAUTH_TOKEN_ENV}); "
+            f"cannot verify --claude-model={chosen!r}. Proceeding."
+        )
+        return None
     if override_url:
         api_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
