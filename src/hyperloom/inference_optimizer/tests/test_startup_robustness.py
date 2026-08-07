@@ -21,7 +21,6 @@ from hyperloom.inference_optimizer.cli.parser import _build_parser
 @pytest.fixture
 def clean_creds_env(monkeypatch):
     for var in (
-        "_".join(("SAFE", "API", "KEY")),
         "OPENAI_BASE_URL",
         "ANTHROPIC_BASE_URL",
         "_".join(("OPENAI", "API", "KEY")),
@@ -34,9 +33,9 @@ def clean_creds_env(monkeypatch):
     return monkeypatch
 
 
-def test_validate_credentials_passes_legacy_single_gateway(clean_creds_env):
-    """Legacy AMD single-gateway pair (SAFE API key + OPENAI_BASE_URL) still passes."""
-    clean_creds_env.setenv("_".join(("SAFE", "API", "KEY")), "fake-token")
+def test_validate_credentials_passes_single_gateway(clean_creds_env):
+    """Single-gateway pair (OPENAI_API_KEY + OPENAI_BASE_URL) passes."""
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "fake-token")
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
     cli_credentials._validate_credentials()
 
@@ -48,10 +47,20 @@ def test_validate_credentials_passes_anthropic_only_entrypoint(clean_creds_env):
     cli_credentials._validate_credentials()
 
 
-def test_validate_credentials_passes_openai_key_with_anthropic_url(clean_creds_env):
-    """A URL on one side + a key on the other still satisfies the check."""
+def test_validate_credentials_rejects_openai_key_with_anthropic_url(clean_creds_env, capsys):
+    """A URL on one side paired with only the other side's key is a mispairing:
+    the OpenAI key would be sent to the Anthropic host."""
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
+    with pytest.raises(SystemExit) as exc_info:
+        cli_credentials._validate_credentials()
+    assert exc_info.value.code == 2
+    assert "Conflicting LLM credentials" in capsys.readouterr().err
+
+
+def test_validate_credentials_passes_anthropic_auth_token_only(clean_creds_env):
+    """ANTHROPIC_AUTH_TOKEN alone satisfies the check."""
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), "anthropic-fake-token")
     cli_credentials._validate_credentials()
 
 
@@ -65,16 +74,6 @@ def test_validate_credentials_passes_official_openai_key_only(clean_creds_env):
     """Official OpenAI SDK default endpoint works without OPENAI_BASE_URL."""
     clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
     cli_credentials._validate_credentials()
-
-
-def test_validate_credentials_exits_2_when_safe_key_has_no_base_url(clean_creds_env, capsys):
-    """SAFE API key is a gateway key and still needs an explicit gateway URL."""
-    clean_creds_env.setenv("_".join(("SAFE", "API", "KEY")), "fake-token")
-    with pytest.raises(SystemExit) as exc_info:
-        cli_credentials._validate_credentials()
-    assert exc_info.value.code == 2
-    err = capsys.readouterr().err
-    assert "usable endpoint/key pair" in err
 
 
 def test_validate_credentials_exits_2_when_no_key(clean_creds_env, capsys):
@@ -105,22 +104,22 @@ def test_validate_credentials_no_bypass_paths(clean_creds_env):
 
 
 # _resolve_llm_endpoints
-def test_resolve_llm_endpoints_legacy_openai_only(clean_creds_env):
-    """Only OPENAI_BASE_URL: Anthropic base is derived (trailing /v1 stripped)."""
+def test_resolve_llm_endpoints_openai_only_leaves_anthropic_unset(clean_creds_env):
+    """Only the OpenAI side is configured: the Anthropic side stays empty rather
+    than being derived from the OpenAI gateway."""
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
     anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
     assert openai_url == "https://gateway.example/v1"
-    assert anthropic_url == "https://gateway.example"
+    assert anthropic_url == ""
 
 
-def test_resolve_llm_endpoints_anthropic_only_derives_openai_v1(clean_creds_env):
-    """Only a non-official ANTHROPIC_BASE_URL: the OpenAI/Codex side derives the
-    ``/Unified/v1`` chat-completions base (not the raw ``/anthropic`` value,
-    which 404s on ``/chat/completions``)."""
+def test_resolve_llm_endpoints_anthropic_only_leaves_openai_unset(clean_creds_env):
+    """Only the Anthropic side is configured: the OpenAI/Codex side stays empty
+    rather than being derived from the Anthropic gateway."""
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/anthropic")
     anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
     assert anthropic_url == "https://gateway.example/anthropic"
-    assert openai_url == "https://gateway.example/Unified/v1"
+    assert openai_url == ""
 
 
 def test_resolve_llm_endpoints_official_anthropic_key_only(clean_creds_env):
@@ -135,6 +134,82 @@ def test_resolve_llm_endpoints_official_openai_key_only(clean_creds_env):
     anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
     assert anthropic_url == ""
     assert openai_url == "https://api.openai.com/v1"
+
+
+def test_resolve_llm_endpoints_one_gateway_under_both_names(clean_creds_env):
+    """One gateway serving both providers is configured explicitly on both sides;
+    each side then resolves to its own value with no derivation involved."""
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "ak-gw")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "ak-gw")
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gw.example.com/api/v1/llm-proxy/v1")
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://gw.example.com/api/v1/llm-proxy")
+    anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
+    assert anthropic_url == "https://gw.example.com/api/v1/llm-proxy"
+    assert openai_url == "https://gw.example.com/api/v1/llm-proxy/v1"
+
+
+def test_validate_credentials_rejects_openai_gateway_with_foreign_anthropic_key(clean_creds_env, capsys):
+    """A gateway URL on the OpenAI side must not be paired with only an Anthropic
+    key. The check reads the raw env, before any endpoint resolution."""
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "sk-ant-real")
+    with pytest.raises(SystemExit) as exc_info:
+        cli_credentials._validate_credentials()
+    assert exc_info.value.code == 2
+    assert "Conflicting LLM credentials" in capsys.readouterr().err
+
+
+def test_validate_credentials_rejects_anthropic_gateway_with_foreign_openai_key(clean_creds_env, capsys):
+    """Mirror image: an Anthropic-side gateway must not be paired with a
+    different OpenAI key."""
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://gw.example.com/anthropic")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "sk-openai-real")
+    with pytest.raises(SystemExit) as exc_info:
+        cli_credentials._validate_credentials()
+    assert exc_info.value.code == 2
+    assert "Conflicting LLM credentials" in capsys.readouterr().err
+
+
+def test_validate_credentials_rejects_gateway_key_plus_foreign_anthropic_key(clean_creds_env, capsys):
+    """The gateway having its own key does not excuse a second, different
+    provider key riding along without its own base URL."""
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "ak-gw")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "sk-ant-real")
+    with pytest.raises(SystemExit) as exc_info:
+        cli_credentials._validate_credentials()
+    assert exc_info.value.code == 2
+
+
+def test_validate_credentials_rejects_mirrored_key_without_its_own_base_url(clean_creds_env, capsys):
+    """An Anthropic-side key still needs ANTHROPIC_BASE_URL, even when its value
+    matches the OpenAI-side key."""
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "ak-gw")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "ak-gw")
+    with pytest.raises(SystemExit) as exc_info:
+        cli_credentials._validate_credentials()
+    assert exc_info.value.code == 2
+    assert "Conflicting LLM credentials" in capsys.readouterr().err
+
+
+def test_validate_credentials_accepts_one_gateway_configured_on_both_sides(clean_creds_env):
+    """The hosted sandbox points both sides at the same gateway and sets both
+    keys, so each side is self-consistent."""
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://gw.example.com")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "ak-gw")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "ak-gw")
+    cli_credentials._validate_credentials()
+
+
+def test_validate_credentials_accepts_dual_entry_with_distinct_keys(clean_creds_env):
+    """Two explicit base URLs are self-consistent: each side keeps its own key."""
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "sk-openai")
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "sk-ant")
+    cli_credentials._validate_credentials()
 
 
 def test_openai_key_only_makes_claude_follow_codex_before_preflight(clean_creds_env):
@@ -200,11 +275,9 @@ def test_build_backends_uses_claude_critic_when_codex_follows_claude(
     built = cli_backends._build_backends(
         claude_model="claude-opus-4-8",
         codex_model="stale-codex-model",
-        kernel_codex=True,
         critic_choice="agent",
         session_dir=tmp_path,
         critic_agent_root=None,
-        no_kernel=True,
         codex_follows_claude=True,
     )
 

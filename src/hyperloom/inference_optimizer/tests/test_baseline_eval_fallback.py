@@ -198,6 +198,57 @@ def test_disable_run_eval_param_forces_run_eval_false(tmp_path):
     assert str(captured["cfg"]["benchmark"]["envs"]["RUN_EVAL"]).lower() == "false"
 
 
+def test_no_eval_forces_run_eval_false(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    captured: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        cfg_idx = cmd.index("--benchmark-config")
+        out_idx = cmd.index("--output-dir")
+        captured["cfg"] = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
+        _fake_workspace(Path(cmd[out_idx + 1]))
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    ctx = _make_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": 10,
+            "model_path": "/path/models/Qwen-Qwen3-8B",
+            "gpu_type": "mi300x",
+        }
+    )
+    ctx.extra["shared_state"].eval_disabled = True
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert str(captured["cfg"]["benchmark"]["envs"]["RUN_EVAL"]).lower() == "false"
+    assert ctx.extra["shared_state"].stop_reason == ""
+
+
+def test_eval_disabled_resolves_without_a_ctx_shared_state(tmp_path):
+    # The kernel integrate lane builds the executor with no shared_state= and a
+    # RunnerContext with no extra, so the flag has to come off the session dir.
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState(session_id="s1")
+    state.eval_disabled = True
+    state.save(tmp_path)
+
+    executor = BaselineExecutor(session_dir=tmp_path)
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", kind="baseline", params={}), extra=None)
+    assert executor._eval_disabled(ctx) is True
+
+
 # --- eval-failure fallback end-to-end --------------------------------------
 def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
     base = tmp_path / "base.yaml"
@@ -536,10 +587,17 @@ def _stop_ctx(framework: str, recorder, params: dict | None = None) -> SimpleNam
     return SimpleNamespace(task=task, extra={"shared_state": recorder})
 
 
-def _stopped(framework: str, result: dict, *, params: dict | None = None) -> str:
+def _stopped(
+    framework: str,
+    result: dict,
+    *,
+    params: dict | None = None,
+    eval_disabled: bool = False,
+) -> str:
     """Run ``_maybe_stop_on_missing_baseline_accuracy`` and return the reason."""
     executor = BaselineExecutor()
     rec = _StopRecorder()
+    rec.eval_disabled = eval_disabled
     executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx(framework, rec, params), result)
     return rec.stop_reason
 
@@ -579,6 +637,17 @@ def test_stop_serving_operator_disabled_via_config():
         {"status": "succeeded", "run_eval_disabled": True},
     )
     assert reason == "baseline_accuracy_failed"
+
+
+def test_no_stop_when_eval_is_disabled():
+    # --no-eval never asked for a reference, so the baseline anchors on
+    # throughput instead of halting.
+    reason = _stopped(
+        "sglang",
+        {"status": "succeeded", "run_eval_disabled": True},
+        eval_disabled=True,
+    )
+    assert reason == ""
 
 
 def test_no_stop_when_quality_ref_exempt():

@@ -1,26 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ``recipe_kb.gbrain_ingest`` mirroring helpers."""
+"""Coverage for the GBrain Recipe page codec."""
 
 from __future__ import annotations
 
-from typing import Any
+import json
 
+import yaml
 
 from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_ingest as gi
-
-
-class _FakeMcp:
-    def __init__(self, fail: bool = False) -> None:
-        self.calls: list[tuple[str, dict]] = []
-        self.fail = fail
-
-    def call(self, method: str, params: dict) -> Any:
-        self.calls.append((method, params))
-        if self.fail:
-            raise RuntimeError("transport down")
-        return {"ok": True}
 
 
 # -- _emit_yaml ------------------------------------------------------------
@@ -40,45 +29,12 @@ def test_emit_yaml_shapes() -> None:
     assert "flat: v" in out
 
 
-# -- _has_shareable_signal -------------------------------------------------
-def test_has_shareable_signal_session_throughput() -> None:
-    assert gi._has_shareable_signal({"sessions": [{"throughput_after": 12.0}]}) is True
-
-
-def test_has_shareable_signal_session_actions() -> None:
-    assert (
-        gi._has_shareable_signal(
-            {"sessions": [{"throughput_after": "bad", "actions_taken": ["x"]}]},
-        )
-        is True
-    )
-
-
-def test_has_shareable_signal_negative_knowledge_field() -> None:
-    assert gi._has_shareable_signal({"what_worked": ["aiter"]}) is True
-
-
-def test_has_shareable_signal_model_class() -> None:
-    assert gi._has_shareable_signal({"architectures": ["DeepseekV3"]}) is True
-
-
-def test_has_shareable_signal_none() -> None:
-    assert gi._has_shareable_signal({"sessions": ["not-a-map", {}]}) is False
-
-
 # -- recipe_to_page --------------------------------------------------------
 def test_recipe_to_page_none_without_canonical() -> None:
     assert gi.recipe_to_page({"model": "m"}) is None
 
 
-def test_recipe_to_page_strict_gate_skips_seed_only(monkeypatch) -> None:
-    monkeypatch.setenv("RECIPE_KB_MIRROR_REQUIRE_SIGNAL", "1")
-    page = gi.recipe_to_page({"canonical_id": "a:b:c:d:e"})
-    assert page is None
-
-
 def test_recipe_to_page_emits_fingerprint_and_negatives(monkeypatch) -> None:
-    monkeypatch.delenv("RECIPE_KB_MIRROR_REQUIRE_SIGNAL", raising=False)
     slug, content = gi.recipe_to_page(
         {
             "canonical_id": "sglang:qwen:mi300x:bf16:v1",
@@ -98,66 +54,64 @@ def test_recipe_to_page_emits_fingerprint_and_negatives(monkeypatch) -> None:
     assert "kind:recipe" in content
 
 
-# -- mirror_recipe ---------------------------------------------------------
-def test_mirror_recipe_no_mcp() -> None:
-    assert gi.mirror_recipe({"canonical_id": "a:b:c:d:e"}, None) is False
+def test_recipe_json_strips_secrets_and_internal_paths_but_keeps_safe_replay_fields() -> None:
+    _slug, content = gi.recipe_to_page(
+        {
+            "canonical_id": "inference:qwen:mi300x:sglang:qwen:qwen:1.0:fp8",
+            "model": "qwen",
+            "hardware": "mi300x",
+            "best_config": {
+                "extra_server_args": (
+                    "--tp 8 --token top-secret --token-budget 4096 "
+                    "--tokenizer /workspace/replay/tokenizer"
+                ),
+                "extra_envs": {
+                    "ROCM_VERSION": "7.0",
+                    "AITER_CONFIG": "/workspace/replay/tuned.csv",
+                    "API_TOKEN": "env-secret",
+                },
+            },
+            "provenance": {
+                "generator": "close",
+                "authorization": "Bearer provenance-secret",
+                "session_path": "/workspace/hyperloom/sessions/s1",
+                "details": {"safe": "kept", "password": "nested-secret"},
+            },
+            "evidence_refs": [
+                {
+                    "kind": "report",
+                    "url": "https://reports.example/safe",
+                    "local_path": "/workspace/hyperloom/report.json",
+                }
+            ],
+            "safe_metadata": {
+                "note": "shareable",
+                "workspace": "/home/operator/private",
+                "references": ["paper", "/tmp/session/private.json"],
+            },
+        }
+    )
 
-
-def test_mirror_recipe_page_none() -> None:
-    assert gi.mirror_recipe({"model": "no-canon"}, _FakeMcp()) is False
-
-
-def test_mirror_recipe_success_and_error() -> None:
-    ok = _FakeMcp()
-    assert gi.mirror_recipe({"canonical_id": "a:b:c:d:e"}, ok) is True
-    bad = _FakeMcp(fail=True)
-    assert gi.mirror_recipe({"canonical_id": "a:b:c:d:e"}, bad) is False
-
-
-# -- build_mirror_mcp_from_env --------------------------------------------
-def test_build_mirror_mcp_from_env_missing(monkeypatch) -> None:
-    monkeypatch.delenv("GBRAIN_BASE_URL", raising=False)
-    monkeypatch.delenv("GBRAIN_TOKEN", raising=False)
-    assert gi.build_mirror_mcp_from_env() is None
-
-
-def test_build_mirror_mcp_from_env_present(monkeypatch) -> None:
-    monkeypatch.setenv("GBRAIN_BASE_URL", "https://gbrain.example")
-    monkeypatch.setenv("GBRAIN_TOKEN", "tok")
-    mcp = gi.build_mirror_mcp_from_env()
-    assert mcp is not None
-
-
-# -- GbrainMirroringRecipeKB ----------------------------------------------
-def test_mirroring_kb_put_and_delegate() -> None:
-    class _Inner:
-        def __init__(self) -> None:
-            self.put_calls: list[dict] = []
-
-        def put_recipe(self, **kwargs: Any) -> str:
-            self.put_calls.append(kwargs)
-            return "wrote"
-
-        def get_recipe(self, x: str) -> str:
-            return f"got:{x}"
-
-    inner = _Inner()
-    mcp = _FakeMcp()
-    kb = gi.GbrainMirroringRecipeKB(inner, mcp)
-    assert kb.put_recipe(canonical_id="a:b:c:d:e") == "wrote"
-    assert inner.put_calls  # local write happened first
-    assert mcp.calls  # mirror happened
-    assert kb.get_recipe("z") == "got:z"  # __getattr__ delegates unknown attrs
-
-
-def test_mirroring_kb_swallows_mirror_error(monkeypatch) -> None:
-    class _Inner:
-        def put_recipe(self, **kwargs: Any) -> str:
-            return "wrote"
-
-    def _raise(*_a, **_k):
-        raise RuntimeError("mirror boom")
-
-    monkeypatch.setattr(gi, "mirror_recipe", _raise)
-    kb = gi.GbrainMirroringRecipeKB(_Inner(), _FakeMcp())
-    assert kb.put_recipe(canonical_id="a:b:c:d:e") == "wrote"  # error swallowed
+    frontmatter = yaml.safe_load(content.split("---", 2)[1])
+    decoded = json.loads(frontmatter["attrs"]["recipe_json"])
+    assert decoded["best_config"]["extra_server_args"] == (
+        "--tp 8 --token-budget 4096 --tokenizer /workspace/replay/tokenizer"
+    )
+    assert decoded["best_config"]["extra_envs"] == {
+        "ROCM_VERSION": "7.0",
+        "AITER_CONFIG": "/workspace/replay/tuned.csv",
+    }
+    assert decoded["provenance"] == {"generator": "close", "details": {"safe": "kept"}}
+    assert decoded["evidence_refs"] == [{"kind": "report", "url": "https://reports.example/safe"}]
+    assert decoded["safe_metadata"] == {"note": "shareable", "references": ["paper"]}
+    for secret_or_path in (
+        "top-secret",
+        "env-secret",
+        "provenance-secret",
+        "nested-secret",
+        "/workspace/hyperloom/sessions/",
+        "/workspace/hyperloom/report.json",
+        "/home/operator/",
+        "/tmp/session/",
+    ):
+        assert secret_or_path not in content

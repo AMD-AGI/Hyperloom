@@ -439,6 +439,11 @@ def _derive_lane(params: dict[str, Any]) -> str:
     return "perf_explore"
 
 
+def _is_eval_origin(params: dict[str, Any]) -> bool:
+    """Whether the enablement candidate came from the eval gate, not the boot gate."""
+    return str(params.get("enablement_origin") or "") == "eval"
+
+
 def _accuracy_delta_pct(measured: Any, baseline: Any) -> float | None:
     """Percent accuracy change of ``measured`` against ``baseline``.
 
@@ -2590,7 +2595,7 @@ class IntegratePatchExecutor:
         enablement_accuracy = gate_evidence.get("enablement_accuracy")
         _param_floor = params.get("enablement_accuracy_floor")
         floor = float(_param_floor) if isinstance(_param_floor, (int, float)) else DEFAULT_ENABLEMENT_ACCURACY_FLOOR
-        eval_origin = str(params.get("enablement_origin") or "") == "eval"
+        eval_origin = _is_eval_origin(params)
         accuracy_kind = classify_accuracy_failure(enablement_accuracy, floor)
         correctness_ok: bool | None
         if enablement_accuracy is None:
@@ -3837,8 +3842,9 @@ class IntegratePatchExecutor:
         _base_envs = dict(params.get("base_extra_envs") or {})
         _variant_envs = dict(_base_envs)
         _variant_envs.update(extra_envs_applied)
-        # For enablement runs, ensure RUN_EVAL=true survives any variant overlay.
-        if bool(params.get("enablement")):
+        # Eval-origin enablement needs a raw accuracy for its runnable gate, so
+        # RUN_EVAL=true must survive any variant overlay.
+        if bool(params.get("enablement")) and _is_eval_origin(params):
             _variant_envs["RUN_EVAL"] = "true"
         _unset = to_str_list(params.get("base_unset_envs"))
         for name in unset_envs or []:
@@ -3977,9 +3983,10 @@ class IntegratePatchExecutor:
 
         Two independent triggers:
 
-        * **Enablement** (``params["enablement"]``): force ``RUN_EVAL=true``
-          unconditionally so ``_bench_patch`` can obtain a raw accuracy for the
-          runnable gate.
+        * **Eval-origin enablement**: force ``RUN_EVAL=true`` so ``_bench_patch``
+          can obtain a raw accuracy for the runnable gate, which fails closed
+          without one. A boot-origin candidate is only ever provisional on a
+          missing accuracy, so it inherits the session's contract instead.
         * **Perf framework authoring**: force only when a comparable baseline
           accuracy exists (``accuracy_baseline > 0``); otherwise leave the
           candidate's ``RUN_EVAL`` to the materializer's default handling.
@@ -3990,12 +3997,12 @@ class IntegratePatchExecutor:
             params: The integrate_patch task params.
 
         Returns:
-            ``{"RUN_EVAL": "true"}`` for enablement patches, or for
+            ``{"RUN_EVAL": "true"}`` for eval-origin enablement patches, or for
             framework-authored perf patches that have a positive baseline
             accuracy to compare against; else ``None``.
         """
         if bool(params.get("enablement")):
-            return {"RUN_EVAL": "true"}
+            return {"RUN_EVAL": "true"} if _is_eval_origin(params) else None
         fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
         try:
             baseline = float(params.get("accuracy_baseline") or 0.0)

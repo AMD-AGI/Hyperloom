@@ -39,23 +39,15 @@ def load_dotenv(path: Path) -> dict[str, str]:
         key, value = line.split("=", 1)
         value = value.strip().strip('"').strip("'")
         env[key.strip()] = value
-    if "SAFE_API_KEY" in env:
-        env.setdefault("ANTHROPIC_API_KEY", env["SAFE_API_KEY"])
-        env.setdefault("OPENAI_API_KEY", env["SAFE_API_KEY"])
-        env.setdefault("ANTHROPIC_AUTH_TOKEN", env["SAFE_API_KEY"])
+    # Mirror parallel_e2e_runner.load_env_file: each side's aliases come from that
+    # side's own credentials, and the GEAK aliases are never derived.
     if "ANTHROPIC_AUTH_TOKEN" in env:
         env.setdefault("ANTHROPIC_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])
-        env.setdefault("OPENAI_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])
     if "AMD_API_KEY" in env:
         env.setdefault("AMD_LLM_API_KEY", env["AMD_API_KEY"])
         env.setdefault("LLM_API_KEY", env["AMD_API_KEY"])
-        env.setdefault("GEAK_API_KEY", env["AMD_API_KEY"])
     if "OPENAI_BASE_URL" in env:
-        env.setdefault("ANTHROPIC_BASE_URL", env["OPENAI_BASE_URL"])
         env.setdefault("LLM_API_BASE", env["OPENAI_BASE_URL"])
-    elif "ANTHROPIC_BASE_URL" in env:
-        env.setdefault("OPENAI_BASE_URL", env["ANTHROPIC_BASE_URL"])
-        env.setdefault("LLM_API_BASE", env["ANTHROPIC_BASE_URL"])
     return env
 
 

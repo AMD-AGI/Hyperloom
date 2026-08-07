@@ -29,6 +29,8 @@ def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear the env vars the resolver consults so each test owns its own precedence tier."""
     for key in (
         "HYPERLOOM_LOCAL_KB_ROOT",
+        "KNOWLEDGE_LOCAL_ROOT",
+        "KNOWLEDGE_STORE_MODE",
         "USER_DATA_PATH",
         "KB_SERVICE_TOKEN",
         "GBRAIN_BASE_URL",
@@ -68,15 +70,15 @@ def test_item1_canonical_id_keyword_only_no_positional_drift() -> None:
         recipe_canonical_id(*bad_positional_args)  # type: ignore[misc]
 
 
-def test_item2_default_local_kb_root_is_user_data_path_kb(
+def test_item2_default_local_kb_root_is_user_data_path_knowledge(
     env_clean: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Default resolution lands at ``${USER_DATA_PATH}/kb``."""
+    """Default resolution lands at ``${USER_DATA_PATH}/knowledge``."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     args = _ns()
-    assert _resolve_local_kb_root(args) == tmp_path / "kb"
+    assert _resolve_local_kb_root(args) == tmp_path / "knowledge"
 
 
 def test_item2_explicit_flag_wins_over_user_data_path(
@@ -120,12 +122,12 @@ def test_item3_no_central_url_reads_and_writes_go_local(
     assert row["best_throughput"] == 12345.0
 
 
-def test_item4_central_kb_reads_central_writes_local(
+def test_item4_local_mode_ignores_central_credentials(
     env_clean: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Read-remote / write-local invariant when the gbrain remote is healthy."""
+    """Local mode keeps both reads and writes local despite ambient credentials."""
     cid = recipe_canonical_id(
         model="m",
         hardware="mi300x",
@@ -134,33 +136,20 @@ def test_item4_central_kb_reads_central_writes_local(
         precision="fp8",
     )
 
-    central_payload = {
-        "canonical_id": cid,
-        "version": 9,
-        "labels": {"model": "m", "hardware": "mi300x"},
-        "body": {"best_config": {"tp": "16"}},
-        "metrics": {"throughput": 99999.0},
-    }
-
-    class _FakeGbrain:
-        enabled = True
-
-        def get_recipe(self, *, canonical_id: str, version: int | None = None):
-            return dict(central_payload) if canonical_id == cid else None
-
-        def search(self, **_k: Any):
-            return [dict(central_payload)]
-
-        def close(self) -> None:
-            pass
-
     from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
 
-    monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _FakeGbrain())
-    kb = _build_recipe_kb_dispatcher(_ns(local_kb_root=str(tmp_path)))
-    assert kb.remote is not None
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "local")
+    monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path))
+    monkeypatch.setenv("GBRAIN_BASE_URL", "https://ambient.invalid")
+    monkeypatch.setenv("GBRAIN_TOKEN", "ambient-secret")
+    monkeypatch.setattr(
+        grc,
+        "build_gbrain_remote_from_env",
+        lambda: pytest.fail("local mode constructed a GBrain client"),
+    )
+    kb = _build_recipe_kb_dispatcher(_ns())
+    assert kb.remote is None
 
-    # WRITE goes local only.
     kb.put_recipe(
         canonical_id=cid,
         model="m",
@@ -174,11 +163,9 @@ def test_item4_central_kb_reads_central_writes_local(
     assert local_row is not None
     assert local_row["best_throughput"] == 11111.0
 
-    # READ returns the REMOTE row, not the local one.
     out = kb.get_recipe(canonical_id=cid)
     assert out is not None
-    assert out["version"] == 9
-    assert out["best_throughput"] == 99999.0  # remote wins
+    assert out["best_throughput"] == 11111.0
 
 
 def test_item5_unreachable_central_falls_back_to_local(

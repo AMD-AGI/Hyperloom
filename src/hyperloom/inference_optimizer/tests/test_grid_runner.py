@@ -721,7 +721,6 @@ def test_run_magpie_default_result_dir_is_output_dir(tmp_path, monkeypatch):
 
 def test_run_magpie_does_not_forward_llm_credentials(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
-    monkeypatch.setenv("SAFE_API_KEY", "must-not-reach-benchmark")
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-reach-benchmark")
     captured: dict = {}
@@ -742,7 +741,6 @@ def test_run_magpie_does_not_forward_llm_credentials(tmp_path, monkeypatch):
             cwd=str(tmp_path),
         )
 
-    assert "SAFE_API_KEY" not in captured["env"]
     assert "OPENAI_API_KEY" not in captured["env"]
     assert "ANTHROPIC_API_KEY" not in captured["env"]
 

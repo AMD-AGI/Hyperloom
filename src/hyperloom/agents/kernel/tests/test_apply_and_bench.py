@@ -215,3 +215,78 @@ def test_gpu_vram_used_none_without_gpu_scope(monkeypatch):
     assert _ab._gpu_vram_used_mb("") is None
     assert _ab._gpu_vram_used_mb(None) is None
     assert _ab._gpu_vram_used_mb("  ,  ") is None
+
+
+def test_apply_and_bench_accepts_and_reports_deferred_rebuild(
+    tmp_path,
+    monkeypatch,
+):
+    patch_file = tmp_path / "kernel.py"
+    target = tmp_path / "target.py"
+    patch_file.write_text("VALUE = 2\n", encoding="utf-8")
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    measurements = iter(
+        (
+            {
+                "status": "ok",
+                "median": 100.0,
+                "tput_spread": {"p25": 99.0, "p75": 101.0},
+                "tpot_spread_ms": {"median": 1.0},
+                "p99_tpot_spread_ms": {"median": 2.0},
+                "vram_used_mb": 1000,
+                "reps": [100.0],
+            },
+            {
+                "status": "ok",
+                "median": 110.0,
+                "tput_spread": {"p25": 109.0, "p75": 111.0},
+                "tpot_spread_ms": {"median": 0.9},
+                "p99_tpot_spread_ms": {"median": 1.8},
+                "vram_used_mb": 1000,
+                "reps": [110.0],
+            },
+        )
+    )
+    monkeypatch.setattr(ab, "_find_benchmark_serving", lambda: tmp_path)
+    monkeypatch.setattr(
+        ab,
+        "_serve_and_bench",
+        lambda *args, **kwargs: next(measurements),
+    )
+    monkeypatch.setattr(
+        ab,
+        "apply_kernel_patch",
+        lambda **kwargs: {
+            "status": "ok",
+            "manifest_path": str(manifest),
+            "rebuild": {
+                "status": "deferred",
+                "mode": "runtime_jit",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        ab,
+        "revert_kernel_patch",
+        lambda manifest_path: {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        ab,
+        "_engagement_proof",
+        lambda *args, **kwargs: {"engaged": True},
+    )
+
+    result = ab.apply_and_bench(
+        patch_path=str(patch_file),
+        target_file=str(target),
+        backup_root=str(tmp_path / "backups"),
+        model="model",
+        out_dir=str(tmp_path / "out"),
+    )
+
+    assert result["status"] == "ok"
+    assert result["applied"][0]["rebuild"] == {
+        "status": "deferred",
+        "mode": "runtime_jit",
+    }

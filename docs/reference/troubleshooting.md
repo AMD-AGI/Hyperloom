@@ -9,7 +9,7 @@ myst:
 A consolidated symptom → cause → fix index for the most common Hyperloom failures. If a symptom isn't listed here, check the
 upstream SKILL file for the component you're touching:
 [`inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md),
-[`kernel/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/kernel/SKILL.md),
+[`kernel-execution-path.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/conceptual/kernel-execution-path.md),
 [`critic/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/critic/SKILL.md),
 [`robustness/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/robustness/SKILL.md).
 
@@ -29,9 +29,9 @@ configured upstream gateway.
 
 **Fix**:
 
-1. Confirm `SAFE_API_KEY` is set without printing the secret:
+1. Confirm `OPENAI_API_KEY` is set without printing the secret:
    ```bash
-   test -n "${SAFE_API_KEY:-}"
+   test -n "${OPENAI_API_KEY:-}"
    ```
 2. Re-run preflight (idempotent — rewrites `~/.claude/config.json`
    `customApiUrl` and `primaryApiKey` and re-derives all alias keys):
@@ -322,26 +322,31 @@ original session, or the session never reached the point of writing
 **Symptom**: Recipe KB warm-start is empty or new local KB records do not
 appear under the selected local KB root.
 
-**Cause**: The local recipe KB root is on a read-only/full mount, permission is
-denied, or the optional gbrain recipe read side is unreachable.
+**Cause**: The selected local root is read-only/full, permission is denied, a
+one-time legacy Recipe migration failed, or the explicitly selected remote
+GBrain backend is unreachable.
 
 **Fix**:
 
 1. Resolve and test the local KB root:
    ```bash
-   KB_ROOT="${HYPERLOOM_LOCAL_KB_ROOT:-${USER_DATA_PATH:-/workspace/hyperloom}/kb}"
+   KB_ROOT="${KNOWLEDGE_LOCAL_ROOT:-${HYPERLOOM_LOCAL_KB_ROOT:-${USER_DATA_PATH:-$HOME/.cache/hyperloom}/knowledge}}"
    echo "$KB_ROOT"
    mkdir -p "$KB_ROOT"
    touch "$KB_ROOT/.write-test" && rm "$KB_ROOT/.write-test"
    ```
-2. If you configured `GBRAIN_BASE_URL`, verify reachability from inside the
-   same pod. An unreachable gbrain read side degrades to local-only; recipe
-   writes are unaffected.
-3. To skip KB hooks deliberately for a diagnosis run, pass `--degraded-kb`.
+2. If `KNOWLEDGE_STORE_MODE=remote`, verify `GBRAIN_BASE_URL` reachability and
+   the token from the same pod. Remote mode does not fall back to local.
+3. After an upgrade, inspect the startup error before moving data manually.
+   Stop old writers, back up `$USER_DATA_PATH/kb` (or
+   `/workspace/hyperloom/kb`), correct permissions, and retry the one-time
+   migration.
+4. To skip KB hooks deliberately for a diagnosis run, pass `--degraded-kb`.
 
-KB unreachability is **never** fatal. Hyperloom continues with local-only or
-degraded KB behavior. See [Integrate Recipe knowledge base in Hyperloom](integrate-kb.md) for the detailed
-resolver order.
+Missing remote credentials and failed legacy migration are startup errors by
+design; they prevent silent cold starts. See
+[Integrate Recipe knowledge base in Hyperloom](integrate-kb.md) for the
+detailed resolver and mode contracts.
 
 ---
 

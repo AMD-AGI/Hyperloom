@@ -395,7 +395,6 @@ SAFE_ENV_KEYS = (
     "KERNEL_AGENT_ENV",
     "MAGPIE_PATH",
     "INFERENCEX_PATH",
-    "SAFE_API_KEY",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
@@ -435,45 +434,31 @@ def safe_runtime_env() -> dict:
 
     Copies only the keys in :data:`SAFE_ENV_KEYS` from the current
     environment, then fills sensible fallbacks (e.g. deriving the
-    per-provider API keys and base URLs from ``SAFE_API_KEY`` /
-    ``OPENAI_BASE_URL``). GPU-visibility variables are deliberately
-    excluded so Ray manages device assignment itself.
+    per-provider API keys and base URLs from ``OPENAI_API_KEY`` /
+    ``ANTHROPIC_API_KEY`` / ``OPENAI_BASE_URL``). GPU-visibility variables are
+    deliberately excluded so Ray manages device assignment itself.
 
     Returns:
         dict: A ``{"env_vars": {...}}`` mapping suitable for passing as
             Ray's ``runtime_env``.
     """
     env = {k: os.environ[k] for k in SAFE_ENV_KEYS if k in os.environ}
-    # SAFE_API_KEY is primary; a split deploy falls back to the per-provider
-    # key. GEAK speaks the OpenAI protocol, so it takes the OpenAI-side key.
-    openai_key = (
-        env.get("SAFE_API_KEY")
-        or env.get("OPENAI_API_KEY")
-        or env.get("ANTHROPIC_AUTH_TOKEN")
-        or env.get("ANTHROPIC_API_KEY")
-    )
+    # Each side's aliases come from that side's own credentials. GEAK_API_KEY /
+    # GEAK_BASE_URL are never derived: GEAK runs on the Anthropic side via
+    # GEAK_CLAUDE_MODEL + ANTHROPIC_*, so an OpenAI-side value could not start it.
+    # They are forwarded verbatim when an operator sets them.
+    openai_key = env.get("OPENAI_API_KEY")
     if openai_key:
-        env.setdefault("OPENAI_API_KEY", openai_key)
-        env.setdefault("GEAK_API_KEY", openai_key)
         env.setdefault("LLM_API_KEY", openai_key)
         env.setdefault("AMD_LLM_API_KEY", openai_key)
         env.setdefault("LLM_GATEWAY_KEY", openai_key)
-    anthropic_key = (
-        env.get("SAFE_API_KEY")
-        or env.get("ANTHROPIC_API_KEY")
-        or env.get("ANTHROPIC_AUTH_TOKEN")
-        or env.get("OPENAI_API_KEY")
-    )
+    anthropic_key = env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN")
     if anthropic_key:
         env.setdefault("ANTHROPIC_API_KEY", anthropic_key)
         env.setdefault("ANTHROPIC_AUTH_TOKEN", anthropic_key)
-    # OPENAI_BASE_URL primary; fall back to ANTHROPIC_BASE_URL.
-    base_url = env.get("OPENAI_BASE_URL") or env.get("ANTHROPIC_BASE_URL")
-    if base_url:
-        env.setdefault("ANTHROPIC_BASE_URL", base_url)
-        env.setdefault("OPENAI_BASE_URL", base_url)
-        env.setdefault("GEAK_BASE_URL", base_url)
-        env.setdefault("LLM_API_BASE", base_url)
+    openai_url = env.get("OPENAI_BASE_URL")
+    if openai_url:
+        env.setdefault("LLM_API_BASE", openai_url)
     if "AMD_LLM_API_KEY" not in env and "AMD_API_KEY" in env:
         env["AMD_LLM_API_KEY"] = env["AMD_API_KEY"]
     return {"env_vars": env}

@@ -5,6 +5,139 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **`--no-eval` turns the accuracy eval off for a whole run.** Setting
+  `RUN_EVAL=false` by hand leaves the baseline with no accuracy reference, which
+  the baseline guard rejects, so the run stopped before it optimized anything.
+  The flag makes that an explicit session-wide choice instead: the baseline
+  anchors on throughput rather than halting on the missing reference, and every
+  candidate lands on the existing `baseline_accuracy == 0` path that already
+  degrades to a throughput-only KEEP. A *measured* regression still blocks — the
+  scriptable (xDiT) `quality_gate` is computed by the benchmark run itself and
+  never consulted `RUN_EVAL`.
+
+  The choice is session state (`shared_state.eval_disabled`), not just a parsed
+  arg, so it also reaches the lanes that template their own benchmark config
+  rather than inheriting the baseline's: the framework-agent bench, eval-origin
+  enablement, the multi-node `lm_eval` preflight install, and the GEAK GEMM
+  shape capture. It persists across `--resume`, and is refused with a warning
+  once the session has anchored an accuracy, because every KEEP up to that point
+  was graded against it.
+
+  Default-off is byte-for-byte today's behaviour. Runs made with the flag are
+  not accuracy-validated.
+
+### Fixed
+
+- **Enablement dispatch evidence reaches the specialist again**: the Coordinator
+  computes the source lines near the offending site — and, on a weight-init
+  failure, the checkpoint's per-layer weight inventory — plus a ranked list of
+  bridging PR refs, but since the mandate stopped being passed as free-text
+  `notes` none of it was delivered: the mandate was re-rendered downstream from
+  a bare request, so the agent was told to find a bridge while the candidates
+  already discovered for it were withheld. Both now travel as structured
+  `enablement_source_context` / `enablement_candidate_refs` params and are
+  folded into the §1b mandate at the point of use.
+
+- **An LLM outage during forge-fusion no longer disables fusion for the rest of the
+  session.** forge-fusion reports `verdict: llm_unavailable` (manifest schema v2)
+  when discovery never reached the model, which is a fact about the gateway and not
+  about the kernel. The wrapper's `_normalize_manifest` had no case for it, so it
+  fell through to the generic no-KEEP shape — `status: complete`,
+  `micro_decision: no_improvement`, `decision: REVERT`. That was wrong twice over.
+  It recorded an outage as an optimization result, and because
+  `_fusion_required_before_kernel_opt` skips fusion once `last_fusion.status` is
+  `ok`/`complete`/`kept`, a single gateway blip marked fusion "done" and the model
+  was never fusion-optimized again in that session.
+
+  It is now shaped like the existing subprocess-timeout result — `status: failed`,
+  `micro_decision: failed`, `kept: false`, `error_class: llm_unavailable`, with the
+  manifest's error kind, attempt count and message carried through — which is how
+  Hyperloom already says "infrastructure failed, this is retryable". A real
+  `no_opportunity` (the model was asked and found nothing) is unchanged and still
+  suppresses a pointless re-run. The verdict is matched tolerantly and only honoured
+  when the manifest reports no KEEP, so it can never discard a validated fusion.
+
+- **vLLM roofline runs no longer launch an unbounded torch profiler**: the
+  profile path injects `--profiler-config.delay_iterations/max_iterations` into
+  `EXTRA_VLLM_ARGS`, but three later steps could each drop them — a candidate
+  carrying `args_mode="replace"` (which `writeback` sets automatically as soon as
+  a KEEP needs `remove_args`) overwrote the whole flag string, `extra_envs` could
+  override it outright, and `remove_args` strips flags by name — taking the
+  `--profiler-config.ignore_frontend True` from the profile YAML with them. vLLM
+  reads a missing `max_iterations` as "profile until `stop_profile`", so the
+  worker accumulated every profiler event in host anonymous memory — measured at
+  60 MiB/s with the production option set — until the cgroup OOM-killer took the
+  engine or worker process out mid-roofline, at 107–137 GiB RSS. Because
+  `args_mode` is sticky on `current_best`, one such KEEP turned *every* later
+  roofline in that session into an OOM candidate.
+
+  `materialize_config_with_envs` now re-asserts the profiler flags as the LAST
+  write to `EXTRA_VLLM_ARGS` — after the `extra_server_args`/`extra_envs` merges
+  and after `remove_args`/`unset_envs` — restoring only the flags that went
+  missing, warning about exactly which ones, and re-running the shell-safety
+  guard on the result. `ignore_frontend` is stated alongside the bounds, since the
+  AsyncLLM-side profiler tracks no iterations and would otherwise capture the
+  entire `start_profile`..`stop_profile` range. Candidate flags still win for
+  everything else, and the append path is unchanged apart from no longer relying
+  on the YAML to carry `ignore_frontend`.
+
+  The re-assertion checks flag VALUES, not just flag names, for the two flags that
+  decide whether the capture is bounded at all: `max_iterations` has to parse as a
+  positive integer within the computed serialization-safe cap (vLLM reads 0 as "no
+  limit"), and `ignore_frontend` has to be true. A name-only check accepted
+  `--profiler-config.max_iterations 0` and then logged that it had bounded the
+  profiler — worse than not guarding, since the warning sends the next
+  investigation the wrong way. The injected flags also keep overriding whatever the
+  YAML pins, via the repeated-flag last-wins vLLM's argparse already applies: a
+  hand-written `max_iterations 100000` is unbounded in practice and must not
+  displace the computed budget (`HYPERLOOM_PROFILE_MAX_ITERS` is the override
+  channel for that), and a stale `capture_torch_profiler_dir` must not send this
+  run's traces to a previous session's directory.
+
+  Scope: **vLLM only**. SGLang bounds its capture through `start_step`/`num_steps`
+  inside `PROFILE_EXTRA_BODY`, which is written before the same `extra_envs`
+  merge and is therefore droppable the same way, but it is not re-asserted here —
+  whether a non-positive `num_steps` means "unbounded" or "no capture" needs a
+  SGLang-side answer this layer does not have, and every OOM observed so far was
+  vLLM. The exposure is called out in a comment at that write site.
+
+### Removed
+
+- **Kernel-agent LLM role retired** (breaking): the `kernel_agent` role has been
+  removed from the role registry. All kernel work was already handled by
+  programmatic Python handlers in `orchestrator/kernel/request_handlers.py`; the
+  LLM role was a no-op heartbeat responder. These env vars are gone, and setting
+  them now has no effect:
+  - `INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS` — no kernel LLM backend.
+  - `INFERENCE_OPTIMIZER_KERNEL_CLAUDE_CONVERSATIONAL` — no kernel LLM backend.
+
+  The matching CLI flags **still parse, as accepted no-ops**, so a launcher or
+  operator template that passes them keeps starting instead of dying in argparse
+  before the run begins. They are hidden from `--help`, nothing reads them, and
+  they will be deleted outright in a future release once the callers that pass
+  them have been updated:
+  - `--kernel-prompt PATH` — overriding the kernel system prompt is no longer
+    meaningful. It still consumes its argument, so the path is swallowed rather
+    than left behind as a stray positional.
+  - `--kernel-codex` / `--kernel-claude` — there is no kernel LLM backend to select.
+  
+  `--no-kernel` continues to work: it sets `shared_state.kernel_enabled=False`,
+  which causes the Coordinator's request router to auto-reject kernel REQUESTs
+  with `agent_disabled`.
+
+  The Slurm launcher's `HL_KERNEL_BACKEND` (`codex|claude`) selected the retired
+  LLM backend and is removed with it. Use `KERNEL_OPT_BACKEND_ORDER`
+  (`geak|forge`) to steer the kernel-opt rewrite ladder; the launcher forwards it
+  into the container and every carrier defaults it to `geak`.
+
+  `agents/kernel/SKILL.md` (561 lines, never loaded by Python) has been partially
+  superseded by `docs/conceptual/kernel-execution-path.md`, which documents the
+  programmatic dispatch flow and artifact layout. Operator sections from the
+  original (Credentials, Ray head, Recovery, TraceLens Requirements, Proposal
+  Rules) are not carried over; refer to the individual reference docs for those.
+
 ## [v1.0.0a3] - 2026-08-05
 Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) and the

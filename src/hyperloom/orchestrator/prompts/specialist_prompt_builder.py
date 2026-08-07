@@ -25,6 +25,7 @@ from ..specialists.domains import (
     SpecialistDomain,
     domain_for_tag,
 )
+from ..specialists.profile import MODE_PATCH
 
 
 _NONE_PLACEHOLDER = "(none)"
@@ -44,6 +45,39 @@ DEFAULT_RECIPE_SITES: tuple[str, ...] = (
 
 # Operator sentinels (via HYPERLOOM_RECIPE_SITES) that disable recipe-site guidance.
 RECIPE_SITES_DISABLED_VALUES: frozenset[str] = frozenset({"none", "off", "disable", "disabled"})
+
+# Per-task-kind brief appended by _section_mandate; only the per-dispatch dynamic
+# context (PR lead, critic feedback, apply errors, residual questions) lives in
+# ``inp.notes``. Boilerplate that is the same for every dispatch of a given kind
+# lives here so it is maintained in one place.
+_TASK_KIND_BRIEFS: dict[str, str] = {
+    "framework_authoring": (
+        "Read the upstream PR as inspiration, then deliver the best win for this"
+        " model / hardware / workload — go beyond the diff where the live source justifies it."
+        " Deliverable: a unified-diff patch in your worktree (``patches_written``)"
+        " OR a config/env ``proposal_set`` entry when the win is a flag toggle."
+        " The Coordinator applies and benches it; you do not benchmark."
+    ),
+    "framework_local_explore": (
+        "No upstream PR was found. Author the best throughput win directly from"
+        " the live source + profiling evidence. Read ``framework_source_roots``"
+        " and the roofline (Section 4a) to locate the hot path."
+        " You MAY use WebSearch / WebFetch to compare the local checkout against"
+        " the latest upstream code and port a newer optimisation when behind."
+        " Deliverable: a unified-diff patch (``patches_written``)"
+        " OR a config/env ``proposal_set`` entry. You do not benchmark."
+    ),
+    "explore_apply_retry": (
+        "A previous patch failed to apply against the live source tree."
+        " Study the apply errors in the notes, produce a corrected patch."
+    ),
+    "framework_config_generation": (
+        "Propose a GRID of runtime config variants (server flags and/or env vars)"
+        " that may raise throughput WITHOUT changing source. Return a"
+        " ``proposal_set`` — each entry with ``name``, ``extra_args`` or"
+        " ``extra_envs``, and a one-line ``reason``. You do not benchmark."
+    ),
+}
 
 
 # Forbids global process cleanup that could kill the optimizer's serving /
@@ -894,16 +928,21 @@ class SpecialistPromptInputs:
     # the static_recon_specialist dispatch.
     static_recon_checklist: str = ""
 
+    # Enablement dispatch evidence, folded into the §1b mandate. Both are empty
+    # for every non-enablement domain, and the mandate degrades gracefully.
+    enablement_source_context: str = ""
+    enablement_candidate_refs: tuple[str, ...] = ()
+
     # Workspace path (for transcript / heartbeat instructions)
     workspace_path: str = ""
 
     # Free-form notes from Orchestration (e.g. previous-round resid_qs)
     notes: str = ""
 
-    # Dispatch profile dials (see orchestrator.specialist_profile) that shape
+    # Dispatch profile dials (see orchestrator.specialists.profile) that shape
     # single-domain / cross-domain / freeform / bench prompting.
     scope: str = "domain"
-    mode: str = "patch"
+    mode: str = MODE_PATCH
     bench: bool = False
     lane: str = "gpu"
     # Free-form task description (only populated when scope == 'freeform').
@@ -919,8 +958,27 @@ class SpecialistPromptInputs:
     wall_budget_sec: float = 0.0
     started_at_iso: str = ""
 
+    # Run-status snapshot for §0 MANDATE; 0/[] = absent (section renders gracefully).
+    baseline_tput: float = 0.0
+    current_tput: float = 0.0
+    cumulative_gain_validated: float = 0.0
+    keep_threshold_pct: float = 0.0
+    applied_stack: list[dict[str, Any]] = field(default_factory=list)
+
+    # Structured mandate payload; routes §0 boilerplate and per-dispatch context.
+    task_kind: str = ""
+    prior_attempts: list[dict[str, Any]] = field(default_factory=list)
+    pr_lead: dict[str, Any] = field(default_factory=dict)
+    # "A" = emit_intent, "B" = file write, "" = render both (render-script path).
+    exit_channel: str = ""
+
 
 # Section 1 — Identity & autonomy
+def _authors_patches(inp: SpecialistPromptInputs) -> bool:
+    """Whether this dispatch may author patches; research mode gets no worktree."""
+    return inp.mode == MODE_PATCH
+
+
 def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 1 (identity & autonomy) of the specialist prompt.
 
@@ -933,6 +991,30 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
     Returns:
         list[str]: Markdown lines for the identity section.
     """
+    if _authors_patches(inp):
+        capability_line = (
+            "probe the host via Bash, **author source patches into your isolated"
+            " worktree**, and use as many of your ``max_turns`` LLM turns as you need"
+        )
+        deliverable_line = "(Section 8) carrying ``proposal_set`` + ``patches_written``. The hard"
+    else:
+        capability_line = (
+            "probe the host via Bash, and use as many of your ``max_turns`` LLM"
+            " turns as you need"
+        )
+        deliverable_line = "(Section 8) carrying ``proposal_set``. The hard"
+    if inp.allocated_gpu_ids:
+        leaf_examples = "bench N candidates of one lever at once, or read several subsystems"
+        leaf_devices = "inherit your VISIBLE_DEVICES (so they share your GPU and cannot oversubscribe), and "
+    else:
+        leaf_examples = "read several subsystems at once"
+        leaf_devices = ""
+    fanout_line = (
+        f"Fan-out: to parallelize independent single-shot sub-tasks (e.g. {leaf_examples}), "
+        'you MAY ``Task(subagent_type="hyperloom-leaf")``. Leaves are single-turn, '
+        f"{leaf_devices}cannot fan out further. Use leaves for breadth; do multi-round "
+        "depth (e.g. coordinate-descent autotune) yourself."
+    )
     body: list[str] = [
         "## 1. IDENTITY & AUTONOMY",
         "",
@@ -945,8 +1027,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "You operate **autonomously** inside your domain — no per-step approval",
         "is needed. You have full authority to read any code under the framework",
         "source roots (Section 7), search any public GitHub repo or NVIDIA PR,",
-        "probe the host via Bash, **author source patches into your isolated",
-        "worktree**, and use as many of your ``max_turns`` LLM turns as you need",
+        capability_line,
         "to be thorough. Be creative. Investigate deeply. One-turn shortcuts",
         "are discouraged when a real bottleneck is on the table. Quality is",
         "scored over quantity: cap your final ``proposal_set`` at the",
@@ -955,16 +1036,11 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "Division of labour: the Coordinator owns the serving GPU, runs the E2E",
         "benchmark, and decides KEEP/REVERT — you do not have to validate final",
         "throughput yourself. Your single deliverable is ONE final ``specialist_done``",
-        "(Section 8) carrying ``proposal_set`` + ``patches_written``. The hard",
+        deliverable_line,
         "capability boundary is fixed by Section 9 Iron Rules; everything inside",
         "it is yours.",
         "",
-        "Fan-out: to parallelize independent single-shot sub-tasks (e.g. bench "
-        + "N candidates of one lever at once, or read several subsystems), you "
-        + 'MAY ``Task(subagent_type="hyperloom-leaf")``. Leaves are single-turn, '
-        + "inherit your VISIBLE_DEVICES (so they share your GPU and cannot "
-        + "oversubscribe), and cannot fan out further. Use leaves for breadth; do "
-        + "multi-round depth (e.g. coordinate-descent autotune) yourself.",
+        fanout_line,
     ]
     rendered_focus_keys: set[str] = set()
     focus = _DOMAIN_FOCUS_TEMPLATES.get(inp.domain.key)
@@ -1091,23 +1167,27 @@ def _freeform_block(inp: SpecialistPromptInputs) -> list[str]:
         The rendered free-form mandate lines.
     """
     desc = (inp.task_description or "").strip() or "(no task description provided)"
+    if _authors_patches(inp):
+        reach = "upstream PRs, host probing, source patches"
+        deliverable = "``proposal_set`` + ``patches_written``"
+    else:
+        reach = "upstream PRs, host probing"
+        deliverable = "``proposal_set``"
     return [
         "",
         "### Free-form mandate (scope = freeform)",
         "",
         "You are dispatched as a **free-form** specialist: you are NOT bound to "
         + "the domain catalogue above. The Orchestration mandate below is your "
-        + "whole task — investigate it wherever it leads (framework internals, "
-        + "upstream PRs, host probing, source patches).",
+        + f"whole task — investigate it wherever it leads (framework internals, {reach}).",
         "",
         "Mandate from Orchestration:",
         "",
         f"> {desc}",
         "",
         "Set ``scope='freeform'`` on each proposal. Your single deliverable is "
-        + "still ONE ``specialist_done`` carrying ``proposal_set`` + "
-        + "``patches_written``. Never self-report numeric speedups — the "
-        + "Coordinator measures gain.",
+        + f"still ONE ``specialist_done`` carrying {deliverable}. Never "
+        + "self-report numeric speedups — the Coordinator measures gain.",
     ]
 
 
@@ -1146,6 +1226,98 @@ def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
         + "cross-domain review rules. Never self-report numeric speedups — the "
         + "Coordinator measures gain.",
     ]
+
+
+# Section 0 — Mandate (deliverable contract + run status)
+def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
+    """Render §0: deliverable contract, run status, and task-kind brief."""
+    from hyperloom.inference_optimizer.framework_registry import format_primary_metric
+
+    # Deliverable line based on scope × mode.
+    scope = (inp.scope or "domain").lower()
+    if scope == "freeform":
+        anchor = (inp.task_description.split("\n")[0].strip()[:120] if inp.task_description else "")
+        deliverable = "freeform investigation — see task description"
+    else:
+        anchor = inp.gap_canonical_id or ""
+        if not _authors_patches(inp):
+            deliverable = "findings and up to 6 ranked config variants (read-only; no patch)"
+        elif scope == "domains":
+            deliverable = "a coupled patch spanning multiple domains + up to 6 ranked config variants"
+        else:
+            deliverable = "a source patch and/or up to 6 ranked config variants addressing the gap below"
+
+    rows: list[str] = [
+        "## 0. MANDATE",
+        "",
+        f"- deliverable: {deliverable}",
+    ]
+    if anchor:
+        rows.append(f"- anchor: `{anchor}`")
+
+    has_status = inp.baseline_tput > 0 or inp.keep_threshold_pct > 0
+    if has_status:
+        rows.append("")
+        rows.append("Run status (read-only context; do NOT re-state these as your own measurements):")
+        fw = inp.framework or None
+        if inp.baseline_tput > 0:
+            rows.append(f"- baseline: {format_primary_metric(fw, inp.baseline_tput)}")
+        if inp.current_tput > 0:
+            rows.append(f"- current best: {format_primary_metric(fw, inp.current_tput)}")
+        if inp.cumulative_gain_validated != 0:
+            rows.append(f"- validated cumulative gain: {inp.cumulative_gain_validated:+.2f}%")
+        if inp.keep_threshold_pct > 0:
+            rows.append(f"- KEEP threshold this cycle: {inp.keep_threshold_pct:.2f}%")
+        if inp.applied_stack:
+            stack_items = ", ".join(
+                f"{e.get('variant_name', '?')} ({e.get('gain_pct', 0):+.2f}%)"
+                for e in inp.applied_stack[:6]
+            )
+            rows.append(f"- applied stack: {stack_items}")
+
+    rows.extend([
+        "",
+        "Judged by: the Coordinator benches your proposals end-to-end against",
+        "the sealed baseline and decides KEEP/REVERT; the accuracy gate runs",
+        "alongside. You are not asked to prove the number.",
+    ])
+
+    kind = (inp.task_kind or "").strip()
+    brief = _TASK_KIND_BRIEFS.get(kind, "")
+    if brief:
+        rows.extend(["", brief])
+
+    if inp.pr_lead:
+        title = str(inp.pr_lead.get("title") or "").strip()
+        url = str(inp.pr_lead.get("url") or "").strip()
+        diff_url = str(inp.pr_lead.get("diff_url") or "").strip()
+        rows.append("")
+        if title:
+            rows.append(f"PR lead: {title}")
+        if url:
+            rows.append(f"PR url: {url}")
+        if diff_url:
+            rows.append(f"Diff: {diff_url} (fetch with WebFetch)")
+
+    if inp.prior_attempts:
+        rows.extend([
+            "",
+            "Already tried this session — avoid the same or equivalent change:",
+        ])
+        for att in inp.prior_attempts[:20]:
+            if not isinstance(att, dict):
+                continue
+            ref = str(att.get("ref") or "").strip()
+            if not ref:
+                continue
+            status = str(att.get("status") or "?").strip()
+            gain = att.get("gain_pct")
+            gain_str = f" gain={float(gain):+.2f}%" if isinstance(gain, (int, float)) else ""
+            why = str(att.get("why") or "").strip()
+            why_str = f" — {why}" if why else ""
+            rows.append(f"  - {ref} [{status}]{gain_str}{why_str}")
+
+    return rows
 
 
 # Section 2 — Hardware context
@@ -1851,15 +2023,18 @@ def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
     Returns:
         list[str]: Markdown lines for the PR-query capability section.
     """
+    from hyperloom.orchestrator.policy.gate import PR_MONITOR_TOOL_NAMES
     from hyperloom.orchestrator.specialists.domains import PR_QUERY_REPOS
 
     rows = ["## 6. PR MONITOR", ""]
     if not inp.pr_monitor_available:
         rows.append("(unavailable: pr_monitor disabled)")
         return rows
+    _prefix = "mcp__pr_monitor__"
+    tool_shorts = sorted(t[len(_prefix) :] for t in PR_MONITOR_TOOL_NAMES if t.startswith(_prefix))
     rows += [
         "Use ``mcp__pr_monitor__*`` tools to query PRs on demand:",
-        "``pr_search`` / ``pr_list`` / ``pr_get`` / ``pr_files`` / ``pr_patches`` / ``pr_file_patch`` / ``pr_blob``",
+        " / ".join(f"``{t}``" for t in tool_shorts),
         "",
         "Repos you may query:",
     ]
@@ -1912,37 +2087,56 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 8 — Output protocol
 def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
-    """Render Section 8 (output protocol) of the specialist prompt.
-
-    Describes the two equivalent ``specialist_done`` exit channels, the
-    payload schema, field contract, heartbeat rules, and the turn cap.
-
-    Args:
-        inp (SpecialistPromptInputs): The assembled prompt inputs (source
-            of workspace path, gap id, domain, and turn cap).
-
-    Returns:
-        list[str]: Markdown lines for the output-protocol section.
-    """
+    """Render Section 8 (output protocol) of the specialist prompt."""
     workspace = inp.workspace_path or "<workspace>"
+    channel = (inp.exit_channel or "").upper().strip()
+    authors_patches = _authors_patches(inp)
+
+    exit_lines: list[str] = []
+    if channel == "A" or channel == "":
+        exit_lines.extend([
+            "**Exit — ``emit_intent`` tool:** call ``emit_intent`` exactly once",
+            "with intent type ``specialist_done`` and the payload schema below.",
+        ])
+    if channel == "B" or channel == "":
+        if channel == "":
+            exit_lines.append("")
+        exit_lines.extend([
+            "**Exit — file write (subprocess runtime):** write the same payload to",
+            f"``{workspace}/specialist_done.json`` as your **absolute last action**.",
+            "The dispatcher polls for that file as the exit signal; stop after writing.",
+        ])
+
+    if authors_patches:
+        patch_fields = [
+            "- ``patches_written`` (PR-A2) lists paths (relative to your",
+            "  workspace or worktree) of any unified-diff patch files you",
+            "  authored this round. Empty list = no patches; downstream",
+            "  ``integrate_patch`` action skips when empty.",
+            "- ``artifacts_written`` lists any non-diff tuned artifacts to install",
+            "  (e.g. an autotuned config JSON) as objects ``{source, target, kind,",
+            "  description}``: ``source`` is a path inside your worktree, ``target``",
+            "  is the install path — PREFER a framework-relative path (e.g.",
+            "  ``configs/model_configs/foo.csv``); an absolute path is accepted only",
+            "  if it resolves inside an allowlisted framework root. ``integrate_patch``",
+            "  backs up the target, installs the artifact, runs the same E2E gate, and",
+            "  restores the backup on REVERT. A non-diff tuned artifact is a FULL",
+            "  result — set ``empty=false`` when ``artifacts_written`` is non-empty.",
+        ]
+        no_output = "  AND no ``patches_written``/``artifacts_written``; in that case"
+    else:
+        patch_fields = []
+        no_output = "  and no findings; in that case"
+    empty_rule = [
+        "- ``empty=true`` is legitimate ONLY when you have no actionable proposals",
+        no_output,
+        "  ``proposal_set=[]`` and you must put the reason in ``summary``.",
+    ]
+
     return [
         "## 8. OUTPUT PROTOCOL",
         "",
-        "Your run terminates by producing **exactly one** specialist_done",
-        "record. The Hyperloom runner accepts either of two equivalent",
-        "exit channels — use whichever your tool surface supports:",
-        "",
-        "**Channel A — ``emit_intent`` tool (in-process / SDK runtime):**",
-        "Call the ``emit_intent`` tool exactly once with an intent of type",
-        "``specialist_done`` and the payload schema below.",
-        "",
-        "**Channel B — file write (subprocess / production runtime,",
-        "PR-A2 Arbor-into-Hyperloom):** When ``emit_intent`` is not in",
-        "your tool list, write the same payload to",
-        f"``{workspace}/specialist_done.json`` via the ``Write`` tool as",
-        "your **absolute last action**. The Hyperloom dispatcher polls",
-        "for that file and treats its appearance as the run's exit",
-        "signal. After writing it, stop — do not call any further tools.",
+        *exit_lines,
         "",
         "**Messages from the Orchestrator (check this as you work):** read",
         f"``{workspace}/inbox.json`` whenever you finish a step. It is a JSON",
@@ -1992,7 +2186,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
                             "source_evidence": [],
                         }
                     ],
-                    "patches_written": [],
+                    **({"patches_written": []} if authors_patches else {}),
                     "empty": False,
                     "summary": "≤ 500 char overview of what you tried this round",
                     "confidence": 0.6,
@@ -2042,22 +2236,8 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             + "a reject (and a pitfall fact that will warn future sessions "
             + "off the same dead-end)."
         ),
-        "- ``patches_written`` (PR-A2) lists paths (relative to your",
-        "  workspace or worktree) of any unified-diff patch files you",
-        "  authored this round. Empty list = no patches; downstream",
-        "  ``integrate_patch`` action skips when empty.",
-        "- ``artifacts_written`` lists any non-diff tuned artifacts to install",
-        "  (e.g. an autotuned config JSON) as objects ``{source, target, kind,",
-        "  description}``: ``source`` is a path inside your worktree, ``target``",
-        "  is the install path — PREFER a framework-relative path (e.g.",
-        "  ``configs/model_configs/foo.csv``); an absolute path is accepted only",
-        "  if it resolves inside an allowlisted framework root. ``integrate_patch``",
-        "  backs up the target, installs the artifact, runs the same E2E gate, and",
-        "  restores the backup on REVERT. A non-diff tuned artifact is a FULL",
-        "  result — set ``empty=false`` when ``artifacts_written`` is non-empty.",
-        "- ``empty=true`` is legitimate ONLY when you have no actionable proposals",
-        "  AND no ``patches_written``/``artifacts_written``; in that case",
-        "  ``proposal_set=[]`` and you must put the reason in ``summary``.",
+        *patch_fields,
+        *empty_rule,
         "- ``new_findings`` is a list of learned items. Research scouts must",
         "  emit source-backed ``{what, source, expected_impact, accuracy_risk,",
         "  domain_tags[]}`` records.",
@@ -2078,21 +2258,9 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 9 — Iron rules
 def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
-    """Render Section 9 (iron rules) of the specialist prompt.
-
-    Emits the immutable capability boundary (full autonomy on the
-    specialist's own leased cards with the single production-serving boundary,
-    worktree-only patch/artifact staging, no KB writes, allowed intents, turn
-    cap, and workspace confinement).
-
-    Args:
-        inp (SpecialistPromptInputs): The assembled prompt inputs (source
-            of the workspace path interpolated into the rules).
-
-    Returns:
-        list[str]: Markdown lines for the iron-rules section.
-    """
+    """Render Section 9 (iron rules) of the specialist prompt."""
     workspace = inp.workspace_path or "<runs/specialist/<task_id>/>"
+    authors_patches = _authors_patches(inp)
     if inp.allocated_gpu_ids:
         cards = ", ".join(str(g) for g in inp.allocated_gpu_ids)
         gpu_rule = [
@@ -2105,56 +2273,50 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
             "   Manage only processes YOU started, by their own PID/PGID.",
         ]
     else:
+        last = "   try and optionally author patches." if authors_patches else "   try."
         gpu_rule = [
             "1. You have no GPU allocation for this task, so do not run GPU",
             "   benchmarks or start servers. The ONE hard boundary that always",
             "   holds: never touch the production serving process / its cards /",
             "   port 8888. The Coordinator runs benchmarks; you propose what to",
-            "   try and optionally author patches.",
+            last,
+        ]
+    if authors_patches:
+        integration_rule = [
+            "2. **You MAY** produce changes for integration, but stage them ONLY",
+            f"   inside your own worktree at ``{workspace}/``. Two output kinds:",
+            "   - Unified-diff patches: ``git diff > patches/NNN_<slug>.patch``",
+            "     from the worktree; list paths in ``patches_written``.",
+            "   - Tuned non-diff artifacts (e.g. an autotuned config JSON): write",
+            "     under the worktree and list in ``artifacts_written`` as",
+            "     ``{source, target, kind, description}``.",
+            "   **NEVER** ``git apply`` / ``git commit`` against the shared",
+            "   ``framework_source_roots`` directly — ``integrate_patch`` is",
+            "   the single integration point.",
+        ]
+    else:
+        integration_rule = [
+            "2. **Read-only dispatch:** you have no worktree and MUST NOT author",
+            "   patches or edit ``framework_source_roots``. Report what you found",
+            "   through ``specialist_done``; a patch-capable specialist authors any",
+            "   source change you recommend.",
         ]
     return [
         "## 9. IRON RULES (Inv-5.1 / Inv-5.3)",
         "",
         *gpu_rule,
-        "2. **You MAY** produce changes for integration, but stage them ONLY",
-        f"   inside your own worktree at ``{workspace}/`` (a git checkout",
-        "   branched off the framework HEAD just for this task). Two output",
-        "   kinds are accepted by the orchestrator's ``integrate_patch`` gate:",
-        "   - Unified-diff patches: ``git diff > patches/NNN_<slug>.patch``",
-        "     from inside the worktree; list paths in ``patches_written``.",
-        "   - Tuned non-diff artifacts (e.g. an autotuned config JSON): write",
-        "     the file under your worktree and list it in ``artifacts_written``",
-        "     as ``{source, target, kind, description}`` (``source`` relative to",
-        "     the worktree, ``target`` the framework-relative install path).",
-        "   You **MUST NEVER** ``git apply`` / ``git commit`` against or",
-        "   otherwise mutate the main ``framework_source_roots`` directly —",
-        "   the orchestrator's ``integrate_patch`` action is the single",
-        "   integration point that applies your patches/artifacts with the",
-        "   throughput + accuracy gate. (Starting/stopping YOUR OWN servers on",
-        "   YOUR OWN leased cards per rule 1 is fine; the prohibition here is",
-        "   only about mutating the shared framework tree directly.)",
-        "3. **NEVER** write to the Recipe KB directly. Its only write paths",
-        "   (``RecipeKB.put_recipe`` and the framework-record writeback) are",
-        "   in-process Coordinator calls. The Coordinator owns all KB writes. KB",
-        "   read context is pre-warmed into Section 4 of this prompt; the",
-        "   specialist subprocess has no live KB connection.",
-        "4. **NEVER** emit any intent other than ``specialist_done``,",
-        "   ``send_message`` (heartbeat), or ``alert``. Other intent types",
-        "   are dropped and recorded as a tool violation.",
-        "5. You **MUST** finish within ``max_turns`` LLM turns and end with",
-        "   a single ``specialist_done`` exit signal (intent OR",
-        "   ``specialist_done.json`` file write per Section 8). Sub-agent",
-        "   silence past the cap is treated as stale (an empty",
-        "   ``specialist_done`` is synthesized for you so the EXPLORE",
-        "   round still progresses).",
-        f"6. Use ``{workspace}/`` for ALL writes (patches, transcript notes,",
-        "   heartbeat). Do not write anywhere else in the filesystem; the",
-        "   dispatcher only exposes this directory + read-only access to",
-        "   ``framework_source_roots`` and SESSION_DIR.",
-        "7. If you hit a tool error or run out of useful actions, emit",
-        "   ``specialist_done{empty=true, summary='<why>'}`` rather than",
-        "   stalling.",
-        f"8. {BASH_KILL_SAFETY_PREAMBLE}",
+        *integration_rule,
+        "3. Only ``specialist_done``, ``send_message``, and ``alert`` are",
+        "   accepted intents; all others are dropped.",
+        "4. You **MUST** finish within ``max_turns`` LLM turns and end with",
+        "   exactly one ``specialist_done`` exit signal. Silence past the cap",
+        "   synthesizes an empty done.",
+        f"5. Use ``{workspace}/`` for ALL writes. The dispatcher exposes only",
+        "   this directory + read-only access to ``framework_source_roots``",
+        "   and ``SESSION_DIR``.",
+        "6. On tool error or no useful action left, emit",
+        "   ``specialist_done{empty=true, summary='<why>'}``.",
+        f"7. {BASH_KILL_SAFETY_PREAMBLE}",
     ]
 
 
@@ -2166,6 +2328,12 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     renders the mandate's ``task_description`` (which embeds the ladder book) from
     ``framework_agent.enablement_ops.build_mandate``. Kept in the user prompt so
     the cached system prompt stays task-independent.
+
+    The dispatch's own evidence — source lines near the offending site (plus the
+    checkpoint weight inventory on a weight-init failure) and the ranked bridging
+    refs — is folded in from ``enablement_*`` inputs. Without them the mandate
+    renders its generic skeleton, so the agent is told to find a bridge while the
+    candidates already discovered for it are withheld.
 
     Args:
         inp: Assembled prompt inputs for the current dispatch.
@@ -2184,7 +2352,11 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
         launch_log=inp.gap_symptom or "",
         gpu_type=(inp.gpu_type or "").strip().lower(),
     )
-    mandate = build_mandate(req)
+    mandate = build_mandate(
+        req,
+        candidate_refs=inp.enablement_candidate_refs,
+        source_context=inp.enablement_source_context,
+    )
     rows = ["## 1b. ENABLEMENT PLAYBOOK", ""]
     rows.extend(mandate.task_description.splitlines())
     return rows
@@ -2275,6 +2447,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         # or the baseline fails its accuracy eval. Carry only the failure, the
         # tiered playbook, and the tools to discover + navigate a fix.
         user_sections = [
+            _section_mandate(inp),
             _section_hardware(inp),
             _section_pd_disaggregation(inp),  # § 1a (omitted unless disaggregated)
             _section_execution_budget(inp),  # omitted when no budget
@@ -2285,6 +2458,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         ]
     else:
         user_sections = [
+            _section_mandate(inp),
             _section_hardware(inp),
             _section_pd_disaggregation(inp),  # § 1a (PD-disaggregation; omitted unless disaggregated)
             _section_execution_budget(inp),  # omitted when no budget

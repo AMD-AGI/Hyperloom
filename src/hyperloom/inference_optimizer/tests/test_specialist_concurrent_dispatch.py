@@ -50,7 +50,6 @@ async def _build_coord_with_capacity(
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle_plan),
-        "kernel_agent": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
         "robustness": MockBackend(idle_plan),
     }

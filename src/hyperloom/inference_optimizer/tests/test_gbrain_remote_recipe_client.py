@@ -181,6 +181,15 @@ def test_get_recipe_uses_direct_slug_fast_path() -> None:
     assert [tool for tool, _ in c._mcp.calls] == ["get_page"]  # type: ignore[union-attr]
 
 
+def test_get_recipe_exact_miss_never_searches_or_scans() -> None:
+    c = _client({})
+    cid = "inference:qwen3-32b:mi300x:sglang:qwen3:qwen3forcausallm:0.5.12:fp8"
+
+    assert c.get_recipe_exact(canonical_id=cid) is None
+
+    assert [tool for tool, _ in c._mcp.calls] == ["get_page"]  # type: ignore[union-attr]
+
+
 def test_get_recipe_unknown_version_direct_fallback() -> None:
     slug = _default_slug("inference/qwen3-32b/mi300x/sglang/qwen3/qwen3forcausallm/unknown_version/fp8")
     fm = _recipe_page("Qwen3-32B", "mi300x", "sglang", "fp8")

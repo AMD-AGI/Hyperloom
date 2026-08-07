@@ -58,7 +58,6 @@ fi
 if [ "${HL_PROXY_ENABLED:-0}" = "1" ]; then
   : "${OPENAI_BASE_URL:?proxy enabled but OPENAI_BASE_URL unset}"
   : "${OPENAI_API_KEY:?proxy enabled but OPENAI_API_KEY unset}"
-  export SAFE_API_KEY="${SAFE_API_KEY:-$OPENAI_API_KEY}"
   if [ -n "${HL_CA_BUNDLE_HOST:-}" ] && [ -f "$HL_CA_BUNDLE_HOST" ]; then
     PROXY_MOUNTS=",${HL_CA_BUNDLE_HOST}:${HL_CA_BUNDLE_CONTAINER}:ro"
     export REQUESTS_CA_BUNDLE="$HL_CA_BUNDLE_CONTAINER"
@@ -66,15 +65,14 @@ if [ "${HL_PROXY_ENABLED:-0}" = "1" ]; then
   fi
 fi
 # Hard requirements regardless of proxy toggle.
-: "${SAFE_API_KEY:?export SAFE_API_KEY (or set it in proxy.env)}"
+: "${OPENAI_API_KEY:?export OPENAI_API_KEY (or set it in proxy.env)}"
 : "${OPENAI_BASE_URL:?export OPENAI_BASE_URL (or set it in proxy.env)}"
 export HF_TOKEN="${HF_TOKEN:-}"
 
 # --- copy the in-container runner to the shared mount ----------------------
 # run_hyperloom.sbatch runs _incontainer.sh.in inside the container.
-# HL_KERNEL_BACKEND selects the python carrier's kernel-agent backend
-# (default claude); it is forwarded into the container.
-export HL_KERNEL_BACKEND="${HL_KERNEL_BACKEND:-claude}"
+# Kernel-opt rewrite ladder (geak|forge); forwarded into the container.
+export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
 INCONTAINER="$USER_DATA_PATH/_incontainer.sh"
 cp "$CONF_DIR/_incontainer.sh.in" "$INCONTAINER"
 chmod +x "$INCONTAINER"
@@ -108,14 +106,15 @@ case "$RUNTIME" in
     # Private registry image needs `docker login <registry>` first (or a
     # locally-cached image, in which case no login/pull is needed).
     DOCKER_ENV=()
-    for v in CLAW_SESSION_ID USER_DATA_PATH HL_SHARED_MOUNT SAFE_API_KEY \
+    for v in CLAW_SESSION_ID USER_DATA_PATH HL_SHARED_MOUNT \
              OPENAI_BASE_URL OPENAI_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
              REQUESTS_CA_BUNDLE SSL_CERT_FILE HF_TOKEN HYPERLOOM_SOURCE_DIR \
              HYPERLOOM_SOURCE_REPO HYPERLOOM_SOURCE_REF \
              KEY REPO_ID MODEL_PATH FRAMEWORK GPU_TYPE TP PREC ISL OSL CONC MODEL_CLASS \
-             MAX_HOURS TARGET_GAIN BACKEND HL_KERNEL_BACKEND HL_HOST_ALIAS_IP HL_HOST_ALIAS_NAME \
+             MAX_HOURS TARGET_GAIN BACKEND KERNEL_OPT_BACKEND_ORDER HL_HOST_ALIAS_IP HL_HOST_ALIAS_NAME \
              CURSOR_DEFAULT_MODEL GEAK_CLAUDE_MODEL CLAUDE_MODEL CODEX_MODEL LLM_MODEL \
-             RECIPE_KB_REMOTE GBRAIN_BASE_URL GBRAIN_TOKEN GBRAIN_KG_GUIDED \
+             KNOWLEDGE_STORE_MODE KNOWLEDGE_LOCAL_ROOT \
+             GBRAIN_BASE_URL GBRAIN_TOKEN GBRAIN_KG_GUIDED \
              GBRAIN_KG_NATIVE GBRAIN_RECIPE_SCAN_BUDGET_SEC \
              HYPERLOOM_LANGFUSE_ENABLE LANGFUSE_HOST LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY; do
       [ -n "${!v:-}" ] && DOCKER_ENV+=(-e "$v=${!v}")

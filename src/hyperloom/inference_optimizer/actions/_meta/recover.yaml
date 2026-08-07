@@ -19,7 +19,7 @@ side_effects:
   - server_restart
   - reads_checkpoint
 preferred_backend: claude
-preferred_model: claude-opus-4-7
+preferred_model: claude-opus-5
 max_turns: 20
 lease_ttl_sec: 1200
 description: "Restore the workspace from the last good checkpoint and relaunch the server after a crash or REVERT."

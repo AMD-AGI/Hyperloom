@@ -12,7 +12,12 @@ system/user prompt pair).
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+from hyperloom.inference_optimizer.session.session_paths import agent_prompt_snapshot
+
+log = logging.getLogger(__name__)
 
 
 def read_rules_fragment(path: Path | None) -> str:
@@ -31,3 +36,29 @@ def read_rules_fragment(path: Path | None) -> str:
         return path.read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+def write_prompt_snapshot(
+    session_dir: Path,
+    role: str,
+    body: str,
+    *,
+    phase: str = "",
+) -> None:
+    """Persist a role's effective system prompt for audit / drift inspection.
+
+    Fail-soft: a failed write must never take down a phase transition.
+
+    Args:
+        session_dir (Path): The session root directory.
+        role (str): The agent role the prompt belongs to.
+        body (str): The prompt text as handed to the backend.
+        phase (str): Pipeline phase this scope was built for; ``""`` writes the
+            unsuffixed boot snapshot.
+    """
+    try:
+        target = agent_prompt_snapshot(session_dir, role, phase=phase)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body or "(empty)", encoding="utf-8")
+    except OSError:
+        log.warning("prompt snapshot write failed for role=%s phase=%s", role, phase)

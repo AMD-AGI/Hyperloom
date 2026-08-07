@@ -161,7 +161,7 @@ class SpecialistSubprocessConfig:
     """Path / name of the claude CLI binary. Default looks it up on $PATH."""
 
     model: str = ""
-    """Claude model id (e.g. ``claude-opus-4-7``). Empty = SDK default."""
+    """Claude model id (e.g. ``claude-opus-5``). Empty = SDK default."""
 
     permission_mode: str = "bypassPermissions"
     """claude-cli ``--permission-mode``. Default ``bypassPermissions``: specialist

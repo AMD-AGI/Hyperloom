@@ -97,7 +97,6 @@ async def test_config_discover_uses_deepseek_anthropic_defaults(monkeypatch, tmp
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
     monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
-    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
     monkeypatch.setattr("hyperloom.agents.robustness.config._probe_robustness_server", lambda: _async_value(""))
 
     config = await Config.discover()
@@ -146,7 +145,6 @@ async def test_config_discover_does_not_treat_gateway_key_as_official_openai(mon
     monkeypatch.setenv("LLM_GATEWAY_KEY", "gateway-token")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
-    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
     monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
     monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
     monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)

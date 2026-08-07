@@ -74,7 +74,6 @@ def test_ensure_client_no_api_key(monkeypatch):
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_API_KEY",
         "LLM_GATEWAY_KEY",
-        "SAFE_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
     scorer = ProposalScorer(models=("m",))
@@ -85,7 +84,7 @@ def test_ensure_client_no_api_key(monkeypatch):
 def test_ensure_client_builds_with_key(monkeypatch):
     import openai
 
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok")
+    monkeypatch.setenv("OPENAI_API_KEY", "tok")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://proxy")
     sentinel = object()
     monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: sentinel)
@@ -109,18 +108,15 @@ def test_ensure_client_prefers_explicit_openai_key(monkeypatch):
     assert captured["api_key"] == "openai-user-key"
 
 
-def test_ensure_client_falls_back_to_anthropic_token(monkeypatch):
-    """Only ANTHROPIC_AUTH_TOKEN set still builds a client."""
-    import openai
-
+def test_ensure_client_refuses_anthropic_token(monkeypatch):
+    """The scorer speaks the OpenAI protocol, so it raises with no OpenAI-side key."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "safe-filled")
+    monkeypatch.delenv("LLM_GATEWAY_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-token")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://proxy")
-    captured: dict = {}
-    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: captured.update(kw) or object())
     scorer = ProposalScorer(models=("m",))
-    scorer._ensure_client()
-    assert captured["api_key"] == "safe-filled"
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+        scorer._ensure_client()
 
 
 # ---- score: proposal cap + timeout + no-usable ----

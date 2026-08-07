@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator-side handlers for Kernel-agent REQUEST kinds.
-
-A request is served by an LLM responder or a programmatic handler.
+"""Coordinator-side programmatic handlers for kernel REQUEST kinds.
 
 Handler signature::
 
@@ -1169,6 +1167,20 @@ def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
     return tool.revert_kernel_patch(apply_result["manifest_path"])
 
 
+def _maybe_finalize_kernel_patch(
+    apply_result: HandlerResult,
+) -> HandlerResult:
+    """Delete backups once a KEEP becomes the accepted baseline."""
+    if (
+        apply_result.get("status") != "ok"
+        or not apply_result.get("manifest_path")
+    ):
+        return {"status": "skipped", "reason": "no applied patch manifest"}
+    return _load_apply_tool().finalize_kernel_patch(
+        apply_result["manifest_path"]
+    )
+
+
 def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
     """Look up a kernel's source file from the last trace-analyze result.
 
@@ -1635,7 +1647,8 @@ export OSL={int(osl)}
 export RANDOM_RANGE_RATIO="${{RANDOM_RANGE_RATIO:-1}}"
 export NUM_PROMPTS="${{NUM_PROMPTS:-320}}"
 export NUM_WARMUPS="${{NUM_WARMUPS:-8}}"
-export RUN_EVAL="${{RUN_EVAL:-true}}"
+# Shape capture consumes throughput only, so it never pays for an accuracy eval.
+export RUN_EVAL="false"
 export RESULT_DIR="${{RESULT_DIR:-$PWD/gemm_benchmark_result}}"
 export RESULT_FILENAME="${{RESULT_FILENAME:-bench_serving.json}}"
 export PORT="${{PORT:-18888}}"
@@ -1920,12 +1933,24 @@ def _resolve_forge_shapes(
     session_dir: Path,
     *,
     require_fresh_profile: bool = False,
+    precision: str = "",
 ) -> str:
     """Find TraceLens shapes JSON if available and in forge-compatible format.
 
     Forge dense tuners expect: [{"M": int, "N": int, "K": int}, ...]
     Only passes files that match this schema; incompatible formats are
     silently skipped so forge falls back to config.json shape derivation.
+
+    ``precision`` scopes the traced shapes to the dtype the tuner will actually
+    tune (a trace carries every GEMM dtype the model runs, e.g. FP8 projections
+    alongside BF16 router heads). Empty means "no dtype scoping".
+
+    When scoping is requested the candidate extraction runs first, because it is
+    the only source whose dtype can be checked: a pre-rendered shapes artifact is
+    a bare ``[{M,N,K}]`` list carrying no dtype or provenance, so an artifact
+    recorded for another dtype would otherwise be handed to the tuner ahead of
+    correctly-scoped shapes. Artifacts stay the fallback for the unscoped case
+    and for when the trace yields nothing for this precision.
     """
     if require_fresh_profile and not _profile_shapes_are_fresh(state):
         log.info(
@@ -1958,31 +1983,71 @@ def _resolve_forge_shapes(
             shapes_file = cand_file.parent / "shapes.json"
             candidates.append(str(shapes_file))
 
+    # Extract the GEMM shapes observed by the latest TraceLens analysis. Older
+    # traces can describe a backend that is no longer active.
+    def _extracted() -> str:
+        return _extract_gemm_shapes_from_candidates(
+            str(last_trace.get("candidates_path") or ""),
+            session_dir,
+            precision=precision,
+        )
+
+    if _canonical_dtype(precision):
+        scoped = _extracted()
+        if scoped:
+            return scoped
+
     for candidate in candidates:
         p = Path(candidate)
         if p.is_file() and _is_forge_compatible_shapes_json(p):
             return str(p)
 
-    # Final fallback: extract the GEMM shapes observed by the latest TraceLens
-    # analysis. Older traces can describe a backend that is no longer active.
-    extracted = _extract_gemm_shapes_from_candidates(
-        str(last_trace.get("candidates_path") or ""),
-        session_dir,
-    )
-    if extracted:
-        return extracted
+    return _extracted()
 
+
+# TraceLens has spelled the tensor separator <br>, <br/> and <BR/> over time.
+_BR_SPLIT_RE = re.compile(r"<\s*br\s*/?\s*>", re.IGNORECASE)
+
+
+def _canonical_dtype(raw: str) -> str:
+    """Fold a precision name or traced dtype token onto one canonical family.
+
+    Both sides of the comparison spell the same dtype many ways: a tuning
+    precision arrives as ``fp8`` / ``mxfp4``, while TraceLens renders whatever
+    the framework reported -- ``fp8_e4m3``, ``e4m3fnuz``, ``fp4x2``, and
+    ``_TRACE_DTYPE_SUFFIX`` in this repo emits ``f16`` for float16. Matching the
+    raw strings drops shapes that do belong to the tuned precision, so both are
+    folded onto a family first.
+
+    Returns "" for anything unrecognised, which callers treat as "do not scope".
+    """
+    token = str(raw or "").strip().lower().removeprefix("torch.")
+    if not token:
+        return ""
+    if token.startswith(("fp4", "mxfp4", "float4")) or "e2m1" in token:
+        return "fp4"
+    if token.startswith(("fp8", "float8")) or token == "f8" or "e4m3" in token or "e5m2" in token:
+        return "fp8"
+    if token.startswith(("bf16", "bfloat16")) or token == "b16":
+        return "bf16"
+    if token.startswith(("fp16", "float16")) or token in {"f16", "half"}:
+        return "fp16"
     return ""
 
 
 def _extract_gemm_shapes_from_candidates(
-    candidates_path_str: str, session_dir: Path
+    candidates_path_str: str, session_dir: Path, *, precision: str = ""
 ) -> str:
     """Extract M,N,K from kernel_candidates.json hot_kernels input_shapes.
 
-    Parses the TraceLens shape format "(M,K) fp8<br>(N,K) fp8<br>..." to derive
-    the actual GEMM dimensions observed during serving. Writes a forge-compatible
-    shapes JSON beside the candidates file and returns its path.
+    Derives the GEMM dimensions actually observed during serving and writes a
+    forge-compatible shapes JSON beside the candidates file, returning its path.
+
+    ``precision`` scopes the result to one traced dtype. A trace records every
+    GEMM the model runs, so an FP8 tuner would otherwise also receive the BF16
+    router/head shapes; those rows are never looked up at serve time and they
+    displace real FP8 shapes in the call-count ordering below. Empty keeps every
+    dtype (historical behaviour).
     """
     import json as _json
     import re as _re
@@ -2002,8 +2067,55 @@ def _extract_gemm_shapes_from_candidates(
     if not isinstance(hot_kernels, list):
         return ""
 
-    shapes: list[dict[str, int]] = []
-    seen: set[tuple[int, int, int]] = set()
+    # Tolerate whitespace after the comma ("(1024, 5120)") and any leading token
+    # before the tuple; TraceLens formats vary. .search() rather than .match() so
+    # a leading dtype/name does not defeat it.
+    dim_pattern = _re.compile(r"\((\d+)\s*,\s*(\d+)\)")
+    # TraceLens renders the dtype right after the dims: "(64,3072) fp8".
+    # Dots are allowed so a fully-qualified spelling ("torch.float8_e4m3fn") is
+    # captured whole rather than truncated at "torch".
+    dtype_pattern = _re.compile(r"\)\s*([A-Za-z][A-Za-z0-9_.]*)")
+    wanted_dtype = _canonical_dtype(precision)
+
+    def _dtype_matches(a_text: str) -> bool:
+        """Whether the A tensor's traced dtype is the family being tuned."""
+        if not wanted_dtype:
+            return True
+        found = dtype_pattern.search(a_text)
+        return bool(found) and _canonical_dtype(found.group(1)) == wanted_dtype
+
+    def _mnk(a_text: str, b_text: str) -> tuple[int, int, int] | None:
+        """Derive (M, N, K) from the A ``(M,K)`` and B tensor texts."""
+        if not _dtype_matches(a_text):
+            return None
+        m0 = dim_pattern.search(a_text)
+        m1 = dim_pattern.search(b_text)
+        if not m0 or not m1:
+            return None
+        M, K = int(m0.group(1)), int(m0.group(2))
+        b0, b1 = int(m1.group(1)), int(m1.group(2))
+        # B is stored either (N,K) or (K,N); pick the orientation whose
+        # contracted dim matches K, else keep the legacy first-dim reading.
+        N = b0 if b1 == K else (b1 if b0 == K else b0)
+        # ``N == 1`` is a matrix-vector head (e.g. a scalar projection), not a
+        # tunable GEMM tile; it would otherwise sort first on call count and
+        # burn a tuning slot.
+        return (M, N, K) if min(M, K) > 0 and N > 1 else None
+
+    # ``weight`` is the observed call count: decode GEMMs are invoked far more
+    # often than prefill ones, so ordering by it puts the throughput-dominant
+    # shapes first and they still get tuned when the tuner runs out of budget.
+    # The same (M,N,K) can be reported by several kernels; keep the largest
+    # count, otherwise a rare first sighting would outrank the hot one.
+    weights: dict[tuple[int, int, int], int] = {}
+    order: dict[tuple[int, int, int], int] = {}
+
+    def _record(key: tuple[int, int, int] | None, weight: int) -> None:
+        if key is None:
+            return
+        if key not in order:
+            order[key] = len(order)
+        weights[key] = max(weights.get(key, 0), weight)
 
     for kernel in hot_kernels:
         name = str(kernel.get("name", ""))
@@ -2012,32 +2124,30 @@ def _extract_gemm_shapes_from_candidates(
         input_shapes = kernel.get("input_shapes", [])
         if not isinstance(input_shapes, list):
             continue
-        for entry in input_shapes:
-            shape_str = entry.get("shape", "") if isinstance(entry, dict) else ""
-            if not shape_str:
-                continue
-            # Parse "(M,K) dtype<br>(N,K) dtype<br>..." — first two tensors give M,N,K
-            parts = [p.strip() for p in shape_str.split("<br>") if p.strip()]
+        entries = [e for e in input_shapes if isinstance(e, dict) and e.get("shape")]
+
+        # Legacy format: one entry carries every tensor, "<br>"-joined. The tag
+        # is spelled several ways across TraceLens versions (<br>, <br/>, <BR/>).
+        matched_joined = False
+        for entry in entries:
+            parts = [p.strip() for p in _BR_SPLIT_RE.split(str(entry["shape"])) if p.strip()]
             if len(parts) < 2:
                 continue
-            # Tolerate whitespace after the comma ("(1024, 5120)") and any
-            # leading token before the tuple; TraceLens formats vary. .search()
-            # rather than .match() so a leading dtype/name does not defeat it.
-            dim_pattern = _re.compile(r"\((\d+)\s*,\s*(\d+)\)")
-            m0 = dim_pattern.search(parts[0])
-            m1 = dim_pattern.search(parts[1])
-            if not m0 or not m1:
-                continue
-            M = int(m0.group(1))
-            K = int(m0.group(2))
-            N = int(m1.group(1))
-            key = (M, N, K)
-            if key not in seen:
-                seen.add(key)
-                shapes.append({"M": M, "N": N, "K": K})
+            matched_joined = True
+            _record(_mnk(parts[0], parts[1]), int(entry.get("call_num") or 0))
+        if matched_joined or len(entries) < 2:
+            continue
 
-    if not shapes:
+        # Current format: one entry per tensor, so A and B are the first two.
+        weight = max(int(e.get("call_num") or 0) for e in entries[:2])
+        _record(_mnk(str(entries[0]["shape"]), str(entries[1]["shape"])), weight)
+
+    if not weights:
         return ""
+
+    # Most-called first; ties keep discovery order so output stays deterministic.
+    ranked = sorted(weights, key=lambda key: (-weights[key], order[key]))
+    shapes = [{"M": M, "N": N, "K": K} for M, N, K in ranked]
 
     out_path = cand_file.parent / "traced_gemm_shapes.json"
     try:
@@ -3046,6 +3156,7 @@ async def _run_forge_gemm_tuning(
             state,
             session_dir,
             require_fresh_profile=True,
+            precision=precision,
         )
         if not shapes_json:
             untuned_csv = _resolve_forge_untuned_csv(
@@ -3071,6 +3182,27 @@ async def _run_forge_gemm_tuning(
         tunableop_input=tunableop_input,
         dry_run=bool(payload.get("dry_run")),
     )
+    if block_fp8_profile_capture:
+        # Decode steps replay inside a CUDA Graph and therefore emit no Kineto
+        # *op* events, so every profile-derived block-FP8 shape set structurally
+        # carries prefill M only -- measured on a real capture, the decode-only
+        # trace split yields zero block-FP8 events while the prefill splits yield
+        # M=2095. Tuning that alone optimizes an operating point the workload
+        # barely uses. TraceLens candidates are built from the device kernel
+        # timeline, which does see through the graph and carries the decode M
+        # that dominates throughput, so prefer them. ``require_fresh_profile``
+        # keeps the vLLM rule that shapes must be workload-matched, and
+        # ``precision`` keeps BF16 heads out of an FP8 tuner's input.
+        traced_shapes = _resolve_forge_shapes(
+            state,
+            session_dir,
+            require_fresh_profile=True,
+            precision=precision,
+        )
+        if traced_shapes:
+            shapes_json = traced_shapes
+            untuned_csv = ""
+            block_fp8_profile_capture = False
     if block_fp8_profile_capture:
         shape_capture = _reuse_vllm_block_fp8_roofline_shapes(
             state,
@@ -3634,7 +3766,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
 
     framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
     gpu = str(payload.get("gpu") or "0").strip()
-    llm_model = str(payload.get("llm_model") or os.environ.get("CLAUDE_MODEL") or "claude-opus-4-6").strip()
+    llm_model = str(payload.get("llm_model") or os.environ.get("CLAUDE_MODEL") or "claude-opus-5").strip()
     max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
     timeout = _forge_fusion_timeout_sec(payload)
 
@@ -5576,6 +5708,15 @@ def _trace_kernel_attempt_usage(
         try:
             usage = parse_forge_usage(stdout_text)
             if not usage:
+                # No failure row is written here, deliberately. This is a
+                # post-hoc log scrape of an out-of-process child, and the child
+                # prints FORGE_LLM_USAGE only on success — so a missing marker
+                # cannot be told apart from "the child's LLM calls failed".
+                # The attempt dict carries only business outcomes (improved,
+                # best_ms), and synthesizing an LLM error from those is exactly
+                # the conflation that makes an error rate untrustworthy.
+                # Closing this gap needs the child (GEAK / KernelForge
+                # forge_submit) to emit a failure marker of its own.
                 continue
             record = LLMCallRecord(
                 session_id=session_dir.name,
@@ -6440,6 +6581,11 @@ async def integrate_handler(
             paired_pristine_revert if paired_pristine_revert is not None else _maybe_revert_kernel_patch(apply_result)
         )
     )
+    finalize_result = (
+        _maybe_finalize_kernel_patch(apply_result)
+        if decision == "KEEP"
+        else {"status": "skipped", "reason": "non-KEEP decision"}
+    )
 
     result: dict[str, Any] = {
         "status": "ok",
@@ -6456,6 +6602,7 @@ async def integrate_handler(
         "extra_envs": dict(payload.get("extra_envs") or {}),
         "apply_result": apply_result,
         "revert_result": revert_result,
+        "finalize_result": finalize_result,
         "rebuild_check": rebuild_check,
         "task_group_key": str(payload.get("task_group_key") or ""),
         "identity_route": str(payload.get("identity_route") or ""),

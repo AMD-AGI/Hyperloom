@@ -40,6 +40,8 @@ class SpecialistDomain:
             (e.g. ``M5`` or ``M6``). Defaults to ``"M6"``.
         description (str): Free-form description of the domain's responsibilities.
             Defaults to an empty string.
+        readonly (bool): When ``True`` the domain never authors patches;
+            ``resolve_specialist_profile`` will force ``mode='research'``.
     """
 
     key: str
@@ -47,6 +49,7 @@ class SpecialistDomain:
     kb_anchor: str
     available_in: str = "M6"
     description: str = ""
+    readonly: bool = False
 
 
 # Global allowlist of repos specialists may query via mcp__pr_monitor__*.
@@ -120,6 +123,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         layer="cross-repo PR research",
         kb_anchor="pr_intelligence",
         available_in="M6",
+        readonly=True,
         description=(
             "EXPLORE-phase per-gap PR top-up. Surveys PRs across known "
             "repos and feeds refs to other specialists. Dispatch sparingly "
@@ -131,6 +135,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         layer="proven-prior research / reference scripts / arch features",
         kb_anchor="research_scout",
         available_in="M5",
+        readonly=True,
         description=(
             "Read-only research collector dispatched at PRELUDE (and "
             "periodically during EXPLORE). Surveys reference launch "
@@ -146,6 +151,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         layer="framework source static reconnaissance / un-bridged switches",
         kb_anchor="static_recon",
         available_in="M6",
+        readonly=True,
         description=(
             "Read-only static-source reconnaissance dispatched at PRELUDE. "
             "Greps the framework source tree (vLLM / SGLang) for un-bridged "

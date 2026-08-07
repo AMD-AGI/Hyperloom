@@ -9,6 +9,7 @@ import time
 from typing import Any
 from ..phases import machine_state as _phase_state
 from ..roles.base import BackendTurnResult
+from ..roles.mcp_context_tools import CONTEXT_TOOL_NAMES as _CONTEXT_TOOL_NAMES
 from ..bus.message_bus import Message
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 
@@ -52,6 +53,16 @@ class ConversationCollaborator:
             except Exception:  # noqa: BLE001
                 log.exception("Coordinator: orchestration reset_conversation failed")
         self._coord._orchestration_seeded = False
+
+    def _count_prompt_mode(self, mode: str) -> None:
+        """Tally one orchestration prompt push as SEED or DELTA.
+
+        Args:
+            mode: ``"seed"`` or ``"delta"``.
+        """
+        census = dict(self.shared_state.orchestration_prompt_modes or {})
+        census[mode] = int(census.get(mode, 0)) + 1
+        self.shared_state.orchestration_prompt_modes = census
 
     def _conversation_progress_signal(self) -> dict[str, Any]:
         """Compute the no-progress circuit-breaker signal.
@@ -130,10 +141,28 @@ class ConversationCollaborator:
                 recent_outcomes_reader=self._context_recent_outcomes_reader,
                 running_tasks_reader=self._context_running_tasks_reader,
                 action_runner=self._run_action_now_sync,
+                reference_reader=self._context_reference_reader,
             )
             setter(provider)
         except Exception:  # noqa: BLE001 — context pull is best-effort
             log.exception("Coordinator: failed to attach orchestration context tools")
+
+    def _context_reference_reader(self, name: str = "") -> str:
+        """Resolve a reference doc by stem; reject path traversal."""
+        from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir
+
+        refs_dir = asset_prompt_references_dir()
+        stem = (name or "").strip()
+        if not stem or "/" in stem or "\\" in stem or stem.startswith("."):
+            available = sorted(p.stem for p in refs_dir.glob("*.md"))
+            return f"(read_reference: invalid name {name!r}; available: {available})"
+        candidate = (refs_dir / stem).with_suffix(".md").resolve()
+        if candidate.parent != refs_dir.resolve():
+            return f"(read_reference: path traversal rejected for {name!r})"
+        if not candidate.exists():
+            available = sorted(p.stem for p in refs_dir.glob("*.md"))
+            return f"(read_reference: {name!r} not found; available: {available})"
+        return candidate.read_text(encoding="utf-8")
 
     def _context_inbox_reader(self, since_seq: int = 0) -> str:
         """Synchronous projection of the orchestration inbox tail (sync SQLite path).
@@ -392,6 +421,7 @@ class ConversationCollaborator:
                     self._orchestration_seeded,
                     getattr(self.shared_state, "tick", 0),
                 )
+                self._count_prompt_mode("seed" if push_full else "delta")
 
         # On a full SEED push, inject recovered working memory.
         if (
@@ -403,6 +433,9 @@ class ConversationCollaborator:
             sections.append(self._orchestration_seed_memory)
 
         if agent_name == "orchestration":
+            # Refresh before any section renders it.
+            obj = self._current_objective
+            self.shared_state.target_gap_pct = obj.gap_pct(self.shared_state) if obj is not None else 0.0
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
             if push_full:
@@ -452,21 +485,11 @@ class ConversationCollaborator:
         if push_full:
             sections.append("=== Shared session state ===")
             sections.append(self.shared_state.to_prompt_summary())
-            # Capacities a needs_gpu dispatch is admitted against.
-            sections.append("=== Resource pools ===")
-            sections.append(self.shared_state.to_resource_pools_summary())
+            # Resource pools are orchestration-only; robustness cannot schedule GPU work.
+            if agent_name != "robustness":
+                sections.append("=== Resource pools ===")
+                sections.append(self.shared_state.to_resource_pools_summary())
         if agent_name == "orchestration":
-            # target_gap_pct is the gain still needed for --target-gain.
-            obj = getattr(self, "_current_objective", None)
-            obj_kind = getattr(obj, "kind", "") if obj is not None else ""
-            if obj_kind == "gain_pct":
-                target_val = float(getattr(obj, "value", 0.0) or 0.0)
-                self.shared_state.target_gap_pct = max(
-                    0.0,
-                    target_val - float(self.shared_state.cumulative_gain or 0.0),
-                )
-            else:
-                self.shared_state.target_gap_pct = 0.0
             # Advisory/ledger blocks below are part of the full SEED push only.
             if push_full:
                 denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
@@ -582,16 +605,15 @@ class ConversationCollaborator:
 
         # Conversational DELTA turn: tell the agent verbose state was not re-pushed + how to pull it.
         if agent_name == "orchestration" and not push_full:
+            tool_list = ", ".join(_CONTEXT_TOOL_NAMES)
             sections.append("=== Context (pull on demand) ===")
             sections.append(
                 "This is a continuation of our ongoing conversation; the "
                 "full session state was NOT re-pasted. The Phase, Mission "
                 "progress, Time budget, and new inbox events above are the "
                 "delta since your last turn. Pull anything else you need "
-                "with the read-only context tools: get_shared_state, "
-                "get_gaps, get_warm_start, get_proposal_scores, "
-                "get_intervention_mix, why_denied, show_analysis_md, "
-                "get_inbox, get_recent_outcomes, get_running_tasks. Reason "
+                f"with the read-only context tools: {tool_list} "
+                "(and `Read` for sandboxed files). Reason "
                 "from your own running plan; do not re-derive it from scratch."
             )
 
@@ -714,13 +736,16 @@ class ConversationCollaborator:
             agent_name: Name of the agent/role whose prompt to load.
 
         Returns:
-            The override prompt if configured, the role's prompt file
-            contents, or a placeholder string when none exists.
+            The override prompt if configured, ``""`` for roles that are not
+            prompt-driven, the role's prompt file contents, or a placeholder
+            string when the file is missing.
         """
         override = getattr(self, "system_prompt_overrides", {}).get(agent_name)
         if override is not None:
             return override
         role = self.role_registry[agent_name]
+        if not role.prompt_driven:
+            return ""
         try:
             return role.load_system_prompt()
         except FileNotFoundError:

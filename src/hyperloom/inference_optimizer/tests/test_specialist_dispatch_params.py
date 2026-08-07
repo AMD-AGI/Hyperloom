@@ -711,3 +711,39 @@ def test_bench_specialist_no_serving_tp_defaults_to_whole_machine(orchestration_
             }
         ),
     )
+
+
+# --------------------------------------------------------------------------- #
+# readonly param + domain.readonly → mode=research, lane=cpu
+# --------------------------------------------------------------------------- #
+def test_readonly_param_forces_research_mode():
+    """params['readonly']=True must override any mode/lane dial."""
+    profile = resolve_specialist_profile({"readonly": True, "domain": "serving_specialist"})
+    assert profile.mode == MODE_RESEARCH
+    assert profile.lane == LANE_CPU
+    assert profile.bench is False
+
+
+def test_readonly_domain_flag_forces_research_mode():
+    """Domains marked readonly=True yield mode=research even without the param."""
+    from hyperloom.orchestrator.specialists.domains import get_domain
+
+    for key in ("research_scout_specialist", "static_recon_specialist", "pr_intel_specialist"):
+        domain = get_domain(key)
+        assert domain is not None
+        assert domain.readonly is True
+        profile = resolve_specialist_profile({"domain": key}, domain=domain)
+        assert profile.mode == MODE_RESEARCH, f"{key} should resolve to research mode"
+        assert profile.lane == LANE_CPU, f"{key} should resolve to cpu lane"
+
+
+def test_patch_capable_domains_unaffected_by_readonly_flag():
+    """Patch-capable domains must NOT be marked readonly."""
+    from hyperloom.orchestrator.specialists.domains import get_domain
+
+    for key in ("serving_specialist", "kernel_switch_specialist", "comm_specialist"):
+        domain = get_domain(key)
+        assert domain is not None
+        assert domain.readonly is False
+        profile = resolve_specialist_profile({"domain": key}, domain=domain)
+        assert profile.mode == MODE_PATCH
