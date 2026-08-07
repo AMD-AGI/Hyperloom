@@ -17,7 +17,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
+from hyperloom.common.llm_config import (
+    ANTHROPIC_SYNTHESIZABLE_KEY_ENVS,
+    CLAUDE_OAUTH_TOKEN_ENV,
+    has_anthropic_credential,
+)
 
 log = logging.getLogger(__name__)
 
@@ -205,11 +209,8 @@ def _has_claude_oauth_token() -> bool:
 
 
 def _has_explicit_anthropic_key() -> bool:
-    return bool(
-        os.environ.get("ANTHROPIC_API_KEY")
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-        or _has_claude_oauth_token()
-    )
+    """True for any credential form in ``ANTHROPIC_CREDENTIAL_ENV_ORDER``."""
+    return has_anthropic_credential()
 
 
 def _has_explicit_deepseek_key() -> bool:
@@ -330,12 +331,9 @@ def _reject_cross_provider_pairing() -> None:
     openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     oauth_token = os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip()
-    anthropic_key = (
-        os.environ.get("ANTHROPIC_API_KEY", "").strip()
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
-        or deepseek_key
-        or oauth_token
-    )
+    # DeepSeek's key also authenticates the Anthropic-compatible side, so it
+    # joins the credential tuple here rather than replacing it.
+    anthropic_key = has_anthropic_credential() or bool(deepseek_key)
     # DeepSeek serves its own Anthropic-compatible endpoint, so its key carries an
     # implied base URL. A subscription OAuth token likewise only validates against
     # Anthropic itself, so it implies the official endpoint.
@@ -399,7 +397,7 @@ def _warn_on_shadowed_oauth_token() -> None:
     """
     if not _has_claude_oauth_token():
         return
-    shadowing = [name for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN") if os.environ.get(name, "").strip()]
+    shadowing = [name for name in ANTHROPIC_SYNTHESIZABLE_KEY_ENVS if os.environ.get(name, "").strip()]
     if not shadowing:
         return
     print(
@@ -424,12 +422,7 @@ def _validate_credentials() -> None:
     _reject_cross_provider_pairing()
     _warn_on_shadowed_oauth_token()
     anthropic_url, openai_url = _resolve_llm_endpoints()
-    has_anthropic_side = bool(
-        os.environ.get("ANTHROPIC_API_KEY")
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-        or os.environ.get("DEEPSEEK_API_KEY")
-        or _has_claude_oauth_token()
-    )
+    has_anthropic_side = has_anthropic_credential() or bool(os.environ.get("DEEPSEEK_API_KEY"))
     has_key = bool(os.environ.get("OPENAI_API_KEY") or has_anthropic_side)
     has_usable_endpoint = bool(
         (anthropic_url and has_anthropic_side) or (openai_url and os.environ.get("OPENAI_API_KEY"))
