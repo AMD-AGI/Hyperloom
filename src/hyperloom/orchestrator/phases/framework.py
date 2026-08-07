@@ -3115,17 +3115,20 @@ class FrameworkPhase(PhaseHandler):
         primary_repo_url = _fa_client.repo_url_for_framework(framework)
         _add(primary_repo_url)
 
-        # Serving/infra PRs cannot be git-applied to scriptable model repos.
-        # If a scriptable framework has no repo map yet, keep the old fallback.
-        if not (primary_repo_url and framework_registry.is_scriptable(framework)):
+        # Serving/infra PRs cannot be git-applied to scriptable model repos, so
+        # a scriptable session queries its own repo and nothing else. Scoping on
+        # scriptability alone is deliberate: keying it on also having a repo URL
+        # excluded the case that needs it most, since an operator-supplied
+        # workload has no upstream repo by construction and so inherited the
+        # whole serving allowlist. It queries nothing now rather than everything.
+        if not framework_registry.is_scriptable(framework):
             for repo in PR_QUERY_REPOS:
                 repo = str(repo or "").strip()
                 if repo and "/" in repo:
                     _add(f"https://github.com/{repo}.git")
-
-        if not urls:
-            # Last-ditch: let phase_discover resolve from framework itself.
-            _add(_fa_client.repo_url_for_framework(framework or "sglang"))
+            if not urls:
+                # Last-ditch: let phase_discover resolve from framework itself.
+                _add(_fa_client.repo_url_for_framework(framework or "sglang"))
         return urls
 
     @staticmethod
