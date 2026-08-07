@@ -1180,6 +1180,13 @@ def test_catalog_probe_retries_the_other_side_only_when_a_route_is_missing(monke
     The Anthropic side answers 404 for /models, which is the sentinel rather
     than None -- so the candidate loop has to keep going on the sentinel, or the
     catalog is never read and every model stays unverified until the first call.
+
+    Both halves of the stub mirror what api.deepseek.com actually answers:
+    /anthropic/models is a 404 and /v1/models lists exactly deepseek-v4-pro and
+    deepseek-v4-flash. That correspondence is what makes reading the catalog an
+    improvement rather than a regression -- the default model has to be in the
+    ids the gateway really serves, or resolution below exits 2 on the miss
+    instead of proceeding on the old "no /models route" warning.
     """
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
