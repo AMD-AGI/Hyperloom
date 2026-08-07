@@ -763,6 +763,47 @@ def _find_hyperloom_auto_stash(framework_root: Path) -> str:
     return ""
 
 
+def _git_unmerged_paths(framework_root: Path) -> list[str]:
+    """Return repo-relative paths left in an unresolved merge state, if any."""
+    cp = _run_git_cp(["-C", str(framework_root), "ls-files", "-u", "--full-name"], timeout=30.0)
+    if cp is None or cp.returncode != 0:
+        return []
+    seen: list[str] = []
+    for line in (cp.stdout or "").splitlines():
+        _meta, _sep, path = line.partition("\t")
+        path = path.strip()
+        if path and path not in seen:
+            seen.append(path)
+    return seen
+
+
+def _git_restore_to_head(framework_root: Path, paths: list[str] | None = None) -> tuple[bool, str]:
+    """Force ``paths`` (or the whole tree) back to HEAD, clearing any merge state.
+
+    Every KEEP is committed, so HEAD is the accepted stack: restoring to it drops
+    candidate work and keeps everything the loop has accepted.
+
+    Args:
+        framework_root (Path): The git checkout to restore.
+        paths (list[str] | None): Repo-relative paths, or ``None`` for the tree.
+
+    Returns:
+        tuple[bool, str]: ``(ok, stderr)``.
+    """
+    target = paths if paths else ["."]
+    # `checkout --force HEAD --` resolves an unmerged index, which plain
+    # `checkout -- .` refuses to touch.
+    cp = _run_git_cp(
+        ["-C", str(framework_root), "checkout", "--force", "HEAD", "--", *target],
+        timeout=60.0,
+    )
+    if cp is None:
+        return False, "git checkout spawn failed"
+    if cp.returncode != 0:
+        return False, (cp.stderr or "").strip()
+    return True, ""
+
+
 def _git_stash_if_dirty(framework_root: Path) -> tuple[str, str]:
     """Stash uncommitted user changes so destructive resets don't lose them.
 
@@ -792,6 +833,27 @@ def _git_stash_if_dirty(framework_root: Path) -> tuple[str, str]:
         return "clean", ""
     if not cp.stdout.strip():
         return "clean", ""
+    # An unresolved merge is wreckage from an earlier cycle, not user state:
+    # git refuses to stash while it stands, so every later candidate would abort
+    # here forever. Restore those paths to HEAD and carry on.
+    unmerged = _git_unmerged_paths(framework_root)
+    if unmerged:
+        ok, err = _git_restore_to_head(framework_root, unmerged)
+        log.warning(
+            "integrate_patch: %s had %d path(s) left in an unresolved merge by an "
+            "earlier cycle (%s); restored to HEAD%s",
+            framework_root,
+            len(unmerged),
+            ", ".join(unmerged[:5]),
+            "" if ok else f" FAILED: {err}",
+        )
+        if not ok:
+            return "failed", f"unresolved merge could not be restored: {err}"
+        cp = _run_git_cp(["-C", str(framework_root), "status", "--porcelain"], timeout=30.0)
+        if cp is None:
+            return "failed", "git status check failed"
+        if not cp.stdout.strip():
+            return "clean", ""
     cp2 = _run_git_cp(
         ["-C", str(framework_root), "stash", "push", "-u", "-m", _HYPERLOOM_AUTO_STASH_MSG],
         timeout=60.0,
@@ -826,7 +888,26 @@ def _git_restore_stash_if_needed(
     if cp.returncode == 0:
         log.info("integrate_patch: restored user changes from %s", ref)
         return ""
-    return f"git stash pop {ref} rc={cp.returncode}: {(cp.stderr or '').strip()}; user changes remain in git stash"
+    # A pop that cannot merge leaves conflict markers in source. Left there they
+    # break every later measurement silently -- the benchmark fails to parse the
+    # file, and git will not stash again while the merge is unresolved. Put the
+    # tree back at HEAD instead; the stash is deliberately NOT dropped, so the
+    # work is still there under `git stash list`.
+    detail = (cp.stderr or "").strip()
+    unmerged = _git_unmerged_paths(framework_root)
+    if unmerged:
+        ok, err = _git_restore_to_head(framework_root, unmerged)
+        log.warning(
+            "integrate_patch: %s did not merge back into %s; restored %d path(s) to "
+            "HEAD and kept the stash%s",
+            ref,
+            framework_root,
+            len(unmerged),
+            "" if ok else f" (restore FAILED: {err})",
+        )
+        if not ok:
+            detail = f"{detail}; tree left conflicted: {err}"
+    return f"git stash pop {ref} rc={cp.returncode}: {detail}; user changes remain in git stash"
 
 
 def _with_stash_restore(
@@ -846,10 +927,11 @@ def _with_stash_restore(
 
 
 def _git_checkout_clean(framework_root: Path) -> tuple[bool, str]:
-    """``git checkout -- .`` + ``git clean -fd`` to discard candidate changes.
+    """Restore the working tree to HEAD and remove untracked candidate files.
 
-    Last-resort REVERT path when individual reverse-apply fails. User changes
-    must already have been stashed before candidate apply.
+    This is the REVERT: HEAD is the accepted stack because every KEEP is
+    committed, so what this discards is exactly the candidate. User changes must
+    already have been stashed before the candidate was applied.
 
     Args:
         framework_root (Path): Directory to run ``git checkout`` in.
@@ -858,11 +940,9 @@ def _git_checkout_clean(framework_root: Path) -> tuple[bool, str]:
         tuple[bool, str]: ``(ok, stderr)`` where ``ok`` is ``True`` on
         return code 0.
     """
-    cp = _run_git_cp(["-C", str(framework_root), "checkout", "--", "."], timeout=60.0)
-    if cp is None:
-        return False, "git checkout spawn failed"
-    if cp.returncode != 0:
-        return False, cp.stderr.strip()
+    ok, err = _git_restore_to_head(framework_root)
+    if not ok:
+        return False, err
     cp2 = _run_git_cp(["-C", str(framework_root), "clean", "-fd"], timeout=60.0)
     if cp2 is None:
         return False, "git clean spawn failed"
@@ -3596,25 +3676,34 @@ class IntegratePatchExecutor:
         if nogit_backups is not None and not _is_git_tree(framework_root):
             _revert_patches_no_git(nogit_backups)
             return list(applied)
+        # Restoring to HEAD is the revert, not a fallback for one. Every KEEP is
+        # committed, so HEAD is exactly the accepted stack: kept work is in
+        # commits and survives, candidate work is uncommitted and goes. User
+        # state was stashed before the apply.
+        #
+        # Reverse-applying each diff was the old primary path and is where the
+        # residue came from: a forward apply that used fuzz or a guessed -p level
+        # reverses to something a few lines off HEAD, `git apply -R` still
+        # reports success, and what is left behind gets banked as user state by
+        # the next candidate's auto-stash.
+        ok, err = _git_checkout_clean(framework_root)
+        if ok:
+            return list(applied)
+        log.error(
+            "integrate_patch: could not restore %s to HEAD (%s); falling back to reverse-apply",
+            framework_root,
+            err,
+        )
         # Reverse order so dependent patches unstick correctly.
         for patch in reversed(applied):
-            ok, err = _git_apply_reverse(framework_root, patch)
-            if ok:
+            ok_rev, err_rev = _git_apply_reverse(framework_root, patch)
+            if ok_rev:
                 reverted.append(patch)
             else:
                 log.warning(
-                    "integrate_patch: git apply -R failed for %s: %s; falling back to git checkout",
+                    "integrate_patch: git apply -R failed for %s: %s",
                     patch,
-                    err,
-                )
-                # Reverse-apply failed: checkout clears all uncommitted at once.
-                ok2, err2 = _git_checkout_clean(framework_root)
-                if ok2:
-                    reverted = list(applied)
-                    break
-                log.error(
-                    "integrate_patch: git checkout fallback failed: %s",
-                    err2,
+                    err_rev,
                 )
                 break
         return reverted
