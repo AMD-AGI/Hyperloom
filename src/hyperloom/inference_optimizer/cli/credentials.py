@@ -386,7 +386,10 @@ def _validate_credentials() -> None:
         "     Official provider keys may omit the matching *_BASE_URL.\n"
         "     A dual-protocol gateway such as DeepSeek is exactly this shape:\n"
         "       export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic  ANTHROPIC_API_KEY=sk-xxx\n"
-        "       export OPENAI_BASE_URL=https://api.deepseek.com/v1            OPENAI_API_KEY=sk-xxx",
+        "       export OPENAI_BASE_URL=https://api.deepseek.com/v1            OPENAI_API_KEY=sk-xxx\n"
+        "     A gateway serving only its own models also needs the model ids;\n"
+        "     known hosts default themselves, otherwise set CLAUDE_MODEL (the\n"
+        "     Anthropic side) and CODEX_MODEL (the OpenAI side) yourself.",
         file=sys.stderr,
     )
     sys.exit(2)

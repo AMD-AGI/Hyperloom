@@ -65,6 +65,11 @@ _DEEPSEEK_MODEL = "deepseek-v4-pro"
 # convention (``/Unified/v1``) does not exist on them.
 _DUAL_PROTOCOL_HOSTS: frozenset[str] = frozenset({"api.deepseek.com"})
 
+# Gateways that serve only their own models. Without a default the run would
+# ask them for an AMD Claude / OpenAI id and fail on the first LLM call, since
+# their catalog cannot be probed for a model the host does not have.
+_HOST_DEFAULT_MODELS: dict[str, str] = {"api.deepseek.com": _DEEPSEEK_MODEL}
+
 # The retired variables are Anthropic-side shaped, so they are adopted only
 # when that whole side is empty -- and then for BOTH protocols, since they
 # describe one gateway. Adopting them piecemeal next to an existing Anthropic
@@ -171,6 +176,50 @@ def deepseek_compat_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     return {key: value for key, value in candidates.items() if value and not (source.get(key) or "").strip()}
 
 
+def endpoint_default_model(base_url: str | None) -> str:
+    """Return the model a known gateway host serves, or ``""`` for anything else."""
+    if not base_url:
+        return ""
+    return _HOST_DEFAULT_MODELS.get(urlsplit(str(base_url).strip()).hostname or "", "")
+
+
+def provider_model_defaults(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return the model variables implied by the configured endpoints.
+
+    A gateway serving only its own models (DeepSeek) has to supply the model
+    ids too: the AMD Claude / OpenAI defaults would be sent verbatim and fail on
+    the first call, and its catalog cannot confirm a model it does not host.
+    Retired ``DEEPSEEK_*`` config is normalized first so both spellings resolve
+    identically.
+
+    Only keys absent from ``env`` are returned, so an explicit operator model
+    always wins. ``GEAK_CLAUDE_MODEL`` follows the Anthropic-side model, since
+    GEAKv4 drives Claude Code over that side.
+
+    Args:
+        env: Environment mapping to read; defaults to ``os.environ``.
+
+    Returns:
+        The ``CLAUDE_MODEL`` / ``CODEX_MODEL`` / ``GEAK_CLAUDE_MODEL`` updates to
+        apply, empty when the endpoints imply nothing.
+    """
+    source = env if env is not None else os.environ
+    resolved = dict(source)
+    resolved.update(deepseek_compat_env(resolved))
+    claude_model = (resolved.get("CLAUDE_MODEL") or "").strip() or endpoint_default_model(
+        resolved.get("ANTHROPIC_BASE_URL")
+    )
+    codex_model = (resolved.get("CODEX_MODEL") or "").strip() or endpoint_default_model(
+        resolved.get("OPENAI_BASE_URL")
+    )
+    candidates = {
+        "CLAUDE_MODEL": claude_model,
+        "CODEX_MODEL": codex_model,
+        "GEAK_CLAUDE_MODEL": (resolved.get("GEAK_CLAUDE_MODEL") or "").strip() or claude_model,
+    }
+    return {key: value for key, value in candidates.items() if value and not (source.get(key) or "").strip()}
+
+
 def _expand_env_refs(raw: str, env: Mapping[str, str] | None = None) -> str:
     source = env if env is not None else os.environ
 
@@ -220,18 +269,12 @@ def derive_openai_base_url(anthropic_base_url: str | None) -> str | None:
     The trailing path segment is matched case-insensitively so a capitalized
     ``/Anthropic`` (AMD's default) is still recognized. Unknown Anthropic URLs
     fall back to their original value.
-
-    Hosts in :data:`_DUAL_PROTOCOL_HOSTS` serve plain ``/v1`` instead and have
-    no ``/Unified`` route, so they are resolved before the AMD convention is
-    applied — otherwise a DeepSeek Anthropic endpoint would derive a 404.
     """
     if not anthropic_base_url:
         return None
     base = anthropic_base_url.strip().rstrip("/")
     if not base:
         return None
-    if _is_dual_protocol_host(base):
-        return dual_protocol_endpoint_pair(base)[1]
     parts = urlsplit(base)
     path = parts.path.rstrip("/")
     # Match case-insensitively: AMD's default endpoint uses "/Anthropic" (issue #929).
@@ -389,6 +432,8 @@ __all__ = [
     "deepseek_compat_env",
     "derive_openai_base_url",
     "dual_protocol_endpoint_pair",
+    "endpoint_default_model",
+    "provider_model_defaults",
     "openai_client_kwargs",
     "parse_custom_headers",
     "resolve_openai_client_config",

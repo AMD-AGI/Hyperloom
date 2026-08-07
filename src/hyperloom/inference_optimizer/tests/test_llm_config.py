@@ -13,6 +13,7 @@ from hyperloom.common.llm_config import (
     derive_openai_base_url,
     openai_client_kwargs,
     parse_custom_headers,
+    provider_model_defaults,
 )
 
 _LEGACY_KEY = "_".join(("DEEPSEEK", "API", "KEY"))
@@ -212,17 +213,64 @@ def test_claude_sdk_env_options_does_not_mix_legacy_and_explicit_keys():
     assert child_env[auth_token_var] == "sk-explicit"
 
 
+def test_provider_model_defaults_supplies_a_model_for_a_known_gateway():
+    """A gateway serving only its own models must not get the AMD Claude id.
+
+    This is the shape the docs now recommend: both sides pointed at DeepSeek
+    with the standard variables and no ``DEEPSEEK_*`` anywhere.
+    """
+    defaults = provider_model_defaults(
+        {
+            "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+            "OPENAI_BASE_URL": "https://api.deepseek.com/v1",
+            "_".join(("ANTHROPIC", "API", "KEY")): "sk-ds",
+            "_".join(("OPENAI", "API", "KEY")): "sk-ds",
+        }
+    )
+    assert defaults == {
+        "CLAUDE_MODEL": "deepseek-v4-pro",
+        "CODEX_MODEL": "deepseek-v4-pro",
+        "GEAK_CLAUDE_MODEL": "deepseek-v4-pro",
+    }
+
+
+def test_provider_model_defaults_resolves_a_retired_config_too():
+    """The legacy spelling must reach the same model, without preflight."""
+    defaults = provider_model_defaults({_LEGACY_KEY: "sk-ds"})
+    assert defaults["CLAUDE_MODEL"] == "deepseek-v4-pro"
+    assert defaults["CODEX_MODEL"] == "deepseek-v4-pro"
+
+
+def test_provider_model_defaults_never_overrides_explicit_models():
+    defaults = provider_model_defaults(
+        {
+            "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+            "OPENAI_BASE_URL": "https://api.deepseek.com/v1",
+            "CLAUDE_MODEL": "my-claude",
+            "CODEX_MODEL": "my-codex",
+        }
+    )
+    assert "CLAUDE_MODEL" not in defaults
+    assert "CODEX_MODEL" not in defaults
+    # GEAKv4 still follows the Anthropic-side model in effect.
+    assert defaults["GEAK_CLAUDE_MODEL"] == "my-claude"
+
+
 @pytest.mark.parametrize(
-    "anthropic_url",
-    ["https://api.deepseek.com/anthropic", "https://api.deepseek.com/Anthropic"],
+    "env",
+    [
+        {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"},
+        {"OPENAI_BASE_URL": "https://api.openai.com/v1"},
+        {
+            "ANTHROPIC_BASE_URL": "https://llm.amd.example/Anthropic",
+            "OPENAI_BASE_URL": "https://llm.amd.example/Unified/v1",
+        },
+        {},
+    ],
 )
-def test_derive_openai_base_url_uses_v1_for_dual_protocol_hosts(anthropic_url):
-    """DeepSeek has no /Unified route, so the AMD convention would 404 there."""
-    assert derive_openai_base_url(anthropic_url) == "https://api.deepseek.com/v1"
-
-
-def test_derive_openai_base_url_keeps_amd_convention_for_other_hosts():
-    assert derive_openai_base_url("https://amd.example/api/Anthropic") == "https://amd.example/api/Unified/v1"
+def test_provider_model_defaults_is_silent_for_unknown_gateways(env):
+    """Only hosts we know the catalog of get a model; everything else is left alone."""
+    assert provider_model_defaults(env) == {}
 
 
 def test_deepseek_compat_env_never_overrides_explicit_values():

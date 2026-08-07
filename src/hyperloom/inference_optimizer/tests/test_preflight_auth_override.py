@@ -1619,24 +1619,60 @@ def test_parser_dual_protocol_gateway_empty_codex_model_uses_gateway_model(monke
 
 
 def test_parser_retired_deepseek_key_only_defaults_to_gateway_model(monkeypatch):
-    """A key-only legacy config must not inherit the Claude Opus / GPT defaults."""
-    monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
-    monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
-    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("CLAUDE_MODEL", raising=False)
-    monkeypatch.delenv("CODEX_MODEL", raising=False)
+    """A key-only legacy config must not inherit the Claude Opus / GPT defaults.
 
-    updates = deepseek_compat_env()
-    for key, value in updates.items():
-        monkeypatch.setenv(key, value)
+    The parser runs BEFORE ``_preflight`` normalizes the environment, so it has
+    to resolve this on its own -- relying on preflight to export CLAUDE_MODEL
+    would leave ``args.claude_model`` on the AMD default.
+    """
+    monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
+    for name in ("DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL",
+                 "CLAUDE_MODEL", "CODEX_MODEL", "INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX"):
+        monkeypatch.delenv(name, raising=False)
+
     args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
 
-    assert updates["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
-    assert updates["OPENAI_BASE_URL"] == "https://api.deepseek.com/v1"
     assert args.claude_model == "deepseek-v4-pro"
     assert args.codex_model == "deepseek-v4-pro"
+
+
+def test_parser_standard_dual_protocol_config_defaults_to_gateway_model(monkeypatch):
+    """The configuration the docs recommend resolves its own models.
+
+    Without this both sides would be handed ``claude-opus-5`` / ``gpt-5.6-sol``
+    and fail on the first call, since DeepSeek serves neither.
+    """
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "sk-deepseek")
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "sk-deepseek")
+    for name in ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "CLAUDE_MODEL", "CODEX_MODEL",
+                 "INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX"):
+        monkeypatch.delenv(name, raising=False)
+
+    args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
+
+    assert args.claude_model == "deepseek-v4-pro"
+    assert args.codex_model == "deepseek-v4-pro"
+
+
+@pytest.mark.parametrize(
+    ("anthropic_url", "openai_url", "expected"),
+    [
+        ("https://api.deepseek.com/anthropic", "https://api.deepseek.com/v1", True),
+        ("https://gw.example/x", "https://gw.example/x", True),
+        ("https://llm.amd.example/Anthropic", "https://llm.amd.example/Unified/v1", True),
+        ("https://api.anthropic.com", "https://api.openai.com/v1", False),
+        ("", "https://api.openai.com/v1", False),
+    ],
+)
+def test_same_gateway_recognizes_one_host_serving_both_protocols(anthropic_url, openai_url, expected):
+    """The catalog probe may retry the OpenAI side only within one gateway.
+
+    A dual-protocol gateway lists its models on the OpenAI side only, so a
+    string-equality check would leave its catalog permanently unreadable.
+    """
+    assert cli._same_gateway(anthropic_url, openai_url) is expected
 
 
 def test_parser_anthropic_only_generated_codex_default_uses_claude_model(monkeypatch):

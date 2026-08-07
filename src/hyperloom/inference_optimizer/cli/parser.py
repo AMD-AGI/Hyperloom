@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from .. import framework_registry
+from hyperloom.common.llm_config import provider_model_defaults
 from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
@@ -150,12 +151,20 @@ def _positive_int_arg(value: str) -> int:
 
 
 def _default_claude_model_env() -> str:
-    """Resolve the default Claude model from env."""
+    """Resolve the default Claude model from env.
+
+    Runs before ``_preflight`` normalizes the environment, so it consults
+    :func:`provider_model_defaults` itself: a gateway that only serves its own
+    models must not be handed the AMD Claude default.
+    """
     explicit = (os.environ.get("CLAUDE_MODEL") or "").strip()
     if explicit:
         return explicit
     if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
         return (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
+    gateway_model = provider_model_defaults().get("CLAUDE_MODEL", "")
+    if gateway_model:
+        return gateway_model
     openai_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
     anthropic_url = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
     if openai_url and not anthropic_url:
@@ -179,6 +188,9 @@ def _default_codex_model_env() -> str:
     explicit = (os.environ.get("CODEX_MODEL") or "").strip()
     if explicit:
         return explicit
+    gateway_model = provider_model_defaults().get("CODEX_MODEL", "")
+    if gateway_model:
+        return gateway_model
     return DEFAULT_CODEX_MODEL
 
 

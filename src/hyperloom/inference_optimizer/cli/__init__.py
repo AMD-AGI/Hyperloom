@@ -590,6 +590,22 @@ def _catalog_compare_model_id(model_id: str) -> str:
     return lowered
 
 
+def _same_gateway(anthropic_url: str, openai_url: str) -> bool:
+    """True when both protocol sides are served by one gateway.
+
+    Either the same URL, or the same host with a different path per protocol
+    (``/anthropic`` vs ``/v1``) — the shape the installers call a dual-protocol
+    gateway.
+    """
+    if not anthropic_url or not openai_url:
+        return False
+    if anthropic_url == openai_url:
+        return True
+    from urllib.parse import urlsplit
+
+    return urlsplit(anthropic_url).netloc == urlsplit(openai_url).netloc
+
+
 def _codex_model_should_follow_claude() -> bool:
     """True when the operator supplied only Anthropic config."""
     has_anthropic = bool(
@@ -735,8 +751,11 @@ def _validate_and_resolve_claude_model(
         # OpenAI-side key only.
         openai_key = os.environ.get("OPENAI_API_KEY", "")
         # The Claude catalog must come from the Anthropic side. Fall back to the
-        # OpenAI side only for a single-gateway deploy where both sides resolve
-        # to the same endpoint.
+        # OpenAI side only when both sides are the same gateway: identical URLs,
+        # or one host serving each protocol on its own path. A dual-protocol
+        # gateway lists its models on the OpenAI side only, so without that
+        # second candidate the catalog can never be read and every model would
+        # go unverified until the first LLM call.
         candidates: list[tuple[str, str]] = []
         if _claude_model_should_follow_codex():
             if openai_url:
@@ -746,8 +765,7 @@ def _validate_and_resolve_claude_model(
         else:
             if anthropic_url:
                 candidates.append((anthropic_url, anthropic_key))
-            if openai_url and openai_url == anthropic_url:
-                # single gateway: same URL serves both; OpenAI key is a valid retry
+            if openai_url and anthropic_url and _same_gateway(anthropic_url, openai_url):
                 candidates.append((openai_url, openai_key))
             elif openai_url and not anthropic_url:
                 # pure single-gateway with only OPENAI_BASE_URL configured
