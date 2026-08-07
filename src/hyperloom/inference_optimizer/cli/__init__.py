@@ -752,13 +752,13 @@ def _validate_and_resolve_claude_model(
             elif anthropic_url:
                 candidates.append((anthropic_url, anthropic_key))
         else:
-            if anthropic_url:
+            # A keyless Anthropic candidate can only fail — a subscription token
+            # is not a catalog credential — so it must not consume the one probe
+            # slot and leave a configured OpenAI gateway unverified.
+            if anthropic_url and anthropic_key:
                 candidates.append((anthropic_url, anthropic_key))
-            if openai_url and openai_url == anthropic_url:
-                # single gateway: same URL serves both; OpenAI key is a valid retry
-                candidates.append((openai_url, openai_key))
-            elif openai_url and not anthropic_url:
-                # pure single-gateway with only OPENAI_BASE_URL configured
+            if openai_url and (openai_url == anthropic_url or not candidates):
+                # Single gateway serving both sides, or the only side left.
                 candidates.append((openai_url, openai_key))
         seen_urls: set[str] = set()
         for cand_url, cand_key in candidates:

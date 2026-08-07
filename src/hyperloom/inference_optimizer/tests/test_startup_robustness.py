@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import time
@@ -148,6 +149,28 @@ def test_validate_credentials_warns_when_api_key_shadows_oauth(clean_creds_env, 
     assert "WARNING" in err
     assert _OAUTH_ENV in err
     assert "_".join(("ANTHROPIC", "API", "KEY")) in err
+
+
+def test_validate_credentials_warns_when_oauth_widens_an_openai_only_deploy(clean_creds_env, capsys):
+    """A stray token silently moves orchestration off the configured gateway."""
+    clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "ak-openai")
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    cli_credentials._validate_credentials()
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "OPENAI_BASE_URL" in err
+
+
+def test_validate_credentials_does_not_warn_when_anthropic_side_was_intended(clean_creds_env, capsys):
+    """An explicit Anthropic key means the dual-sided shape was deliberate."""
+    clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "sk-ant-api")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "ak-openai")
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    cli_credentials._validate_credentials()
+    assert "orchestration runs on the Claude subscription" not in capsys.readouterr().err
 
 
 def test_validate_credentials_oauth_only_is_not_warned_about(clean_creds_env, capsys):
@@ -410,6 +433,45 @@ def test_resolve_llm_endpoints_neither_set_returns_empty(clean_creds_env):
     anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
     assert anthropic_url == ""
     assert openai_url == ""
+
+
+# _validate_and_resolve_claude_model catalog candidates
+def _record_probed_urls(monkeypatch, catalog: set[str]) -> list[str]:
+    probed: list[str] = []
+
+    def fake_probe(*, base_url: str, api_key: str):
+        probed.append(base_url)
+        return catalog if api_key else None
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", fake_probe)
+    return probed
+
+
+def test_catalog_probe_skips_keyless_anthropic_side_and_uses_the_gateway(clean_creds_env):
+    """A stray subscription token must not cost the gateway its verification."""
+    clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "ak-openai")
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    probed = _record_probed_urls(clean_creds_env, {"claude-opus-5"})
+    args = argparse.Namespace(claude_model="claude-opus-5")
+
+    cli._validate_and_resolve_claude_model(args, ("https://api.anthropic.com", "https://gw.example.com/v1"))
+
+    assert probed == ["https://gw.example.com/v1"]
+
+
+def test_catalog_probe_keeps_anthropic_side_when_it_has_its_own_key(clean_creds_env):
+    """A keyed Anthropic side still owns the Claude catalog, gateway untouched."""
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "sk-ant-api")
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "ak-openai")
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    probed = _record_probed_urls(clean_creds_env, {"claude-opus-5"})
+    args = argparse.Namespace(claude_model="claude-opus-5")
+
+    cli._validate_and_resolve_claude_model(args, ("https://api.anthropic.com", "https://gw.example.com/v1"))
+
+    assert probed == ["https://api.anthropic.com"]
 
 
 # _resolve_gpu_type
