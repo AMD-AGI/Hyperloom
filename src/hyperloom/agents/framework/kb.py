@@ -17,26 +17,39 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from .models import Finding
 
+_log = logging.getLogger(__name__)
+
 
 # Per-framework KB partition root under ``<KB_ROOT>/framework_optimization/``.
 _FRAMEWORK_OPTIMIZATION_ROOT: str = "framework_optimization"
 
-#: The supported override for the mutable KB root. Both this module and
-#: ``kb_writeback`` honour it, and it is the only KB variable the dotenv
-#: allowlist in ``common/env_safety`` lets through preflight.
+#: The only supported override for the mutable KB root; both this module and
+#: ``kb_writeback`` honour it. It reaches the process through the
+#: ``INFERENCE_OPTIMIZER_`` prefix rule in the ``common/env_safety`` dotenv
+#: allowlist, which is a prefix rule rather than an entry for this name.
 KB_ROOT_ENV: str = "INFERENCE_OPTIMIZER_FA_KB_PATH"
 
-#: Workspace subdirectory holding this KB. Distinct from ``kb``, which the
-#: recipe KB owns: ``list_domains`` treats every directory under the root as a
-#: domain, so a shared root would surface recipe trees as framework domains.
+#: Workspace subdirectory holding this KB. Deliberately not ``kb``: that is the
+#: legacy recipe root (``inference_optimizer.cli.kb._legacy_recipe_root``, still
+#: read by the one-time recipe migration), and ``list_domains`` reports every
+#: directory under this root as a framework domain, so sharing it would surface
+#: recipe trees as framework domains. The current recipe root is
+#: ``<workspace>/knowledge`` and never collided.
 _MUTABLE_KB_DIRNAME: str = "framework-kb"
+
+#: Where the writer put this partition before it was given its own directory.
+#: Same value as ``inference_optimizer.cli.kb._legacy_recipe_root``'s leaf, which
+#: this package cannot import; the guard test asserts they still agree.
+_LEGACY_WORKSPACE_KB_DIRNAME: str = "kb"
 
 #: Workspace root when ``USER_DATA_PATH`` is unset. Mirrors
 #: ``session.paths.DEFAULT_SESSION_DIR``, which this package cannot import:
@@ -44,11 +57,108 @@ _MUTABLE_KB_DIRNAME: str = "framework-kb"
 _DEFAULT_WORKSPACE_ROOT: str = "/workspace/hyperloom"
 
 #: Withdrawn override. Only the reader honoured it, so setting it split the KB
-#: in two; a run that still sets it is failed rather than silently redirected.
-#: ``FRAMEWORK_AGENT_ROOT`` is deliberately absent: it means "where this skill
-#: is installed", is used for other purposes, and never reached the reader
-#: anyway because no installer exports it.
+#: in two. ``FRAMEWORK_AGENT_ROOT`` is deliberately absent: it means "where
+#: this skill is installed", is used for other purposes, and never reached the
+#: reader anyway because no installer exports it.
 _REMOVED_KB_ROOT_ENV: str = "FRAMEWORK_AGENT_KB_DIR"
+
+
+#: Marker written into the migrated partition so the copy happens exactly once
+#: and its provenance stays inspectable.
+_MIGRATION_MARKER: str = ".migrated-from-legacy-kb.json"
+
+
+class KBConfigurationError(RuntimeError):
+    """The environment asks for a KB layout this build no longer supports."""
+
+
+def prepare_kb_environment() -> None:
+    """Start-up sequence for the framework KB: validate, then migrate.
+
+    Both entry points that can reach this KB — the inference_optimizer preflight
+    and the standalone ``fa`` CLI — call this one function, so a future start-up
+    step is added in one place instead of being remembered in two.
+
+    Raises:
+        KBConfigurationError: If the environment asks for an unsupported layout.
+    """
+    check_kb_configuration()
+    migrate_legacy_partition_once()
+
+
+def check_kb_configuration() -> None:
+    """Reject a KB environment that would silently split reads from writes.
+
+    Called once at start-up rather than from the resolver. Callers of the read
+    path treat their KB lookups as advisory and swallow failures so an
+    unreadable ledger cannot block dispatch; raising from the resolver would
+    therefore turn a misconfiguration into a silently disabled accuracy gate,
+    which is the failure mode this whole area is trying to remove.
+
+    Raises:
+        KBConfigurationError: If the withdrawn reader-only override is set.
+    """
+    if os.environ.get(_REMOVED_KB_ROOT_ENV, "").strip():
+        raise KBConfigurationError(
+            f"{_REMOVED_KB_ROOT_ENV} is no longer honoured because it redirected only the "
+            f"reader, leaving writes behind in the previous location. "
+            f"Set {KB_ROOT_ENV} instead; it moves both halves of the KB together."
+        )
+
+
+def migrate_legacy_partition_once() -> Path | None:
+    """Carry the framework partition over from the legacy ``<workspace>/kb`` root.
+
+    Until this KB was given its own directory, the writer put the ledger under
+    ``<workspace>/kb/framework_optimization``. The writer was working, so every
+    deployment that ever ran a FRAMEWORK phase has real data there — leaving it
+    behind silently empties the dedup ledger and re-proposes PRs that already
+    lost an accuracy gate.
+
+    Only runs when the destination has no framework data yet, so it can never
+    overwrite a live partition, and stages the copy under a sibling directory so
+    an interrupted run does not leave a half-populated destination that the next
+    start-up would mistake for a live one. The source is left in place.
+
+    Skipped entirely when :data:`KB_ROOT_ENV` is set: the operator named a
+    location, and the legacy default was never theirs.
+
+    Returns:
+        The destination partition when data was migrated, else ``None``.
+    """
+    if os.environ.get(KB_ROOT_ENV, "").strip():
+        return None
+
+    workspace = Path(os.environ.get("USER_DATA_PATH", "").strip() or _DEFAULT_WORKSPACE_ROOT).expanduser()
+    source = workspace / _LEGACY_WORKSPACE_KB_DIRNAME / _FRAMEWORK_OPTIMIZATION_ROOT
+    destination = mutable_kb_root() / _FRAMEWORK_OPTIMIZATION_ROOT
+
+    if not source.is_dir() or not any(source.iterdir()):
+        return None
+    if destination.exists() and any(destination.iterdir()):
+        return None
+
+    staging = destination.with_name(f"{destination.name}.migrating")
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        shutil.copytree(source, staging)
+        (staging / _MIGRATION_MARKER).write_text(
+            json.dumps({"version": 1, "source": str(source)}, sort_keys=True),
+            encoding="utf-8",
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staging, destination)
+    except OSError:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    _log.warning(
+        "FRAMEWORK KB: migrated the legacy partition %s -> %s. The source is left in place; "
+        "remove it once the new location looks right.",
+        source,
+        destination,
+    )
+    return destination
 
 
 def path_for_framework(framework: str) -> Path:
@@ -128,9 +238,9 @@ def mutable_kb_root() -> Path:
     Resolved per call rather than at import, because the environment is not
     fully settled when this module is first imported.
 
-    Deliberately not ``<workspace>/kb``: that is the recipe KB's root, and this
-    reader enumerates whatever directories sit under its own root, so sharing
-    one would present recipe trees as framework domains.
+    Deliberately not ``<workspace>/kb``: that is the legacy recipe root, and
+    this reader enumerates whatever directories sit under its own root, so
+    sharing one would present recipe trees as framework domains.
 
     Returns:
         ``$INFERENCE_OPTIMIZER_FA_KB_PATH`` when set, else
@@ -147,22 +257,13 @@ def mutable_kb_root() -> Path:
 def _resolve_kb_root() -> Path:
     """Resolve the active KB root each call (so tests can monkeypatch env).
 
+    Never raises: read paths swallow their own failures by design, so an
+    exception here would be absorbed rather than surfaced. The withdrawn
+    override is rejected by :func:`check_kb_configuration` at start-up.
+
     Returns:
         The resolved KB root path.
-
-    Raises:
-        RuntimeError: If ``FRAMEWORK_AGENT_KB_DIR`` is set. It only ever
-            redirected the reader, so honouring it is what let the two halves
-            of the KB drift apart; failing here makes the migration visible
-            instead of quietly writing somewhere the reader will not look.
     """
-    removed = os.environ.get(_REMOVED_KB_ROOT_ENV, "").strip()
-    if removed:
-        raise RuntimeError(
-            f"{_REMOVED_KB_ROOT_ENV} is no longer honoured because it redirected only the "
-            f"reader, leaving writes behind in the previous location. "
-            f"Set {KB_ROOT_ENV} instead; it moves both halves of the KB together."
-        )
     return mutable_kb_root()
 
 
