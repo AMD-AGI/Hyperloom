@@ -17,9 +17,14 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.actions.registry import ActionRegistry
 from hyperloom.orchestrator.framework import client as _fa_client
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.phases.framework import FrameworkPhase
+
+
+_ACTION_REGISTRY = ActionRegistry().load()
 
 
 # Cross-cutting framework parametrisation; add new frameworks here.
@@ -138,10 +143,13 @@ class _CoordinatorStub:
     _maybe_dispatch_local_explore = FrameworkPhase._maybe_dispatch_local_explore
     # The discovery merge calls this reverse-lookup on every repo.
     _framework_agent_repo_url_origin_framework = staticmethod(Coordinator._framework_agent_repo_url_origin_framework)
+    # The enqueue path resolves its lanes and lease TTL from the registry.
+    _registry_lanes_ttl = DispatcherCollaborator._registry_lanes_ttl
 
     def __init__(self, tmp_path: Path, *, framework: str = "sglang") -> None:
         self.session_dir = tmp_path
         self.shared_state = _StateStub(framework=framework)
+        self.action_registry = _ACTION_REGISTRY
         self.tasks = _TasksStub()
         self.bus = _BusStub()
         self.state = SimpleNamespace(pending_proposals={})
