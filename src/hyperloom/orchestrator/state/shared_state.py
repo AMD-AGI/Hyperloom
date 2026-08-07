@@ -321,6 +321,13 @@ _FRAMEWORK_FIELD_RENAMES_V5: dict[str, str] = {
     "framework_pr_specialist_candidate_map": "framework_agent_specialist_candidate_map",
 }
 
+#: Stack action label for FRAMEWORK entries, and the prefix promote used to glue
+#: onto their ``variant_name``. Resume reconciliation keys on the bare candidate
+#: key, so an entry still carrying the prefix reads as an orphaned KEEP and
+#: misses the ``(action, variant_name)`` dedup that stops a second append.
+_FRAMEWORK_STACK_ACTION_V5: str = "framework"
+_FRAMEWORK_VARIANT_PREFIX_V5: str = "framework:"
+
 
 def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
     """Bound the explore_search negative ledger for multi-day runs.
@@ -1267,6 +1274,22 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             for legacy, current in _FRAMEWORK_FIELD_RENAMES_V5.items():
                 if legacy in raw and current not in raw:
                     filtered[current] = raw[legacy]
+
+            # Renaming the fields is not enough: a session that already promoted
+            # a FRAMEWORK KEEP has stack entries whose variant_name still carries
+            # the promote-side prefix, and reconciliation keys on the bare
+            # candidate key. Left alone they read as orphaned KEEPs for the rest
+            # of the session and no longer collide with the dedup key.
+            stack = filtered.get("optimization_stack")
+            if isinstance(stack, list):
+                for entry in stack:
+                    if not isinstance(entry, dict):
+                        continue
+                    if str(entry.get("action") or "") != _FRAMEWORK_STACK_ACTION_V5:
+                        continue
+                    name = str(entry.get("variant_name") or "")
+                    if name.startswith(_FRAMEWORK_VARIANT_PREFIX_V5):
+                        entry["variant_name"] = name[len(_FRAMEWORK_VARIANT_PREFIX_V5):]
 
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])

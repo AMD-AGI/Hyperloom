@@ -460,6 +460,45 @@ def test_v5_migration_prefers_the_current_spelling(tmp_path):
     assert SharedState.load_or_init(sd).framework_agent_discover_failures == 1
 
 
+def test_v5_migration_strips_the_promote_prefix_from_stacked_framework_keeps(tmp_path):
+    """An in-flight session's already-stacked KEEPs must reconcile after the upgrade.
+
+    Renaming the fields alone leaves ``variant_name`` spelled the promote-side
+    way. Resume reconciliation keys on the bare candidate key, so those entries
+    keep reporting as orphaned KEEPs, and the ``(action, variant_name)`` dedup
+    that stops a second append for the same PR no longer matches either.
+    """
+    sd = tmp_path / "session"
+    sd.mkdir()
+    (sd / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 4,
+                "optimization_stack": [
+                    {"action": "framework", "variant_name": "framework:PR-1", "tput": 1.0},
+                    {"action": "framework", "variant_name": "PR-2", "tput": 2.0},
+                    {"action": "explore", "variant_name": "framework:not-mine", "tput": 3.0},
+                ],
+            }
+        )
+    )
+
+    stack = SharedState.load_or_init(sd).optimization_stack
+
+    assert stack[0]["variant_name"] == "PR-1"
+    assert stack[1]["variant_name"] == "PR-2"
+    # Only the framework family carried that prefix; explore names are its own.
+    assert stack[2]["variant_name"] == "framework:not-mine"
+
+
+def test_v5_stack_action_label_matches_the_writeback_constant():
+    """The migration hardcodes the stack label; writeback owns the real one."""
+    from hyperloom.orchestrator.loop.writeback import _FRAMEWORK_STACK_ACTION
+    from hyperloom.orchestrator.state.shared_state import _FRAMEWORK_STACK_ACTION_V5
+
+    assert _FRAMEWORK_STACK_ACTION_V5 == _FRAMEWORK_STACK_ACTION
+
+
 def test_v5_rename_table_targets_are_real_fields():
     """Every rename target must still exist, or the migration drops the data.
 
