@@ -2075,10 +2075,10 @@ def test_nogit_scratch_uses_supplied_non_main_branch(tmp_path):
 
 def _capabilities_payload(**overrides) -> dict:
     payload = {
-        "protocol_versions": [1],
+        "rewrite_protocol_version": 2,
         "artifact_schema_versions": [2],
         "driver_contract_versions": [1],
-        "frameworks": ["aiter", "sglang", "vllm"],
+        "frameworks": ["aiter", "vllm", "sglang"],
         "result_sentinel": "__FORGE_RESULT__",
     }
     payload.update(overrides)
@@ -2177,7 +2177,7 @@ def test_capability_probe_reads_the_declared_rewrite_contract(monkeypatch):
 
     assert capabilities.supported is True
     assert capabilities.reason == "capability_ok"
-    assert capabilities.frameworks == ("aiter", "sglang", "vllm")
+    assert capabilities.frameworks == ("aiter", "vllm", "sglang")
     # The flag is an eager short-circuit; nothing else may be guessed onto it.
     assert captured["command"] == [
         sys.executable,
@@ -2192,7 +2192,8 @@ def test_capability_probe_reads_the_declared_rewrite_contract(monkeypatch):
 @pytest.mark.parametrize(
     ("overrides", "reason"),
     [
-        ({"protocol_versions": [2]}, "capability_protocol_unsupported"),
+        ({"rewrite_protocol_version": 1}, "capability_protocol_unsupported"),
+        ({"rewrite_protocol_version": 3}, "capability_protocol_unsupported"),
         ({"artifact_schema_versions": [1]}, "capability_artifact_schema_unsupported"),
         ({"driver_contract_versions": [2]}, "capability_driver_contract_unsupported"),
         ({"result_sentinel": "__FORGE_REWRITE_RESULT__"}, "capability_sentinel_mismatch"),
@@ -2206,6 +2207,33 @@ def test_capability_probe_rejects_an_incompatible_producer(monkeypatch, override
 
     assert capabilities.supported is False
     assert capabilities.reason == reason
+
+
+def test_capability_probe_rejects_a_renamed_protocol_field(monkeypatch):
+    payload = _capabilities_payload()
+    del payload["rewrite_protocol_version"]
+    payload["protocol_versions"] = [2]
+    _stub_capability_process(monkeypatch, stdout=json.dumps(payload))
+
+    capabilities = _flydsl_rewrite.probe_capabilities()
+
+    assert capabilities.supported is False
+    assert capabilities.reason == "capability_protocol_unsupported"
+
+
+def test_installed_producer_capabilities_are_accepted():
+    producer_root = forge_submit._ensure_forge_on_path()
+    if not producer_root:
+        pytest.skip("no KernelForge checkout resolvable from $FORGE_PATH")
+
+    capabilities = _flydsl_rewrite.probe_capabilities(
+        forge_root=producer_root,
+    )
+
+    assert capabilities.supported is True, (
+        f"{capabilities.reason}: {capabilities.detail}"
+    )
+    assert set(capabilities.frameworks) == {"aiter", "vllm", "sglang"}
 
 
 def test_capability_probe_reports_a_producer_that_rejects_the_flag(monkeypatch):
