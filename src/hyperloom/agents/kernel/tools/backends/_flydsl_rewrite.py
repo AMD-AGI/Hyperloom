@@ -42,8 +42,9 @@ REWRITE_COMMAND = "forge-rewrite-by-flydsl"
 CAPABILITIES_FLAG = "--capabilities-json"
 
 # Consumer-side halves of the cross-repo contract. Bumping any of these means
-# this module can no longer read what an older producer emits.
-PROTOCOL_VERSION = 1
+# this module can no longer read what an older producer emits. The producer
+# declares one scalar protocol version and lists for schema/driver versions.
+PROTOCOL_VERSION = 2
 ARTIFACT_SCHEMA_VERSION = 2
 DRIVER_CONTRACT_VERSION = 1
 RESULT_SENTINEL = "__FORGE_RESULT__"
@@ -179,6 +180,17 @@ def _decode_capability_payload(stdout: str) -> dict[str, Any] | None:
     return None
 
 
+def _int_version(payload: Mapping[str, Any], key: str) -> int | None:
+    """Read one scalar version, rejecting booleans and malformed values."""
+    raw = payload.get(key)
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _int_versions(payload: Mapping[str, Any], key: str) -> tuple[int, ...]:
     """Read one declared version list, dropping entries that are not integers."""
     raw = payload.get(key)
@@ -212,12 +224,12 @@ def _validated_capabilities(payload: dict[str, Any] | None) -> RewriteCapabiliti
     """Check one capability payload against the versions this consumer reads."""
     if not isinstance(payload, dict):
         return RewriteCapabilities(False, "capability_payload_invalid", "capability output is not a JSON object")
-    protocols = _int_versions(payload, "protocol_versions")
-    if PROTOCOL_VERSION not in protocols:
+    protocol = _int_version(payload, "rewrite_protocol_version")
+    if protocol != PROTOCOL_VERSION:
         return RewriteCapabilities(
             False,
             "capability_protocol_unsupported",
-            f"producer protocol versions {list(protocols)} exclude {PROTOCOL_VERSION}",
+            f"producer rewrite protocol version {protocol!r} is not {PROTOCOL_VERSION}",
         )
     schemas = _int_versions(payload, "artifact_schema_versions")
     if ARTIFACT_SCHEMA_VERSION not in schemas:
