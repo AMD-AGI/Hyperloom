@@ -3408,6 +3408,16 @@ class FrameworkPhase(PhaseHandler):
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
         lanes, ttl = self._registry_lanes_ttl("framework_agent")
         try:
+            # A framework candidate rebuilds and benchmarks, so it cannot share
+            # the GPU. ``_registry_lanes_ttl`` also answers ([], 0) when the
+            # registry failed to load, and enqueueing then would run this
+            # unserialised against every other task; refuse instead. The
+            # handler below turns it into a warning plus a progress row.
+            if not lanes:
+                raise RuntimeError(
+                    "framework_agent resolved to no lanes — the action registry is missing "
+                    "or failed to load, so the task would run without GPU exclusivity."
+                )
             await self.tasks.create_or_return_existing(
                 kind="framework_agent",
                 params=params,
