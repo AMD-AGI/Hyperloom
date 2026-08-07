@@ -28,7 +28,6 @@ class _StateStub:
         self.framework_agent_discover_failures = 0
         self.framework_agent_batches: list[dict[str, Any]] = []
         self.framework_agent_phase_progress: list[dict[str, Any]] = []
-        self.framework_agent_critic_decisions: list[dict[str, Any]] = []
         self.framework_agent_authoring_enabled = authoring
         # Local-exploration arm off in this suite: these tests exercise the
         # PR-authoring track; the arm has dedicated coverage elsewhere.
@@ -115,7 +114,6 @@ class _BusStub:
 class _Stub:
     """Binds the Coordinator methods the pump + helpers touch."""
 
-    _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
     _MAX_REPEATED_REVIEW_SUBMISSIONS = Coordinator._MAX_REPEATED_REVIEW_SUBMISSIONS
     _collect_framework_agent_candidate_priors = Coordinator._collect_framework_agent_candidate_priors

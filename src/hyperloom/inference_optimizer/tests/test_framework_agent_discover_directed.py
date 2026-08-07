@@ -33,7 +33,6 @@ class _StateStub:
         self.gpu_type = "MI300X"
         self.model_class = "dense"
         self.precision = "fp8"
-        self.framework_max_candidates = 0
         self.last_profile_kernel_breakdown = None
 
     def save(self, _session_dir: Path) -> None:

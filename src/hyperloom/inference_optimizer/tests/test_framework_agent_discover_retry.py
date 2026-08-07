@@ -44,7 +44,6 @@ class _StateStub:
         self.gpu_type = "MI300X"
         self.model_class = "dense"
         self.precision = "fp8"
-        self.framework_max_candidates = 0
         self.last_profile_kernel_breakdown = None
         self._saves = 0
 
