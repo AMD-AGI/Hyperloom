@@ -137,6 +137,15 @@ def test_framework_run_eval_envs_no_force_without_baseline():
     )
 
 
+def test_framework_run_eval_envs_forces_only_for_eval_origin_enablement():
+    # Eval-origin fails closed without a raw accuracy; boot-origin stays provisional.
+    assert IntegratePatchExecutor._framework_run_eval_envs(
+        {"enablement": True, "enablement_origin": "eval"}
+    ) == {"RUN_EVAL": "true"}
+    assert IntegratePatchExecutor._framework_run_eval_envs({"enablement": True, "enablement_origin": "launch"}) is None
+    assert IntegratePatchExecutor._framework_run_eval_envs({"enablement": True}) is None
+
+
 def test_framework_run_eval_envs_none_for_generic_explore():
     assert (
         IntegratePatchExecutor._framework_run_eval_envs({"specialist_task_id": "s1", "accuracy_baseline": 0.8}) is None

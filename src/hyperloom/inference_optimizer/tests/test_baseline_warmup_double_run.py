@@ -275,6 +275,38 @@ def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
     assert result["accuracy_stage"]["status"] == "succeeded"
 
 
+def test_deferred_accuracy_is_cancelled_by_no_eval(tmp_path):
+    """The staged accuracy round is an eval, so ``--no-eval`` drops it."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    captured: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured)
+
+    executor = _executor(base, tmp_path, baseline_double_run=True)
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+            "defer_accuracy_until_after_measure": True,
+            "post_measure_accuracy_min_tput": _HOT_TPUT - 1,
+        }
+    )
+    ctx.extra["shared_state"] = SimpleNamespace(eval_disabled=True, baseline_double_run=True)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert state["calls"] == 2
+    assert [cfg["benchmark"]["envs"]["RUN_EVAL"] for cfg in captured] == ["false", "false"]
+    assert "accuracy_stage" not in result
+
+
 def test_deferred_accuracy_single_round_keeps_eval_enabled(tmp_path):
     """Ineligible lifecycle fallback must retain accuracy in its only round."""
     base = tmp_path / "base.yaml"

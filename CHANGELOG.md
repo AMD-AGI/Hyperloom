@@ -5,6 +5,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **`--no-eval` turns the accuracy eval off for a whole run.** Setting
+  `RUN_EVAL=false` by hand leaves the baseline with no accuracy reference, which
+  the baseline guard rejects, so the run stopped before it optimized anything.
+  The flag makes that an explicit session-wide choice instead: the baseline
+  anchors on throughput rather than halting on the missing reference, and every
+  candidate lands on the existing `baseline_accuracy == 0` path that already
+  degrades to a throughput-only KEEP. A *measured* regression still blocks — the
+  scriptable (xDiT) `quality_gate` is computed by the benchmark run itself and
+  never consulted `RUN_EVAL`.
+
+  The choice is session state (`shared_state.eval_disabled`), not just a parsed
+  arg, so it also reaches the lanes that template their own benchmark config
+  rather than inheriting the baseline's: the framework-agent bench, eval-origin
+  enablement, the multi-node `lm_eval` preflight install, and the GEAK GEMM
+  shape capture. It persists across `--resume`, and is refused with a warning
+  once the session has anchored an accuracy, because every KEEP up to that point
+  was graded against it.
+
+  Default-off is byte-for-byte today's behaviour. Runs made with the flag are
+  not accuracy-validated.
+
 ### Fixed
 
 - **Enablement dispatch evidence reaches the specialist again**: the Coordinator
@@ -85,12 +108,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Kernel-agent LLM role retired** (breaking): the `kernel_agent` role has been
   removed from the role registry. All kernel work was already handled by
   programmatic Python handlers in `orchestrator/kernel/request_handlers.py`; the
-  LLM role was a no-op heartbeat responder. The following CLI flags and env vars
-  are removed:
-  - `--kernel-prompt` — overriding the kernel system prompt is no longer meaningful.
-  - `--kernel-codex` / `--kernel-claude` — there is no kernel LLM backend to select.
+  LLM role was a no-op heartbeat responder. These env vars are gone, and setting
+  them now has no effect:
   - `INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS` — no kernel LLM backend.
   - `INFERENCE_OPTIMIZER_KERNEL_CLAUDE_CONVERSATIONAL` — no kernel LLM backend.
+
+  The matching CLI flags **still parse, as accepted no-ops**, so a launcher or
+  operator template that passes them keeps starting instead of dying in argparse
+  before the run begins. They are hidden from `--help`, nothing reads them, and
+  they will be deleted outright in a future release once the callers that pass
+  them have been updated:
+  - `--kernel-prompt PATH` — overriding the kernel system prompt is no longer
+    meaningful. It still consumes its argument, so the path is swallowed rather
+    than left behind as a stray positional.
+  - `--kernel-codex` / `--kernel-claude` — there is no kernel LLM backend to select.
   
   `--no-kernel` continues to work: it sets `shared_state.kernel_enabled=False`,
   which causes the Coordinator's request router to auto-reject kernel REQUESTs

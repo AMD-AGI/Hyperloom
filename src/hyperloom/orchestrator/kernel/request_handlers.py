@@ -1647,7 +1647,8 @@ export OSL={int(osl)}
 export RANDOM_RANGE_RATIO="${{RANDOM_RANGE_RATIO:-1}}"
 export NUM_PROMPTS="${{NUM_PROMPTS:-320}}"
 export NUM_WARMUPS="${{NUM_WARMUPS:-8}}"
-export RUN_EVAL="${{RUN_EVAL:-true}}"
+# Shape capture consumes throughput only, so it never pays for an accuracy eval.
+export RUN_EVAL="false"
 export RESULT_DIR="${{RESULT_DIR:-$PWD/gemm_benchmark_result}}"
 export RESULT_FILENAME="${{RESULT_FILENAME:-bench_serving.json}}"
 export PORT="${{PORT:-18888}}"
