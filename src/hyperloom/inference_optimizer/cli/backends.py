@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import framework_registry
+from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
 from hyperloom.orchestrator.roles import (
     ClaudeBackend,
     CodexBackend,
@@ -28,34 +29,32 @@ from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 
 
 
+CRITIC_PROTOCOL_CHOICES: tuple[str, ...] = ("auto", "openai", "anthropic")
+
+# Anthropic-side env vars that, alone, make the Anthropic side usable.
+_ANTHROPIC_SIDE_ENV: tuple[str, ...] = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    CLAUDE_OAUTH_TOKEN_ENV,
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_API_KEY",
+)
+_OPENAI_SIDE_ENV: tuple[str, ...] = ("OPENAI_BASE_URL", "OPENAI_API_KEY")
+
+
+def _any_env_set(names: tuple[str, ...]) -> bool:
+    return any((os.environ.get(name) or "").strip() for name in names)
+
+
 def _official_anthropic_only() -> bool:
     """True when only the Anthropic-side endpoint is available."""
-    has_anthropic = bool(
-        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
-        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
-    )
-    has_openai = bool(
-        (os.environ.get("OPENAI_BASE_URL") or "").strip() or (os.environ.get("OPENAI_API_KEY") or "").strip()
-    )
-    return has_anthropic and not has_openai
+    return _any_env_set(_ANTHROPIC_SIDE_ENV) and not _any_env_set(_OPENAI_SIDE_ENV)
 
 
 def _official_openai_only() -> bool:
     """True when only the OpenAI-side endpoint is available."""
-    has_openai = bool(
-        (os.environ.get("OPENAI_BASE_URL") or "").strip() or (os.environ.get("OPENAI_API_KEY") or "").strip()
-    )
-    has_anthropic = bool(
-        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
-        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
-    )
-    return has_openai and not has_anthropic
+    return _any_env_set(_OPENAI_SIDE_ENV) and not _any_env_set(_ANTHROPIC_SIDE_ENV)
 
 
 def _deepseek_only() -> bool:
@@ -74,6 +73,44 @@ def _deepseek_only() -> bool:
         (os.environ.get("OPENAI_BASE_URL") or "").strip() or (os.environ.get("OPENAI_API_KEY") or "").strip()
     )
     return has_deepseek and not has_anthropic_key and not has_openai
+
+
+def _resolve_critic_protocol(requested: str, *, provider_anthropic_only: bool) -> str:
+    """Pick the critic's review protocol and verify that side is configured.
+
+    ``auto`` reproduces the historical derivation. An explicit choice is a hard
+    contract: a missing credential fails at startup instead of silently routing
+    the review somewhere the operator did not ask for.
+
+    Args:
+        requested: One of :data:`CRITIC_PROTOCOL_CHOICES`.
+        provider_anthropic_only: Whether only the Anthropic side is configured.
+
+    Returns:
+        Either ``"openai"`` or ``"anthropic"``.
+
+    Raises:
+        ValueError: If ``requested`` is unknown, or the forced side has no
+            usable credential.
+    """
+    if requested not in CRITIC_PROTOCOL_CHOICES:
+        raise ValueError(f"_build_backends: critic_protocol={requested!r} not in {set(CRITIC_PROTOCOL_CHOICES)}")
+
+    if requested == "auto":
+        # DeepSeek serves an OpenAI-compatible endpoint, so it stays on the
+        # OpenAI transport even though it is an Anthropic-side credential.
+        return "anthropic" if provider_anthropic_only and not _deepseek_only() else "openai"
+
+    if requested == "anthropic" and not _any_env_set(
+        ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", CLAUDE_OAUTH_TOKEN_ENV)
+    ):
+        raise ValueError(
+            "--critic-protocol=anthropic requires one of ANTHROPIC_API_KEY, "
+            f"ANTHROPIC_AUTH_TOKEN or {CLAUDE_OAUTH_TOKEN_ENV}"
+        )
+    if requested == "openai" and not _any_env_set(("OPENAI_API_KEY", "DEEPSEEK_API_KEY")):
+        raise ValueError("--critic-protocol=openai requires OPENAI_API_KEY or DEEPSEEK_API_KEY")
+    return requested
 
 
 def _deepseek_openai_client_factory() -> Any:
@@ -124,6 +161,7 @@ def _build_backends(
     robustness_agent_root: Path | None = None,
     robustness_options: dict[str, Any] | None = None,
     codex_follows_claude: bool = False,
+    critic_protocol: str = "auto",
 ) -> dict[str, Any]:
     """Construct all per-role backends.
 
@@ -146,13 +184,17 @@ def _build_backends(
             ``robustness_choice='agent'``.
         robustness_options: Optional ``request.options`` overrides for the
             robustness agent.
+        codex_follows_claude: Whether the Codex model id follows the Claude one.
+        critic_protocol: Review transport selector (``auto``, ``openai`` or
+            ``anthropic``).
 
     Returns:
         A mapping of role name to its constructed backend.
 
     Raises:
-        ValueError: If ``critic_choice`` / ``robustness_choice`` is invalid, or
-            an ``agent`` choice is missing its required agent root.
+        ValueError: If ``critic_choice`` / ``robustness_choice`` /
+            ``critic_protocol`` is invalid, an ``agent`` choice is missing its
+            required agent root, or a forced protocol has no credential.
     """
     if critic_choice not in ("mock", "agent"):
         raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
@@ -165,12 +207,30 @@ def _build_backends(
 
     if critic_choice == "mock":
         critic_backend: Any = MockCriticBackend()
-    elif provider_anthropic_only and critic_agent_root is not None:
-        # Provider-only: keep the full KB+tools critic-agent, driving review
-        # inference over the native provider endpoint (DeepSeek OpenAI-compatible
-        # or Anthropic /v1/messages).
+    else:  # "agent"
+        # No degraded critic: dropping the runtime would silently discard KB
+        # priors, session memory and reviewed_msg_ids dedupe. Operators who
+        # genuinely want no review pass --critic-mock.
+        if critic_agent_root is None:
+            raise ValueError("_build_backends: critic_choice='agent' requires critic_agent_root")
+        protocol = _resolve_critic_protocol(
+            critic_protocol,
+            provider_anthropic_only=provider_anthropic_only,
+        )
         _policy = _load_action_verdict_policy()
-        if _deepseek_only():
+        if protocol == "anthropic":
+            critic_backend = CriticAgentBackend(
+                critic_agent_root=critic_agent_root,
+                session_dir=session_dir,
+                protocol="anthropic",
+                claude_model=claude_model,
+                codex_model=codex_model,
+                kb_mode=critic_kb_mode,
+                action_verdict_policy=_policy,
+            )
+        elif provider_anthropic_only and _deepseek_only():
+            # DeepSeek's OpenAI-compatible endpoint serves the orchestration
+            # model id, so the review runs on claude_model over that transport.
             critic_backend = CriticAgentBackend(
                 critic_agent_root=critic_agent_root,
                 session_dir=session_dir,
@@ -184,28 +244,11 @@ def _build_backends(
             critic_backend = CriticAgentBackend(
                 critic_agent_root=critic_agent_root,
                 session_dir=session_dir,
-                protocol="anthropic",
-                claude_model=claude_model,
+                protocol="openai",
                 codex_model=codex_model,
                 kb_mode=critic_kb_mode,
                 action_verdict_policy=_policy,
             )
-    elif provider_anthropic_only:
-        # Fallback: critic-agent runtime unresolved, degrade to Claude tool-use.
-        critic_backend = ClaudeBackend(
-            model=claude_model,
-            max_turns_default=4,
-        )
-    else:  # "agent"
-        if critic_agent_root is None:
-            raise ValueError("_build_backends: critic_choice='agent' requires critic_agent_root")
-        critic_backend = CriticAgentBackend(
-            critic_agent_root=critic_agent_root,
-            session_dir=session_dir,
-            codex_model=codex_model,
-            kb_mode=critic_kb_mode,
-            action_verdict_policy=_load_action_verdict_policy(),
-        )
 
     if robustness_choice not in ("mock", "agent"):
         raise ValueError(f"_build_backends: robustness_choice={robustness_choice!r} not in {{'mock','agent'}}")

@@ -264,31 +264,25 @@ def test_anthropic_only_critic_agent_runtime_needed(clean_creds_env):
     assert cli._critic_agent_runtime_needed("agent") is True
 
 
-def test_anthropic_intent_skips_critic_agent_even_after_openai_env_appears(clean_creds_env):
-    """Preflight may add stale/runtime OpenAI env, but captured Anthropic intent wins."""
+def test_critic_agent_runtime_always_needed_for_agent_choice(clean_creds_env):
+    """Preflight may add stale/runtime OpenAI env, but the runtime is required
+    either way: there is no longer a degraded critic that skips it."""
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-fake-token")
-    codex_follows_claude = cli._codex_model_should_follow_claude()
-    assert codex_follows_claude is True
+    assert cli._codex_model_should_follow_claude() is True
 
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://api.anthropic.com")
     clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "stale-openai-token")
 
-    assert (
-        cli._critic_agent_runtime_needed(
-            "agent",
-            codex_follows_claude=codex_follows_claude,
-        )
-        is False
-    )
+    assert cli._critic_agent_runtime_needed("agent") is True
 
 
-def test_build_backends_uses_claude_critic_when_codex_follows_claude(
+def test_build_backends_keeps_anthropic_critic_when_codex_follows_claude(
     clean_creds_env,
     monkeypatch,
     tmp_path,
 ):
-    """Stale OpenAI env after preflight must not force critic-agent/Codex."""
+    """Stale OpenAI env after preflight must not force critic-agent onto Codex."""
     from hyperloom.inference_optimizer.cli import backends as cli_backends
 
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
@@ -304,19 +298,27 @@ def test_build_backends_uses_claude_critic_when_codex_follows_claude(
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
+    class _FakeCriticAgent:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
     monkeypatch.setattr(cli_backends, "ClaudeBackend", _FakeClaude)
     monkeypatch.setattr(cli_backends, "CodexBackend", _FakeCodex)
+    monkeypatch.setattr(cli_backends, "CriticAgentBackend", _FakeCriticAgent)
 
     built = cli_backends._build_backends(
         claude_model="claude-opus-4-8",
         codex_model="stale-codex-model",
         critic_choice="agent",
         session_dir=tmp_path,
-        critic_agent_root=None,
+        critic_agent_root=tmp_path,
         codex_follows_claude=True,
     )
 
-    assert isinstance(built["critic"], _FakeClaude)
+    critic = built["critic"]
+    assert isinstance(critic, _FakeCriticAgent)
+    assert critic.kwargs["protocol"] == "anthropic"
+    assert critic.kwargs["claude_model"] == "claude-opus-4-8"
 
 
 def test_openai_only_critic_agent_runtime_needed(clean_creds_env):
