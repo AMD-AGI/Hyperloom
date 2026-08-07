@@ -38,7 +38,7 @@ def _silent_plan() -> ScriptedPlan:
 def _build_backends() -> dict[str, Backend]:
     return {
         name: MockBackend(_silent_plan(), name=name)
-        for name in ("orchestration", "kernel_agent", "critic", "robustness")
+        for name in ("orchestration", "critic", "robustness")
     }
 
 
@@ -311,8 +311,19 @@ def test_ranker_client_none_without_key(coord: Coordinator, monkeypatch) -> None
             raise RuntimeError("no scorer client")
 
     coord._proposal_scorer = _Scorer()  # type: ignore[attr-defined]
-    monkeypatch.delenv("SAFE_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert coord._framework_agent_ranker_client() is None
+
+
+def test_ranker_client_none_for_anthropic_only_deploy(coord: Coordinator, monkeypatch) -> None:
+    """The ranker speaks the OpenAI protocol, so an Anthropic-only deploy leaves it
+    disabled."""
+    coord._fa_ranker_client = None  # type: ignore[attr-defined]
+    coord._proposal_scorer = None  # type: ignore[attr-defined]
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-user-token")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     assert coord._framework_agent_ranker_client() is None
 
 
@@ -320,7 +331,7 @@ def test_ranker_client_builds_from_env(coord: Coordinator, monkeypatch) -> None:
     pytest.importorskip("openai")
     coord._fa_ranker_client = None  # type: ignore[attr-defined]
     coord._proposal_scorer = None  # type: ignore[attr-defined]
-    monkeypatch.setenv("SAFE_API_KEY", "safe-test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "safe-test-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://gateway.example/v1")
     client = coord._framework_agent_ranker_client()
     assert client is not None

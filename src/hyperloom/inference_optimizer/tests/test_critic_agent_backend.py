@@ -333,7 +333,7 @@ def test_construct_no_creds_no_factory_raises(monkeypatch, tmp_path: Path):
     (root / "runtime" / "cli.py").write_text("# stub", encoding="utf-8")
     sd = tmp_path / "sd"
     sd.mkdir()
-    with pytest.raises(BackendError, match="ANTHROPIC_AUTH_TOKEN"):
+    with pytest.raises(BackendError, match="OPENAI_API_KEY"):
         CriticAgentBackend(
             critic_agent_root=root,
             session_dir=sd,
@@ -1241,7 +1241,6 @@ async def test_critic_agent_real_runtime_clears_proposal(
             ),
             name="orchestration",
         ),
-        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="kernel_agent"),
         "critic": critic_backend,
         "robustness": MockRobustnessBackend(),
     }
@@ -1326,7 +1325,6 @@ async def test_critic_agent_heartbeat_when_no_proposal(
             ScriptedPlan(turns=[], default_intent=_heartbeat()),
             name="orchestration",
         ),
-        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="kernel_agent"),
         "critic": critic_backend,
         "robustness": MockRobustnessBackend(),
     }

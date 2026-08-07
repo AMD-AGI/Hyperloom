@@ -4,7 +4,7 @@
 """CriticAgentBackend — bridges the ``hyperloom.agents.critic`` runtime into
 the Coordinator as a real Critic Backend.
 
-Runs the two-phase loop from ``src/hyperloom/agents/critic/AGENTS.md``
+Runs the two-phase loop from ``src/hyperloom/agents/critic/README.md``
 (prepare-review → Codex review.json → commit-review), giving KB priors,
 per-session memory, review_constraints injection, and emergency fallbacks.
 The returned envelope is re-validated locally so malformed replies surface as
@@ -231,6 +231,57 @@ def _verdict_references_kb(review: dict[str, Any] | None) -> bool:
     return False
 
 
+# Per-phase review orientation; only the live phase's entry is injected.
+_PHASE_ORIENTATION: dict[str, str] = {
+    "PRELUDE": (
+        "Typical proposals are `target_analysis` and `baseline`. If something "
+        "else slips through (PolicyGate R1 should already have blocked it), "
+        "`advise` with a phase hint rather than reject."
+    ),
+    "FRAMEWORK_AGENT": (
+        "Typical proposal is `integrate_patch` carrying an upstream PR diff or "
+        "an authored enablement patch. The gate here is runnability plus the "
+        "accuracy floor, not throughput — a candidate that boots and holds "
+        "accuracy is a legitimate KEEP even at flat gain."
+    ),
+    "EXPLORE": (
+        "Typical proposals are `explore`, `specialist` and `integrate_patch`. "
+        "Specialist-style proposal_set packets arrive as "
+        "`propose_action='explore'` with a `variants` array — return one "
+        "verdict dict per variant msg_id; missing entries are treated as "
+        "`needs_review`."
+    ),
+    "KERNEL_AGENT": (
+        "Typical proposals are the KERNEL_AGENT_OWNED_ACTIONS (proxied via "
+        "REQUEST) plus auto-managed `profile` / `roofline`. Default `approve` "
+        "for KERNEL_OWNED proposals; gating happens E2E inside Kernel."
+    ),
+    "SWEEP": ("Typical proposal is `sweep`. Mismatches → `advise` with the phase hint."),
+    "CLOSE": (
+        "Typical proposals are `report` and `session_breakdown`. Both are "
+        "archival: they transcribe existing state and introduce no new "
+        "measurement, so the before/after gate does not apply."
+    ),
+}
+
+
+def _inject_phase_constraints(judge_bundle: dict[str, Any], phase: str) -> None:
+    """Stamp the live phase and its review orientation onto the judge bundle.
+
+    Args:
+        judge_bundle: The judge bundle to enrich in place.
+        phase: Coordinator pipeline phase; an unrecognised one leaves the bundle
+            untouched so nothing asserts a phase that was never delivered.
+    """
+    normalized = (phase or "").strip().upper()
+    if normalized not in _PHASE_ORIENTATION:
+        return
+    judge_bundle["phase"] = normalized
+    rc = judge_bundle.setdefault("review_constraints", {})
+    rc["phase"] = normalized
+    rc["phase_orientation"] = _PHASE_ORIENTATION[normalized]
+
+
 def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None:
     """Set ``review_constraints.cross_domain`` + rule descriptors when any
     proposal is cross-domain (unified ``scope == 'domains'`` dial). Idempotent.
@@ -273,7 +324,7 @@ class CriticAgentBackend:
         Coordinator session directory. Scopes per-turn workdirs and the
         per-session critic memory store.
     codex_model:
-        OpenAI / Codex chat-completion model id (e.g. ``gpt-5.4``).
+        OpenAI / Codex chat-completion model id (e.g. ``gpt-5.6-sol``).
     codex_client_factory:
         Optional callable returning an ``AsyncOpenAI``-compatible client
         (test seam).
@@ -295,7 +346,7 @@ class CriticAgentBackend:
 
     critic_agent_root: Path
     session_dir: Path
-    codex_model: str = "gpt-5.4"
+    codex_model: str = "gpt-5.6-sol"
     codex_client_factory: Callable[[], Any] | None = None
     kb_mode: Literal["inmemory", "live"] = "inmemory"
     kb_env: dict[str, str] | None = None
@@ -555,11 +606,15 @@ class CriticAgentBackend:
         emit_path = workdir / "emit.json"
 
         session_id = self.session_dir.name
+        # prepare-review runs as a subprocess; the phase reaches it via context.
+        context = dict(self._static_context)
+        if self._trace_phase:
+            context["phase"] = str(self._trace_phase).strip().upper()
         request: dict[str, Any] = {
             "kind": "coordinator_inbox",
             "session_id": session_id,
             "raw_prompt": prompt,
-            "context": dict(self._static_context),
+            "context": context,
         }
         if self.known_actions:
             request["options"] = {
@@ -600,6 +655,7 @@ class CriticAgentBackend:
                 judge_bundle["review_constraints"] = rc
             rc["action_verdict_policy"] = dict(self.action_verdict_policy)
 
+        _inject_phase_constraints(judge_bundle, self._trace_phase or "")
         _maybe_inject_cross_domain_constraints(judge_bundle)
 
         # Codex reasoning; short-circuit when there are no proposals.
@@ -911,6 +967,7 @@ class CriticAgentBackend:
             "kind": judge_bundle.get("kind"),
             "session_id": judge_bundle.get("session_id"),
             "decision_id": judge_bundle.get("decision_id"),
+            "phase": judge_bundle.get("phase"),
             "merged_context": judge_bundle.get("merged_context"),
             "missing_context": judge_bundle.get("missing_context"),
             "required_context": judge_bundle.get("required_context"),

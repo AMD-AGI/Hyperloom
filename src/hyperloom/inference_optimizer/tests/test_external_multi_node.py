@@ -26,7 +26,6 @@ from hyperloom.inference_optimizer.multi_node.state_paths import resolve_state_f
 def _external_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Minimal infera PD external env without SaFE credentials."""
     monkeypatch.delenv("SAFE_API_URL", raising=False)
-    monkeypatch.delenv("SAFE_API_KEY", raising=False)
     monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://frontend:8000")
     monkeypatch.setenv("HYPERLOOM_MN_EXT_PREFILL_IPS", "10.0.1.1")
     monkeypatch.setenv("HYPERLOOM_MN_EXT_DECODE_IPS", "10.0.1.2")
@@ -207,7 +206,7 @@ def test_load_multi_node_state_honours_handoff_alongside_safe_creds(
     exactly where the integration runs. The hand-off must still win here.
     """
     monkeypatch.setenv("SAFE_API_URL", "http://safe")
-    monkeypatch.setenv("SAFE_API_KEY", "key")
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
     state_path = resolve_state_file()
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(
@@ -226,7 +225,7 @@ def test_external_mode_signals_ignore_safe_creds(
 ) -> None:
     """Every external-mode signal keys off the hand-off, never off SaFE creds."""
     monkeypatch.setenv("SAFE_API_URL", "http://safe")
-    monkeypatch.setenv("SAFE_API_KEY", "key")
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
     assert ext.external_service_url() == "http://frontend:8000"
     assert ext.external_has_ssh_control() is True
     assert ext.external_has_server_control() is True

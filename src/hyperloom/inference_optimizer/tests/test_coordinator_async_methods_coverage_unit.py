@@ -13,12 +13,14 @@ import time
 
 import pytest
 
+from hyperloom.orchestrator.roles.mcp_context_tools import CONTEXT_TOOL_NAMES
 from hyperloom.orchestrator.roles import (
     Backend,
     MockBackend,
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.state.objective import TargetGainObjective, TimeOnlyObjective
 from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
@@ -32,10 +34,7 @@ def _silent_plan() -> ScriptedPlan:
 
 
 def _build_backends() -> dict[str, Backend]:
-    return {
-        name: MockBackend(_silent_plan(), name=name)
-        for name in ("orchestration", "kernel_agent", "critic", "robustness")
-    }
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
 
 
 @pytest.fixture
@@ -717,17 +716,41 @@ def test_is_promotable_result_unchanged_for_reverted_integrate_patch(coord: Coor
 
 
 # -- _compose_prompt additional branches -----------------------------------
-class _Obj:
-    kind = "gain_pct"
-    value = 20.0
+@pytest.mark.asyncio
+async def test_compose_prompt_orchestration_gain_objective(coord: Coordinator) -> None:
+    coord._current_objective = TargetGainObjective(target_gain_pct=20.0)
+    coord.shared_state.cumulative_gain = 5.0
+    await coord._compose_prompt("orchestration")
+    assert coord.shared_state.target_gap_pct == pytest.approx(15.0)
 
 
 @pytest.mark.asyncio
-async def test_compose_prompt_orchestration_gain_objective(coord: Coordinator) -> None:
-    coord._current_objective = _Obj()
+async def test_compose_prompt_renders_the_gap_it_just_computed(coord: Coordinator) -> None:
+    """The first SEED must carry the live gap, not the value left from a prior tick."""
+    coord._current_objective = TargetGainObjective(target_gain_pct=20.0)
+    coord.shared_state.cumulative_gain = 5.0
+    text = await coord._compose_prompt("orchestration")
+    assert "target_gap_pct=15.00" in text
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_time_only_objective_leaves_no_gap(coord: Coordinator) -> None:
+    coord._current_objective = TimeOnlyObjective()
     coord.shared_state.cumulative_gain = 5.0
     await coord._compose_prompt("orchestration")
-    assert coord.shared_state.target_gap_pct == 15.0
+    assert coord.shared_state.target_gap_pct == 0.0
+
+
+@pytest.mark.asyncio
+async def test_delta_banner_names_every_registered_context_tool(coord: Coordinator, monkeypatch) -> None:
+    monkeypatch.setattr(coord.conversation, "_orchestration_conversational", lambda: True)
+    coord._orchestration_seeded = True
+    text = await coord._compose_prompt("orchestration")
+    banner_start = text.find("=== Context (pull on demand) ===")
+    assert banner_start != -1, "DELTA banner missing"
+    banner = text[banner_start:]
+    for tool in CONTEXT_TOOL_NAMES:
+        assert tool in banner, f"{tool!r} not in DELTA banner"
 
 
 @pytest.mark.asyncio

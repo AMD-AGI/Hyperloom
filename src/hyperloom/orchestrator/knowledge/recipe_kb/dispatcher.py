@@ -11,7 +11,6 @@ from typing import Any
 
 from . import RemoteRecipeClientError
 from .canonical_id import InvalidCanonicalIdError, cid_to_path_components
-from .local_store import LocalRecipeStore
 
 
 log = logging.getLogger(__name__)
@@ -222,15 +221,14 @@ def _rerank_by_prefer(
 
 @dataclass
 class RecipeKB:
-    """Local-write / remote-read-with-fallback dispatcher.
+    """Selected-store dispatcher with a legacy remote-read fallback.
 
     Args:
-        local: Authoritative local store. REQUIRED — there is no
-            "remote-only" mode under this design (writes must
-            always have somewhere to land).
-        remote: Optional read-side central kb-service client.
+        local: Store selected by ``mode``. In exclusive remote mode this is the
+            direct GBrain store; in local mode it is the filesystem store.
+        remote: Optional legacy read-side central kb-service client.
             ``None`` (or a client with ``enabled=False``) makes
-            reads short-circuit to the local store.
+            reads use only the selected store.
         on_remote_failure: Callback invoked when a read against
             the central kb-service fails and the dispatcher falls
             back to local. Receives ``(method_name, exception)``.
@@ -245,10 +243,12 @@ class RecipeKB:
             ``recipe_snapshot/.audit.jsonl`` trace.
     """
 
-    local: LocalRecipeStore
+    local: Any
     remote: Any = None  # read-side gbrain client (duck-typed); None = local-only
     on_remote_failure: Any = None
     audit_hook: Any = None
+    mode: str = "local"
+    backend_name: str = ""
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -289,12 +289,21 @@ class RecipeKB:
             str: ``"none"`` when no remote, else ``"gbrain"`` (falling
                 back to the client class name for any future backend).
         """
+        if self.mode == "remote":
+            return self.backend_name or getattr(self.local, "backend_name", "gbrain")
         if self.remote is None:
             return "none"
         return _REMOTE_LABELS.get(
             type(self.remote).__name__,
             type(self.remote).__name__,
         )
+
+    def _backend_label(self) -> str:
+        """Stable selected-backend label, independent of legacy remote state."""
+
+        if self.backend_name:
+            return self.backend_name
+        return self._remote_label() if self.remote is not None else "local-json"
 
     def _emit_audit(self, event: dict[str, Any]) -> None:
         """Best-effort emit one audit event to ``audit_hook`` (never raises).
@@ -353,6 +362,8 @@ class RecipeKB:
         return {
             "op": "read",
             "method": method,
+            "mode": self.mode,
+            "backend": self._backend_label(),
             "remote": self._remote_label(),
             "resolution": resolution,
             "hit": row is not None,
@@ -363,6 +374,7 @@ class RecipeKB:
                 "label_match": label_match or None,
             },
             "result": result,
+            "provenance": {"component": "recipe_kb", "backend": self._backend_label()},
         }
 
     def _write_audit_event(
@@ -403,6 +415,7 @@ class RecipeKB:
         result = result if isinstance(result, dict) else {}
         counts = result.get("counts") if isinstance(result.get("counts"), dict) else {}
         prior_counts = result.get("prior_counts") if isinstance(result.get("prior_counts"), dict) else {}
+        write_safety = result.get("write_safety") if isinstance(result.get("write_safety"), dict) else {}
         delta = {key: int(value) - int(prior_counts.get(key, 0) or 0) for key, value in counts.items()}
 
         provenance = provenance if isinstance(provenance, dict) else {}
@@ -415,9 +428,11 @@ class RecipeKB:
         return {
             "op": "write",
             "method": "put_recipe",
+            "mode": self.mode,
+            "backend": self._backend_label(),
             "remote": self._remote_label(),
-            # Writes are local-authoritative; the remote is read-side only.
-            "resolution": "local_write",
+            "resolution": f"{self.mode}_write",
+            "success": True,
             "hit": True,
             "generator": str(provenance.get("generator") or ""),
             "phase": str(details.get("phase") or ""),
@@ -429,9 +444,18 @@ class RecipeKB:
                 "created": bool(result.get("created")),
                 "best_throughput": throughput,
                 "best_config_nonempty": bool(best_config),
+                "write_safety": {
+                    key: str(value)
+                    for key, value in write_safety.items()
+                    if key in {"lock", "latest_read", "merge", "champion"}
+                },
             },
             "counts": {key: int(value) for key, value in counts.items()},
             "delta": delta,
+            "provenance": {
+                "component": "recipe_kb",
+                "generator": str(provenance.get("generator") or ""),
+            },
         }
 
     def _note_failure(self, method: str, exc: Exception) -> None:
@@ -459,6 +483,32 @@ class RecipeKB:
                 method,
                 exc,
             )
+
+    def _put_backend(self, **kwargs: Any) -> dict[str, Any]:
+        """Write through the selected backend and audit observable failures."""
+
+        try:
+            return self.local.put_recipe(**kwargs)
+        except Exception as exc:
+            self._emit_audit(
+                {
+                    "op": "write",
+                    "method": "put_recipe",
+                    "mode": self.mode,
+                    "backend": self._backend_label(),
+                    "remote": self._remote_label(),
+                    "resolution": f"{self.mode}_error",
+                    "success": False,
+                    "hit": False,
+                    "request": {"canonical_id": kwargs.get("canonical_id") or None},
+                    "error": {
+                        "type": type(exc).__name__,
+                        "category": str(getattr(exc, "category", "unknown")),
+                    },
+                    "provenance": {"component": "recipe_kb"},
+                }
+            )
+            raise
 
     # Writes — local only
     def put_recipe(
@@ -524,7 +574,7 @@ class RecipeKB:
             dict[str, Any]: ``{"canonical_id", "version", "created",
                 "prior_counts", "counts"}``.
         """
-        result = self.local.put_recipe(
+        result = self._put_backend(
             canonical_id=canonical_id,
             model=model,
             hardware=hardware,
@@ -568,7 +618,43 @@ class RecipeKB:
         )
         return result
 
-    # Reads — remote-first, local fallback
+    # Reads — selected-store authority and regular warm-start reads
+    def get_authoritative_recipe(
+        self,
+        *,
+        canonical_id: str,
+        version: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Read the selected store's exact canonical row without broad fallback.
+
+        Remote mode delegates to ``get_recipe_exact`` so a miss or degraded
+        backend never starts GBrain search/list pagination. Local and legacy
+        stores use their naturally exact ``get_recipe`` implementation.
+        """
+
+        exact_reader = getattr(self.local, "get_recipe_exact", None)
+        try:
+            if callable(exact_reader):
+                row = exact_reader(canonical_id=canonical_id, version=version)
+            else:
+                row = self.local.get_recipe(canonical_id=canonical_id, version=version)
+        except Exception as exc:  # noqa: BLE001 - authority reads are degradation-safe
+            log.warning(
+                "recipe_kb: exact authority read failed for %s (%s)",
+                canonical_id,
+                exc,
+            )
+            row = None
+        self._emit_audit(
+            self._read_audit_event(
+                method="get_authoritative_recipe",
+                resolution=f"{self.mode}_authority",
+                row=row,
+                canonical_id=canonical_id,
+            )
+        )
+        return row
+
     def get_recipe(
         self,
         *,
@@ -600,7 +686,7 @@ class RecipeKB:
             dict[str, Any] | None: The recipe row in arbor shape, or
                 ``None`` when neither store has the row.
         """
-        resolution = "local"
+        resolution = self.mode
         if version is None and self._remote_active():
             try:
                 # Fast path: delegate to the remote's slug-based get_recipe
@@ -679,10 +765,23 @@ class RecipeKB:
             except InvalidCanonicalIdError as exc:
                 log.warning("get_recipe: %s; local-only read", exc)
                 resolution = "remote_error"
-        local_row = self.local.get_recipe(
-            canonical_id=canonical_id,
-            version=version,
-        )
+        try:
+            local_row = self.local.get_recipe(
+                canonical_id=canonical_id,
+                version=version,
+            )
+        except RemoteRecipeClientError as exc:
+            # Exclusive remote mode stores its GBrain backend in ``local``;
+            # preserve degradation/audit behavior even though ``remote`` is None.
+            self._note_failure("get_recipe", exc)
+            resolution = "remote_error" if self.mode == "remote" else "local_error"
+            local_row = None
+        except Exception as exc:  # noqa: BLE001 - remote reads must degrade safely
+            if self.mode != "remote":
+                raise
+            self._note_failure("get_recipe", exc)
+            resolution = "remote_error"
+            local_row = None
         self._emit_audit(
             self._read_audit_event(
                 method="get_recipe",
@@ -730,7 +829,7 @@ class RecipeKB:
             The matching recipe rows (remote-first, local fall-through),
             reranked by ``prefer``.
         """
-        resolution = "local"
+        resolution = self.mode
         if self._remote_active():
             try:
                 rows = self.remote.search(  # type: ignore[union-attr]
@@ -761,13 +860,24 @@ class RecipeKB:
             except RemoteRecipeClientError as exc:
                 self._note_failure("search", exc)
                 resolution = "remote_error"
-        local_rows = self.local.search(
-            label_match=label_match,
-            metric_filters=metric_filters,
-            updated_since=updated_since,
-            order_by=order_by,
-            limit=limit,
-        )
+        try:
+            local_rows = self.local.search(
+                label_match=label_match,
+                metric_filters=metric_filters,
+                updated_since=updated_since,
+                order_by=order_by,
+                limit=limit,
+            )
+        except RemoteRecipeClientError as exc:
+            self._note_failure("search", exc)
+            resolution = "remote_error" if self.mode == "remote" else "local_error"
+            local_rows = []
+        except Exception as exc:  # noqa: BLE001 - remote reads must degrade safely
+            if self.mode != "remote":
+                raise
+            self._note_failure("search", exc)
+            resolution = "remote_error"
+            local_rows = []
         ranked_local = _rerank_by_prefer(local_rows, prefer)
         self._emit_audit(
             self._read_audit_event(
@@ -782,14 +892,19 @@ class RecipeKB:
 
     # Lifecycle
     def close(self) -> None:
-        """Release the remote client's HTTP transport (no-op for the local
-        store). Idempotent; safe to call from a CLI atexit handler.
-        """
-        if self.remote is not None:
+        """Release selected and legacy backend transports, at most once each."""
+        seen: set[int] = set()
+        for backend in (self.local, self.remote):
+            if backend is None or id(backend) in seen:
+                continue
+            seen.add(id(backend))
+            close = getattr(backend, "close", None)
+            if not callable(close):
+                continue
             try:
-                self.remote.close()
+                close()
             except Exception:  # noqa: BLE001
-                log.exception("recipe_kb: remote.close raised")
+                log.exception("recipe_kb: backend close raised")
 
 
 __all__ = [

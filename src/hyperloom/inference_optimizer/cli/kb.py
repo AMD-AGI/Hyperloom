@@ -1,27 +1,26 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Recipe-snapshot KB + KnowledgePlane bootstrap for the CLI.
-
-Resolves the local KB root, builds the RecipeKB local-write/remote-read
-dispatcher, runs the T0 warm-start anchor, and wires the KnowledgePlane
-facade (PR Monitor + KB). Must not import ``cli`` (one-way dependency).
-"""
+"""Recipe-snapshot KB + Phase 1 KnowledgePlane bootstrap for the CLI."""
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import logging
 import os
+import shutil
 import sys
+import warnings
+from contextlib import contextmanager, suppress
+from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator, Mapping
 
-from hyperloom.common.io import append_jsonl
+from hyperloom.common.io import append_jsonl, atomic_write_json
 from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
 from hyperloom.orchestrator.state.shared_state import SharedState
-from ..session.paths import workspace_root as _workspace_root_resolve
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import
     from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
@@ -29,11 +28,172 @@ if TYPE_CHECKING:  # pragma: no cover - type-only import
 
 log = logging.getLogger(__name__)
 
+_LEGACY_WORKSPACE_KB_ROOT = Path("/workspace/hyperloom/kb")
+_RECIPE_MIGRATION_MARKER = ".recipe-kb-migration-v1.json"
+_RECIPE_MIGRATION_LOCK = ".recipe-kb-migration.lock"
+_RECIPE_DATA_FILES = frozenset({"recipe.json", "attempts.ndjson"})
+
+
+def _recipe_live_paths(root: Path) -> list[Path]:
+    """Return valid seven-component Recipe live rows below *root*."""
+
+    if not root.exists():
+        return []
+    if not root.is_dir():
+        raise RuntimeError(f"legacy Recipe KB source is not a directory: {root}")
+    rows: list[Path] = []
+    try:
+        for path in root.rglob("recipe.json"):
+            if path.is_symlink() or not path.is_file():
+                continue
+            if len(path.parent.relative_to(root).parts) == 7:
+                rows.append(path)
+    except OSError as exc:
+        raise RuntimeError(f"could not inspect legacy Recipe KB source {root}: {exc}") from exc
+    return sorted(rows)
+
+
+def _is_migratable_recipe_file(path: Path, recipe_dir: Path) -> bool:
+    """Select durable Recipe data while excluding live lock/temporary files."""
+
+    if path.is_symlink() or not path.is_file():
+        return False
+    relative = path.relative_to(recipe_dir)
+    if any(part == ".lock" or part.endswith(".tmp") or part.startswith(".tmp") for part in relative.parts):
+        return False
+    return relative.name in _RECIPE_DATA_FILES or relative.parts[0] == "history" or not relative.name.startswith(".")
+
+
+@contextmanager
+def _recipe_migration_lock(destination: Path) -> Iterator[None]:
+    """Serialize one-time migration among concurrent local-mode startups."""
+
+    destination.mkdir(parents=True, exist_ok=True)
+    lock_path = destination / _RECIPE_MIGRATION_LOCK
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0), 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        with suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _copy_recipe_corpus(
+    source: Path,
+    destination: Path,
+    live_paths: list[Path],
+) -> tuple[int, list[Path], list[Path]]:
+    """Copy complete Recipe directories without clobbering destination files."""
+
+    files: list[tuple[Path, Path]] = []
+    seen: set[Path] = set()
+    for live_path in live_paths:
+        recipe_dir = live_path.parent
+        for source_path in recipe_dir.rglob("*"):
+            if not _is_migratable_recipe_file(source_path, recipe_dir):
+                continue
+            target = destination / source_path.relative_to(source)
+            if target in seen:
+                continue
+            seen.add(target)
+            if target.exists():
+                raise RuntimeError(f"legacy Recipe migration would clobber existing file: {target}")
+            files.append((source_path, target))
+
+    created_files: list[Path] = []
+    created_dirs: list[Path] = []
+    completed = False
+    try:
+        for source_path, target in sorted(files, key=lambda pair: pair[1].as_posix()):
+            missing_parents: list[Path] = []
+            parent = target.parent
+            while parent != destination and not parent.exists():
+                missing_parents.append(parent)
+                parent = parent.parent
+            for directory in reversed(missing_parents):
+                directory.mkdir()
+                created_dirs.append(directory)
+            with source_path.open("rb") as source_stream, target.open("xb") as target_stream:
+                created_files.append(target)
+                shutil.copyfileobj(source_stream, target_stream)
+                target_stream.flush()
+                os.fsync(target_stream.fileno())
+            shutil.copystat(source_path, target, follow_symlinks=False)
+        completed = True
+    finally:
+        if not completed:
+            for path in reversed(created_files):
+                with suppress(OSError):
+                    path.unlink()
+            for path in reversed(created_dirs):
+                with suppress(OSError):
+                    path.rmdir()
+    return len(live_paths), created_files, created_dirs
+
+
+def _legacy_recipe_root(env: Mapping[str, str]) -> Path:
+    """Resolve the legacy implicit source without changing the new default."""
+
+    user_data_path = str(env.get("USER_DATA_PATH") or "").strip()
+    return Path(user_data_path).expanduser() / "kb" if user_data_path else _LEGACY_WORKSPACE_KB_ROOT
+
+
+def _migrate_legacy_recipe_kb_once(*, destination: Path, source: Path) -> bool:
+    """Migrate legacy Recipe data once, failing startup on a real copy error."""
+
+    destination = destination.expanduser()
+    source = source.expanduser()
+    marker = destination / _RECIPE_MIGRATION_MARKER
+    if marker.exists() or _recipe_live_paths(destination):
+        return False
+    live_paths = _recipe_live_paths(source)
+    if not live_paths:
+        return False
+    with _recipe_migration_lock(destination):
+        if marker.exists() or _recipe_live_paths(destination):
+            return False
+        live_paths = _recipe_live_paths(source)
+        if not live_paths:
+            return False
+        created_files: list[Path] = []
+        created_dirs: list[Path] = []
+        completed = False
+        try:
+            recipe_count, created_files, created_dirs = _copy_recipe_corpus(source, destination, live_paths)
+            atomic_write_json(
+                marker,
+                {"version": 1, "source": str(source), "recipes": recipe_count},
+                fsync=True,
+                mode=0o600,
+            )
+            directory_fd = os.open(destination, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            completed = True
+        except Exception as exc:
+            raise RuntimeError(
+                f"legacy Recipe KB data exists at {source}, but migration into {destination} failed: {exc}"
+            ) from exc
+        finally:
+            if not completed:
+                with suppress(OSError):
+                    marker.unlink()
+                for path in reversed(created_files):
+                    with suppress(OSError):
+                        path.unlink()
+                for path in reversed(created_dirs):
+                    with suppress(OSError):
+                        path.rmdir()
+    log.info("migrated %d legacy Recipe row(s) from %s into %s", recipe_count, source, destination)
+    return True
+
 
 def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
-    """Resolve the local recipe-snapshot KB root: ``--local-kb-root`` ->
-    ``$HYPERLOOM_LOCAL_KB_ROOT`` -> ``workspace_root()/kb``. Not created here
-    (LocalRecipeStore creates it lazily on first write).
+    """Resolve the shared local knowledge root without creating it.
 
     Args:
         args: Parsed CLI arguments; ``local_kb_root`` is consulted first.
@@ -41,10 +201,17 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
     Returns:
         Path: The resolved local KB root directory.
     """
+    from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
+
     explicit = getattr(args, "local_kb_root", None) or os.environ.get("HYPERLOOM_LOCAL_KB_ROOT", "")
-    if explicit:
+    if explicit and "KNOWLEDGE_LOCAL_ROOT" not in os.environ:
+        warnings.warn(
+            "--local-kb-root/HYPERLOOM_LOCAL_KB_ROOT is deprecated; use KNOWLEDGE_LOCAL_ROOT",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return Path(str(explicit).strip())
-    return _workspace_root_resolve() / "kb"
+    return Path(KnowledgeConfig.from_env().local_root)
 
 
 def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
@@ -95,49 +262,62 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
 def _build_recipe_kb_dispatcher(
     args: argparse.Namespace,
 ) -> Any:
-    """Build the local-write / gbrain-read RecipeKB dispatcher. Local store is
-    always wired; the read-side remote is the gbrain page store (``GBRAIN_*``),
-    enabled unless ``--degraded-kb`` is set or gbrain is unconfigured.
-
-    Writes stay local-only; gbrain serves the read side (and an optional
-    in-process mirror of each local write via ``RECIPE_KB_MIRROR_MODE=inline``).
+    """Build RecipeKB over exactly one selected local or remote store.
 
     Args:
         args: Parsed CLI arguments (``degraded_kb`` etc.).
 
     Returns:
-        Any: A configured ``RecipeKB`` dispatcher (optionally gbrain-mirroring).
+        Any: A configured ``RecipeKB``, or ``None`` for ``--degraded-kb``.
     """
-    from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
-
-    local_root = _resolve_local_kb_root(args)
-    local_store = LocalRecipeStore(root=local_root)
+    from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
+    from hyperloom.orchestrator.knowledge.recipe_kb import (
+        GbrainRecipeStore,
+        LocalRecipeStore,
+        RecipeKB,
+    )
 
     if bool(getattr(args, "degraded_kb", False)):
-        return RecipeKB(local=local_store, remote=None)  # opt-out: no network
+        return None
 
-    # Read-side remote is gbrain only. Writes stay local-only; gbrain is
-    # consulted for READS and (optionally) mirrored to on local write.
-    from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import build_gbrain_remote_from_env
-
-    gbrain_remote = build_gbrain_remote_from_env()
-    if gbrain_remote is None or not gbrain_remote.enabled:
-        return RecipeKB(local=local_store, remote=None)  # gbrain unconfigured: local-only
-
-    kb = RecipeKB(local=local_store, remote=gbrain_remote)
-    # RECIPE_KB_MIRROR_MODE (default ``external``): ``external`` keeps gbrain off
-    # the write path; ``inline`` best-effort mirrors each local write into gbrain
-    # in-process (local write stays authoritative).
-    mirror_mode = os.environ.get("RECIPE_KB_MIRROR_MODE", "external").strip().lower()
-    if mirror_mode == "inline":
-        from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_ingest import (
-            GbrainMirroringRecipeKB,
-            build_mirror_mcp_from_env,
+    config = KnowledgeConfig.from_env()
+    if os.environ.get("RECIPE_KB_MIRROR_MODE"):
+        log.warning("RECIPE_KB_MIRROR_MODE is deprecated and ignored; use KNOWLEDGE_STORE_MODE=local|remote")
+        warnings.warn(
+            "RECIPE_KB_MIRROR_MODE is deprecated and ignored by KnowledgePlane; "
+            "select KNOWLEDGE_STORE_MODE=local|remote",
+            DeprecationWarning,
+            stacklevel=2,
         )
-
-        mirror_mcp = build_mirror_mcp_from_env()
-        return GbrainMirroringRecipeKB(kb, mirror_mcp) if mirror_mcp is not None else kb
-    return kb  # external (default): no in-process mirror
+    if config.mode is KnowledgeStoreMode.LOCAL:
+        # No GBrain client is constructed in local mode, even when ambient
+        # credentials are present.
+        explicit_compatibility_root = getattr(args, "local_kb_root", None) or os.environ.get(
+            "HYPERLOOM_LOCAL_KB_ROOT"
+        )
+        explicit_knowledge_root = str(os.environ.get("KNOWLEDGE_LOCAL_ROOT") or "").strip()
+        if not explicit_knowledge_root and explicit_compatibility_root:
+            config = replace(config, local_root=str(_resolve_local_kb_root(args)))
+        if not explicit_knowledge_root and not explicit_compatibility_root:
+            _migrate_legacy_recipe_kb_once(
+                destination=Path(config.local_root),
+                source=_legacy_recipe_root(os.environ),
+            )
+        store: Any = LocalRecipeStore(root=Path(config.local_root))
+    else:
+        store = GbrainRecipeStore.from_credentials(
+            base_url=config.gbrain_base_url,
+            token=config.gbrain_token,
+            lock_root=Path(config.local_root) / ".remote-locks" / "recipes",
+        )
+    kb = RecipeKB(
+        local=store,
+        remote=None,
+        mode=config.mode.value,
+        backend_name=config.backend,
+    )
+    kb.knowledge_config = config
+    return kb
 
 
 def _bootstrap_recipe_kb(
@@ -295,7 +475,10 @@ def _bootstrap_knowledge_plane(
                 exc,
             )
 
+    config = getattr(recipe_kb_client, "knowledge_config", None)
     return KnowledgePlane.from_clients(
         pr_monitor=pr_client,
         pr_monitor_mcp_url=pr_mcp_url,
+        recipe_kb=recipe_kb_client,
+        config=config,
     )

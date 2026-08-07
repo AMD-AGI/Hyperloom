@@ -6,8 +6,7 @@
 # vars exported by the launcher (REPO_ID, MODEL_PATH, FRAMEWORK, GPU_TYPE,
 # BACKEND, TP, PREC, ISL, OSL, CONC, MODEL_CLASS, TARGET_GAIN, MAX_HOURS, ...).
 #
-# The kernel-agent conversation backend for the python carrier is chosen by
-# HL_KERNEL_BACKEND (codex|claude); the launcher sets a per-cluster default.
+# KERNEL_OPT_BACKEND_ORDER (geak|forge) selects the kernel-opt rewrite ladder.
 set -euo pipefail
 
 echo "[hl] session=$CLAW_SESSION_ID model=$REPO_ID fw=$FRAMEWORK gpu=$GPU_TYPE tp=$TP backend=$BACKEND"
@@ -22,7 +21,7 @@ fi
 
 # 2) gateway reachability preflight (non-fatal; surfaces misconfig early).
 curl -sS -o /dev/null -w "[hl] gateway /models HTTP=%{http_code}\n" \
-  -H "Authorization: Bearer ${OPENAI_API_KEY:-$SAFE_API_KEY}" \
+  -H "Authorization: Bearer ${OPENAI_API_KEY}" \
   "${OPENAI_BASE_URL}/models" || echo "[hl][warn] gateway preflight failed" >&2
 
 # 3) Hyperloom source. Precedence:
@@ -54,20 +53,10 @@ bash src/hyperloom/inference_optimizer/assets/install.sh
 RUN_DIR="$USER_DATA_PATH/optimizer_runs"; mkdir -p "$RUN_DIR"
 LAUNCH_INFO_FILE="$RUN_DIR/launch_${CLAW_SESSION_ID}.json"
 
-hl_kernel_backend_flag() {
-  case "${HL_KERNEL_BACKEND:-claude}" in
-    codex)  echo --kernel-codex ;;
-    claude) echo --kernel-claude ;;
-    *) echo "[hl] unknown HL_KERNEL_BACKEND: ${HL_KERNEL_BACKEND:-} (want codex|claude)" >&2; return 2 ;;
-  esac
-}
-
 # Build the carrier prompt inline. The carrier loads SKILL.md and issues
 # `python -m hyperloom.inference_optimizer.cli optimize` itself.
 hl_build_prompt() {
   export TP  # ensure TP is visible to the child python
-  local kernel_backend_flag
-  kernel_backend_flag="$(hl_kernel_backend_flag)"
   cat <<PROMPT_EOF
 You are running the Hyperloom inference optimizer from ${REPO_ROOT}.
 
@@ -84,8 +73,8 @@ Target:
 - max hours: ${MAX_HOURS}
 
 Load the repository skill instructions, then run this exact optimizer command
-for the workload. Do not omit the env exports, model-class, precision,
-kernel backend, or launch-info-file wiring:
+for the workload. Do not omit the env exports, model-class, precision, or
+launch-info-file wiring:
 
 export TP=${TP} EP=1 CONC=${CONC} ISL=${ISL} OSL=${OSL} PRECISION=${PREC} NODES=1
 export KERNEL_OPT_BACKEND_ORDER="\${KERNEL_OPT_BACKEND_ORDER:-geak}"
@@ -97,7 +86,6 @@ python3 -m hyperloom.inference_optimizer.cli --verbose optimize \\
   --target-gain "${TARGET_GAIN}" \\
   --max-hours "${MAX_HOURS}" \\
   --tick-interval-sec 30 \\
-  ${kernel_backend_flag} \\
   --launch-info-file "${LAUNCH_INFO_FILE}"
 
 Keep changes scoped to the optimization workspace and report the final
@@ -109,10 +97,7 @@ case "$BACKEND" in
   python)
     # Workload envs the Coordinator reuses for baseline -> params -> sweep.
     export TP EP=1 CONC ISL OSL PRECISION="$PREC" NODES=1
-    # Kernel-agent conversation backend is orthogonal to the scheduler; the
-    # launcher sets a per-cluster default via HL_KERNEL_BACKEND (codex or
-    # claude). Override HL_KERNEL_BACKEND to flip it.
-    KERNEL_BACKEND_FLAG="$(hl_kernel_backend_flag)" || exit 2
+    export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
     exec python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
       --model "$MODEL_PATH" \
       --framework "$FRAMEWORK" \
@@ -121,7 +106,6 @@ case "$BACKEND" in
       --target-gain "$TARGET_GAIN" \
       --max-hours "$MAX_HOURS" \
       --tick-interval-sec 30 \
-      "$KERNEL_BACKEND_FLAG" \
       --launch-info-file "$LAUNCH_INFO_FILE"
     ;;
   claude)
@@ -160,7 +144,7 @@ case "$BACKEND" in
     mkdir -p "$CODEX_HOME"
     [ -n "${SSL_CERT_FILE:-}" ] && export CODEX_CA_CERTIFICATE="${CODEX_CA_CERTIFICATE:-$SSL_CERT_FILE}"
     cat > "$CODEX_HOME/config.toml" <<CODEX_EOF
-model = "${CODEX_MODEL:-gpt-5.4}"
+model = "${CODEX_MODEL:-gpt-5.6-sol}"
 model_provider = "amdgw"
 
 [model_providers.amdgw]
@@ -184,10 +168,10 @@ CODEX_EOF
     # passes. Agent approvals/sandbox stay enabled by default; dedicated
     # internal containers can opt into the legacy bypass with
     # HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS=1.
-    codex_args=(exec -C "$REPO_ROOT" -m "${CODEX_MODEL:-gpt-5.4}" "$PROMPT")
+    codex_args=(exec -C "$REPO_ROOT" -m "${CODEX_MODEL:-gpt-5.6-sol}" "$PROMPT")
     if [ "${HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS:-0}" = "1" ]; then
       echo "[hl] WARNING: enabling codex --dangerously-bypass-approvals-and-sandbox by explicit opt-in" >&2
-      codex_args=(exec --dangerously-bypass-approvals-and-sandbox -C "$REPO_ROOT" -m "${CODEX_MODEL:-gpt-5.4}" "$PROMPT")
+      codex_args=(exec --dangerously-bypass-approvals-and-sandbox -C "$REPO_ROOT" -m "${CODEX_MODEL:-gpt-5.6-sol}" "$PROMPT")
     fi
     exec codex "${codex_args[@]}"
     ;;

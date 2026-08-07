@@ -56,6 +56,37 @@ from .mcp_emit_intent import (
 log = logging.getLogger(__name__)
 
 
+def _input_side_total(usage: dict[str, Any]) -> int:
+    """Total input-side tokens (fresh + cache read + cache creation) of a usage dict.
+
+    Args:
+        usage (dict[str, Any]): An Anthropic-shaped usage dict.
+
+    Returns:
+        int: The summed input side; ``0`` when no counters are present.
+    """
+    return (
+        safe_int(usage.get("input_tokens"))
+        + safe_int(usage.get("cache_read_input_tokens"))
+        + safe_int(usage.get("cache_creation_input_tokens"))
+    )
+
+
+def _context_tokens_estimate(usage: dict[str, Any], *, num_turns: int) -> int:
+    """Mean per-request context size implied by call-cumulative usage.
+
+    Args:
+        usage (dict[str, Any]): The call-cumulative usage dict.
+        num_turns (int): Internal turns the call took; ``<= 1`` means the sum
+            already describes a single request.
+
+    Returns:
+        int: The per-request estimate, or ``0`` when usage carries no counters.
+    """
+    total = _input_side_total(usage)
+    return total // num_turns if num_turns > 1 else total
+
+
 # Prompt suffix appended to every Claude turn so the model knows the tool contract.
 _OUTPUT_INSTRUCTIONS = f"""
 ==== OUTPUT FORMAT (REQUIRED) ====
@@ -150,7 +181,7 @@ class ClaudeBackend:
     """Production Claude backend. Implements :class:`Backend`.
 
     Args:
-        model: Claude model id (e.g. ``"claude-opus-4-7"``); defaults to
+        model: Claude model id (e.g. ``"claude-opus-5"``); defaults to
             ``ANTHROPIC_MODEL`` env or library default.
         api_key_env: env var checked at construction (``ANTHROPIC_API_KEY``
             by default). Missing key is recorded as a soft warning — SDK
@@ -469,11 +500,14 @@ class ClaudeBackend:
                 "cache_read_input_tokens": cache_read,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                # Per-request context size; the counters above sum the call's
+                # internal turns and are spend, not size.
+                "context_tokens_peak": safe_int(usage.get("context_tokens_peak") if usage else None),
                 # Full conversation text so the caller (which holds the
                 # session_dir / component / tick context the stateless
                 # backend lacks) can persist it to conversations.jsonl.
                 # The composed prompt carries the user turn; the system
-                # prompt is snapshotted once under agents/<role>/.
+                # prompt is snapshotted per scope under agents/<role>/.
                 "prompt": full_prompt,
                 "response": raw_text,
             },
@@ -788,14 +822,18 @@ class ClaudeBackend:
 
         Returns:
             A tuple ``(intents, raw_text, tool_block_count, usage, session_id)``
-            where ``usage`` is the latest cumulative usage dict and
-            ``session_id`` is the SDK session token (or ``None``).
+            where ``usage`` is the latest cumulative usage dict plus a
+            per-request ``context_tokens_peak``, and ``session_id`` is the SDK
+            session token (or ``None``).
         """
         intents: list[Intent] = []
         text_chunks: list[str] = []
         result_chunks: list[str] = []
         tool_block_count = 0
-        last_usage: dict[str, Any] = {}
+        # Every usage dict the stream reports, in order: the last is cumulative
+        # over the call, the ones before it describe single requests.
+        usages: list[dict[str, Any]] = []
+        num_turns = 0
         session_id: str | None = None
         stream = self.sdk_query_factory(prompt=prompt, options=options)
         try:
@@ -831,11 +869,12 @@ class ClaudeBackend:
                 result_text = getattr(message, "result", None)
                 if isinstance(result_text, str) and result_text:
                     result_chunks.append(result_text)
-                # Overwrite (not accumulate): the terminal message reports
-                # cumulative session usage.
+                msg_turns = getattr(message, "num_turns", None)
+                if isinstance(msg_turns, int) and msg_turns > 0:
+                    num_turns = msg_turns
                 msg_usage = getattr(message, "usage", None)
                 if isinstance(msg_usage, dict) and msg_usage:
-                    last_usage = dict(msg_usage)
+                    usages.append(dict(msg_usage))
         except Exception as exc:
             # The SDK raises on a terminal ResultMessage with is_error=True. Two
             # such subtypes are NON-fatal turn boundaries, not real failures, and
@@ -877,6 +916,13 @@ class ClaudeBackend:
         if self._active_turn_diagnostic is not None:
             self._active_turn_diagnostic["result"] = "".join(result_chunks)
             self._active_turn_diagnostic["raw_text"] = raw_text
+        last_usage: dict[str, Any] = dict(usages[-1]) if usages else {}
+        if last_usage:
+            peak = max((_input_side_total(u) for u in usages[:-1]), default=0)
+            last_usage["context_tokens_peak"] = peak or _context_tokens_estimate(
+                last_usage,
+                num_turns=num_turns,
+            )
         return intents, raw_text, tool_block_count, last_usage, session_id
 
     @staticmethod

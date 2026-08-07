@@ -1121,6 +1121,7 @@ def _build_multinode_apply_patch_entrypoint(
     backup_dir: str,
     kernel_id: str,
     timeout_sec: int,
+    jit_build_dir: str = "",
 ) -> str:
     """Compose the head-pod entrypoint that fans out a kernel patch to every pod via heredoc-embedded kernel_patch_multinode.py.
 
@@ -1149,6 +1150,7 @@ def _build_multinode_apply_patch_entrypoint(
         f"--patch-b64 {shlex.quote(str(patch_b64))} "
         f"--backup-dir {shlex.quote(str(backup_dir))} "
         f"--kernel-id {shlex.quote(str(kernel_id))} "
+        f"--jit-build-dir {shlex.quote(str(jit_build_dir))} "
         f"--timeout-sec {int(timeout_sec)}"
     )
 
@@ -1157,6 +1159,7 @@ def _build_multinode_revert_patch_entrypoint(
     target_path: str,
     backup_map_json: str,
     timeout_sec: int,
+    records_json: str = "",
 ) -> str:
     """Compose the head-pod entrypoint that fans out a revert via heredoc-embedded kernel_patch_multinode.py (``backup_map_json`` from the matching apply).
 
@@ -1181,7 +1184,29 @@ def _build_multinode_revert_patch_entrypoint(
         f"{py}__MN_KPATCH_PY_EOF__\n"
         f'python3 "$WORK_DIR/kernel_patch_multinode.py" revert '
         f"--target-path {shlex.quote(str(target_path))} "
+        f"--records-json {shlex.quote(str(records_json))} "
         f"--backup-map-json {shlex.quote(str(backup_map_json))} "
+        f"--timeout-sec {int(timeout_sec)}"
+    )
+
+
+def _build_multinode_finalize_patch_entrypoint(
+    records_json: str,
+    timeout_sec: int,
+) -> str:
+    """Compose the head-pod entrypoint that finalizes accepted backups."""
+    pps = _read_pod_script("patch_path_safety.py")
+    py = _read_pod_script("kernel_patch_multinode.py")
+    return (
+        f"{_MN_ENTRYPOINT_PREAMBLE}"
+        f'cat > "$WORK_DIR/patch_path_safety.py" '
+        f"<<'__MN_PPATH_EOF__'\n"
+        f"{pps}__MN_PPATH_EOF__\n"
+        f'cat > "$WORK_DIR/kernel_patch_multinode.py" '
+        f"<<'__MN_KPATCH_PY_EOF__'\n"
+        f"{py}__MN_KPATCH_PY_EOF__\n"
+        f'python3 "$WORK_DIR/kernel_patch_multinode.py" finalize '
+        f"--records-json {shlex.quote(str(records_json))} "
         f"--timeout-sec {int(timeout_sec)}"
     )
 
@@ -1407,6 +1432,7 @@ from .commands.infera import (
     _infera_kill_inference as _infera_kill_inference,
     _infera_apply_tracelens_patch as _infera_apply_tracelens_patch,
     _infera_apply_patch as _infera_apply_patch,
+    _infera_finalize_patch as _infera_finalize_patch,
     _infera_revert_patch as _infera_revert_patch,
     _infera_kernel_bench as _infera_kernel_bench,
     cmd_install_geak as cmd_install_geak,
@@ -1468,6 +1494,7 @@ def cmd_apply_patch(args: argparse.Namespace) -> int:
         args.backup_dir,
         args.kernel_id,
         args.timeout_sec,
+        str(args.jit_build_dir or ""),
     )
     rc, parsed, logs = _submit_and_collect_pod_json(
         state,
@@ -1509,20 +1536,23 @@ def cmd_revert_patch(args: argparse.Namespace) -> int:
         return EXIT_CONFIG_ERROR
 
     try:
+        decoded_records = json.loads(args.records_json or "{}")
         decoded_map = json.loads(args.backup_map_json or "{}")
     except json.JSONDecodeError as exc:
-        err(f"--backup-map-json is not valid JSON: {exc}")
+        err(f"revert records JSON is invalid: {exc}")
         return EXIT_CONFIG_ERROR
-    if not decoded_map:
-        err("--backup-map-json must be a non-empty {host: backup_path} object")
+    if not decoded_records and not decoded_map:
+        err("revert requires non-empty --records-json or --backup-map-json")
         return EXIT_CONFIG_ERROR
 
-    info(f"revert-patch: target={args.target_path} backup_hosts={list(decoded_map.keys())}")
+    hosts = list((decoded_records or decoded_map).keys())
+    info(f"revert-patch: target={args.target_path} backup_hosts={hosts}")
 
     entrypoint = _build_multinode_revert_patch_entrypoint(
         args.target_path,
         args.backup_map_json,
         args.timeout_sec,
+        args.records_json,
     )
     rc, parsed, logs = _submit_and_collect_pod_json(
         state,
@@ -1535,6 +1565,36 @@ def cmd_revert_patch(args: argparse.Namespace) -> int:
         err("revert-patch: could not parse per-pod JSON from dashboard logs")
         if args.print_logs:
             print(logs)
+        return EXIT_TRANSIENT
+    print(json.dumps(parsed, indent=2, sort_keys=True))
+    return rc
+
+
+def cmd_finalize_patch(args: argparse.Namespace) -> int:
+    """Delete backups after a patch becomes the accepted baseline."""
+    if _load_state().get("backend") == "infera":
+        return _infera_finalize_patch(args)
+    state = _load_state()
+    if not (state.get("head_pod_ip") or "").strip():
+        return EXIT_CONFIG_ERROR
+    try:
+        records = json.loads(args.records_json or "{}")
+    except json.JSONDecodeError:
+        return EXIT_CONFIG_ERROR
+    if not records:
+        return EXIT_CONFIG_ERROR
+    entrypoint = _build_multinode_finalize_patch_entrypoint(
+        args.records_json,
+        args.timeout_sec,
+    )
+    rc, parsed, _logs = _submit_and_collect_pod_json(
+        state,
+        entrypoint,
+        label="finalize-patch",
+        poll_interval=args.poll_interval,
+        poll_timeout=_poll_timeout_from_args(args),
+    )
+    if parsed is None:
         return EXIT_TRANSIENT
     print(json.dumps(parsed, indent=2, sort_keys=True))
     return rc
@@ -2313,6 +2373,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="directory on each pod where the pre-patch original is saved (e.g. /var/kernel_patch_backups)",
     )
     sp.add_argument("--kernel-id", default="", help="optional id used to construct backup filename")
+    sp.add_argument("--jit-build-dir", default="")
     sp.add_argument("--timeout-sec", type=int, default=120, help="per-actor timeout (default 120s)")
     sp.add_argument("--print-logs", action="store_true", help="dump full dashboard job_logs on parse failure")
     _add_common_poll_flags(sp)
@@ -2323,16 +2384,26 @@ def build_parser() -> argparse.ArgumentParser:
         "revert-patch",
         help="fan-out a kernel patch revert; multi-node only",
     )
-    sp.add_argument("--target-path", required=True)
+    sp.add_argument("--target-path", default="")
+    sp.add_argument("--records-json", default="")
     sp.add_argument(
         "--backup-map-json",
-        required=True,
+        default="",
         help="JSON object {hostname: backup_path} from the matching apply-patch result",
     )
     sp.add_argument("--timeout-sec", type=int, default=60)
     sp.add_argument("--print-logs", action="store_true")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_revert_patch)
+
+    sp = sub.add_parser(
+        "finalize-patch",
+        help="delete backups for a patch accepted as the new baseline",
+    )
+    sp.add_argument("--records-json", required=True)
+    sp.add_argument("--timeout-sec", type=int, default=60)
+    _add_common_poll_flags(sp)
+    sp.set_defaults(func=cmd_finalize_patch)
 
     # apply-tracelens-patch (multi-node only)
     sp = sub.add_parser(

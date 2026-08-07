@@ -791,7 +791,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
     # Monotonic Coordinator tick counter; stable anchor for plateau/phase budget math.
     tick: int = 0
-    # Remaining gain-pct target gap (0.0 => no target); fact for the "Mission progress" line, not a priority.
+    # Percent improvement still needed to reach the objective (0.0 => none/reached); fact for the "Mission progress" line, not a priority.
     target_gap_pct: float = 0.0
 
     # Phase state machine fields
@@ -865,6 +865,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Bounded rollback ring (cap 10) of prior good ``orchestration_memory``
     # records; recovers a later degenerate compaction from a prior snapshot.
     orchestration_memory_history: list[dict[str, Any]] = field(default_factory=list)
+
+    # Census of orchestration prompt pushes: {"seed": n, "delta": n}; a ratio
+    # near 1:0 means compaction is re-seeding the conversation every tick.
+    orchestration_prompt_modes: dict[str, int] = field(default_factory=dict)
 
     # Bounded ring (cap 10) of per-macro-cycle directives injected into the
     # orchestration system prompt; entries: {cycle, directive, source, ts}.

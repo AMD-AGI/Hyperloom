@@ -38,7 +38,7 @@ GEAK workers. The Coordinator pod itself is small.
 | Coordinator + Orchestration        | 4 cores   | 16 GiB    | none                                      | minimal                                                                                    |
 | Critic (subprocess)                | 1 core    | 2 GiB     | none                                      | <100 MB (knowledge base (KB) drafts)                                                       |
 | Robustness (subprocess)            | 1 core    | 2 GiB     | none                                      | <100 MB (findings JSONL)                                                                   |
-| Kernel-agent + Ray head            | 4 cores   | 16 GiB    | none for head; workers below              | varies                                                                                     |
+| GEAK + Ray head (kernel optimization) | 4 cores   | 16 GiB    | none for head; workers below              | varies                                                                                     |
 | Ray worker (GEAK attempt)          | 8 cores   | 32 GiB    | 1 × MI300X / MI325X / MI355X              | ~10 GB per attempt for build artifacts                                                     |
 | Inference server (sglang / vllm)   | 16 cores  | 128 GiB   | 1–8 × MI300X / MI325X / MI355X (matches TP)| weights + KV cache; depends on model                                                       |
 | GEAK retrieval-augmented generation (RAG) index (first build) | 4 cores   | 16 GiB    | 1 × any GPU (CPU is hours-slow)           | ~1.3 GB BGE embedding model + index in `~/.cache/amd-ai-devtool/semantic-index/`           |
@@ -95,17 +95,18 @@ namespace: hyperloom
 │   ├── Pod: coordinator                  # Python CLI
 │   ├── (subprocess) critic-agent
 │   ├── (subprocess) robustness-agent
-│   └── (subprocess) kernel-agent + Ray head
+│   └── Ray head (launched by kernel request handlers; GEAK runs as Ray workers)
 ├── PersistentVolumeClaim: user-data       # mounted at /workspace/hyperloom
 ├── PersistentVolumeClaim: tracelens-extension  # optional read-only private extension mount
-├── Secret: hyperloom-creds                # SAFE_API_KEY
+├── Secret: hyperloom-creds                # OPENAI_API_KEY
 └── ConfigMap: hyperloom-env               # path env, KB env, observability env
 ```
 
 Notes:
 
-* Ray workers are launched as child processes of the kernel-agent,
-  not as separate pods. Hyperloom does not require Ray's Kubernetes
+* Ray is launched directly by the Coordinator's programmatic kernel request
+  handlers (`orchestrator/kernel/request_handlers.py`) when GEAK runs, not by a
+  separate kernel-agent process. Hyperloom does not require Ray's Kubernetes
   operator. (Hosted Primus-Claw deployments do use RayJob for multi-node
   scale-out; that is internal to the Primus-Claw control plane.)
 * Pin the pod to a single node with `nodeSelector` matching your AMD
@@ -141,7 +142,7 @@ Back up the following artifacts from each session.
 |-----------------------------------------|-------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
 | Session manifest + state                | `$SESSION_DIR/manifest.json`,<br>`$SESSION_DIR/state.json`        | Until the session ends; not normally needed afterwards.                                                  |
 | `session_breakdown.json` (downstream contract) | `$SESSION_DIR/`<br>`session_breakdown.json`                | Permanent. This is the canonical record consumed by downstream dashboards and notebooks.                 |
-| Local recipe KB                         | `${HYPERLOOM_LOCAL_KB_ROOT`<br>`:-$USER_DATA_PATH/kb}`            | Permanent. Backup before cleanup of `USER_DATA_PATH`.                                                    |
+| Local knowledge root                    | `${KNOWLEDGE_LOCAL_ROOT:-$USER_DATA_PATH/knowledge}` (otherwise `~/.cache/hyperloom/knowledge`) | Permanent. Backup before cleanup of `USER_DATA_PATH`. |
 | Robustness findings                     | `$SESSION_DIR/agents/`<br>`robustness/findings/`<br>`<session_id>.jsonl` | 30 days minimum; longer if your incident process needs it.                                        |
 | Kernel-opt attempts                     | `$SESSION_DIR/kernel-agent/`<br>`runs/<session_id>/`<br>`optimization_attempts.jsonl` | 14 days unless an attempt was promoted; keep promoted attempts permanently.          |
 | Per-attempt artifacts (full)            | `$SESSION_DIR/kernel-agent/`<br>`runs/<session_id>/`<br>`{logs,results,verification}/` | 7–14 days. Cold-archive only if you need full reproducibility.                    |
@@ -154,7 +155,8 @@ Use the following cron jobs to automate session backup and cleanup.
 # Daily: ship session_breakdown.json + KB to S3
 find "$USER_DATA_PATH" -name session_breakdown.json -mtime -1 \
   -exec aws s3 cp {} s3://my-bucket/hyperloom/sessions/ \;
-aws s3 sync "${HYPERLOOM_LOCAL_KB_ROOT:-$USER_DATA_PATH/kb}" s3://my-bucket/hyperloom/kb/
+KB_ROOT="${KNOWLEDGE_LOCAL_ROOT:-${HYPERLOOM_LOCAL_KB_ROOT:-${USER_DATA_PATH:-$HOME/.cache/hyperloom}/knowledge}}"
+aws s3 sync "$KB_ROOT" s3://my-bucket/hyperloom/knowledge/
 
 # Weekly: prune session dirs older than 14 days
 find "$USER_DATA_PATH" -mindepth 2 -maxdepth 2 -type d -name '20??????T??????Z' -mtime +14 -exec rm -rf {} \;
@@ -170,13 +172,13 @@ directly using the aliases generated by preflight and the kernel-agent installer
 Operational checks:
 
 ```bash
-test -n "${SAFE_API_KEY:-${OPENAI_API_KEY:-${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}}}"
+test -n "${OPENAI_API_KEY:-${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}}"
 test -n "${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}"
 bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only
 ```
 
 Child processes inherit the gateway settings prepared by preflight; keep
-operator-facing gateway configuration in `SAFE_API_KEY` / `OPENAI_BASE_URL`
+operator-facing gateway configuration in `OPENAI_API_KEY` / `OPENAI_BASE_URL`
 or the split Anthropic/OpenAI credentials.
 
 ---
@@ -241,7 +243,7 @@ breakdown artifact.
 
 ### Scenario C: Gateway 401 after credential or config drift
 
-1. Confirm the pod has a current key and base URL (`SAFE_API_KEY` /
+1. Confirm the pod has a current key and base URL (`OPENAI_API_KEY` /
    `OPENAI_BASE_URL`, or split Anthropic/OpenAI credentials).
 2. Re-run `bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only`
    and then without `--check-only` if it reports missing aliases.
@@ -252,8 +254,8 @@ breakdown artifact.
 
 1. Move the selected local KB root aside before starting a new run:
    ```bash
-   mv "${HYPERLOOM_LOCAL_KB_ROOT:-$USER_DATA_PATH/kb}" \
-      "${HYPERLOOM_LOCAL_KB_ROOT:-$USER_DATA_PATH/kb}.corrupt.$(date -u +%Y%m%dT%H%M%SZ)"
+   KB_ROOT="${KNOWLEDGE_LOCAL_ROOT:-${HYPERLOOM_LOCAL_KB_ROOT:-${USER_DATA_PATH:-$HOME/.cache/hyperloom}/knowledge}}"
+   mv "$KB_ROOT" "$KB_ROOT.corrupt.$(date -u +%Y%m%dT%H%M%SZ)"
    ```
 2. Restart the optimizer with the same `--local-kb-root` (or env default). The
    local store is recreated lazily on first write.
@@ -287,9 +289,9 @@ Before going to production with self-hosted Hyperloom, ensure:
   = 1–8 GPUs depending on workload TP).
 - `USER_DATA_PATH` PV ≥ 200 GB per active session, ideally local
   NVMe.
-- `HYPERLOOM_LOCAL_KB_ROOT` (or `$USER_DATA_PATH/kb`) on persistent
+- `KNOWLEDGE_LOCAL_ROOT` (or the default `$USER_DATA_PATH/knowledge`) on persistent
   storage with daily backup.
-- `SAFE_API_KEY` rotation runbook (key is long-lived; rotation
+- `OPENAI_API_KEY` rotation runbook (key is long-lived; rotation
   requires only re-export + `install.sh` re-run).
 - LLM gateway credential and endpoint check in the session startup probe.
 - Daily ship of `session_breakdown.json` to long-term storage.

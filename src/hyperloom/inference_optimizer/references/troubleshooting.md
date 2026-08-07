@@ -4,11 +4,11 @@
 
 If the CLI exits with `Claude SDK exit code 1` or
 `Primus.00009 token not present`, the gateway rejected the request. Check that
-`OPENAI_BASE_URL` / `SAFE_API_KEY` are set in `.env` (or the calling shell) and
+`OPENAI_BASE_URL` / `OPENAI_API_KEY` are set in `.env` (or the calling shell) and
 that the gateway is reachable:
 
 ```bash
-curl -sS -H "Authorization: Bearer $SAFE_API_KEY" "$OPENAI_BASE_URL/models" | head
+curl -sS -H "Authorization: Bearer $OPENAI_API_KEY" "$OPENAI_BASE_URL/models" | head
 ```
 
 If `_preflight()` itself fails, run install in `--check-only` mode to see which
@@ -57,12 +57,12 @@ Transient SDK errors retry/resume up to the Coordinator emergency threshold.
 Custom orchestration models are enabled by default and are validated against the
 configured gateway catalog. Set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`
 only when you intentionally want the strict AMD Claude allowlist
-(`claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6`).
+(`claude-opus-5` / `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6`).
 
 | Symptom | Fix |
 |---|---|
 | `--claude-model=... is not allowed` | You likely set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`; unset it or set it to `1`, then ensure the model appears in the gateway `/models` catalog. |
-| `gateway catalog unreachable after retries` (4 probes at 0/1/3/5s) | Reproduce: `curl -k -H "Authorization: Bearer $SAFE_API_KEY" "$OPENAI_BASE_URL/models" \| jq '.data[].id'`. Gateway answers → proxy/SSL is wrong; gateway down → fix gateway. Fail-fast is intentional vs. 401 mid-baseline. |
+| `gateway catalog unreachable after retries` (4 probes at 0/1/3/5s) | Reproduce: `curl -k -H "Authorization: Bearer $OPENAI_API_KEY" "$OPENAI_BASE_URL/models" \| jq '.data[].id'`. Gateway answers → proxy/SSL is wrong; gateway down → fix gateway. Fail-fast is intentional vs. 401 mid-baseline. |
 
 ### Critic-agent runtime errors
 
@@ -73,7 +73,7 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 | Symptom | Fix |
 |---|---|
 | `--critic-agent selected but critic-agent runtime not found` | `export CRITIC_AGENT_ROOT=/path/to/src/hyperloom/agents/critic`, or check the `src/hyperloom/agents/critic/` install. |
-| `hyperloom.agents.critic.runtime.cli prepare-review/commit-review exited rc=2` | Schema/validation bug (per `src/hyperloom/agents/critic/AGENTS.md` §Exit codes). Inspect workdir payload; retry with `--critic-mock` while fixing. |
+| `hyperloom.agents.critic.runtime.cli prepare-review/commit-review exited rc=2` | Schema/validation bug (per `src/hyperloom/agents/critic/README.md` §Exit codes). Inspect workdir payload; retry with `--critic-mock` while fixing. |
 | `hyperloom.agents.critic.runtime.cli ... timed out after 30s` | Critic runtime is stuck. If `CRITIC_KB_CLIENT_MODE=live`, drop to the default `inmemory` mode. A default local-only run should not block on remote I/O. |
 | All verdicts `('needs_review','critic_unavailable')` + `kb_skipped=missing_critical_context` | Static context load failed. Check `manifest.json` has non-empty `model_name`/`framework`; grep `logs/cli.log` for `critic_agent_backend static_context`. |
 

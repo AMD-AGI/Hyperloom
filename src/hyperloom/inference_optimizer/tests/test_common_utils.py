@@ -225,7 +225,7 @@ def test_llm_config_parse_and_derive_edges() -> None:
 def test_credentials_validate_and_reset_claude_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import credentials
 
-    for key in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+    for key in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("REPO_ROOT", str(tmp_path))
     with pytest.raises(SystemExit) as exc:
@@ -419,14 +419,14 @@ def test_infera_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
         json.dumps({"SGLANG_USE_AITER": "1", "MORI_FOO": "override", "SGLANG_MORI_BAR": "explicit"}),
     )
     monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", json.dumps(["SGLANG_MORI_BAR"]))
-    for k in ("SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL"):
+    for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL"):
         monkeypatch.setenv(k, f"secret-{k}")
     fwd = inf._collect_forward_env()
     assert fwd["MORI_FOO"] == "override"
     assert fwd["SGLANG_TORCH_PROFILER_DIR"] == "/shared/traces"
     assert fwd["SGLANG_USE_AITER"] == "1"
     assert fwd["SGLANG_MORI_BAR"] == "explicit"
-    for k in ("SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL"):
+    for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL"):
         assert k not in fwd
 
     monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", "{bad")
@@ -619,6 +619,7 @@ def test_infera_node_ops_apply_revert_and_bench(tmp_path: Path, monkeypatch: pyt
         [
             ({"status": "ok", "backup_path": "/b0"}, {"rc": 0, "stderr": ""}),
             ({"status": "failed", "error": "nope"}, {"rc": 1, "stderr": "bad"}),
+            ({"status": "restored"}, {"rc": 0, "stderr": ""}),
         ]
     )
     monkeypatch.setattr(inf, "_infera_ssh_node_op", lambda *a, **kw: next(responses))
@@ -1138,21 +1139,25 @@ def test_framework_audit_llm_refine_fallbacks(monkeypatch: pytest.MonkeyPatch) -
         "layer": "static",
         "metrics": {},
     }
-    monkeypatch.delenv("SAFE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     out = audit._maybe_llm_refine({}, dict(static), "diff")
     assert out["layer"] == "static"
-    assert "missing SAFE_API_KEY" in out["risks"][-1]
+    assert "missing OPENAI_API_KEY" in out["risks"][-1]
 
-    class _Message:
+    class _Delta:
         content = '{"semantic_status":"partially_present","applicability":"needs_rewrite","confidence":0.77,"recommended_next_step":"author_via_specialist","note":"drift"}'
 
     class _Choice:
-        message = _Message()
+        delta = _Delta()
+
+    class _Chunk:
+        usage = None
+        choices = [_Choice()]
 
     class _Completions:
         def create(self, **_kwargs):
-            return SimpleNamespace(choices=[_Choice()])
+            return iter([_Chunk()])
 
     class _OpenAI:
         def __init__(self, **_kwargs):
