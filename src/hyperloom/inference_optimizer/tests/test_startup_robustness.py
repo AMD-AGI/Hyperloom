@@ -16,6 +16,8 @@ from hyperloom.inference_optimizer.cli import credentials as cli_credentials
 from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 
+_OAUTH_ENV = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
+
 
 # _validate_credentials
 @pytest.fixture
@@ -28,6 +30,7 @@ def clean_creds_env(monkeypatch):
         "_".join(("ANTHROPIC", "AUTH", "TOKEN")),
         "_".join(("DEEPSEEK", "API", "KEY")),
         "DEEPSEEK_BASE_URL",
+        _OAUTH_ENV,
     ):
         monkeypatch.delenv(var, raising=False)
     return monkeypatch
@@ -74,6 +77,38 @@ def test_validate_credentials_passes_official_openai_key_only(clean_creds_env):
     """Official OpenAI SDK default endpoint works without OPENAI_BASE_URL."""
     clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
     cli_credentials._validate_credentials()
+
+
+def test_validate_credentials_passes_oauth_token_only(clean_creds_env):
+    """A Max/Pro subscription token alone is a complete Anthropic-side setup."""
+    clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")
+    cli_credentials._validate_credentials()
+
+
+def test_resolve_llm_endpoints_oauth_only_implies_official_anthropic(clean_creds_env):
+    """OAuth-only derives the official endpoint and leaves the OpenAI side empty."""
+    clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")
+    anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
+    assert anthropic_url == "https://api.anthropic.com"
+    assert openai_url == ""
+
+
+def test_validate_credentials_accepts_oauth_alongside_configured_openai_side(clean_creds_env):
+    """Subscription Anthropic side + fully configured OpenAI side is a legal pair."""
+    clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "ak-openai")
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    cli_credentials._validate_credentials()
+
+
+def test_validate_credentials_rejects_oauth_with_bare_openai_base_url(clean_creds_env, capsys):
+    """OAuth never vouches for the OpenAI side: its base URL still needs its own key."""
+    clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    with pytest.raises(SystemExit) as exc_info:
+        cli_credentials._validate_credentials()
+    assert exc_info.value.code == 2
+    assert "Conflicting LLM credentials" in capsys.readouterr().err
 
 
 def test_validate_credentials_exits_2_when_no_key(clean_creds_env, capsys):

@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.common.llm_config import (
+    ANTHROPIC_CREDENTIAL_ENV_ORDER,
     LLMConfigError,
     apply_reasoning_effort,
     claude_sdk_env_options,
@@ -134,6 +135,35 @@ def test_claude_sdk_env_options_from_deepseek_key_only():
     assert child_env["_".join(("ANTHROPIC", "API", "KEY"))] == "deepseek-token"
     assert child_env["_".join(("ANTHROPIC", "AUTH", "TOKEN"))] == "deepseek-token"
     assert child_env["ANTHROPIC_MODEL"] == "deepseek-v4-pro"
+
+
+def test_claude_sdk_env_options_never_synthesizes_api_keys_from_oauth_token():
+    """The subscription token must stay env-passthrough only.
+
+    Either API-key var switches the Claude CLI out of subscription mode, so
+    synthesizing one here would both re-bill the run and 401 it.
+    """
+    oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
+    opts = claude_sdk_env_options(env={oauth_env: "sk-ant-oat01-fake"})
+    child_env = opts["env"]
+    assert child_env[oauth_env] == "sk-ant-oat01-fake"
+    assert "_".join(("ANTHROPIC", "API", "KEY")) not in child_env
+    assert "_".join(("ANTHROPIC", "AUTH", "TOKEN")) not in child_env
+
+
+def test_claude_sdk_env_options_isolates_settings_for_oauth_only_env():
+    """OAuth alone is a gateway signal, so the run still gets an isolated env."""
+    opts = claude_sdk_env_options(env={"_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")): "sk-ant-oat01-fake"})
+    assert opts["setting_sources"] == []
+
+
+def test_anthropic_credential_env_order_is_cli_precedence():
+    """Highest precedence first; OAuth is live only when both key vars are unset."""
+    assert ANTHROPIC_CREDENTIAL_ENV_ORDER == (
+        "_".join(("ANTHROPIC", "API", "KEY")),
+        "_".join(("ANTHROPIC", "AUTH", "TOKEN")),
+        "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")),
+    )
 
 
 def test_claude_sdk_env_options_keeps_explicit_deepseek_base_url():
