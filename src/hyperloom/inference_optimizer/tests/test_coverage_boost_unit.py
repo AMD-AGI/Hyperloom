@@ -53,7 +53,7 @@ def test_kb_writeback_default_root_uses_user_data_path(monkeypatch, tmp_path) ->
     monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
 
-    assert kb_writeback._default_kb_root() == tmp_path / "workspace" / "kb" / "framework_optimization"
+    assert kb_writeback._default_kb_root() == tmp_path / "workspace" / "framework-kb" / "framework_optimization"
 
 
 async def test_kb_writeback_rejects_unknown_outcome() -> None:

@@ -33,6 +33,11 @@ _FRAMEWORK_OPTIMIZATION_ROOT: str = "framework_optimization"
 #: allowlist in ``common/env_safety`` lets through preflight.
 KB_ROOT_ENV: str = "INFERENCE_OPTIMIZER_FA_KB_PATH"
 
+#: Workspace subdirectory holding this KB. Distinct from ``kb``, which the
+#: recipe KB owns: ``list_domains`` treats every directory under the root as a
+#: domain, so a shared root would surface recipe trees as framework domains.
+_MUTABLE_KB_DIRNAME: str = "framework-kb"
+
 #: Workspace root when ``USER_DATA_PATH`` is unset. Mirrors
 #: ``session.paths.DEFAULT_SESSION_DIR``, which this package cannot import:
 #: the ``fa`` CLI runs standalone and must not depend on inference_optimizer.
@@ -123,15 +128,20 @@ def mutable_kb_root() -> Path:
     Resolved per call rather than at import, because the environment is not
     fully settled when this module is first imported.
 
+    Deliberately not ``<workspace>/kb``: that is the recipe KB's root, and this
+    reader enumerates whatever directories sit under its own root, so sharing
+    one would present recipe trees as framework domains.
+
     Returns:
-        ``$INFERENCE_OPTIMIZER_FA_KB_PATH`` when set, else ``<workspace>/kb``
-        where the workspace is ``$USER_DATA_PATH`` or the pod-local default.
+        ``$INFERENCE_OPTIMIZER_FA_KB_PATH`` when set, else
+        ``<workspace>/framework-kb`` where the workspace is ``$USER_DATA_PATH``
+        or the pod-local default.
     """
     override = os.environ.get(KB_ROOT_ENV, "").strip()
     if override:
         return Path(override).expanduser()
     workspace = os.environ.get("USER_DATA_PATH", "").strip() or _DEFAULT_WORKSPACE_ROOT
-    return Path(workspace).expanduser() / "kb"
+    return Path(workspace).expanduser() / _MUTABLE_KB_DIRNAME
 
 
 def _resolve_kb_root() -> Path:
