@@ -11,6 +11,21 @@ needed).
 Default is overridable per pod via `INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND`
 (one of `mock` / `agent`).
 
+## Review transport: `--critic-protocol {auto,openai,anthropic}`
+
+Both transports run the full critic-agent runtime; only the review reasoning
+call differs. There is no degraded critic, so a transport whose credentials are
+missing fails at startup rather than silently changing the review quality.
+
+| Value | Behaviour |
+|---|---|
+| `auto` (default) | Anthropic-only config picks `anthropic`; everything else picks `openai`. |
+| `openai` | `AsyncOpenAI.chat.completions`. Needs the OpenAI side configured. |
+| `anthropic` | `ClaudeBackend(raw_completion=True)`, i.e. the `claude` CLI. Needs an Anthropic-side credential, including `CLAUDE_CODE_OAUTH_TOKEN`. |
+
+Force `anthropic` when both sides are configured but the Critic should run on a
+Claude subscription; `auto` would otherwise choose the OpenAI transport.
+
 ## Required env when `--critic-agent` is active
 
 | Var | Purpose | Default |

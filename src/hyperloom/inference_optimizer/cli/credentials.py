@@ -391,6 +391,26 @@ def _reject_cross_provider_pairing() -> None:
     sys.exit(2)
 
 
+def _warn_on_shadowed_oauth_token() -> None:
+    """Warn when an API key will silently outrank the subscription token.
+
+    The Claude CLI prefers an API key over the OAuth token, so this combination
+    bills API credits even though the operator configured a subscription.
+    """
+    if not _has_claude_oauth_token():
+        return
+    shadowing = [name for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN") if os.environ.get(name, "").strip()]
+    if not shadowing:
+        return
+    print(
+        f"Preflight: WARNING — {CLAUDE_OAUTH_TOKEN_ENV} is set alongside "
+        f"{' and '.join(shadowing)}; the Claude CLI prefers the API key, so this run "
+        f"bills API credits rather than your subscription. Unset "
+        f"{' and '.join(shadowing)} to use the subscription.",
+        file=sys.stderr,
+    )
+
+
 def _validate_credentials() -> None:
     """Fail fast when no usable LLM endpoint/key is configured.
 
@@ -402,6 +422,7 @@ def _validate_credentials() -> None:
     gateways (same key under both provider env names) are both accepted.
     """
     _reject_cross_provider_pairing()
+    _warn_on_shadowed_oauth_token()
     anthropic_url, openai_url = _resolve_llm_endpoints()
     has_anthropic_side = bool(
         os.environ.get("ANTHROPIC_API_KEY")

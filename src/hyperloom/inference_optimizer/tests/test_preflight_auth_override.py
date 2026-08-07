@@ -1085,6 +1085,55 @@ def test_validate_claude_model_falls_back_to_openai_url_single_gateway(monkeypat
     assert seen["api_key"] == "gateway-key"
 
 
+def test_validate_claude_model_skips_probe_for_oauth_only(monkeypatch, capsys):
+    """The catalog probe is bearer-authenticated; a subscription token has nothing
+    to send, so probing would only fail with a misleading auth error."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setenv("_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")), "sk-ant-oat01-fake")
+    for var in (
+        "_".join(("ANTHROPIC", "API", "KEY")),
+        "_".join(("ANTHROPIC", "AUTH", "TOKEN")),
+        "_".join(("DEEPSEEK", "API", "KEY")),
+        "_".join(("OPENAI", "API", "KEY")),
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    def _no_probe(**kw):
+        raise AssertionError("catalog probe should not run without a bearer credential")
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
+    args = _make_args(claude_model="claude-opus-5")
+    result = cli._validate_and_resolve_claude_model(args, None)
+
+    assert result is None
+    assert args.claude_model == "claude-opus-5"
+    out = capsys.readouterr().out
+    assert "catalog probe skipped: oauth-only credential" in out
+
+
+def test_validate_claude_model_still_probes_when_oauth_accompanies_an_api_key(monkeypatch):
+    """An API key alongside the token can authenticate the probe, so it still runs."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setenv("_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")), "sk-ant-oat01-fake")
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
+    monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
+
+    seen: dict[str, str] = {}
+
+    def _capture(**kw):
+        seen["api_key"] = kw.get("api_key", "")
+        return {"claude-opus-5"}
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _capture)
+    args = _make_args(claude_model="claude-opus-5")
+    cli._validate_and_resolve_claude_model(args, None)
+
+    assert seen["api_key"] == "anthropic-user-token"
+
+
 def test_validate_claude_model_split_entry_no_models_route_proceeds(monkeypatch, capsys):
     """Dual entry: Anthropic side returns 404/405 for /models (no catalog route)
     → proceed without probing the OpenAI side. The OpenAI catalog must never
