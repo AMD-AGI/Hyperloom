@@ -12,7 +12,6 @@ from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
     default_role_registry,
-    roles_for_run,
 )
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
@@ -37,13 +36,34 @@ from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
 
 # agent_role
-def test_default_role_registry_has_4_v06_agents():
+def test_default_claude_model_is_opus_5():
+    """The default orchestration model must stay in sync with the allowlist head."""
+    from hyperloom.inference_optimizer.cli.credentials import (
+        _CLAUDE_ALLOWED_MODELS,
+        _CLAUDE_PREFERRED_MODEL,
+    )
+
+    assert DEFAULT_CLAUDE_MODEL == "claude-opus-5"
+    assert _CLAUDE_PREFERRED_MODEL == DEFAULT_CLAUDE_MODEL
+    assert _CLAUDE_ALLOWED_MODELS == (
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+    )
+
+
+def test_default_role_registry_has_3_agents():
     reg = default_role_registry()
-    assert set(reg.keys()) == {"orchestration", "kernel_agent", "critic", "robustness"}
+    assert set(reg.keys()) == {"orchestration", "critic", "robustness"}
+    assert "kernel_agent" not in reg
 
 
-def test_roles_for_run_deterministic_order():
-    assert roles_for_run() == ("orchestration", "kernel_agent", "critic", "robustness")
+def test_kernel_agent_not_a_role_but_still_a_request_target():
+    """kernel_agent is not an AgentRole, but REQUEST_ROUTING still names it as the valid target."""
+    reg = default_role_registry()
+    assert "kernel_agent" not in reg
+    assert REQUEST_ROUTING["orchestration"] == frozenset({"kernel_agent"})
 
 
 def test_orchestration_permissions():
@@ -61,16 +81,6 @@ def test_orchestration_permissions():
     assert IntentType.REVIEW_VERDICT not in role.allowed_intents
     assert IntentType.KILL_TASK in role.allowed_intents
     assert IntentType.RESPONSE not in role.allowed_intents
-
-
-def test_kernel_responder_only():
-    role = default_role_registry()["kernel_agent"]
-    assert role.backend_type == BackendType.CLAUDE
-    assert role.can_delegate_side_effects is False
-    assert IntentType.RESPONSE in role.allowed_intents
-    assert IntentType.PROPOSE_ACTION not in role.allowed_intents
-    assert IntentType.DELEGATE not in role.allowed_intents
-    assert IntentType.REQUEST not in role.allowed_intents
 
 
 def test_critic_review_only_codex_no_tools():
@@ -432,40 +442,6 @@ def test_gate_orchestration_request_to_critic_rejected(gate):
     assert exc.value.rule == "request_target"
 
 
-def test_gate_kernel_response_ok(gate):
-    gate.validate_intent(
-        "kernel_agent",
-        Intent(
-            type=IntentType.RESPONSE,
-            payload={"in_reply_to": "msg-abc", "kind": "trace_analyze_done"},
-        ),
-    )
-
-
-def test_gate_kernel_request_rejected_by_role(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "kernel_agent",
-            Intent(
-                type=IntentType.REQUEST,
-                payload={"target_agent": "orchestration", "kind": "x"},
-            ),
-        )
-    assert exc.value.rule == "role"
-
-
-def test_gate_kernel_propose_rejected_by_role(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "kernel_agent",
-            Intent(
-                type=IntentType.PROPOSE_ACTION,
-                payload={"action_name": "x", "predicted_gain_pct": 0},
-            ),
-        )
-    assert exc.value.rule == "role"
-
-
 def test_gate_critic_review_verdict_ok(gate):
     gate.validate_intent(
         "critic",
@@ -648,7 +624,6 @@ def test_gate_update_state_degraded_markers_rejected(gate):
 
 # allowed_tools_for_agent
 def test_allowed_tools_claude_returns_emit_intent(gate):
-    assert gate.allowed_tools_for_agent("kernel_agent") == ["emit_intent"]
     assert gate.allowed_tools_for_agent("robustness") == ["emit_intent"]
     from hyperloom.orchestrator.roles.mcp_context_tools import (
         CONTEXT_TOOL_NAMES,
@@ -675,13 +650,31 @@ def test_allowed_tools_unknown_agent_returns_empty(gate):
 
 
 # system_prompts assets
-@pytest.mark.parametrize("name", ["orchestration", "kernel_agent", "critic", "robustness"])
+@pytest.mark.parametrize("name", ["orchestration", "critic"])
 def test_system_prompt_files_exist_and_nonempty(name):
     p = asset_system_prompts_dir() / f"{name}.md"
     assert p.is_file(), f"missing system prompt: {p}"
     text = p.read_text(encoding="utf-8")
     assert len(text) > 200, f"system prompt too short: {p}"
     assert name.capitalize() in text or name in text.lower()
+
+
+def test_kernel_agent_prompt_file_absent():
+    """kernel_agent no longer has a system prompt file; kernel work is programmatic."""
+    p = asset_system_prompts_dir() / "kernel_agent.md"
+    assert not p.exists(), f"kernel_agent.md should have been deleted: {p}"
+
+
+def test_robustness_role_not_prompt_driven():
+    from hyperloom.orchestrator.roles.agent_role import default_role_registry
+
+    registry = default_role_registry()
+    assert not registry["robustness"].prompt_driven
+
+
+def test_robustness_role_no_system_prompt_file():
+    p = asset_system_prompts_dir() / "robustness.md"
+    assert not p.exists(), "robustness.md should be removed; its prompt is driven by the RCA engine"
 
 
 def test_core_state_fields_includes_closing_phase_and_baseline_config():

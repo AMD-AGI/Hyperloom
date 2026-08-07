@@ -429,7 +429,7 @@ class TestAutoWarmupTeardown:
                     cmd,
                     1,
                     "",
-                    "warmup boom SAFE_API_KEY=ak-warmup-secret-value",
+                    "warmup boom OPENAI_API_KEY=ak-warmup-secret-value",
                 )
             out_idx = cmd.index("--output-dir")
             _valid_workspace(Path(cmd[out_idx + 1]))

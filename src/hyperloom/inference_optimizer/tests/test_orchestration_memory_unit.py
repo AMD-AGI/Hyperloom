@@ -209,6 +209,33 @@ def test_context_window_known_and_unknown(monkeypatch):
     assert context_window_for_model("totally-unknown") == 123_456
 
 
+def test_default_orchestration_model_has_an_explicit_window(monkeypatch):
+    """The default model must be listed, not merely coincide with the fallback.
+
+    ``claude-opus-5`` shares the 200k value with
+    ``DEFAULT_MODEL_CONTEXT_WINDOW``, so asserting the number alone would pass
+    even with the entry deleted. Pin membership and re-read under a different
+    fallback so a dropped entry actually fails.
+    """
+    from hyperloom.orchestrator.roles.agent_role import DEFAULT_CLAUDE_MODEL
+
+    assert DEFAULT_CLAUDE_MODEL in om.MODEL_CONTEXT_WINDOWS
+    monkeypatch.setattr(om, "DEFAULT_MODEL_CONTEXT_WINDOW", 1)
+    assert context_window_for_model(DEFAULT_CLAUDE_MODEL) == 200_000
+    # The gateway spells it "Claude-Opus-5"; folding must resolve it too.
+    assert context_window_for_model("Claude-Opus-5") == 200_000
+
+
+def test_context_window_matches_gateway_model_spelling(monkeypatch):
+    # Gateways report the same model as "Claude-Opus-4.8"; an exact-match lookup
+    # missed every one of those and silently used the fallback window.
+    monkeypatch.setattr(om, "DEFAULT_MODEL_CONTEXT_WINDOW", 1)
+    monkeypatch.setitem(om.MODEL_CONTEXT_WINDOWS, "unit-opus-4-8", 500_000)
+    for spelling in ("Unit-Opus-4.8", "unit_opus_4_8", "  UNIT-OPUS-4-8  "):
+        assert context_window_for_model(spelling) == 500_000
+    assert context_window_for_model("unit-opus-5") == 1
+
+
 def test_policy_context_token_soft_trigger():
     p = CheckpointPolicy(
         on_phase_boundary=False,
@@ -218,14 +245,14 @@ def test_policy_context_token_soft_trigger():
         context_token_soft=140_000,
     )
     assert p.should_checkpoint(
-        ticks_since_last=0,
+        ticks_since_last=om.DEFAULT_CHECKPOINT_MIN_TICK_GAP,
         minutes_since_last=0,
         chars_since_last=0,
         phase_changed=False,
         context_tokens_now=140_000,
     )
     assert not p.should_checkpoint(
-        ticks_since_last=0,
+        ticks_since_last=om.DEFAULT_CHECKPOINT_MIN_TICK_GAP,
         minutes_since_last=0,
         chars_since_last=0,
         phase_changed=False,
@@ -233,11 +260,55 @@ def test_policy_context_token_soft_trigger():
     )
 
 
+def test_policy_token_trigger_suppressed_inside_min_tick_gap():
+    p = CheckpointPolicy(
+        on_phase_boundary=False,
+        every_ticks=0,
+        every_minutes=0,
+        char_budget=0,
+        context_token_soft=140_000,
+        min_tick_gap=3,
+    )
+    for gap in (0, 1, 2):
+        assert not p.should_checkpoint(
+            ticks_since_last=gap,
+            minutes_since_last=0,
+            chars_since_last=0,
+            phase_changed=False,
+            context_tokens_now=10**6,
+        )
+    assert p.should_checkpoint(
+        ticks_since_last=3,
+        minutes_since_last=0,
+        chars_since_last=0,
+        phase_changed=False,
+        context_tokens_now=10**6,
+    )
+
+
+def test_policy_min_tick_gap_does_not_gate_cadence_triggers():
+    p = CheckpointPolicy(on_phase_boundary=True, min_tick_gap=10**6)
+    assert p.should_checkpoint(
+        ticks_since_last=0,
+        minutes_since_last=0,
+        chars_since_last=0,
+        phase_changed=True,
+        context_tokens_now=0,
+    )
+    assert p.should_checkpoint(
+        ticks_since_last=0,
+        minutes_since_last=0,
+        chars_since_last=om.DEFAULT_CHECKPOINT_CHAR_BUDGET,
+        phase_changed=False,
+        context_tokens_now=0,
+    )
+
+
 def test_policy_context_token_soft_disabled_by_default():
     # Default soft=0 → token trigger off; huge token count alone does not fire.
     p = CheckpointPolicy(on_phase_boundary=False, every_ticks=0, every_minutes=0, char_budget=0)
     assert not p.should_checkpoint(
-        ticks_since_last=0,
+        ticks_since_last=100,
         minutes_since_last=0,
         chars_since_last=0,
         phase_changed=False,
@@ -245,16 +316,16 @@ def test_policy_context_token_soft_disabled_by_default():
     )
 
 
-def test_tracker_set_context_tokens_and_reset_preserves_level():
+def test_tracker_set_context_tokens_and_reset_clears_level():
     t = CheckpointTracker()
     t.set_context_tokens(123_456)
     t.set_context_tokens(-5)  # clamped to 0
     assert t.context_tokens_now == 0
     t.set_context_tokens(123_456)
     t.reset(tick=1, minute_mark=2.0, phase="EXPLORE")
-    # reset clears cadence counters but NOT the absolute token water level.
+    # The compacted conversation no longer holds what that level described.
     assert t.chars_since_last == 0
-    assert t.context_tokens_now == 123_456
+    assert t.context_tokens_now == 0
 
 
 # ---- degenerate detection + non-empty-inherit + fallback ----
@@ -380,3 +451,62 @@ def test_build_memory_record_directive_absent_key():
 def test_parse_checkpoint_reply_no_json_has_empty_directive():
     out = parse_checkpoint_reply("just prose")
     assert out["next_cycle_directive"] == ""
+
+
+# ---- compaction-storm regression ----
+
+# Per-tick input-side totals (input + cache_read + cache_creation) reported by
+# the orchestration backend across the 32 ticks of session
+# vllm/Qwen3-30B-A3B/20260731T083332Z; 20 of them exceed the 200,000-token
+# window itself, so the figure sums one call's internal turns.
+_QWEN30B_PER_TICK_CALL_TOTALS = [
+    189428, 145812, 229553, 145556, 149585, 226780, 301512, 150692,
+    305910, 304526, 325373, 278753, 245105, 161516, 245056, 245041,
+    162617, 246067, 495608, 162932, 168199, 344032, 169259, 249183,
+    248904, 337083, 255609, 163891, 253773, 432564, 256705, 165881,
+]
+
+
+def _replay(levels, *, policy):
+    """Count compactions over a tick sequence, resetting the tracker on each one."""
+    tracker = CheckpointTracker()
+    compactions = 0
+    for tick, level in enumerate(levels, start=1):
+        tracker.set_context_tokens(level)
+        due = policy.should_checkpoint(
+            ticks_since_last=tick - tracker.last_tick,
+            minutes_since_last=0.0,
+            chars_since_last=tracker.chars_since_last,
+            phase_changed=False,
+            context_tokens_now=tracker.context_tokens_now,
+        )
+        if due:
+            compactions += 1
+            tracker.reset(tick=tick, minute_mark=0.0, phase="EXPLORE")
+    return compactions
+
+
+def test_min_tick_gap_bounds_a_permanently_tripped_token_trigger():
+    # A level that never drops below the budget is capped by the floor.
+    policy = CheckpointPolicy(
+        on_phase_boundary=False,
+        every_ticks=0,
+        every_minutes=0,
+        char_budget=0,
+        context_token_soft=140_000,
+    )
+    compactions = _replay(_QWEN30B_PER_TICK_CALL_TOTALS, policy=policy)
+    ticks = len(_QWEN30B_PER_TICK_CALL_TOTALS)
+    assert compactions < ticks
+    assert compactions <= ticks / om.DEFAULT_CHECKPOINT_MIN_TICK_GAP + 1
+
+
+def test_call_cumulative_usage_is_never_read_as_a_water_level():
+    from hyperloom.orchestrator.roles.claude import _context_tokens_estimate
+
+    window = om.context_window_for_model("claude-opus-4-8")
+    usage = {"input_tokens": 6, "cache_read_input_tokens": 75_448, "cache_creation_input_tokens": 154_099}
+    assert _context_tokens_estimate(usage, num_turns=1) > window
+    assert _context_tokens_estimate(usage, num_turns=8) < window
+    # No turn count reported → pass the sum through unchanged.
+    assert _context_tokens_estimate(usage, num_turns=0) == _context_tokens_estimate(usage, num_turns=1)

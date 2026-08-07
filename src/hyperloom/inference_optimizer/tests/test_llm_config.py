@@ -75,19 +75,32 @@ def test_openai_kwargs_reads_openai_custom_headers():
 
 
 def test_openai_kwargs_ignores_anthropic_custom_headers_and_host():
-    """The OpenAI/Codex client reads only OPENAI_CUSTOM_HEADERS and does no
-    host-based auto-injection. Base URL is still derived."""
+    """The OpenAI/Codex client reads only the OpenAI side; Anthropic headers and
+    host are ignored."""
     kwargs = openai_client_kwargs(
         env={
+            "_".join(("OPENAI", "API", "KEY")): "openai-token",
+            "OPENAI_BASE_URL": "https://api.openai.com/v1",
             "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
             "ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic",
             "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: ak-header",
         }
     )
-    assert kwargs["api_key"] == "ak-anthropic"
-    assert kwargs["base_url"] == "https://llm.example.invalid/Unified/v1"
+    assert kwargs["api_key"] == "openai-token"
+    assert kwargs["base_url"] == "https://api.openai.com/v1"
     # Empty headers are omitted from kwargs entirely.
     assert "default_headers" not in kwargs
+
+
+def test_openai_kwargs_refuse_anthropic_only_env():
+    """Anthropic-only credentials cannot auth an OpenAI-protocol client."""
+    with pytest.raises(LLMConfigError):
+        openai_client_kwargs(
+            env={
+                "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
+                "ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic",
+            }
+        )
 
 
 def test_openai_kwargs_preserves_explicit_openai_config():

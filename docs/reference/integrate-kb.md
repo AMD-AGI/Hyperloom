@@ -10,15 +10,15 @@ This topic explains the optional recipe knowledge-base (KB) integration used by 
 how the runtime behaves when KB sources are unavailable. The KB is optional;
 Hyperloom can run in local-only or degraded mode.
 
-Hyperloom uses a recipe-snapshot KB. Two distinct stores are involved; they
-serve different purposes and are configured independently:
+Hyperloom uses a recipe-snapshot KB and selects exactly one store:
 
 | KB path | Owner / process | Purpose |
 |---------|-----------------|---------|
-| Local recipe KB | `inference_optimizer` | Always the write target for recipes, attempts, and session-derived optimization knowledge. Root resolved by `--local-kb-root` / `HYPERLOOM_LOCAL_KB_ROOT`. |
-| Remote gbrain recipe KB (optional) | gbrain page store | Read side of the recipe KB. Consulted for warm-start reads when `GBRAIN_BASE_URL` / `GBRAIN_TOKEN` are set. Writes never go here directly (an out-of-band CronJob ingests the local store unless `RECIPE_KB_MIRROR_MODE=inline`). |
+| Local recipe KB | `inference_optimizer` | Selected by local/default mode; reads and writes durable Recipe JSON, history, and attempts. |
+| Remote gbrain recipe KB | gbrain page store | Selected only by `KNOWLEDGE_STORE_MODE=remote`; reads and writes canonical GBrain pages directly. |
 
-The old `INFERENCE_OPTIMIZER_KB_ROOT` JSONL store is retired. Current code doesn't read it; use `HYPERLOOM_LOCAL_KB_ROOT` or `--local-kb-root` instead.
+Ambient GBrain credentials do not enable remote reads. `RECIPE_KB_MIRROR_MODE`
+is obsolete and ignored.
 
 ---
 
@@ -28,19 +28,20 @@ You don't need to configure a remote KB to start. By default, Hyperloom writes a
 local recipe KB under:
 
 ```text
-$USER_DATA_PATH/kb
+$USER_DATA_PATH/knowledge
 ```
 
-If `USER_DATA_PATH` is unset, the default workspace root is
-`/workspace/hyperloom`, so the local KB falls back to `/workspace/hyperloom/kb`.
+If `USER_DATA_PATH` is unset, the default is
+`~/.cache/hyperloom/knowledge`.
 
 To choose an explicit local path:
 
 ```bash
-export HYPERLOOM_LOCAL_KB_ROOT=/path/to/hyperloom-kb
-# or pass:
-python3 -m hyperloom.inference_optimizer.cli optimize --local-kb-root /path/to/hyperloom-kb ...
+export KNOWLEDGE_LOCAL_ROOT=/path/to/hyperloom-knowledge
 ```
+
+The older `HYPERLOOM_LOCAL_KB_ROOT` and `--local-kb-root` forms remain
+deprecated compatibility inputs.
 
 To force a run without KB hooks:
 
@@ -52,11 +53,17 @@ python3 -m hyperloom.inference_optimizer.cli optimize --degraded-kb ...
 
 ## Local recipe KB
 
-The local store is always the write target. The resolver order is:
+Local/default mode uses this resolver order:
 
-1. `--local-kb-root` (or `HYPERLOOM_LOCAL_KB_ROOT`) when set
-2. otherwise `workspace_root()/kb` — that is, `$USER_DATA_PATH/kb`, falling back to
-   `/workspace/hyperloom/kb` when `USER_DATA_PATH` is unset
+1. `KNOWLEDGE_LOCAL_ROOT` when set
+2. deprecated `--local-kb-root` or `HYPERLOOM_LOCAL_KB_ROOT`
+3. `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge`
+
+When no root is explicit, the first upgraded startup performs a one-time copy
+of legacy Recipes from `$USER_DATA_PATH/kb`, or `/workspace/hyperloom/kb` when
+`USER_DATA_PATH` is unset. It does not copy lock/temp files and does not replace
+existing destination Recipes. See the [upgrade guide](upgrade.md) for the
+stop, backup, and rollout procedure.
 
 The store uses a nested on-disk layout keyed by recipe canonical-id components.
 Treat the directory as Hyperloom-owned; use the CLI/runtime APIs rather than
@@ -66,27 +73,25 @@ Recommended locations:
 
 | Setup | Suggested path |
 |-------|----------------|
-| Single-user pod | `$USER_DATA_PATH/kb` |
-| Shared persistent mount | `/shared/hyperloom/kb` |
+| Single-user pod | `$USER_DATA_PATH/knowledge` |
+| Shared persistent mount | `/shared/hyperloom/knowledge` |
 | Hosted Primus-Claw sandbox | Platform-managed; don't override unless instructed. |
 
 ---
 
-## Remote recipe KB reads (gbrain)
+## Remote recipe KB (gbrain)
 
-The read side of the recipe KB is the gbrain page store. It is enabled only
-when gbrain is configured; writes always stay local.
+Remote mode reads and writes the gbrain page store directly:
 
 ```bash
+export KNOWLEDGE_STORE_MODE=remote
 export GBRAIN_BASE_URL=https://your-gbrain
 export GBRAIN_TOKEN=...
 ```
 
-When gbrain is unset or unreachable, the dispatcher degrades to local-only
-reads. Use `--degraded-kb` to skip all KB hooks deliberately. By default
-(`RECIPE_KB_MIRROR_MODE=external`) an out-of-band CronJob ingests the local
-store into gbrain; set `RECIPE_KB_MIRROR_MODE=inline` to best-effort mirror each
-local write in-process (the local write stays authoritative either way).
+Both credentials are required; missing credentials fail configuration. Remote
+mode does not fall back to local Recipe data. Use `--degraded-kb` to skip all
+Recipe KB hooks deliberately.
 
 ---
 
@@ -98,7 +103,7 @@ baseline, profile/roofline, explore, kernel optimization, sweep, and report
 still run.
 
 The runtime records KB state in session artifacts so downstream consumers can
-tell whether a run used local-only, remote-enriched, or degraded KB mode.
+tell whether a run used local, remote, or degraded KB mode.
 
 ---
 
@@ -114,13 +119,15 @@ use the default local store.
 
 **Q: Does a missing remote KB fail the run?**
 
-No. An unset or unreachable gbrain recipe read side degrades to local-only
-operation. `--degraded-kb` skips the recipe KB path intentionally.
+In local/default mode GBrain is not consulted. In remote mode missing
+credentials fail configuration and write failures are surfaced; select local
+mode or `--degraded-kb` rather than relying on an implicit fallback.
 
 **Q: Can I back up the KB?**
 
 Yes. Back up the directory selected by `--local-kb-root` or
-`HYPERLOOM_LOCAL_KB_ROOT`; otherwise back up `$USER_DATA_PATH/kb`.
+`HYPERLOOM_LOCAL_KB_ROOT`; otherwise back up `KNOWLEDGE_LOCAL_ROOT` or the
+default `$USER_DATA_PATH/knowledge`.
 
 **Q: Do I need the KB for a first run?**
 

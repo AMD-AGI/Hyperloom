@@ -356,3 +356,62 @@ def test_final_source_layers_populated_from_stack(tmp_path):
     assert len(layers) == 1, f"expected 1 source_layer, got {layers}"
     assert layers[0]["snapshot_dir"] == "/session/opt/src/abc"
     assert layers[0]["reproducible"] is True
+
+
+# ---- telemetry.orchestration_context ----
+
+
+def _write_checkpoint_events(session_dir: Path, levels: list[int], *, degenerate: int = 0) -> None:
+    """Seed a coordinator DB with orchestration checkpoint events."""
+    import sqlite3
+
+    db_dir = session_dir / "storage"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_dir / "coordinator.db")
+    try:
+        conn.execute("CREATE TABLE events (seq INTEGER PRIMARY KEY, topic TEXT, payload TEXT)")
+        for i, level in enumerate(levels):
+            payload = {"kind": "orchestration_checkpoint", "tick": i + 1, "context_tokens": level}
+            conn.execute(
+                "INSERT INTO events (topic, payload) VALUES (?, ?)",
+                ("observation", json.dumps(payload)),
+            )
+        for _ in range(degenerate):
+            conn.execute(
+                "INSERT INTO events (topic, payload) VALUES (?, ?)",
+                ("observation", json.dumps({"kind": "orchestration_checkpoint_degraded"})),
+            )
+            # The repeat-degeneracy advisory duplicates the kind with a severity.
+            conn.execute(
+                "INSERT INTO events (topic, payload) VALUES (?, ?)",
+                ("observation", json.dumps({"kind": "orchestration_checkpoint_degraded", "severity": "medium"})),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_orchestration_context_exposes_a_compaction_storm(tmp_path):
+    from hyperloom.inference_optimizer.breakdown.collectors.telemetry import collect_telemetry
+
+    _write_checkpoint_events(tmp_path, [145_556 + i for i in range(32)], degenerate=1)
+    state = {"tick": 32, "orchestration_prompt_modes": {"seed": 32, "delta": 0}}
+    section = collect_telemetry(tmp_path, state, [])["orchestration_context"]
+
+    assert section["compactions"] == 32
+    assert section["compactions_per_tick"] == 1.0
+    assert section["degenerate_compactions"] == 1
+    assert section["seed_prompts"] == 32
+    assert section["delta_ratio"] == 0.0
+    assert section["context_tokens_at_compaction"]["min"] == 145_556
+
+
+def test_orchestration_context_is_empty_without_a_census_or_db(tmp_path):
+    from hyperloom.inference_optimizer.breakdown.collectors.telemetry import collect_telemetry
+
+    warnings: list[str] = []
+    section = collect_telemetry(tmp_path, {}, warnings)["orchestration_context"]
+    assert section["compactions"] == 0
+    assert section["compactions_per_tick"] == 0.0
+    assert section["context_tokens_at_compaction"] == {}
+    assert warnings == []

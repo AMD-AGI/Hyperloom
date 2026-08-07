@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator-side handlers for Kernel-agent REQUEST kinds.
-
-A request is served by an LLM responder or a programmatic handler.
+"""Coordinator-side programmatic handlers for kernel REQUEST kinds.
 
 Handler signature::
 
@@ -1167,6 +1165,20 @@ def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
         return {"status": "skipped", "reason": "no applied patch manifest"}
     tool = _load_apply_tool()
     return tool.revert_kernel_patch(apply_result["manifest_path"])
+
+
+def _maybe_finalize_kernel_patch(
+    apply_result: HandlerResult,
+) -> HandlerResult:
+    """Delete backups once a KEEP becomes the accepted baseline."""
+    if (
+        apply_result.get("status") != "ok"
+        or not apply_result.get("manifest_path")
+    ):
+        return {"status": "skipped", "reason": "no applied patch manifest"}
+    return _load_apply_tool().finalize_kernel_patch(
+        apply_result["manifest_path"]
+    )
 
 
 def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
@@ -3754,7 +3766,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
 
     framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
     gpu = str(payload.get("gpu") or "0").strip()
-    llm_model = str(payload.get("llm_model") or os.environ.get("CLAUDE_MODEL") or "claude-opus-4-6").strip()
+    llm_model = str(payload.get("llm_model") or os.environ.get("CLAUDE_MODEL") or "claude-opus-5").strip()
     max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
     timeout = _forge_fusion_timeout_sec(payload)
 
@@ -6539,6 +6551,11 @@ async def integrate_handler(
             paired_pristine_revert if paired_pristine_revert is not None else _maybe_revert_kernel_patch(apply_result)
         )
     )
+    finalize_result = (
+        _maybe_finalize_kernel_patch(apply_result)
+        if decision == "KEEP"
+        else {"status": "skipped", "reason": "non-KEEP decision"}
+    )
 
     result: dict[str, Any] = {
         "status": "ok",
@@ -6555,6 +6572,7 @@ async def integrate_handler(
         "extra_envs": dict(payload.get("extra_envs") or {}),
         "apply_result": apply_result,
         "revert_result": revert_result,
+        "finalize_result": finalize_result,
         "rebuild_check": rebuild_check,
         "task_group_key": str(payload.get("task_group_key") or ""),
         "identity_route": str(payload.get("identity_route") or ""),

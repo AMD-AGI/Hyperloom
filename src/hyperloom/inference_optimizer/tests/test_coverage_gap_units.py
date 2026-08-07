@@ -89,17 +89,16 @@ def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.Mo
 def test_credentials_endpoint_resolution_and_geak_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import credentials
 
-    assert credentials._derive_anthropic_base_url("https://gw.example/v1") == "https://gw.example"
-
+    # Each side resolves on its own; an unconfigured side stays empty.
     monkeypatch.setenv("OPENAI_BASE_URL", "https://open.example/v1")
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    assert credentials._resolve_llm_endpoints() == ("https://open.example", "https://open.example/v1")
+    assert credentials._resolve_llm_endpoints() == ("", "https://open.example/v1")
 
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://anthropic.example")
     assert credentials._resolve_llm_endpoints() == ("https://anthropic.example", "https://open.example/v1")
 
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    assert credentials._resolve_llm_endpoints() == ("https://anthropic.example", "https://anthropic.example")
+    assert credentials._resolve_llm_endpoints() == ("https://anthropic.example", "")
 
     cfg = tmp_path / "geak.yaml"
     cfg.write_text("model: x\n  base_url: https://old/v1\n", encoding="utf-8")
@@ -112,7 +111,7 @@ def test_credentials_endpoint_resolution_and_geak_sync(tmp_path: Path, monkeypat
 def test_credentials_validate_and_reset_claude_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import credentials
 
-    for key in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+    for key in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("REPO_ROOT", str(tmp_path))
     with pytest.raises(SystemExit) as exc:
@@ -256,14 +255,14 @@ def test_infera_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
         json.dumps({"SGLANG_USE_AITER": "1", "MORI_FOO": "override", "SGLANG_MORI_BAR": "explicit"}),
     )
     monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", json.dumps(["SGLANG_MORI_BAR"]))
-    for k in ("SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL"):
+    for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL"):
         monkeypatch.setenv(k, f"secret-{k}")
     fwd = inf._collect_forward_env()
     assert fwd["MORI_FOO"] == "override"
     assert fwd["SGLANG_TORCH_PROFILER_DIR"] == "/shared/traces"
     assert fwd["SGLANG_USE_AITER"] == "1"
     assert fwd["SGLANG_MORI_BAR"] == "explicit"
-    for k in ("SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL"):
+    for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL"):
         assert k not in fwd
 
     monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", "{bad")
@@ -536,6 +535,7 @@ def test_infera_node_ops_apply_revert_and_bench(tmp_path: Path, monkeypatch: pyt
         [
             ({"status": "ok", "backup_path": "/b0"}, {"rc": 0, "stderr": ""}),
             ({"status": "failed", "error": "nope"}, {"rc": 1, "stderr": "bad"}),
+            ({"status": "restored"}, {"rc": 0, "stderr": ""}),
         ]
     )
     monkeypatch.setattr(inf, "_infera_ssh_node_op", lambda *a, **kw: next(responses))
@@ -977,21 +977,25 @@ def test_framework_audit_llm_refine_fallbacks(monkeypatch: pytest.MonkeyPatch) -
         "layer": "static",
         "metrics": {},
     }
-    monkeypatch.delenv("SAFE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     out = audit._maybe_llm_refine({}, dict(static), "diff")
     assert out["layer"] == "static"
-    assert "missing SAFE_API_KEY" in out["risks"][-1]
+    assert "missing OPENAI_API_KEY" in out["risks"][-1]
 
-    class _Message:
+    class _Delta:
         content = '{"semantic_status":"partially_present","applicability":"needs_rewrite","confidence":0.77,"recommended_next_step":"author_via_specialist","note":"drift"}'
 
     class _Choice:
-        message = _Message()
+        delta = _Delta()
+
+    class _Chunk:
+        usage = None
+        choices = [_Choice()]
 
     class _Completions:
         def create(self, **_kwargs):
-            return SimpleNamespace(choices=[_Choice()])
+            return iter([_Chunk()])
 
     class _OpenAI:
         def __init__(self, **_kwargs):
@@ -1218,9 +1222,6 @@ def test_infera_install_timeout_failure(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_cli_multi_node_remaining_edge_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import multi_node as opt_mn
-    import hyperloom.inference_optimizer.multi_node._internal.external_state as ext_state
-    import hyperloom.inference_optimizer.multi_node.cli as mn_cli
-    import hyperloom.inference_optimizer.multi_node.state_paths as state_paths
 
     root = tmp_path / "gc"
     root.mkdir()

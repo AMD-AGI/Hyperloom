@@ -310,12 +310,27 @@ def _snapshot_system_prompts(
     session_dir: Path,
     *,
     prompts: dict[str, str],
+    orchestration_phase: str = "",
 ) -> None:
-    """Persist each agent's effective system prompt to ``agents/<role>/system_prompt.snapshot.md``."""
+    """Persist each agent's effective system prompt to ``agents/<role>/system_prompt.snapshot.md``.
+
+    The boot orchestration prompt is also written under its phase suffix; the
+    Coordinator adds one file per later phase it re-scopes into.
+
+    Args:
+        session_dir (Path): The session root directory.
+        prompts (dict[str, str]): Effective system prompt per agent role.
+        orchestration_phase (str): Phase the boot orchestration prompt was
+            scoped to; ``""`` writes only the unsuffixed snapshot.
+    """
     for role, body in prompts.items():
         target = agent_prompt_snapshot(session_dir, role)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body or "(empty)", encoding="utf-8")
+    boot_phase = orchestration_phase.strip()
+    if boot_phase and "orchestration" in prompts:
+        scoped = agent_prompt_snapshot(session_dir, "orchestration", phase=boot_phase)
+        scoped.write_text(prompts["orchestration"] or "(empty)", encoding="utf-8")
 
 
 def _print_session_skeleton(session_dir: Path) -> None:

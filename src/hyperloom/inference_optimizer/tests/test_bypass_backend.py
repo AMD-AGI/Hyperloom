@@ -1294,10 +1294,10 @@ def test_num_prompts_warmups_passthrough(tmp_path, monkeypatch):
 
 
 def test_server_env_injects_rocr_visible_devices(monkeypatch):
-    monkeypatch.setenv("SAFE_API_KEY", "must-not-reach-benchmark")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
     env = bypass_runner._server_env(False, None, {"ROCR_VISIBLE_DEVICES": "0,1,2,3"})
     assert env["ROCR_VISIBLE_DEVICES"] == "0,1,2,3"
-    assert "SAFE_API_KEY" not in env
+    assert "OPENAI_API_KEY" not in env
     env2 = bypass_runner._server_env(False, None, {})
     # No pin in bench_envs: whatever the parent env had (may be unset).
     assert env2.get("ROCR_VISIBLE_DEVICES") == os.environ.get("ROCR_VISIBLE_DEVICES")
@@ -1613,10 +1613,10 @@ def test_run_subprocess_timeout_writes_log(tmp_path, monkeypatch):
     """Timeouts return 124 and leave a phase stderr log for debugging."""
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
-        assert "SAFE_API_KEY" not in (env or {})
+        assert "OPENAI_API_KEY" not in (env or {})
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
 
-    monkeypatch.setenv("SAFE_API_KEY", "must-not-reach-benchmark")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     rc = bypass_runner._run_subprocess(["client"], 0.01, tmp_path, "client")

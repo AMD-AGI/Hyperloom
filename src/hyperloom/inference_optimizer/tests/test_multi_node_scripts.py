@@ -1562,7 +1562,6 @@ def test_bootstrap_renders_env_file_path_only_no_credentials(tmp_path):
         "AMD_LLM_API_KEY": "secret-amd",
         "ANTHROPIC_API_KEY": "secret-anthropic",
         "OPENAI_API_KEY": "secret-openai",
-        "SAFE_API_KEY": "secret-safe",
         "ANTHROPIC_BASE_URL": "https://secret.example/v1",
     }
     env = {

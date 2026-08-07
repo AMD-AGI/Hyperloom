@@ -96,9 +96,8 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch):
     assert params["enablement"] is True
     assert params["enablement_failure_kind"] == "missing_model_arch"
     assert params["enablement_before_signature"]["kind"] == "missing_model_arch"
-    assert "RUNNABILITY" in params["notes"]
-    assert "git apply --check" in params["notes"]
-    assert "GLM-5" in params["notes"]
+    # Mandate body is rendered by _section_enablement_playbook; notes only carries per-dispatch context.
+    assert params.get("notes", "") == ""  # fresh attempt with no stacked patches or build failure
     # Boot-origin: no eval carriers.
     assert "enablement_origin" not in params
 
@@ -166,7 +165,6 @@ def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch):
     assert params is not None
     # Enablement-intent PR ranks first and its html_url is threaded through.
     assert params["enablement_candidate_refs"][0] == "http://x/2"
-    assert "http://x/2" in params["notes"]
 
 
 def test_build_params_degrades_gracefully_when_discovery_raises(monkeypatch):
@@ -1068,7 +1066,7 @@ def _make_coord_with_phase(session_dir) -> "Coordinator":
         default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
     )
     backends = {
-        name: MockBackend(plan, name=name) for name in ("orchestration", "kernel_agent", "critic", "robustness")
+        name: MockBackend(plan, name=name) for name in ("orchestration", "critic", "robustness")
     }
     return Coordinator(session_dir, backends=backends)
 
