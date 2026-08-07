@@ -2583,7 +2583,7 @@ class KernelPhase(PhaseHandler):
             return
         try:
             new_tput = float(integrate_result.get("new_tput") or 0.0)
-            gain = float(integrate_result.get("gain_pct") or 0.0)
+            incremental_gain = float(integrate_result.get("gain_pct") or 0.0)
         except (TypeError, ValueError):
             return
         if new_tput <= 0:
@@ -2607,7 +2607,10 @@ class KernelPhase(PhaseHandler):
             "provenance": "forge_fusion",
             "source": "kernel_entry_auto",
             "tput": new_tput,
-            "gain_pct": gain,
+            # integrate reports the increment against its own base_tput (the
+            # currently active stack). Keep that local meaning on the entry;
+            # the session headline below must use the original baseline.
+            "gain_pct": incremental_gain,
             "workspace": integrate_result.get("workspace"),
             "patch_path": patch,
             "target_file": fusion_result.get("source_file") or integrate_result.get("target_file"),
@@ -2638,10 +2641,18 @@ class KernelPhase(PhaseHandler):
             "extra_envs": envs,
             "extra_server_args": extra_args,
         }
-        self.shared_state.cumulative_gain = gain
-        self.shared_state.cumulative_gain_validated = gain
-        self.shared_state.cumulative_gain_validated_ts = ts
-        self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack or [])
+        try:
+            baseline_tput = float(self.shared_state.baseline_tput or 0.0)
+        except (TypeError, ValueError):
+            baseline_tput = 0.0
+        if baseline_tput > 0:
+            total_gain = (new_tput - baseline_tput) / baseline_tput * 100.0
+            self.shared_state.cumulative_gain = total_gain
+            self.shared_state.cumulative_gain_validated = total_gain
+            self.shared_state.cumulative_gain_validated_ts = ts
+            self.shared_state.cumulative_gain_validated_stack_len = len(
+                self.shared_state.optimization_stack or []
+            )
 
     def _current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed).
