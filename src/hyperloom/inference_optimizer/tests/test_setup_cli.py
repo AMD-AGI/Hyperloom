@@ -505,19 +505,43 @@ _SHIM_CASES = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_SHIM_CASES))
-def test_shell_shim_matches_python_deepseek_compat_env(tmp_path: Path, case: str):
-    """The shell shim and ``deepseek_compat_env`` must resolve identically.
-
-    Four copies of this translation exist (Python plus three installers); a
-    divergence would send credentials to a different endpoint depending on
-    which entrypoint the operator used.
-    """
-    env = _SHIM_CASES[case]
+def _optimizer_shim() -> tuple[str, str]:
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install.sh"
     script_text = install_script.read_text(encoding="utf-8")
     start = script_text.index("normalize_legacy_deepseek_env() {")
     end = script_text.index("\npreflight_validate_credentials() {")
+    return script_text[start:end], "normalize_legacy_deepseek_env"
+
+
+def _baremetal_shim() -> tuple[str, str]:
+    # Carries read_dotenv_var along, which this shim consults for each retired
+    # key. DOTENV points at a missing file below, so the .env lookups come back
+    # empty and only the exported values drive the comparison.
+    return _baremetal_credential_functions(), "migrate_legacy_deepseek_env"
+
+
+_SHIM_INSTALLERS = {
+    "install.sh": _optimizer_shim,
+    "install_baremetal.sh": _baremetal_shim,
+}
+
+
+@pytest.mark.parametrize("installer", sorted(_SHIM_INSTALLERS))
+@pytest.mark.parametrize("case", sorted(_SHIM_CASES))
+def test_shell_shim_matches_python_deepseek_compat_env(tmp_path: Path, case: str, installer: str):
+    """Every shell shim and ``deepseek_compat_env`` must resolve identically.
+
+    Three copies of this translation exist (Python plus the two installers that
+    own an entrypoint); a divergence would send credentials to a different
+    endpoint depending on which one the operator happened to use.
+
+    ``ANTHROPIC_AUTH_TOKEN`` is excluded from the compared set on purpose and
+    pinned separately below: an installer's job ends at a ``.env``, which only
+    ever carries the API-key spelling, while the Python shim resolves in-process
+    where offering the bearer spelling as well costs nothing.
+    """
+    env = _SHIM_CASES[case]
+    shim_text, entry_point = _SHIM_INSTALLERS[installer]()
 
     runner = tmp_path / "shim.sh"
     runner.write_text(
@@ -529,10 +553,15 @@ def test_shell_shim_matches_python_deepseek_compat_env(tmp_path: Path, case: str
                 # to start from the same blank slate rather than inherit pytest's.
                 *_CLEAN_PROVIDER_ENV,
                 "warn() { :; }",
+                "log() { :; }",
+                f'DOTENV="{tmp_path / "absent.env"}"',
                 *(f'export {name}="{value}"' for name, value in env.items()),
-                script_text[start:end],
-                "normalize_legacy_deepseek_env",
-                *(f'printf "%s=%s\\n" {name} "${{{name}-}}"' for name in _SHIM_REPORTED_VARS),
+                shim_text,
+                entry_point,
+                *(
+                    f'printf "%s=%s\\n" {name} "${{{name}-}}"'
+                    for name in (*_SHIM_REPORTED_VARS, "ANTHROPIC_AUTH_TOKEN")
+                ),
             ]
         )
         + "\n",
@@ -545,6 +574,9 @@ def test_shell_shim_matches_python_deepseek_compat_env(tmp_path: Path, case: str
 
     for name in _SHIM_REPORTED_VARS:
         assert from_shell.get(name, "") == from_python.get(name, ""), name
+    # The documented exception, asserted rather than assumed: no installer may
+    # start writing the bearer spelling without this test being updated.
+    assert from_shell.get("ANTHROPIC_AUTH_TOKEN", "") == env.get("ANTHROPIC_AUTH_TOKEN", "")
 
 
 def test_install_preflights_accept_dual_protocol_gateway(tmp_path: Path):
