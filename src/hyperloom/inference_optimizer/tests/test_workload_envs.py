@@ -70,6 +70,11 @@ def _clear_env(monkeypatch):
         "INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP",
         "XDIT_QUALITY_REF",
         "XDIT_QUALITY_REF_WRITE",
+        "HYPERLOOM_QUALITY_REF",
+        "HYPERLOOM_QUALITY_REF_WRITE",
+        "XDIT_MODEL_ARG",
+        "XDIT_MODEL_ROOT",
+        "XDIT_ATTENTION_BACKEND",
     ):
         monkeypatch.delenv(k, raising=False)
 
@@ -537,6 +542,61 @@ def test_quality_ref_baseline_establishes(monkeypatch, tmp_path):
     bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
     assert bench["envs"]["XDIT_QUALITY_REF"] == ""
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == "/ref/q.png"
+
+
+_XDIT_ONLY_ENVS = ("XDIT_MODEL_ARG", "XDIT_MODEL_ROOT", "XDIT_ATTENTION_BACKEND")
+
+
+def test_custom_baseline_gets_no_xdit_only_envs(monkeypatch, tmp_path):
+    # An operator-supplied workload declares its own contract, so nothing that
+    # only the xDiT runner reads may reach it -- least of all an attention
+    # backend on the BASELINE, which would make the reference measurement
+    # something the operator never asked for.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("XDIT_MODEL_ROOT", "/models")
+    src = _write(tmp_path / "cfg.yaml", framework="custom", envs={})
+    bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
+    for key in _XDIT_ONLY_ENVS:
+        assert key not in bench["envs"], f"{key} leaked into a custom baseline"
+
+
+def test_xdit_baseline_still_gets_xdit_only_envs(monkeypatch, tmp_path):
+    # The counterpart: scoping those envs to xdit must not disarm xdit itself.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("XDIT_MODEL_ROOT", "/models")
+    src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={})
+    bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
+    assert bench["envs"]["XDIT_MODEL_ARG"] == "name"
+    assert bench["envs"]["XDIT_MODEL_ROOT"] == "/models"
+    assert bench["envs"]["XDIT_ATTENTION_BACKEND"] == "aiter"
+
+
+def test_quality_ref_emitted_under_both_names(monkeypatch, tmp_path):
+    # The gate itself IS generic, so a custom workload keeps it. Both names are
+    # written so operator bench scripts reading either one resolve the same file.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_QUALITY_REF", "/ref/q.png")
+    src = _write(tmp_path / "cfg.yaml", framework="custom", envs={})
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["HYPERLOOM_QUALITY_REF"] == "/ref/q.png"
+    assert bench["envs"]["XDIT_QUALITY_REF"] == "/ref/q.png"
+    assert bench["envs"]["HYPERLOOM_QUALITY_REF_WRITE"] == ""
+    assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == ""
+
+
+def test_quality_ref_legacy_name_still_resolves(monkeypatch, tmp_path):
+    # Operator scripts that predate the rename set only the XDIT_ name; it must
+    # still select the reference until they migrate.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/legacy.png")
+    src = _write(tmp_path / "cfg.yaml", framework="custom", envs={})
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["HYPERLOOM_QUALITY_REF"] == "/ref/legacy.png"
+    assert bench["envs"]["XDIT_QUALITY_REF"] == "/ref/legacy.png"
 
 
 def test_quality_ref_baseline_write_env_override(monkeypatch, tmp_path):
