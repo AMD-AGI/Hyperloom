@@ -1202,7 +1202,7 @@ class ExplorePhase(PhaseHandler):
                     "symptom": (f"current_best is {target_gap:.1f}% short of the run objective target"),
                     "layer": "framework",
                     "severity": severity,
-                    "domain_hint": "serving_specialist",
+                    "domain_hint": self._framework_authoring_domain(),
                     "source": "baseline",
                 }
             )
@@ -1240,7 +1240,9 @@ class ExplorePhase(PhaseHandler):
             variant = str(row.get("variant_name") or "").strip()
             # Variant discriminator keeps distinct crash causes in distinct gaps.
             key = f"{action}::{err}::{variant}" if variant else f"{action}::{err}"
-            layer, domain = self._gap_layer_for_action(action)
+            layer, domain = self._gap_layer_for_action(
+                action, str(getattr(self.shared_state, "framework", "") or "")
+            )
             excerpt = str(row.get("error_excerpt") or "")
             detail = next((ln.strip() for ln in excerpt.splitlines() if ln.strip()), err)[:200]
             symptom = f"{action}/{variant} fails: {detail}" if variant else f"{action} repeatedly fails with {detail}"
@@ -1281,22 +1283,38 @@ class ExplorePhase(PhaseHandler):
                     "symptom": (f"{no_promote} consecutive grid rounds without a new current_best"),
                     "layer": "framework",
                     "severity": "high" if no_promote >= 6 else "medium",
-                    "domain_hint": "serving_specialist",
+                    "domain_hint": self._framework_authoring_domain(),
                     "source": "attempts",
                 }
             )
         return gaps
 
+    def _framework_authoring_domain(self) -> str:
+        """Return the authoring domain matching this session's framework kind.
+
+        Returns:
+            str: ``"framework_rewrite_specialist"`` for a scriptable framework,
+            else ``"serving_specialist"``.
+        """
+        from ..specialists.domains import authoring_domain_for_framework
+
+        return authoring_domain_for_framework(getattr(self.shared_state, "framework", ""))
+
     @staticmethod
-    def _gap_layer_for_action(action: str) -> tuple[str, str]:
-        """Map an action name → (layer, domain_hint) for gap rows (fallback ("framework", "serving_specialist")).
+    def _gap_layer_for_action(action: str, framework: str = "") -> tuple[str, str]:
+        """Map an action name → (layer, domain_hint) for gap rows.
 
         Args:
             action: The action name to classify.
+            framework: The session's framework, which decides the authoring
+                domain for framework-layer rows. Defaults to the serving domain
+                so a caller with no framework in hand keeps the old mapping.
 
         Returns:
             A ``(layer, domain_hint)`` tuple for the action.
         """
+        from ..specialists.domains import authoring_domain_for_framework
+
         a = str(action or "").strip().lower()
         if a in {
             "kernel_opt",
@@ -1308,11 +1326,9 @@ class ExplorePhase(PhaseHandler):
             "roofline",
         }:
             return ("kernel_agent", "kernel_switch_specialist")
-        if a in {"sweep", "explore"}:
-            return ("framework", "serving_specialist")
         if a in {"baseline"}:
             return ("system", "system_specialist")
-        return ("framework", "serving_specialist")
+        return ("framework", authoring_domain_for_framework(framework))
 
     def _record_explore_round_gaps(
         self,
@@ -1344,7 +1360,7 @@ class ExplorePhase(PhaseHandler):
                     "symptom": "explore round outcomes",
                     "layer": "framework",
                     "severity": "medium",
-                    "domain_hint": "serving_specialist",
+                    "domain_hint": self._framework_authoring_domain(),
                     "source": "attempts",
                 }
             )

@@ -151,9 +151,13 @@ _MAX_CONTAINER_WIDTH = 8
 _MAX_CALLERS_PER_SITE = 8
 
 # Tensor objects tracked for strict-identity generations before the table is
-# cleared. Clearing only costs a few spurious "new object" verdicts, which is a
-# far better failure mode than unbounded growth in a long benchmark.
+# trimmed. The bound exists to stop unbounded growth in a long benchmark; how it
+# is enforced decides whether the probe's central distinction survives, so see
+# ``_evict_tracked_objects``.
 _MAX_TRACKED_OBJECTS = 4096
+# Trim down to this rather than to the cap, so eviction is amortised instead of
+# running on nearly every insert once the table is full.
+_EVICT_TRACKED_OBJECTS_TO = _MAX_TRACKED_OBJECTS // 2
 
 
 def _env_on(name: str) -> bool:
@@ -458,16 +462,45 @@ class HostProbe:
         key = id(value)
         hit = self._object_generations.get(key)
         if hit is not None and hit[0]() is value:
+            # Re-insert to mark it as recently seen; dicts keep insertion order,
+            # which is what makes eviction below drop the stalest entries.
+            del self._object_generations[key]
+            self._object_generations[key] = hit
             return hit[1]
         try:
             ref = weakref.ref(value)
         except TypeError:
             return -1
         if len(self._object_generations) >= _MAX_TRACKED_OBJECTS:
-            self._object_generations.clear()
+            self._evict_tracked_objects()
         self._next_generation += 1
         self._object_generations[key] = (ref, self._next_generation)
         return self._next_generation
+
+    def _evict_tracked_objects(self) -> None:
+        """Make room in the generation table without forgetting live objects.
+
+        Clearing the table wholesale costs precisely what the table exists to
+        record. A tensor that is still alive and still being passed loses its
+        generation, so its next appearance reads as a brand-new object: strict
+        repeats disappear while loose repeats do not, and a memoization
+        candidate is reported as a hoist candidate. That is the one
+        misclassification this probe must not make, and on a long run -- a
+        diffusion rollout allocates intermediates continuously -- a wholesale
+        clear fires again and again rather than once.
+
+        Dead entries go first. A tensor freed inside the loop can never be
+        recognised again whatever we keep, and under allocation churn those are
+        most of the table, so this alone is usually enough. Only if it is not do
+        the least recently seen live entries go, oldest first.
+        """
+        for key in [k for k, (ref, _gen) in self._object_generations.items() if ref() is None]:
+            del self._object_generations[key]
+        overflow = len(self._object_generations) - _EVICT_TRACKED_OBJECTS_TO
+        if overflow <= 0:
+            return
+        for key in list(self._object_generations)[:overflow]:
+            del self._object_generations[key]
 
     def _fingerprint(self, value: object, *, strict: bool, depth: int = 0) -> object:
         """Build a hashable fingerprint of one argument value.

@@ -1332,19 +1332,25 @@ ensure_bench_serving_deps() {
   log "bench_serving deps installed OK"
 }
 
-# --- 4b. xDiT image-quality gate deps (SSIM + LPIPS) ---
+# --- 4b. Scriptable quality-gate deps (SSIM + LPIPS) ---
 #
-# The scriptable xDiT bench wrapper computes an image-quality gate
-# (LPIPS / SSIM / MSE vs a BF16 reference). torch/torchvision/numpy ship
-# with the pytorch-xdit image, but scikit-image (SSIM) and lpips (LPIPS)
-# do NOT — so without this step the gate silently degrades to MSE-only
-# (the wrapper now reports ssim_available/lpips_available=false). These
-# are pip-name != import-name, so we map them explicitly.
+# Every scriptable workload with a visual output computes its gate the same way
+# (LPIPS / SSIM / MSE vs a reference): xDiT does, and so does an
+# operator-supplied `--framework custom` bench script. torch/torchvision/numpy
+# ship with the ROCm images, but scikit-image (SSIM) and lpips (LPIPS) do NOT —
+# so without this step the gate silently degrades to MSE-only (the wrapper
+# reports ssim_available/lpips_available=false). These are pip-name !=
+# import-name, so we map them explicitly.
+#
+# Installed unconditionally rather than per framework: the framework is not
+# known at install time, and an operator's own script is free to import either
+# one. Gating these on `xdit` would disarm the gate for every other scriptable
+# workload, and a workload whose gate cannot run scores every candidate zero.
 #
 # Fail-soft: lpips also pulls AlexNet weights on first use (network), so a
 # failed install must NOT abort the whole install — the wrapper degrades
 # gracefully (honest *_available=false) rather than crashing the run.
-_XDIT_QUALITY_DEPS=(
+_SCRIPTABLE_QUALITY_DEPS=(
   "scikit-image:skimage"
   "lpips:lpips"
 )
@@ -1354,7 +1360,7 @@ _XDIT_QUALITY_DEPS=(
 # a PyPI (CUDA) torch to satisfy e.g. lpips' `torch>=0.4.0` silently bricks GPU
 # access for EVERY framework sharing this venv (that is exactly how this brick
 # shipped: a CUDA torch replaced the ROCm one, exit 0, no visible error).
-_XDIT_CORE_PINS=(torch torchvision torchaudio triton)
+_SHARED_VENV_CORE_PINS=(torch torchvision torchaudio triton)
 
 # Write a pip constraints file pinning each installed core package to its exact
 # current version. `pip install -c <file>` then forbids the resolver from moving
@@ -1362,7 +1368,7 @@ _XDIT_CORE_PINS=(torch torchvision torchaudio triton)
 _write_core_constraints() {
   local dest="$1" pkg ver
   : > "$dest"
-  for pkg in "${_XDIT_CORE_PINS[@]}"; do
+  for pkg in "${_SHARED_VENV_CORE_PINS[@]}"; do
     ver="$("$PYTHON" -c "import importlib.metadata as m; print(m.version('$pkg'))" 2>/dev/null || true)"
     [ -n "$ver" ] && printf '%s==%s\n' "$pkg" "$ver" >> "$dest"
   done
@@ -1384,18 +1390,18 @@ _guard_torch_not_clobbered() {
   [ -n "$hip_before" ] || return 0
   hip_after="$(_torch_hip_version)"
   [ -n "$hip_after" ] && return 0
-  warn "xDiT quality deps swapped the ROCm torch for a non-ROCm build; attempting rollback to: $(tr '\n' ' ' < "$constraints")"
+  warn "scriptable quality deps swapped the ROCm torch for a non-ROCm build; attempting rollback to: $(tr '\n' ' ' < "$constraints")"
   "$PYTHON" -m pip install --quiet --no-cache-dir --force-reinstall --no-deps \
     "${PIP_EXTRA[@]}" -r "$constraints" \
     || warn "rollback reinstall failed (pinned ROCm wheels may need the vendor index); restore torch manually"
-  die "optional xDiT quality deps clobbered the load-bearing ROCm torch (was hip=${hip_before}, now a non-ROCm build). Aborting instead of poisoning every framework in this shared venv. Preinstall scikit-image/lpips in the image, or extend _XDIT_CORE_PINS."
+  die "optional scriptable quality deps clobbered the load-bearing ROCm torch (was hip=${hip_before}, now a non-ROCm build). Aborting instead of poisoning every framework in this shared venv. Preinstall scikit-image/lpips in the image, or extend _SHARED_VENV_CORE_PINS."
 }
 
-ensure_xdit_quality_deps() {
-  log "ensuring xDiT image-quality gate deps (SSIM/LPIPS) in $PYTHON"
+ensure_scriptable_quality_deps() {
+  log "ensuring scriptable quality-gate deps (SSIM/LPIPS) in $PYTHON"
   local missing=()
   local pair pip_name import_name
-  for pair in "${_XDIT_QUALITY_DEPS[@]}"; do
+  for pair in "${_SCRIPTABLE_QUALITY_DEPS[@]}"; do
     pip_name="${pair%%:*}"
     import_name="${pair##*:}"
     if ! "$PYTHON" -c "import ${import_name}" >/dev/null 2>&1; then
@@ -1403,18 +1409,18 @@ ensure_xdit_quality_deps() {
     fi
   done
   if [ ${#missing[@]} -eq 0 ]; then
-    log "xDiT quality deps already satisfied"
+    log "scriptable quality deps already satisfied"
     return 0
   fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "check-only mode; would install xDiT quality deps: ${missing[*]}"
+    warn "check-only mode; would install scriptable quality deps: ${missing[*]}"
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "dry-run; skipping xDiT quality dep install"
+    log "dry-run; skipping scriptable quality dep install"
     return 0
   fi
-  log "installing missing xDiT quality deps: ${missing[*]}"
+  log "installing missing scriptable quality deps: ${missing[*]}"
   # Pin the load-bearing core so this optional install can never move
   # torch/torchvision/triton, and snapshot torch's ROCm build so the tripwire
   # can abort loudly if it got swapped anyway.
@@ -1424,13 +1430,13 @@ ensure_xdit_quality_deps() {
   hip_before="$(_torch_hip_version)"
   "$PYTHON" -m pip install --quiet --no-cache-dir -c "$constraints" \
     "${PIP_EXTRA[@]}" "${missing[@]}" \
-    || warn "failed to install xDiT quality deps: ${missing[*]} (gate degrades to MSE-only)"
+    || warn "failed to install scriptable quality deps: ${missing[*]} (gate degrades to MSE-only)"
   _guard_torch_not_clobbered "$constraints" "$hip_before"
   rm -f "$constraints"
-  for pair in "${_XDIT_QUALITY_DEPS[@]}"; do
+  for pair in "${_SCRIPTABLE_QUALITY_DEPS[@]}"; do
     import_name="${pair##*:}"
     "$PYTHON" -c "import ${import_name}" >/dev/null 2>&1 \
-      || warn "xDiT quality dep '${import_name}' not importable after install (gate excludes it)"
+      || warn "scriptable quality dep '${import_name}' not importable after install (gate excludes it)"
   done
 }
 
@@ -1600,7 +1606,7 @@ if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
   esac
 fi
 ensure_bench_serving_deps
-ensure_xdit_quality_deps
+ensure_scriptable_quality_deps
 ensure_framework_deps
 chain_kernel_agent
 # rocprof-compute + pandas<3 pin runs LAST — strictly AFTER every pip-installing

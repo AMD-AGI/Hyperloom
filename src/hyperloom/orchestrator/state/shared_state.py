@@ -595,6 +595,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # which appears in a kernel timeline, and which is where framework-level
     # source rewrites (as opposed to kernel rewrites) find their wins.
     last_framework_rewrite_evidence: str = ""
+    # Why the field above is empty, when it is. "No candidates" and "the probe
+    # never ran" both render as no evidence, and only one of them means the
+    # workload has nothing left to rewrite; without this the framework phase
+    # cannot tell a genuine negative from a broken instrument.
+    last_framework_rewrite_evidence_status: str = ""
     # Environment switches behind accepted framework-level source rewrites,
     # registered as search levers. Each row carries its rewrite category, its
     # dependency edges, whether it is currently on (``default_on``), and its

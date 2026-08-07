@@ -2275,26 +2275,13 @@ class FrameworkPhase(PhaseHandler):
     def _authoring_specialist_domain(self) -> str:
         """Pick the authoring domain that matches the session's framework kind.
 
-        A request-serving framework and an iterative model pipeline have almost
-        no optimization surface in common: one is scheduling, batching and
-        KV-cache admission, the other is redundant work created by running the
-        same stack once per block per denoising step. Dispatching a scriptable
-        pipeline to ``serving_specialist`` steers it at a hot path that does not
-        exist there, so the domain follows the framework kind.
-
         Returns:
             ``"framework_rewrite_specialist"`` for a scriptable (server-less)
             framework, else ``"serving_specialist"``.
         """
-        framework = str(getattr(self.shared_state, "framework", "") or "").strip().lower()
-        try:
-            from hyperloom.inference_optimizer import framework_registry
+        from ..specialists.domains import authoring_domain_for_framework
 
-            if framework and framework_registry.is_scriptable(framework):
-                return "framework_rewrite_specialist"
-        except Exception:  # noqa: BLE001 — fall back to the serving default
-            log.debug("FRAMEWORK: authoring domain resolution failed", exc_info=True)
-        return "serving_specialist"
+        return authoring_domain_for_framework(getattr(self.shared_state, "framework", ""))
 
     def _render_rewrite_evidence_for_prompt(self) -> str:
         """Render the measured host-side rewrite evidence as prompt lines.
@@ -2316,8 +2303,47 @@ class FrameworkPhase(PhaseHandler):
             document = _json.loads(Path(path).read_text(encoding="utf-8"))
             return summarize_for_prompt(document)
         except Exception:  # noqa: BLE001 — advisory only
-            log.debug("FRAMEWORK: rewrite-evidence render failed path=%s", path, exc_info=True)
+            log.warning("FRAMEWORK: rewrite-evidence render failed path=%s", path, exc_info=True)
             return ""
+
+    def _rewrite_evidence_absence_note(self) -> str:
+        """Explain an empty evidence block instead of implying there is nothing to find.
+
+        "No candidates" and "the probe never produced any" read identically to a
+        specialist, and only the first one means the source is already clean.
+        Saying which it is decides whether the specialist should trust the
+        silence or go read the loop itself.
+
+        Returns:
+            str: The prompt note describing why no evidence is present.
+        """
+        read_the_source = (
+            "Locate the candidates by reading the source: find the denoising / "
+            "rollout loop and ask, for each call inside it, whether the result "
+            "can change across iterations."
+        )
+        status = str(getattr(self.shared_state, "last_framework_rewrite_evidence_status", "") or "").strip()
+        if status == "no_candidates":
+            return (
+                "The host-side probe ran and found no rewrite candidates. Treat "
+                "that as a measured negative for the patterns it covers "
+                "(host round-trips, host syncs, device residency, collective "
+                "fusion, memoization, loop hoisting) and look elsewhere. " + read_the_source
+            )
+        if status and status != "ok":
+            return (
+                "No host-side rewrite evidence is available because the probe did "
+                f"not deliver any: {status}. This is a broken instrument, NOT a "
+                "measured negative -- do not conclude the loop is clean. " + read_the_source
+            )
+        if str(getattr(self.shared_state, "last_framework_rewrite_evidence", "") or "").strip():
+            # Reached only when a document is on record but rendering it produced
+            # nothing, so the evidence exists and this prompt cannot show it.
+            return (
+                "Host-side rewrite evidence was collected but could not be "
+                "rendered here, so its absence below means nothing. " + read_the_source
+            )
+        return "No host-side rewrite evidence has been collected yet for this session. " + read_the_source
 
     def _framework_local_explore_arm_enabled(self) -> bool:
         """True when the candidate-free local-exploration arm may run.
@@ -2464,12 +2490,7 @@ class FrameworkPhase(PhaseHandler):
         rewrite_arm = domain == "framework_rewrite_specialist"
         notes = ""
         if rewrite_arm:
-            notes = self._render_rewrite_evidence_for_prompt() or (
-                "No host-side rewrite evidence has been collected yet for this "
-                "session, so locate the candidates by reading the source: find "
-                "the denoising / rollout loop and ask, for each call inside it, "
-                "whether the result can change across iterations."
-            )
+            notes = self._render_rewrite_evidence_for_prompt() or self._rewrite_evidence_absence_note()
         try:
             state.upsert_gap({
                 "canonical_id": gap_cid,

@@ -538,6 +538,10 @@ class ProfileExecutor(BaselineExecutor):
         # Set by ``_after_materialize_config`` once the probe is armed, read
         # after the run to aggregate the per-rank reports.
         self._host_probe_dir: str = ""
+        # Non-empty only when arming failed, and then it carries why: an empty
+        # probe dir alone cannot say whether the probe was never asked for or
+        # could not be installed.
+        self._host_probe_status: str = ""
 
     def _resolve_default_config(self) -> Path:
         """Override BaselineExecutor's resolver to pick the profile yaml.
@@ -693,9 +697,11 @@ class ProfileExecutor(BaselineExecutor):
         """
         try:
             self._host_probe_dir = self._inject_host_probe(config_path, output_dir)
-        except Exception:  # noqa: BLE001 - evidence collection is never fatal
-            log.debug("profile_executor: host-probe injection failed", exc_info=True)
+            self._host_probe_status = ""
+        except Exception as exc:  # noqa: BLE001 - evidence collection is never fatal
+            log.warning("profile_executor: host-probe injection failed: %s", exc, exc_info=True)
             self._host_probe_dir = ""
+            self._host_probe_status = f"probe_injection_failed: {exc}"
         try:
             cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         except Exception as exc:  # noqa: BLE001
@@ -780,23 +786,34 @@ class ProfileExecutor(BaselineExecutor):
         """Merge the per-rank host-probe reports onto ``result``.
 
         Adds ``framework_rewrite_evidence`` (the document path) and
-        ``framework_rewrite_candidate_count``. Silent no-op when the probe was
-        not armed, and never raises: evidence is an input to the next
-        optimization decision, not a precondition for reporting this profile.
+        ``framework_rewrite_candidate_count`` when candidates were found, and
+        always sets ``framework_rewrite_evidence_status``. Never raises:
+        evidence is an input to the next optimization decision, not a
+        precondition for reporting this profile. It does not fail *silently*
+        either — "the probe broke" and "this workload has nothing left to
+        rewrite" both end with no document, and the phase that consumes the
+        evidence has to be able to tell those apart.
 
         Args:
             result: The profile result dict, mutated in place.
         """
         probe_dir = str(self._host_probe_dir or "").strip()
         if not probe_dir:
+            result["framework_rewrite_evidence_status"] = self._host_probe_status or "probe_not_armed"
             return
         from . import _framework_rewrite_evidence as _evidence
 
         try:
             out_path = Path(probe_dir).parent / _evidence.EVIDENCE_FILENAME
             document = _evidence.aggregate_probe_dir(probe_dir, out_path)
-        except Exception:  # noqa: BLE001 - aggregation is best-effort
-            log.debug("profile_executor: rewrite-evidence aggregation failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001 - aggregation is best-effort
+            log.warning(
+                "profile_executor: rewrite-evidence aggregation failed for %s: %s",
+                probe_dir,
+                exc,
+                exc_info=True,
+            )
+            result["framework_rewrite_evidence_status"] = f"aggregation_failed: {exc}"
             return
         candidates = document.get("candidates") or []
         if not candidates:
@@ -806,9 +823,11 @@ class ProfileExecutor(BaselineExecutor):
                 document.get("ranks_merged"),
                 out_path,
             )
+            result["framework_rewrite_evidence_status"] = "no_candidates"
             return
         result["framework_rewrite_evidence"] = str(out_path)
         result["framework_rewrite_candidate_count"] = len(candidates)
+        result["framework_rewrite_evidence_status"] = "ok"
         log.info(
             "profile_executor: %d host-side rewrite candidate(s) from %s rank(s) -> %s",
             len(candidates),

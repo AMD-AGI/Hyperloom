@@ -21,6 +21,14 @@ Manifest format, one entry per line, blanks and ``#`` comments ignored::
 
 The import name defaults to the pip name with ``-`` mapped to ``_`` and any
 version specifier stripped.
+
+No manifest ships yet, so today every framework takes the no-op path. That is
+the intended resting state, not an oversight: the two dependency sets currently
+installed are the shared quality-gate libraries, which every scriptable workload
+needs and ``install.sh`` therefore installs unconditionally, and an operator's
+own packages, which belong to the operator and cannot be enumerated here. The
+first manifest lands with the first vendored framework that needs packages of
+its own -- at which point onboarding it is this file plus a text file.
 """
 
 from __future__ import annotations
