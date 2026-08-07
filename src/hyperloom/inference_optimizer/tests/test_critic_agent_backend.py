@@ -1577,6 +1577,7 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
     call = fake_client.calls[0]
     assert call["system_prompt"] == "critic system"
     assert call["tools"] == []
+    # What the critic asks for; ClaudeBackend.run floors it (see the test below).
     assert call["max_turns"] == 1
     assert "JUDGE BUNDLE" in call["prompt"]
     assert "critic system" not in call["prompt"]
@@ -1697,6 +1698,28 @@ def test_default_claude_backend_is_single_turn_and_tool_free(
     assert built.raw_completion is True
     assert built.conversational is False
     assert built.enable_mcp_emit_intent is False
+
+
+@pytest.mark.asyncio
+async def test_critic_single_turn_request_is_floored_by_the_real_backend(monkeypatch):
+    """The fake records max_turns=1, but ClaudeBackend raises it to its floor —
+    Claude Code counts the model's own message as a turn, so a literal 1 trips
+    before any output. Pin the real value the review actually runs with."""
+    from hyperloom.orchestrator.roles import claude as claude_mod
+
+    seen: dict[str, int] = {}
+
+    def fake_build_options(self, **kwargs):
+        seen["max_turns"] = kwargs["max_turns"]
+        raise RuntimeError("stop after options")
+
+    monkeypatch.setattr(claude_mod.ClaudeBackend, "_build_options", fake_build_options)
+    backend = claude_mod.ClaudeBackend(model="claude-opus-4-8", raw_completion=True, conversational=False)
+    with pytest.raises(Exception):
+        await backend.run("prompt", system_prompt="critic system", tools=[], max_turns=1)
+
+    assert seen["max_turns"] == claude_mod._RAW_COMPLETION_MIN_MAX_TURNS
+    assert seen["max_turns"] > 1
 
 
 def test_accumulate_claude_usage_folds_tokens_and_tolerates_garbage():
