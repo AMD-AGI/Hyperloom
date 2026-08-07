@@ -301,7 +301,25 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 
 
 #: top-level state.json schema version; absent key treated as v1 and migrated to LATEST_STATE_SCHEMA_VERSION on first save.
-LATEST_STATE_SCHEMA_VERSION: int = 4
+LATEST_STATE_SCHEMA_VERSION: int = 5
+
+#: FRAMEWORK fields renamed by the framework_agent rename, old name -> current
+#: name. A state written before that rename spells them the old way, and the
+#: unknown-key filter in ``from_dict`` drops anything not in this table, which
+#: is why an un-migrated resume silently restarted the phase from scratch.
+#: ``framework_pr_max_candidates`` and ``framework_pr_critic_decisions`` are
+#: deliberately absent: both fields have since been removed, so there is
+#: nothing left to migrate them into.
+_FRAMEWORK_FIELD_RENAMES_V5: dict[str, str] = {
+    "framework_phase_enabled": "framework_agent_phase_enabled",
+    "framework_pr_phase_progress": "framework_agent_phase_progress",
+    "framework_pr_batches": "framework_agent_batches",
+    "framework_pr_phase_done": "framework_agent_phase_done",
+    "framework_pr_discover_failures": "framework_agent_discover_failures",
+    "framework_pr_consecutive_empty_discoveries": "framework_consecutive_empty_discoveries",
+    "framework_pr_authoring_enabled": "framework_agent_authoring_enabled",
+    "framework_pr_specialist_candidate_map": "framework_agent_specialist_candidate_map",
+}
 
 
 def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
@@ -1240,6 +1258,15 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             else:
                 for k, v in flat.items():
                     filtered["enablement"].setdefault(k, v)
+
+        if incoming_version < 5:
+            # Carry the pre-rename FRAMEWORK fields over. Read from ``raw``:
+            # the old spellings are not dataclass fields, so the filter above
+            # has already discarded them. A state holding both spellings is
+            # mid-migration, and the current one wins.
+            for legacy, current in _FRAMEWORK_FIELD_RENAMES_V5.items():
+                if legacy in raw and current not in raw:
+                    filtered[current] = raw[legacy]
 
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])
