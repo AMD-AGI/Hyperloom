@@ -259,6 +259,42 @@ def test_install_sh_delegates_to_this_module():
     )
 
 
+def test_pip_extra_keeps_every_dash_prefixed_flag(monkeypatch):
+    """Every pip flag starts with a dash, which argparse never takes as a value.
+
+    A variadic --pip-extra dropped them and exited 2, failing the whole install.
+    """
+    seen = {}
+
+    def fake_ensure(framework, **kwargs):
+        seen["pip_extra"] = kwargs.get("pip_extra")
+        return fd.Outcome(framework=framework)
+
+    monkeypatch.setattr(fd, "ensure", fake_ensure)
+    rc = fd.main(
+        [
+            "--framework",
+            "vllm",
+            "--python",
+            "py",
+            "--pip-extra=--break-system-packages",
+            "--pip-extra=--no-cache-dir",
+        ]
+    )
+
+    assert rc == 0
+    assert seen["pip_extra"] == ("--break-system-packages", "--no-cache-dir")
+
+
+def test_install_sh_passes_pip_extra_in_the_form_argparse_accepts():
+    """The space-separated form is what broke CI: the flag became a stray token."""
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    assert not re.search(r'--pip-extra "\$\{PIP_EXTRA\[@\]\}"', text), (
+        "install.sh passes pip flags as separate words, which argparse rejects"
+    )
+    assert "--pip-extra=" in text, "install.sh must attach each pip flag with ="
+
+
 # --------------------------------------------------------------------------
 # the shipped manifest
 # --------------------------------------------------------------------------

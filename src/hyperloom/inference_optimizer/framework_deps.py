@@ -327,7 +327,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--framework", default=os.environ.get("FRAMEWORK", ""))
     parser.add_argument("--python", dest="python_exe", default=sys.executable)
-    parser.add_argument("--pip-extra", nargs="*", default=[])
+    # One flag per occurrence, attached with =: a pip flag starts with a dash,
+    # which argparse never consumes as the value of a variadic option.
+    parser.add_argument("--pip-extra", action="append", default=None, metavar="FLAG")
     parser.add_argument("--check-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--prefix", default="framework deps")
@@ -337,7 +339,7 @@ def main(argv: list[str] | None = None) -> int:
         outcome = ensure(
             args.framework,
             python_exe=args.python_exe,
-            pip_extra=tuple(args.pip_extra),
+            pip_extra=tuple(args.pip_extra or ()),
             check_only=args.check_only,
             dry_run=args.dry_run,
         )
