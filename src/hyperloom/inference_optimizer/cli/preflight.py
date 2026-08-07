@@ -22,6 +22,7 @@ from hyperloom.common.env_safety import (
     is_allowed_dotenv_key,
     is_allowed_kernel_agent_env_key,
 )
+from hyperloom.common.llm_config import anthropic_synthesizable_key
 
 from .credentials import (
     _is_deepseek_anthropic_url,
@@ -1365,12 +1366,9 @@ def _preflight(
             if prev != want:
                 os.environ[var] = want
                 print(f"Preflight: {var} {prev or '<unset>'} -> {want} (resolved endpoint)")
-        # Claude CLI primary key: Anthropic-side credentials only.
-        claude_primary_key = (
-            os.environ.get("ANTHROPIC_API_KEY", "")
-            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-            or os.environ.get("DEEPSEEK_API_KEY", "")
-        )
+        # Claude CLI primary key: Anthropic-side credentials only, and only the
+        # synthesizable subset so a subscription token never lands in config.json.
+        claude_primary_key = anthropic_synthesizable_key() or os.environ.get("DEEPSEEK_API_KEY", "")
         _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
         if anthropic_url and not openai_url and not os.environ.get("GEAK_CLAUDE_MODEL"):
             geak_claude_model = (
