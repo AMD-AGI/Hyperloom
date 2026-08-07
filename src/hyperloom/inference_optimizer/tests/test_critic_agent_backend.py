@@ -22,9 +22,8 @@ from hyperloom.orchestrator.roles import (
     CriticAgentBackend,
     RuntimeCall,
 )
-from hyperloom.orchestrator.roles.base import BackendError
+from hyperloom.orchestrator.roles.base import BackendError, BackendTurnResult, LLMCallFailed
 from hyperloom.orchestrator.roles.critic_agent import (
-    _anthropic_text_from_content,
     _extract_review_json,
     _reviewed_msg_ids_from_bundle,
     _verdict_references_kb,
@@ -1471,50 +1470,52 @@ async def test_run_skips_langfuse_mirror_when_disabled(
     assert fake_em.spans == []
 
 
-# Native Anthropic review path (protocol="anthropic")
-class FakeAnthropicResponse:
-    """Minimal httpx-Response stand-in for the Anthropic Messages API."""
+# Claude CLI review path (protocol="anthropic")
+class FakeClaudeBackend:
+    """Records ``run()`` calls and replays queued turn results or errors."""
 
-    def __init__(self, *, status_code: int = 200, body: dict[str, Any] | None = None, text: str = ""):
-        self.status_code = status_code
-        self._body = body if body is not None else {}
-        self.text = text
-
-    def json(self) -> dict[str, Any]:
-        return self._body
-
-
-class FakeAnthropicClient:
-    """Records ``/v1/messages`` POSTs and returns queued fake responses."""
-
-    def __init__(self, responses: list[FakeAnthropicResponse]):
-        self._responses = list(responses)
+    def __init__(self, results: list[Any]):
+        self._results = list(results)
         self.calls: list[dict[str, Any]] = []
 
-    async def post(self, path: str, *, json: dict[str, Any]) -> FakeAnthropicResponse:
-        self.calls.append({"path": path, "json": json})
-        if self._responses:
-            return self._responses.pop(0)
-        return FakeAnthropicResponse(body={"content": [], "stop_reason": "end_turn"})
+    async def run(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        max_turns: int = 1,
+    ) -> BackendTurnResult:
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "tools": tools,
+                "max_turns": max_turns,
+            }
+        )
+        result = self._results.pop(0) if self._results else BackendTurnResult(raw_text="")
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
-def _anthropic_review_body(review_json: str) -> dict[str, Any]:
-    return {
-        "content": [{"type": "text", "text": review_json}],
-        "stop_reason": "end_turn",
-        "usage": {"input_tokens": 21, "output_tokens": 7},
-    }
+def _claude_review_result(review_json: str) -> BackendTurnResult:
+    return BackendTurnResult(
+        raw_text=review_json,
+        metadata={"input_tokens": 21, "output_tokens": 7, "model": "claude-opus-4-8"},
+    )
 
 
 def _make_anthropic_backend(
     fake_critic_root: Path,
     fake_session_dir: Path,
     *,
-    responses: list[FakeAnthropicResponse],
+    results: list[Any],
     judge_bundle: dict[str, Any],
     claude_model: str = "claude-opus-4-8",
-) -> tuple[CriticAgentBackend, FakeAnthropicClient]:
-    fake_client = FakeAnthropicClient(responses)
+) -> tuple[CriticAgentBackend, FakeClaudeBackend]:
+    fake_client = FakeClaudeBackend(results)
     fake_caller = _make_fake_runtime(judge_bundle=judge_bundle)
     backend = CriticAgentBackend(
         critic_agent_root=fake_critic_root,
@@ -1522,7 +1523,7 @@ def _make_anthropic_backend(
         protocol="anthropic",
         claude_model=claude_model,
         codex_model="gpt-5.4",
-        anthropic_client_factory=lambda: fake_client,
+        claude_backend_factory=lambda: fake_client,
         runtime_caller_factory=lambda: fake_caller,
     )
     return backend, fake_client
@@ -1559,28 +1560,28 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
     backend, fake_client = _make_anthropic_backend(
         fake_critic_root,
         fake_session_dir,
-        responses=[FakeAnthropicResponse(body=_anthropic_review_body(review_json))],
+        results=[_claude_review_result(review_json)],
         judge_bundle=judge_bundle,
     )
 
     res = await backend.run("prompt-with-proposal-abc1", system_prompt="critic system")
 
-    # Full KB+tools critic-agent produced the verdict via the native Anthropic path.
+    # Full KB+tools critic-agent produced the verdict via the Claude CLI path.
     assert len(res.intents) == 1
     assert res.intents[0].type == IntentType.REVIEW_VERDICT
     assert res.intents[0].payload["target_proposal_msg_id"] == "abc1"
     assert res.intents[0].payload["verdict"] == "approve"
-    # The review ran on the Claude model over /v1/messages with a system field.
     assert res.metadata["model"] == "claude-opus-4-8"
+    # One single-turn, tool-free call carrying the system prompt separately.
     assert len(fake_client.calls) == 1
-    assert fake_client.calls[0]["path"] == "/v1/messages"
-    payload = fake_client.calls[0]["json"]
-    assert payload["model"] == "claude-opus-4-8"
-    assert payload["system"]
-    assert payload["messages"][-1]["role"] == "user"
-    assert all(m["role"] != "system" for m in payload["messages"])
+    call = fake_client.calls[0]
+    assert call["system_prompt"] == "critic system"
+    assert call["tools"] == []
+    assert call["max_turns"] == 1
+    assert "JUDGE BUNDLE" in call["prompt"]
+    assert "critic system" not in call["prompt"]
 
-    # Token usage from the Anthropic usage block landed on the critic trace row.
+    # Token usage from the turn metadata landed on the critic trace row.
     import json as _json
     from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
 
@@ -1596,41 +1597,87 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
     assert critic_rows[0]["model"] == "claude-opus-4-8"
 
 
-@pytest.mark.asyncio
-async def test_anthropic_protocol_non_2xx_raises(
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-):
-    judge_bundle = {
+def _minimal_judge_bundle() -> dict[str, Any]:
+    return {
         "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [{"msg_id": "p1", "from_agent": "orchestration", "action_name": "baseline", "payload": {}}],
         "review_constraints": {},
     }
+
+
+@pytest.mark.asyncio
+async def test_anthropic_protocol_propagates_llm_call_failed_and_traces_it(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+):
+    """A CLI failure reaches the caller unwrapped but still costs one trace row."""
     backend, _ = _make_anthropic_backend(
         fake_critic_root,
         fake_session_dir,
-        responses=[FakeAnthropicResponse(status_code=401, body={}, text="unauthorized")],
-        judge_bundle=judge_bundle,
+        results=[LLMCallFailed("claude cli stream idle")],
+        judge_bundle=_minimal_judge_bundle(),
     )
-    with pytest.raises(BackendError, match="Anthropic API call failed"):
+    with pytest.raises(LLMCallFailed, match="claude cli stream idle"):
+        await backend.run("prompt", system_prompt="critic system")
+
+    import json as _json
+
+    from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
+
+    rows = [
+        _json.loads(line)
+        for line in llm_calls_path(fake_session_dir).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    critic_rows = [r for r in rows if r["component"] == "critic"]
+    assert len(critic_rows) == 1
+    assert critic_rows[0]["status"] == "error"
+    # The row carries the original error type, not a re-wrapped one.
+    assert critic_rows[0]["error_type"] == "LLMCallFailed"
+    assert "claude cli stream idle" in critic_rows[0]["error_message"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_protocol_wraps_unexpected_transport_error(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+):
+    backend, _ = _make_anthropic_backend(
+        fake_critic_root,
+        fake_session_dir,
+        results=[RuntimeError("boom")],
+        judge_bundle=_minimal_judge_bundle(),
+    )
+    with pytest.raises(BackendError, match="Claude CLI call failed"):
         await backend.run("prompt", system_prompt="critic system")
 
 
-def test_anthropic_text_from_content_joins_text_blocks():
-    content = [
-        {"type": "text", "text": "hello "},
-        {"type": "tool_use", "id": "x"},
-        {"type": "text", "text": "world"},
-    ]
-    assert _anthropic_text_from_content(content) == "hello world"
-    assert _anthropic_text_from_content(None) == ""
-    assert _anthropic_text_from_content("nope") == ""
+def test_default_claude_backend_is_single_turn_and_tool_free(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+    monkeypatch,
+):
+    """The review executor must never be handed a tool palette or a session."""
+    backend = CriticAgentBackend(
+        critic_agent_root=fake_critic_root,
+        session_dir=fake_session_dir,
+        protocol="anthropic",
+        claude_model="claude-opus-4-8",
+        codex_model="gpt-5.4",
+        claude_backend_factory=lambda: FakeClaudeBackend([]),
+        runtime_caller_factory=lambda: _make_fake_runtime(judge_bundle=_minimal_judge_bundle()),
+    )
+    built = backend._default_claude_backend()
+    assert built.model == "claude-opus-4-8"
+    assert built.raw_completion is True
+    assert built.conversational is False
+    assert built.enable_mcp_emit_intent is False
 
 
-def test_accumulate_anthropic_usage_folds_tokens_and_tolerates_garbage():
+def test_accumulate_claude_usage_folds_tokens_and_tolerates_garbage():
     acc = {"input_tokens": 0, "output_tokens": 0}
-    CriticAgentBackend._accumulate_anthropic_usage(acc, {"input_tokens": 3, "output_tokens": 4})
-    CriticAgentBackend._accumulate_anthropic_usage(acc, {"input_tokens": "x", "output_tokens": None})
-    CriticAgentBackend._accumulate_anthropic_usage(acc, None)
+    CriticAgentBackend._accumulate_claude_usage(acc, {"input_tokens": 3, "output_tokens": 4})
+    CriticAgentBackend._accumulate_claude_usage(acc, {"input_tokens": "x", "output_tokens": None})
+    CriticAgentBackend._accumulate_claude_usage(acc, None)
     assert acc == {"input_tokens": 3, "output_tokens": 4}

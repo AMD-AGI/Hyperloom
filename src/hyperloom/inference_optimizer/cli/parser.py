@@ -781,6 +781,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "review_constraints). Requires CRITIC_AGENT_ROOT or a sibling "
         "$REPO_ROOT/critic-agent/ directory.",
     )
+    opt.add_argument(
+        "--critic-protocol",
+        dest="critic_protocol",
+        choices=("auto", "openai", "anthropic"),
+        default="auto",
+        help="Transport for the Critic's review inference. 'openai' uses the "
+        "OpenAI SDK, 'anthropic' uses the Claude CLI (which accepts an API key, "
+        "a gateway bearer token, or a CLAUDE_CODE_OAUTH_TOKEN subscription). "
+        "'auto' (default) derives it from the configured credentials; an "
+        "explicit value fails at startup when that side has no credential.",
+    )
     # Robustness backend selection (mirrors critic)
     opt.add_argument(
         "--robustness-mock",

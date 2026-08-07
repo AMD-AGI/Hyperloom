@@ -34,6 +34,8 @@ from .backends import (
     _build_backends,
     _build_proposal_scorer,
     _build_robustness_options,
+    _official_anthropic_only,
+    _official_openai_only,
     _robustness_server_configured,
 )
 from .model_gate import (
@@ -592,34 +594,14 @@ def _catalog_compare_model_id(model_id: str) -> str:
 
 def _codex_model_should_follow_claude() -> bool:
     """True when the operator supplied only Anthropic config."""
-    has_anthropic = bool(
-        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
-        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
-    )
-    has_openai = bool(
-        (os.environ.get("OPENAI_BASE_URL") or "").strip() or (os.environ.get("OPENAI_API_KEY") or "").strip()
-    )
-    return has_anthropic and not has_openai
+    return _official_anthropic_only()
 
 
 def _claude_model_should_follow_codex() -> bool:
     """True when the operator supplied only OpenAI-compatible config."""
     if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
         return True
-    has_openai = bool(
-        (os.environ.get("OPENAI_BASE_URL") or "").strip() or (os.environ.get("OPENAI_API_KEY") or "").strip()
-    )
-    has_anthropic = bool(
-        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
-        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
-    )
-    return has_openai and not has_anthropic
+    return _official_openai_only()
 
 
 def _custom_orch_model_allowed() -> bool:
@@ -643,20 +625,14 @@ def _custom_orch_model_explicitly_disabled() -> bool:
     return raw is not None and raw.strip().lower() in {"0", "false", "no", "off"}
 
 
-def _critic_agent_runtime_needed(
-    critic_choice: str,
-    *,
-    codex_follows_claude: bool = False,
-) -> bool:
+def _critic_agent_runtime_needed(critic_choice: str) -> bool:
     """Whether the selected critic path will actually instantiate critic-agent.
 
-    Provider-only setups (including Anthropic-only) still run the full
-    critic-agent — its KB two-phase runtime is protocol-independent, and the
-    review inference is driven over the native provider endpoint. The runtime is
-    only skipped when the caller explicitly signals a plain Claude fallback via
-    ``codex_follows_claude``.
+    Every provider shape runs the full critic-agent: its KB two-phase runtime is
+    protocol-independent, and both review transports keep it. There is no
+    degraded critic to fall back to — ``--critic-mock`` is the only opt-out.
     """
-    return critic_choice == "agent" and not codex_follows_claude
+    return critic_choice == "agent"
 
 
 def _validate_and_resolve_claude_model(
@@ -2013,10 +1989,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         sys.exit(2)
-    if _critic_agent_runtime_needed(
-        critic_choice,
-        codex_follows_claude=codex_follows_claude,
-    ):
+    if _critic_agent_runtime_needed(critic_choice):
         critic_agent_root = _resolve_agent_root("critic")
         if critic_agent_root is None:
             print(
@@ -2071,6 +2044,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         robustness_agent_root=robustness_agent_root,
         robustness_options=robustness_options,
         codex_follows_claude=codex_follows_claude,
+        critic_protocol=getattr(args, "critic_protocol", "auto"),
     )
     # Expose active session_dir to in-process executors via the canonical pin
     # env var; reinforced here for --resume paths. Do NOT overwrite
