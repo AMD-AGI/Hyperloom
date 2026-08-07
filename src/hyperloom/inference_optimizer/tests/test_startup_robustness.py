@@ -111,6 +111,34 @@ def test_validate_credentials_rejects_oauth_with_bare_openai_base_url(clean_cred
     assert "Conflicting LLM credentials" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    "anthropic_env",
+    [
+        pytest.param(("_".join(("ANTHROPIC", "API", "KEY")), "sk-ant-api"), id="api-key"),
+        pytest.param((_OAUTH_ENV, "sk-ant-oat01-fake"), id="oauth-token"),
+        pytest.param(("_".join(("DEEPSEEK", "API", "KEY")), "sk-deepseek"), id="deepseek-key"),
+    ],
+)
+def test_validate_credentials_accepts_implied_endpoints_on_both_sides(clean_creds_env, anthropic_env):
+    """A key that implies its own official endpoint never borrows the other
+    side's, so it pairs with a bare OPENAI_API_KEY."""
+    clean_creds_env.setenv(*anthropic_env)
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "ak-openai")
+    cli_credentials._validate_credentials()
+
+
+def test_validate_credentials_rejects_gateway_anthropic_url_with_bare_openai_key(clean_creds_env, capsys):
+    """An explicit ANTHROPIC_BASE_URL marks a gateway deploy, where a bare
+    OPENAI_API_KEY is a gateway key that lost its OPENAI_BASE_URL."""
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://gw.example.com/anthropic")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "gw-key")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "gw-key")
+    with pytest.raises(SystemExit) as exc_info:
+        cli_credentials._validate_credentials()
+    assert exc_info.value.code == 2
+    assert "Conflicting LLM credentials" in capsys.readouterr().err
+
+
 def test_validate_credentials_warns_when_api_key_shadows_oauth(clean_creds_env, capsys):
     """The Claude CLI prefers the API key, so the subscription would go unused."""
     clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")

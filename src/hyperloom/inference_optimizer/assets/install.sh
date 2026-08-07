@@ -412,7 +412,9 @@ preflight_reject_cross_provider() {
     conflict="ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an OPENAI_API_KEY is configured"
   elif [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "$a_key" ] && [ -z "$a_endpoint" ]; then
     conflict="an Anthropic-side key is configured without ANTHROPIC_BASE_URL, while the OpenAI side points at OPENAI_BASE_URL"
-  elif [ -n "$a_endpoint" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
+  # Only an explicit ANTHROPIC_BASE_URL signals a gateway-shaped deploy whose
+  # OPENAI_API_KEY is likely a gateway key missing its own URL.
+  elif [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
     conflict="OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the Anthropic side points at ANTHROPIC_BASE_URL"
   fi
   [ -z "$conflict" ] && return 0
