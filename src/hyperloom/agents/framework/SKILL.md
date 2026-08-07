@@ -29,10 +29,11 @@ src/hyperloom/agents/framework/     # hyperloom.agents.framework
 └── tests/
 ```
 
-The KB root resolves in order: `FRAMEWORK_AGENT_KB_DIR`, then
-`INFERENCE_OPTIMIZER_FA_KB_PATH` (Hyperloom compatibility override), then
-`${FRAMEWORK_AGENT_ROOT}/kb`. The runtime partition written under it is
-`framework_optimization/<framework>/`.
+The KB a session reads and writes is `INFERENCE_OPTIMIZER_FA_KB_PATH` when
+set, else `<workspace>/kb` (`USER_DATA_PATH` or the pod-local default). The
+orchestrator's writeback resolves the same root, so both halves move together.
+The runtime partition written under it is `framework_optimization/<framework>/`.
+Read-only seed data shipped in the wheel lives separately under the package.
 
 ## Subcommands
 
