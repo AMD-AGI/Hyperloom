@@ -20,7 +20,7 @@ missing fails at startup rather than silently changing the review quality.
 | Value | Behaviour |
 |---|---|
 | `auto` (default) | Anthropic-only config picks `anthropic`; everything else picks `openai`. |
-| `openai` | `AsyncOpenAI.chat.completions`. Needs the OpenAI side configured. |
+| `openai` | `AsyncOpenAI.chat.completions`. Needs `OPENAI_API_KEY`, `LLM_GATEWAY_KEY` or `DEEPSEEK_API_KEY`. |
 | `anthropic` | `ClaudeBackend(raw_completion=True)`, i.e. the `claude` CLI. Needs an Anthropic-side credential, including `CLAUDE_CODE_OAUTH_TOKEN`. |
 
 Force `anthropic` when both sides are configured but the Critic should run on a

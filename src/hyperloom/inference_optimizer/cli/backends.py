@@ -108,8 +108,10 @@ def _resolve_critic_protocol(requested: str, *, provider_anthropic_only: bool) -
             "--critic-protocol=anthropic requires one of ANTHROPIC_API_KEY, "
             f"ANTHROPIC_AUTH_TOKEN or {CLAUDE_OAUTH_TOKEN_ENV}"
         )
-    if requested == "openai" and not _any_env_set(("OPENAI_API_KEY", "DEEPSEEK_API_KEY")):
-        raise ValueError("--critic-protocol=openai requires OPENAI_API_KEY or DEEPSEEK_API_KEY")
+    # Mirror resolve_openai_client_config's key chain, LLM_GATEWAY_KEY included:
+    # rejecting a gateway-only host here would fail a config that does run.
+    if requested == "openai" and not _any_env_set(("OPENAI_API_KEY", "LLM_GATEWAY_KEY", "DEEPSEEK_API_KEY")):
+        raise ValueError("--critic-protocol=openai requires OPENAI_API_KEY, LLM_GATEWAY_KEY or DEEPSEEK_API_KEY")
     return requested
 
 
