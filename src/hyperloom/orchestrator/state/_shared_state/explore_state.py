@@ -411,6 +411,10 @@ class _ExploreStateMixin:
         self.rounds_since_last_keep = {}
         self.last_sweep = {}
         self.last_conc_sweep = {}
+        # A hint set during the prior macro-cycle (e.g. by kernel_agent
+        # completion) and never claimed by the transition it caused must not
+        # survive into the next cycle's phases as if they'd earned it.
+        self.pending_escalate_hint = ""
 
     def note_explore_outcome(self, *, promoted: bool) -> None:
         """Update the plateau proxy after one explore task (KEEP resets, no-promote increments).
