@@ -103,9 +103,10 @@ Options:
 
 Credential resolution (highest precedence first): env > .env > interactive
 prompt (TTY + not --yes). Configure Anthropic
-(ANTHROPIC_BASE_URL+ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN) or DeepSeek
-(DEEPSEEK_API_KEY, optional DEEPSEEK_BASE_URL), matching runtime credential
-rules.
+(ANTHROPIC_BASE_URL+ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN), a Claude
+subscription token (CLAUDE_CODE_OAUTH_TOKEN, from "claude setup-token"), or
+DeepSeek (DEEPSEEK_API_KEY, optional DEEPSEEK_BASE_URL), matching runtime
+credential rules.
 Env overrides honored: REPO_ROOT,
 USER_DATA_PATH, HYPERLOOM_DEPS_ROOT / HYPERLOOM_CACHE_DIR,
 PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON,
@@ -1074,6 +1075,7 @@ remove_dotenv_var() {
 resolve_credentials() {
   log "Phase 4: credentials"
   local anthropic_key anthropic_token deepseek_key anthropic_url deepseek_url
+  local oauth_token dv_oauth_token
   local dv_anthropic_key dv_anthropic_token dv_deepseek_key
   local dv_anthropic_url dv_deepseek_url
   local has_url=0 has_key=0 setup_env_authoritative=0 setup_llm_mode=""
@@ -1090,6 +1092,7 @@ resolve_credentials() {
   # .env fallbacks (used only for values missing from process env).
   dv_anthropic_key="$(read_dotenv_var ANTHROPIC_API_KEY || true)"
   dv_anthropic_token="$(read_dotenv_var ANTHROPIC_AUTH_TOKEN || true)"
+  dv_oauth_token="$(read_dotenv_var CLAUDE_CODE_OAUTH_TOKEN || true)"
   dv_deepseek_key="$(read_dotenv_var DEEPSEEK_API_KEY || true)"
   dv_anthropic_url="$(read_dotenv_var ANTHROPIC_BASE_URL || true)"
   dv_deepseek_url="$(read_dotenv_var DEEPSEEK_BASE_URL || true)"
@@ -1099,7 +1102,7 @@ resolve_credentials() {
     setup_env_authoritative=1
   fi
   if [ "$setup_env_authoritative" -eq 1 ] && [ -z "$setup_llm_mode" ]; then
-    if [ -n "$dv_anthropic_key" ] || [ -n "$dv_anthropic_token" ] || [ -n "$dv_anthropic_url" ]; then
+    if [ -n "$dv_anthropic_key" ] || [ -n "$dv_anthropic_token" ] || [ -n "$dv_oauth_token" ] || [ -n "$dv_anthropic_url" ]; then
       setup_llm_mode="anthropic"
     elif [ -n "$dv_deepseek_key" ] || [ -n "$dv_deepseek_url" ]; then
       setup_llm_mode="deepseek"
@@ -1112,6 +1115,7 @@ resolve_credentials() {
   # Precedence: process env > .env.
   anthropic_key="${ANTHROPIC_API_KEY:-$dv_anthropic_key}"
   anthropic_token="${ANTHROPIC_AUTH_TOKEN:-$dv_anthropic_token}"
+  oauth_token="${CLAUDE_CODE_OAUTH_TOKEN:-$dv_oauth_token}"
   deepseek_key="${DEEPSEEK_API_KEY:-$dv_deepseek_key}"
   anthropic_url="${ANTHROPIC_BASE_URL:-$dv_anthropic_url}"
   deepseek_url="${DEEPSEEK_BASE_URL:-$dv_deepseek_url}"
@@ -1125,13 +1129,14 @@ resolve_credentials() {
   elif [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "deepseek" ]; then
     anthropic_key=""
     anthropic_token=""
+    oauth_token=""
     anthropic_url=""
     unset LLM_GATEWAY_KEY
     unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_CUSTOM_HEADERS
-    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL
+    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN
   fi
 
-  if [ -z "$anthropic_key" ] && [ -z "$anthropic_token" ] && [ -z "$deepseek_key" ] && is_interactive; then
+  if [ -z "$anthropic_key" ] && [ -z "$anthropic_token" ] && [ -z "$oauth_token" ] && [ -z "$deepseek_key" ] && is_interactive; then
     read -rsp "[install-baremetal] Enter Anthropic/DeepSeek API key (or leave blank if already configured): " anthropic_key; echo >&2
   fi
 
@@ -1139,10 +1144,15 @@ resolve_credentials() {
   # matching the CLI preflight. DeepSeek serves its own Anthropic-compatible
   # endpoint, so its key counts as one.
   local _x_akey _x_aend _x_conflict=""
-  _x_akey="${anthropic_key:-${anthropic_token:-${deepseek_key:-}}}"
+  _x_akey="${anthropic_key:-${anthropic_token:-${deepseek_key:-${oauth_token:-}}}}"
   _x_aend="${anthropic_url:-}"
   if [ -z "$_x_aend" ] && [ -n "$deepseek_key" ]; then
     _x_aend="${deepseek_url:-https://api.deepseek.com/anthropic}"
+  fi
+  # A subscription token only validates against Anthropic, so it implies the
+  # official endpoint the same way a DeepSeek key implies its own.
+  if [ -z "$_x_aend" ] && [ -n "$oauth_token" ]; then
+    _x_aend="https://api.anthropic.com"
   fi
   if [ -n "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -n "$_x_akey" ]; then
     _x_conflict="OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an Anthropic-side key is configured"
@@ -1161,13 +1171,13 @@ resolve_credentials() {
     fi
   fi
 
-  { [ -n "$anthropic_url" ] || [ -n "$deepseek_url" ] || [ -n "$deepseek_key" ]; } && has_url=1
-  { [ -n "$anthropic_key" ] || [ -n "$anthropic_token" ] || [ -n "$deepseek_key" ]; } && has_key=1
+  { [ -n "$anthropic_url" ] || [ -n "$deepseek_url" ] || [ -n "$deepseek_key" ] || [ -n "$oauth_token" ]; } && has_url=1
+  { [ -n "$anthropic_key" ] || [ -n "$anthropic_token" ] || [ -n "$deepseek_key" ] || [ -n "$oauth_token" ]; } && has_key=1
   if [ "$has_url" -eq 0 ] || [ "$has_key" -eq 0 ]; then
     if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
       warn "LLM credentials not fully resolved (continuing: --check-only / --dry-run)"
     else
-      die "no usable LLM endpoint: configure Anthropic (ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN) or DeepSeek (DEEPSEEK_API_KEY, optional DEEPSEEK_BASE_URL)."
+      die "no usable LLM endpoint: configure Anthropic (ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN), a Claude subscription token (CLAUDE_CODE_OAUTH_TOKEN), or DeepSeek (DEEPSEEK_API_KEY, optional DEEPSEEK_BASE_URL)."
     fi
   fi
 
@@ -1175,6 +1185,9 @@ resolve_credentials() {
   # inference_optimizer skill install and CLI preflight.
   [ -n "$anthropic_key" ] && export ANTHROPIC_API_KEY="$anthropic_key"
   [ -n "$anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$anthropic_token"
+  # Subscription token stays in its own variable; mirroring it into an API-key
+  # slot would move the run onto API billing.
+  [ -n "$oauth_token" ] && export CLAUDE_CODE_OAUTH_TOKEN="$oauth_token"
   [ -n "$deepseek_key" ] && export DEEPSEEK_API_KEY="$deepseek_key"
   [ -n "$anthropic_url" ] && export ANTHROPIC_BASE_URL="$anthropic_url"
   [ -n "$deepseek_url" ] && export DEEPSEEK_BASE_URL="$deepseek_url"
@@ -1188,7 +1201,10 @@ resolve_credentials() {
       remove_dotenv_var OPENAI_BASE_URL
       remove_dotenv_var ANTHROPIC_API_KEY
       remove_dotenv_var ANTHROPIC_BASE_URL
+      remove_dotenv_var CLAUDE_CODE_OAUTH_TOKEN
     else
+      # Subscription token is deliberately excluded: it is persisted under its
+      # own key below, never folded into an API-key slot.
       local persist_anthropic_key="${anthropic_key:-$anthropic_token}"
       if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
         # Anthropic-only deployment: scrub the other providers' entries.
@@ -1206,6 +1222,11 @@ resolve_credentials() {
         upsert_dotenv_var ANTHROPIC_BASE_URL "$anthropic_url"
       else
         remove_dotenv_var ANTHROPIC_BASE_URL
+      fi
+      if [ -n "$oauth_token" ]; then
+        upsert_dotenv_var CLAUDE_CODE_OAUTH_TOKEN "$oauth_token"
+      else
+        remove_dotenv_var CLAUDE_CODE_OAUTH_TOKEN
       fi
     fi
     # Only the Anthropic / DeepSeek side is persisted here. The OpenAI-side entries

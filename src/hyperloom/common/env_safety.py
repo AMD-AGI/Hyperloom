@@ -61,6 +61,7 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_CUSTOM_HEADERS",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAW_API_KEY",
         "DEEPSEEK_API_KEY",
         "GEAK_API_KEY",
@@ -92,7 +93,9 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
         "DEEPSEEK_API_KEY",
@@ -148,7 +151,9 @@ DOTENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
 KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "FORGE_PATH",
         "GEAK_CLAUDE_BIN",
         "GEAK_CLAUDE_MODEL",

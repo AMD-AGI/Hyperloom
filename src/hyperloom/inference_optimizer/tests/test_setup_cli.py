@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 from pathlib import Path
@@ -447,6 +448,104 @@ def test_baremetal_setup_rejects_cross_provider_pairing(tmp_path: Path):
 
     assert proc.returncode != 0, "mispaired credentials were accepted"
     assert "Conflicting LLM credentials" in proc.stderr, proc.stderr
+
+
+def _oauth_only_env() -> dict[str, str]:
+    """Ambient provider credentials would mask an oauth-only preflight."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "OPENAI_", "DEEPSEEK_"))}
+    env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+    return env
+
+
+def test_install_preflights_accept_oauth_only_credentials(tmp_path: Path):
+    """A Claude subscription token alone is a self-consistent Anthropic side."""
+    script_paths = [
+        (
+            "install",
+            Path(setup.__file__).resolve().parent / "assets" / "install.sh",
+            ["preflight_load_dotenv() { :; }"],
+        ),
+        (
+            "kernel",
+            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            [],
+        ),
+    ]
+    for name, script_path, stubs in script_paths:
+        script_text = script_path.read_text(encoding="utf-8")
+        start = script_text.index("preflight_reject_cross_provider() {")
+        end = script_text.index(
+            "\npreflight_validate_credentials", script_text.index("preflight_validate_credentials() {")
+        )
+        runner = tmp_path / f"{name}-oauth-preflight.sh"
+        runner.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    "set -uo pipefail",
+                    f"REPO_ROOT={tmp_path}",
+                    "CHECK_ONLY=0",
+                    "DRY_RUN=0",
+                    "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test",
+                    "log() { :; }",
+                    'warn() { echo "$*" >&2; }',
+                    'die() { echo "$*" >&2; exit 99; }',
+                    *stubs,
+                    script_text[start:end],
+                    "preflight_validate_credentials",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, env=_oauth_only_env())
+
+        assert proc.returncode == 0, f"{name}: oauth-only rejected: {proc.stderr}"
+
+
+def test_baremetal_setup_accepts_oauth_only_without_mirroring_it(tmp_path: Path):
+    """Subscription token resolves on its own and stays out of API-key slots."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("read_dotenv_var() {")
+    end = script_text.index("\nwrite_runtime_dotenv() {")
+    credential_functions = script_text[start:end]
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("HYPERLOOM_RUN_MODE=baremetal\n", encoding="utf-8")
+    dump = tmp_path / "resolved.txt"
+    runner = tmp_path / "oauth-only-run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -uo pipefail",
+                f"DOTENV={dotenv}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "log() { :; }",
+                'warn() { echo "$*" >&2; }',
+                'die() { echo "$*" >&2; exit 99; }',
+                "is_interactive() { return 1; }",
+                credential_functions,
+                "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test",
+                "resolve_credentials",
+                f'printf "%s|%s|%s\\n" "${{CLAUDE_CODE_OAUTH_TOKEN:-}}" "${{ANTHROPIC_API_KEY:-}}"'
+                f' "${{ANTHROPIC_AUTH_TOKEN:-}}" > {dump}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, env=_oauth_only_env())
+
+    assert proc.returncode == 0, f"oauth-only rejected: {proc.stderr}"
+    assert dump.read_text(encoding="utf-8").strip() == "sk-ant-oat01-test||"
+    persisted = dotenv.read_text(encoding="utf-8")
+    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test" in persisted
+    assert "ANTHROPIC_API_KEY=" not in persisted
+    assert "ANTHROPIC_AUTH_TOKEN=" not in persisted
 
 
 def test_baremetal_install_no_longer_accepts_openai_safe_credential_flags():
