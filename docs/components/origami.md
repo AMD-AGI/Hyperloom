@@ -147,6 +147,31 @@ When at least one measured winner exists, Hyperloom passes the merged file to
 the configured tuner through the existing
 `AITER_CONFIG_GEMM_A8W8_BLOCKSCALE` environment variable.
 
+## Runtime logging
+
+The optimizer log emits stable markers that can be monitored without parsing
+the full selector JSON:
+
+- `ORIGAMI_GEMM_START`: selector invocation, workload type, shape source, and
+  workspace.
+- `ORIGAMI_GEMM_SUMMARY`: observed, fallback, benchmarked, and selected counts,
+  plus the report path.
+- `ORIGAMI_GEMM_WIN`: exact shape, selected kernel ID, paired median timings,
+  and measured speedup.
+- `ORIGAMI_GEMM_INJECT`: merged AITER CSV injected before GEAK/Forge.
+- `ORIGAMI_GEMM_BACKEND`: authoritative backend continuation and decision.
+- `ORIGAMI_GEMM_SKIP` / `ORIGAMI_GEMM_ERROR`: fail-closed reason.
+
+For an overnight run:
+
+```bash
+grep -E 'ORIGAMI_GEMM_(START|SUMMARY|WIN|INJECT|BACKEND|SKIP|ERROR)' run.log
+```
+
+Detailed provenance and every per-shape decision remain in
+`origami_a8w8_blockscale_report.json`; logs intentionally omit tensors,
+credentials, and the full ranking payload.
+
 ## Safety properties
 
 - Default-off and zero-touch when disabled.

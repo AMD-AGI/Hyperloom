@@ -36,8 +36,9 @@ def test_pre_tuning_env_is_inserted_before_existing_env_args(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_origami_fallback_shapes_pre_tuning_seed(tmp_path, monkeypatch):
+async def test_origami_fallback_shapes_pre_tuning_seed(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("HYPERLOOM_ORIGAMI_GEMM_FALLBACK", "1")
+    caplog.set_level("INFO", logger=krh.__name__)
     state = SharedState(
         precision="fp8",
         framework="vllm",
@@ -72,10 +73,25 @@ async def test_origami_fallback_shapes_pre_tuning_seed(tmp_path, monkeypatch):
                 {
                     "status": "ok",
                     "candidate": True,
+                    "observed_shapes": 1,
+                    "fallback_shapes": 1,
+                    "benchmarked_shapes": 1,
                     "selected_shapes": 1,
                     "report_path": str(Path(data["output_dir"]) / "report.json"),
                     "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
                     "env_value": str(candidate),
+                    "rows": [
+                        {
+                            "status": "selected",
+                            "M": 16,
+                            "N": 4096,
+                            "K": 8192,
+                            "kernelId": 3,
+                            "benchmark_selected_us": 8.0,
+                            "benchmark_default_us": 10.0,
+                            "benchmark_speedup": 1.25,
+                        }
+                    ],
                 }
             ),
             "",
@@ -98,11 +114,15 @@ async def test_origami_fallback_shapes_pre_tuning_seed(tmp_path, monkeypatch):
     assert result["selected_shapes"] == 1
     assert "requires_e2e_validation" not in result
     assert "--input-json" in captured["cmd"]
+    assert "ORIGAMI_GEMM_START" in caplog.text
+    assert "ORIGAMI_GEMM_SUMMARY" in caplog.text
+    assert "ORIGAMI_GEMM_WIN" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_run_gemm_tuning_seeds_then_calls_geak(tmp_path, monkeypatch):
+async def test_run_gemm_tuning_seeds_then_calls_geak(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("HYPERLOOM_ORIGAMI_GEMM_FALLBACK", "1")
+    caplog.set_level("INFO", logger=krh.__name__)
     seed = tmp_path / "origami-merged.csv"
     seed.write_text("M,N,K\n16,4096,8192\n", encoding="utf-8")
     candidate = {
@@ -139,11 +159,52 @@ async def test_run_gemm_tuning_seeds_then_calls_geak(tmp_path, monkeypatch):
     assert result["origami_fallback"]["candidate"] is True
     assert result["origami_fallback"]["applied_before_backend"] is True
     assert result["origami_fallback"]["authoritative_backend"] == "geak"
+    assert "ORIGAMI_GEMM_INJECT" in caplog.text
+    assert "ORIGAMI_GEMM_BACKEND backend=geak" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_run_gemm_tuning_continues_when_origami_errors(tmp_path, monkeypatch):
+async def test_run_gemm_tuning_seeds_then_calls_forge(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("HYPERLOOM_ORIGAMI_GEMM_FALLBACK", "1")
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+    caplog.set_level("INFO", logger=krh.__name__)
+    seed = tmp_path / "origami-merged.csv"
+    seed.write_text("M,N,K\n16,4096,8192\n", encoding="utf-8")
+
+    async def fake_origami(_payload, *, session_dir):
+        assert session_dir == tmp_path
+        return {
+            "status": "ok",
+            "candidate": True,
+            "selected_shapes": 1,
+            "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
+            "env_value": str(seed),
+        }
+
+    async def fake_forge(payload, *, session_dir):
+        assert session_dir == tmp_path
+        assert payload["_origami_pre_tuning_envs"] == {
+            "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": str(seed)
+        }
+        return {"status": "complete", "backend": "forge", "decision": "KEEP"}
+
+    monkeypatch.setattr(krh, "_run_origami_gemm_fallback", fake_origami)
+    monkeypatch.setattr(krh, "_run_forge_gemm_tuning", fake_forge)
+
+    result = await krh.run_gemm_tuning_handler(
+        {"task_id": "origami-seeds-forge"},
+        session_dir=tmp_path,
+    )
+
+    assert result["backend"] == "forge"
+    assert "ORIGAMI_GEMM_INJECT" in caplog.text
+    assert "ORIGAMI_GEMM_BACKEND backend=forge" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_run_gemm_tuning_continues_when_origami_errors(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("HYPERLOOM_ORIGAMI_GEMM_FALLBACK", "1")
+    caplog.set_level("INFO", logger=krh.__name__)
 
     async def broken_origami(_payload, *, session_dir):
         raise RuntimeError("origami unavailable")
@@ -161,6 +222,8 @@ async def test_run_gemm_tuning_continues_when_origami_errors(tmp_path, monkeypat
 
     assert result["backend"] == "geak"
     assert result["origami_fallback"]["reason"] == "selector_error"
+    assert "ORIGAMI_GEMM_ERROR reason=selector_exception" in caplog.text
+    assert "ORIGAMI_GEMM_BACKEND backend=geak" in caplog.text
 
 
 def test_pre_tuning_env_is_blocked_when_origami_disabled(tmp_path, monkeypatch):
@@ -200,8 +263,9 @@ async def test_origami_helper_disabled_is_zero_touch(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_handler_disabled_skips_all_origami_paths(tmp_path, monkeypatch):
+async def test_handler_disabled_skips_all_origami_paths(tmp_path, monkeypatch, caplog):
     monkeypatch.delenv("HYPERLOOM_ORIGAMI_GEMM_FALLBACK", raising=False)
+    caplog.set_level("INFO", logger=krh.__name__)
     payload = {"task_id": "disabled-handler"}
     called: dict[str, object] = {}
 
@@ -221,3 +285,4 @@ async def test_handler_disabled_skips_all_origami_paths(tmp_path, monkeypatch):
     assert called["payload"] is payload
     assert "_origami_pre_tuning_envs" not in payload
     assert "origami_fallback" not in result
+    assert "ORIGAMI_GEMM_" not in caplog.text

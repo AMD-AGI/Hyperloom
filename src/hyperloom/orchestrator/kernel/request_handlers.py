@@ -3092,6 +3092,38 @@ def _origami_gemm_fallback_enabled() -> bool:
     return env_bool("HYPERLOOM_ORIGAMI_GEMM_FALLBACK", False)
 
 
+def _log_origami_selector_result(result: HandlerResult) -> None:
+    """Emit stable summary/winner markers without dumping selector payloads."""
+    log.info(
+        "ORIGAMI_GEMM_SUMMARY status=%s reason=%s observed=%s fallback=%s "
+        "benchmarked=%s selected=%s report=%s",
+        result.get("status", "unknown"),
+        result.get("reason") or "none",
+        result.get("observed_shapes", 0),
+        result.get("fallback_shapes", 0),
+        result.get("benchmarked_shapes", 0),
+        result.get("selected_shapes", 0),
+        result.get("report_path") or "none",
+    )
+    rows = result.get("rows")
+    if not isinstance(rows, list):
+        return
+    for row in rows:
+        if not isinstance(row, dict) or row.get("status") != "selected":
+            continue
+        log.info(
+            "ORIGAMI_GEMM_WIN M=%s N=%s K=%s kernel_id=%s "
+            "selected_us=%s default_us=%s speedup=%s",
+            row.get("M"),
+            row.get("N"),
+            row.get("K"),
+            row.get("kernelId"),
+            row.get("benchmark_selected_us"),
+            row.get("benchmark_default_us"),
+            row.get("benchmark_speedup"),
+        )
+
+
 def _with_gemm_pre_tuning_env(cmd: list[str], payload: dict) -> list[str]:
     """Prefix a tuner command with validated Origami baseline environment."""
     if not _origami_gemm_fallback_enabled():
@@ -3133,6 +3165,11 @@ async def _run_origami_gemm_fallback(
         "a8w8_blockscale",
         "fp8_blockscale",
     }:
+        log.info(
+            "ORIGAMI_GEMM_SKIP reason=not_plain_fp8_blockscale precision=%s quant_type=%s",
+            precision,
+            quant_type,
+        )
         return {
             "status": "skipped",
             "reason": "not_plain_fp8_blockscale",
@@ -3151,6 +3188,7 @@ async def _run_origami_gemm_fallback(
             require_fresh_profile=True,
         )
     if not shapes_json:
+        log.info("ORIGAMI_GEMM_SKIP reason=no_profile_shapes")
         return {
             "status": "skipped",
             "reason": "no_profile_shapes",
@@ -3203,9 +3241,22 @@ async def _run_origami_gemm_fallback(
         json.dumps(input_payload, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    log.info(
+        "ORIGAMI_GEMM_START task_id=%s precision=%s quant_type=%s "
+        "shapes=%s workspace=%s",
+        payload.get("task_id") or "unknown",
+        precision,
+        quant_type,
+        shapes_json,
+        workspace,
+    )
     try:
         tool_path = _kernel_agent_tool_path("origami_gemm_select.py")
     except RuntimeError as exc:
+        log.warning(
+            "ORIGAMI_GEMM_ERROR reason=selector_tool_unavailable error_class=%s",
+            type(exc).__name__,
+        )
         return {
             "status": "skipped",
             "candidate": False,
@@ -3229,6 +3280,7 @@ async def _run_origami_gemm_fallback(
         rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
         selected = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired:
+        log.warning("ORIGAMI_GEMM_ERROR reason=selector_timeout timeout_sec=%s", timeout)
         selected = {
             "status": "skipped",
             "candidate": False,
@@ -3239,6 +3291,7 @@ async def _run_origami_gemm_fallback(
     selected.setdefault("workspace", str(workspace))
     selected.setdefault("precision", precision)
     selected.setdefault("quant_type", quant_type)
+    _log_origami_selector_result(selected)
     if not selected.get("candidate") or not selected.get("env_value"):
         return selected
 
@@ -3780,7 +3833,11 @@ async def run_gemm_tuning_handler(
                 session_dir=session_dir,
             )
         except Exception as exc:  # noqa: BLE001 - optional pre-tuner must fail soft
-            log.warning("run_gemm_tuning: Origami fallback selector skipped: %s", exc)
+            log.warning(
+                "ORIGAMI_GEMM_ERROR reason=selector_exception error_class=%s "
+                "action=continue_without_seed",
+                type(exc).__name__,
+            )
             origami_result = {
                 "status": "skipped",
                 "candidate": False,
@@ -3796,8 +3853,9 @@ async def run_gemm_tuning_handler(
                 ): str(origami_result["env_value"])
             }
             log.info(
-                "run_gemm_tuning: seeding %s fallback shape(s) with Origami before %s",
+                "ORIGAMI_GEMM_INJECT rows=%s path=%s backend=%s",
                 origami_result.get("selected_shapes", 0),
+                origami_result.get("env_value"),
                 backend,
             )
     if backend == "forge":
@@ -3809,6 +3867,15 @@ async def run_gemm_tuning_handler(
         result = await _run_geak_gemm_tuning(
             backend_payload,
             session_dir=session_dir,
+        )
+    if origami_enabled and origami_result is not None:
+        log.info(
+            "ORIGAMI_GEMM_BACKEND backend=%s origami_status=%s candidate=%s "
+            "decision=%s",
+            backend,
+            origami_result.get("status", "unknown"),
+            int(bool(origami_result.get("candidate"))),
+            result.get("decision") or "unknown",
         )
     if origami_enabled and origami_result is not None:
         result.setdefault(
