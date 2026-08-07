@@ -23,7 +23,6 @@ class _StateStub:
     def __init__(self) -> None:
         self.framework_agent_phase_progress: list[dict[str, Any]] = []
         self.framework_agent_batches: list[dict[str, Any]] = []
-        self.framework_agent_critic_decisions: list[dict[str, Any]] = []
         self.research_scout_seen_pr_ids: list[str] = []
         # Workload context read by the ranker prompt.
         self.model = "test-model"
