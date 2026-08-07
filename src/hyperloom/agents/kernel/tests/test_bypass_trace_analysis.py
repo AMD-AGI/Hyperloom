@@ -896,3 +896,47 @@ def test_single_graph_launch_low_busy_not_under_recorded(tmp_path):
     cov = bta._reader.analyze_trace(str(trace), top_k=0)["graph_coverage"]
     assert cov["graph_launch_count"] == 1
     assert cov["graph_under_recorded"] is False
+
+
+def _graph_fully_recorded_idle_events():
+    """Four graph launches that EACH recorded a kernel (coverage 1.0) but spread
+    over a long wall so busy% ~0 / idle% ~100%. This is a genuinely idle graph
+    workload, NOT an under-recorded capture: recorded-launch coverage is full, so
+    the idle gate must still suppress candidates (regression for the P1 review)."""
+    events = []
+    for corr in (5, 6, 7, 8):
+        events.append(
+            {"cat": "cuda_runtime", "name": "hipGraphLaunch", "args": {"correlation": corr, "External id": None}}
+        )
+    for i, corr in enumerate((5, 6, 7, 8)):
+        events.append(
+            {"cat": "kernel", "ph": "X", "name": f"graph_k{i}", "ts": 1000 + i * 3_000_000, "dur": 100, "args": {"correlation": corr}}
+        )
+    return events
+
+
+def test_graph_fully_recorded_low_busy_not_under_recorded(tmp_path):
+    trace = tmp_path / "idle.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _graph_fully_recorded_idle_events()}).encode("utf-8"))
+    cov = bta._reader.analyze_trace(str(trace), top_k=0)["graph_coverage"]
+    assert cov["graph_launch_count"] == 4
+    assert cov["graph_launches_with_kernels"] == 4
+    assert cov["busy_fraction"] < 0.5
+    # Full recorded-launch coverage => NOT under-recorded even though busy is low.
+    assert cov["graph_under_recorded"] is False
+
+
+def test_fully_recorded_idle_graph_still_suppressed_by_idle_gate(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+    monkeypatch.delenv("HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD", raising=False)
+    trace = tmp_path / "idle.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _graph_fully_recorded_idle_events()}).encode("utf-8"))
+    rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert rc == 0
+    assert result["timeline"]["idle_pct"] > 80.0
+    assert result["graph_coverage"]["graph_under_recorded"] is False
+    codes = {w["code"] for w in result["trace_health_warnings"]}
+    # Genuinely idle (fully recorded) graph workload: idle gate MUST still fire.
+    assert "high_gpu_idle_pct" in codes
+    assert "bypass_graph_under_recorded" not in codes
+    assert not result["hot_kernels"]

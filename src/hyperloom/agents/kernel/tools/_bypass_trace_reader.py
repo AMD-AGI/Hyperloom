@@ -62,26 +62,34 @@ def _backfill_shape_signature(meta: dict[str, Any]) -> tuple[tuple[tuple[int, ..
     return (tuple(norm_shapes), norm_dtypes)
 
 
+# A graph trace is judged under-recorded when fewer than this fraction of its
+# graph-launch correlations actually recorded any kernel: activity-buffer
+# overflow drops whole replays, so recorded-launch coverage collapses toward
+# ~1/launch_count, whereas a fully-recorded (merely idle) workload keeps kernels
+# on essentially every launch.
+_GRAPH_RECORDED_LAUNCH_COVERAGE_MAX = 0.5
+
+
 def _graph_under_recorded(
     *,
     graph_mode: bool,
     graph_launch_count: int,
+    graph_launches_with_kernels: int,
     graph_kernels: int,
-    busy_fraction: float,
 ) -> bool:
-    """Return whether a graph-mode trace likely under-recorded replays."""
-    if not graph_mode or graph_launch_count < 2:
+    """Return whether a graph-mode trace likely under-recorded replays.
+
+    Keyed on *recorded-launch coverage* — the share of graph-launch correlations
+    that recorded at least one kernel — NOT on busy%. A low busy fraction alone
+    is ambiguous: a genuinely idle / sparse / host-bound workload whose replays
+    are all fully recorded also looks idle, and must still be gated by the
+    high-idle suppression. Only when the profiler dropped whole replays (coverage
+    far below 1.0) is idle% an unreliable capture artifact.
+    """
+    if not graph_mode or graph_launch_count < 2 or graph_kernels <= 0:
         return False
-    if busy_fraction < 0.5:
-        return True
-    if graph_launch_count >= 4 and graph_kernels > 0 and busy_fraction < 0.9:
-        return True
-    # Few graph-kernel events per launch suggests only ~1 replay was captured.
-    if graph_kernels > 0:
-        events_per_launch = graph_kernels / graph_launch_count
-        if events_per_launch < 2.0 and busy_fraction < 0.9:
-            return True
-    return False
+    coverage = graph_launches_with_kernels / graph_launch_count
+    return coverage < _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX
 
 
 def _file_size(fp: Path) -> int:
@@ -470,6 +478,12 @@ def _finalize(
     graph_corrs = graph_launch_corrs or frozenset()
     graph_kernels = 0
     graph_gpu_us = 0.0
+    # Distinct graph-launch correlations that actually recorded >=1 kernel. Under
+    # activity-buffer overflow the profiler drops whole replays, so most launch
+    # correlations record nothing and this count falls far below
+    # graph_launch_count; a genuinely idle (but fully recorded) graph workload
+    # keeps kernels on every launch, so the two counts stay close.
+    graph_launch_corrs_with_kernels: set[int] = set()
     geom = corr_to_launch_geom or {}
     # Name-keyed shape backfill: accumulate GPU time per (kernel, shape) so the
     # majority capture-time shape wins; multiple distinct shapes mark ambiguous.
@@ -488,6 +502,7 @@ def _finalize(
             op_name = "(graph)"
             graph_kernels += 1
             graph_gpu_us += dur
+            graph_launch_corrs_with_kernels.add(corr)
         else:
             op_name = "(unlinked)"
             unlinked_us += dur
@@ -555,11 +570,12 @@ def _finalize(
     # many launches map to a single recorded replay's worth of kernels.
     graph_mode = graph_launch_count > 0
     busy_fraction = round(busy_ms / total_ms, 4) if total_ms > 0 else 0.0
+    graph_launches_with_kernels = len(graph_launch_corrs_with_kernels)
     graph_under_recorded = _graph_under_recorded(
         graph_mode=graph_mode,
         graph_launch_count=graph_launch_count,
+        graph_launches_with_kernels=graph_launches_with_kernels,
         graph_kernels=graph_kernels,
-        busy_fraction=busy_fraction,
     )
     kern_name_backfill_meta: dict[str, dict[str, Any]] = {}
     kern_name_backfill_ambiguous: set[str] = set()
@@ -662,6 +678,7 @@ def _finalize(
         "graph_coverage": {
             "graph_mode": graph_mode,
             "graph_launch_count": graph_launch_count,
+            "graph_launches_with_kernels": graph_launches_with_kernels,
             "graph_attributed_kernels": graph_kernels,
             "busy_fraction": busy_fraction,
             "graph_under_recorded": graph_under_recorded,

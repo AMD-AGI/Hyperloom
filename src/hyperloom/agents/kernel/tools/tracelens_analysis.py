@@ -770,13 +770,18 @@ def _graph_coverage_from_raw_trace(trace_path: str | Path | None) -> dict[str, A
     inflated idle%) apart from a genuinely idle/launch-bound workload. Best
     effort: any failure returns ``{}`` so the caller falls back to the plain
     idle gate (never worse than today).
+
+    ``graph_coverage`` is derived from the launch/kernel correlation scan and is
+    independent of the returned aggregation lists, so we pass ``emit_launches=
+    False`` and ``top_k=1`` to avoid materializing the per-launch rows and full
+    top-N lists on large ``--skip-split`` raw traces.
     """
     if not trace_path:
         return {}
     try:
         import _bypass_trace_reader as _reader
 
-        analyze = _reader.analyze_trace(str(trace_path), top_k=0, emit_launches=True)
+        analyze = _reader.analyze_trace(str(trace_path), top_k=1, emit_launches=False)
         cov = analyze.get("graph_coverage") if isinstance(analyze, dict) else None
         return cov if isinstance(cov, dict) else {}
     except Exception:  # noqa: BLE001 - guard is advisory; never block on it
@@ -6440,7 +6445,7 @@ def main() -> int:
                         "suppressing hot_kernels[]",
                     )
                 else:
-                    if idle_pct_value is not None:
+                    if idle_pct_value is not None and graph_under_recorded_warning is None:
                         append_log(
                             log_path,
                             f"deterministic: GPU Idle % = "
@@ -6556,7 +6561,7 @@ def main() -> int:
                             "parameter optimization.",
                         )
                     else:
-                        if idle_pct_value is not None:
+                        if idle_pct_value is not None and graph_under_recorded_warning is None:
                             append_log(
                                 log_path,
                                 f"TraceLens Executive Summary: "
