@@ -443,10 +443,19 @@ def test_remote_store_champion_merge_is_monotonic_and_paired(tmp_path: Path) -> 
     mcp = _PageMcp()
     store = _remote_store(mcp, tmp_path / "locks")
     cid = "inference:m:h:f:mt:a:v:p"
+    bundle_a = {
+        "schema_version": 1,
+        "replayable": True,
+        "bundle_sha256": "a",
+        "config": {"argv": ["--champion"], "extra_envs": {}},
+        "source_artifacts": [],
+        "measurement": {"optimized_throughput": 100.0},
+    }
     store.put_recipe(
         canonical_id=cid,
         best_config={"extra_server_args": "--champion"},
         best_throughput=100.0,
+        extras={"replay_bundle": bundle_a},
     )
 
     store.put_recipe(
@@ -462,11 +471,19 @@ def test_remote_store_champion_merge_is_monotonic_and_paired(tmp_path: Path) -> 
         canonical_id=cid,
         best_config={"extra_server_args": "--late-lower"},
         best_throughput=90.0,
+        extras={
+            "replay_bundle": {
+                **bundle_a,
+                "bundle_sha256": "lower",
+                "measurement": {"optimized_throughput": 90.0},
+            }
+        },
     )
     row = store.get_recipe(canonical_id=cid)
     assert row is not None
     assert row["best_config"] == {"extra_server_args": "--champion"}
     assert row["best_throughput"] == 100.0
+    assert row["replay_bundle"]["bundle_sha256"] == "a"
     assert lower["write_safety"]["champion"] == "latest_preserved"
 
     store.put_recipe(canonical_id=cid, best_config={}, best_throughput=200.0)
@@ -479,11 +496,20 @@ def test_remote_store_champion_merge_is_monotonic_and_paired(tmp_path: Path) -> 
         canonical_id=cid,
         best_config={"extra_server_args": "--higher"},
         best_throughput=101.0,
+        extras={
+            "replay_bundle": {
+                **bundle_a,
+                "bundle_sha256": "higher",
+                "config": {"argv": ["--higher"], "extra_envs": {}},
+                "measurement": {"optimized_throughput": 101.0},
+            }
+        },
     )
     row = store.get_recipe(canonical_id=cid)
     assert row is not None
     assert row["best_config"] == {"extra_server_args": "--higher"}
     assert row["best_throughput"] == 101.0
+    assert row["replay_bundle"]["bundle_sha256"] == "higher"
     assert higher["write_safety"]["champion"] == "incoming_higher_throughput"
 
     empty_cid = "inference:m:h:f:mt:a:v:fp16"

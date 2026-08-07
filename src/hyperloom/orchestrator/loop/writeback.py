@@ -23,6 +23,7 @@ from ..state.optimization_journal import (
     summarize_change,
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
+from ..knowledge.recipe_kb.replay_bundle import build_replay_bundle
 from ..state.shared_state import SharedState, resolve_grading_anchor_tput
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
@@ -1497,6 +1498,26 @@ class WritebackCollaborator:
                 ).strip()
                 if stack_args:
                     best_config["extra_server_args"] = stack_args
+        # Bind the champion's throughput to the complete state that produced it.
+        # ``best_config`` remains for legacy readers, while ``replay_bundle`` is
+        # the authoritative replay contract: config argv + every source layer.
+        env_spec = self.build_env_spec()
+        workload_tags = self._coord._collect_workload_tags()
+        optimized_tput = (
+            float(current_best.get("tput", 0.0)) if isinstance(current_best, dict) else 0.0
+        )
+        replay_bundle = build_replay_bundle(
+            env_spec=env_spec,
+            producer_session_id=str(
+                getattr(ss, "recipe_kb_session_id", "") or self.session_dir.name
+            ),
+            baseline_throughput=float(getattr(ss, "baseline_tput", 0.0) or 0.0),
+            optimized_throughput=optimized_tput,
+            workload=workload_tags,
+        )
+        bundle_argv = list((replay_bundle.get("config") or {}).get("argv") or [])
+        if bundle_argv:
+            best_config["argv"] = bundle_argv
         sediment_on = bool(getattr(ss, "recipe_sediment_enabled", True))
         kept_sources, kept_by_gap, reverted_rows = self._collect_attempt_provenance() if sediment_on else ({}, {}, [])
         what_worked: list[dict[str, Any]] = []
@@ -1539,12 +1560,11 @@ class WritebackCollaborator:
         cumulative_total = float(getattr(ss, "cumulative_gain", 0.0) or 0.0)
         validated_stack_len = int(getattr(ss, "cumulative_gain_validated_stack_len", 0) or 0)
         stack_fingerprint = getattr(ss, "stack_fingerprint", "") or ""
-        # Workload-shape tags for shape-filtered warm-start queries (shared via _collect_workload_tags).
-        workload_tags = self._coord._collect_workload_tags()
         # framework_version left unset here (manifest-derived); the T0 backfill writes it.
         return {
             "best_config": best_config,
-            "best_throughput": float(current_best.get("tput", 0.0)) if isinstance(current_best, dict) else 0.0,
+            "best_throughput": optimized_tput,
+            "replay_bundle": replay_bundle,
             "what_worked": what_worked,
             "what_failed": what_failed,
             "kernel_optimizations": kernel_optimizations,
@@ -1675,6 +1695,9 @@ class WritebackCollaborator:
             if has_validated_win and my_tput > live_tput:
                 overrides["best_config"] = attrs["best_config"]
                 overrides["best_throughput"] = my_tput
+                # Champion state is atomic: never advance throughput/config
+                # without the bundle that was actually measured.
+                extras_payload["replay_bundle"] = attrs["replay_bundle"]
             # Merge stack_fingerprint rather than replace (CLOSE only has the sha; T0 stamps version keys).
             merged_fp = dict(existing_row.get("stack_fingerprint") or {})
             for fp_key, fp_val in (attrs.get("stack_fingerprint") or {}).items():

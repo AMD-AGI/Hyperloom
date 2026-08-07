@@ -245,6 +245,27 @@ def test_json_serve_arg_survives_append_merge_as_valid_json(tmp_path):
         json.loads(blob)  # must parse: broken JSON was repaired, not passed through
 
 
+def test_shell_quoted_json_is_normalized_for_magpie_env_expansion(tmp_path):
+    """Quotes in an env value are data, so outer shell quotes must be removed."""
+    src = tmp_path / "cfg.yaml"
+    _write_yaml_with_envs(src, "vllm", {})
+    out = materialize_config_with_envs(
+        src,
+        tmp_path / "out",
+        extra_server_args=(
+            """--compilation-config '{"cudagraph_mode":"FULL"}' """
+            "--max-num-seqs 64"
+        ),
+    )
+    args = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert args == (
+        '--compilation-config {"cudagraph_mode":"FULL"} --max-num-seqs 64'
+    )
+    assert json.loads(args.split("--compilation-config ", 1)[1].split(" ", 1)[0]) == {
+        "cudagraph_mode": "FULL"
+    }
+
+
 def test_json_serve_arg_survives_shape_capture_port_removal(tmp_path):
     """The shape-capture materialization path must remove its inherited port
     without corrupting a sibling JSON-valued server flag."""

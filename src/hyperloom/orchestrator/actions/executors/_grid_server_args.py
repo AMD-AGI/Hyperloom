@@ -41,10 +41,74 @@ def validate_server_args_shell_safe(server_args: str | None) -> str:
         return ""
     if _UNSAFE_SERVER_ARG_CHARS_RE.search(args):
         raise ValueError("extra_server_args contains shell control characters")
+    # Protect balanced JSON blobs before shell tokenization. ``shlex`` correctly
+    # removes their *outer* syntax quotes but would also strip the JSON's inner
+    # double quotes. Placeholders let us obtain the actual argv while restoring
+    # byte-valid JSON afterwards.
+    compact = _reserialize_json_blobs(args)
+    placeholders: dict[str, str] = {}
+    protected: list[str] = []
+    index = 0
+    cursor = 0
+    while cursor < len(compact):
+        if compact[cursor] not in "{[":
+            protected.append(compact[cursor])
+            cursor += 1
+            continue
+        start = cursor
+        depth = 0
+        in_string = False
+        escaped = False
+        while cursor < len(compact):
+            char = compact[cursor]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char in "{[":
+                depth += 1
+            elif char in "}]":
+                depth -= 1
+                if depth == 0:
+                    cursor += 1
+                    break
+            cursor += 1
+        blob = compact[start:cursor]
+        marker = f"__HYPERLOOM_JSON_{index}__"
+        placeholders[marker] = blob
+        protected.append(marker)
+        index += 1
+    protected_args = "".join(protected)
     try:
-        tokens = shlex.split(args)
+        tokens = shlex.split(protected_args)
     except ValueError as exc:
         raise ValueError(f"extra_server_args is not shell-tokenizable: {exc}") from exc
+    tokens = [
+        next(
+            (
+                token.replace(marker, blob)
+                for marker, blob in placeholders.items()
+                if marker in token
+            ),
+            token,
+        )
+        for token in tokens
+    ]
+    # Magpie expands ``$EXTRA_*_ARGS`` unquoted. Quotes embedded in the env
+    # value are therefore literal bytes, not shell syntax; returning the
+    # original string would pass outer quotes around JSON to vLLM. Parse once
+    # here and persist the actual argv tokens. A token containing whitespace
+    # cannot survive Magpie's current env transport and must fail closed rather
+    # than silently becoming several arguments.
+    if any(any(ch.isspace() for ch in token) for token in tokens):
+        raise ValueError(
+            "extra_server_args contains a whitespace-bearing value unsupported by Magpie env expansion"
+        )
     expect_value = False
     for token in tokens:
         if token.startswith("-"):
@@ -54,7 +118,7 @@ def validate_server_args_shell_safe(server_args: str | None) -> str:
             expect_value = False
             continue
         raise ValueError("extra_server_args must be argv-like flags, not bare positional arguments")
-    return args
+    return " ".join(tokens)
 
 
 def server_args_env_name(framework: str | None) -> str:

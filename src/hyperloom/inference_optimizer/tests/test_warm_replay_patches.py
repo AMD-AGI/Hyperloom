@@ -156,6 +156,22 @@ def test_build_warm_start_context_includes_patches():
         "canonical_id": "inference:test:mi300x:sglang:llama:llamaforcausallm:0.5.11:fp8",
         "best_config": {"extra_server_args": "--disable-radix-cache"},
         "best_throughput": 5000.0,
+        "replay_bundle": {
+            "schema_version": 1,
+            "replayable": True,
+            "bundle_sha256": "bundle",
+            "producer_session_id": "prior",
+            "config": {
+                "argv": ["--disable-radix-cache"],
+                "extra_envs": {},
+            },
+            "source_artifacts": [],
+            "measurement": {
+                "baseline_throughput": 4000.0,
+                "optimized_throughput": 5000.0,
+                "gain_pct": 25.0,
+            },
+        },
         "prs_tested": [
             {
                 "outcome": "KEEP",

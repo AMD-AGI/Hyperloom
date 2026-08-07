@@ -12,6 +12,11 @@ from . import machine_state as _phase_state
 from ..state.optimization_journal import (
     JournalEntry,
 )
+from ..knowledge.recipe_kb.replay_bundle import (
+    REPLAY_BUNDLE_KEY,
+    argv_to_env_string,
+    replay_patches,
+)
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import Task
 from ..loop.coordinator import (
@@ -268,6 +273,7 @@ class PreludePhase(PhaseHandler):
         wsc = getattr(state, "warm_start_context", None) or {}
         replay = wsc.get("recommended_replay") if isinstance(wsc, dict) else {}
         replay = replay if isinstance(replay, dict) else {}
+        bundle: dict[str, Any] = {}
         rep_args = str(replay.get("extra_server_args") or "").strip()
         rep_envs = replay.get("extra_envs") if isinstance(replay.get("extra_envs"), dict) else {}
         if rep_args or rep_envs:
@@ -279,17 +285,32 @@ class PreludePhase(PhaseHandler):
             config_tier = str(replay.get("config_tier") or "self")
             donor_expected_gain = float(replay.get("expected_gain_pct") or 0.0)
         else:
-            best_config = recipe_attrs.get("best_config") or {}
-            if not isinstance(best_config, dict):
-                best_config = {}
-            bc_args = str(best_config.get("extra_server_args") or "").strip()
-            bc_envs = best_config.get("extra_envs") or {}
-            if not isinstance(bc_envs, dict):
-                bc_envs = {}
+            raw_bundle = recipe_attrs.get(REPLAY_BUNDLE_KEY)
+            bundle = raw_bundle if isinstance(raw_bundle, dict) else {}
+            bundle_config = (
+                bundle.get("config") if isinstance(bundle.get("config"), dict) else {}
+            )
+            if bundle.get("replayable"):
+                try:
+                    bc_args = argv_to_env_string(bundle_config.get("argv") or [])
+                except ValueError:
+                    bc_args = ""
+                bc_envs = bundle_config.get("extra_envs") or {}
+                if not isinstance(bc_envs, dict):
+                    bc_envs = {}
+            else:
+                # Old recipes do not atomically bind config, source layers and
+                # throughput. They remain useful as history, but are not run.
+                bc_args, bc_envs = "", {}
             replay_conf = float(conf or 0.0)
             config_source = str(recipe.get("canonical_id") or "")
             config_tier = "self"
-            donor_expected_gain = 0.0
+            measurement = (
+                bundle.get("measurement")
+                if isinstance(bundle.get("measurement"), dict)
+                else {}
+            )
+            donor_expected_gain = float(measurement.get("gain_pct") or 0.0)
         donor_metadata = {
             field: replay.get(field)
             for field in (
@@ -317,6 +338,8 @@ class PreludePhase(PhaseHandler):
             return None
         # Extract code patches from warm_start_context (populated by T0).
         wsc_patches = (wsc.get("recommended_replay") or {}).get("patches") or [] if isinstance(wsc, dict) else []
+        if not wsc_patches and bundle:
+            wsc_patches = replay_patches(bundle)
         wsc_blocked = wsc.get("blocked_patches") or [] if isinstance(wsc, dict) else []
         wsc_advisory = wsc.get("advisory_blocked_patches") or [] if isinstance(wsc, dict) else []
         # KG-driven filtering (best-effort; unfiltered on any KG failure).

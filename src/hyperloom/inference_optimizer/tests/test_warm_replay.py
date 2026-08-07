@@ -135,6 +135,22 @@ def _warm_recipe_t1(
             "extra_envs": dict(extra_envs or {}),
         },
         "sessions": recipe_sessions,
+        "replay_bundle": {
+            "schema_version": 1,
+            "replayable": True,
+            "bundle_sha256": "test-bundle",
+            "producer_session_id": "prior-session-A",
+            "config": {
+                "argv": extra_server_args.split(),
+                "extra_envs": dict(extra_envs or {}),
+            },
+            "source_artifacts": [],
+            "measurement": {
+                "baseline_throughput": 100.0,
+                "optimized_throughput": 125.0,
+                "gain_pct": expected_gain_pct,
+            },
+        },
     }
     if what_failed is not None:
         attrs["what_failed"] = what_failed
@@ -174,6 +190,22 @@ def _warm_recipe_v2_arbor(
             "sessions": [
                 {"session_id": "prior-A", "gain_pct": expected_gain_pct, "stack_len": 1},
             ],
+            "replay_bundle": {
+                "schema_version": 1,
+                "replayable": True,
+                "bundle_sha256": "test-bundle-v2",
+                "producer_session_id": "prior-A",
+                "config": {
+                    "argv": extra_server_args.split(),
+                    "extra_envs": dict(extra_envs or {}),
+                },
+                "source_artifacts": [],
+                "measurement": {
+                    "baseline_throughput": 100.0,
+                    "optimized_throughput": 125.0,
+                    "gain_pct": expected_gain_pct,
+                },
+            },
         },
     }
 
@@ -902,8 +934,8 @@ def test_inject_warm_recipe_history_skips_empty_rows(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_warm_replay_pulls_expected_gain_from_sessions_max(tmp_path):
-    """The historical gain anchor is the MAX of ``attrs.sessions[].gain_pct``."""
+async def test_warm_replay_uses_bundle_gain_not_unbound_session_max(tmp_path):
+    """The gain anchor is atomically bound to the replay bundle."""
     recipe = _warm_recipe_t1(
         sessions=[
             {"session_id": "older", "gain_pct": 12.0, "stack_len": 1},
@@ -913,21 +945,19 @@ async def test_warm_replay_pulls_expected_gain_from_sessions_max(tmp_path):
     )
     coord = _make_coord(tmp_path, warm_start_recipe=recipe)
     await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
-    assert coord.tasks.calls[0]["params"]["warm_expected_gain_pct"] == 28.0
+    assert coord.tasks.calls[0]["params"]["warm_expected_gain_pct"] == 25.0
 
 
 @pytest.mark.asyncio
-async def test_warm_replay_zero_expected_when_no_sessions(tmp_path):
-    """Recipes without sessions[] → expected_gain falls to 0 (``_promote`` accepts any positive measurement)."""
+async def test_warm_replay_bundle_gain_does_not_require_sessions(tmp_path):
     recipe = _warm_recipe_t1(sessions=[])
     coord = _make_coord(tmp_path, warm_start_recipe=recipe)
     await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
-    assert coord.tasks.calls[0]["params"]["warm_expected_gain_pct"] == 0.0
+    assert coord.tasks.calls[0]["params"]["warm_expected_gain_pct"] == 25.0
 
 
 @pytest.mark.asyncio
-async def test_warm_replay_falls_back_to_flat_gain_pct_for_arbor_seed(tmp_path):
-    """Arbor seeds with a flat ``gain_pct`` attr (no sessions[]) are still read as the expected anchor."""
+async def test_legacy_recipe_without_bundle_is_reference_only(tmp_path):
     coord = _make_coord(tmp_path)
     coord.shared_state.warm_start_recipe = {
         "tier": "relative",
@@ -940,7 +970,8 @@ async def test_warm_replay_falls_back_to_flat_gain_pct_for_arbor_seed(tmp_path):
         },
     }
     await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
-    assert coord.tasks.calls[0]["params"]["warm_expected_gain_pct"] == 18.0
+    assert coord.tasks.calls == []
+    assert coord.shared_state.warm_replay_outcome["reason"] == "best_config_empty"
 
 
 def test_promote_warm_replay_cumulative_gain_uses_tput_ratio(tmp_path):

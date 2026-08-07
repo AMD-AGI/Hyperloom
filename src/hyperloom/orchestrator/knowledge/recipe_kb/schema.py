@@ -316,7 +316,10 @@ class Recipe:
     precision: str = ""
 
     # ----- arbor payload (verbatim shape) -----
-    best_config: dict[str, str] = field(default_factory=dict)
+    # ``argv`` is intentionally a list: shell quoting is not a durable argv
+    # transport. Legacy ``extra_server_args`` remains alongside it for readers
+    # predating replay bundles.
+    best_config: dict[str, Any] = field(default_factory=dict)
     best_throughput: float = 0.0
     what_worked: list[Finding] = field(default_factory=list)
     what_failed: list[Failure] = field(default_factory=list)

@@ -39,6 +39,12 @@ from hyperloom.common.jsonio import iter_sse_objects
 from hyperloom.inference_optimizer import recipe_snapshot_constants as C
 from . import RemoteRecipeClientError
 from .canonical_id import recipe_canonical_id
+from .replay_bundle import (
+    REPLAY_BUNDLE_KEY,
+    argv_to_env_string,
+    canonical_server_argv,
+    hydrate_replay_bundle,
+)
 
 log = logging.getLogger(__name__)
 
@@ -351,7 +357,15 @@ def _best_config_from_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
         canonical key and the env map nested under ``extra_envs``.
     """
     out: dict[str, Any] = {}
-    args = str(attrs.get("best_config_args") or "").strip()
+    argv = canonical_server_argv(
+        attrs.get("best_config_argv")
+        if attrs.get("best_config_argv") is not None
+        else attrs.get("best_config_args")
+    )
+    try:
+        args = argv_to_env_string(argv) if argv else ""
+    except ValueError:
+        args = str(attrs.get("best_config_args") or "").strip()
     if args:
         out[_EXTRA_SERVER_ARGS_KEY] = args
     envs = attrs.get("best_config_envs")
@@ -718,7 +732,13 @@ class GbrainRemoteRecipeClient:
         fm = page.get("frontmatter") if isinstance(page, dict) else None
         if not isinstance(fm, Mapping):
             return None
-        return _page_to_recipe(fm)
+        row = _page_to_recipe(fm)
+        if isinstance(row, dict) and isinstance(row.get(REPLAY_BUNDLE_KEY), Mapping):
+            row[REPLAY_BUNDLE_KEY] = hydrate_replay_bundle(
+                self._mcp,
+                row[REPLAY_BUNDLE_KEY],
+            )
+        return row
 
     def _search_recipe_candidates(self, label_match: Mapping[str, Any], *, limit: int) -> list[dict[str, Any]]:
         """Use gbrain page search to preselect recipe candidates by labels.

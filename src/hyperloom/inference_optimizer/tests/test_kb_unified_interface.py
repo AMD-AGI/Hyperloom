@@ -231,6 +231,22 @@ def test_build_warm_start_context_hit() -> None:
         },
         "best_throughput": 5430.9,
         "validated_gain_pct": 7.8,
+        "replay_bundle": {
+            "schema_version": 1,
+            "replayable": True,
+            "bundle_sha256": "bundle",
+            "producer_session_id": "donor-session",
+            "config": {
+                "argv": ["--cuda-graph-max-bs", "256"],
+                "extra_envs": {"FOO": "1"},
+            },
+            "source_artifacts": [],
+            "measurement": {
+                "baseline_throughput": 5038.0,
+                "optimized_throughput": 5430.9,
+                "gain_pct": 7.8,
+            },
+        },
         "sessions": [
             {
                 "session_id": "donor-session",
@@ -351,6 +367,21 @@ def test_t0_status_hit_when_actionable_row_present(tmp_path: Path) -> None:
         precision="fp8",
         best_config={"extra_server_args": "--x 1", "extra_envs": {"A": "1"}},
         best_throughput=2000.0,
+        extras={
+            "replay_bundle": {
+                "schema_version": 1,
+                "replayable": True,
+                "bundle_sha256": "bundle",
+                "producer_session_id": "prior",
+                "config": {"argv": ["--x", "1"], "extra_envs": {"A": "1"}},
+                "source_artifacts": [],
+                "measurement": {
+                    "baseline_throughput": 1800.0,
+                    "optimized_throughput": 2000.0,
+                    "gain_pct": 11.111,
+                },
+            }
+        },
     )
     run_t0_anchor(
         kb,

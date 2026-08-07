@@ -25,6 +25,8 @@ import re
 import shlex
 from typing import Any, Mapping
 
+from .replay_bundle import argv_to_env_string, canonical_server_argv
+
 # A scalar safe to emit bare (unquoted) in YAML: letter-leading, otherwise
 # alnum/._- only. Anything reinterpretable (digit-leading versions, tokens with
 # ``:`` / spaces / YAML keywords) is JSON-quoted instead.
@@ -69,6 +71,7 @@ _CORE_RECIPE_KEYS = frozenset(
         "architectures",
         "best_config",
         "best_throughput",
+        "replay_bundle",
         "validated_gain_pct",
         "what_worked",
         "what_failed",
@@ -161,7 +164,13 @@ def _sanitize_server_args(value: str, *, drop_paths: bool) -> str:
         if drop_paths and separator and _is_absolute_path_text(operand):
             continue
         safe.append(token)
-    return shlex.join(safe)
+    try:
+        return argv_to_env_string(safe)
+    except ValueError:
+        # Magpie cannot represent whitespace-bearing argv tokens through its
+        # unquoted EXTRA_*_ARGS environment expansion. Do not publish a string
+        # that will be interpreted differently when replayed.
+        return ""
 
 
 def _sanitize_gbrain_value(
@@ -329,6 +338,7 @@ _NON_ENV_BEST_CONFIG_KEYS = frozenset(
         "name",
         "tput",
         "accuracy",
+        "argv",
     }
 )
 
@@ -369,7 +379,17 @@ def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, s
     Returns:
         A tuple of the launch-args string and the env-var dict.
     """
-    args = _coerce_server_args(best_config.get(_EXTRA_SERVER_ARGS_KEY)).strip()
+    argv = canonical_server_argv(
+        best_config.get("argv")
+        if best_config.get("argv") is not None
+        else best_config.get(_EXTRA_SERVER_ARGS_KEY)
+    )
+    try:
+        args = argv_to_env_string(argv)
+    except ValueError:
+        # Keep the legacy string for reference-only rows. Replay-bundle
+        # eligibility will fail closed when the argv transport is unsafe.
+        args = _coerce_server_args(best_config.get(_EXTRA_SERVER_ARGS_KEY)).strip()
     nested = best_config.get("extra_envs")
     if isinstance(nested, Mapping):
         envs = {str(k): str(v) for k, v in nested.items()}
@@ -402,6 +422,11 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     if not canonical:
         return None
     args, envs = _best_config_split(best_config)
+    argv = canonical_server_argv(
+        best_config.get("argv")
+        if best_config.get("argv") is not None
+        else args
+    )
     model = str(recipe.get("model") or "")
     hardware = str(recipe.get("hardware") or "")
     # Back-compat: rows predating the framework_name rename use ``framework``.
@@ -415,6 +440,7 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
         "model_type": str(recipe.get("model_type") or ""),
         "architectures": list(recipe.get("architectures") or []),
         "best_config_args": args,
+        "best_config_argv": argv,
         "best_config_envs": envs,
         "best_throughput": float(recipe.get("best_throughput") or 0.0),
         "validated_gain_pct": float(recipe.get("validated_gain_pct") or 0.0),

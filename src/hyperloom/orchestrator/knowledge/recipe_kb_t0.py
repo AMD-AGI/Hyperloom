@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB, recipe_canonical_id
+from hyperloom.orchestrator.knowledge.recipe_kb.replay_bundle import (
+    REPLAY_BUNDLE_KEY,
+    argv_to_env_string,
+    replay_patches,
+)
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version, kb_hardware_slug
 from hyperloom.inference_optimizer.session.session_paths import (
     recipe_kb_lessons_json,
@@ -152,9 +157,17 @@ def _config_replay_args_envs(row: Mapping[str, Any]) -> tuple[str, dict[str, str
     under ``extra_envs`` / ``envs``. Returns empty values when nothing
     replayable is present.
     """
-    best_config = row.get("best_config") if isinstance(row.get("best_config"), Mapping) else {}
-    args = str(best_config.get("extra_server_args") or "").strip()
-    envs = best_config.get("extra_envs") or {}
+    bundle = row.get(REPLAY_BUNDLE_KEY)
+    if not isinstance(bundle, Mapping) or not bundle.get("replayable"):
+        # Legacy config+throughput pairs are not known to describe the same
+        # state. Keep them as priors, never as executable warm replay.
+        return "", {}
+    config = bundle.get("config") if isinstance(bundle.get("config"), Mapping) else {}
+    try:
+        args = argv_to_env_string(config.get("argv") or [])
+    except ValueError:
+        return "", {}
+    envs = config.get("extra_envs") or {}
     if not isinstance(envs, Mapping):
         envs = {}
     return args, {str(k): str(v) for k, v in envs.items()}
@@ -165,11 +178,23 @@ def _has_replayable_config(row: Mapping[str, Any]) -> bool:
     if not isinstance(row, Mapping):
         return False
     args, envs = _config_replay_args_envs(row)
-    return bool(args or envs)
+    bundle = row.get(REPLAY_BUNDLE_KEY)
+    patches = replay_patches(bundle) if isinstance(bundle, Mapping) else []
+    return bool(args or envs or patches)
 
 
 def _max_session_gain(row: Mapping[str, Any]) -> float:
     """Return the MAX ``gain_pct`` across a row's sessions (fallback flat gain_pct)."""
+    bundle = row.get(REPLAY_BUNDLE_KEY)
+    if isinstance(bundle, Mapping):
+        measurement = bundle.get("measurement")
+        if isinstance(measurement, Mapping):
+            try:
+                bundle_gain = float(measurement.get("gain_pct") or 0.0)
+            except (TypeError, ValueError):
+                bundle_gain = 0.0
+            if bundle_gain > 0.0:
+                return bundle_gain
     best = 0.0
     sessions = row.get("sessions")
     if isinstance(sessions, list):
@@ -227,6 +252,11 @@ def _donor_is_trustworthy(
     if not isinstance(donor, Mapping):
         return False
     if not _has_replayable_config(donor):
+        return False
+    bundle = donor.get(REPLAY_BUNDLE_KEY)
+    if isinstance(bundle, Mapping) and bundle.get("source_artifacts"):
+        # Source layers are model/repository specific. They may only be replayed
+        # by the exact identity row, never by a cross-model config donor.
         return False
     # Require evidence of a real positive gain.
     if _max_session_gain(donor) <= 0:
@@ -454,13 +484,29 @@ def _build_warm_start_context(
         config_donor_confidence = config_donor_confidence or confidence
     if donor is not None:
         args, envs = _config_replay_args_envs(donor)
-        if args or envs:
+        bundle = donor.get(REPLAY_BUNDLE_KEY)
+        bundle = bundle if isinstance(bundle, Mapping) else {}
+        patches = replay_patches(bundle)
+        if args or envs or patches:
+            measurement = (
+                bundle.get("measurement")
+                if isinstance(bundle.get("measurement"), Mapping)
+                else {}
+            )
             try:
-                best_tput = float(donor.get("best_throughput") or 0.0)
+                best_tput = float(
+                    measurement.get("optimized_throughput")
+                    or donor.get("best_throughput")
+                    or 0.0
+                )
             except (TypeError, ValueError):
                 best_tput = 0.0
             try:
-                expected_gain = float(donor.get("validated_gain_pct") or 0.0)
+                expected_gain = float(
+                    measurement.get("gain_pct")
+                    or donor.get("validated_gain_pct")
+                    or 0.0
+                )
             except (TypeError, ValueError):
                 expected_gain = 0.0
             if expected_gain <= 0:
@@ -485,6 +531,8 @@ def _build_warm_start_context(
                 "config_source": str(donor.get("canonical_id") or ""),
                 "config_tier": config_donor_tier or "self",
                 "config_confidence": float(config_donor_confidence or confidence),
+                "patches": patches,
+                "bundle_sha256": str(bundle.get("bundle_sha256") or ""),
             }
             donor_canonical_id = str(donor.get("canonical_id") or "")
             donor_model = str(donor.get("model") or "")
@@ -500,7 +548,8 @@ def _build_warm_start_context(
                 {
                     "donor_canonical_id": donor_canonical_id,
                     "donor_model": donor_model,
-                    "donor_session_id": (
+                    "donor_session_id": str(bundle.get("producer_session_id") or "")
+                    or (
                         str(donor_session.get("session_id") or "")
                         if donor_session is not None
                         else ""
@@ -821,7 +870,10 @@ def _extract_patches_from_prs_tested(
         replay = ctx.setdefault("recommended_replay", {})
         replay.setdefault("extra_server_args", "")
         replay.setdefault("extra_envs", {})
-        replay["patches"] = patches
+        existing = [
+            item for item in (replay.get("patches") or []) if isinstance(item, dict)
+        ]
+        replay["patches"] = existing + patches
     if blocked:
         ctx["blocked_patches"] = blocked
 

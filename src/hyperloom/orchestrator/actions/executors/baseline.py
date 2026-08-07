@@ -738,17 +738,19 @@ def _apply_warm_patches(
     target_repo: str,
     output_dir: Path,
 ) -> list[dict[str, str]]:
-    """Apply warm-replay code patches to the InferenceX checkout.
+    """Apply warm-replay code patches to their recorded source checkouts.
 
     Reads ``params["patches"]`` (list of dicts with patch_file/patch_content/
     patch_ref) and ``params["blocked_patches"]`` (blocklist). Applies each patch
-    via ``git apply`` in the target repo. Skips patches that appear in the
-    blocklist. Returns list of successfully applied patch metadata dicts.
+    via ``git apply``. Legacy patches use ``target_repo`` (InferenceX); replay
+    bundle patches resolve their ``target_repo`` name against installed
+    framework roots and require an exact base SHA. Skips patches that appear in
+    the blocklist. Returns list of successfully applied patch metadata dicts.
 
     If target_repo is empty or no patches are present, returns [].
     """
     patches = params.get("patches") or []
-    if not patches or not target_repo:
+    if not patches:
         return []
 
     blocked = {p.get("patch_file", "") for p in (params.get("blocked_patches") or [])}
@@ -757,15 +759,52 @@ def _apply_warm_patches(
     patch_log_dir = output_dir / "warm_patches"
     patch_log_dir.mkdir(parents=True, exist_ok=True)
 
+    def resolve_target(patch: dict[str, Any]) -> str:
+        requested = str(patch.get("target_repo") or "").strip().lower()
+        if not requested or requested in {"inferencex", "default"}:
+            return target_repo
+        from ...framework.paths import resolve_patch_target_roots
+
+        candidates = [Path(root.rstrip("/")) for root in resolve_patch_target_roots()]
+        matches: list[Path] = []
+        for candidate in candidates:
+            name = candidate.name.lower().replace("_meta", "")
+            if candidate.is_dir() and name == requested:
+                matches.append(candidate)
+        expected_base = str(patch.get("base_sha") or "")
+        if expected_base:
+            for candidate in matches:
+                if _git_head_sha(str(candidate)) == expected_base:
+                    return str(candidate)
+        return str(matches[0]) if matches else ""
+
     for idx, patch in enumerate(patches):
         patch_file = patch.get("patch_file") or ""
         patch_content = patch.get("patch_content") or ""
         patch_ref = patch.get("patch_ref") or ""
+        patch_target = resolve_target(patch)
 
         if patch_file in blocked:
             log.info(
                 "baseline_executor: skipping blocked patch %s",
                 patch_file,
+            )
+            continue
+        if not patch_target:
+            log.warning(
+                "baseline_executor: no installed source root for warm patch %s target_repo=%s",
+                patch_file,
+                patch.get("target_repo"),
+            )
+            continue
+        pre_sha = _git_head_sha(patch_target)
+        expected_base = str(patch.get("base_sha") or "")
+        if expected_base and pre_sha != expected_base:
+            log.warning(
+                "baseline_executor: warm patch %s base mismatch (need %s, have %s)",
+                patch_file,
+                expected_base[:12],
+                pre_sha[:12] if pre_sha else "<non-git>",
             )
             continue
 
@@ -825,14 +864,14 @@ def _apply_warm_patches(
         try:
             subprocess.run(
                 ["git", "apply", "--stat", "--check", str(patch_path)],
-                cwd=target_repo,
+                cwd=patch_target,
                 capture_output=True,
                 timeout=30,
                 check=True,
             )
             subprocess.run(
                 ["git", "apply", str(patch_path)],
-                cwd=target_repo,
+                cwd=patch_target,
                 capture_output=True,
                 timeout=30,
                 check=True,
@@ -852,7 +891,14 @@ def _apply_warm_patches(
             )
             continue
 
-        applied.append({"patch_file": patch_file, "idx": str(idx)})
+        applied.append(
+            {
+                "patch_file": patch_file,
+                "idx": str(idx),
+                "target_repo": patch_target,
+                "pre_sha": pre_sha,
+            }
+        )
 
     return applied
 
@@ -1930,13 +1976,11 @@ class BaselineExecutor:
         # Record pre-apply HEAD so patches are reverted after the benchmark
         # completes (or fails), preventing residue in the shared checkout.
         patch_target = effective_inferencex_path or ix_env
-        _pre_patch_sha = _git_head_sha(patch_target)
         applied_patches = _apply_warm_patches(params, patch_target, output_dir)
         if applied_patches:
             log.info(
-                "baseline_executor: applied %d warm-replay code patches (pre_sha=%s): %s",
+                "baseline_executor: applied %d warm-replay code patches: %s",
                 len(applied_patches),
-                _pre_patch_sha[:8],
                 [p["patch_file"] for p in applied_patches],
             )
 
@@ -2307,8 +2351,14 @@ class BaselineExecutor:
             )
             # Revert warm-replay patches to prevent state leakage into
             # subsequent tasks that reuse the same InferenceX checkout.
-            if applied_patches and _pre_patch_sha:
-                _revert_patches(patch_target, _pre_patch_sha)
+            reverted: set[tuple[str, str]] = set()
+            for patch in applied_patches:
+                target = str(patch.get("target_repo") or "")
+                pre_sha = str(patch.get("pre_sha") or "")
+                key = (target, pre_sha)
+                if target and pre_sha and key not in reverted:
+                    _revert_patches(target, pre_sha)
+                    reverted.add(key)
             if bench_lease is not None:
                 bench_lease.close()
 

@@ -41,6 +41,19 @@ def _donor(
     }
     if with_config:
         row["best_config"] = {"extra_server_args": "--enable-foo", "extra_envs": {"X": "1"}}
+        row["replay_bundle"] = {
+            "schema_version": 1,
+            "replayable": True,
+            "bundle_sha256": "donor-bundle",
+            "producer_session_id": "donor-session",
+            "config": {"argv": ["--enable-foo"], "extra_envs": {"X": "1"}},
+            "source_artifacts": [],
+            "measurement": {
+                "baseline_throughput": 100.0,
+                "optimized_throughput": 100.0 + gain,
+                "gain_pct": gain,
+            },
+        }
     return row
 
 

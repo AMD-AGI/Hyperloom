@@ -467,6 +467,15 @@ def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert row["best_throughput"] == 2200.0
     assert "--page-size 32" in row["best_config"].get("extra_server_args", "")
+    bundle = row["replay_bundle"]
+    assert bundle["replayable"] is True
+    assert bundle["config"]["argv"] == [
+        "--page-size",
+        "32",
+        "--schedule-policy",
+        "lpm",
+    ]
+    assert bundle["measurement"]["optimized_throughput"] == 2200.0
 
 
 # kernel_optimizations[].e2e_decision must carry the integrate verdict, not

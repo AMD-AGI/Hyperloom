@@ -31,6 +31,7 @@ from .local_store import (
     _normalise_sessions,
     _normalise_str_dicts,
 )
+from .replay_bundle import REPLAY_BUNDLE_KEY, externalize_large_artifacts
 from .schema import Recipe
 
 try:
@@ -332,7 +333,27 @@ class GbrainRecipeStore:
                 ),
                 "provenance": dict(provenance or {}),
             }
-            merged_extras = _merge_nonempty_mapping(latest_extras, dict(extras or {}))
+            incoming_extras = dict(extras or {})
+            latest_bundle = latest_extras.get(REPLAY_BUNDLE_KEY)
+            incoming_bundle = incoming_extras.pop(REPLAY_BUNDLE_KEY, None)
+            # The champion's config, throughput and replay bundle are one value.
+            # Metadata-only writes must never replace just the bundle, and a
+            # losing candidate must not displace the live champion's artifacts.
+            incoming_won = champion in {
+                "incoming_new",
+                "incoming_filled_empty",
+                "incoming_higher_throughput",
+            }
+            selected_bundle = incoming_bundle if incoming_won else latest_bundle
+            if isinstance(selected_bundle, dict):
+                selected_bundle = externalize_large_artifacts(
+                    self.mcp,
+                    canonical_id=canonical_id,
+                    bundle=selected_bundle,
+                )
+            merged_extras = _merge_nonempty_mapping(latest_extras, incoming_extras)
+            if isinstance(selected_bundle, dict):
+                merged_extras[REPLAY_BUNDLE_KEY] = selected_bundle
             for key, value in merged_extras.items():
                 payload.setdefault(key, value)
             written = Recipe.from_dict(payload).to_dict()
