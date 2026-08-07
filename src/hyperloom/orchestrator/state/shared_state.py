@@ -612,8 +612,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # (empty_discovery). Drives the Step-1 advisory ("framework phase ineffective");
     # reset whenever a phase completes having tested >=1 candidate.
     framework_consecutive_empty_discoveries: int = 0
-    # Per-repo candidate cap for ``fa phase-discover``; 0 => DEFAULT_FRAMEWORK_MAX_CANDIDATES.
-    framework_max_candidates: int = 0
     # Default True: FRAMEWORK pump dispatches a write-capable serving_specialist per candidate alongside diff-only track. False restores diff-only.
     framework_agent_authoring_enabled: bool = True
     # Default True: when PR discovery is empty/exhausted (or the ranker prefers

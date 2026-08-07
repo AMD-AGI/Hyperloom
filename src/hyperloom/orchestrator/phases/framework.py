@@ -3198,7 +3198,7 @@ class FrameworkPhase(PhaseHandler):
         timeout_sec = float(
             getattr(self, "framework_agent_discover_timeout_sec", 0.0) or _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC
         )
-        max_candidates = int(getattr(state, "framework_max_candidates", 0) or 0) or DEFAULT_FRAMEWORK_MAX_CANDIDATES
+        max_candidates = DEFAULT_FRAMEWORK_MAX_CANDIDATES
         # Cross-repo: query every pr_intel_specialist repo so discovery isn't confined to one framework repo.
         repo_urls = self._framework_agent_discover_repo_urls(framework)
         # Step A/B — feed the session working memory into discovery so fa
