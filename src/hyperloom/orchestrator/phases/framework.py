@@ -3448,34 +3448,33 @@ class FrameworkPhase(PhaseHandler):
             )
 
     def _collect_framework_agent_candidate_priors(self) -> dict[str, Any]:
-        """Return compact session-local priors for the Critic gate; best-effort.
+        """Return compact session-local priors for the Critic gate.
 
         Everything the Critic needs about earlier candidates lives in the
         progress ledger, denials included, so the outcomes carry the rationale
-        rather than being paired with a separate decision list.
+        rather than being paired with a separate decision list. Only the rows
+        that were stamped with a reason have one — bench results record their
+        numbers instead — so the key is omitted rather than sent empty.
 
         Returns:
             A dict with ``recent_outcomes`` (recent terminal apply/bench
-            results, each with the reason recorded for it), bounded to a short
-            tail.
+            results, each with the reason recorded for it, where there is one),
+            bounded to a short tail.
         """
-        state = self.shared_state
+        raw_progress = getattr(self.shared_state, "framework_agent_phase_progress", None) or []
+        terminal = {"kept", "reverted", "no_patch", "enqueue_failed", FRAMEWORK_CRITIC_DENIED_STATUS}
+        tail = [r for r in raw_progress if isinstance(r, dict) and str(r.get("status") or "") in terminal]
         outcomes: list[dict[str, Any]] = []
-        try:
-            raw_progress = getattr(state, "framework_agent_phase_progress", None) or []
-            terminal = {"kept", "reverted", "no_patch", "enqueue_failed", FRAMEWORK_CRITIC_DENIED_STATUS}
-            tail = [r for r in raw_progress if isinstance(r, dict) and str(r.get("status") or "") in terminal]
-            for row in tail[-self._CRITIC_PRIORS_OUTCOME_TAIL :]:
-                outcomes.append(
-                    {
-                        "candidate_id": str(row.get("candidate_id") or ""),
-                        "status": str(row.get("status") or ""),
-                        "gain_pct": row.get("gain_pct"),
-                        "rationale": str(row.get("rationale") or "")[:200],
-                    }
-                )
-        except Exception:  # noqa: BLE001
-            outcomes = []
+        for row in tail[-self._CRITIC_PRIORS_OUTCOME_TAIL :]:
+            entry: dict[str, Any] = {
+                "candidate_id": str(row.get("candidate_id") or ""),
+                "status": str(row.get("status") or ""),
+                "gain_pct": row.get("gain_pct"),
+            }
+            rationale = str(row.get("rationale") or "")[:200]
+            if rationale:
+                entry["rationale"] = rationale
+            outcomes.append(entry)
         return {
             "recent_outcomes": outcomes,
         }

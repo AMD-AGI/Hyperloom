@@ -213,11 +213,10 @@ def _section_phase_semantics(
     lines.extend(
         [
             "",
-            "roofline, profile, replay_warm_recipe, conc_sweep and",
-            "framework_agent are never",
-            "in the sets above: the Coordinator auto-manages them and PolicyGate",
-            "denies any attempt to propose them. Denial of any action lands in",
-            "your inbox as a `policy_denied` event.",
+            "roofline, profile, replay_warm_recipe, conc_sweep and framework_agent",
+            "are never in the sets above: the Coordinator auto-manages them and",
+            "PolicyGate denies any attempt to propose them. Denial of any action",
+            "lands in your inbox as a `policy_denied` event.",
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
             "are: `baseline_tput > 0` exits PRELUDE; IR-6 force-exit, the per-",
