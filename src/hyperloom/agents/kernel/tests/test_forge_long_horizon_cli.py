@@ -2479,7 +2479,11 @@ def _publish_applyback_in(workspace: str, base_commit: str, **outer_overrides) -
         json.dumps(
             {
                 "schema_version": 2,
+                "artifact_kind": "framework_applyback",
                 "validation_scope": "reference",
+                "logical_op_name": "vllm::fused_gemm",
+                "operator_slug": "vllm_fused_gemm",
+                "source_entry": "matmul",
                 "reference_correctness_passed": True,
                 "reference_snr_db": 51.0,
                 "integration_validation_required": True,
@@ -2488,9 +2492,13 @@ def _publish_applyback_in(workspace: str, base_commit: str, **outer_overrides) -
                 "commit_hash": best_commit,
                 "commit_ref": _REWRITE_PINNED_REF,
                 "builder_symbol": "build_fused_gemm_module",
+                "flydsl_best_commit": "f" * 40,
                 "baseline_wall_ms": 4.0,
                 "best_wall_ms": 2.0,
+                "framework": "vllm",
                 "changed_files": changed_files,
+                "artifact_dir": "rewrite",
+                "patch_path": "rewrite/forge.patch",
             }
         ),
         encoding="utf-8",

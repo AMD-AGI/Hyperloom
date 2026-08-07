@@ -2742,7 +2742,44 @@ _REWRITE_ARTIFACT_KIND = "framework_applyback"
 _REWRITE_ARTIFACT_SCHEMA_VERSION = 2
 _REWRITE_VALIDATION_SCOPE = "reference"
 _REWRITE_INTEGRATION_PENDING = "pending"
+_REWRITE_SUPPORTED_FRAMEWORKS = frozenset({"aiter", "vllm", "sglang"})
+_REWRITE_MANIFEST_REQUIRED_FIELDS: dict[str, type | tuple[type, ...]] = {
+    "schema_version": int,
+    "artifact_kind": str,
+    "validation_scope": str,
+    "logical_op_name": str,
+    "operator_slug": str,
+    "builder_symbol": str,
+    "source_entry": str,
+    "reference_correctness_passed": bool,
+    "reference_snr_db": (int, float, type(None)),
+    "integration_validation_required": bool,
+    "integration_validation_status": str,
+    "base_commit": str,
+    "commit_hash": str,
+    "commit_ref": str,
+    "flydsl_best_commit": str,
+    "baseline_wall_ms": (int, float, type(None)),
+    "best_wall_ms": (int, float, type(None)),
+    "framework": str,
+    "changed_files": list,
+    "artifact_dir": str,
+    "patch_path": str,
+}
 _PATCH_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)$", re.MULTILINE)
+
+
+def _rewrite_manifest_has_producer_shape(manifest: dict) -> bool:
+    """Require every field the installed producer's schema-2 manifest owns."""
+    for field, expected in _REWRITE_MANIFEST_REQUIRED_FIELDS.items():
+        if field not in manifest:
+            return False
+        value = manifest[field]
+        if isinstance(value, bool) and expected is not bool:
+            return False
+        if not isinstance(value, expected):
+            return False
+    return True
 
 
 def _rewrite_contained_path(
@@ -2856,9 +2893,15 @@ def _validated_rewrite_applyback_result(
         return None
     if not isinstance(manifest, dict):
         return None
+    if not _rewrite_manifest_has_producer_shape(manifest):
+        return None
     if manifest.get("schema_version") != _REWRITE_ARTIFACT_SCHEMA_VERSION:
         return None
+    if manifest.get("artifact_kind") != _REWRITE_ARTIFACT_KIND:
+        return None
     if manifest.get("validation_scope") != _REWRITE_VALIDATION_SCOPE:
+        return None
+    if str(manifest.get("framework") or "") not in _REWRITE_SUPPORTED_FRAMEWORKS:
         return None
     if manifest.get("reference_correctness_passed") is not True:
         return None
@@ -2867,6 +2910,20 @@ def _validated_rewrite_applyback_result(
     if str(manifest.get("integration_validation_status") or "") != _REWRITE_INTEGRATION_PENDING:
         return None
     if str(manifest.get("base_commit") or "").strip() != base_commit:
+        return None
+    manifest_artifact_dir = _rewrite_contained_path(
+        workspace_root / "forge_experiments",
+        manifest.get("artifact_dir"),
+        allow_absolute=False,
+    )
+    manifest_patch_path = _rewrite_contained_path(
+        workspace_root / "forge_experiments",
+        manifest.get("patch_path"),
+        allow_absolute=False,
+    )
+    if manifest_artifact_dir is None or manifest_artifact_dir != files_root.parent:
+        return None
+    if manifest_patch_path is None or manifest_patch_path != patch_path:
         return None
 
     lineage = _validated_commit_lineage_and_timing(
@@ -2918,14 +2975,15 @@ def _validated_rewrite_applyback_result(
         "base_commit": base_commit,
         "commit_ref": commit_ref,
         "builder_symbol": str(manifest.get("builder_symbol") or ""),
+        "framework": str(manifest.get("framework") or ""),
+        "logical_op_name": str(manifest.get("logical_op_name") or ""),
+        "source_entry": str(manifest.get("source_entry") or ""),
         "canonical_manifest": str(manifest_path),
         "canonical_patch_path": str(patch_path),
         "canonical_files_root": str(files_root),
         "changed_files": changed_files,
         "temporary_paths": temporary_paths,
         "applyback_required": payload.get("applyback_required"),
-        "logical_op_name": str(payload.get("logical_op_name") or ""),
-        "source_entry": str(payload.get("source_entry") or ""),
         "source": "framework_applyback",
     }
 
