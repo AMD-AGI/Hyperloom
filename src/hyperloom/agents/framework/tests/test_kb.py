@@ -51,16 +51,18 @@ class TestResolveKbRoot:
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
         assert kb._resolve_kb_root() == tmp_path / "workspace" / "framework-kb"
 
-    def test_withdrawn_override_fails_loudly(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A run still setting the reader-only override is stopped, not redirected.
+    def test_withdrawn_override_is_ignored_not_raised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Resolution stays total; rejecting the withdrawn override is start-up's job.
 
-        Honouring it moved reads without moving writes, which is how the
-        ledger came to be written in one place and read from another. A start-up
-        failure naming the replacement is recoverable; a silent split is not.
+        Read paths treat KB lookups as advisory and swallow their own failures,
+        so raising here would be absorbed by the caller rather than surfaced —
+        turning a misconfiguration into a silently disabled gate.
         """
         monkeypatch.setenv("FRAMEWORK_AGENT_KB_DIR", str(tmp_path / "legacy"))
-        with pytest.raises(RuntimeError, match="INFERENCE_OPTIMIZER_FA_KB_PATH"):
-            kb._resolve_kb_root()
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "io-kb"))
+        assert kb._resolve_kb_root() == tmp_path / "io-kb"
 
     def test_framework_agent_root_is_not_a_kb_override(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -71,6 +73,101 @@ class TestResolveKbRoot:
         monkeypatch.setenv("FRAMEWORK_AGENT_ROOT", str(tmp_path / "skill"))
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
         assert kb._resolve_kb_root() == tmp_path / "workspace" / "framework-kb"
+
+
+class TestCheckKbConfiguration:
+    """The start-up gate that rejects a KB layout this build cannot honour."""
+
+    def test_withdrawn_override_fails_loudly(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A run still setting the reader-only override is stopped at start-up.
+
+        Honouring it moved reads without moving writes, which is how the ledger
+        came to be written in one place and read from another. A start-up
+        failure naming the replacement is recoverable; a silent split is not.
+        """
+        monkeypatch.setenv("FRAMEWORK_AGENT_KB_DIR", str(tmp_path / "legacy"))
+        with pytest.raises(kb.KBConfigurationError, match="INFERENCE_OPTIMIZER_FA_KB_PATH"):
+            kb.check_kb_configuration()
+
+    def test_blank_value_is_not_a_configuration(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An exported-but-empty variable expresses no intent, so it cannot fail the run."""
+        monkeypatch.setenv("FRAMEWORK_AGENT_KB_DIR", "   ")
+        kb.check_kb_configuration()
+
+    def test_passes_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
+        kb.check_kb_configuration()
+
+    def test_fa_cli_refuses_to_start(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`fa` runs standalone, so it carries its own copy of the gate.
+
+        Guards the reason the check moved out of the resolver: the failure has
+        to reach the operator, and every read-path caller swallows exceptions.
+        """
+        monkeypatch.setenv("FRAMEWORK_AGENT_KB_DIR", str(tmp_path / "legacy"))
+        assert cli.main(["kb", "list"]) == 2
+
+
+class TestMigrateLegacyPartition:
+    """The one-time carry-over from ``<workspace>/kb`` to ``<workspace>/framework-kb``."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
+        return tmp_path
+
+    @staticmethod
+    def _seed_legacy(tmp_path: Path, body: str = '{"pr_url": "PR-1"}') -> Path:
+        legacy = tmp_path / "workspace" / "kb" / "framework_optimization"
+        legacy.mkdir(parents=True)
+        (legacy / "lessons.jsonl").write_text(body, encoding="utf-8")
+        return legacy
+
+    def test_carries_the_ledger_to_the_new_root(self, tmp_path: Path) -> None:
+        """The writer was already working, so a real deployment has data to move."""
+        self._seed_legacy(tmp_path)
+
+        destination = kb.migrate_legacy_partition_once()
+
+        assert destination == tmp_path / "workspace" / "framework-kb" / "framework_optimization"
+        assert (destination / "lessons.jsonl").read_text(encoding="utf-8") == '{"pr_url": "PR-1"}'
+        assert kb.read_pr_ledger() == [{"pr_url": "PR-1"}]
+
+    def test_leaves_the_source_in_place(self, tmp_path: Path) -> None:
+        """A copy, not a move: the operator decides when the old root goes."""
+        legacy = self._seed_legacy(tmp_path)
+
+        kb.migrate_legacy_partition_once()
+
+        assert (legacy / "lessons.jsonl").exists()
+
+    def test_is_idempotent(self, tmp_path: Path) -> None:
+        self._seed_legacy(tmp_path)
+
+        assert kb.migrate_legacy_partition_once() is not None
+        assert kb.migrate_legacy_partition_once() is None
+
+    def test_never_overwrites_a_live_partition(self, tmp_path: Path) -> None:
+        """A destination already in use wins; the migration is not a repair tool."""
+        self._seed_legacy(tmp_path, '{"pr_url": "OLD"}')
+        live = tmp_path / "workspace" / "framework-kb" / "framework_optimization"
+        live.mkdir(parents=True)
+        (live / "lessons.jsonl").write_text('{"pr_url": "LIVE"}', encoding="utf-8")
+
+        assert kb.migrate_legacy_partition_once() is None
+        assert kb.read_pr_ledger() == [{"pr_url": "LIVE"}]
+
+    def test_skipped_when_the_operator_named_a_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The legacy default was never the operator's location to inherit."""
+        self._seed_legacy(tmp_path)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "chosen"))
+
+        assert kb.migrate_legacy_partition_once() is None
+
+    def test_no_legacy_data_is_not_an_error(self, tmp_path: Path) -> None:
+        assert kb.migrate_legacy_partition_once() is None
 
 
 class TestListAndMatch:

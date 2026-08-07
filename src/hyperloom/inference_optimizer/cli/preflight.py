@@ -1303,6 +1303,12 @@ def _preflight(
     # Fail fast on missing credentials after the fallback loaders.
     _validate_credentials()
 
+    # Same timing, same reason: run after the loaders so a withdrawn KB
+    # override set in ``.env`` is caught, and before any KB read happens.
+    from hyperloom.agents.framework.kb import prepare_kb_environment
+
+    prepare_kb_environment()
+
     # --- Auth alias export (internal LLM aliases only) ---
     # These aliases feed OpenAI-protocol consumers, so they are filled from the
     # OpenAI-side key only and stay unset when that side is not configured. An

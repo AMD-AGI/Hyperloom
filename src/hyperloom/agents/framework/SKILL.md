@@ -31,7 +31,8 @@ for this skill: `pip install -e '.[test]'` from the repo root provides it.
 
 The KB a session reads and writes is `INFERENCE_OPTIMIZER_FA_KB_PATH` when
 set, else `<workspace>/framework-kb` (`USER_DATA_PATH` or the pod-local
-default; `<workspace>/kb` belongs to the recipe KB). The
+default). It is deliberately not `<workspace>/kb`, the legacy recipe root:
+every directory under this root is reported as a framework domain. The
 orchestrator's writeback resolves the same root, so both halves move together.
 The runtime partition written under it is `framework_optimization/<framework>/`.
 Read-only seed data shipped in the wheel lives separately under the package.
