@@ -1998,6 +1998,12 @@ def _framework_agent_pending_candidate_count(state: Any) -> int:
     return pending
 
 
+# Terminal row for a candidate whose specialist never ran. It exists so the pump
+# stops re-selecting the candidate, and is skipped by the plateau streak because
+# an infrastructure failure is not evidence that the search is exhausted.
+_FRAMEWORK_DISPATCH_FAILED_STATUS = "dispatch_failed"
+
+
 def _framework_agent_consecutive_no_keep(state: Any) -> int:
     """Count trailing consecutive resolved candidates that did not KEEP.
 
@@ -2007,6 +2013,9 @@ def _framework_agent_consecutive_no_keep(state: Any) -> int:
     (``not_applicable`` / ``apply_failed`` / ``authored_empty`` / ``no_patches``
     / ``already_present`` / audit-skip / ``critic_denied``). Counting the latter
     lets a batch of dead candidates trip the plateau instead of grinding on.
+
+    ``dispatch_failed`` is the exception: the specialist never ran, so the row
+    carries no information about whether the search still has leverage.
 
     Args:
         state (Any): Frozen SharedState view exposing
@@ -2027,6 +2036,11 @@ def _framework_agent_consecutive_no_keep(state: Any) -> int:
         # trailing no-KEEP rows cannot instantly re-plateau the next cycle.
         if status == "cycle_boundary":
             break
+        # A specialist that never ran produced no search result to plateau on.
+        # Transparent to the walk: rows on either side still add up, and a KEEP
+        # behind one still breaks the streak.
+        if status == _FRAMEWORK_DISPATCH_FAILED_STATUS:
+            continue
         is_keep = bool(row.get("kept")) or status == "kept"
         if is_keep:
             break

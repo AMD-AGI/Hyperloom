@@ -133,6 +133,7 @@ class _Stub:
     _record_framework_agent_authored_outcome = Coordinator._record_framework_agent_authored_outcome
     _recover_framework_agent_authoring_outcome = Coordinator._recover_framework_agent_authoring_outcome
     _record_framework_agent_authoring_empty_outcome = Coordinator._record_framework_agent_authoring_empty_outcome
+    _record_framework_agent_dispatch_failure = Coordinator._record_framework_agent_dispatch_failure
     _record_framework_agent_audit_skip = Coordinator._record_framework_agent_audit_skip
     _framework_agent_audit_seed_lines = staticmethod(Coordinator._framework_agent_audit_seed_lines)
     _framework_audit_use_llm_mode = staticmethod(FrameworkPhase._framework_audit_use_llm_mode)

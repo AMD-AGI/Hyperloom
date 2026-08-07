@@ -4892,10 +4892,15 @@ class FrameworkPhase(PhaseHandler):
                 continue
             result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
             done_payload = result.get("specialist_done")
-            if isinstance(done_payload, dict):
+            # A run that failed before delivering carries its error on the bus
+            # entry rather than in the result, and must reach the recorder for
+            # the same reason it does on the live path.
+            run_error = str(payload.get("error") or "")
+            if isinstance(done_payload, dict) or run_error:
                 self._record_framework_agent_authoring_empty_outcome(
                     task=specialist_task,
-                    done_payload=done_payload,
+                    done_payload=done_payload if isinstance(done_payload, dict) else {},
+                    run_error=run_error,
                 )
                 if cand_id in self._framework_processed_candidate_keys():
                     return True
@@ -4926,11 +4931,50 @@ class FrameworkPhase(PhaseHandler):
                 return True
         return False
 
+    def _record_framework_agent_dispatch_failure(
+        self,
+        *,
+        task: "Task",
+        run_error: str,
+    ) -> None:
+        """Stamp a terminal row for a candidate whose specialist never ran.
+
+        The row is what stops the pump re-selecting the candidate every tick, so
+        it must exist; ``dispatch_failed`` is what keeps the plateau streak from
+        counting it as a search that came back empty.
+
+        Args:
+            task: The specialist task that failed before delivering.
+            run_error: The dispatch error, recorded as the row's rationale.
+        """
+        params = getattr(task, "params", None) or {}
+        cand_id = str(params.get("framework_agent_candidate_id") or "")
+        if not cand_id:
+            return
+        recorded = self._stamp_framework_progress(
+            candidate_id=cand_id,
+            batch_id=str(params.get("framework_batch_id") or ""),
+            status="dispatch_failed",
+            kept=False,
+            rationale=run_error[:500],
+            provenance="dispatch_failed",
+            gain_pct=0.0,
+            extra={"specialist_task_id": str(getattr(task, "task_id", "") or "")},
+        )
+        if not recorded:
+            return
+        log.warning(
+            "FRAMEWORK: authoring specialist never delivered candidate=%s: %s",
+            cand_id,
+            run_error[:300],
+        )
+
     def _record_framework_agent_authoring_empty_outcome(
         self,
         *,
         task: "Task",
         done_payload: dict[str, Any] | None,
+        run_error: str = "",
     ) -> None:
         """Record a terminal FRAMEWORK row when an authoring specialist finishes WITHOUT a patch.
 
@@ -4948,11 +4992,20 @@ class FrameworkPhase(PhaseHandler):
             task: The completed authoring specialist task (carries the
                 ``framework_*`` provenance markers).
             done_payload: The specialist's ``specialist_done`` payload.
+            run_error: The dispatch error when the run failed before delivering
+                anything. Together with an absent payload it separates "the
+                specialist ran and found nothing" from "the specialist never
+                ran", which the plateau streak must not treat alike.
         """
         params = getattr(task, "params", None) or {}
         if not bool(params.get("framework_agent_authoring")):
             return
         payload = done_payload if isinstance(done_payload, dict) else {}
+        # No payload at all plus an error means the run never delivered: there is
+        # no deliverable to judge, so this is infrastructure, not a search result.
+        if run_error and not payload:
+            self._record_framework_agent_dispatch_failure(task=task, run_error=run_error)
+            return
         inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
         # A downstream integrate_patch (owned by the authored-outcome bridge
         # that writes the terminal row) is created by
