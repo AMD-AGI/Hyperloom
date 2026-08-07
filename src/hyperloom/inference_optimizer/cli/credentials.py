@@ -20,6 +20,7 @@ from pathlib import Path
 from hyperloom.common.llm_config import (
     ANTHROPIC_SYNTHESIZABLE_KEY_ENVS,
     CLAUDE_OAUTH_TOKEN_ENV,
+    anthropic_synthesizable_key,
     has_anthropic_credential,
 )
 
@@ -411,6 +412,30 @@ def _warn_on_shadowed_oauth_token() -> None:
     )
 
 
+def _warn_on_oauth_widened_provider_shape() -> None:
+    """Warn when a subscription token turns an OpenAI-only deploy dual-sided.
+
+    The token is a full Anthropic side, so its mere presence in the shell moves
+    orchestration off the gateway and onto the subscription — surprising for an
+    operator who only configured the OpenAI side.
+    """
+    if not _has_claude_oauth_token():
+        return
+    if anthropic_synthesizable_key() or os.environ.get("DEEPSEEK_API_KEY", "").strip():
+        return
+    if os.environ.get("ANTHROPIC_BASE_URL", "").strip():
+        return
+    if not (os.environ.get("OPENAI_BASE_URL", "").strip() and os.environ.get("OPENAI_API_KEY", "").strip()):
+        return
+    print(
+        f"Preflight: WARNING — {CLAUDE_OAUTH_TOKEN_ENV} is set alongside a fully "
+        "configured OpenAI side, so orchestration runs on the Claude subscription "
+        f"rather than OPENAI_BASE_URL. Unset {CLAUDE_OAUTH_TOKEN_ENV} for an "
+        "OpenAI-only run.",
+        file=sys.stderr,
+    )
+
+
 def _validate_credentials() -> None:
     """Fail fast when no usable LLM endpoint/key is configured.
 
@@ -423,6 +448,7 @@ def _validate_credentials() -> None:
     """
     _reject_cross_provider_pairing()
     _warn_on_shadowed_oauth_token()
+    _warn_on_oauth_widened_provider_shape()
     anthropic_url, openai_url = _resolve_llm_endpoints()
     has_anthropic_side = has_anthropic_credential() or bool(os.environ.get("DEEPSEEK_API_KEY"))
     has_key = bool(os.environ.get("OPENAI_API_KEY") or has_anthropic_side)
