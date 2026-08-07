@@ -366,6 +366,32 @@ def get_domain(key: str) -> SpecialistDomain | None:
     return None
 
 
+def authoring_domain_for_framework(framework: str | None) -> str:
+    """Return the authoring domain that matches a framework's kind.
+
+    A request-serving framework and an iterative model pipeline have almost no
+    optimization surface in common: one is scheduling, batching and KV-cache
+    admission, the other is redundant work created by running the same stack
+    once per block per denoising step. Steering a scriptable pipeline at
+    ``serving_specialist`` points it at a hot path that does not exist there, so
+    every place that names an authoring domain resolves it through here rather
+    than hard-coding one.
+
+    Args:
+        framework (str | None): The session's framework name.
+
+    Returns:
+        str: ``"framework_rewrite_specialist"`` for a scriptable (server-less)
+        framework, else ``"serving_specialist"``.
+    """
+    name = str(framework or "").strip().lower()
+    if not name:
+        return "serving_specialist"
+    from hyperloom.inference_optimizer import framework_registry
+
+    return "framework_rewrite_specialist" if framework_registry.is_scriptable(name) else "serving_specialist"
+
+
 # Synthetic domain for ``scope='freeform'`` dispatches. NOT part of
 # SPECIALIST_DOMAINS / the knowledge-domain vocabulary — it exists only to
 # satisfy the runner's Domain contract. The real mandate is carried by

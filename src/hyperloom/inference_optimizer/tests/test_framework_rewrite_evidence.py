@@ -122,6 +122,69 @@ def test_strict_fingerprint_separates_tensor_identity(probe_module, tmp_path):
     )
 
 
+def test_a_live_tensor_keeps_its_generation_across_eviction(probe_module, tmp_path):
+    """Trimming the table must not turn a memoize candidate into a hoist candidate.
+
+    The table is bounded, and a long rollout allocates enough intermediates to
+    reach that bound repeatedly. If the bound is enforced by clearing the table,
+    a tensor that is still alive and still being passed loses its generation and
+    reads as new. Strict repeats then vanish while loose repeats survive, which
+    is exactly the signature the classifier reads as "hoist first, memoizing
+    would never hit" -- on a site where memoizing was the right answer.
+    """
+
+    class _Obj:
+        __slots__ = ("__weakref__",)
+
+    probe = probe_module.HostProbe(out_dir=str(tmp_path), roots=())
+    survivor = _Obj()
+    first = probe._object_generation(survivor)
+
+    # Churn well past the cap with objects that die immediately, as a rollout does.
+    for _ in range(probe_module._MAX_TRACKED_OBJECTS * 3):
+        probe._object_generation(_Obj())
+
+    assert probe._object_generation(survivor) == first, "a live, repeatedly-passed object was forgotten"
+    assert len(probe._object_generations) <= probe_module._MAX_TRACKED_OBJECTS, "the bound stopped holding"
+
+
+def test_a_repeatedly_passed_tensor_outlives_live_pressure(probe_module, tmp_path):
+    """Reclaiming dead entries is not enough on its own.
+
+    When the table fills with objects that are all still alive, something live
+    has to go. Dropping by insertion order alone would evict the loop-invariant
+    tensor first -- it was inserted before the loop started -- which is the
+    worst possible choice. Being passed again has to count as recency.
+    """
+
+    class _Obj:
+        __slots__ = ("__weakref__",)
+
+    probe = probe_module.HostProbe(out_dir=str(tmp_path), roots=())
+    invariant = _Obj()
+    first = probe._object_generation(invariant)
+    held = []
+    for i in range(probe_module._MAX_TRACKED_OBJECTS * 2):
+        obj = _Obj()
+        held.append(obj)  # keep it alive so the dead-entry sweep cannot reclaim it
+        probe._object_generation(obj)
+        if i % 8 == 0:
+            probe._object_generation(invariant)  # the loop passes it every iteration
+
+    assert probe._object_generation(invariant) == first, "the loop-invariant object was evicted"
+
+
+def test_eviction_still_gives_a_new_generation_to_a_new_object(probe_module, tmp_path):
+    """Keeping live objects must not go so far as to recycle their tokens."""
+
+    class _Obj:
+        __slots__ = ("__weakref__",)
+
+    probe = probe_module.HostProbe(out_dir=str(tmp_path), roots=())
+    seen = {probe._object_generation(_Obj()) for _ in range(probe_module._MAX_TRACKED_OBJECTS * 2)}
+    assert len(seen) == probe_module._MAX_TRACKED_OBJECTS * 2, "two distinct objects shared a generation"
+
+
 def test_strict_fingerprint_survives_allocator_address_reuse(probe_module, tmp_path):
     """A recycled allocation must not read as "the same tensor as last time".
 
@@ -868,6 +931,75 @@ def test_a_flat_call_distribution_demotes_nothing():
     assert any("no dominant call site" in note for note in document["notes"])
 
 
+def test_mostly_uncalled_sites_do_not_anchor_a_hot_loop():
+    """A zero median is not a "typical" call count to measure dominance against.
+
+    Substituting 1 for it makes any called site look infinitely dominant, so a
+    distribution that carries no loop at all still anchors one, and every site
+    that finished early is then labelled set-up on an invented reference.
+    """
+    table = {
+        f"k{i}": {"first_s": 10.0 + i, "last_s": 11.0 + i, "count_per_rank": count}
+        for i, count in enumerate((1000, 900, 0, 0, 0, 0, 0))
+    }
+    assert evidence._hot_loop_start(table) is None
+    # The same shape with a real median still anchors, so this is not a blanket refusal.
+    called = {
+        f"k{i}": {"first_s": 10.0 + i, "last_s": 11.0 + i, "count_per_rank": count}
+        for i, count in enumerate((100000, 5, 4, 3, 2, 1, 1))
+    }
+    assert evidence._hot_loop_start(called) == 10.0
+
+
+def test_a_collective_fused_only_during_setup_is_demoted():
+    """Fusion was the one category that never checked the hot-loop anchor.
+
+    Collectives issued while the model is being built are genuinely fusable and
+    fusing them buys nothing, so left un-demoted they outrank steady-state finds
+    in a list capped at MAX_CANDIDATES.
+    """
+    document = evidence.build_evidence(
+        [
+            _report(
+                wall_seconds=100.0,
+                host_calls=[
+                    # The loop: dominant call count, anchors hot_loop_start.
+                    {
+                        "api": "torch.Tensor.cpu",
+                        "site": "framework/loop.py:1:step",
+                        "count": 500000,
+                        "wall_s": 20.0,
+                        "bytes": 0,
+                        "shape_sigs": [],
+                        "callers": [],
+                        "first_s": 30.0,
+                        "last_s": 99.0,
+                    },
+                    # Adjacent same-shape collectives, all finished before it began.
+                    {
+                        "api": "torch.distributed.all_gather",
+                        "site": "framework/build.py:5:construct",
+                        "count": 6,
+                        "wall_s": 2.0,
+                        "bytes": 1024,
+                        "shape_sigs": ["f32[8]"],
+                        "callers": [
+                            "framework/build.py:10:construct",
+                            "framework/build.py:11:construct",
+                            "framework/build.py:12:construct",
+                        ],
+                        "first_s": 1.0,
+                        "last_s": 2.0,
+                    },
+                ],
+            )
+        ]
+    )
+    fusion = [row for row in document["candidates"] if row["category"] == evidence.CATEGORY_FUSE_COLLECTIVES]
+    assert fusion, "the fusion candidate disappeared"
+    assert fusion[0].get("setup_phase") is True
+
+
 def test_a_report_without_timestamps_is_not_assumed_to_be_setup():
     """An older probe report has no timing, so nothing may be demoted on absent evidence."""
     document = evidence.build_evidence(
@@ -1438,13 +1570,36 @@ def test_evidence_collection_is_silent_without_candidates(tmp_path):
     assert "framework_rewrite_evidence" not in result
 
 
-def test_evidence_collection_is_a_noop_when_unarmed():
-    """An unarmed profile leg leaves the result alone."""
+def test_evidence_collection_reports_that_it_was_unarmed():
+    """An unarmed leg publishes no document, and says so rather than staying mute.
+
+    A bare empty result is indistinguishable from a probe that ran and found
+    nothing, which is the difference between "look elsewhere" and "the
+    instrument is broken".
+    """
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
 
     result: dict[str, Any] = {}
     ProfileExecutor()._collect_rewrite_evidence(result)
-    assert result == {}
+    assert result == {"framework_rewrite_evidence_status": "probe_not_armed"}
+
+
+def test_evidence_collection_reports_an_aggregation_failure(tmp_path, monkeypatch):
+    """A crash while merging the reports must not read as 'nothing to rewrite'."""
+    from hyperloom.orchestrator.actions.executors import _framework_rewrite_evidence as _ev
+    from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("truncated report")
+
+    monkeypatch.setattr(_ev, "aggregate_probe_dir", _boom)
+    executor = ProfileExecutor()
+    executor._host_probe_dir = str(tmp_path / "host_probe")
+    result: dict[str, Any] = {}
+    executor._collect_rewrite_evidence(result)
+    assert result["framework_rewrite_evidence_status"].startswith("aggregation_failed")
+    assert "truncated report" in result["framework_rewrite_evidence_status"]
+    assert "framework_rewrite_evidence" not in result
 
 
 # --------------------------------------------------------------------------

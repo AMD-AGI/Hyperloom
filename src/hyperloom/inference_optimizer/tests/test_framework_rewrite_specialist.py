@@ -214,20 +214,62 @@ def test_reference_document_covers_every_category_id():
 class _State:
     """Minimal SharedState stand-in for the domain router."""
 
-    def __init__(self, framework: str, evidence: str = "") -> None:
+    def __init__(self, framework: str, evidence: str = "", status: str = "") -> None:
         self.framework = framework
         self.last_framework_rewrite_evidence = evidence
+        self.last_framework_rewrite_evidence_status = status
 
 
 class _Phase:
     """Bind the two FrameworkPhase helpers under test to a stub state."""
 
-    def __init__(self, framework: str, evidence: str = "") -> None:
+    def __init__(self, framework: str, evidence: str = "", status: str = "") -> None:
         from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
-        self.shared_state = _State(framework, evidence)
+        self.shared_state = _State(framework, evidence, status)
         self._authoring_specialist_domain = FrameworkPhase._authoring_specialist_domain.__get__(self)
         self._render_rewrite_evidence_for_prompt = FrameworkPhase._render_rewrite_evidence_for_prompt.__get__(self)
+        self._rewrite_evidence_absence_note = FrameworkPhase._rewrite_evidence_absence_note.__get__(self)
+
+
+def test_a_measured_negative_reads_as_a_measured_negative():
+    """The probe ran and found nothing: the specialist may trust the silence."""
+    note = _Phase("custom", status="no_candidates")._rewrite_evidence_absence_note()
+    assert "found no rewrite candidates" in note
+    assert "measured negative" in note
+
+
+def test_a_broken_probe_does_not_read_as_a_clean_loop():
+    """The failure must be named, or an absent instrument looks like a result.
+
+    This is the whole point of carrying a status: both cases render as an empty
+    evidence block, and only one of them means there is nothing left to find.
+    """
+    note = _Phase("custom", status="aggregation_failed: boom")._rewrite_evidence_absence_note()
+    assert "aggregation_failed: boom" in note
+    assert "broken instrument" in note
+    assert "NOT a measured negative" in note
+
+
+def test_no_profile_yet_is_neither_of_those():
+    """Before any profile lands the honest answer is 'not yet', not a verdict."""
+    note = _Phase("custom")._rewrite_evidence_absence_note()
+    assert "has been collected yet" in note
+    assert "measured negative" not in note
+
+
+def test_evidence_that_exists_but_will_not_render_says_so(tmp_path):
+    """A document on disk that this prompt cannot show is not an absence either.
+
+    Status is 'ok' and a path is on record, so neither the failure branch nor
+    the 'nothing yet' branch is honest: the evidence exists and the specialist
+    must not read the empty block as a verdict on the source.
+    """
+    recorded = tmp_path / "evidence.json"
+    recorded.write_text("{}", encoding="utf-8")
+    note = _Phase("custom", evidence=str(recorded), status="ok")._rewrite_evidence_absence_note()
+    assert "could not be rendered" in note
+    assert "has been collected yet" not in note
 
 
 @pytest.mark.parametrize("framework", ["custom", "custom", "xdit", "hunyuan_image3"])
@@ -331,6 +373,7 @@ class _DispatchStub:
         for name in (
             "_authoring_specialist_domain",
             "_render_rewrite_evidence_for_prompt",
+            "_rewrite_evidence_absence_note",
             "_enqueue_framework_agent_local_explore_specialist",
             "_next_local_explore_candidate_id",
         ):

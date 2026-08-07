@@ -14,8 +14,12 @@ Two properties matter here:
 * **Chaining.** Prepending this directory shadows any ``sitecustomize`` the
   image already ships, which could silently drop that environment's own
   start-up configuration. So this module finds the next ``sitecustomize`` on the
-  path *after* our directory and imports it first, under its real name, before
-  installing the probe.
+  path *after* our directory and executes it first, before installing the probe.
+  It is loaded under a private name (``_hl_prior_sitecustomize``) rather than as
+  ``sitecustomize``, since that entry in ``sys.modules`` is already this module.
+  Executing it is what preserves its side effects, which is the whole point; a
+  prior hook that expects to be importable again *by name* would not find
+  itself, but a start-up hook that does that is not a shape we support.
 * **Inertness.** The probe installs only when ``HYPERLOOM_HOST_PROBE`` is
   truthy. A benchmark that merely has this directory on ``PYTHONPATH`` behaves
   exactly as if it did not, which is what makes it safe to leave the prefix in

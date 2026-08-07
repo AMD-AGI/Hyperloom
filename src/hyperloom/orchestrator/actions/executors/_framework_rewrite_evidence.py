@@ -356,7 +356,7 @@ def build_probe_env(
 
 
 def promote_evidence_path(shared_state: Any, result: dict[str, Any] | None) -> str:
-    """Lift an executor result's evidence path onto SharedState, if it carries one.
+    """Lift an executor result's evidence path and status onto SharedState.
 
     Both the standalone ``profile`` action and the composite ``roofline`` action
     (which runs profile internally) can produce the document, so both have to
@@ -365,15 +365,24 @@ def promote_evidence_path(shared_state: Any, result: dict[str, Any] | None) -> s
     evidence was available: the roofline path never looked for it, and the prompt
     renderer reads SharedState, not the filesystem.
 
+    ``framework_rewrite_evidence_status`` rides along and is promoted whenever
+    present, including on the legs that produce no document at all — that is the
+    only record of *why* there is none, and it is what keeps a broken probe from
+    reading like a workload with nothing left to rewrite.
+
     Args:
         shared_state: The SharedState to update.
-        result: An executor result that may carry ``framework_rewrite_evidence``.
+        result: An executor result that may carry ``framework_rewrite_evidence``
+            and/or ``framework_rewrite_evidence_status``.
 
     Returns:
         The promoted path, or ``""`` when the result carries none — in which case
         any path already on record is left alone, because a leg that produced no
         document is not evidence that the previous one was wrong.
     """
+    status = str((result or {}).get("framework_rewrite_evidence_status") or "").strip()
+    if status:
+        shared_state.last_framework_rewrite_evidence_status = status
     path = str((result or {}).get("framework_rewrite_evidence") or "").strip()
     if not path:
         return ""
@@ -515,7 +524,12 @@ def _hot_loop_start(*tables: dict[Any, dict[str, Any]]) -> float | None:
     counts = sorted((int(entry.get("count_per_rank") or 0) for entry in timed), reverse=True)
     if not counts or counts[0] <= 0:
         return None
-    median = counts[len(counts) // 2] or 1
+    median = counts[len(counts) // 2]
+    if median <= 0:
+        # Over half the sites were never called. There is no "typical" call count
+        # to measure dominance against, and substituting 1 would make any hot
+        # site look infinitely dominant and anchor the loop on it.
+        return None
     if counts[0] / median < HOT_LOOP_DOMINANCE_RATIO:
         return None
     hottest = max(timed, key=lambda entry: int(entry.get("count_per_rank") or 0))
@@ -741,13 +755,14 @@ def _host_call_candidates(
                     hot_loop_start_s=hot_loop_start,
                 )
             )
-    out.extend(_fusion_candidates(merged, wall_seconds))
+    out.extend(_fusion_candidates(merged, wall_seconds, hot_loop_start))
     return out
 
 
 def _fusion_candidates(
     merged: dict[tuple[str, str], dict[str, Any]],
     wall_seconds: float,
+    hot_loop_start: float | None = None,
 ) -> list[dict[str, Any]]:
     """Find tensor collectives issued from several adjacent same-shape sites.
 
@@ -759,6 +774,11 @@ def _fusion_candidates(
     Args:
         merged: Output of :func:`_merge_host_calls`.
         wall_seconds: Measured run wall seconds, used for the percentage column.
+        hot_loop_start: Output of :func:`_hot_loop_start`, used to demote sites
+            that had stopped being called before the loop began. Collectives
+            issued while the model is being built are real and fusable, and
+            fusing them buys nothing, so they must not outrank a steady-state
+            find in a list capped at ``MAX_CANDIDATES``.
 
     Returns:
         Unsorted fusion candidate rows.
@@ -783,6 +803,7 @@ def _fusion_candidates(
             continue
         wall = float(entry["wall_s_per_rank"])
         pct = (wall / denom * 100.0) if denom else 0.0
+        setup_phase = _stops_before_hot_loop(entry, hot_loop_start)
         for function, lines in sorted(fusable.items()):
             out.append(
                 _candidate(
@@ -797,6 +818,9 @@ def _fusion_candidates(
                     count=int(entry["count_per_rank"]),
                     wall_s=wall,
                     wall_pct=pct,
+                    setup_phase=setup_phase,
+                    last_call_s=entry.get("last_s"),
+                    hot_loop_start_s=hot_loop_start,
                     extra={
                         "api": api,
                         "call_lines": sorted(lines),
