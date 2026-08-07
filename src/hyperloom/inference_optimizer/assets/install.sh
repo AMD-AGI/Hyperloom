@@ -1505,9 +1505,13 @@ ensure_framework_deps() {
   local args=(--framework "$FRAMEWORK" --python "$PYTHON" --prefix "[inference-optimizer] framework deps")
   [ "$CHECK_ONLY" -eq 1 ] && args+=(--check-only)
   [ "$DRY_RUN" -eq 1 ] && args+=(--dry-run)
-  # --pip-extra is variadic, so it must stay last.
+  # Each flag attaches with =: a bare --pip-extra would leave a dashed value
+  # unconsumed, and argparse then rejects it as an unrecognized argument.
   if [ ${#PIP_EXTRA[@]} -gt 0 ]; then
-    args+=(--pip-extra "${PIP_EXTRA[@]}")
+    local pip_flag
+    for pip_flag in "${PIP_EXTRA[@]}"; do
+      args+=("--pip-extra=${pip_flag}")
+    done
   fi
   "$PYTHON" -m hyperloom.inference_optimizer.framework_deps "${args[@]}" \
     || die "framework deps for '${FRAMEWORK}' failed fatally; see the error above"
