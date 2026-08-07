@@ -237,18 +237,11 @@ MAGPIE_PATH INFERENCEX_PATH TRACELENS_ROOT TRACELENS_INTERNAL_ROOT
 GEAK_ROOT GEAK_E2E_RUNNER PYTHONPATH'
 
 if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
-   || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -z "${DEEPSEEK_API_KEY:-}" ] \
-   || [ -z "${DEEPSEEK_BASE_URL:-}" ]; then
+   || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
   if [ -f "$REPO_ROOT/.env" ]; then
     _snap_anthropic_url="${ANTHROPIC_BASE_URL-}"
     _snap_anthropic_key="${ANTHROPIC_API_KEY-}"
     _snap_anthropic_token="${ANTHROPIC_AUTH_TOKEN-}"
-    # Retired keys are snapshotted too: the legacy normalization below runs
-    # AFTER this sourcing, so without them a stale .env DEEPSEEK_API_KEY would
-    # win over a shell export and break this block's own "env wins" contract.
-    _snap_deepseek_key="${DEEPSEEK_API_KEY-}"
-    _snap_deepseek_url="${DEEPSEEK_BASE_URL-}"
-    _snap_deepseek_model="${DEEPSEEK_MODEL-}"
     for _v in $_DOTENV_PROTECTED_VARS; do
       eval "_snap_prot_${_v}=\"\${${_v}-}\""
     done
@@ -259,9 +252,6 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     [ -n "$_snap_anthropic_url" ] && export ANTHROPIC_BASE_URL="$_snap_anthropic_url"
     [ -n "$_snap_anthropic_key" ] && export ANTHROPIC_API_KEY="$_snap_anthropic_key"
     [ -n "$_snap_anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$_snap_anthropic_token"
-    [ -n "$_snap_deepseek_key" ] && export DEEPSEEK_API_KEY="$_snap_deepseek_key"
-    [ -n "$_snap_deepseek_url" ] && export DEEPSEEK_BASE_URL="$_snap_deepseek_url"
-    [ -n "$_snap_deepseek_model" ] && export DEEPSEEK_MODEL="$_snap_deepseek_model"
     for _v in $_DOTENV_PROTECTED_VARS; do
       eval "_snap_val=\"\${_snap_prot_${_v}-}\""
       if [ -n "${_snap_val}" ]; then
@@ -275,53 +265,19 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     done
     unset _v _snap_val _cur_val
     unset _snap_anthropic_url _snap_anthropic_key _snap_anthropic_token
-    unset _snap_deepseek_key _snap_deepseek_url _snap_deepseek_model
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
-# Retired DEEPSEEK_* config (process env or a not-yet-migrated .env). DeepSeek is
-# a dual-protocol gateway, not a third provider: /anthropic speaks the Anthropic
-# API and /v1 speaks OpenAI chat-completions, both with the same key. Endpoint
-# and model derivation matches hyperloom.common.llm_config.deepseek_compat_env.
-# Explicit values always win.
-# Adopt the gateway whole or not at all: anything already on the Anthropic side
-# means the retired variables are stale leftovers, and half-adopting them would
-# send an explicit Anthropic credential to DeepSeek's host.
-if { [ -n "${DEEPSEEK_API_KEY:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ]; } \
-   && [ -z "${ANTHROPIC_BASE_URL:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] \
-   && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-  _ds_base="${DEEPSEEK_BASE_URL:-}"
-  _ds_base="${_ds_base%/}"
-  # Case-insensitive match (AMD spells it /Anthropic); ${_ds_base%/*} drops the
-  # final segment whatever its casing.
-  _ds_lower="$(printf '%s' "$_ds_base" | tr '[:upper:]' '[:lower:]')"
-  case "$_ds_lower" in
-    "")           _ds_anthropic="https://api.deepseek.com/anthropic"; _ds_openai="https://api.deepseek.com/v1" ;;
-    */anthropic)  _ds_anthropic="$_ds_base"; _ds_openai="${_ds_base%/*}/v1" ;;
-    */v1)         _ds_anthropic="${_ds_base%/*}/anthropic"; _ds_openai="$_ds_base" ;;
-    https://api.deepseek.com|http://api.deepseek.com)
-                  _ds_anthropic="${_ds_base}/anthropic"; _ds_openai="${_ds_base}/v1" ;;
-    *)            _ds_anthropic="$_ds_base"; _ds_openai="${_ds_base}/v1" ;;
-  esac
-  _ds_model="${DEEPSEEK_MODEL:-deepseek-v4-pro}"
-  export ANTHROPIC_BASE_URL="$_ds_anthropic"
-  [ -n "${DEEPSEEK_API_KEY:-}" ] && export ANTHROPIC_API_KEY="$DEEPSEEK_API_KEY"
-  [ -n "${CLAUDE_MODEL:-}" ] || export CLAUDE_MODEL="$_ds_model"
-  # GEAKv4 follows whichever Claude model is actually in effect.
-  [ -n "${GEAK_CLAUDE_MODEL:-}" ] || export GEAK_CLAUDE_MODEL="${CLAUDE_MODEL:-$_ds_model}"
-  # The OpenAI side is adopted only when it is entirely free; otherwise some
-  # other gateway already runs there and keeps its own key and model.
-  if [ -z "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
-    export OPENAI_BASE_URL="$_ds_openai"
-    [ -n "${DEEPSEEK_API_KEY:-}" ] && export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
-    [ -n "${CODEX_MODEL:-}" ] || export CODEX_MODEL="$_ds_model"
-  fi
-  unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL
-  unset _ds_base _ds_lower _ds_anthropic _ds_openai _ds_model
-  echo "[kernel-agent] DEEPSEEK_* is retired; normalized to ANTHROPIC_*/OPENAI_*" >&2
-elif [ -n "${DEEPSEEK_API_KEY:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ]; then
-  echo "[kernel-agent] DEEPSEEK_* is retired and ignored here: the Anthropic side is already configured" >&2
-fi
+# kernel-agent consumes ANTHROPIC_* and nothing else. Translating a retired
+# DEEPSEEK_* config into the standard variables belongs to whoever owns the
+# entrypoint -- assets/install.sh for a chained install, llm_config for the
+# Python side -- and both do it before this script is reached. Repeating it
+# here bought nothing: the chained caller unsets the retired keys and exports
+# the Anthropic side first, so a second translation could never fire. It only
+# added a copy of the endpoint derivation that no test covered and that would
+# drift out of step with deepseek_compat_env. A retired variable reaching this
+# far is a stale leftover; the .env writer below purges it rather than acting
+# on it.
 # e2e whole-pipeline optimizer — Hyperloom calls it simply "geak" (formerly the
 # standalone PerfSkills repo / GEAK_v4). Its code lives IN GEAK (interface/run_e2e.py
 # + e2e_workflow/), tracked on the ``main`` branch. Hyperloom calls
