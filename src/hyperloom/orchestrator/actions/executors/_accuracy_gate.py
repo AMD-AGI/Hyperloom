@@ -163,7 +163,12 @@ def launch_enablement_allowed(shared_state: Any) -> bool:
 
 
 def eval_enablement_allowed(shared_state: Any) -> bool:
-    """Whether a baseline accuracy-eval failure may route into enablement."""
+    """Whether a baseline accuracy-eval failure may route into enablement.
+
+    ``--no-eval`` closes the lane: with no eval running there is nothing to repair.
+    """
+    if bool(getattr(shared_state, "eval_disabled", False)):
+        return False
     return resolve_enablement_mode(shared_state) in (ENABLEMENT_MODE_EVAL, ENABLEMENT_MODE_ALL)
 
 

@@ -60,6 +60,23 @@ def test_gemm_tuning_workspace_timestamp_fallback(tmp_path: Path) -> None:
     assert out.name.startswith("request_")
 
 
+# -- _write_gemm_tuning_benchmark_script ----------------------------------
+def test_gemm_tuning_script_disables_the_eval(tmp_path: Path) -> None:
+    path = krh._write_gemm_tuning_benchmark_script(
+        workspace=tmp_path,
+        model_path="/models/Qwen-Qwen3-8B",
+        framework="sglang",
+        gpu_type="mi355x",
+        tp=1,
+        conc=8,
+        isl=256,
+        osl=256,
+    )
+    script = path.read_text(encoding="utf-8")
+    assert 'export RUN_EVAL="false"' in script
+    assert "RUN_EVAL:-" not in script
+
+
 # -- _optimization_budget_minutes / wrapper timeout -----------------------
 def test_optimization_budget_uses_payload_budget_minutes() -> None:
     assert krh._optimization_budget_minutes({"backend_order": "forge", "budget_minutes": 20}) == 20.0
