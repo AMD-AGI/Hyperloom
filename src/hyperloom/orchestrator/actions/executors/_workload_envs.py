@@ -82,6 +82,30 @@ _DEFAULT_PROFILE_MAX_STEPS = 128
 _PROFILE_DEFAULT_OSL = 1024
 _AGENTX_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
+# Quality-reference env names, in resolution order. Every scriptable workload
+# needs this gate, so the contract is the framework-neutral ``HYPERLOOM_`` pair.
+# The ``XDIT_`` pair predates ``--framework custom`` and is still both read and
+# written because operator bench scripts live outside this repo and cannot be
+# renamed in lockstep; drop it once those scripts have moved over.
+_QUALITY_REF_ENVS = ("HYPERLOOM_QUALITY_REF", "XDIT_QUALITY_REF")
+_QUALITY_REF_WRITE_ENVS = ("HYPERLOOM_QUALITY_REF_WRITE", "XDIT_QUALITY_REF_WRITE")
+
+
+def _first_env(names: tuple[str, ...]) -> str:
+    """Return the first non-empty stripped value among ``names`` in ``os.environ``.
+
+    Args:
+        names (tuple[str, ...]): Env var names in resolution order.
+
+    Returns:
+        str: The first non-empty value, or ``""`` when none is set.
+    """
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
 
 def agentx_enabled(env: dict[str, str] | None = None) -> bool:
     """Return whether the AgentX benchmark wrapper is explicitly enabled."""
@@ -1210,9 +1234,11 @@ def materialize_config_with_envs(
         envs[framework_env] = dedup_vllm_server_args(_final_args, bench.get("framework"))
     # ── Quality-reference wiring (scriptable / server-less workloads) ──────
     # Magpie forwards only ``benchmark.envs`` to the wrapper subprocess, so
-    # re-inject the image-quality reference here (the single scriptable choke
-    # point) or the shipped empty YAML default silently skips the gate. When the
-    # operator configures nothing, derive a stable per-session reference path
+    # re-inject the quality reference here (the single scriptable choke point)
+    # or the shipped empty YAML default silently skips the gate. What the
+    # reference holds is the workload's business — an xDiT image, an operator's
+    # own artifact — so the default filename is a convention, not a contract.
+    # When the operator configures nothing, derive a stable reference path
     # under ``session_dir()`` (pinned via
     # ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR``) so baseline + variants
     # resolve the same file:
@@ -1222,28 +1248,33 @@ def materialize_config_with_envs(
     #     variant can never overwrite the baseline reference).
     #   * Profiling / roofline (is_profile): no gate and never write.
     if framework_registry.is_scriptable(bench.get("framework")):
-        _qref = os.environ.get("XDIT_QUALITY_REF", "").strip()
+        _qref = _first_env(_QUALITY_REF_ENVS)
         if not _qref:
             from hyperloom.inference_optimizer.session.paths import session_dir
 
             _qref = str(session_dir() / "storage" / "quality_ref" / "baseline.png")
         if is_profile:
-            envs["XDIT_QUALITY_REF"] = ""
-            envs["XDIT_QUALITY_REF_WRITE"] = ""
+            _ref_compare, _ref_write = "", ""
         elif establish_quality_ref:
-            envs["XDIT_QUALITY_REF"] = ""
-            envs["XDIT_QUALITY_REF_WRITE"] = os.environ.get("XDIT_QUALITY_REF_WRITE", "").strip() or _qref
+            _ref_compare, _ref_write = "", (_first_env(_QUALITY_REF_WRITE_ENVS) or _qref)
         else:
-            envs["XDIT_QUALITY_REF"] = _qref
-            envs["XDIT_QUALITY_REF_WRITE"] = ""
-        # ── Model-arg wiring (scriptable xDiT registry resolution) ────────
+            _ref_compare, _ref_write = _qref, ""
+        for _name in _QUALITY_REF_ENVS:
+            envs[_name] = _ref_compare
+        for _name in _QUALITY_REF_WRITE_ENVS:
+            envs[_name] = _ref_write
+    # ── xDiT-only wiring ───────────────────────────────────────────────────
+    # These three are read by the xDiT runner and by nothing else, so they are
+    # keyed on the framework rather than on scriptability: an operator-supplied
+    # ``custom`` workload must not have its baseline altered by settings it
+    # never declared, least of all an attention backend.
+    if str(bench.get("framework") or "").strip().lower() == "xdit":
         # The xDiT runner resolves models via MODEL_REGISTRY keys, not
         # filesystem paths. XDIT_MODEL_ARG selects the basename ("name",
         # registry-correct) vs the full path ("path", which fails lookup). Force
         # it onto benchmark.envs here so per-task overrides can't break model
         # resolution. Default "name".
         envs["XDIT_MODEL_ARG"] = os.environ.get("XDIT_MODEL_ARG", "").strip() or "name"
-        # ── Global model root for xDiT local-snapshot resolution ──────────
         # If set, the baked hyperloom_local_aliases map each registered name to
         # a local snapshot dir rooted at $XDIT_MODEL_ROOT/<slug>. Leave unset in
         # public/default deployments so the operator chooses the model cache
@@ -1251,7 +1282,6 @@ def materialize_config_with_envs(
         _xdit_model_root = os.environ.get("XDIT_MODEL_ROOT", "").strip()
         if _xdit_model_root:
             envs["XDIT_MODEL_ROOT"] = _xdit_model_root
-        # ── Baseline attention-backend guard (scriptable xDiT) ────────────
         # For the baseline only, force the operator-pinned backend (default
         # 'aiter', the MI300X-verified path) so an invalid agent override cannot
         # poison the reference measurement. Explore/sweep variants keep their
