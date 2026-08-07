@@ -2651,9 +2651,9 @@ class FrameworkPhase(PhaseHandler):
 
         Reuses the ProposalScorer's client when present (same gateway/auth),
         then the orchestration backend's own client (so the LLM ranker is on by
-        default whenever orchestration has LLM credentials); otherwise builds
-        one from the orchestration backend's configured key/URL env (falling
-        back to ``SAFE_API_KEY``/``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``).
+        default whenever orchestration has LLM credentials); otherwise builds one
+        from ``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``. Returns ``None`` when the
+        OpenAI side is unconfigured, which leaves the LLM ranker disabled.
         Cached on first successful build.
         """
         import os
@@ -2683,23 +2683,15 @@ class FrameworkPhase(PhaseHandler):
             from openai import AsyncOpenAI  # type: ignore[import-not-found]
         except ImportError:
             return None
-        # Resolve credentials from the orchestration backend's configured env
-        # names first (so a split-gateway orchestration key is reused), then the
-        # shared gateway defaults.
-        api_key_env = getattr(backend, "api_key_env", "OPENAI_API_KEY")
-        base_url_env = getattr(backend, "base_url_env", "OPENAI_BASE_URL")
-        api_key = (
-            os.environ.get(api_key_env)
-            or os.environ.get("SAFE_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
-        )
+        # This client speaks the OpenAI protocol, so it authenticates from the
+        # OpenAI side only. The orchestration backend's own ``api_key_env`` is not
+        # consulted: the orchestration role is Claude, so it names the Anthropic
+        # key, which must never reach an OpenAI-protocol endpoint.
+        api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
+            log.debug("FRAMEWORK: LLM ranker disabled (OPENAI_API_KEY not set; ranker needs the OpenAI side)")
             return None
-        base_url = (
-            os.environ.get(base_url_env)
-            or os.environ.get("OPENAI_BASE_URL")
-            or os.environ.get("ANTHROPIC_BASE_URL")
-        )
+        base_url = os.environ.get("OPENAI_BASE_URL")
         kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url.strip()
@@ -3400,6 +3392,9 @@ class FrameworkPhase(PhaseHandler):
             # Source patches require the accuracy gate for KEEP.
             "require_accuracy_for_keep": True,
             "accuracy_baseline": float(getattr(state, "baseline_accuracy", 0.0) or 0.0),
+            # The lane templates from the shipped default config, which
+            # materializes RUN_EVAL=true and would override the session's choice.
+            "disable_run_eval": bool(getattr(state, "eval_disabled", False)),
         }
         cand_id = self._framework_candidate_key(candidate)
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"

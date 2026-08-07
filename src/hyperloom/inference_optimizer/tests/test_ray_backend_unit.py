@@ -72,7 +72,6 @@ def test_merge_worker_env_preserves_ray_visible_devices(monkeypatch: pytest.Monk
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "2,3")
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "2,3")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,3")
-    monkeypatch.setenv("SAFE_API_KEY", "must-not-reach-benchmark")
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
     merged = rb._merge_worker_env(
         {
@@ -86,7 +85,6 @@ def test_merge_worker_env_preserves_ray_visible_devices(monkeypatch: pytest.Monk
     assert merged["HIP_VISIBLE_DEVICES"] == "2,3"
     assert merged["CUDA_VISIBLE_DEVICES"] == "2,3"
     assert merged["MY_FLAG"] == "1"
-    assert "SAFE_API_KEY" not in merged
     assert "OPENAI_API_KEY" not in merged
 
 
@@ -1063,7 +1061,6 @@ def test_serving_actor_scrubs_benchmark_credentials_when_requested(monkeypatch: 
     monkeypatch.setitem(sys.modules, "ray", _PassthroughRay())
     monkeypatch.setattr(rs, "ManagedServerProcess", _CaptureEnvProcess)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "2")
-    monkeypatch.setenv("SAFE_API_KEY", "must-not-reach-benchmark")
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
 
     actor = rs._serving_actor_body()()
@@ -1075,7 +1072,6 @@ def test_serving_actor_scrubs_benchmark_credentials_when_requested(monkeypatch: 
 
     assert captured_env["ROCR_VISIBLE_DEVICES"] == "2"
     assert captured_env["WORKLOAD_FLAG"] == "1"
-    assert "SAFE_API_KEY" not in captured_env
     assert "OPENAI_API_KEY" not in captured_env
 
 

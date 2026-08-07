@@ -24,7 +24,7 @@ side_effects:
   - reads_server
   - writes_results
 preferred_backend: claude
-preferred_model: claude-opus-4-7
+preferred_model: claude-opus-5
 max_turns: 30
 lease_ttl_sec: 7200
 description: "Apply a batch of N candidate variants serially; KEEP/REVERT each, stack onto optimization_stack. Per-KEEP stack rebench inlined (replaces backends/params/validate_stack)."

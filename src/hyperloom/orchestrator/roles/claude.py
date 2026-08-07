@@ -181,7 +181,7 @@ class ClaudeBackend:
     """Production Claude backend. Implements :class:`Backend`.
 
     Args:
-        model: Claude model id (e.g. ``"claude-opus-4-7"``); defaults to
+        model: Claude model id (e.g. ``"claude-opus-5"``); defaults to
             ``ANTHROPIC_MODEL`` env or library default.
         api_key_env: env var checked at construction (``ANTHROPIC_API_KEY``
             by default). Missing key is recorded as a soft warning — SDK

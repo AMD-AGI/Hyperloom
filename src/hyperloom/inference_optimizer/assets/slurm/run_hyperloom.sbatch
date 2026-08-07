@@ -58,7 +58,6 @@ fi
 if [ "${HL_PROXY_ENABLED:-0}" = "1" ]; then
   : "${OPENAI_BASE_URL:?proxy enabled but OPENAI_BASE_URL unset}"
   : "${OPENAI_API_KEY:?proxy enabled but OPENAI_API_KEY unset}"
-  export SAFE_API_KEY="${SAFE_API_KEY:-$OPENAI_API_KEY}"
   if [ -n "${HL_CA_BUNDLE_HOST:-}" ] && [ -f "$HL_CA_BUNDLE_HOST" ]; then
     PROXY_MOUNTS=",${HL_CA_BUNDLE_HOST}:${HL_CA_BUNDLE_CONTAINER}:ro"
     export REQUESTS_CA_BUNDLE="$HL_CA_BUNDLE_CONTAINER"
@@ -66,7 +65,7 @@ if [ "${HL_PROXY_ENABLED:-0}" = "1" ]; then
   fi
 fi
 # Hard requirements regardless of proxy toggle.
-: "${SAFE_API_KEY:?export SAFE_API_KEY (or set it in proxy.env)}"
+: "${OPENAI_API_KEY:?export OPENAI_API_KEY (or set it in proxy.env)}"
 : "${OPENAI_BASE_URL:?export OPENAI_BASE_URL (or set it in proxy.env)}"
 export HF_TOKEN="${HF_TOKEN:-}"
 
@@ -107,7 +106,7 @@ case "$RUNTIME" in
     # Private registry image needs `docker login <registry>` first (or a
     # locally-cached image, in which case no login/pull is needed).
     DOCKER_ENV=()
-    for v in CLAW_SESSION_ID USER_DATA_PATH HL_SHARED_MOUNT SAFE_API_KEY \
+    for v in CLAW_SESSION_ID USER_DATA_PATH HL_SHARED_MOUNT \
              OPENAI_BASE_URL OPENAI_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
              REQUESTS_CA_BUNDLE SSL_CERT_FILE HF_TOKEN HYPERLOOM_SOURCE_DIR \
              HYPERLOOM_SOURCE_REPO HYPERLOOM_SOURCE_REF \

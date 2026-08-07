@@ -467,6 +467,360 @@ def test_materialize_profile_window_vllm_skill_formula_explicit_R(
     assert envs["RANDOM_RANGE_RATIO"] == 0.5
 
 
+def test_materialize_profile_bounds_survive_a_replacing_candidate(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """A candidate with args_mode="replace" must not strip the profiler bounds.
+
+    Once ``current_best`` carries ``args_mode="replace"``, the candidate's flag
+    string overwrote EXTRA_VLLM_ARGS wholesale and took the injected
+    ``max_iterations`` with it. vLLM reads a missing ``max_iterations`` as
+    "profile until stop_profile", which grew host RAM at ~60 MiB/s until the
+    cgroup OOM-killer took the engine process out mid-roofline.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(
+        tmp_path,
+        "vllm",
+        {
+            "CONC": 32,
+            "ISL": 256,
+            "OSL": 1024,
+            "EXTRA_VLLM_ARGS": "--profiler-config.ignore_frontend True",
+        },
+    )
+    caplog.set_level("WARNING")
+    # Verbatim from the gemma-4-26B-A4B roofline that was OOM-killed, JSON flag
+    # included -- the restore has to survive a string the arg merger refuses to
+    # tokenize.
+    candidate = '--no-enable-prefix-caching --compilation-config {"cudagraph_capture_sizes":[17,34,1088]}'
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_server_args=candidate,
+        args_mode="replace",
+    )
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.delay_iterations 6080" in extra, extra
+    assert "--profiler-config.max_iterations 128" in extra, extra
+    # The frontend profiler tracks no iterations, so it has to come back too.
+    assert "--profiler-config.ignore_frontend True" in extra, extra
+    assert "--profiler-config.capture_torch_profiler_dir " in extra, extra
+    # The candidate's own flags must still take effect, JSON value unmangled.
+    assert "--no-enable-prefix-caching" in extra, extra
+    assert '--compilation-config {"cudagraph_capture_sizes":[17,34,1088]}' in extra, extra
+    assert "lost torch-profiler flags" in caplog.text
+
+
+def test_materialize_profile_bounds_survive_an_extra_envs_override(
+    tmp_path,
+    monkeypatch,
+):
+    """``extra_envs`` is applied last and unconditionally, so an EXTRA_VLLM_ARGS entry there is the other way the bounds can vanish."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_envs={"EXTRA_VLLM_ARGS": "--quantization fp8"},
+    )
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.delay_iterations 6080" in extra, extra
+    assert "--profiler-config.max_iterations 128" in extra, extra
+    assert "--quantization fp8" in extra, extra
+
+
+def test_materialize_profile_states_ignore_frontend_exactly_once(
+    tmp_path,
+    monkeypatch,
+):
+    """The bounds imply ignore_frontend, but the YAML usually already sets it and vLLM warns on duplicate keys."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=False)
+    src = _profile_yaml(
+        tmp_path,
+        "vllm",
+        {
+            "CONC": 32,
+            "ISL": 256,
+            "OSL": 1024,
+            "EXTRA_VLLM_ARGS": "--profiler-config.ignore_frontend True",
+        },
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert extra.count("--profiler-config.ignore_frontend True") == 1, extra
+
+
+def test_materialize_profile_adds_ignore_frontend_when_yaml_omits_it(
+    tmp_path,
+    monkeypatch,
+):
+    """Bounding only the worker profiler leaves AsyncLLM capturing the whole range, so the flag is injected alongside the bounds."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.ignore_frontend True" in extra, extra
+
+
+def test_materialize_profile_cap_wins_over_a_max_iterations_pinned_in_the_yaml(
+    tmp_path,
+    monkeypatch,
+):
+    """The computed cap has to override a YAML-pinned value, not defer to it.
+
+    The cap is a serialization-safe budget (``HYPERLOOM_PROFILE_MAX_STEPS_CAP`` /
+    steady-floor); a hand-written ``max_iterations 100000`` is unbounded in practice.
+    Injecting unconditionally and letting the repeated flag win last is what enforces
+    that -- skipping injection because the name is already present hands the run the
+    YAML value and silently discards the budget. ``HYPERLOOM_PROFILE_MAX_ITERS`` is
+    the operator override channel, not the YAML.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=False)
+    src = _profile_yaml(
+        tmp_path,
+        "vllm",
+        {
+            "CONC": 32,
+            "ISL": 256,
+            "OSL": 1024,
+            "EXTRA_VLLM_ARGS": "--profiler-config.max_iterations 100000",
+        },
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.max_iterations 128" in extra, extra
+    # Last occurrence wins in vLLM's argparse, so the injected cap must come after.
+    assert extra.rindex("max_iterations 128") > extra.rindex("max_iterations 100000"), extra
+
+
+def test_materialize_profile_capture_dir_wins_over_a_stale_yaml_path(
+    tmp_path,
+    monkeypatch,
+):
+    """A stale capture dir left in the YAML would send this run's traces to the
+    previous session's directory, so this run's dir has to be injected after it."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(
+        tmp_path,
+        "vllm",
+        {
+            "CONC": 32,
+            "ISL": 256,
+            "OSL": 1024,
+            "EXTRA_VLLM_ARGS": "--profiler-config.capture_torch_profiler_dir /stale/run",
+        },
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "capture_traces" in extra, extra
+    assert extra.rindex("capture_traces") > extra.rindex("/stale/run"), extra
+
+
+def test_materialize_profile_restore_rejects_a_zero_max_iterations(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """``max_iterations 0`` is vLLM's own spelling of "no limit".
+
+    Matching the flag by name alone accepted it, so the guard logged that it had made
+    the profiler bounded while the run stayed unbounded -- worse than not guarding,
+    because the warning sends the next investigation the wrong way.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    caplog.set_level("WARNING")
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_server_args="--profiler-config.max_iterations 0",
+        args_mode="replace",
+    )
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.max_iterations 128" in extra, extra
+    assert extra.rindex("max_iterations 128") > extra.rindex("max_iterations 0"), extra
+    assert "lost torch-profiler flags" in caplog.text
+
+
+def test_materialize_profile_restore_rejects_a_max_iterations_above_the_cap(
+    tmp_path,
+    monkeypatch,
+):
+    """Above the serialization-safe cap is unbounded in every way that matters."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_server_args="--profiler-config.max_iterations 100000",
+        args_mode="replace",
+    )
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert extra.rindex("max_iterations 128") > extra.rindex("max_iterations 100000"), extra
+
+
+def test_materialize_profile_restore_rejects_ignore_frontend_false(
+    tmp_path,
+    monkeypatch,
+):
+    """A frontend profiler left on tracks no iterations and captures the whole range;
+    that is how an API-server process became an OOM victim."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_server_args="--profiler-config.ignore_frontend False",
+        args_mode="replace",
+    )
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.ignore_frontend True" in extra, extra
+    assert extra.rindex("ignore_frontend True") > extra.rindex("ignore_frontend False"), extra
+
+
+def test_materialize_profile_restore_accepts_a_bound_that_already_holds(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """A candidate carrying a valid in-cap bound is left alone and logs nothing."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    caplog.set_level("WARNING")
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_envs={
+            "EXTRA_VLLM_ARGS": (
+                "--profiler-config.delay_iterations 6080 "
+                "--profiler-config.max_iterations 64 "
+                "--profiler-config.ignore_frontend True "
+                "--profiler-config.capture_torch_profiler_dir /x "
+                "--profiler-config.detailed_trace_annotation True"
+            ),
+        },
+    )
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert extra.count("--profiler-config.max_iterations") == 1, extra
+    assert "--profiler-config.max_iterations 64" in extra, extra
+    assert "lost torch-profiler flags" not in caplog.text
+
+
+def test_materialize_profile_bounds_outlive_remove_args(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """``remove_args`` runs after the merges, so the re-assertion has to be the last write.
+
+    The two arrive together in practice: ``args_mode="replace"`` exists precisely
+    because the KEEP carried ``remove_args`` (profile.py copies both off
+    ``base_*``), so a restore that lands before ``remove_server_args`` can be
+    undone by it -- while still logging that it restored the bounds.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    caplog.set_level("WARNING")
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_server_args="--no-enable-prefix-caching",
+        args_mode="replace",
+        remove_args=["--profiler-config.max_iterations"],
+    )
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.max_iterations 128" in extra, extra
+    assert "lost torch-profiler flags" in caplog.text
+
+
+def test_materialize_profile_restores_max_iterations_even_when_delay_survives(
+    tmp_path,
+    monkeypatch,
+):
+    """``delay_iterations`` is a bad sentinel: it is ``max_iterations`` that bounds the capture.
+
+    A candidate that happens to carry a delay flag used to satisfy the guard and
+    leave the run with no cap at all -- exactly the unbounded profiler this is
+    meant to prevent.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_server_args="--profiler-config.delay_iterations 0",
+        args_mode="replace",
+    )
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.max_iterations 128" in extra, extra
+    assert "--profiler-config.ignore_frontend True" in extra, extra
+    assert "--profiler-config.capture_torch_profiler_dir " in extra, extra
+    # The candidate's own delay value is left alone; only the missing flags return.
+    assert extra.count("--profiler-config.delay_iterations") == 1, extra
+
+
+def test_materialize_profile_restore_does_not_duplicate_surviving_flags(
+    tmp_path,
+    monkeypatch,
+):
+    """The restore re-states only what is missing; vLLM warns on duplicate keys."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_envs={
+            "EXTRA_VLLM_ARGS": "--profiler-config.ignore_frontend True --quantization fp8",
+        },
+    )
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert extra.count("--profiler-config.ignore_frontend True") == 1, extra
+    assert "--profiler-config.max_iterations 128" in extra, extra
+    assert "--quantization fp8" in extra, extra
+
+
 def test_materialize_profile_window_sglang_skill_formula(
     tmp_path,
     monkeypatch,
@@ -2240,7 +2594,7 @@ benchmark:
     EXTRA_SGLANG_ARGS: "--kv-cache-dtype fp8 --page-size 16"
     SGLANG_USE_TRITON: "1"
     ROCR_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
-    SAFE_API_KEY: "should-not-leak"
+    OPENAI_API_KEY: "should-not-leak"
 """,
         encoding="utf-8",
     )
@@ -2289,7 +2643,7 @@ benchmark:
     assert res["hot_kernels"][0]["env_vars"]["SGLANG_USE_TRITON"] == "1"
     assert enriched["env_vars"]["TP"] == "8"
     assert enriched["env_vars"]["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
-    assert "SAFE_API_KEY" not in enriched["env_vars"]
+    assert "OPENAI_API_KEY" not in enriched["env_vars"]
     assert enriched["runtime_args"]["framework"] == "sglang"
     assert enriched["runtime_args"]["server_args"] == "--kv-cache-dtype fp8 --page-size 16"
     assert enriched["runtime_args"]["workload"] == {

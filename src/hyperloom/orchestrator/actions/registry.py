@@ -154,7 +154,7 @@ class ActionMetadata:
     allowed_tools: tuple[str, ...] = ()
     side_effects: tuple[str, ...] = ()
     preferred_backend: str = "claude"
-    preferred_model: str = "claude-opus-4-7"
+    preferred_model: str = "claude-opus-5"
     max_turns: int = 30
     lease_ttl_sec: int = 1800
     applicable_when: tuple[str, ...] = ()
@@ -242,7 +242,7 @@ class ActionMetadata:
             allowed_tools=tuple(data.get("allowed_tools") or ()),
             side_effects=tuple(data.get("side_effects") or ()),
             preferred_backend=backend,
-            preferred_model=str(data.get("preferred_model", "claude-opus-4-7")),
+            preferred_model=str(data.get("preferred_model", "claude-opus-5")),
             max_turns=int(data.get("max_turns", 30)),
             lease_ttl_sec=int(data.get("lease_ttl_sec", 1800)),
             applicable_when=tuple(data.get("applicable_when") or ()),

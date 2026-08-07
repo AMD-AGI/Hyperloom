@@ -3,7 +3,8 @@
 
 """CLI entry — ``optimize`` subcommand wiring Claude+Codex backends, executors, objective, and Coordinator.run().
 
-Env vars consumed: MODEL_PATH, OPENAI_BASE_URL + SAFE_API_KEY, ROCR_VISIBLE_DEVICES,
+Env vars consumed: MODEL_PATH, OPENAI_BASE_URL / ANTHROPIC_BASE_URL +
+OPENAI_API_KEY / ANTHROPIC_API_KEY, ROCR_VISIBLE_DEVICES,
 CLAUDE_MODEL, CODEX_MODEL, USER_DATA_PATH.
 """
 
@@ -58,9 +59,8 @@ from .bootstrap import (
 from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
 
 from .credentials import (
-    _CLAUDE_PREFERRED_MODEL as _CLAUDE_PREFERRED_MODEL,
-    _CLAUDE_FALLBACK_MODEL as _CLAUDE_FALLBACK_MODEL,
     _CLAUDE_ALLOWED_MODELS as _CLAUDE_ALLOWED_MODELS,
+    _CODEX_FALLBACK_MODELS as _CODEX_FALLBACK_MODELS,
     _CATALOG_RETRY_DELAYS_SEC as _CATALOG_RETRY_DELAYS_SEC,
     _CRITIC_AGENT_ROOT_ENV as _CRITIC_AGENT_ROOT_ENV,
     _ROBUSTNESS_AGENT_ROOT_ENV as _ROBUSTNESS_AGENT_ROOT_ENV,
@@ -665,7 +665,9 @@ def _validate_and_resolve_claude_model(
 ) -> set[str] | None:
     """Gate Claude model selection against the gateway catalog; mutates ``args.claude_model``.
 
-    Probes the gateway catalog (retries); falls back to a known-good model with a WARN, else sys.exit(2). Returns the
+    Probes the gateway catalog (retries); on a miss it walks
+    ``_CLAUDE_ALLOWED_MODELS`` in order and falls back to the first id the
+    gateway serves with a WARN, else sys.exit(2). Returns the
     catalog id set on success (reused by the codex smoke-test). The AMD
     ``_CLAUDE_ALLOWED_MODELS`` allowlist is enforced only when the operator sets
     ``INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL`` to 0/false/no/off (and is
@@ -696,9 +698,8 @@ def _validate_and_resolve_claude_model(
     if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "
-            f"Orchestration model must be one of {list(_CLAUDE_ALLOWED_MODELS)} "
-            f"(preferred: {_CLAUDE_PREFERRED_MODEL}, "
-            f"fallback: {_CLAUDE_FALLBACK_MODEL}). Refusing to start. "
+            f"Orchestration model must be one of "
+            f"{list(_CLAUDE_ALLOWED_MODELS)} (best first). Refusing to start. "
             f"For a non-AMD gateway, set "
             f"INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1 to use a custom "
             f"orchestration model validated against your gateway catalog.",
@@ -725,7 +726,6 @@ def _validate_and_resolve_claude_model(
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
             or os.environ.get("DEEPSEEK_API_KEY", "")
-            or os.environ.get("SAFE_API_KEY", "")
             or os.environ.get("OPENAI_API_KEY", "")
         )
         catalog_ids = _probe_llm_catalog(base_url=override_url, api_key=api_key)
@@ -740,13 +740,9 @@ def _validate_and_resolve_claude_model(
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
             or os.environ.get("DEEPSEEK_API_KEY", "")
-            or os.environ.get("SAFE_API_KEY", "")
         )
-        openai_key = (
-            os.environ.get("OPENAI_API_KEY", "")
-            or os.environ.get("SAFE_API_KEY", "")
-            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-        )
+        # OpenAI-side key only.
+        openai_key = os.environ.get("OPENAI_API_KEY", "")
         # The Claude catalog must come from the Anthropic side. Fall back to the
         # OpenAI side only for a single-gateway deploy where both sides resolve
         # to the same endpoint.
@@ -815,10 +811,18 @@ def _validate_and_resolve_claude_model(
         )
         sys.exit(2)
 
-    if _CLAUDE_FALLBACK_MODEL in catalog_ids:
-        print(f"Preflight: WARNING — {chosen!r} not in gateway catalog; falling back to {_CLAUDE_FALLBACK_MODEL!r}")
-        args.claude_model = _CLAUDE_FALLBACK_MODEL
-        return catalog_ids
+    # Walk the allowlist in order so it acts as a real preference ladder: a
+    # gateway that carries opus-4-8 but not the newer default must land on 4-8,
+    # not skip two generations down to the last entry.
+    # Allowlist ids are already in the probe's normalized form, so a plain
+    # membership test is enough here.
+    for candidate in _CLAUDE_ALLOWED_MODELS:
+        if candidate == chosen:
+            continue
+        if candidate in catalog_ids:
+            print(f"Preflight: WARNING — {chosen!r} not in gateway catalog; falling back to {candidate!r}")
+            args.claude_model = candidate
+            return catalog_ids
 
     print(
         f"ERROR: none of the allowed Claude models {list(_CLAUDE_ALLOWED_MODELS)!r} "
@@ -830,39 +834,96 @@ def _validate_and_resolve_claude_model(
     raise SystemExit(2)
 
 
+def _resolve_models_for_run(
+    args: argparse.Namespace,
+    resolved_urls: tuple[str, str] | None,
+    *,
+    claude_follows_codex: bool | None = None,
+    codex_follows_claude: bool | None = None,
+) -> None:
+    """Resolve both model ids against the gateway before any session work.
+
+    Order matters in the single-provider deploys. When the Codex model also
+    becomes the orchestration model, its ladder has to run *first*: otherwise
+    the Claude gate sees an id derived from a Codex default the gateway may not
+    serve, and aborts on a model the operator never chose.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI namespace; both ``claude_model``
+            and ``codex_model`` may be rewritten.
+        resolved_urls (tuple[str, str] | None): ``(anthropic_url, openai_url)``
+            from preflight.
+        claude_follows_codex (bool | None): Whether the orchestration model is
+            derived from ``codex_model`` (OpenAI-only deploy). Callers pass the
+            value captured before ``_preflight`` filled in missing endpoints;
+            ``None`` re-derives it from the environment.
+        codex_follows_claude (bool | None): The Anthropic-only mirror image.
+
+    Raises:
+        SystemExit: With code 2 when the Claude gate rejects the model.
+    """
+    if claude_follows_codex is None:
+        claude_follows_codex = _claude_model_should_follow_codex()
+    if codex_follows_claude is None:
+        codex_follows_claude = _codex_model_should_follow_claude()
+
+    if claude_follows_codex:
+        # codex_model is about to become the orchestration model, so it needs
+        # the ladder whatever the critic backend is.
+        _smoke_test_codex_model(args, resolved_urls, required=True)
+        args.claude_model = args.codex_model
+
+    # Hard-gate the Claude model (mutates args.claude_model on fallback; sys.exit(2) on failure).
+    _validate_and_resolve_claude_model(args, resolved_urls)
+
+    if codex_follows_claude:
+        args.codex_model = args.claude_model
+    elif not claude_follows_codex:
+        # Codex smoke probes the OpenAI side independently (split entrypoints).
+        _smoke_test_codex_model(args, resolved_urls)
+
+
 def _smoke_test_codex_model(
     args: argparse.Namespace,
     resolved_urls: tuple[str, str] | None,
+    *,
+    required: bool = False,
 ) -> None:
-    """WARN-only catalog check for ``--codex-model`` (no hard gate); flags typos before Coordinator starts.
+    """WARN-only catalog check for ``--codex-model``; flags typos and steps down the ladder before Coordinator starts.
 
     Probes the OpenAI-side catalog independently of the Claude check: in a
     split-entrypoint deploy the Claude catalog lives on the Anthropic gateway
     and would not list ``gpt-*``, so reusing it would always false-warn.
 
+    Unlike the Claude gate this never aborts, but it mirrors its ladder: a
+    ``_CODEX_FALLBACK_MODELS`` id the gateway does not serve is rewritten to the
+    newest one it does, so a gateway lagging behind the default degrades at
+    preflight instead of on the first Codex turn. Ids outside that tuple are the
+    operator's own choice and are only reported.
+
     Args:
         args (argparse.Namespace): The parsed CLI namespace (reads
-            ``codex_model`` / ``critic_backend``).
+            ``codex_model`` / ``critic_backend``); ``codex_model`` may be
+            mutated to a fallback.
         resolved_urls (tuple[str, str] | None): ``(anthropic_url, openai_url)``
             from preflight; the OpenAI side is probed for the Codex catalog.
+        required (bool): Check even when no critic-agent will run. Set on the
+            OpenAI-only path, where ``codex_model`` also drives orchestration
+            and so matters regardless of the critic backend.
     """
-    if _codex_model_should_follow_claude():
-        return
-    critic_uses_codex = args.critic_backend == "agent"
-    needs_codex = critic_uses_codex
-    if not needs_codex:
-        return
+    if not required:
+        if _codex_model_should_follow_claude():
+            return
+        if args.critic_backend != "agent":
+            return
 
     openai_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
     if not openai_url:
         openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     if not openai_url and resolved_urls is not None:
         openai_url = resolved_urls[1]
-    openai_key = (
-        os.environ.get("OPENAI_API_KEY", "")
-        or os.environ.get("SAFE_API_KEY", "")
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-    )
+    # OpenAI-side key only.
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
     catalog_ids = _probe_llm_catalog(base_url=openai_url, api_key=openai_key)
     if catalog_ids is None:
         # WARN-only path: don't block startup just because the OpenAI catalog
@@ -877,11 +938,25 @@ def _smoke_test_codex_model(
     if chosen in catalog_ids:
         print(f"Preflight: Codex model {chosen!r} confirmed in gateway catalog")
         return
+
+    if chosen in _CODEX_FALLBACK_MODELS:
+        for candidate in _CODEX_FALLBACK_MODELS:
+            if candidate == chosen:
+                continue
+            if candidate in catalog_ids:
+                print(
+                    f"Preflight: WARNING — codex model {chosen!r} not in gateway "
+                    f"catalog; falling back to {candidate!r}"
+                )
+                args.codex_model = candidate
+                return
+
     print(
         f"Preflight: WARNING — codex model {chosen!r} not in gateway catalog "
         f"({sorted(m for m in catalog_ids if m.startswith('gpt-'))}); "
         f"CodexBackend will fail at first turn. Pass --codex-model with a "
-        f"value in the catalog or use --critic-mock to "
+        f"value in the catalog (known-good ids, newest first: "
+        f"{list(_CODEX_FALLBACK_MODELS)}) or use --critic-mock to "
         f"avoid the Codex path entirely."
     )
 
@@ -1084,6 +1159,22 @@ def _resume_can_disable_explore(cur_phase: str) -> bool:
         entered), so the flag can be honoured retroactively.
     """
     return (cur_phase or "").strip().upper() in _PRE_EXPLORE_PHASES
+
+
+def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
+    """Whether ``--no-eval`` may still disable the accuracy eval for a resumed session.
+
+    The cutoff is the anchored accuracy rather than a phase: the baseline runs
+    inside PRELUDE, so the phase alone cannot say whether a reference exists.
+    Once it does, every KEEP so far was graded against it.
+
+    Args:
+        baseline_accuracy (float): The persisted ``state.baseline_accuracy``.
+
+    Returns:
+        bool: ``True`` while no accuracy is anchored yet.
+    """
+    return float(baseline_accuracy or 0.0) <= 0.0
 
 
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
@@ -1400,14 +1491,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     codex_follows_claude = _codex_model_should_follow_claude()
     resolved_urls = _preflight(args)
 
-    # Hard-gate Claude model before any session work (mutates args.claude_model on fallback; sys.exit(2) on failure).
-    if claude_follows_codex:
-        args.claude_model = args.codex_model
-    _validate_and_resolve_claude_model(args, resolved_urls)
-    if codex_follows_claude:
-        args.codex_model = args.claude_model
-    # Codex smoke probes the OpenAI side independently (split entrypoints).
-    _smoke_test_codex_model(args, resolved_urls)
+    _resolve_models_for_run(
+        args,
+        resolved_urls,
+        claude_follows_codex=claude_follows_codex,
+        codex_follows_claude=codex_follows_claude,
+    )
 
     # `--resume-from <path>` implies `--resume` (operator convenience).
     if args.resume_from and not args.resume:
@@ -1584,6 +1673,22 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     f"  explore phase         : WARN --no-explore ignored; "
                     f"session is already in phase={cur_phase!r} "
                     f"(cannot retroactively skip)"
+                )
+        # Same persistence contract for the eval toggle.
+        if state.eval_disabled:
+            args.no_eval = True
+            print("  accuracy eval         : DISABLED (persisted from original run)")
+        elif bool(getattr(args, "no_eval", False)):
+            anchored = float(state.baseline_accuracy or 0.0)
+            if _resume_can_disable_eval(anchored):
+                state.eval_disabled = True
+                state.save(session_dir)
+                print("  accuracy eval         : DISABLING for resume (--no-eval + no anchored accuracy)")
+            else:
+                print(
+                    f"  accuracy eval         : WARN --no-eval ignored; "
+                    f"session already anchored accuracy={anchored:.4f} "
+                    f"(cannot retroactively ungrade prior KEEPs)"
                 )
 
         # CRITICAL: clear leftover stop_reason or Orchestration heartbeats forever thinking work is done.

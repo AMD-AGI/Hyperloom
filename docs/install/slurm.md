@@ -209,13 +209,15 @@ optimization. Model names must exist in your key's catalog:
 
 | Use | Environment variable | Allowed values | Notes |
 |---|---|---|---|
-| Orchestration | `CLAUDE_MODEL` / `CURSOR_DEFAULT_MODEL` / `LLM_MODEL` | Any model in the gateway catalog; `claude-opus-4-8` preferred, with `claude-opus-4-7` / `claude-opus-4-6` as the AMD allowlist fallbacks | Validated against your gateway's `/models` catalog. |
-| GEAK (kernel optimization subprocess) | `GEAK_CLAUDE_MODEL` | for example `claude-opus-4-8` | Defaults from `CLAUDE_MODEL`; set explicitly only when GEAK should use a different model. |
-| Codex / external | `CODEX_MODEL` | for example `gpt-5.4` | Use a gpt/codex-family model. |
+| Orchestration | `CLAUDE_MODEL` / `CURSOR_DEFAULT_MODEL` / `LLM_MODEL` | Any model in the gateway catalog; `claude-opus-5` preferred, with `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6` as the AMD allowlist fallbacks | Validated against your gateway's `/models` catalog. |
+| GEAK (kernel optimization subprocess) | `GEAK_CLAUDE_MODEL` | for example `claude-opus-5` | Defaults from `CLAUDE_MODEL`; set explicitly only when GEAK should use a different model. |
+| Codex / external | `CODEX_MODEL` | Any model in the gateway catalog; `gpt-5.6-sol` preferred, with `gpt-5.5` / `gpt-5.4` as fallbacks | WARN-only: preflight steps down that ladder when the gateway lacks the chosen id, but never aborts. |
 
-- Do *not* use suffixed variants (for example `claude-opus-4-7-thinking-xhigh`);
-  the gateway returns `Invalid model name` (which can surface misleadingly as
-  `401 missing subscription key`).
+- Do *not* append effort/thinking suffixes (for example
+  `claude-opus-4-7-thinking-xhigh`); the gateway returns `Invalid model name`
+  (which can surface misleadingly as `401 missing subscription key`). Ids the
+  catalog lists verbatim are fine even when they look suffixed — `gpt-5.6-sol`
+  is a deployment name, not a variant of a bare `gpt-5.6`.
 - To restore the stricter AMD Claude allowlist instead of catalog validation,
   set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`.
 - These variables are set in `proxy.env` and are on the docker `-e` allowlist in
@@ -247,7 +249,7 @@ The following items address common Slurm job and cluster configuration problems.
 - `CERTIFICATE_VERIFY_FAILED: unable to get local issuer` (huggingface/github): the CA bundle has only the internal cert. Use a combined CA bundle.
 - `ModuleNotFoundError: No module named '...cli'`: the source snapshot is incomplete or an old layout. Stage a complete src-layout checkout (`src/hyperloom/...`).
 - `--gpu-type: invalid choice: 'MI355X'`: the CLI is case-sensitive. Use lowercase (for example `mi355x`; `submit-vultr.sh` already does).
-- `--claude-model=... is not allowed`: the strict AMD allowlist is in force (`INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`). Use `claude-opus-4-8` for orchestration, or unset the variable to validate against the gateway catalog instead.
+- `--claude-model=... is not allowed`: the strict AMD allowlist is in force (`INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`). Use `claude-opus-5` for orchestration, or unset the variable to validate against the gateway catalog instead.
 - `Invalid model name` / `401 missing subscription key`: the model name is not in the key catalog (often a suffixed variant). Use a name from `curl $OPENAI_BASE_URL/models`.
 - Server fails to start / OOM in shm: `/dev/shm` is too small. Raise `HL_SHM_SIZE` (default `64g`).
 - DNS failure / connection timeout to the gateway: the host alias was not applied. The docker path uses `--add-host`; confirm the node can reach the jump host on `:443`.
