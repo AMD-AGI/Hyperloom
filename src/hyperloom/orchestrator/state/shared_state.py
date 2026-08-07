@@ -614,10 +614,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     framework_consecutive_empty_discoveries: int = 0
     # Per-repo candidate cap for ``fa phase-discover``; 0 => DEFAULT_FRAMEWORK_MAX_CANDIDATES.
     framework_max_candidates: int = 0
-    # FRAMEWORK Critic-gate decisions; cache lets resume avoid re-calling the Critic.
-    framework_agent_critic_decisions: list[dict[str, Any]] = field(
-        default_factory=list,
-    )
     # Default True: FRAMEWORK pump dispatches a write-capable serving_specialist per candidate alongside diff-only track. False restores diff-only.
     framework_agent_authoring_enabled: bool = True
     # Default True: when PR discovery is empty/exhausted (or the ranker prefers

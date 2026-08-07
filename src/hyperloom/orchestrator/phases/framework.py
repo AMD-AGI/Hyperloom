@@ -162,6 +162,12 @@ def _maybe_build_localization_candidate(
         return None
 
 
+#: Progress-row status for a candidate the Critic rejected. The gate writes it
+#: and the working-memory and priors readers select on it, so the ledger is the
+#: only record of a denial and the three sites agree by construction.
+FRAMEWORK_CRITIC_DENIED_STATUS: str = "critic_denied"
+
+
 class FrameworkPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
@@ -2752,8 +2758,9 @@ class FrameworkPhase(PhaseHandler):
         learned", so discovery and the candidate ranker can be biased away from
         repeating failed candidates. No new data source — it aggregates
         ``framework_agent_phase_progress`` (terminal rows, reliably populated
-        after the P0 fix), ``framework_agent_critic_decisions`` (recent Critic
-        verdicts) and the batch dedup set.
+        after the P0 fix) and the batch dedup set. Critic denials are part of
+        that ledger: the gate stamps them as ``critic_denied`` rows carrying
+        the rationale.
 
         Returns:
             A dict with:
@@ -2782,14 +2789,15 @@ class FrameworkPhase(PhaseHandler):
                 }
             )
         # Learnings: distinct Critic denial rationales (negative priors), capped.
+        # Read from the progress ledger, the only place a denial is recorded:
+        # ``_record_framework_agent_critic_denied`` stamps a ``critic_denied``
+        # row carrying the Critic's reasoning.
         learnings: list[str] = []
         seen_learn: set[str] = set()
-        for dec in getattr(state, "framework_agent_critic_decisions", None) or []:
-            if not isinstance(dec, dict):
+        for row in rows:
+            if str(row.get("status") or "").strip().lower() != FRAMEWORK_CRITIC_DENIED_STATUS:
                 continue
-            if str(dec.get("verdict") or "").strip().lower() not in ("reject", "critic_denied", "deny"):
-                continue
-            rationale = str(dec.get("rationale") or "").strip()
+            rationale = str(row.get("rationale") or "").strip()
             if rationale and rationale not in seen_learn:
                 seen_learn.add(rationale)
                 learnings.append(rationale[:200])
@@ -3430,33 +3438,22 @@ class FrameworkPhase(PhaseHandler):
             )
 
     def _collect_framework_agent_candidate_priors(self) -> dict[str, Any]:
-        """Return compact session-local priors for the Critic gate (recent_decisions + recent_outcomes); best-effort.
+        """Return compact session-local priors for the Critic gate; best-effort.
+
+        Everything the Critic needs about earlier candidates lives in the
+        progress ledger, denials included, so the outcomes carry the rationale
+        rather than being paired with a separate decision list.
 
         Returns:
-            A dict with ``recent_decisions`` (recent critic verdicts) and
-            ``recent_outcomes`` (recent terminal apply/bench results), each
-            bounded to a short tail.
+            A dict with ``recent_outcomes`` (recent terminal apply/bench
+            results, each with the reason recorded for it), bounded to a short
+            tail.
         """
         state = self.shared_state
-        decisions: list[dict[str, Any]] = []
-        try:
-            raw_decisions = getattr(state, "framework_agent_critic_decisions", None) or []
-            for row in raw_decisions[-self._CRITIC_PRIORS_DECISION_TAIL :]:
-                if not isinstance(row, dict):
-                    continue
-                decisions.append(
-                    {
-                        "candidate_id": str(row.get("candidate_id") or ""),
-                        "verdict": str(row.get("verdict") or ""),
-                        "rationale": str(row.get("rationale") or "")[:200],
-                    }
-                )
-        except Exception:  # noqa: BLE001
-            decisions = []
         outcomes: list[dict[str, Any]] = []
         try:
             raw_progress = getattr(state, "framework_agent_phase_progress", None) or []
-            terminal = {"kept", "reverted", "no_patch", "enqueue_failed", "critic_denied"}
+            terminal = {"kept", "reverted", "no_patch", "enqueue_failed", FRAMEWORK_CRITIC_DENIED_STATUS}
             tail = [r for r in raw_progress if isinstance(r, dict) and str(r.get("status") or "") in terminal]
             for row in tail[-self._CRITIC_PRIORS_OUTCOME_TAIL :]:
                 outcomes.append(
@@ -3464,12 +3461,12 @@ class FrameworkPhase(PhaseHandler):
                         "candidate_id": str(row.get("candidate_id") or ""),
                         "status": str(row.get("status") or ""),
                         "gain_pct": row.get("gain_pct"),
+                        "rationale": str(row.get("rationale") or "")[:200],
                     }
                 )
         except Exception:  # noqa: BLE001
             outcomes = []
         return {
-            "recent_decisions": decisions,
             "recent_outcomes": outcomes,
         }
 
@@ -3792,7 +3789,7 @@ class FrameworkPhase(PhaseHandler):
         self._stamp_framework_progress(
             candidate_id=cand_id,
             batch_id=batch_id,
-            status="critic_denied",
+            status=FRAMEWORK_CRITIC_DENIED_STATUS,
             kept=False,
             rationale=str(reasoning or ""),
             provenance="critic",
