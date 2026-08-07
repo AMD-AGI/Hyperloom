@@ -246,10 +246,11 @@ def test_credentials_validate_and_reset_claude_config(tmp_path: Path, monkeypatc
     credentials._reset_claude_config_to_upstream("ignored", "https://anthropic.example")
 
 
-def test_reset_claude_config_refuses_oauth_token_as_primary_key(
+def test_reset_claude_config_leaves_file_alone_for_oauth_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """primaryApiKey is API-credits billing; the subscription token must not land there."""
+    """primaryApiKey is API-credits billing; with only a subscription token there
+    is no key to write, so the installers' no-op behaviour applies here too."""
     from hyperloom.inference_optimizer.cli import credentials
 
     oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
@@ -257,9 +258,26 @@ def test_reset_claude_config_refuses_oauth_token_as_primary_key(
     monkeypatch.setenv("HOME", str(tmp_path))
     credentials._reset_claude_config_to_upstream("sk-ant-oat01-fake", "https://api.anthropic.com")
 
-    payload = json.loads((tmp_path / ".claude" / "config.json").read_text(encoding="utf-8"))
-    assert payload["primaryApiKey"] == ""
-    assert payload["customApiUrl"] == "https://api.anthropic.com"
+    assert not (tmp_path / ".claude" / "config.json").exists()
+
+
+def test_reset_claude_config_preserves_existing_file_for_oauth_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator's logged-in Claude config survives an oauth-only preflight."""
+    from hyperloom.inference_optimizer.cli import credentials
+
+    oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
+    monkeypatch.setenv(oauth_env, "sk-ant-oat01-fake")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg_path = tmp_path / ".claude" / "config.json"
+    cfg_path.parent.mkdir(parents=True)
+    cfg_path.write_text('{"theme": "light", "oauthAccount": {"emailAddress": "a@b.c"}}\n', encoding="utf-8")
+
+    credentials._reset_claude_config_to_upstream("", "https://api.anthropic.com")
+
+    payload = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert payload == {"theme": "light", "oauthAccount": {"emailAddress": "a@b.c"}}
 
 
 # ---------------------------------------------------------------------------

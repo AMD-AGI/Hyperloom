@@ -271,7 +271,8 @@ def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: s
             leaves any existing key untouched. Callers should pass the
             Anthropic-side key (``ANTHROPIC_API_KEY``) so a split-entrypoint
             deploy authenticates Claude with its own key rather than the shared
-            gateway key. A subscription OAuth token is rejected here.
+            gateway key. A subscription OAuth token is rejected here, and with
+            no other key the file is left untouched.
         anthropic_base_url (str): The upstream gateway URL; blank is a no-op.
     """
     import json as _json
@@ -287,6 +288,11 @@ def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: s
             "~/.claude/config.json primaryApiKey (subscription credential)"
         )
         primary_api_key = ""
+    if oauth_token and not primary_api_key.strip():
+        # Matches the installers: with no API key to write there is nothing this
+        # file can add, so leave the operator's Claude config untouched.
+        print("Preflight: subscription token in use; ~/.claude/config.json left alone")
+        return
     claude_config_path = Path.home() / ".claude" / "config.json"
     config_data: dict = {}
     if claude_config_path.exists():
