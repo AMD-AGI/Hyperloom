@@ -47,6 +47,8 @@ log = logging.getLogger(__name__)
 
 
 CRITIC_AGENT_RUNTIME_TIMEOUT_SEC = 30  # prepare-review / commit-review wall cap
+# OpenAI review path only: the Claude SDK exposes no output-token cap, so the
+# anthropic path relies on the CLI's own default.
 CRITIC_AGENT_MAX_COMPLETION_TOKENS = 2000
 # OpenAI HTTP client timeout defaults for critic review calls.
 CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC = 10.0
@@ -497,7 +499,12 @@ class CriticAgentBackend:
             ) from exc
 
     def _default_claude_backend(self) -> ClaudeBackend:
-        """Single-turn, tool-free Claude executor for review reasoning."""
+        """Single-turn, tool-free Claude executor for review reasoning.
+
+        ``CRITIC_AGENT_LLM_RW_TIMEOUT_S`` is reused for the budget, but the
+        Claude SDK spends it as an idle gap between streamed messages rather
+        than as an HTTP read timeout, so a slow call can outlast it.
+        """
         return ClaudeBackend(
             model=self._review_model,
             raw_completion=True,
@@ -1042,15 +1049,16 @@ class CriticAgentBackend:
         The CLI resolves its own credentials, so this path accepts an API key,
         a gateway bearer token, or a Max/Pro subscription token alike. Token
         counts arrive on the turn metadata and fold into the same trace row as
-        the OpenAI path.
+        the OpenAI path. Unlike that path there is no output-token cap: the SDK
+        takes none, so the CLI's own default applies.
 
         Args:
             system_prompt: The system instruction, or ``None``.
             user_prompt: The judge bundle plus output instructions.
 
         Returns:
-            A tuple of the reply text and the model's stop reason (e.g.
-            ``max_tokens``), keeping truncation visible as on the OpenAI path.
+            A tuple of the reply text and the stop reason when the SDK reports
+            one, else ``None``; it is not guaranteed as on the OpenAI path.
 
         Raises:
             BackendError: If the Claude CLI call fails.
