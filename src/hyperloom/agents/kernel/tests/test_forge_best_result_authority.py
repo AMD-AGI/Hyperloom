@@ -11,6 +11,7 @@ manifest from being trusted.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -251,7 +252,12 @@ def _publish_applyback(
 
     manifest = {
         "schema_version": 2,
+        "artifact_kind": "framework_applyback",
         "validation_scope": "reference",
+        "logical_op_name": "vllm::fused_gemm",
+        "operator_slug": "vllm_fused_gemm",
+        "builder_symbol": "build_fused_gemm_module",
+        "source_entry": "matmul",
         "reference_correctness_passed": True,
         "reference_snr_db": 48.5,
         "integration_validation_required": True,
@@ -259,10 +265,13 @@ def _publish_applyback(
         "base_commit": base_commit,
         "commit_hash": best_commit,
         "commit_ref": _APPLYBACK_REF,
-        "builder_symbol": "build_fused_gemm_module",
+        "flydsl_best_commit": "f" * 40,
         "baseline_wall_ms": 2.0,
         "best_wall_ms": 1.25,
+        "framework": "vllm",
         "changed_files": changed_files,
+        "artifact_dir": "rewrite",
+        "patch_path": "rewrite/forge.patch",
     }
     manifest.update(manifest_overrides or {})
     (artifact_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -306,6 +315,84 @@ def test_canonical_applyback_is_accepted_with_both_documents_agreeing(repo):
     # Paths come back absolute and inside the workspace, ready to act on.
     assert validated["canonical_patch_path"].startswith(str(workspace))
     assert validated["temporary_paths"] == [str(workspace / _ARTIFACT_DIR / "scratch.py")]
+
+
+def test_installed_producer_contract_is_consumed_without_a_local_fixture(repo):
+    """Materialize the real producer documents and pass them through this consumer."""
+    producer_root = forge_submit._ensure_forge_on_path()
+    if not producer_root:
+        pytest.skip("no KernelForge checkout resolvable from $FORGE_PATH")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kernel_agents.cli",
+            "forge-rewrite-by-flydsl",
+            "--applyback-contract-json",
+        ],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PYTHONPATH": (
+                producer_root
+                + os.pathsep
+                + os.environ.get("PYTHONPATH", "")
+            ),
+        },
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    contract = json.loads(proc.stdout)
+    manifest = dict(contract["manifest"])
+    outer = dict(contract["outer_result"])
+
+    workspace, base_commit = repo
+    changed_files = list(manifest["changed_files"])
+    for relative in changed_files:
+        path = workspace / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def example(x):\n    return x\n")
+    _git(workspace, "add", "-A")
+    _git(workspace, "commit", "-qm", "producer contract apply-back")
+    best_commit = _git(workspace, "rev-parse", "HEAD")
+    commit_ref = "refs/forge-rewrite/applyback/contract-example"
+    _git(workspace, "update-ref", commit_ref, best_commit)
+
+    manifest.update(
+        {
+            "base_commit": base_commit,
+            "commit_hash": best_commit,
+            "commit_ref": commit_ref,
+        }
+    )
+    outer["best_commit"] = best_commit
+    campaign = workspace / "forge_experiments"
+    version = campaign / manifest["artifact_dir"]
+    files_root = workspace / outer["canonical_files_root"]
+    files_root.mkdir(parents=True, exist_ok=True)
+    assert files_root == version / "files"
+    for relative in changed_files:
+        destination = files_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text((workspace / relative).read_text())
+    patch_path = workspace / outer["canonical_patch_path"]
+    patch_path.parent.mkdir(parents=True, exist_ok=True)
+    patch_path.write_text(_git(workspace, "diff", f"{base_commit}..{best_commit}") + "\n")
+    manifest_path = workspace / outer["canonical_manifest"]
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    validated = forge_submit._validated_rewrite_applyback_result(
+        outer,
+        workspace=str(workspace),
+        base_commit=base_commit,
+    )
+
+    assert validated is not None
+    assert validated["framework"] == manifest["framework"]
+    assert validated["logical_op_name"] == manifest["logical_op_name"]
+    assert validated["source_entry"] == manifest["source_entry"]
 
 
 def test_applyback_accepts_absolute_canonical_paths_inside_the_workspace(repo):
