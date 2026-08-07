@@ -416,6 +416,17 @@ def _finalize(
         A dict with ``kernel_launches`` (when ``emit_launches``) / ``timeline`` /
         ``ops`` / ``kernels`` / ``attribution`` / ``graph_coverage``.
     """
+    # Graph capture health is a WHOLE-TRACE property (activity-buffer overflow
+    # drops replays across the run), so the recorded-launch coverage must be
+    # computed over the full event stream -- BEFORE any steady-window filter --
+    # to stay scope-consistent with ``graph_launch_count`` (also whole-trace).
+    # Otherwise a window holding one replay of a fully-recorded N-launch trace
+    # would read as 1/N and be misflagged as under-recorded.
+    _graph_corrs_full = graph_launch_corrs or frozenset()
+    graph_launch_corrs_with_kernels: set[int] = {
+        e[2] for e in k_events if e[2] is not None and e[2] in _graph_corrs_full
+    }
+
     ws = we = None
     if window is not None:
         ws, we = window
@@ -478,12 +489,6 @@ def _finalize(
     graph_corrs = graph_launch_corrs or frozenset()
     graph_kernels = 0
     graph_gpu_us = 0.0
-    # Distinct graph-launch correlations that actually recorded >=1 kernel. Under
-    # activity-buffer overflow the profiler drops whole replays, so most launch
-    # correlations record nothing and this count falls far below
-    # graph_launch_count; a genuinely idle (but fully recorded) graph workload
-    # keeps kernels on every launch, so the two counts stay close.
-    graph_launch_corrs_with_kernels: set[int] = set()
     geom = corr_to_launch_geom or {}
     # Name-keyed shape backfill: accumulate GPU time per (kernel, shape) so the
     # majority capture-time shape wins; multiple distinct shapes mark ambiguous.
@@ -502,7 +507,6 @@ def _finalize(
             op_name = "(graph)"
             graph_kernels += 1
             graph_gpu_us += dur
-            graph_launch_corrs_with_kernels.add(corr)
         else:
             op_name = "(unlinked)"
             unlinked_us += dur

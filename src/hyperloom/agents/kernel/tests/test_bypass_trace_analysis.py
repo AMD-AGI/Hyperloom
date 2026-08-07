@@ -940,3 +940,63 @@ def test_fully_recorded_idle_graph_still_suppressed_by_idle_gate(tmp_path, capsy
     assert "high_gpu_idle_pct" in codes
     assert "bypass_graph_under_recorded" not in codes
     assert not result["hot_kernels"]
+
+
+def test_finalize_graph_coverage_is_whole_trace_scoped_under_steady_window():
+    """Regression: recorded-launch coverage must be computed over the FULL event
+    stream, not the steady window. A fully-recorded 4-launch trace whose steady
+    window happens to clip to a single replay must NOT read as 1/4 under-recorded
+    (the denominator graph_launch_count is whole-trace, so the numerator must be
+    too). Guards the steady-state bypass path (xDiT / HYPERLOOM_BYPASS_STEADY_STATE)."""
+    # One recorded kernel per graph launch (coverage 1.0 on the full trace),
+    # spread far apart in time so a narrow window contains only the first replay.
+    k_events = [
+        ("graph_k0", 100.0, 5, 1000.0, 1100.0),
+        ("graph_k1", 100.0, 6, 3_000_000.0, 3_000_100.0),
+        ("graph_k2", 100.0, 7, 6_000_000.0, 6_000_100.0),
+        ("graph_k3", 100.0, 8, 9_000_000.0, 9_000_100.0),
+    ]
+    out = bta._reader._finalize(
+        k_events,
+        [],
+        {},
+        {},
+        {},
+        window=(0.0, 2_000_000.0),  # clips to only the corr-5 replay
+        top_k=0,
+        graph_launch_corrs=frozenset({5, 6, 7, 8}),
+        graph_launch_count=4,
+    )
+    cov = out["graph_coverage"]
+    assert cov["graph_launch_count"] == 4
+    # whole-trace scope: all four launches recorded a kernel, not just the one in
+    # the window -> coverage 1.0 -> NOT under-recorded.
+    assert cov["graph_launches_with_kernels"] == 4
+    assert cov["graph_under_recorded"] is False
+
+
+def _graph_launch_stripped_events():
+    """The graph-under-recorded kernels WITHOUT the hipGraphLaunch runtime events
+    -- i.e. what a steady-state chunk can look like after the splitter drops the
+    launch records. Detection must see this as non-graph (so probing the chunk
+    instead of the raw trace would miss the artifact)."""
+    return [
+        {"cat": "kernel", "ph": "X", "name": "graph_fused_attn", "ts": 1100, "dur": 100, "args": {"correlation": 5}},
+        {"cat": "kernel", "ph": "X", "name": "graph_fused_mlp", "ts": 10_000_000, "dur": 100, "args": {"correlation": 5}},
+    ]
+
+
+def test_graph_launch_events_required_for_detection(tmp_path):
+    # Raw trace (with hipGraphLaunch events) -> detected as graph, under-recorded.
+    raw = tmp_path / "raw.trace.json"
+    raw.write_bytes(json.dumps({"traceEvents": _graph_under_recorded_events()}).encode("utf-8"))
+    raw_cov = bta._reader.analyze_trace(str(raw), top_k=0)["graph_coverage"]
+    assert raw_cov["graph_mode"] is True
+    assert raw_cov["graph_under_recorded"] is True
+    # Chunk with the launch runtime events stripped -> looks non-graph, so the
+    # artifact would be missed. This is why the guard must probe the RAW trace.
+    chunk = tmp_path / "chunk.trace.json"
+    chunk.write_bytes(json.dumps({"traceEvents": _graph_launch_stripped_events()}).encode("utf-8"))
+    chunk_cov = bta._reader.analyze_trace(str(chunk), top_k=0)["graph_coverage"]
+    assert chunk_cov["graph_mode"] is False
+    assert chunk_cov["graph_under_recorded"] is False

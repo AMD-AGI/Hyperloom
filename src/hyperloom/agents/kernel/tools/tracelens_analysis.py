@@ -6153,6 +6153,11 @@ def main() -> int:
             # TraceLens's own splitter, since the perf report expects a single
             # steady-state chunk.
             cli_trace_path = trace_files[0]
+            # The un-split source trace: analysis runs on the steady-state chunk
+            # (cli_trace_path is reassigned below), but graph-capture health is a
+            # whole-run property and must be read from the original trace -- the
+            # chunk may drop the graph-launch runtime events the detector needs.
+            raw_trace_path = trace_files[0]
             trace_split_blocked = False
             if not args.skip_split:
                 update_status(
@@ -6422,7 +6427,7 @@ def main() -> int:
                     _evaluate_idle_gate_with_graph_guard(
                         idle_pct_value,
                         tracelens_dir / "analysis.md",
-                        cli_trace_path,
+                        raw_trace_path,
                     )
                 )
                 if graph_under_recorded_warning is not None:
@@ -6532,7 +6537,7 @@ def main() -> int:
                         _evaluate_idle_gate_with_graph_guard(
                             idle_pct_value,
                             skill_result.report_path,
-                            cli_trace_path,
+                            raw_trace_path,
                         )
                     )
                     if graph_under_recorded_warning is not None:
