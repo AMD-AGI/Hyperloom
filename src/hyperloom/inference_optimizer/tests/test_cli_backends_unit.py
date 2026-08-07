@@ -169,6 +169,32 @@ def test_build_backends_forced_openai_protocol_without_any_key_fails(monkeypatch
         )
 
 
+def test_build_backends_forced_anthropic_protocol_accepts_deepseek_key(monkeypatch) -> None:
+    """DeepSeek's key authenticates its Anthropic-compatible endpoint, so the
+    flag must accept it instead of rejecting a config that would have run."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://proxy.example.com/anthropic")
+    b = _build(
+        critic_choice="agent",
+        critic_agent_root=Path("/tmp/critic"),
+        critic_protocol="anthropic",
+    )
+    assert b["critic"][1]["protocol"] == "anthropic"
+
+
+def test_build_backends_forced_openai_protocol_rejects_bare_gateway_key(monkeypatch) -> None:
+    """A gateway key without OPENAI_BASE_URL would be sent to official OpenAI."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("LLM_GATEWAY_KEY", "ak-gateway-key")
+    with pytest.raises(ValueError, match="OPENAI_BASE_URL"):
+        _build(
+            critic_choice="agent",
+            critic_agent_root=Path("/tmp/critic"),
+            critic_protocol="openai",
+        )
+
+
 def test_build_backends_rejects_unknown_critic_protocol(monkeypatch) -> None:
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
@@ -222,7 +248,7 @@ def test_deepseek_factory_respects_explicit_base_url(monkeypatch) -> None:
 
 
 def test_build_backends_openai_only_uses_codex_for_orchestration(monkeypatch) -> None:
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    _clear_provider_env(monkeypatch)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     b = _build(
         critic_choice="agent",
@@ -256,8 +282,8 @@ def test_proposal_scorer_disabled_by_default(monkeypatch) -> None:
 
 
 def test_proposal_scorer_disabled_for_anthropic_only(monkeypatch) -> None:
+    _clear_provider_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     args = argparse.Namespace(
         proposal_scoring=True,
         proposal_scorer_models=None,
