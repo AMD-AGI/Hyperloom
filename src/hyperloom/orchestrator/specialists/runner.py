@@ -126,6 +126,7 @@ _SECRET_ENV_NAMES: tuple[str, ...] = (
     "HYPERLOOM_PR_CI_GH_TOKEN",
     "LLM_API_KEY",
     "OPENAI_API_KEY",
+    # Legacy: not consumed anymore, still redacted if present.
     "SAFE_API_KEY",
 )
 _SECRET_ASSIGNMENT_RE = re.compile(
@@ -137,7 +138,8 @@ _SECRET_ASSIGNMENT_RE = re.compile(
 _AUTHORIZATION_RE = re.compile(r"(?i)\b(?P<prefix>authorization\s*:\s*(?:bearer\s+)?)(?P<value>[A-Za-z0-9._~+/=-]+)")
 _BEARER_RE = re.compile(r"(?i)\b(?P<prefix>bearer\s+)(?P<value>[A-Za-z0-9._~+/=-]+)")
 _TOKEN_VALUE_RES = (
-    re.compile(r"\bsk-[A-Za-z0-9_-]{3,}\b"),
+    # Keep in sync with env_safety.redact_secret_values().
+    re.compile(r"\b(?:ak|pk|sk)-[A-Za-z0-9_-]{3,}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{3,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{10,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),

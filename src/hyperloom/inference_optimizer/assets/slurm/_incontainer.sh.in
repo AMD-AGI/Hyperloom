@@ -21,7 +21,7 @@ fi
 
 # 2) gateway reachability preflight (non-fatal; surfaces misconfig early).
 curl -sS -o /dev/null -w "[hl] gateway /models HTTP=%{http_code}\n" \
-  -H "Authorization: Bearer ${OPENAI_API_KEY:-$SAFE_API_KEY}" \
+  -H "Authorization: Bearer ${OPENAI_API_KEY}" \
   "${OPENAI_BASE_URL}/models" || echo "[hl][warn] gateway preflight failed" >&2
 
 # 3) Hyperloom source. Precedence:
@@ -144,7 +144,7 @@ case "$BACKEND" in
     mkdir -p "$CODEX_HOME"
     [ -n "${SSL_CERT_FILE:-}" ] && export CODEX_CA_CERTIFICATE="${CODEX_CA_CERTIFICATE:-$SSL_CERT_FILE}"
     cat > "$CODEX_HOME/config.toml" <<CODEX_EOF
-model = "${CODEX_MODEL:-gpt-5.4}"
+model = "${CODEX_MODEL:-gpt-5.6-sol}"
 model_provider = "amdgw"
 
 [model_providers.amdgw]
@@ -168,10 +168,10 @@ CODEX_EOF
     # passes. Agent approvals/sandbox stay enabled by default; dedicated
     # internal containers can opt into the legacy bypass with
     # HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS=1.
-    codex_args=(exec -C "$REPO_ROOT" -m "${CODEX_MODEL:-gpt-5.4}" "$PROMPT")
+    codex_args=(exec -C "$REPO_ROOT" -m "${CODEX_MODEL:-gpt-5.6-sol}" "$PROMPT")
     if [ "${HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS:-0}" = "1" ]; then
       echo "[hl] WARNING: enabling codex --dangerously-bypass-approvals-and-sandbox by explicit opt-in" >&2
-      codex_args=(exec --dangerously-bypass-approvals-and-sandbox -C "$REPO_ROOT" -m "${CODEX_MODEL:-gpt-5.4}" "$PROMPT")
+      codex_args=(exec --dangerously-bypass-approvals-and-sandbox -C "$REPO_ROOT" -m "${CODEX_MODEL:-gpt-5.6-sol}" "$PROMPT")
     fi
     exec codex "${codex_args[@]}"
     ;;

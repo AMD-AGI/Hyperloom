@@ -3,7 +3,8 @@
 
 """CLI entry — ``optimize`` subcommand wiring Claude+Codex backends, executors, objective, and Coordinator.run().
 
-Env vars consumed: MODEL_PATH, OPENAI_BASE_URL + SAFE_API_KEY, ROCR_VISIBLE_DEVICES,
+Env vars consumed: MODEL_PATH, OPENAI_BASE_URL / ANTHROPIC_BASE_URL +
+OPENAI_API_KEY / ANTHROPIC_API_KEY, ROCR_VISIBLE_DEVICES,
 CLAUDE_MODEL, CODEX_MODEL, USER_DATA_PATH.
 """
 
@@ -16,23 +17,39 @@ import subprocess
 import sys
 from pathlib import Path
 
-from hyperloom.common.llm_config import derive_openai_base_url
-
 log = logging.getLogger(__name__)
 
 _OFFICIAL_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _OFFICIAL_OPENAI_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
 
-# AMD Claude allowlist. Enforced as a hard gate only under
+# AMD Claude allowlist, ordered best-first: on a catalog miss preflight walks
+# this tuple and takes the first id the gateway actually serves, so the order
+# is the fallback ladder. Enforced as a hard gate only under
 # INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0; by default the gateway catalog
-# probe is the gate. Allowlisted ids also get the _CLAUDE_FALLBACK_MODEL ladder
-# on a catalog miss (custom ids fail outright).
-_CLAUDE_PREFERRED_MODEL = "claude-opus-4-8"
+# probe is the gate, and custom ids outside this tuple fail outright rather
+# than degrade.
+_CLAUDE_PREFERRED_MODEL = "claude-opus-5"
 
-_CLAUDE_FALLBACK_MODEL = "claude-opus-4-6"
+_CLAUDE_ALLOWED_MODELS = (
+    _CLAUDE_PREFERRED_MODEL,
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+)
 
-_CLAUDE_ALLOWED_MODELS = (_CLAUDE_PREFERRED_MODEL, "claude-opus-4-7", _CLAUDE_FALLBACK_MODEL)
+# Codex-side counterpart, also ordered best-first. This is a fallback ladder
+# only, never a gate: the Codex smoke test stays WARN-only, so an id outside
+# this tuple is left untouched and merely reported. It exists because the
+# default Codex model is as new as the default Claude one, and without a ladder
+# a gateway that lags behind would only fail on the first Codex turn.
+_CODEX_PREFERRED_MODEL = "gpt-5.6-sol"
+
+_CODEX_FALLBACK_MODELS = (
+    _CODEX_PREFERRED_MODEL,
+    "gpt-5.5",
+    "gpt-5.4",
+)
 
 # Catalog probe retry delays: sleep N seconds before attempt i+1; the length is
 # the retry count after the initial attempt.
@@ -171,40 +188,6 @@ def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
     return True
 
 
-def _derive_anthropic_base_url(openai_base_url: str) -> str:
-    """Derive ``ANTHROPIC_BASE_URL`` from ``OPENAI_BASE_URL`` by stripping a trailing ``/v1`` (SDK re-appends it).
-
-    Args:
-        openai_base_url (str): The ``OPENAI_BASE_URL`` value.
-
-    Returns:
-        str: The derived Anthropic base URL with a trailing ``/v1`` removed.
-    """
-    from urllib.parse import urlparse, urlunparse
-
-    parsed = urlparse(openai_base_url)
-    path = parsed.path.rstrip("/")
-    if path.endswith("/v1"):
-        path = path[: -len("/v1")]
-    return urlunparse(parsed._replace(path=path))
-
-
-def _is_official_anthropic_url(value: str | None) -> bool:
-    if not value:
-        return False
-    from urllib.parse import urlparse
-
-    return urlparse(str(value).strip()).hostname == "api.anthropic.com"
-
-
-def _is_official_openai_url(value: str | None) -> bool:
-    if not value:
-        return False
-    from urllib.parse import urlparse
-
-    return urlparse(str(value).strip()).hostname == "api.openai.com"
-
-
 def _is_deepseek_anthropic_url(value: str | None) -> bool:
     if not value:
         return False
@@ -215,22 +198,15 @@ def _is_deepseek_anthropic_url(value: str | None) -> bool:
 
 
 def _has_explicit_anthropic_key() -> bool:
-    safe_key = os.environ.get("SAFE_API_KEY", "")
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-    return bool((api_key and api_key != safe_key) or (auth_token and auth_token != safe_key))
+    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
 
 
 def _has_explicit_deepseek_key() -> bool:
-    safe_key = os.environ.get("SAFE_API_KEY", "")
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    return bool(deepseek_key and deepseek_key != safe_key)
+    return bool(os.environ.get("DEEPSEEK_API_KEY"))
 
 
 def _has_explicit_openai_key() -> bool:
-    safe_key = os.environ.get("SAFE_API_KEY", "")
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    return bool(openai_key and openai_key != safe_key)
+    return bool(os.environ.get("OPENAI_API_KEY"))
 
 
 def _is_stale_proxy_url(value: str | None) -> bool:
@@ -256,16 +232,14 @@ def _is_stale_proxy_url(value: str | None) -> bool:
 def _resolve_llm_endpoints() -> tuple[str, str]:
     """Resolve ``(anthropic_base_url, openai_base_url)`` for split entrypoints.
 
-    Each side keeps an explicit operator value. Official provider keys may omit
-    the base URL and use the SDK default endpoint. A missing side only falls
-    back to the other for non-official gateway URLs; official OpenAI and
-    official Anthropic endpoints are not protocol-interchangeable.
+    Each side resolves from its own configuration only: its explicit
+    ``*_BASE_URL``, or the official SDK endpoint implied by that side's own key,
+    or empty. An empty side disables the features that speak its protocol; the
+    other provider's endpoint is never substituted.
     """
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
     deepseek_url = os.environ.get("DEEPSEEK_BASE_URL", "").strip()
-    anthropic_explicit = bool(anthropic_url)
-    openai_explicit = bool(openai_url)
 
     if not anthropic_url and _has_explicit_anthropic_key():
         anthropic_url = _OFFICIAL_ANTHROPIC_BASE_URL
@@ -273,27 +247,7 @@ def _resolve_llm_endpoints() -> tuple[str, str]:
         anthropic_url = deepseek_url or _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL
     if not openai_url and _has_explicit_openai_key():
         openai_url = _OFFICIAL_OPENAI_BASE_URL
-
-    if anthropic_url and openai_url:
-        # Both explicitly configured: respect each as-is (true dual entry).
-        return anthropic_url, openai_url
-    if openai_url and not anthropic_url and openai_explicit and not _is_official_openai_url(openai_url):
-        # Single OpenAI-style gateway: derive the Anthropic base from it.
-        return _derive_anthropic_base_url(openai_url), openai_url
-    if (
-        anthropic_url
-        and not openai_url
-        and anthropic_explicit
-        and not _is_official_anthropic_url(anthropic_url)
-        and not _is_deepseek_anthropic_url(anthropic_url)
-    ):
-        # Anthropic-compatible gateway: the OpenAI/Codex side reuses the same
-        # gateway with a different chat-completions path. Derive it so
-        # OPENAI_BASE_URL isn't left without ``/v1`` (which 404s).
-        return anthropic_url, derive_openai_base_url(anthropic_url) or anthropic_url
-    if anthropic_url or openai_url:
-        return anthropic_url, openai_url
-    return "", ""
+    return anthropic_url, openai_url
 
 
 def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: str) -> None:
@@ -302,9 +256,9 @@ def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: s
     Args:
         primary_api_key (str): The Claude CLI primary API key to write; blank
             leaves any existing key untouched. Callers should pass the
-            Anthropic-side key (explicit ANTHROPIC_API_KEY wins, SAFE_API_KEY
-            is the fallback) so a split-entrypoint deploy authenticates Claude
-            with its own key rather than the shared gateway key.
+            Anthropic-side key (``ANTHROPIC_API_KEY``) so a split-entrypoint
+            deploy authenticates Claude with its own key rather than the shared
+            gateway key.
         anthropic_base_url (str): The upstream gateway URL; blank is a no-op.
     """
     import json as _json
@@ -339,19 +293,89 @@ def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: s
     print(f"Preflight: updated ~/.claude/config.json customApiUrl -> {anthropic_base_url}")
 
 
+def _reject_cross_provider_pairing() -> None:
+    """Fail fast unless the credentials form one of the three legal shapes.
+
+    Legal: the Anthropic side alone, the OpenAI side alone, or both sides. A side
+    is either fully absent or carries both its own base URL and its own key.
+    Rejected: a base URL whose only key belongs to the other provider, and a key
+    whose only endpoint would come from the other provider.
+
+    Reads the *raw* environment, before :func:`_resolve_llm_endpoints` fills in
+    any implied endpoint. Official provider keys may omit their own
+    ``*_BASE_URL`` while the other side is unconfigured.
+    """
+    openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+    anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    anthropic_key = (
+        os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
+        or deepseek_key
+    )
+    # DeepSeek serves its own Anthropic-compatible endpoint, so its key carries an
+    # implied base URL.
+    anthropic_endpoint = anthropic_url or (
+        (os.environ.get("DEEPSEEK_BASE_URL", "").strip() or _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL)
+        if deepseek_key
+        else ""
+    )
+    offender = ""
+    if openai_url and not openai_key and anthropic_key:
+        offender = (
+            "OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an "
+            "Anthropic-side key is configured"
+        )
+    elif anthropic_url and not anthropic_key and openai_key:
+        offender = (
+            "ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an "
+            "OPENAI_API_KEY is configured"
+        )
+    elif openai_url and anthropic_key and not anthropic_endpoint:
+        offender = (
+            "an Anthropic-side key is configured without ANTHROPIC_BASE_URL, "
+            "while the OpenAI side points at OPENAI_BASE_URL"
+        )
+    elif anthropic_endpoint and openai_key and not openai_url:
+        offender = (
+            "OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the "
+            "Anthropic side points at ANTHROPIC_BASE_URL"
+        )
+    if not offender:
+        return
+    print(
+        f"\nERROR: Conflicting LLM credentials: {offender}.\n\n"
+        "Hyperloom never borrows one provider's key or endpoint for the other. "
+        "Configure exactly ONE of:\n"
+        "  1. Anthropic side only:\n"
+        "       export ANTHROPIC_BASE_URL=...  ANTHROPIC_API_KEY=...\n"
+        "  2. OpenAI side only:\n"
+        "       export OPENAI_BASE_URL=...     OPENAI_API_KEY=...\n"
+        "  3. Both sides, each with its own base URL and key.\n"
+        "Leaving a side unset simply disables the features that speak its "
+        "protocol.\n\n"
+        "Values are read from the shell AND from the repo .env, so a variable "
+        "you did not export yourself may come from there; remove the stale "
+        "entry or complete that side.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 def _validate_credentials() -> None:
     """Fail fast when no usable LLM endpoint/key is configured.
 
-    Accepts either the legacy single-gateway pair (``SAFE_API_KEY`` +
-    ``OPENAI_BASE_URL``) or the split Anthropic/OpenAI entrypoints: at least
-    one base URL (``OPENAI_BASE_URL`` / ``ANTHROPIC_BASE_URL``) and at least
-    one key (``SAFE_API_KEY`` / ``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` /
-    ``ANTHROPIC_AUTH_TOKEN``).
+    Requires a base URL (``OPENAI_BASE_URL`` / ``ANTHROPIC_BASE_URL``, or an
+    official provider key that implies its default endpoint) plus at least one
+    key (``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` /
+    ``DEEPSEEK_API_KEY``). Split Anthropic/OpenAI entrypoints and single
+    gateways (same key under both provider env names) are both accepted.
     """
+    _reject_cross_provider_pairing()
     anthropic_url, openai_url = _resolve_llm_endpoints()
     has_key = bool(
-        os.environ.get("SAFE_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
+        os.environ.get("OPENAI_API_KEY")
         or os.environ.get("ANTHROPIC_API_KEY")
         or os.environ.get("ANTHROPIC_AUTH_TOKEN")
         or os.environ.get("DEEPSEEK_API_KEY")
@@ -363,10 +387,9 @@ def _validate_credentials() -> None:
                 os.environ.get("ANTHROPIC_API_KEY")
                 or os.environ.get("ANTHROPIC_AUTH_TOKEN")
                 or os.environ.get("DEEPSEEK_API_KEY")
-                or os.environ.get("SAFE_API_KEY")
             )
         )
-        or (openai_url and (os.environ.get("OPENAI_API_KEY") or os.environ.get("SAFE_API_KEY")))
+        or (openai_url and os.environ.get("OPENAI_API_KEY"))
     )
     if has_usable_endpoint and has_key:
         return
@@ -375,7 +398,9 @@ def _validate_credentials() -> None:
     if not has_usable_endpoint:
         missing.append("a usable endpoint/key pair")
     if not has_key:
-        missing.append("an API key (SAFE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / DEEPSEEK_API_KEY)")
+        missing.append(
+            "an API key (OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / DEEPSEEK_API_KEY)"
+        )
     repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
     env_file = Path(repo_root) / ".env"
     env_status = "present" if env_file.exists() else "not found"
@@ -385,15 +410,18 @@ def _validate_credentials() -> None:
         "Tried loading from:\n"
         "  - shell environment\n"
         f"  - $REPO_ROOT/.env  ({env_status}: {env_file})\n\n"
+        "Each provider side needs BOTH its own base URL and its own key; a side\n"
+        "you leave unset just disables the features that speak its protocol.\n"
         "Configure ONE of:\n"
-        "  1. Single gateway (AMD / LiteLLM-style):\n"
-        "       export SAFE_API_KEY=ak-your-safe-apikey\n"
-        "       export OPENAI_BASE_URL=https://gateway.example.com/v1\n"
-        "  2. Split entrypoints (native Anthropic + OpenAI):\n"
+        "  1. OpenAI side only (Codex / GEAK; Claude-side features disabled):\n"
+        "       export OPENAI_BASE_URL=https://gateway.example.com/v1  OPENAI_API_KEY=ak-your-key\n"
+        "  2. Anthropic side only (Claude; Codex / GEAK disabled):\n"
         "       export ANTHROPIC_BASE_URL=https://api.anthropic.com  ANTHROPIC_API_KEY=sk-ant-xxx\n"
-        "       export OPENAI_BASE_URL=https://api.openai.com/v1      OPENAI_API_KEY=sk-xxx\n"
+        "  3. Both sides, each with its own base URL and key. One gateway serving\n"
+        "     both providers is this shape: point both URLs at it and set both\n"
+        "     keys, even when the key value is the same.\n"
         "     Official provider keys may omit the matching *_BASE_URL.\n"
-        "  3. DeepSeek Anthropic-compatible endpoint:\n"
+        "  4. DeepSeek Anthropic-compatible endpoint:\n"
         "       export DEEPSEEK_API_KEY=sk-xxx\n"
         "       # optional: export DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic",
         file=sys.stderr,

@@ -13,7 +13,7 @@ allowed_tools:
 side_effects:
   - writes_results
 preferred_backend: claude
-preferred_model: claude-opus-4-7
+preferred_model: claude-opus-5
 max_turns: 5
 lease_ttl_sec: 90
 description: "Refresh $SESSION_DIR/session_breakdown.json for downstream dashboards (cheap, idempotent). End-of-session export already runs from cli.py finally; only dispatch mid-run for live consumers."

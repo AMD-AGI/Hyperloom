@@ -394,32 +394,42 @@ def _maybe_llm_refine(
 ) -> dict[str, Any]:
     """Optionally refine the static verdict with a single chat-completion.
 
-    Requires a gateway API key and base URL; skips when either is absent to
-    avoid falling through to api.openai.com. Never escalates ``already_*``
-    without static evidence.
+    Opt-in (``use_llm=True``) and best-effort: requires ``OPENAI_API_KEY`` +
+    ``OPENAI_BASE_URL`` (or request ``api_key`` / ``openai_base_url``). Skips
+    when either is absent rather than falling through to api.openai.com. Never
+    escalates an ``already_*`` claim the static layer didn't already back with
+    evidence.
+
+    Args:
+        request: The phase-audit request (carries ``model`` / creds overrides).
+        static_result: The static-layer verdict.
+        patch_text: The PR's unified diff (truncated before sending).
+
+    Returns:
+        A possibly-refined verdict dict (``layer="llm"`` when refined).
     """
     import os
 
     import hyperloom.common.llm_config as _llm_cfg
 
-    model = str(request.get("model") or os.environ.get("FRAMEWORK_AGENT_AUDIT_MODEL") or "gpt-5.4").strip()
+    model = str(request.get("model") or os.environ.get("FRAMEWORK_AGENT_AUDIT_MODEL") or "gpt-5.6-sol").strip()
 
     env_override: dict[str, str] = {}
     req_key = str(request.get("api_key") or "").strip()
     req_url = str(request.get("openai_base_url") or "").strip()
     if req_key:
-        env_override["SAFE_API_KEY"] = req_key
+        env_override["OPENAI_API_KEY"] = req_key
     if req_url:
         env_override["OPENAI_BASE_URL"] = req_url
 
     try:
         cfg = _llm_cfg.resolve_openai_client_config(env={**os.environ, **env_override})
     except _llm_cfg.LLMConfigError:
-        static_result.setdefault("risks", []).append("llm refine skipped: missing SAFE_API_KEY/OPENAI_BASE_URL")
+        static_result.setdefault("risks", []).append("llm refine skipped: missing OPENAI_API_KEY/OPENAI_BASE_URL")
         return static_result
 
     if not cfg.base_url:
-        static_result.setdefault("risks", []).append("llm refine skipped: missing SAFE_API_KEY/OPENAI_BASE_URL")
+        static_result.setdefault("risks", []).append("llm refine skipped: missing OPENAI_API_KEY/OPENAI_BASE_URL")
         return static_result
 
     try:

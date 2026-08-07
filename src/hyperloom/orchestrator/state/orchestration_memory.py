@@ -34,7 +34,12 @@ DEFAULT_CHECKPOINT_MIN_TICK_GAP: int = 3
 # Conservative fallback window for an unknown model id.
 DEFAULT_MODEL_CONTEXT_WINDOW: int = 200_000
 # Keys must be lower-case with ``-`` separators; lookups are folded to that form.
+# These drive the compaction trigger (window * soft fraction), so they stay at
+# the 200k every Claude model serves without an extended-window opt-in, even
+# where a gateway advertises 1M. Listing a model explicitly keeps it pinned to
+# that value if DEFAULT_MODEL_CONTEXT_WINDOW ever moves.
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-opus-5": 200_000,
     "claude-opus-4-8": 200_000,
     "claude-opus-4-7": 200_000,
     "claude-opus-4-6": 200_000,
@@ -47,9 +52,9 @@ def context_window_for_model(model: str) -> int:
     """Context-window size (tokens) for a model id; conservative fallback if unknown.
 
     Args:
-        model: The model id (e.g. ``"claude-opus-4-8"``); matched
+        model: The model id (e.g. ``"claude-opus-5"``); matched
             case-insensitively with ``.`` / ``_`` folded to ``-``, so gateway
-            spellings such as ``"Claude-Opus-4.8"`` resolve. Blank/unknown ids
+            spellings such as ``"Claude-Opus-5"`` resolve. Blank/unknown ids
             fall back to :data:`DEFAULT_MODEL_CONTEXT_WINDOW`.
 
     Returns:

@@ -105,8 +105,8 @@ Required env vars:
 
 | Variable | Set by | Purpose |
 |---|---|---|
-| `SAFE_API_KEY` | operator | LLM gateway key (GEAK and TraceLens inherit this) |
-| `OPENAI_BASE_URL` | operator | LLM gateway endpoint |
+| `ANTHROPIC_API_KEY` | operator | Anthropic-side key; GEAK and TraceLens both run Claude Code |
+| `ANTHROPIC_BASE_URL` | operator | Anthropic-side endpoint (point it at your gateway) |
 | `TRACELENS_ROOT` | `install.sh` (operator may override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
 | `KERNEL_OPT_BACKEND_ORDER` | launcher (default `geak`) | Set to `forge` to enable per-kernel Forge |
 

@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env import is_truthy
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ._accuracy_gate import (
     accuracy_keep_block,
@@ -1148,15 +1149,18 @@ class FrameworkAgentExecutor:
         )
         override_script = sanitize_script_name(params.get("benchmark_script"))
         override_result_dir = sanitize_result_dir(params.get("result_dir"))
-        # When the accuracy gate is required and a baseline accuracy exists,
-        # force RUN_EVAL=true so a stale config can't silently disable eval.
+        # The session's ``--no-eval`` wins; otherwise force RUN_EVAL=true when the
+        # gate is required and a baseline accuracy exists, so a stale config
+        # cannot silently disable the eval.
         bench_extra_envs: dict[str, Any] = {}
         acc_required = bool(params.get("require_accuracy_for_keep", require_framework_accuracy_default()))
         try:
             _acc_base = float(params.get("accuracy_baseline") or 0.0)
         except (TypeError, ValueError):
             _acc_base = 0.0
-        if acc_required and _acc_base > 0:
+        if is_truthy(params.get("disable_run_eval")):
+            bench_extra_envs["RUN_EVAL"] = "false"
+        elif acc_required and _acc_base > 0:
             bench_extra_envs["RUN_EVAL"] = "true"
         config_path = materialize_config_with_envs(
             config_path,

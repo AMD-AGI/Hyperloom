@@ -691,22 +691,25 @@ _VALID_ANALYSIS_ROUTES = {ANALYSIS_ROUTE_DETERMINISTIC, ANALYSIS_ROUTE_AGENT}
 
 
 def _is_safe_litellm_gateway() -> bool:
-    """True when the Claude SDK targets the AMD SAFE/LiteLLM gateway (#574).
+    """True when the Claude SDK targets a strict LiteLLM-style gateway (#574).
 
-    Detected via the SDK's ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL`` host or
-    the codebase-wide ``SAFE_API_KEY`` signal; other backends are left alone.
+    ``LLM_GATEWAY_KEY`` is an explicit gateway signal and wins on its own; a
+    deployment may front the gateway on a hostname with no protocol marker.
+    Otherwise detected via the SDK's ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL``
+    host; other backends are left alone.
     """
+    if os.environ.get("LLM_GATEWAY_KEY", "").strip():
+        return True
     base_url = (os.environ.get("ANTHROPIC_BASE_URL", "") or os.environ.get("OPENAI_BASE_URL", "")).lower()
     # Generic protocol markers by default (no operator/brand strings shipped);
     # a specific deployment can add its own gateway host substrings via
-    # HYPERLOOM_STRICT_GATEWAY_MARKERS (comma-separated). SAFE_API_KEY is the
-    # strong signal and is checked regardless.
+    # HYPERLOOM_STRICT_GATEWAY_MARKERS (comma-separated).
     markers = tuple(
         m.strip().lower()
         for m in os.environ.get("HYPERLOOM_STRICT_GATEWAY_MARKERS", "litellm,llm-proxy").split(",")
         if m.strip()
     )
-    return bool(os.environ.get("SAFE_API_KEY")) or any(m in base_url for m in markers)
+    return any(m in base_url for m in markers)
 
 
 def _resolve_tracelens_model() -> str:

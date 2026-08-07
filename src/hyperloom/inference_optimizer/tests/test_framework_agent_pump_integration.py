@@ -372,3 +372,28 @@ def test_pump_empty_then_nonempty_discover_resets_streak(
     assert stub.shared_state.framework_agent_empty_discoveries == 0
     assert stub.shared_state.framework_agent_phase_done is False
     assert len(_framework_agent_pendings(stub)) == 1
+
+
+def test_enqueue_forwards_the_session_eval_choice(tmp_path: Path):
+    # The lane templates from the shipped default config, which materializes
+    # RUN_EVAL=true; the param is what carries --no-eval across.
+    stub = _CoordinatorStub(tmp_path)
+    stub.shared_state.eval_disabled = True
+    asyncio.run(
+        Coordinator._enqueue_framework_agent_task(  # type: ignore[arg-type]
+            stub,
+            {"pr_url": "https://example.com/pr/1", "repo": "a/b", "ref": "x1"},
+        )
+    )
+    assert stub.tasks.created[0]["params"]["disable_run_eval"] is True
+
+
+def test_enqueue_leaves_the_eval_on_by_default(tmp_path: Path):
+    stub = _CoordinatorStub(tmp_path)
+    asyncio.run(
+        Coordinator._enqueue_framework_agent_task(  # type: ignore[arg-type]
+            stub,
+            {"pr_url": "https://example.com/pr/1", "repo": "a/b", "ref": "x1"},
+        )
+    )
+    assert stub.tasks.created[0]["params"]["disable_run_eval"] is False

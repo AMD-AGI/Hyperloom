@@ -16,7 +16,6 @@ def _clear_safe_and_ext(monkeypatch):
     # developer's real credentials out of the run, they do not affect the mode.
     for key in (
         "SAFE_API_URL",
-        "SAFE_API_KEY",
         "HYPERLOOM_MN_EXT_SERVICE_URL",
         "INFERENCE_OPTIMIZER_NODES",
     ):

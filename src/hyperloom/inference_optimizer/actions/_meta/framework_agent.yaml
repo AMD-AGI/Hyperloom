@@ -28,7 +28,7 @@ side_effects:
   - reads_server
   - writes_results
 preferred_backend: claude
-preferred_model: claude-opus-4-7
+preferred_model: claude-opus-5
 max_turns: 4
 lease_ttl_sec: 3600
 description: "FRAMEWORK_AGENT-phase per-candidate executor: applies an upstream framework to framework_source_roots, runs throughput + accuracy gate, KEEPs or REVERTs. Coordinator-internal."

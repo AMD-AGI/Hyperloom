@@ -1698,7 +1698,8 @@ export OSL={int(osl)}
 export RANDOM_RANGE_RATIO="${{RANDOM_RANGE_RATIO:-1}}"
 export NUM_PROMPTS="${{NUM_PROMPTS:-320}}"
 export NUM_WARMUPS="${{NUM_WARMUPS:-8}}"
-export RUN_EVAL="${{RUN_EVAL:-true}}"
+# Shape capture consumes throughput only, so it never pays for an accuracy eval.
+export RUN_EVAL="false"
 export RESULT_DIR="${{RESULT_DIR:-$PWD/gemm_benchmark_result}}"
 export RESULT_FILENAME="${{RESULT_FILENAME:-bench_serving.json}}"
 export PORT="${{PORT:-18888}}"
@@ -3816,7 +3817,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
 
     framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
     gpu = str(payload.get("gpu") or "0").strip()
-    llm_model = str(payload.get("llm_model") or os.environ.get("CLAUDE_MODEL") or "claude-opus-4-6").strip()
+    llm_model = str(payload.get("llm_model") or os.environ.get("CLAUDE_MODEL") or "claude-opus-5").strip()
     max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
     timeout = _forge_fusion_timeout_sec(payload)
 

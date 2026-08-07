@@ -27,7 +27,6 @@ _PACKAGE_SKILL = Path(__file__).resolve().parent / "SKILL.md"
 
 _AMBIENT_LLM_ENV_PREFIXES = ("ANTHROPIC_", "OPENAI_", "DEEPSEEK_")
 _AMBIENT_LLM_ENV_KEYS = {
-    "SAFE_API_KEY",
     "LLM_GATEWAY_KEY",
     "CLAUDE_MODEL",
     "CODEX_MODEL",

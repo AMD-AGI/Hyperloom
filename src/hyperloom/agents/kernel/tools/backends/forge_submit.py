@@ -67,8 +67,8 @@ def _reset_knowledge_config_cache() -> None:
     _KNOWLEDGE_CONFIG_RESOLVED = False
 
 
-def _knowledge_config_for_forge(env: dict | None = None):
-    """Resolve knowledge configuration once and degrade invalid input locally."""
+def _knowledge_config_for_forge():
+    """Resolve process-level knowledge configuration once."""
 
     global _KNOWLEDGE_CONFIG_CACHE, _KNOWLEDGE_CONFIG_RESOLVED
     if _KNOWLEDGE_CONFIG_RESOLVED:
@@ -80,7 +80,7 @@ def _knowledge_config_for_forge(env: dict | None = None):
 
         from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
 
-        source = dict(os.environ if env is None else env)
+        source = dict(os.environ)
         try:
             config = KnowledgeConfig.from_env(source)
         except Exception as exc:  # noqa: BLE001 - submit hot paths must remain available
@@ -2149,7 +2149,7 @@ def _apply_fellow_env(env: dict) -> None:
 
     # The process-level configuration was validated at startup/first use and is
     # cached. A malformed child mapping therefore cannot fail every submission.
-    KernelExperienceBridge(_knowledge_config_for_forge(env)).configure_child_env(env)
+    KernelExperienceBridge(_knowledge_config_for_forge()).configure_child_env(env)
 
     # Auth fallback: seed ANTHROPIC_API_KEY from the claude CLI's config.json
     # primaryApiKey when it is not already exported.

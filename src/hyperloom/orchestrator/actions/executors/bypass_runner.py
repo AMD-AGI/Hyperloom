@@ -71,10 +71,14 @@ def _as_float(value: Any, default: float) -> float:
 
 
 def _run_eval_enabled(bench_envs: dict[str, Any]) -> bool:
-    """Whether RUN_EVAL requests an accuracy pass (env then YAML envs)."""
-    raw = os.environ.get("RUN_EVAL")
+    """Whether RUN_EVAL requests an accuracy pass.
+
+    The materialized YAML wins; the ambient env only fills an absent key, so a
+    stale exported ``RUN_EVAL`` cannot resurrect an eval the session turned off.
+    """
+    raw = bench_envs.get("RUN_EVAL")
     if raw is None:
-        raw = str(bench_envs.get("RUN_EVAL", "false"))
+        raw = os.environ.get("RUN_EVAL", "false")
     return str(raw).strip().lower() not in _FALSE_VALUES
 
 

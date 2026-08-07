@@ -204,7 +204,6 @@ def test_audit_patches_path_source(tmp_path: Path):
 # opt-in LLM layer: no creds -> static verdict kept, risk noted (hermetic)
 def test_audit_use_llm_without_creds_keeps_static(tmp_path: Path, monkeypatch):
     for var in (
-        "SAFE_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "ANTHROPIC_API_KEY",
@@ -245,7 +244,7 @@ def test_audit_llm_refine_uses_streaming(tmp_path: Path, monkeypatch):
         return _valid_reply, None
 
     monkeypatch.setattr("hyperloom.common.llm_config.stream_chat_completion_text", _fake_stream)
-    monkeypatch.setenv("SAFE_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://fake-gateway/v1")
 
     fake_openai = types.ModuleType("openai")
@@ -279,7 +278,7 @@ def test_audit_llm_refine_exception_leaves_risk(tmp_path: Path, monkeypatch):
         raise RuntimeError("boom")
 
     monkeypatch.setattr("hyperloom.common.llm_config.stream_chat_completion_text", _boom)
-    monkeypatch.setenv("SAFE_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://fake-gateway/v1")
 
     fake_openai = types.ModuleType("openai")
