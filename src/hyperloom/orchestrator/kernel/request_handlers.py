@@ -6041,6 +6041,93 @@ def _integrate_rebaseline_timeout_sec(
     return max(1, int(default_timeout_sec))
 
 
+def _snapshot_integrate_keep_source(
+    payload: dict[str, Any],
+    apply_result: dict[str, Any],
+    *,
+    session_dir: Path,
+    kernel_id: Any,
+) -> dict[str, Any]:
+    """Capture the final source files retained by a kernel integrate KEEP."""
+    if str(apply_result.get("reason") or "") == "env_only_validation":
+        return {}
+    raw_paths: list[str] = [
+        str(path) for path in (apply_result.get("touched") or []) if str(path).strip()
+    ]
+    for backup in apply_result.get("source_backups") or []:
+        if isinstance(backup, dict) and backup.get("path"):
+            raw_paths.append(str(backup["path"]))
+    target = str(payload.get("target_file") or payload.get("source_file") or "").strip()
+    if target:
+        raw_paths.append(target)
+    raw_paths = list(dict.fromkeys(raw_paths))
+    if not raw_paths:
+        return {}
+
+    root_text = str(payload.get("kernel_repo") or payload.get("repo") or "").strip()
+    root = Path(root_text) if root_text else None
+    if root is None or not root.is_dir():
+        probe = subprocess.run(
+            ["git", "-C", str(Path(raw_paths[0]).parent), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        root = Path(probe.stdout.strip()) if probe.returncode == 0 and probe.stdout.strip() else None
+    if root is None or not root.is_dir():
+        return {}
+    base = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    base_sha = base.stdout.strip() if base.returncode == 0 else ""
+    if not base_sha:
+        return {}
+
+    rel_paths: list[str] = []
+    resolved_root = root.resolve()
+    for raw in raw_paths:
+        try:
+            rel = Path(raw).resolve().relative_to(resolved_root)
+        except (OSError, ValueError):
+            continue
+        if str(rel) and ".." not in rel.parts:
+            rel_paths.append(str(rel))
+    rel_paths = list(dict.fromkeys(rel_paths))
+    if not rel_paths:
+        return {}
+    try:
+        from ..source_snapshot import MANIFEST_NAME, snapshot_source_layer
+
+        safe_id = re.sub(r"[^A-Za-z0-9._-]+", "_", str(kernel_id or "kernel"))
+        snapshot = snapshot_source_layer(
+            framework_root=root,
+            base_sha=base_sha,
+            rel_paths=rel_paths,
+            dest_dir=session_dir / "optimization_stack" / "src" / f"kernel_integrate_{safe_id}",
+            provenance="kernel_integrate",
+            extra={"kernel_id": str(kernel_id or "")},
+        )
+        if not snapshot:
+            return {}
+        snapshot_dir = str(snapshot.get("snapshot_dir") or "")
+        return {
+            "scope": "source_patch",
+            "source_snapshot": snapshot_dir,
+            "source_manifest": str(Path(snapshot_dir) / MANIFEST_NAME) if snapshot_dir else "",
+            "target_files": rel_paths,
+            "framework_root": str(root),
+            "base_sha": base_sha,
+        }
+    except Exception:  # noqa: BLE001 - KEEP remains valid but bundle fails closed
+        log.exception("kernel integrate KEEP source snapshot failed")
+        return {}
+
+
 async def integrate_handler(
     payload: dict,
     *,
@@ -6503,6 +6590,15 @@ async def integrate_handler(
         "identity_route": str(payload.get("identity_route") or ""),
         "integration_id": str(payload.get("integration_id") or ""),
     }
+    if decision == "KEEP":
+        result.update(
+            _snapshot_integrate_keep_source(
+                payload,
+                apply_result,
+                session_dir=session_dir,
+                kernel_id=kernel_id,
+            )
+        )
     if stack_positive_keep and gain_pct <= keep_threshold_pct:
         result["decision_reason"] = "stack_positive_increment"
         result["stack_incremental_gain_pct"] = stack_incremental_gain_pct

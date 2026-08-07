@@ -43,6 +43,36 @@ log = _logging.getLogger(__name__)
 _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
 
 
+def _source_snapshot_stack_fields(snapshot_dir: Any) -> dict[str, Any]:
+    """Project a durable source snapshot into optimization-stack metadata."""
+    directory = Path(str(snapshot_dir or ""))
+    if not directory.is_dir():
+        return {}
+    try:
+        from ..source_snapshot import MANIFEST_NAME
+
+        manifest = json.loads((directory / MANIFEST_NAME).read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return {}
+    files = [
+        str(item.get("rel") or "")
+        for item in (manifest.get("files") or [])
+        if isinstance(item, dict) and str(item.get("rel") or "").strip()
+    ]
+    root = str(manifest.get("framework_root") or "")
+    base_sha = str(manifest.get("base_sha") or "")
+    if not root or not base_sha or not files:
+        return {}
+    return {
+        "scope": "source_patch",
+        "source_snapshot": str(directory),
+        "source_manifest": str(directory / MANIFEST_NAME),
+        "target_files": files,
+        "framework_root": root,
+        "base_sha": base_sha,
+    }
+
+
 class KernelPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
@@ -2004,6 +2034,9 @@ class KernelPhase(PhaseHandler):
             "source": "kernel_entry_auto",
             "ts": ts,
         }
+        entry.update(
+            _source_snapshot_stack_fields(result.get("source_snapshot"))
+        )
         if tuned_file not in existing:
             self.shared_state.optimization_stack.append(entry)
             self.shared_state.append_stack_gain_entry(
@@ -2267,6 +2300,11 @@ class KernelPhase(PhaseHandler):
                     "source": "kernel_entry_auto",
                     "ts": ts,
                 }
+                entry.update(
+                    _source_snapshot_stack_fields(
+                        result.get("source_snapshot")
+                    )
+                )
                 self.shared_state.optimization_stack.append(entry)
                 self.shared_state.append_stack_gain_entry(
                     action="gemm_tuning",
@@ -2617,6 +2655,31 @@ class KernelPhase(PhaseHandler):
             "best_pattern": fusion_result.get("best_pattern"),
             "ts": ts,
         }
+        if patch:
+            entry["scope"] = "source_patch"
+        if integrate_result.get("source_snapshot"):
+            entry.update(
+                {
+                    "scope": "source_patch",
+                    "source_snapshot": str(
+                        integrate_result.get("source_snapshot") or ""
+                    ),
+                    "source_manifest": str(
+                        integrate_result.get("source_manifest") or ""
+                    ),
+                    "target_files": [
+                        str(path)
+                        for path in (
+                            integrate_result.get("target_files") or []
+                        )
+                        if str(path).strip()
+                    ],
+                    "framework_root": str(
+                        integrate_result.get("framework_root") or ""
+                    ),
+                    "base_sha": str(integrate_result.get("base_sha") or ""),
+                }
+            )
         if patch not in existing:
             self.shared_state.optimization_stack.append(entry)
             self.shared_state.append_stack_gain_entry(

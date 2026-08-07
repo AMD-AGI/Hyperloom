@@ -974,6 +974,7 @@ def _apply_warm_patches(
                 .lower(),
                 "pre_sha": pre_sha,
                 "patch_path": str(patch_path),
+                "sha256": str(patch.get("sha256") or ""),
                 "changed_files": [str(path) for path in (patch.get("changed_files") or []) if str(path)],
             }
         )
@@ -2055,6 +2056,36 @@ class BaselineExecutor:
         # completes (or fails), preventing residue in the shared checkout.
         patch_target = effective_inferencex_path or ix_env
         applied_patches = _apply_warm_patches(params, patch_target, output_dir)
+        required_bundle_patches = [
+            patch
+            for patch in (params.get("patches") or [])
+            if isinstance(patch, dict) and patch.get("sha256")
+        ]
+        applied_bundle_hashes = {
+            str(patch.get("sha256") or "")
+            for patch in applied_patches
+            if patch.get("sha256")
+        }
+        missing_bundle_hashes = [
+            str(patch.get("sha256") or "")
+            for patch in required_bundle_patches
+            if str(patch.get("sha256") or "") not in applied_bundle_hashes
+        ]
+        if missing_bundle_hashes:
+            for patch in reversed(applied_patches):
+                _revert_applied_patch(
+                    str(patch.get("target_repo") or ""),
+                    str(patch.get("patch_path") or ""),
+                )
+            return {
+                "status": "failed",
+                "error_class": "warm_patch_incomplete",
+                "error": (
+                    "one or more replay-bundle patches could not be applied "
+                    "at their recorded repository/base SHA"
+                ),
+                "missing_patch_sha256": missing_bundle_hashes,
+            }
         if applied_patches:
             log.info(
                 "baseline_executor: applied %d warm-replay code patches: %s",

@@ -965,6 +965,67 @@ class FrameworkAgentExecutor:
                     },
                 )
 
+        source_snapshot: dict[str, Any] = {}
+        if git_tree and pre_apply_sha and keep_sha:
+            try:
+                changed = subprocess.run(
+                    [
+                        "git",
+                        "diff",
+                        "--name-only",
+                        pre_apply_sha,
+                        keep_sha,
+                        "--",
+                    ],
+                    cwd=framework_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                rel_paths = [
+                    line.strip()
+                    for line in changed.stdout.splitlines()
+                    if line.strip()
+                ]
+                if changed.returncode == 0 and rel_paths:
+                    from ...source_snapshot import (
+                        MANIFEST_NAME,
+                        snapshot_source_layer,
+                    )
+
+                    snapshot = snapshot_source_layer(
+                        framework_root=framework_root,
+                        base_sha=pre_apply_sha,
+                        rel_paths=rel_paths,
+                        dest_dir=(
+                            self.session_dir
+                            / "optimization_stack"
+                            / "src"
+                            / f"framework_{slug}"
+                        ),
+                        provenance="framework_agent",
+                        extra={"candidate_id": slug},
+                    )
+                    if snapshot:
+                        snapshot_dir = str(
+                            snapshot.get("snapshot_dir") or ""
+                        )
+                        source_snapshot = {
+                            "scope": "source_patch",
+                            "source_snapshot": snapshot_dir,
+                            "source_manifest": (
+                                str(Path(snapshot_dir) / MANIFEST_NAME)
+                                if snapshot_dir
+                                else ""
+                            ),
+                            "target_files": rel_paths,
+                            "framework_root": str(framework_root),
+                            "base_sha": pre_apply_sha,
+                        }
+            except Exception:  # noqa: BLE001 - KEEP remains valid; bundle fails closed
+                log.exception("framework KEEP source snapshot failed")
+
         await self._write_kb_record(
             candidate=candidate,
             outcome=OUTCOME_INTEGRATED,
@@ -993,6 +1054,7 @@ class FrameworkAgentExecutor:
                 "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
                 "bench_result": bench_result,
                 "workspace": str(output_root),
+                **source_snapshot,
             },
         )
 

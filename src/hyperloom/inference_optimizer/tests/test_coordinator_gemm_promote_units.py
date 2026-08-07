@@ -280,6 +280,34 @@ class TestPromoteGemmTuningKeep:
         assert coord.shared_state.cumulative_gain == pytest.approx(25.0)
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(25.0)
 
+    def test_forge_backend_carries_source_snapshot_into_stack(self, tmp_path):
+        snapshot = tmp_path / "snapshot"
+        snapshot.mkdir()
+        (snapshot / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "framework_root": "/opt/aiter",
+                    "base_sha": "abc123",
+                    "files": [{"rel": "configs/tuned.csv", "op": "upsert"}],
+                }
+            )
+        )
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord._promote_gemm_tuning_keep(
+            {
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.25,
+                "backend": "forge",
+                "extra_envs": {"AITER_CONFIG": "/opt/aiter/configs/tuned.csv"},
+                "source_snapshot": str(snapshot),
+            }
+        )
+        top = coord.shared_state.optimization_stack[-1]
+        assert top["scope"] == "source_patch"
+        assert top["source_snapshot"] == str(snapshot)
+        assert top["target_files"] == ["configs/tuned.csv"]
+
     def test_geak_backend_uses_tuned_file(self, tmp_path):
         coord = _coord(tmp_path, baseline_tput=200.0)
         coord._promote_gemm_tuning_keep(
@@ -362,6 +390,11 @@ class TestPromoteFusionIntegrateKeep:
                 "gain_pct": 80.0,
                 "workspace": "/tmp/run",
                 "extra_server_args": "--moe-runner-backend aiter",
+                "source_snapshot": "/session/src/fusion",
+                "source_manifest": "/session/src/fusion/manifest.json",
+                "target_files": ["aiter/csrc/fusion.hip"],
+                "framework_root": "/opt/aiter",
+                "base_sha": "abc123",
             },
             extra_envs={"SGLANG_USE_AITER": "1", "ZAYA_FUSED_HYBRID_RESIDUAL": "1"},
         )
@@ -375,6 +408,8 @@ class TestPromoteFusionIntegrateKeep:
         assert stack[0]["extra_envs"]["SGLANG_USE_AITER"] == "1"
         assert stack[0]["extra_envs"]["ZAYA_FUSED_HYBRID_RESIDUAL"] == "1"
         assert stack[0]["kernel_speedup"] == 3.05
+        assert stack[0]["scope"] == "source_patch"
+        assert stack[0]["source_snapshot"] == "/session/src/fusion"
         assert coord.shared_state.current_best["action"] == "fusion"
         assert coord.shared_state.current_best["backend"] == "forge"
         assert coord.shared_state.current_best["engine"] == "forge_fusion"

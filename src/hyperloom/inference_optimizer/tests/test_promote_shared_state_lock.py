@@ -992,11 +992,26 @@ async def test_integrate_keep_carries_the_stack_env_layer(session_dir):
     }
 
     await coord.writeback._record_integrate_keep(
-        {"new_tput": 1200.0, "kernel_id": "k001", "integration_id": "i1"},
+        {
+            "new_tput": 1200.0,
+            "kernel_id": "k001",
+            "integration_id": "i1",
+            "scope": "source_patch",
+            "source_snapshot": "/session/src/kernel-k001",
+            "source_manifest": "/session/src/kernel-k001/manifest.json",
+            "target_files": ["aiter/csrc/kernel.hip"],
+            "framework_root": "/opt/aiter",
+            "base_sha": "abc123",
+        },
     )
 
     assert s.current_best["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
     assert s.current_best["extra_server_args"] == "--kv-cache-dtype fp8_e4m3"
+    top = s.optimization_stack[-1]
+    assert top["scope"] == "source_patch"
+    assert top["source_snapshot"] == "/session/src/kernel-k001"
+    assert top["target_files"] == ["aiter/csrc/kernel.hip"]
+    assert top["base_sha"] == "abc123"
 
 
 async def test_integrate_keep_lets_a_tuning_env_delta_win(session_dir):

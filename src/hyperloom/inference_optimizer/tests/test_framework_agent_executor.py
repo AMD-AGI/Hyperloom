@@ -358,6 +358,10 @@ async def test_executor_keep_when_delta_above_threshold(tmp_path: Path):
     assert len(result["patches_applied"]) == 1
     assert result["patches_reverted"] == []
     assert (repo / "src.py").read_text().endswith("return 2\n")
+    assert result["scope"] == "source_patch"
+    assert result["framework_root"] == str(repo)
+    assert result["target_files"] == ["src.py"]
+    assert Path(result["source_snapshot"]).is_dir()
 
 
 @pytest.mark.asyncio

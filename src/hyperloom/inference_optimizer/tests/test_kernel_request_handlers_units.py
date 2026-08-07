@@ -4349,3 +4349,38 @@ class TestBuildTraceAnalyzeCmd:
         assert cmd[cmd.index("--steady-state-mode") + 1] == "median"
         # session-id falls back to the session dir name when payload omits it.
         assert cmd[cmd.index("--session-id") + 1] == session_dir.name
+
+
+def test_snapshot_integrate_keep_source_captures_kernel_patch(tmp_path):
+    repo = tmp_path / "aiter"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    target = repo / "csrc" / "kernel.hip"
+    target.parent.mkdir()
+    target.write_text("int value = 1;\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "base",
+        ],
+        cwd=repo,
+        check=True,
+    )
+    target.write_text("int value = 2;\n")
+    fields = krh._snapshot_integrate_keep_source(
+        {"kernel_repo": str(repo), "target_file": str(target)},
+        {"status": "ok", "touched": [str(target)]},
+        session_dir=tmp_path / "session",
+        kernel_id="k1",
+    )
+    assert fields["scope"] == "source_patch"
+    assert fields["framework_root"] == str(repo)
+    assert fields["target_files"] == ["csrc/kernel.hip"]
+    assert Path(fields["source_snapshot"]).is_dir()

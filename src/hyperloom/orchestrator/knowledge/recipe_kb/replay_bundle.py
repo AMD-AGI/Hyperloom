@@ -239,7 +239,10 @@ def _snapshot_groups(source_snapshots: list[Mapping[str, Any]]) -> tuple[list[di
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     repo_bases: dict[str, str] = {}
     for raw in source_snapshots:
-        snapshot_dir = Path(str(raw.get("snapshot_dir") or ""))
+        snapshot_text = str(raw.get("snapshot_dir") or "").strip()
+        if not snapshot_text:
+            return [], "source_snapshot_missing"
+        snapshot_dir = Path(snapshot_text)
         if not snapshot_dir.is_dir():
             return [], "source_snapshot_missing"
         try:

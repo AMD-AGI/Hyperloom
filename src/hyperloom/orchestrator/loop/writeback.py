@@ -303,6 +303,25 @@ class WritebackCollaborator:
             "workspace": result.get("workspace"),
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        if result.get("source_snapshot"):
+            entry.update(
+                {
+                    "scope": "source_patch",
+                    "source_snapshot": str(result.get("source_snapshot") or ""),
+                    "source_manifest": str(result.get("source_manifest") or ""),
+                    "target_files": [
+                        str(path)
+                        for path in (result.get("target_files") or [])
+                        if str(path).strip()
+                    ],
+                    "framework_root": str(result.get("framework_root") or ""),
+                    "base_sha": str(result.get("base_sha") or ""),
+                }
+            )
+        elif result.get("patch_path") or result.get("target_file"):
+            # Surface an uncaptured source mutation so bundle construction
+            # fails closed instead of silently replaying only its config/env.
+            entry["scope"] = "source_patch"
         stack_kernel_ids = result.get("stack_kernel_ids")
         if isinstance(stack_kernel_ids, list) and stack_kernel_ids:
             entry["stack_kernel_ids"] = [str(kid) for kid in stack_kernel_ids if str(kid)]
@@ -3414,7 +3433,29 @@ class WritebackCollaborator:
                 # if writeback runs after the state machine has advanced.
                 "source_phase": "FRAMEWORK_AGENT",
                 "provenance": "framework_agent",
+                "scope": "source_patch",
             }
+            if result.get("source_snapshot"):
+                lift.update(
+                    {
+                        "scope": "source_patch",
+                        "source_snapshot": str(
+                            result.get("source_snapshot") or ""
+                        ),
+                        "source_manifest": str(
+                            result.get("source_manifest") or ""
+                        ),
+                        "target_files": [
+                            str(path)
+                            for path in (result.get("target_files") or [])
+                            if str(path).strip()
+                        ],
+                        "framework_root": str(
+                            result.get("framework_root") or ""
+                        ),
+                        "base_sha": str(result.get("base_sha") or ""),
+                    }
+                )
             lifted = self._lift_to_current_best("framework", float(new_tput), lift)
             if lifted and self.shared_state.baseline_tput > 0:
                 self._update_cumulative_gain_validated(new_tput)
