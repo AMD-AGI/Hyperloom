@@ -101,17 +101,35 @@ def _resolve_critic_protocol(requested: str, *, provider_anthropic_only: bool) -
         # OpenAI transport even though it is an Anthropic-side credential.
         return "anthropic" if provider_anthropic_only and not _deepseek_only() else "openai"
 
-    if requested == "anthropic" and not _any_env_set(
-        ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", CLAUDE_OAUTH_TOKEN_ENV)
-    ):
-        raise ValueError(
-            "--critic-protocol=anthropic requires one of ANTHROPIC_API_KEY, "
-            f"ANTHROPIC_AUTH_TOKEN or {CLAUDE_OAUTH_TOKEN_ENV}"
-        )
+    if requested == "anthropic":
+        # A DeepSeek key authenticates DeepSeek's Anthropic-compatible endpoint,
+        # so it is a usable credential for this transport too.
+        if not _any_env_set(
+            ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", CLAUDE_OAUTH_TOKEN_ENV, "DEEPSEEK_API_KEY")
+        ):
+            raise ValueError(
+                "--critic-protocol=anthropic requires one of ANTHROPIC_API_KEY, "
+                f"ANTHROPIC_AUTH_TOKEN, {CLAUDE_OAUTH_TOKEN_ENV} or DEEPSEEK_API_KEY"
+            )
+        return requested
+
     # Mirror resolve_openai_client_config's key chain, LLM_GATEWAY_KEY included:
     # rejecting a gateway-only host here would fail a config that does run.
-    if requested == "openai" and not _any_env_set(("OPENAI_API_KEY", "LLM_GATEWAY_KEY", "DEEPSEEK_API_KEY")):
-        raise ValueError("--critic-protocol=openai requires OPENAI_API_KEY, LLM_GATEWAY_KEY or DEEPSEEK_API_KEY")
+    if requested == "openai":
+        if not _any_env_set(("OPENAI_API_KEY", "LLM_GATEWAY_KEY", "DEEPSEEK_API_KEY")):
+            raise ValueError("--critic-protocol=openai requires OPENAI_API_KEY, LLM_GATEWAY_KEY or DEEPSEEK_API_KEY")
+        # A gateway key is scoped to that gateway; without OPENAI_BASE_URL the
+        # client would send it to the official OpenAI endpoint instead.
+        gateway_only = (
+            _any_env_set(("LLM_GATEWAY_KEY",))
+            and not _any_env_set(("OPENAI_API_KEY", "DEEPSEEK_API_KEY"))
+            and not _any_env_set(("OPENAI_BASE_URL",))
+        )
+        if gateway_only:
+            raise ValueError(
+                "--critic-protocol=openai with only LLM_GATEWAY_KEY requires OPENAI_BASE_URL; "
+                "otherwise the gateway key is sent to the official OpenAI endpoint"
+            )
     return requested
 
 
