@@ -17,6 +17,9 @@ from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _donor_is_trustworthy,
     _find_config_donor,
 )
+from hyperloom.orchestrator.knowledge.recipe_kb.replay_bundle import (
+    refresh_bundle_digest,
+)
 
 
 def _donor(
@@ -41,19 +44,20 @@ def _donor(
     }
     if with_config:
         row["best_config"] = {"extra_server_args": "--enable-foo", "extra_envs": {"X": "1"}}
-        row["replay_bundle"] = {
-            "schema_version": 1,
-            "replayable": True,
-            "bundle_sha256": "donor-bundle",
-            "producer_session_id": "donor-session",
-            "config": {"argv": ["--enable-foo"], "extra_envs": {"X": "1"}},
-            "source_artifacts": [],
-            "measurement": {
-                "baseline_throughput": 100.0,
-                "optimized_throughput": 100.0 + gain,
-                "gain_pct": gain,
-            },
-        }
+        row["replay_bundle"] = refresh_bundle_digest(
+            {
+                "schema_version": 1,
+                "replayable": True,
+                "producer_session_id": "donor-session",
+                "config": {"argv": ["--enable-foo"], "extra_envs": {"X": "1"}},
+                "source_artifacts": [],
+                "measurement": {
+                    "baseline_throughput": 100.0,
+                    "optimized_throughput": 100.0 + gain,
+                    "gain_pct": gain,
+                },
+            }
+        )
     return row
 
 

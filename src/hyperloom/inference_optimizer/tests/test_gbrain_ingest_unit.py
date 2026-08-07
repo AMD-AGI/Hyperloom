@@ -10,6 +10,10 @@ import json
 import yaml
 
 from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_ingest as gi
+from hyperloom.orchestrator.knowledge.recipe_kb.replay_bundle import (
+    refresh_bundle_digest,
+    validate_replay_bundle,
+)
 
 
 # -- _emit_yaml ------------------------------------------------------------
@@ -54,7 +58,7 @@ def test_recipe_to_page_emits_fingerprint_and_negatives(monkeypatch) -> None:
     assert "kind:recipe" in content
 
 
-def test_recipe_json_strips_secrets_and_internal_paths_but_keeps_safe_replay_fields() -> None:
+def test_recipe_json_strips_secrets_and_internal_paths() -> None:
     _slug, content = gi.recipe_to_page(
         {
             "canonical_id": "inference:qwen:mi300x:sglang:qwen:qwen:1.0:fp8",
@@ -62,8 +66,7 @@ def test_recipe_json_strips_secrets_and_internal_paths_but_keeps_safe_replay_fie
             "hardware": "mi300x",
             "best_config": {
                 "extra_server_args": (
-                    "--tp 8 --token top-secret --token-budget 4096 "
-                    "--tokenizer /workspace/replay/tokenizer"
+                    "--tp 8 --token top-secret --token-budget 4096 --tokenizer /workspace/replay/tokenizer"
                 ),
                 "extra_envs": {
                     "ROCM_VERSION": "7.0",
@@ -94,12 +97,9 @@ def test_recipe_json_strips_secrets_and_internal_paths_but_keeps_safe_replay_fie
 
     frontmatter = yaml.safe_load(content.split("---", 2)[1])
     decoded = json.loads(frontmatter["attrs"]["recipe_json"])
-    assert decoded["best_config"]["extra_server_args"] == (
-        "--tp 8 --token-budget 4096 --tokenizer /workspace/replay/tokenizer"
-    )
+    assert decoded["best_config"]["extra_server_args"] == "--tp 8 --token-budget 4096"
     assert decoded["best_config"]["extra_envs"] == {
         "ROCM_VERSION": "7.0",
-        "AITER_CONFIG": "/workspace/replay/tuned.csv",
     }
     assert decoded["provenance"] == {"generator": "close", "details": {"safe": "kept"}}
     assert decoded["evidence_refs"] == [{"kind": "report", "url": "https://reports.example/safe"}]
@@ -115,3 +115,58 @@ def test_recipe_json_strips_secrets_and_internal_paths_but_keeps_safe_replay_fie
         "/tmp/session/",
     ):
         assert secret_or_path not in content
+
+
+def test_replay_argv_is_sanitized_and_bundle_is_resigned_fail_closed() -> None:
+    bundle = refresh_bundle_digest(
+        {
+            "schema_version": 1,
+            "replayable": True,
+            "reason": "",
+            "config": {
+                "argv": [
+                    "--tp",
+                    "8",
+                    "--api-key",
+                    "top-secret",
+                    "--tokenizer",
+                    "/workspace/private/tokenizer",
+                ],
+                "extra_envs": {
+                    "USE_AITER": "1",
+                    "HF_TOKEN": "env-secret",
+                },
+            },
+            "source_artifacts": [],
+            "measurement": {
+                "optimized_throughput": 1000.0,
+                "measured_with_complete_bundle": True,
+            },
+        }
+    )
+    _slug, content = gi.recipe_to_page(
+        {
+            "canonical_id": "inference:qwen:mi300x:vllm:qwen:qwen:1.0:fp8",
+            "model": "qwen",
+            "hardware": "mi300x",
+            "framework_name": "vllm",
+            "best_config": {
+                "argv": bundle["config"]["argv"],
+                "extra_envs": bundle["config"]["extra_envs"],
+            },
+            "best_throughput": 1000.0,
+            "replay_bundle": bundle,
+        }
+    )
+    frontmatter = yaml.safe_load(content.split("---", 2)[1])
+    decoded = json.loads(frontmatter["attrs"]["recipe_json"])
+    cleaned = decoded["replay_bundle"]
+    assert cleaned["config"]["argv"] == ["--tp", "8"]
+    assert cleaned["config"]["extra_envs"] == {"USE_AITER": "1"}
+    assert cleaned["replayable"] is False
+    assert cleaned["reason"] == "gbrain_replay_data_sanitized"
+    assert cleaned["measurement"]["measured_with_complete_bundle"] is False
+    checked = validate_replay_bundle(cleaned)
+    assert checked["reason"] == "gbrain_replay_data_sanitized"
+    for forbidden in ("top-secret", "env-secret", "/workspace/private"):
+        assert forbidden not in content

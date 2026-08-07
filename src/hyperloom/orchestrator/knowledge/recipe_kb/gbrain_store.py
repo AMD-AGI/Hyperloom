@@ -13,7 +13,7 @@ import threading
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from hyperloom.common.timeutil import now_iso
 
@@ -32,6 +32,7 @@ from .local_store import (
     _normalise_str_dicts,
 )
 from .replay_bundle import REPLAY_BUNDLE_KEY, externalize_large_artifacts
+from .replay_bundle import bundle_matches_champion
 from .schema import Recipe
 
 try:
@@ -344,6 +345,26 @@ class GbrainRecipeStore:
                 "incoming_filled_empty",
                 "incoming_higher_throughput",
             }
+            if (
+                incoming_won
+                and latest
+                and isinstance(latest_bundle, Mapping)
+                and not bundle_matches_champion(
+                    incoming_bundle if isinstance(incoming_bundle, Mapping) else None,
+                    best_config=incoming_config,
+                    best_throughput=incoming_throughput,
+                )
+            ):
+                # Never advance only part of the champion. Mid-session metadata
+                # amendments historically carried the previous bundle forward
+                # while replacing config/throughput, producing a plausible but
+                # false replay contract. Preserve the last atomic champion.
+                merged_config = latest_config
+                merged_throughput = latest_throughput
+                champion = "incoming_rejected_unbound_bundle"
+                incoming_won = False
+                payload["best_config"] = merged_config
+                payload["best_throughput"] = merged_throughput
             selected_bundle = incoming_bundle if incoming_won else latest_bundle
             if isinstance(selected_bundle, dict):
                 selected_bundle = externalize_large_artifacts(

@@ -435,6 +435,37 @@ def test_best_config_reads_stack_args_from_canonical_server_key(
     )
 
 
+def test_best_config_and_bundle_share_full_effective_argv(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    coord = _make_coordinator(tmp_path)
+    ss = coord.shared_state
+    ss.current_best = {
+        "name": "tuned",
+        "extra_server_args": "--page-size 32",
+        "tput": 2200.0,
+    }
+    ss.optimization_stack = [
+        {
+            "action": "explore",
+            "variant_name": "page32",
+            "extra_server_args": "--page-size 32",
+        }
+    ]
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.loop.writeback._scrape_resolved_launch_flags",
+        lambda *_args, **_kwargs: "--schedule-policy lpm",
+    )
+    attrs = coord._build_recipe_attrs_from_state()
+    expected = ["--schedule-policy", "lpm", "--page-size", "32"]
+    assert attrs["replay_bundle"]["config"]["argv"] == expected
+    assert attrs["best_config"]["argv"] == expected
+    assert attrs["best_config"]["extra_server_args"] == (
+        "--schedule-policy lpm --page-size 32"
+    )
+
+
 def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
     """Counterpart guard: a genuine validated win DOES update best_config/best_throughput."""
     coord = _make_coordinator(tmp_path)

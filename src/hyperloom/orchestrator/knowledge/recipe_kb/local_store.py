@@ -45,7 +45,7 @@ import os
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.jsonio import read_json
@@ -57,6 +57,7 @@ from .canonical_id import (
     cid_to_path_components,
 )
 from .schema import Attempt, Recipe
+from .replay_bundle import REPLAY_BUNDLE_KEY, bundle_matches_champion
 
 
 log = logging.getLogger(__name__)
@@ -408,6 +409,30 @@ class LocalRecipeStore:
             prior_counts = _collection_counts(live)
             prior_version = int(live.get("version", 0)) if isinstance(live, dict) else 0
             new_version = prior_version + 1 if not created else 1
+            effective_best_config = dict(best_config or {})
+            effective_best_throughput = float(best_throughput)
+            effective_extras = dict(extras or {})
+            if isinstance(live, dict):
+                live_config = dict(live.get("best_config") or {})
+                live_throughput = float(live.get("best_throughput") or 0.0)
+                champion_changed = (
+                    effective_best_config != live_config or abs(effective_best_throughput - live_throughput) > 1e-9
+                )
+                incoming_bundle = effective_extras.get(REPLAY_BUNDLE_KEY)
+                if (
+                    champion_changed
+                    and isinstance(live.get(REPLAY_BUNDLE_KEY), Mapping)
+                    and not bundle_matches_champion(
+                        incoming_bundle if isinstance(incoming_bundle, Mapping) else None,
+                        best_config=effective_best_config,
+                        best_throughput=effective_best_throughput,
+                    )
+                ):
+                    # Metadata/lesson amendments must not pair a new config and
+                    # throughput with the previous champion's replay bundle.
+                    effective_best_config = live_config
+                    effective_best_throughput = live_throughput
+                    effective_extras[REPLAY_BUNDLE_KEY] = live[REPLAY_BUNDLE_KEY]
 
             if not created:
                 # Archive prior live before overwrite; ``replaced_by`` carries
@@ -444,8 +469,8 @@ class LocalRecipeStore:
                 "framework_name": framework_name,
                 "framework_version": framework_version,
                 "precision": precision,
-                "best_config": dict(best_config or {}),
-                "best_throughput": float(best_throughput),
+                "best_config": effective_best_config,
+                "best_throughput": effective_best_throughput,
                 "what_worked": _normalise_str_dicts(what_worked, ("description", "measured_impact")),
                 "what_failed": _normalise_str_dicts(what_failed, ("description", "reason")),
                 "remaining_gaps": _normalise_str_dicts(remaining_gaps, ("description", "metrics")),
@@ -461,9 +486,9 @@ class LocalRecipeStore:
                 "evidence_refs": list(evidence_refs or []),
                 "provenance": dict(provenance or {}),
             }
-            if extras:
+            if effective_extras:
                 # Splat extras at the top level (no nested ``extras`` key on disk).
-                for key, val in extras.items():
+                for key, val in effective_extras.items():
                     payload_dict.setdefault(key, val)
 
             recipe = Recipe.from_dict(payload_dict)

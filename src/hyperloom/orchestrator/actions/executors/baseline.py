@@ -328,9 +328,7 @@ def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
     """Set the effective eval mode after lifecycle eligibility is known."""
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     benchmark = cfg.setdefault("benchmark", {})
-    benchmark.setdefault("envs", {})["RUN_EVAL"] = (
-        "true" if enabled else "false"
-    )
+    benchmark.setdefault("envs", {})["RUN_EVAL"] = "true" if enabled else "false"
     config_path.write_text(
         yaml.safe_dump(cfg, sort_keys=False),
         encoding="utf-8",
@@ -706,38 +704,113 @@ def _git_head_sha(repo_path: str) -> str:
         return ""
 
 
-def _revert_patches(repo_path: str, pre_sha: str) -> None:
-    """Revert the repo to pre_sha after warm-replay patches were applied.
-
-    Prevents patch residue from leaking into subsequent tasks that reuse
-    the same InferenceX checkout mirror.
-    """
-    if not repo_path or not pre_sha:
+def _revert_applied_patch(repo_path: str, patch_path: str) -> None:
+    """Reverse only one warm patch, preserving unrelated checkout state."""
+    if not repo_path or not patch_path:
         return
     try:
         subprocess.run(
-            ["git", "reset", "--hard", pre_sha],
+            ["git", "apply", "-R", "--check", patch_path],
             cwd=repo_path,
             capture_output=True,
             timeout=15,
             check=True,
         )
         subprocess.run(
-            ["git", "clean", "-fd"],
+            ["git", "apply", "-R", patch_path],
             cwd=repo_path,
             capture_output=True,
             timeout=15,
-            check=False,
+            check=True,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-        log.warning("baseline_executor: patch revert failed: %s", exc)
+        log.warning(
+            "baseline_executor: reverse warm patch failed for %s: %s",
+            patch_path,
+            exc,
+        )
+
+
+_KERNEL_CPP_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cu",
+    ".cuh",
+    ".cxx",
+    ".h",
+    ".hip",
+    ".hpp",
+}
+
+
+def _prepare_warm_kernel_rebuild(
+    applied_patches: list[dict[str, Any]],
+) -> tuple[bool, str]:
+    """Activate KernelForge's source-keyed JIT cache for replayed AITER code."""
+    kernel_sources: list[str] = []
+    for patch in applied_patches:
+        root = Path(str(patch.get("target_repo") or ""))
+        if "aiter" not in root.name.lower():
+            continue
+        for rel in patch.get("changed_files") or []:
+            path = root / str(rel)
+            if path.suffix.lower() in _KERNEL_CPP_SUFFIXES:
+                kernel_sources.append(str(path))
+    if not kernel_sources:
+        return True, ""
+    try:
+        from kernel_agents.loop.jit_rebuild import force_jit_rebuild
+    except ImportError:
+        return False, "kernelforge_jit_rebuild_unavailable"
+    try:
+        force_jit_rebuild(kernel_sources)
+    except Exception as exc:  # noqa: BLE001 - fail closed before benchmark
+        log.warning("baseline_executor: KernelForge JIT preparation failed: %s", exc)
+        return False, "kernelforge_jit_rebuild_failed"
+    return True, ""
+
+
+def _materialize_warm_env_path_refs(
+    params: dict[str, Any],
+    applied_patches: list[dict[str, Any]],
+) -> tuple[bool, str]:
+    """Resolve portable repo-relative env values after their patches apply."""
+    refs = params.get("env_path_refs") or {}
+    if not isinstance(refs, dict) or not refs:
+        return True, ""
+    roots: dict[str, Path] = {}
+    for patch in applied_patches:
+        logical_repo = str(patch.get("logical_repo") or "").strip().lower()
+        target = Path(str(patch.get("target_repo") or ""))
+        if logical_repo and target.is_dir():
+            roots[logical_repo] = target.resolve()
+    resolved_envs = dict(params.get("extra_envs") or {})
+    for raw_key, raw_ref in refs.items():
+        if not isinstance(raw_ref, dict):
+            return False, f"invalid_env_path_ref:{raw_key}"
+        repo = str(raw_ref.get("repo") or "").strip().lower()
+        rel = str(raw_ref.get("path") or "").strip().lstrip("/")
+        root = roots.get(repo)
+        if root is None or not rel or ".." in Path(rel).parts:
+            return False, f"unresolved_env_path_ref:{raw_key}"
+        value = (root / rel).resolve(strict=False)
+        try:
+            value.relative_to(root)
+        except ValueError:
+            return False, f"unsafe_env_path_ref:{raw_key}"
+        if not value.is_file():
+            return False, f"missing_env_path_ref:{raw_key}"
+        resolved_envs[str(raw_key)] = str(value)
+    params["extra_envs"] = resolved_envs
+    return True, ""
 
 
 def _apply_warm_patches(
     params: dict[str, Any],
     target_repo: str,
     output_dir: Path,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Apply warm-replay code patches to their recorded source checkouts.
 
     Reads ``params["patches"]`` (list of dicts with patch_file/patch_content/
@@ -755,7 +828,7 @@ def _apply_warm_patches(
 
     blocked = {p.get("patch_file", "") for p in (params.get("blocked_patches") or [])}
 
-    applied: list[dict[str, str]] = []
+    applied: list[dict[str, Any]] = []
     patch_log_dir = output_dir / "warm_patches"
     patch_log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -896,7 +969,12 @@ def _apply_warm_patches(
                 "patch_file": patch_file,
                 "idx": str(idx),
                 "target_repo": patch_target,
+                "logical_repo": str(patch.get("target_repo") or "inferencex")
+                .strip()
+                .lower(),
                 "pre_sha": pre_sha,
+                "patch_path": str(patch_path),
+                "changed_files": [str(path) for path in (patch.get("changed_files") or []) if str(path)],
             }
         )
 
@@ -1983,6 +2061,36 @@ class BaselineExecutor:
                 len(applied_patches),
                 [p["patch_file"] for p in applied_patches],
             )
+            env_ready, env_reason = _materialize_warm_env_path_refs(
+                params,
+                applied_patches,
+            )
+            if not env_ready:
+                for patch in reversed(applied_patches):
+                    _revert_applied_patch(
+                        str(patch.get("target_repo") or ""),
+                        str(patch.get("patch_path") or ""),
+                    )
+                return {
+                    "status": "failed",
+                    "error_class": env_reason,
+                    "error": (
+                        "portable environment path could not be materialized "
+                        "from its replayed source artifact"
+                    ),
+                }
+            jit_ready, jit_reason = _prepare_warm_kernel_rebuild(applied_patches)
+            if not jit_ready:
+                for patch in reversed(applied_patches):
+                    _revert_applied_patch(
+                        str(patch.get("target_repo") or ""),
+                        str(patch.get("patch_path") or ""),
+                    )
+                return {
+                    "status": "failed",
+                    "error_class": jit_reason,
+                    "error": ("kernel source patch was applied but its JIT rebuild could not be prepared"),
+                }
 
         timeout_sec = self._resolve_timeout(params)
         # Model path: task.params['model_path'] > $MODEL_PATH > SharedState;
@@ -2022,9 +2130,7 @@ class BaselineExecutor:
         # Accuracy eval (GSM8K) opt-out: the ``disable_run_eval`` param and the
         # in-executor eval-failure fallback both force ``RUN_EVAL=false``.
         base_extra_envs = dict(params.get("extra_envs") or {})
-        defer_accuracy_until_after_measure = is_truthy(
-            params.get("defer_accuracy_until_after_measure")
-        )
+        defer_accuracy_until_after_measure = is_truthy(params.get("defer_accuracy_until_after_measure"))
         if force_disable_eval or is_truthy(params.get("disable_run_eval")):
             base_extra_envs["RUN_EVAL"] = "false"
         try:
@@ -2126,9 +2232,7 @@ class BaselineExecutor:
                 materialized_config_path,
                 enabled=False,
             )
-        run_eval_disabled = _materialized_run_eval_disabled(
-            materialized_config_path
-        )
+        run_eval_disabled = _materialized_run_eval_disabled(materialized_config_path)
 
         # Ray-managed GPU execution (§12 T1): one held Ray lease (``num_gpus=TP``)
         # spans this baseline's benchmark rounds — a double-run's warmup +
@@ -2293,10 +2397,7 @@ class BaselineExecutor:
                             run_eval=True,
                         )
                         try:
-                            accuracy_timeout_sec = int(
-                                params.get("accuracy_timeout_sec")
-                                or timeout_sec
-                            )
+                            accuracy_timeout_sec = int(params.get("accuracy_timeout_sec") or timeout_sec)
                         except (TypeError, ValueError):
                             accuracy_timeout_sec = timeout_sec
                         accuracy_result = await self._run_single_benchmark(
@@ -2313,9 +2414,7 @@ class BaselineExecutor:
                         )
                         result["accuracy_stage"] = {
                             "status": accuracy_result.get("status"),
-                            "error_class": accuracy_result.get(
-                                "error_class"
-                            ),
+                            "error_class": accuracy_result.get("error_class"),
                             "workspace": accuracy_result.get("workspace"),
                         }
                         if accuracy_result.get("status") == "succeeded":
@@ -2329,9 +2428,7 @@ class BaselineExecutor:
                                     result[key] = accuracy_result[key]
                         else:
                             result.setdefault("nonfatal_warnings", [])
-                            result["nonfatal_warnings"].append(
-                                "post_measure_accuracy_failed"
-                            )
+                            result["nonfatal_warnings"].append("post_measure_accuracy_failed")
                     else:
                         result["accuracy_stage"] = {
                             "status": "skipped",
@@ -2351,14 +2448,22 @@ class BaselineExecutor:
             )
             # Revert warm-replay patches to prevent state leakage into
             # subsequent tasks that reuse the same InferenceX checkout.
-            reverted: set[tuple[str, str]] = set()
-            for patch in applied_patches:
+            # Reverse in LIFO order so overlapping patches unwind exactly in
+            # the inverse order they were applied. Never reset/clean a shared
+            # framework checkout: it may contain unrelated operator changes,
+            # instrumentation, caches, or build outputs.
+            for patch in reversed(applied_patches):
                 target = str(patch.get("target_repo") or "")
-                pre_sha = str(patch.get("pre_sha") or "")
-                key = (target, pre_sha)
-                if target and pre_sha and key not in reverted:
-                    _revert_patches(target, pre_sha)
-                    reverted.add(key)
+                patch_path = str(patch.get("patch_path") or "")
+                if target and patch_path:
+                    _revert_applied_patch(target, patch_path)
+            if applied_patches:
+                restored_jit, restored_reason = _prepare_warm_kernel_rebuild(applied_patches)
+                if not restored_jit:
+                    log.warning(
+                        "baseline_executor: could not restore post-replay JIT cache identity: %s",
+                        restored_reason,
+                    )
             if bench_lease is not None:
                 bench_lease.close()
 
@@ -2454,9 +2559,7 @@ class BaselineExecutor:
             port=port,
         )
         if run_eval is not None:
-            bench.setdefault("envs", {})["RUN_EVAL"] = (
-                "true" if run_eval else "false"
-            )
+            bench.setdefault("envs", {})["RUN_EVAL"] = "true" if run_eval else "false"
         dest_dir.mkdir(parents=True, exist_ok=True)
         out = Path(dest_dir) / "baseline_lifecycle.yaml"
         with out.open("w", encoding="utf-8") as f:

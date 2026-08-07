@@ -38,6 +38,9 @@ from hyperloom.orchestrator.knowledge.recipe_kb.dispatcher import (
     _prefer_score,
     _rerank_by_prefer,
 )
+from hyperloom.orchestrator.knowledge.recipe_kb.replay_bundle import (
+    refresh_bundle_digest,
+)
 
 
 class _NestedRemote:
@@ -231,22 +234,23 @@ def test_build_warm_start_context_hit() -> None:
         },
         "best_throughput": 5430.9,
         "validated_gain_pct": 7.8,
-        "replay_bundle": {
-            "schema_version": 1,
-            "replayable": True,
-            "bundle_sha256": "bundle",
-            "producer_session_id": "donor-session",
-            "config": {
-                "argv": ["--cuda-graph-max-bs", "256"],
-                "extra_envs": {"FOO": "1"},
-            },
-            "source_artifacts": [],
-            "measurement": {
-                "baseline_throughput": 5038.0,
-                "optimized_throughput": 5430.9,
-                "gain_pct": 7.8,
-            },
-        },
+        "replay_bundle": refresh_bundle_digest(
+            {
+                "schema_version": 1,
+                "replayable": True,
+                "producer_session_id": "donor-session",
+                "config": {
+                    "argv": ["--cuda-graph-max-bs", "256"],
+                    "extra_envs": {"FOO": "1"},
+                },
+                "source_artifacts": [],
+                "measurement": {
+                    "baseline_throughput": 5038.0,
+                    "optimized_throughput": 5430.9,
+                    "gain_pct": 7.8,
+                },
+            }
+        ),
         "sessions": [
             {
                 "session_id": "donor-session",
@@ -277,14 +281,69 @@ def test_build_warm_start_context_hit() -> None:
     assert ctx["recommended_replay"]["donor_session_id"] == "donor-session"
     assert ctx["recommended_replay"]["donor_family_tags"] == ["moe", "mla"]
     assert ctx["recommended_replay"]["donor_gain_pct"] == 7.8
-    assert (
-        ctx["recommended_replay"]["donor_breakdown_link"]
-        == "https://example.test/session/donor-session"
-    )
+    assert ctx["recommended_replay"]["donor_breakdown_link"] == "https://example.test/session/donor-session"
     assert ctx["proven_prior"] == [{"id": "w1"}]
     assert ctx["do_not_repeat"] == [{"id": "f1"}]
     assert ctx["lessons"] == [{"attrs": {"statement": "x"}}]
     assert ctx["pitfalls"] == [{"attrs": {"description": "y"}}]
+
+
+def test_build_warm_start_context_rejects_tampered_local_bundle() -> None:
+    bundle = refresh_bundle_digest(
+        {
+            "schema_version": 1,
+            "replayable": True,
+            "config": {"argv": ["--safe"], "extra_envs": {}},
+            "source_artifacts": [],
+            "measurement": {"optimized_throughput": 100.0},
+        }
+    )
+    bundle["config"]["argv"] = ["--tampered"]
+    recipe = {
+        "canonical_id": "inference:m:h:f:mt:a:v:p",
+        "best_config": {"extra_server_args": "--tampered"},
+        "best_throughput": 100.0,
+        "replay_bundle": bundle,
+    }
+    ctx = _build_warm_start_context(
+        status="hit",
+        tier="exact",
+        confidence=1.0,
+        canonical_id=recipe["canonical_id"],
+        source="local",
+        recipe=recipe,
+    )
+    assert ctx["recommended_replay"] == {}
+    assert ctx["replay_unavailable_reason"] == "bundle_sha_mismatch"
+
+
+def test_build_warm_start_context_rejects_tampered_local_bundle() -> None:
+    bundle = refresh_bundle_digest(
+        {
+            "schema_version": 1,
+            "replayable": True,
+            "config": {"argv": ["--safe"], "extra_envs": {}},
+            "source_artifacts": [],
+            "measurement": {"optimized_throughput": 100.0},
+        }
+    )
+    bundle["config"]["argv"] = ["--tampered"]
+    recipe = {
+        "canonical_id": "inference:m:h:f:mt:a:v:p",
+        "best_config": {"extra_server_args": "--tampered"},
+        "best_throughput": 100.0,
+        "replay_bundle": bundle,
+    }
+    ctx = _build_warm_start_context(
+        status="hit",
+        tier="exact",
+        confidence=1.0,
+        canonical_id=recipe["canonical_id"],
+        source="local",
+        recipe=recipe,
+    )
+    assert ctx["recommended_replay"] == {}
+    assert ctx["replay_unavailable_reason"] == "bundle_sha_mismatch"
 
 
 @pytest.mark.parametrize("status", ["seed_only", "miss", "error"])
@@ -368,19 +427,20 @@ def test_t0_status_hit_when_actionable_row_present(tmp_path: Path) -> None:
         best_config={"extra_server_args": "--x 1", "extra_envs": {"A": "1"}},
         best_throughput=2000.0,
         extras={
-            "replay_bundle": {
-                "schema_version": 1,
-                "replayable": True,
-                "bundle_sha256": "bundle",
-                "producer_session_id": "prior",
-                "config": {"argv": ["--x", "1"], "extra_envs": {"A": "1"}},
-                "source_artifacts": [],
-                "measurement": {
-                    "baseline_throughput": 1800.0,
-                    "optimized_throughput": 2000.0,
-                    "gain_pct": 11.111,
-                },
-            }
+            "replay_bundle": refresh_bundle_digest(
+                {
+                    "schema_version": 1,
+                    "replayable": True,
+                    "producer_session_id": "prior",
+                    "config": {"argv": ["--x", "1"], "extra_envs": {"A": "1"}},
+                    "source_artifacts": [],
+                    "measurement": {
+                        "baseline_throughput": 1800.0,
+                        "optimized_throughput": 2000.0,
+                        "gain_pct": 11.111,
+                    },
+                }
+            )
         },
     )
     run_t0_anchor(

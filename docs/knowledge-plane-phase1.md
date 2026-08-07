@@ -75,8 +75,43 @@ filesystem. Startup fails when `fcntl` is unavailable, and writes fail clearly
 when the lock directory/file cannot be safely created or locked. A pod-local
 volume does not provide cross-pod serialization.
 
-Recipe identity, T0 matching tiers, champion selection, and warm-replay policy
-are unchanged.
+Recipe identity and T0 matching tiers are unchanged.
+
+## Replay bundles and legacy Recipes
+
+A replayable champion is one atomic value: the final effective server argv,
+environment variables, source patches, measured throughput, and integrity
+metadata all describe the same validated state. `best_config` remains a
+compatibility projection of that bundle's config; a writer must not advance
+`best_config` or `best_throughput` while carrying forward an older bundle.
+
+Source modifications from every retained `source_patch` stack entry are
+squashed per repository/base commit. Local Recipes keep those diffs inline;
+remote Recipes externalize large diffs to content-addressed GBrain pages.
+Both readers verify artifact hashes and the bundle digest before warm replay.
+Environment values that point at a captured file are stored as
+`{repo, path}` references and resolved only after that repository patch is
+applied; uncaptured absolute paths make the bundle non-replayable.
+Patch application is reversed patch-by-patch after benchmarking and never uses
+`git reset --hard` or `git clean` on a shared framework checkout.
+For replayed AITER C/C++/HIP sources, Hyperloom invokes KernelForge's
+source-keyed JIT preparation before launch and fails closed when that integration
+is unavailable; after reversing the patch it rekeys the cache to the restored
+source state.
+
+An authored-kernel overlay represented only by a host-local `PYTHONPATH`
+directory is not portable. Until that overlay is flattened to a source patch
+or resolved by a stable KernelForge artifact API, the Recipe is retained as
+reference material with `replayable=false` and reason
+`overlay_not_flattened_to_patch`.
+
+Recipes written before replay bundles remain readable for history, lessons,
+and anti-priors, but their unbound `best_config` is not executed
+automatically. Operators will see `legacy_recipe_without_bundle` rather than a
+generic empty-config reason. Backfilling such a row as executable requires an
+explicit migration that can prove the config, patches, environment, and
+throughput came from the same measured champion; copying only `best_config`
+does not establish that guarantee.
 
 ## Local knowledge graph
 

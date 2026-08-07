@@ -25,7 +25,12 @@ import re
 import shlex
 from typing import Any, Mapping
 
-from .replay_bundle import argv_to_env_string, canonical_server_argv
+from .replay_bundle import (
+    REPLAY_BUNDLE_KEY,
+    argv_to_env_string,
+    canonical_server_argv,
+    refresh_bundle_digest,
+)
 
 # A scalar safe to emit bare (unquoted) in YAML: letter-leading, otherwise
 # alnum/._- only. Anything reinterpretable (digit-leading versions, tokens with
@@ -129,8 +134,10 @@ def _is_secret_option(value: str) -> bool:
         return True
     if not parts or "token" not in parts:
         return False
-    return len(parts) == 1 or parts[-1] == "token" or bool(
-        {"api", "auth", "bearer", "access", "refresh", "hf", "gbrain"} & set(parts)
+    return (
+        len(parts) == 1
+        or parts[-1] == "token"
+        or bool({"api", "auth", "bearer", "access", "refresh", "hf", "gbrain"} & set(parts))
     )
 
 
@@ -173,6 +180,30 @@ def _sanitize_server_args(value: str, *, drop_paths: bool) -> str:
         return ""
 
 
+def _sanitize_server_argv(value: Any, *, drop_paths: bool) -> list[str]:
+    """Remove credential operands and host-local paths from structured argv."""
+    tokens = canonical_server_argv(value)
+    safe: list[str] = []
+    skip_value = False
+    for token in tokens:
+        if skip_value:
+            skip_value = False
+            continue
+        option, separator, operand = token.partition("=")
+        normalized_option = option.lstrip("-")
+        if _is_secret_option(normalized_option):
+            skip_value = not separator
+            continue
+        if drop_paths and _is_absolute_path_text(token):
+            if safe and safe[-1].startswith("-") and "=" not in safe[-1]:
+                safe.pop()
+            continue
+        if drop_paths and separator and _is_absolute_path_text(operand):
+            continue
+        safe.append(token)
+    return safe
+
+
 def _sanitize_gbrain_value(
     value: Any,
     *,
@@ -183,6 +214,8 @@ def _sanitize_gbrain_value(
 
     if _is_secret_key(key):
         return _DROP_VALUE
+    if key == "argv" and isinstance(value, (list, tuple, str)):
+        return _sanitize_server_argv(value, drop_paths=True)
     if isinstance(value, Mapping):
         sanitized: dict[str, Any] = {}
         for nested_key, nested_value in value.items():
@@ -232,8 +265,10 @@ def _sanitize_recipe_for_gbrain(recipe: Mapping[str, Any]) -> dict[str, Any]:
         # replay fields retain path-valued knobs/artifacts but still lose any
         # nested secret-bearing keys.
         drop_paths = key not in _CORE_RECIPE_KEYS or key in {
+            "best_config",
             "provenance",
             "evidence_refs",
+            REPLAY_BUNDLE_KEY,
         }
         cleaned = _sanitize_gbrain_value(
             raw_value,
@@ -242,6 +277,23 @@ def _sanitize_recipe_for_gbrain(recipe: Mapping[str, Any]) -> dict[str, Any]:
         )
         if cleaned is not _DROP_VALUE:
             sanitized[key] = cleaned
+    original_bundle = recipe.get(REPLAY_BUNDLE_KEY)
+    cleaned_bundle = sanitized.get(REPLAY_BUNDLE_KEY)
+    if isinstance(original_bundle, Mapping) and isinstance(cleaned_bundle, Mapping):
+        original_without_digest = dict(original_bundle)
+        cleaned_without_digest = dict(cleaned_bundle)
+        original_without_digest.pop("bundle_sha256", None)
+        cleaned_without_digest.pop("bundle_sha256", None)
+        if original_without_digest != cleaned_without_digest:
+            cleaned_without_digest["replayable"] = False
+            cleaned_without_digest["reason"] = "gbrain_replay_data_sanitized"
+            measurement = cleaned_without_digest.get("measurement")
+            if isinstance(measurement, Mapping):
+                cleaned_without_digest["measurement"] = {
+                    **measurement,
+                    "measured_with_complete_bundle": False,
+                }
+        sanitized[REPLAY_BUNDLE_KEY] = refresh_bundle_digest(cleaned_without_digest)
     return sanitized
 
 
@@ -380,9 +432,7 @@ def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, s
         A tuple of the launch-args string and the env-var dict.
     """
     argv = canonical_server_argv(
-        best_config.get("argv")
-        if best_config.get("argv") is not None
-        else best_config.get(_EXTRA_SERVER_ARGS_KEY)
+        best_config.get("argv") if best_config.get("argv") is not None else best_config.get(_EXTRA_SERVER_ARGS_KEY)
     )
     try:
         args = argv_to_env_string(argv)
@@ -422,11 +472,7 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     if not canonical:
         return None
     args, envs = _best_config_split(best_config)
-    argv = canonical_server_argv(
-        best_config.get("argv")
-        if best_config.get("argv") is not None
-        else args
-    )
+    argv = canonical_server_argv(best_config.get("argv") if best_config.get("argv") is not None else args)
     model = str(recipe.get("model") or "")
     hardware = str(recipe.get("hardware") or "")
     # Back-compat: rows predating the framework_name rename use ``framework``.

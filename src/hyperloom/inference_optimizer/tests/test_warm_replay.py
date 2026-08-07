@@ -11,6 +11,9 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.knowledge.recipe_kb.replay_bundle import (
+    refresh_bundle_digest,
+)
 
 
 @dataclass
@@ -135,22 +138,23 @@ def _warm_recipe_t1(
             "extra_envs": dict(extra_envs or {}),
         },
         "sessions": recipe_sessions,
-        "replay_bundle": {
-            "schema_version": 1,
-            "replayable": True,
-            "bundle_sha256": "test-bundle",
-            "producer_session_id": "prior-session-A",
-            "config": {
-                "argv": extra_server_args.split(),
-                "extra_envs": dict(extra_envs or {}),
-            },
-            "source_artifacts": [],
-            "measurement": {
-                "baseline_throughput": 100.0,
-                "optimized_throughput": 125.0,
-                "gain_pct": expected_gain_pct,
-            },
-        },
+        "replay_bundle": refresh_bundle_digest(
+            {
+                "schema_version": 1,
+                "replayable": True,
+                "producer_session_id": "prior-session-A",
+                "config": {
+                    "argv": extra_server_args.split(),
+                    "extra_envs": dict(extra_envs or {}),
+                },
+                "source_artifacts": [],
+                "measurement": {
+                    "baseline_throughput": 100.0,
+                    "optimized_throughput": 125.0,
+                    "gain_pct": expected_gain_pct,
+                },
+            }
+        ),
     }
     if what_failed is not None:
         attrs["what_failed"] = what_failed
@@ -190,22 +194,23 @@ def _warm_recipe_v2_arbor(
             "sessions": [
                 {"session_id": "prior-A", "gain_pct": expected_gain_pct, "stack_len": 1},
             ],
-            "replay_bundle": {
-                "schema_version": 1,
-                "replayable": True,
-                "bundle_sha256": "test-bundle-v2",
-                "producer_session_id": "prior-A",
-                "config": {
-                    "argv": extra_server_args.split(),
-                    "extra_envs": dict(extra_envs or {}),
-                },
-                "source_artifacts": [],
-                "measurement": {
-                    "baseline_throughput": 100.0,
-                    "optimized_throughput": 125.0,
-                    "gain_pct": expected_gain_pct,
-                },
-            },
+            "replay_bundle": refresh_bundle_digest(
+                {
+                    "schema_version": 1,
+                    "replayable": True,
+                    "producer_session_id": "prior-A",
+                    "config": {
+                        "argv": extra_server_args.split(),
+                        "extra_envs": dict(extra_envs or {}),
+                    },
+                    "source_artifacts": [],
+                    "measurement": {
+                        "baseline_throughput": 100.0,
+                        "optimized_throughput": 125.0,
+                        "gain_pct": expected_gain_pct,
+                    },
+                }
+            ),
         },
     }
 
@@ -971,7 +976,7 @@ async def test_legacy_recipe_without_bundle_is_reference_only(tmp_path):
     }
     await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
     assert coord.tasks.calls == []
-    assert coord.shared_state.warm_replay_outcome["reason"] == "best_config_empty"
+    assert coord.shared_state.warm_replay_outcome["reason"] == "legacy_recipe_without_bundle"
 
 
 def test_promote_warm_replay_cumulative_gain_uses_tput_ratio(tmp_path):

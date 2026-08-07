@@ -30,6 +30,9 @@ from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_store import (
     GbrainRecipeLockError,
     GbrainRecipeStore,
 )
+from hyperloom.orchestrator.knowledge.recipe_kb.replay_bundle import (
+    refresh_bundle_digest,
+)
 
 
 def _args(**kwargs) -> argparse.Namespace:
@@ -443,14 +446,15 @@ def test_remote_store_champion_merge_is_monotonic_and_paired(tmp_path: Path) -> 
     mcp = _PageMcp()
     store = _remote_store(mcp, tmp_path / "locks")
     cid = "inference:m:h:f:mt:a:v:p"
-    bundle_a = {
-        "schema_version": 1,
-        "replayable": True,
-        "bundle_sha256": "a",
-        "config": {"argv": ["--champion"], "extra_envs": {}},
-        "source_artifacts": [],
-        "measurement": {"optimized_throughput": 100.0},
-    }
+    bundle_a = refresh_bundle_digest(
+        {
+            "schema_version": 1,
+            "replayable": True,
+            "config": {"argv": ["--champion"], "extra_envs": {}},
+            "source_artifacts": [],
+            "measurement": {"optimized_throughput": 100.0},
+        }
+    )
     store.put_recipe(
         canonical_id=cid,
         best_config={"extra_server_args": "--champion"},
@@ -467,23 +471,36 @@ def test_remote_store_champion_merge_is_monotonic_and_paired(tmp_path: Path) -> 
     assert row is not None
     assert row["best_config"] == {"extra_server_args": "--champion"}
 
+    rejected = store.put_recipe(
+        canonical_id=cid,
+        best_config={"extra_server_args": "--unbound-higher"},
+        best_throughput=110.0,
+    )
+    row = store.get_recipe(canonical_id=cid)
+    assert row is not None
+    assert row["best_config"] == {"extra_server_args": "--champion"}
+    assert row["best_throughput"] == 100.0
+    assert row["replay_bundle"]["bundle_sha256"] == bundle_a["bundle_sha256"]
+    assert rejected["write_safety"]["champion"] == "incoming_rejected_unbound_bundle"
+
     lower = store.put_recipe(
         canonical_id=cid,
         best_config={"extra_server_args": "--late-lower"},
         best_throughput=90.0,
         extras={
-            "replay_bundle": {
-                **bundle_a,
-                "bundle_sha256": "lower",
-                "measurement": {"optimized_throughput": 90.0},
-            }
+            "replay_bundle": refresh_bundle_digest(
+                {
+                    **bundle_a,
+                    "measurement": {"optimized_throughput": 90.0},
+                }
+            )
         },
     )
     row = store.get_recipe(canonical_id=cid)
     assert row is not None
     assert row["best_config"] == {"extra_server_args": "--champion"}
     assert row["best_throughput"] == 100.0
-    assert row["replay_bundle"]["bundle_sha256"] == "a"
+    assert row["replay_bundle"]["bundle_sha256"] == bundle_a["bundle_sha256"]
     assert lower["write_safety"]["champion"] == "latest_preserved"
 
     store.put_recipe(canonical_id=cid, best_config={}, best_throughput=200.0)
@@ -497,19 +514,20 @@ def test_remote_store_champion_merge_is_monotonic_and_paired(tmp_path: Path) -> 
         best_config={"extra_server_args": "--higher"},
         best_throughput=101.0,
         extras={
-            "replay_bundle": {
-                **bundle_a,
-                "bundle_sha256": "higher",
-                "config": {"argv": ["--higher"], "extra_envs": {}},
-                "measurement": {"optimized_throughput": 101.0},
-            }
+            "replay_bundle": refresh_bundle_digest(
+                {
+                    **bundle_a,
+                    "config": {"argv": ["--higher"], "extra_envs": {}},
+                    "measurement": {"optimized_throughput": 101.0},
+                }
+            )
         },
     )
     row = store.get_recipe(canonical_id=cid)
     assert row is not None
     assert row["best_config"] == {"extra_server_args": "--higher"}
     assert row["best_throughput"] == 101.0
-    assert row["replay_bundle"]["bundle_sha256"] == "higher"
+    assert row["replay_bundle"]["bundle_sha256"] != bundle_a["bundle_sha256"]
     assert higher["write_safety"]["champion"] == "incoming_higher_throughput"
 
     empty_cid = "inference:m:h:f:mt:a:v:fp16"
@@ -524,6 +542,38 @@ def test_remote_store_champion_merge_is_monotonic_and_paired(tmp_path: Path) -> 
     assert row["best_config"] == {"extra_server_args": "--first-real-config"}
     assert row["best_throughput"] == 5.0
     assert filled["write_safety"]["champion"] == "incoming_filled_empty"
+
+
+def test_local_store_rejects_champion_advance_with_stale_bundle(tmp_path: Path) -> None:
+    store = LocalRecipeStore(tmp_path / "local")
+    cid = "inference:m:h:f:mt:a:v:p"
+    bundle = refresh_bundle_digest(
+        {
+            "schema_version": 1,
+            "replayable": True,
+            "config": {"argv": ["--old"], "extra_envs": {}},
+            "source_artifacts": [],
+            "measurement": {"optimized_throughput": 100.0},
+        }
+    )
+    store.put_recipe(
+        canonical_id=cid,
+        best_config={"extra_server_args": "--old"},
+        best_throughput=100.0,
+        extras={"replay_bundle": bundle},
+    )
+    store.put_recipe(
+        canonical_id=cid,
+        best_config={"extra_server_args": "--new"},
+        best_throughput=200.0,
+        # This is the exact stale-extras shape produced by a mid-session amend.
+        extras={"replay_bundle": bundle},
+    )
+    row = store.get_recipe(canonical_id=cid)
+    assert row is not None
+    assert row["best_config"] == {"extra_server_args": "--old"}
+    assert row["best_throughput"] == 100.0
+    assert row["replay_bundle"]["bundle_sha256"] == bundle["bundle_sha256"]
 
 
 def test_remote_store_stale_collections_sessions_and_mappings_merge(tmp_path: Path) -> None:

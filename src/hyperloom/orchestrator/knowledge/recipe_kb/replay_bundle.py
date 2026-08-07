@@ -83,13 +83,119 @@ def _bundle_digest(bundle: Mapping[str, Any]) -> str:
         artifact.pop("patch_content", None)
         artifact.pop("storage", None)
         artifact.pop("artifact_slug", None)
-    return _sha256(
-        json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return _sha256(json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def refresh_bundle_digest(bundle: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a copy whose digest describes its current replay semantics."""
+    out = copy.deepcopy(dict(bundle))
+    out["bundle_sha256"] = _bundle_digest(out)
+    return out
+
+
+def validate_replay_bundle(bundle: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate an already-inline bundle without consulting a remote store."""
+    out = copy.deepcopy(dict(bundle))
+    if int(out.get("schema_version") or 0) != SCHEMA_VERSION:
+        out["replayable"] = False
+        out["reason"] = "unsupported_replay_bundle_schema"
+        return refresh_bundle_digest(out)
+    for artifact in out.get("source_artifacts") or []:
+        if not isinstance(artifact, dict):
+            out["replayable"] = False
+            out["reason"] = "artifact_manifest_invalid"
+            return refresh_bundle_digest(out)
+        patch = str(artifact.get("patch_content") or "")
+        if not patch:
+            out["replayable"] = False
+            out["reason"] = (
+                "artifact_missing" if artifact.get("storage") == "gbrain_page" else "artifact_content_missing"
+            )
+            return refresh_bundle_digest(out)
+        if _sha256(patch) != str(artifact.get("sha256") or ""):
+            out["replayable"] = False
+            out["reason"] = "artifact_sha_mismatch"
+            return refresh_bundle_digest(out)
+    expected_bundle_sha = str(out.get("bundle_sha256") or "")
+    if not expected_bundle_sha:
+        out["replayable"] = False
+        out["reason"] = "bundle_sha_missing"
+        return refresh_bundle_digest(out)
+    if _bundle_digest(out) != expected_bundle_sha:
+        out["replayable"] = False
+        out["reason"] = "bundle_sha_mismatch"
+        return refresh_bundle_digest(out)
+    return out
+
+
+def bundle_matches_champion(
+    bundle: Mapping[str, Any] | None,
+    *,
+    best_config: Mapping[str, Any] | None,
+    best_throughput: float,
+) -> bool:
+    """Return whether a bundle is bound to the supplied champion fields."""
+    if not isinstance(bundle, Mapping):
+        return False
+    config = bundle.get("config") if isinstance(bundle.get("config"), Mapping) else {}
+    expected_argv = canonical_server_argv(
+        (best_config or {}).get("argv")
+        if (best_config or {}).get("argv") is not None
+        else (best_config or {}).get("extra_server_args")
+    )
+    bundle_argv = canonical_server_argv(config.get("argv") or [])
+    expected_envs = (best_config or {}).get("extra_envs") or {}
+    if not isinstance(expected_envs, Mapping):
+        expected_envs = {}
+    bundle_envs = config.get("extra_envs") or {}
+    if not isinstance(bundle_envs, Mapping):
+        bundle_envs = {}
+    expected_refs = (best_config or {}).get("env_path_refs") or {}
+    if not isinstance(expected_refs, Mapping):
+        expected_refs = {}
+    bundle_refs = config.get("env_path_refs") or {}
+    if not isinstance(bundle_refs, Mapping):
+        bundle_refs = {}
+    measurement = bundle.get("measurement") if isinstance(bundle.get("measurement"), Mapping) else {}
+    try:
+        bundle_throughput = float(measurement.get("optimized_throughput") or 0.0)
+        champion_throughput = float(best_throughput or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        bundle_argv == expected_argv
+        and {str(k): str(v) for k, v in bundle_envs.items()} == {str(k): str(v) for k, v in expected_envs.items()}
+        and bundle_refs == expected_refs
+        and abs(bundle_throughput - champion_throughput) <= 1e-9
     )
 
 
 def _git_show(root: Path, revision: str, rel: str) -> tuple[bool, str]:
     if not revision:
+        raise ValueError("source snapshot has no base revision")
+    inside = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    if inside.returncode != 0 or inside.stdout.strip() != b"true":
+        raise ValueError(f"source root is not a git worktree: {root}")
+    commit = subprocess.run(
+        ["git", "-C", str(root), "cat-file", "-e", f"{revision}^{{commit}}"],
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    if commit.returncode != 0:
+        raise ValueError(f"source base revision is unavailable: {revision}")
+    exists = subprocess.run(
+        ["git", "-C", str(root), "cat-file", "-e", f"{revision}:{rel}"],
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    if exists.returncode != 0:
         return False, ""
     proc = subprocess.run(
         ["git", "-C", str(root), "show", f"{revision}:{rel}"],
@@ -98,7 +204,7 @@ def _git_show(root: Path, revision: str, rel: str) -> tuple[bool, str]:
         timeout=30,
     )
     if proc.returncode != 0:
-        return False, ""
+        raise ValueError(f"could not read {rel!r} from source base {revision}")
     try:
         return True, proc.stdout.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -214,6 +320,47 @@ def _snapshot_groups(source_snapshots: list[Mapping[str, Any]]) -> tuple[list[di
     return artifacts, ""
 
 
+def _portable_envs(
+    envs: Mapping[str, Any],
+    source_snapshots: list[Mapping[str, Any]],
+) -> tuple[dict[str, str], dict[str, dict[str, str]], str]:
+    """Replace env paths to captured files with repo-relative references."""
+    captured_paths: dict[Path, dict[str, str]] = {}
+    for raw in source_snapshots:
+        snapshot_dir = Path(str(raw.get("snapshot_dir") or ""))
+        try:
+            manifest = json.loads((snapshot_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            continue
+        root = Path(str(manifest.get("framework_root") or ""))
+        repo = root.name.lower().replace("_meta", "")
+        if not root.is_absolute() or not repo:
+            continue
+        for item in manifest.get("files") or []:
+            if not isinstance(item, Mapping):
+                continue
+            rel = str(item.get("rel") or "").strip().lstrip("/")
+            if not rel or ".." in Path(rel).parts:
+                continue
+            captured_paths[(root / rel).resolve(strict=False)] = {
+                "repo": repo,
+                "path": rel,
+            }
+    literal: dict[str, str] = {}
+    refs: dict[str, dict[str, str]] = {}
+    for raw_key, raw_value in envs.items():
+        key = str(raw_key)
+        value = str(raw_value)
+        if not Path(value).is_absolute():
+            literal[key] = value
+            continue
+        ref = captured_paths.get(Path(value).resolve(strict=False))
+        if ref is None:
+            return {}, {}, f"unportable_env_path:{key}"
+        refs[key] = ref
+    return literal, refs, ""
+
+
 def build_replay_bundle(
     *,
     env_spec: Mapping[str, Any],
@@ -224,14 +371,21 @@ def build_replay_bundle(
 ) -> dict[str, Any]:
     """Build the atomic replay value for the measured champion."""
     config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
-    raw_args = config.get("extra_server_args") or ""
+    raw_args = config.get("effective_server_args") or config.get("extra_server_args") or ""
     argv = canonical_server_argv(raw_args)
     envs = config.get("extra_envs") if isinstance(config.get("extra_envs"), Mapping) else {}
-    snapshots = [
-        item for item in (env_spec.get("source_snapshots") or []) if isinstance(item, Mapping)
-    ]
+    snapshots = [item for item in (env_spec.get("source_snapshots") or []) if isinstance(item, Mapping)]
     artifacts, reason = _snapshot_groups(snapshots)
-    replayable = not reason and bool(argv or envs or artifacts)
+    literal_envs, env_path_refs, env_reason = _portable_envs(envs, snapshots)
+    if env_reason and not reason:
+        reason = env_reason
+    overlay = str(env_spec.get("overlay_pythonpath") or "").strip()
+    if overlay and not reason:
+        # A host-local authored-kernel overlay is not a durable replay input.
+        # It must first be flattened to a source patch (or handled by a future
+        # KernelForge artifact resolver) before this champion can be replayed.
+        reason = "overlay_not_flattened_to_patch"
+    replayable = not reason and bool(argv or literal_envs or env_path_refs or artifacts)
     baseline = float(baseline_throughput or 0.0)
     optimized = float(optimized_throughput or 0.0)
     gain_pct = ((optimized - baseline) / baseline * 100.0) if baseline > 0.0 else 0.0
@@ -242,7 +396,8 @@ def build_replay_bundle(
         "producer_session_id": str(producer_session_id or ""),
         "config": {
             "argv": argv,
-            "extra_envs": {str(k): str(v) for k, v in envs.items()},
+            "extra_envs": literal_envs,
+            "env_path_refs": env_path_refs,
             "server_launch_flags": str(config.get("server_launch_flags") or ""),
         },
         "source_artifacts": artifacts,
@@ -254,8 +409,7 @@ def build_replay_bundle(
             "measured_with_complete_bundle": replayable,
         },
     }
-    bundle["bundle_sha256"] = _bundle_digest(bundle)
-    return bundle
+    return refresh_bundle_digest(bundle)
 
 
 def _artifact_slug(sha256: str) -> str:
@@ -329,7 +483,7 @@ def externalize_large_artifacts(
         artifact["storage"] = "gbrain_page"
         artifact["artifact_slug"] = slug
         artifact.pop("patch_content", None)
-    return out
+    return refresh_bundle_digest(out)
 
 
 def _extract_artifact_page(page: Any) -> str:
@@ -346,38 +500,30 @@ def hydrate_replay_bundle(mcp: Any, bundle: Mapping[str, Any]) -> dict[str, Any]
     if int(out.get("schema_version") or 0) != SCHEMA_VERSION:
         out["replayable"] = False
         out["reason"] = "unsupported_replay_bundle_schema"
-        return out
+        return refresh_bundle_digest(out)
     for artifact in out.get("source_artifacts") or []:
         if not isinstance(artifact, dict):
             out["replayable"] = False
             out["reason"] = "artifact_manifest_invalid"
-            return out
+            return refresh_bundle_digest(out)
         if artifact.get("storage") == "gbrain_page":
             slug = str(artifact.get("artifact_slug") or "")
             patch = _extract_artifact_page(mcp.call("get_page", {"slug": slug})) if slug else ""
             if not patch:
                 out["replayable"] = False
                 out["reason"] = "artifact_missing"
-                return out
+                return refresh_bundle_digest(out)
             artifact["patch_content"] = patch
-        patch = str(artifact.get("patch_content") or "")
-        if not patch or _sha256(patch) != str(artifact.get("sha256") or ""):
-            out["replayable"] = False
-            out["reason"] = "artifact_sha_mismatch"
-            return out
-    expected_bundle_sha = str(out.get("bundle_sha256") or "")
-    if expected_bundle_sha and _bundle_digest(out) != expected_bundle_sha:
-        out["replayable"] = False
-        out["reason"] = "bundle_sha_mismatch"
-    return out
+    return validate_replay_bundle(out)
 
 
 def replay_patches(bundle: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Project a hydrated bundle into the baseline executor's patch contract."""
-    if not bundle.get("replayable"):
+    validated = validate_replay_bundle(bundle)
+    if not validated.get("replayable"):
         return []
     out: list[dict[str, Any]] = []
-    for artifact in bundle.get("source_artifacts") or []:
+    for artifact in validated.get("source_artifacts") or []:
         if not isinstance(artifact, Mapping):
             continue
         patch = str(artifact.get("patch_content") or "")
@@ -390,6 +536,7 @@ def replay_patches(bundle: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "target_repo": str(artifact.get("repo") or ""),
                 "base_sha": str(artifact.get("base_sha") or ""),
                 "sha256": str(artifact.get("sha256") or ""),
+                "changed_files": [str(path) for path in (artifact.get("changed_files") or []) if str(path)],
             }
         )
     return out
@@ -400,8 +547,11 @@ __all__ = [
     "SCHEMA_VERSION",
     "argv_to_env_string",
     "build_replay_bundle",
+    "bundle_matches_champion",
     "canonical_server_argv",
     "externalize_large_artifacts",
     "hydrate_replay_bundle",
+    "refresh_bundle_digest",
     "replay_patches",
+    "validate_replay_bundle",
 ]

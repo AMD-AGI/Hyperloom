@@ -17,6 +17,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb.replay_bundle import (
     REPLAY_BUNDLE_KEY,
     argv_to_env_string,
     replay_patches,
+    validate_replay_bundle,
 )
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version, kb_hardware_slug
 from hyperloom.inference_optimizer.session.session_paths import (
@@ -158,9 +159,12 @@ def _config_replay_args_envs(row: Mapping[str, Any]) -> tuple[str, dict[str, str
     replayable is present.
     """
     bundle = row.get(REPLAY_BUNDLE_KEY)
-    if not isinstance(bundle, Mapping) or not bundle.get("replayable"):
+    if not isinstance(bundle, Mapping):
         # Legacy config+throughput pairs are not known to describe the same
         # state. Keep them as priors, never as executable warm replay.
+        return "", {}
+    bundle = validate_replay_bundle(bundle)
+    if not bundle.get("replayable"):
         return "", {}
     config = bundle.get("config") if isinstance(bundle.get("config"), Mapping) else {}
     try:
@@ -180,7 +184,10 @@ def _has_replayable_config(row: Mapping[str, Any]) -> bool:
     args, envs = _config_replay_args_envs(row)
     bundle = row.get(REPLAY_BUNDLE_KEY)
     patches = replay_patches(bundle) if isinstance(bundle, Mapping) else []
-    return bool(args or envs or patches)
+    checked = validate_replay_bundle(bundle) if isinstance(bundle, Mapping) else {}
+    config = checked.get("config") if isinstance(checked.get("config"), Mapping) else {}
+    env_path_refs = config.get("env_path_refs") if isinstance(config.get("env_path_refs"), Mapping) else {}
+    return bool(args or envs or env_path_refs or patches)
 
 
 def _max_session_gain(row: Mapping[str, Any]) -> float:
@@ -483,30 +490,28 @@ def _build_warm_start_context(
         config_donor_tier = config_donor_tier or "self"
         config_donor_confidence = config_donor_confidence or confidence
     if donor is not None:
+        donor = dict(donor)
+        raw_bundle = donor.get(REPLAY_BUNDLE_KEY)
+        if isinstance(raw_bundle, Mapping):
+            donor[REPLAY_BUNDLE_KEY] = validate_replay_bundle(raw_bundle)
         args, envs = _config_replay_args_envs(donor)
         bundle = donor.get(REPLAY_BUNDLE_KEY)
         bundle = bundle if isinstance(bundle, Mapping) else {}
         patches = replay_patches(bundle)
-        if args or envs or patches:
-            measurement = (
-                bundle.get("measurement")
-                if isinstance(bundle.get("measurement"), Mapping)
-                else {}
-            )
+        bundle_config = bundle.get("config") if isinstance(bundle.get("config"), Mapping) else {}
+        env_path_refs = (
+            bundle_config.get("env_path_refs")
+            if isinstance(bundle_config.get("env_path_refs"), Mapping)
+            else {}
+        )
+        if args or envs or env_path_refs or patches:
+            measurement = bundle.get("measurement") if isinstance(bundle.get("measurement"), Mapping) else {}
             try:
-                best_tput = float(
-                    measurement.get("optimized_throughput")
-                    or donor.get("best_throughput")
-                    or 0.0
-                )
+                best_tput = float(measurement.get("optimized_throughput") or donor.get("best_throughput") or 0.0)
             except (TypeError, ValueError):
                 best_tput = 0.0
             try:
-                expected_gain = float(
-                    measurement.get("gain_pct")
-                    or donor.get("validated_gain_pct")
-                    or 0.0
-                )
+                expected_gain = float(measurement.get("gain_pct") or donor.get("validated_gain_pct") or 0.0)
             except (TypeError, ValueError):
                 expected_gain = 0.0
             if expected_gain <= 0:
@@ -526,6 +531,11 @@ def _build_warm_start_context(
             recommended_replay: dict[str, Any] = {
                 "extra_server_args": args,
                 "extra_envs": envs,
+                "env_path_refs": {
+                    str(key): dict(value)
+                    for key, value in env_path_refs.items()
+                    if isinstance(value, Mapping)
+                },
                 "expected_gain_pct": expected_gain,
                 "best_throughput": best_tput,
                 "config_source": str(donor.get("canonical_id") or ""),
@@ -540,30 +550,34 @@ def _build_warm_start_context(
             breakdown_link = str(donor.get("breakdown_link") or "")
             if donor_session is not None:
                 breakdown_link = str(
-                    donor_session.get("breakdown_link")
-                    or donor_session.get("session_breakdown_url")
-                    or breakdown_link
+                    donor_session.get("breakdown_link") or donor_session.get("session_breakdown_url") or breakdown_link
                 )
             recommended_replay.update(
                 {
                     "donor_canonical_id": donor_canonical_id,
                     "donor_model": donor_model,
                     "donor_session_id": str(bundle.get("producer_session_id") or "")
-                    or (
-                        str(donor_session.get("session_id") or "")
-                        if donor_session is not None
-                        else ""
-                    ),
+                    or (str(donor_session.get("session_id") or "") if donor_session is not None else ""),
                     "donor_family_tags": (
-                        [str(tag) for tag in family_tags]
-                        if isinstance(family_tags, (list, tuple, set))
-                        else []
+                        [str(tag) for tag in family_tags] if isinstance(family_tags, (list, tuple, set)) else []
                     ),
                     "donor_gain_pct": expected_gain,
                     "donor_breakdown_link": breakdown_link,
                 }
             )
             ctx["recommended_replay"] = recommended_replay
+        elif bundle:
+            ctx["replay_unavailable_reason"] = str(bundle.get("reason") or "replay_bundle_not_replayable")
+        elif donor.get("best_config"):
+            ctx["replay_unavailable_reason"] = "legacy_recipe_without_bundle"
+    elif isinstance(recipe, Mapping):
+        raw_bundle = recipe.get(REPLAY_BUNDLE_KEY)
+        if isinstance(raw_bundle, Mapping):
+            checked = validate_replay_bundle(raw_bundle)
+            if not checked.get("replayable"):
+                ctx["replay_unavailable_reason"] = str(checked.get("reason") or "replay_bundle_not_replayable")
+        elif recipe.get("best_config"):
+            ctx["replay_unavailable_reason"] = "legacy_recipe_without_bundle"
     # Extract replayable code patches from prs_tested (positive + negative).
     _extract_patches_from_prs_tested(ctx, recipe, model_architectures)
     # KG enhancement (best-effort, degradable).
@@ -870,9 +884,7 @@ def _extract_patches_from_prs_tested(
         replay = ctx.setdefault("recommended_replay", {})
         replay.setdefault("extra_server_args", "")
         replay.setdefault("extra_envs", {})
-        existing = [
-            item for item in (replay.get("patches") or []) if isinstance(item, dict)
-        ]
+        existing = [item for item in (replay.get("patches") or []) if isinstance(item, dict)]
         replay["patches"] = existing + patches
     if blocked:
         ctx["blocked_patches"] = blocked

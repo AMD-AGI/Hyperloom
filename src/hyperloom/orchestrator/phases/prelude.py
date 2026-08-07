@@ -16,6 +16,7 @@ from ..knowledge.recipe_kb.replay_bundle import (
     REPLAY_BUNDLE_KEY,
     argv_to_env_string,
     replay_patches,
+    validate_replay_bundle,
 )
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import Task
@@ -274,11 +275,15 @@ class PreludePhase(PhaseHandler):
         replay = wsc.get("recommended_replay") if isinstance(wsc, dict) else {}
         replay = replay if isinstance(replay, dict) else {}
         bundle: dict[str, Any] = {}
+        env_path_refs: dict[str, Any] = {}
+        replay_unavailable_reason = str(wsc.get("replay_unavailable_reason") or "")
         rep_args = str(replay.get("extra_server_args") or "").strip()
         rep_envs = replay.get("extra_envs") if isinstance(replay.get("extra_envs"), dict) else {}
-        if rep_args or rep_envs:
+        rep_env_path_refs = replay.get("env_path_refs") if isinstance(replay.get("env_path_refs"), dict) else {}
+        if rep_args or rep_envs or rep_env_path_refs:
             bc_args = rep_args
             bc_envs = dict(rep_envs)
+            env_path_refs = dict(rep_env_path_refs)
             # Donor transfer confidence (self-donor == identity confidence).
             replay_conf = float(replay.get("config_confidence") or conf or 0.0)
             config_source = str(replay.get("config_source") or "")
@@ -286,10 +291,12 @@ class PreludePhase(PhaseHandler):
             donor_expected_gain = float(replay.get("expected_gain_pct") or 0.0)
         else:
             raw_bundle = recipe_attrs.get(REPLAY_BUNDLE_KEY)
-            bundle = raw_bundle if isinstance(raw_bundle, dict) else {}
-            bundle_config = (
-                bundle.get("config") if isinstance(bundle.get("config"), dict) else {}
-            )
+            bundle = validate_replay_bundle(raw_bundle) if isinstance(raw_bundle, dict) else {}
+            if not bundle and recipe_attrs.get("best_config"):
+                replay_unavailable_reason = "legacy_recipe_without_bundle"
+            elif bundle and not bundle.get("replayable"):
+                replay_unavailable_reason = str(bundle.get("reason") or "replay_bundle_not_replayable")
+            bundle_config = bundle.get("config") if isinstance(bundle.get("config"), dict) else {}
             if bundle.get("replayable"):
                 try:
                     bc_args = argv_to_env_string(bundle_config.get("argv") or [])
@@ -298,18 +305,20 @@ class PreludePhase(PhaseHandler):
                 bc_envs = bundle_config.get("extra_envs") or {}
                 if not isinstance(bc_envs, dict):
                     bc_envs = {}
+                env_path_refs = (
+                    dict(bundle_config.get("env_path_refs") or {})
+                    if isinstance(bundle_config.get("env_path_refs"), dict)
+                    else {}
+                )
             else:
                 # Old recipes do not atomically bind config, source layers and
                 # throughput. They remain useful as history, but are not run.
                 bc_args, bc_envs = "", {}
+                env_path_refs = {}
             replay_conf = float(conf or 0.0)
             config_source = str(recipe.get("canonical_id") or "")
             config_tier = "self"
-            measurement = (
-                bundle.get("measurement")
-                if isinstance(bundle.get("measurement"), dict)
-                else {}
-            )
+            measurement = bundle.get("measurement") if isinstance(bundle.get("measurement"), dict) else {}
             donor_expected_gain = float(measurement.get("gain_pct") or 0.0)
         donor_metadata = {
             field: replay.get(field)
@@ -344,10 +353,10 @@ class PreludePhase(PhaseHandler):
         wsc_advisory = wsc.get("advisory_blocked_patches") or [] if isinstance(wsc, dict) else []
         # KG-driven filtering (best-effort; unfiltered on any KG failure).
         wsc_patches = self._filter_warm_patches_with_kg(wsc_patches, wsc_advisory, state)
-        if not bc_args and not bc_envs and not wsc_patches:
+        if not bc_args and not bc_envs and not env_path_refs and not wsc_patches:
             state.warm_replay_outcome = {
                 "status": "skipped",
-                "reason": "best_config_empty",
+                "reason": str(replay_unavailable_reason or "best_config_empty"),
                 "warm_recipe_tier": tier,
                 "warm_recipe_conf": conf,
                 **donor_metadata,
@@ -383,6 +392,7 @@ class PreludePhase(PhaseHandler):
             "reason": "warm_replay_prelude",
             "extra_server_args": bc_args,
             "extra_envs": dict(bc_envs),
+            "env_path_refs": dict(env_path_refs),
             # Reuse the baseline's workload contract (else YAML smoke defaults).
             "config_path": str(state.baseline_config_path or ""),
             # Historical-gain anchor for the promote path's reproduce ratio.
