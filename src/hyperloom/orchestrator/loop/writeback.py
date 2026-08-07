@@ -3453,6 +3453,16 @@ class WritebackCollaborator:
         changed = True
         lifted = False
         if kept_flag and isinstance(new_tput, (int, float)) and new_tput > 0:
+            if not cand_id:
+                # The name used to be prefixed, which made an empty key look
+                # non-empty to the stack's own guard and stacked a nameless
+                # entry. Dropping it is the better outcome, but a KEEP whose
+                # gain never reaches the stack must not vanish quietly.
+                log.warning(
+                    "FRAMEWORK: KEEP carries no candidate key (candidate_id / pr_url / ref all "
+                    "empty, and task params had none either), so its gain cannot be stacked. task=%s",
+                    getattr(task, "task_id", "") if task is not None else "",
+                )
             lift = {
                 # The canonical candidate key, unadorned: it becomes the stack
                 # entry's variant_name, which resume reconciliation matches
