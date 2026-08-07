@@ -2100,8 +2100,9 @@ def _apply_fellow_env(env: dict) -> None:
     KernelExperienceBridge(_knowledge_config_for_forge()).configure_child_env(env)
 
     # Auth fallback: seed ANTHROPIC_API_KEY from the claude CLI's config.json
-    # primaryApiKey when it is not already exported.
-    if not env.get("ANTHROPIC_API_KEY", "").strip():
+    # primaryApiKey when it is not already exported. Skipped under a
+    # subscription token, which any API key would silently override.
+    if not env.get("ANTHROPIC_API_KEY", "").strip() and not env.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
         try:
             import json as _json
 

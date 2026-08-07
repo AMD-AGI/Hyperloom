@@ -398,6 +398,7 @@ SAFE_ENV_KEYS = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "AMD_API_KEY",
@@ -452,6 +453,8 @@ def safe_runtime_env() -> dict:
         env.setdefault("LLM_API_KEY", openai_key)
         env.setdefault("AMD_LLM_API_KEY", openai_key)
         env.setdefault("LLM_GATEWAY_KEY", openai_key)
+    # CLAUDE_CODE_OAUTH_TOKEN is forwarded verbatim, never mirrored into these:
+    # either key var switches the Claude CLI out of subscription mode.
     anthropic_key = env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN")
     if anthropic_key:
         env.setdefault("ANTHROPIC_API_KEY", anthropic_key)

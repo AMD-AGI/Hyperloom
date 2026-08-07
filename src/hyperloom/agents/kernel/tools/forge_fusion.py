@@ -53,7 +53,8 @@ def _inject_author_gateway_env() -> None:
     forge-fusion's ``author`` stage drives the ``claude`` CLI, which
     authenticates via ``ANTHROPIC_*``. Only the Anthropic side is used. With no
     Anthropic-side credentials the stage is left unconfigured and fails with the
-    CLI's own auth error.
+    CLI's own auth error. A ``CLAUDE_CODE_OAUTH_TOKEN`` is inherited as-is and
+    deliberately not mirrored here, since either key var would disable it.
     """
     token = str(
         os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN") or ""
