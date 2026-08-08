@@ -20,21 +20,28 @@ import pytest
 
 from hyperloom.common import codex_session as cs
 
-_GATEWAY_ENV = (
+_CODEX_ENV = (
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_CUSTOM_HEADERS",
     "LLM_GATEWAY_KEY",
     "CODEX_HOME",
+    "HYPERLOOM_CODEX_SANDBOX_MODE",
 )
 
 _SECRET = "sk-do-not-leak-this-value"
 
+# The operator-facing sandbox contract, spelled out rather than imported: a
+# rename of the variable or of an accepted value is a breaking change for every
+# deployment that set it, so it has to fail here.
+_SANDBOX_MODE_ENV = "HYPERLOOM_CODEX_SANDBOX_MODE"
+_WRITABLE_ROOTS = (Path("/tmp/out"),)
+
 
 @pytest.fixture(autouse=True)
-def _clear_gateway_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Start every test from a known-empty gateway environment."""
-    for name in _GATEWAY_ENV:
+def _clear_codex_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every test from a known-empty Codex environment."""
+    for name in _CODEX_ENV:
         monkeypatch.delenv(name, raising=False)
 
 
@@ -341,17 +348,173 @@ def test_api_key_env_name_lists_every_candidate_when_none_is_set():
 # --------------------------------------------------------------------------- #
 
 
-def test_codex_sandbox_is_read_only_without_writable_roots():
-    """A session that declares no write scope must not get one."""
-    assert cs.codex_sandbox(_FakeSDKModule, writable_roots=()) == _FakeSandbox.read_only
+@pytest.mark.parametrize("mode", ["bypass", "workspace-write", "read-only"])
+def test_codex_sandbox_is_read_only_without_writable_roots(mode):
+    """A session that declares no write scope must not get one, whatever the mode."""
+    assert cs.codex_sandbox(_FakeSDKModule, writable_roots=(), sandbox_mode=mode) == _FakeSandbox.read_only
 
 
-def test_codex_sandbox_is_workspace_write_for_a_declared_scope():
-    """Declaring a writable root selects the scoped write preset, never full access."""
-    sandbox = cs.codex_sandbox(_FakeSDKModule, writable_roots=(Path("/tmp/out"),))
+def test_codex_sandbox_bypass_mode_lifts_the_preset_sandbox_for_a_write_scope():
+    """``bypass`` must hand a writing session full access.
+
+    Codex builds its ``read-only`` and ``workspace-write`` presets on
+    bubblewrap. Hyperloom's runtime container ships no ``bwrap``, so under
+    either preset every shell command aborts with ``bwrap: Failed to make /
+    slave: Permission denied`` before its body runs -- which is how TraceLens
+    lost the ability to produce ``analysis.md`` on the OpenAI-only path.
+    """
+    sandbox = cs.codex_sandbox(_FakeSDKModule, writable_roots=_WRITABLE_ROOTS, sandbox_mode="bypass")
+
+    assert sandbox == _FakeSandbox.full_access
+
+
+def test_codex_sandbox_workspace_write_mode_scopes_a_declared_write_scope():
+    """A host that can sandbox keeps Codex's scoped write preset."""
+    sandbox = cs.codex_sandbox(_FakeSDKModule, writable_roots=_WRITABLE_ROOTS, sandbox_mode="workspace-write")
 
     assert sandbox == _FakeSandbox.workspace_write
-    assert sandbox != _FakeSandbox.full_access
+
+
+def test_codex_sandbox_read_only_mode_outranks_a_declared_write_scope():
+    """``read-only`` is a ceiling: a declared write scope must not raise it."""
+    sandbox = cs.codex_sandbox(_FakeSDKModule, writable_roots=_WRITABLE_ROOTS, sandbox_mode="read-only")
+
+    assert sandbox == _FakeSandbox.read_only
+
+
+def test_codex_sandbox_rejects_an_unresolved_mode():
+    """Choosing a preset for an unknown mode would silently change containment."""
+    with pytest.raises(cs.CodexSessionUnavailableError, match=_SANDBOX_MODE_ENV):
+        cs.codex_sandbox(_FakeSDKModule, writable_roots=_WRITABLE_ROOTS, sandbox_mode="Bypass")
+
+
+def test_resolve_codex_sandbox_mode_defaults_to_bypass():
+    """The default has to work in Hyperloom's own container, which has no bwrap."""
+    assert cs.resolve_codex_sandbox_mode(env={}) == "bypass"
+
+
+def test_resolve_codex_sandbox_mode_reads_the_operator_variable():
+    """A bwrap-capable deployment tightens the sandbox without a code change."""
+    assert cs.resolve_codex_sandbox_mode(env={_SANDBOX_MODE_ENV: " Workspace-Write "}) == "workspace-write"
+
+
+def test_resolve_codex_sandbox_mode_reads_the_process_environment(monkeypatch):
+    """Callers that pass no environment inherit the app-server's own."""
+    monkeypatch.setenv(_SANDBOX_MODE_ENV, "read-only")
+
+    assert cs.resolve_codex_sandbox_mode() == "read-only"
+
+
+def test_resolve_codex_sandbox_mode_prefers_an_explicit_mode():
+    """A caller that states its mode outranks the deployment-wide setting."""
+    resolved = cs.resolve_codex_sandbox_mode(
+        sandbox_mode=" Read-Only ",
+        env={_SANDBOX_MODE_ENV: "workspace-write"},
+    )
+
+    assert resolved == "read-only"
+
+
+def test_resolve_codex_sandbox_mode_rejects_an_unknown_value():
+    """A typo must name the variable and every accepted mode, not degrade silently."""
+    with pytest.raises(cs.CodexSessionUnavailableError) as excinfo:
+        cs.resolve_codex_sandbox_mode(env={_SANDBOX_MODE_ENV: "full-access"})
+
+    message = str(excinfo.value)
+    assert _SANDBOX_MODE_ENV in message
+    assert "full-access" in message
+    for mode in ("bypass", "workspace-write", "read-only"):
+        assert mode in message
+
+
+def test_run_codex_turn_defaults_to_a_bypassed_sandbox_for_a_write_scope(tmp_path, monkeypatch):
+    """The shape TraceLens runs must not land on a bwrap-backed preset.
+
+    This is the live openai-only failure: the writing turn was given
+    ``workspace_write``, so every shell command the Codex agent issued died in
+    bwrap and no ``analysis.md`` was ever written.
+    """
+    output = tmp_path / "out"
+    output.mkdir()
+    record = _install_fake_sdk(monkeypatch)
+
+    asyncio.run(
+        cs.run_codex_turn(
+            prompt="analyze",
+            developer_instructions="i",
+            cwd=tmp_path,
+            model="m",
+            timeout_sec=5.0,
+            writable_roots=(output,),
+            env=_gateway_env(),
+        )
+    )
+
+    assert record["thread_options"]["sandbox"] == _FakeSandbox.full_access
+    assert record["turn_options"]["sandbox"] == _FakeSandbox.full_access
+
+
+def test_run_codex_turn_honors_the_sandbox_mode_variable(tmp_path, monkeypatch):
+    """Thread and turn must both follow the deployment's sandbox mode."""
+    output = tmp_path / "out"
+    output.mkdir()
+    record = _install_fake_sdk(monkeypatch)
+
+    asyncio.run(
+        cs.run_codex_turn(
+            prompt="analyze",
+            developer_instructions="i",
+            cwd=tmp_path,
+            model="m",
+            timeout_sec=5.0,
+            writable_roots=(output,),
+            env=_gateway_env(**{_SANDBOX_MODE_ENV: "workspace-write"}),
+        )
+    )
+
+    assert record["thread_options"]["sandbox"] == _FakeSandbox.workspace_write
+    assert record["turn_options"]["sandbox"] == _FakeSandbox.workspace_write
+
+
+def test_run_codex_turn_honors_an_explicit_sandbox_mode(tmp_path, monkeypatch):
+    """An explicit caller mode outranks the deployment's variable."""
+    output = tmp_path / "out"
+    output.mkdir()
+    record = _install_fake_sdk(monkeypatch)
+
+    asyncio.run(
+        cs.run_codex_turn(
+            prompt="analyze",
+            developer_instructions="i",
+            cwd=tmp_path,
+            model="m",
+            timeout_sec=5.0,
+            writable_roots=(output,),
+            sandbox_mode="read-only",
+            env=_gateway_env(**{_SANDBOX_MODE_ENV: "bypass"}),
+        )
+    )
+
+    assert record["thread_options"]["sandbox"] == _FakeSandbox.read_only
+
+
+def test_run_codex_turn_rejects_an_unknown_sandbox_mode_before_starting(tmp_path, monkeypatch):
+    """A misconfigured sandbox mode must fail before a thread is opened."""
+    record = _install_fake_sdk(monkeypatch)
+
+    with pytest.raises(cs.CodexSessionUnavailableError, match=_SANDBOX_MODE_ENV):
+        asyncio.run(
+            cs.run_codex_turn(
+                prompt="analyze",
+                developer_instructions="i",
+                cwd=tmp_path,
+                model="m",
+                timeout_sec=5.0,
+                env=_gateway_env(**{_SANDBOX_MODE_ENV: "sandboxed"}),
+            )
+        )
+
+    assert "config" not in record
 
 
 def test_run_codex_turn_denies_approvals_and_scopes_writes(tmp_path, monkeypatch):
@@ -370,6 +533,7 @@ def test_run_codex_turn_denies_approvals_and_scopes_writes(tmp_path, monkeypatch
             model="gpt-5.6-sol",
             timeout_sec=30.0,
             writable_roots=(output,),
+            sandbox_mode="workspace-write",
             env=_gateway_env(),
         )
     )
