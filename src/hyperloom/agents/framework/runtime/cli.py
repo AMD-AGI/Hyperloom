@@ -843,17 +843,11 @@ def main(argv: list[str] | None = None) -> int:
     log = get_logger("cli")
     log.debug("fa cli start cmd=%s argv=%r", args.cmd, argv)
 
-    # Outside the try below so a misconfigured KB reports itself rather than
-    # arriving as an "unexpected failure". `fa` runs standalone, so it cannot
-    # rely on the inference_optimizer preflight that covers the orchestrator.
-    from ..kb import KBConfigurationError, prepare_kb_environment
+    # `fa` runs standalone, so it cannot rely on the inference_optimizer
+    # preflight that covers the orchestrator. The call cannot raise.
+    from ..kb import prepare_kb_environment
 
-    try:
-        prepare_kb_environment()
-    except KBConfigurationError as exc:
-        log.error("%s", exc)
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
+    prepare_kb_environment()
 
     try:
         args.func(args)

@@ -77,36 +77,67 @@ class TestResolveKbRoot:
 
 
 class TestCheckKbConfiguration:
-    """The start-up gate that rejects a KB layout this build cannot honour."""
+    """Start-up reporting for a KB variable this build no longer reads."""
 
-    def test_withdrawn_override_fails_loudly(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A run still setting the reader-only override is stopped at start-up.
+    def test_withdrawn_override_is_reported_not_enforced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A deployment still exporting it is told, and still runs.
 
         Honouring it moved reads without moving writes, which is how the ledger
-        came to be written in one place and read from another. A start-up
-        failure naming the replacement is recoverable; a silent split is not.
+        came to be written in one place and read from another. Now that both
+        halves resolve through one function the variable is inert, so the split
+        it used to cause cannot happen and there is nothing left to refuse over.
         """
         monkeypatch.setenv("FRAMEWORK_AGENT_KB_DIR", str(tmp_path / "legacy"))
-        with pytest.raises(kb.KBConfigurationError, match="INFERENCE_OPTIMIZER_FA_KB_PATH"):
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
+
+        with caplog.at_level("WARNING"):
             kb.check_kb_configuration()
 
-    def test_blank_value_is_not_a_configuration(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """An exported-but-empty variable expresses no intent, so it cannot fail the run."""
+        # Names the replacement and where the KB actually resolved, so the
+        # operator can tell whether their intent was met.
+        assert "INFERENCE_OPTIMIZER_FA_KB_PATH" in caplog.text
+        assert str(tmp_path / "workspace" / "framework-kb") in caplog.text
+
+    def test_blank_value_says_nothing(self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+        """An exported-but-empty variable expresses no intent, so it is not news."""
         monkeypatch.setenv("FRAMEWORK_AGENT_KB_DIR", "   ")
-        kb.check_kb_configuration()
 
-    def test_passes_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with caplog.at_level("WARNING"):
+            kb.check_kb_configuration()
+
+        assert caplog.text == ""
+
+    def test_silent_when_unset(self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
         monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
-        kb.check_kb_configuration()
 
-    def test_fa_cli_refuses_to_start(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """`fa` runs standalone, so it carries its own copy of the gate.
+        with caplog.at_level("WARNING"):
+            kb.check_kb_configuration()
 
-        Guards the reason the check moved out of the resolver: the failure has
-        to reach the operator, and every read-path caller swallows exceptions.
-        """
+        assert caplog.text == ""
+
+    def test_fa_cli_still_starts(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The withdrawn variable must not cost anyone their run."""
         monkeypatch.setenv("FRAMEWORK_AGENT_KB_DIR", str(tmp_path / "legacy"))
-        assert cli.main(["kb", "list"]) == 2
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
+
+        assert cli.main(["kb", "list"]) == 0
+
+    def test_start_up_never_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The whole hook is total, not merely each step as written today.
+
+        Enforced at the hook rather than per step so a step added later cannot
+        quietly reintroduce a start-up failure for an advisory KB.
+        """
+
+        def _explode() -> None:
+            raise RuntimeError("a step nobody expected to fail")
+
+        monkeypatch.setattr(kb, "check_kb_configuration", _explode)
+        monkeypatch.setattr(kb, "migrate_legacy_partition_once", _explode)
+
+        kb.prepare_kb_environment()
 
 
 class TestMigrateLegacyPartition:

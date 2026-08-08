@@ -70,47 +70,50 @@ _REMOVED_KB_ROOT_ENV: str = "FRAMEWORK_AGENT_KB_DIR"
 _MIGRATION_MARKER: str = ".migrated-from-legacy-kb.json"
 
 
-class KBConfigurationError(RuntimeError):
-    """The environment asks for a KB layout this build no longer supports."""
-
-
 def prepare_kb_environment() -> None:
-    """Start-up sequence for the framework KB: validate, then migrate.
+    """Start-up sequence for the framework KB: report the environment, then migrate.
 
     Both entry points that can reach this KB — the inference_optimizer preflight
     and the standalone ``fa`` CLI — call this one function, so a future start-up
     step is added in one place instead of being remembered in two.
 
-    Exactly one of the two steps may stop a session, and the split is the point:
-    validation fails the run because the operator asked for a layout this build
-    cannot honour, while the migration is a convenience whose worst outcome is a
-    cold-start ledger, so it only ever warns.
-
-    Raises:
-        KBConfigurationError: If the environment asks for an unsupported layout.
+    **Cannot stop a session.** Nothing this KB does at start-up is worth refusing
+    to run over: the phase treats an unreadable or empty ledger as a cold start,
+    and a session that disabled the phase never reads it at all. The guarantee is
+    enforced here rather than left to each step, so a step added later inherits
+    it; ``test_start_up_never_raises`` holds the line. Problems are announced at
+    warning level, which is where an operator can act on them.
     """
-    check_kb_configuration()
-    migrate_legacy_partition_once()
+    try:
+        check_kb_configuration()
+        migrate_legacy_partition_once()
+    except Exception:  # noqa: BLE001 — start-up for an advisory KB may not fail a run
+        _log.warning("FRAMEWORK KB: start-up preparation failed; continuing without it", exc_info=True)
 
 
 def check_kb_configuration() -> None:
-    """Reject a KB environment that would silently split reads from writes.
+    """Report an environment naming a KB variable this build no longer reads.
 
-    Called once at start-up rather than from the resolver. Callers of the read
-    path treat their KB lookups as advisory and swallow failures so an
-    unreadable ledger cannot block dispatch; raising from the resolver would
-    therefore turn a misconfiguration into a silently disabled accuracy gate,
-    which is the failure mode this whole area is trying to remove.
+    Announced, not rejected. The withdrawn override was dangerous because only
+    the reader honoured it, so setting it split the KB in two without saying so.
+    Now that the reader and ``kb_writeback`` both resolve through
+    :func:`mutable_kb_root`, it is inert: the KB lands in the same correct place
+    whether or not it is exported. Refusing to start would guard nothing and
+    would strand a deployment still carrying it in a file someone forgot about.
 
-    Raises:
-        KBConfigurationError: If the withdrawn reader-only override is set.
+    Names the resolved root as well as the replacement, so an operator who did
+    mean to move the KB can see where it actually went.
     """
-    if os.environ.get(_REMOVED_KB_ROOT_ENV, "").strip():
-        raise KBConfigurationError(
-            f"{_REMOVED_KB_ROOT_ENV} is no longer honoured because it redirected only the "
-            f"reader, leaving writes behind in the previous location. "
-            f"Set {KB_ROOT_ENV} instead; it moves both halves of the KB together."
-        )
+    if not os.environ.get(_REMOVED_KB_ROOT_ENV, "").strip():
+        return
+    _log.warning(
+        "FRAMEWORK KB: %s is set but no longer read. It only ever redirected the reader, which is "
+        "how reads and writes came to point at different places; it is now ignored and this KB "
+        "resolves to %s. Use %s instead — that one moves both halves together.",
+        _REMOVED_KB_ROOT_ENV,
+        mutable_kb_root(),
+        KB_ROOT_ENV,
+    )
 
 
 def migrate_legacy_partition_once() -> Path | None:
@@ -125,9 +128,7 @@ def migrate_legacy_partition_once() -> Path | None:
     Never raises. A missing ledger is a cold start, which the phase handles, so
     this is a convenience and must not be able to stop a session — least of all
     a ``--no-framework-agent`` one that will never read this KB. A full disk or
-    one unreadable file therefore costs a warning, not the run. Refusing an
-    unsupported layout is :func:`check_kb_configuration`'s job, and that one is
-    allowed to be fatal.
+    one unreadable file therefore costs a warning, not the run.
 
     Only runs when the destination has no framework data yet, so it can never
     overwrite a live partition. Skipped entirely when :data:`KB_ROOT_ENV` is
@@ -303,7 +304,8 @@ def _resolve_kb_root() -> Path:
 
     Never raises: read paths swallow their own failures by design, so an
     exception here would be absorbed rather than surfaced. The withdrawn
-    override is rejected by :func:`check_kb_configuration` at start-up.
+    override is reported by :func:`check_kb_configuration` at start-up and
+    otherwise ignored.
 
     Returns:
         The resolved KB root path.
