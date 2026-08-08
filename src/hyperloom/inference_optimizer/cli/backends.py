@@ -84,14 +84,25 @@ def _deepseek_openai_client_factory() -> Any:
     set to DeepSeek, without mutating the process env. The OpenAI SDK appends
     the route to ``base_url`` verbatim, so the default carries the ``/v1``
     suffix; an explicit ``DEEPSEEK_BASE_URL`` is respected as-is.
+
+    Only the DeepSeek credential resolution lives here; the client itself comes
+    from :mod:`hyperloom.common.llm_config`, the sole sanctioned owner of
+    provider client construction. It is handed a minimal env mapping holding
+    just the resolved DeepSeek pair, so ``llm_config``'s ``OPENAI_API_KEY`` /
+    ``LLM_GATEWAY_KEY`` fallbacks cannot route a foreign credential (or
+    ``OPENAI_CUSTOM_HEADERS``) to the DeepSeek endpoint.
     """
     base_url = (os.environ.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com/v1").strip().rstrip("/")
     api_key = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
 
     def _factory() -> Any:
-        from openai import AsyncOpenAI  # local import: keep module import-light
+        from hyperloom.common import llm_config  # local import: keep module import-light
 
-        return AsyncOpenAI(base_url=base_url, api_key=api_key)
+        return llm_config.get_async_openai_client(
+            api_key_env="DEEPSEEK_API_KEY",
+            base_url_env="DEEPSEEK_BASE_URL",
+            env={"DEEPSEEK_API_KEY": api_key, "DEEPSEEK_BASE_URL": base_url},
+        )
 
     return _factory
 
