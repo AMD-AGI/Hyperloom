@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -80,6 +81,11 @@ def prepare_kb_environment() -> None:
     and the standalone ``fa`` CLI — call this one function, so a future start-up
     step is added in one place instead of being remembered in two.
 
+    Exactly one of the two steps may stop a session, and the split is the point:
+    validation fails the run because the operator asked for a layout this build
+    cannot honour, while the migration is a convenience whose worst outcome is a
+    cold-start ledger, so it only ever warns.
+
     Raises:
         KBConfigurationError: If the environment asks for an unsupported layout.
     """
@@ -116,13 +122,17 @@ def migrate_legacy_partition_once() -> Path | None:
     behind silently empties the dedup ledger and re-proposes PRs that already
     lost an accuracy gate.
 
-    Only runs when the destination has no framework data yet, so it can never
-    overwrite a live partition, and stages the copy under a sibling directory so
-    an interrupted run does not leave a half-populated destination that the next
-    start-up would mistake for a live one. The source is left in place.
+    Never raises. A missing ledger is a cold start, which the phase handles, so
+    this is a convenience and must not be able to stop a session — least of all
+    a ``--no-framework-agent`` one that will never read this KB. A full disk or
+    one unreadable file therefore costs a warning, not the run. Refusing an
+    unsupported layout is :func:`check_kb_configuration`'s job, and that one is
+    allowed to be fatal.
 
-    Skipped entirely when :data:`KB_ROOT_ENV` is set: the operator named a
-    location, and the legacy default was never theirs.
+    Only runs when the destination has no framework data yet, so it can never
+    overwrite a live partition. Skipped entirely when :data:`KB_ROOT_ENV` is
+    set: the operator named a location, and the legacy default was never theirs.
+    The source is left in place.
 
     Returns:
         The destination partition when data was migrated, else ``None``.
@@ -134,24 +144,22 @@ def migrate_legacy_partition_once() -> Path | None:
     source = workspace / _LEGACY_WORKSPACE_KB_DIRNAME / _FRAMEWORK_OPTIMIZATION_ROOT
     destination = mutable_kb_root() / _FRAMEWORK_OPTIMIZATION_ROOT
 
-    if not source.is_dir() or not any(source.iterdir()):
-        return None
-    if destination.exists() and any(destination.iterdir()):
-        return None
-
-    staging = destination.with_name(f"{destination.name}.migrating")
-    shutil.rmtree(staging, ignore_errors=True)
     try:
-        shutil.copytree(source, staging)
-        (staging / _MIGRATION_MARKER).write_text(
-            json.dumps({"version": 1, "source": str(source)}, sort_keys=True),
-            encoding="utf-8",
+        if not source.is_dir() or not any(source.iterdir()):
+            return None
+        if destination.exists() and any(destination.iterdir()):
+            return None
+        _copy_partition_atomically(source, destination)
+    except Exception:  # noqa: BLE001 — a convenience copy may not stop the run
+        _log.warning(
+            "FRAMEWORK KB: could not carry the legacy partition over from %s; continuing with "
+            "whatever is at %s. The FRAMEWORK phase treats a missing ledger as a cold start, so "
+            "it may re-propose PRs it has already tried.",
+            source,
+            destination,
+            exc_info=True,
         )
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(staging, destination)
-    except OSError:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+        return None
 
     _log.warning(
         "FRAMEWORK KB: migrated the legacy partition %s -> %s. The source is left in place; "
@@ -160,6 +168,41 @@ def migrate_legacy_partition_once() -> Path | None:
         destination,
     )
     return destination
+
+
+def _copy_partition_atomically(source: Path, destination: Path) -> None:
+    """Copy ``source`` onto a not-yet-existing ``destination`` in one visible step.
+
+    Staged and renamed so an interrupted copy cannot leave a half-populated
+    destination that the next start-up would read as a live partition.
+
+    The staging directory is unique per process and sits beside the KB root
+    rather than inside it. Two starts sharing a ``USER_DATA_PATH`` (the
+    orchestrator and the ``fa`` CLI, say) would otherwise stage onto the same
+    path and delete each other's work; and ``list_domains`` reports every
+    directory under the root as a framework domain, so one left behind by a
+    crash would surface as a domain.
+
+    The rename is what serialises concurrent migrations: whoever arrives second
+    finds a non-empty destination and fails, which the caller downgrades.
+
+    Args:
+        source: The populated legacy partition.
+        destination: The path to create; must not already hold data.
+    """
+    root = destination.parent
+    staging = root.with_name(f"{root.name}.migrating-{os.getpid()}-{uuid.uuid4().hex[:8]}")
+    try:
+        shutil.copytree(source, staging)
+        (staging / _MIGRATION_MARKER).write_text(
+            json.dumps({"version": 1, "source": str(source)}, sort_keys=True),
+            encoding="utf-8",
+        )
+        root.mkdir(parents=True, exist_ok=True)
+        os.replace(staging, destination)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
 
 
 def path_for_framework(framework: str) -> Path:
