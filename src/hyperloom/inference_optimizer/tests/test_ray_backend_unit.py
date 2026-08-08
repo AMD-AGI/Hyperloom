@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -170,6 +171,144 @@ def test_managed_process_double_start_rejected():
             mgr.start(["sleep", "5"])
     finally:
         mgr.stop()
+
+
+def test_managed_process_defaults_stdin_to_devnull(monkeypatch: pytest.MonkeyPatch):
+    """The Ray-side manager must never inherit the actor's stdin."""
+    captured: dict = {}
+
+    class _ExitedProcess:
+        pid = 4321
+
+        def __init__(self, _cmd, **kwargs):
+            captured.update(kwargs)
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(rs.subprocess, "Popen", _ExitedProcess)
+
+    mgr = ManagedServerProcess()
+    mgr.start(["server"])
+
+    assert captured["stdin"] == subprocess.DEVNULL
+
+
+def test_managed_process_reads_optional_stdin_file(tmp_path: Path):
+    """An explicit stdin file reaches the child byte-for-byte."""
+    stdin_path = tmp_path / "prompt.txt"
+    log_path = tmp_path / "child.log"
+    stdin_path.write_text("prompt from file\nsecond line\n", encoding="utf-8")
+    mgr = ManagedServerProcess()
+
+    mgr.start(
+        [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"],
+        stdin_path=str(stdin_path),
+        log_path=str(log_path),
+    )
+    deadline = time.time() + 5.0
+    while time.time() < deadline and mgr.exit_code() is None:
+        time.sleep(0.05)
+    try:
+        assert mgr.exit_code() == 0
+        assert log_path.read_text(encoding="utf-8") == stdin_path.read_text(encoding="utf-8")
+    finally:
+        mgr.stop()
+
+
+def test_managed_process_closes_files_after_natural_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Parent-side stdin/log descriptors close when the child exits."""
+    stdin_path = tmp_path / "prompt.txt"
+    log_path = tmp_path / "child.log"
+    stdin_path.write_text("prompt\n", encoding="utf-8")
+    opened: list[Any] = []
+    real_open = open
+
+    def _tracking_open(*args, **kwargs):
+        fh = real_open(*args, **kwargs)
+        opened.append(fh)
+        return fh
+
+    monkeypatch.setattr(rs, "open", _tracking_open, raising=False)
+    mgr = ManagedServerProcess()
+    mgr.start(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"],
+        stdin_path=str(stdin_path),
+        log_path=str(log_path),
+    )
+    deadline = time.time() + 5.0
+    while time.time() < deadline and mgr.exit_code() is None:
+        time.sleep(0.05)
+
+    assert mgr.exit_code() == 0
+    assert len(opened) == 2
+    assert all(fh.closed for fh in opened)
+
+
+def test_managed_process_closes_files_on_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Stopping a live child cannot leak either opened parent descriptor."""
+    stdin_path = tmp_path / "prompt.txt"
+    log_path = tmp_path / "child.log"
+    stdin_path.write_text("prompt\n", encoding="utf-8")
+    opened: list[Any] = []
+    real_open = open
+
+    def _tracking_open(*args, **kwargs):
+        fh = real_open(*args, **kwargs)
+        opened.append(fh)
+        return fh
+
+    monkeypatch.setattr(rs, "open", _tracking_open, raising=False)
+    mgr = ManagedServerProcess()
+    mgr.start(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin_path=str(stdin_path),
+        log_path=str(log_path),
+    )
+    mgr.stop()
+
+    assert len(opened) == 2
+    assert all(fh.closed for fh in opened)
+
+
+def test_managed_process_closes_files_on_spawn_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A failed Popen closes stdin and log files before propagating the error."""
+    stdin_path = tmp_path / "prompt.txt"
+    log_path = tmp_path / "child.log"
+    stdin_path.write_text("prompt\n", encoding="utf-8")
+    opened: list[Any] = []
+    real_open = open
+
+    def _tracking_open(*args, **kwargs):
+        fh = real_open(*args, **kwargs)
+        opened.append(fh)
+        return fh
+
+    def _fail_spawn(*_args, **_kwargs):
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(rs, "open", _tracking_open, raising=False)
+    monkeypatch.setattr(rs.subprocess, "Popen", _fail_spawn)
+    mgr = ManagedServerProcess()
+
+    with pytest.raises(OSError, match="spawn failed"):
+        mgr.start(
+            ["server"],
+            stdin_path=str(stdin_path),
+            log_path=str(log_path),
+        )
+
+    assert len(opened) == 2
+    assert all(fh.closed for fh in opened)
 
 
 # ── shared artifact root ─────────────────────────────────────────────────────
@@ -495,13 +634,24 @@ class _FakeGpuActor:
         self.exit_code = _FakeActorMethodP2(lambda: self._exit)
         self.stop = _FakeActorMethodP2(self._stop)
 
-    def _start(self, cmd, env=None, cwd=None, log_path=None, scrub_benchmark_env=False):
+    def _start(
+        self,
+        cmd,
+        env=None,
+        cwd=None,
+        log_path=None,
+        scrub_benchmark_env=False,
+        env_mode="merge",
+        stdin_path=None,
+    ):
         self.started_with = {
             "cmd": cmd,
             "env": env,
             "cwd": cwd,
             "log_path": log_path,
             "scrub_benchmark_env": scrub_benchmark_env,
+            "env_mode": env_mode,
+            "stdin_path": stdin_path,
         }
         return 4242
 
@@ -566,6 +716,32 @@ def test_gpu_specialist_lease_lifecycle(monkeypatch: pytest.MonkeyPatch):
     lease.close()
     assert actor in fake.killed
     lease.close()  # idempotent
+
+
+def test_gpu_specialist_lease_forwards_replace_env_and_stdin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Specialists can opt into filtered-env replacement and file-backed stdin."""
+    fake = _FakeRayP2()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    actor = _FakeGpuActor()
+    monkeypatch.setattr(rs, "make_gpu_specialist_actor", lambda n, *, serving_slot=False: actor)
+    monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
+    stdin_path = tmp_path / "prompt.txt"
+    stdin_path.write_text("prompt\n", encoding="utf-8")
+
+    lease = rs.GpuSpecialistLease(num_gpus=2)
+    lease.start_async(
+        ["codex"],
+        env={"SAFE": "1"},
+        env_mode="replace",
+        stdin_path=str(stdin_path),
+    )
+
+    assert lease.poll_started() == 4242
+    assert actor.started_with["env_mode"] == "replace"
+    assert actor.started_with["stdin_path"] == str(stdin_path)
 
 
 def test_ray_gpu_pending_limit_default_and_override(monkeypatch: pytest.MonkeyPatch):
@@ -1073,6 +1249,75 @@ def test_serving_actor_scrubs_benchmark_credentials_when_requested(monkeypatch: 
     assert captured_env["ROCR_VISIBLE_DEVICES"] == "2"
     assert captured_env["WORKLOAD_FLAG"] == "1"
     assert "OPENAI_API_KEY" not in captured_env
+
+
+def test_serving_actor_replace_env_removes_secrets_and_preserves_ray_devices(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Replacement starts from the filtered env and overlays only Ray GPU assignments."""
+    captured: dict[str, Any] = {}
+
+    class _CaptureProcess:
+        def start(self, cmd, *, env=None, cwd=None, log_path=None, stdin_path=None):
+            captured.update(
+                cmd=cmd,
+                env=dict(env or {}),
+                cwd=cwd,
+                log_path=log_path,
+                stdin_path=stdin_path,
+            )
+            return 4321
+
+    monkeypatch.setitem(sys.modules, "ray", _PassthroughRay())
+    monkeypatch.setattr(rs, "ManagedServerProcess", _CaptureProcess)
+    monkeypatch.setenv("OPENAI_API_KEY", "actor-secret")
+    monkeypatch.setenv("ACTOR_ONLY_SECRET", "must-not-reach-specialist")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "2,3")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "4,5")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "6,7")
+
+    actor = rs._serving_actor_body()()
+    actor.start(
+        ["python", "-m", "specialist"],
+        env={
+            "SAFE_FLAG": "1",
+            "ROCR_VISIBLE_DEVICES": "caller-rocr",
+            "HIP_VISIBLE_DEVICES": "caller-hip",
+            "CUDA_VISIBLE_DEVICES": "caller-cuda",
+        },
+        env_mode="replace",
+        stdin_path="/tmp/prompt.txt",
+    )
+
+    child_env = captured["env"]
+    assert child_env["SAFE_FLAG"] == "1"
+    assert child_env["ROCR_VISIBLE_DEVICES"] == "2,3"
+    assert child_env["HIP_VISIBLE_DEVICES"] == "4,5"
+    assert child_env["CUDA_VISIBLE_DEVICES"] == "6,7"
+    assert "OPENAI_API_KEY" not in child_env
+    assert "ACTOR_ONLY_SECRET" not in child_env
+    assert captured["stdin_path"] == "/tmp/prompt.txt"
+
+
+def test_serving_actor_default_env_mode_keeps_merge_behavior(monkeypatch: pytest.MonkeyPatch):
+    """Existing serving callers still inherit the actor env by default."""
+    captured_env: dict[str, str] = {}
+
+    class _CaptureProcess:
+        def start(self, cmd, *, env=None, cwd=None, log_path=None):
+            del cmd, cwd, log_path
+            captured_env.update(env or {})
+            return 4321
+
+    monkeypatch.setitem(sys.modules, "ray", _PassthroughRay())
+    monkeypatch.setattr(rs, "ManagedServerProcess", _CaptureProcess)
+    monkeypatch.setenv("EXISTING_SERVING_ENV", "preserved")
+
+    actor = rs._serving_actor_body()()
+    actor.start(["python", "-m", "server"], env={"WORKLOAD_FLAG": "1"})
+
+    assert captured_env["EXISTING_SERVING_ENV"] == "preserved"
+    assert captured_env["WORKLOAD_FLAG"] == "1"
 
 
 def test_serving_actor_run_blocking_timeout_sentinel(monkeypatch: pytest.MonkeyPatch):
