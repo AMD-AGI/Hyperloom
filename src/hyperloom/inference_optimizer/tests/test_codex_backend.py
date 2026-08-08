@@ -331,14 +331,24 @@ def test_codex_prefers_explicit_openai_key_over_safe_filled_anthropic(monkeypatc
     assert captured["base_url"] == "https://api.openai.com/v1"
 
 
-def test_codex_refuses_to_auth_with_anthropic_token(monkeypatch):
-    """Codex speaks the OpenAI protocol, so an Anthropic token alone fails to
-    construct it."""
+def test_codex_authenticates_with_the_anthropic_gateway_token(monkeypatch):
+    """Anthropic-only deployment: the gateway token authenticates the OpenAI protocol."""
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-token")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_GATEWAY_KEY", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
-    with pytest.raises(BackendError, match="OPENAI_API_KEY"):
-        _construct_real_codex_capturing_kwargs(monkeypatch)
+    captured = _construct_real_codex_capturing_kwargs(monkeypatch)
+    assert captured["api_key"] == "anthropic-token"
+    assert captured["base_url"] == "https://gateway.example/v1"
+
+
+def test_codex_derives_its_base_url_in_an_anthropic_only_deployment(monkeypatch):
+    for var in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "LLM_GATEWAY_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-token")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/Anthropic")
+    captured = _construct_real_codex_capturing_kwargs(monkeypatch)
+    assert captured["base_url"] == "https://llm-api.amd.com/Unified/v1"
 
 
 # ---------------------------------------------------------------------------
