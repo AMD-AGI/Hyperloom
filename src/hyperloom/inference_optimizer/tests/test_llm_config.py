@@ -677,29 +677,40 @@ def test_get_anthropic_client_raises_clearly_without_httpx(monkeypatch):
 
 # ---- anthropic_messages / aanthropic_messages ----
 class _FakeAnthropicResponse:
-    def __init__(self, *, status_code: int = 200, body: Any = None, text: str = "") -> None:
+    """One canned reply; ``error`` makes ``json()`` fail as a non-JSON body would."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        body: Any = None,
+        text: str = "",
+        error: BaseException | None = None,
+    ) -> None:
         self.status_code = status_code
         self._body = {} if body is None else body
+        self._error = error
         self.text = text
 
     def json(self) -> Any:
-        if isinstance(self._body, BaseException):
-            raise self._body
+        if self._error is not None:
+            raise self._error
         return self._body
 
 
 class _FakeAnthropicTransport:
     """Records ``/v1/messages`` POSTs; the async twin awaits the same recorder."""
 
-    def __init__(self, outcome: Any) -> None:
-        self._outcome = outcome
+    def __init__(self, response: Any = None, *, error: BaseException | None = None) -> None:
+        self._response = response
+        self._error = error
         self.calls: list[dict[str, Any]] = []
 
     def post(self, path: str, *, json: Any) -> Any:
         self.calls.append({"path": path, "json": json})
-        if isinstance(self._outcome, BaseException):
-            raise self._outcome
-        return self._outcome
+        if self._error is not None:
+            raise self._error
+        return self._response
 
 
 class _FakeAsyncAnthropicTransport(_FakeAnthropicTransport):
@@ -750,14 +761,14 @@ async def test_aanthropic_messages_raises_on_non_2xx_with_status_and_body():
 
 @pytest.mark.asyncio
 async def test_aanthropic_messages_raises_on_non_json_body():
-    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(body=ValueError("not json")))
+    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(error=ValueError("not json")))
     with pytest.raises(RuntimeError, match="non-JSON body"):
         await aanthropic_messages(client, model="claude")
 
 
 @pytest.mark.asyncio
 async def test_aanthropic_messages_propagates_transport_errors():
-    client = _FakeAsyncAnthropicTransport(RuntimeError("gateway down"))
+    client = _FakeAsyncAnthropicTransport(error=RuntimeError("gateway down"))
     with pytest.raises(RuntimeError, match="gateway down"):
         await aanthropic_messages(client, model="claude")
 

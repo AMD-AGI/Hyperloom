@@ -465,8 +465,10 @@ async def run_codex_turn(
         finally:
             if turn_task is not None and not turn_task.done():
                 turn_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await turn_task
+                # Let the cancellation settle. The turn's own outcome is already
+                # decided, so the task's result is discarded rather than raised;
+                # a cancellation of *this* task still propagates.
+                await asyncio.gather(turn_task, return_exceptions=True)
 
     return normalize_codex_result(sdk_result, thread_id)
 
