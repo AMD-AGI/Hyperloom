@@ -2055,23 +2055,15 @@ def _ensure_flydsl_aiter_compat(protocol_path: str = "") -> bool:
 def _openai_only_provider() -> bool:
     """Return true when the OpenAI side is the only configured provider.
 
-    Mirrors ``tracelens_skill_runner._should_use_openai_tool_runner``. The forge
-    fellow reaches an OpenAI-protocol gateway only through KernelForge's codex
-    provider, so this predicate is what selects it over the claude provider that
-    ``Config.agent_backend='auto'`` would otherwise resolve to.
+    The forge fellow reaches an OpenAI-protocol gateway only through
+    KernelForge's codex provider, so this predicate is what selects it over the
+    claude provider that ``Config.agent_backend='auto'`` would otherwise resolve
+    to. The shape test lives in :mod:`hyperloom.common.llm_config` so that the
+    fellow, backend selection and the TraceLens runner cannot disagree.
     """
-    has_openai = bool(
-        (os.environ.get("OPENAI_API_KEY") or "").strip()
-        or (os.environ.get("OPENAI_BASE_URL") or "").strip()
-    )
-    has_anthropic = bool(
-        (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-        or (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
-        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
-    )
-    return has_openai and not has_anthropic
+    from hyperloom.common import llm_config  # local import: keep module import-light
+
+    return llm_config.is_openai_only()
 
 
 def _apply_fellow_env(env: dict) -> None:
