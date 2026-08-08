@@ -2087,6 +2087,7 @@ def _capabilities_payload(**overrides) -> dict:
         "driver_contract_versions": [1],
         "frameworks": ["aiter", "vllm", "sglang"],
         "result_sentinel": "__FORGE_RESULT__",
+        "driver_preparation": True,
     }
     payload.update(overrides)
     return payload
@@ -2122,6 +2123,15 @@ _SUPPORTED_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
     "capability_ok",
     "",
     ("aiter", "sglang", "vllm"),
+)
+
+# The same producer, additionally advertising that it can author a driver.
+_PREPARING_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
+    True,
+    "capability_ok",
+    "",
+    ("aiter", "sglang", "vllm"),
+    driver_preparation=True,
 )
 
 
@@ -2357,6 +2367,62 @@ def test_rewrite_route_needs_the_explicit_switch(tmp_path, monkeypatch):
     assert probe.calls == 0
 
 
+def test_an_unsynthesizable_operator_is_handed_to_the_producer(tmp_path, monkeypatch):
+    """No driver contract is a hand-over, not a decline, when the producer can author one.
+
+    Quantized and routed operators carry scale and index operands whose meaning
+    traced shapes do not describe, so this consumer cannot rebuild their
+    invocation. Declining them here is what kept the whole route off every hot
+    kernel of an MXFP8 MoE model.
+    """
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    probe = _RecordingProbe(_PREPARING_CAPABILITIES)
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=probe,
+        **_rewrite_route_kwargs(tmp_path, driver_contract={}),
+    )
+
+    assert decision.eligible is True
+    assert decision.reason == "eligible"
+    assert decision.spec.driver_source == _flydsl_rewrite.DRIVER_SOURCE_PRODUCER
+    # Nothing was classified, so no family may be claimed on this route.
+    assert decision.spec.operator_family == ""
+
+
+def test_an_unsynthesizable_operator_still_declines_without_producer_preparation(
+    tmp_path,
+    monkeypatch,
+):
+    """An older producer cannot author a driver, so the decline must stand."""
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    probe = _RecordingProbe(_SUPPORTED_CAPABILITIES)
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=probe,
+        **_rewrite_route_kwargs(tmp_path, driver_contract={}),
+    )
+
+    assert decision.eligible is False
+    assert decision.reason == "driver_unavailable"
+    assert "does not advertise driver preparation" in decision.detail
+
+
+def test_a_synthesizable_operator_keeps_its_own_driver(tmp_path, monkeypatch):
+    """Driver preparation must not take work away from a contract that exists."""
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    probe = _RecordingProbe(_PREPARING_CAPABILITIES)
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=probe,
+        **_rewrite_route_kwargs(tmp_path),
+    )
+
+    assert decision.eligible is True
+    assert decision.spec.driver_source == _flydsl_rewrite.DRIVER_SOURCE_SYNTHESIZED
+    assert decision.spec.operator_family == "gemm"
+
+
 @pytest.mark.parametrize(
     ("overrides", "reason"),
     [
@@ -2368,7 +2434,6 @@ def test_rewrite_route_needs_the_explicit_switch(tmp_path, monkeypatch):
         ({"framework": "torch"}, "framework_unsupported"),
         ({"timeout_s": 3600}, "budget_insufficient"),
         ({"implementation_symbols": []}, "target_functions_missing"),
-        ({"driver_contract": {}}, "driver_unavailable"),
         ({"driver_contract": _rewrite_driver_contract(contract_version=2)}, "driver_contract_unsupported"),
     ],
 )
@@ -2475,12 +2540,13 @@ def test_eligible_rewrite_route_carries_the_producer_candidate_fields(tmp_path, 
         "shape_cases": [{"M": 8, "N": 16}],
         "framework": "vllm",
         "gpu_target": "gfx942",
-        "operator_family": "gemm",
-        # The driver is generated only after the route is granted.
-        "driver": "",
-        "branch": "forge/session/fused-gemm-abc123def456",
-        "attempt_id": "attempt-1",
-    }
+            "operator_family": "gemm",
+            # The driver is generated only after the route is granted.
+            "driver": "",
+            "driver_source": "synthesized",
+            "branch": "forge/session/fused-gemm-abc123def456",
+            "attempt_id": "attempt-1",
+        }
     assert decision.with_driver("/ws/.forge_driver_x.py").spec.driver == "/ws/.forge_driver_x.py"
 
 
@@ -2862,6 +2928,8 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
     driver = workspace / ".forge_driver_abc.py"
     kernel.write_text("pass\n")
     driver.write_text("pass\n")
+    invocation_spec = tmp_path / "invocation_spec_fused_gemm.json"
+    invocation_spec.write_text('{"schema_version": 2}')
     experiments = tmp_path / "attempt" / "forge_experiments"
     experiments.mkdir(parents=True)
     result_json = tmp_path / "attempt" / "forge_rewrite_result.json"
@@ -2896,7 +2964,9 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         experiments_dir=experiments,
         result_json=result_json,
         target_functions=["matmul", "matmul_kernel"],
-        shapes={"primary": {"CASE_ID": "case_001"}},
+        shapes=[{"M": 8, "N": 16, "dtype": "fp16"}],
+        invocation_spec_file=str(invocation_spec),
+        driver_preparation=True,
         snr_threshold=30.0,
         gpu_target="gfx950",
         max_iters=8,
@@ -2918,7 +2988,10 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         "--workspace": str(workspace),
         "--experiments-dir": str(experiments),
         "--target-functions": "matmul,matmul_kernel",
-        "--shapes-json": json.dumps({"primary": {"CASE_ID": "case_001"}}),
+        # A list of per-case dimension dicts: the producer coerces this with
+        # ``list()``, so a mapping would arrive as a list of its keys.
+        "--shapes-json": json.dumps([{"M": 8, "N": 16, "dtype": "fp16"}]),
+        "--invocation-spec-file": str(invocation_spec),
         "--snr-threshold": "30.0",
         "--gpu-target": "gfx950",
         "--max-iters": "8",
@@ -2931,6 +3004,8 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
     for flag, value in expected.items():
         assert flag in command, flag
         assert command[command.index(flag) + 1] == value, flag
+    # A boolean switch carries no value, so it is checked apart from the pairs.
+    assert "--prepare-driver" in command
     # Options that only exist on the generic loop must never be smuggled across.
     for forbidden in (
         "--kernel",
@@ -2941,7 +3016,6 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         "--operator-name",
         "--source-files",
         "--program-md-file",
-        "--invocation-spec-file",
         "--resume",
         "--task-type",
         "--workload-key",
@@ -2992,7 +3066,9 @@ def test_rewrite_cli_hard_kills_the_producer_at_the_deadline(tmp_path, monkeypat
         experiments_dir=experiments,
         result_json=result_json,
         target_functions=None,
-        shapes={},
+        shapes=[],
+        invocation_spec_file="",
+        driver_preparation=False,
         snr_threshold=30.0,
         gpu_target="gfx942",
         max_iters=4,
@@ -3042,7 +3118,9 @@ def test_rewrite_cli_prefers_the_caller_named_result_file(tmp_path, monkeypatch)
         experiments_dir=experiments,
         result_json=result_json,
         target_functions=None,
-        shapes={},
+        shapes=[],
+        invocation_spec_file="",
+        driver_preparation=False,
         snr_threshold=30.0,
         gpu_target="gfx942",
         max_iters=4,

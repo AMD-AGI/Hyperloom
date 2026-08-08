@@ -3416,6 +3416,8 @@ def _run_rewrite_via_cli(
     result_json: Path,
     target_functions: list[str] | None,
     shapes: list[dict],
+    invocation_spec_file: str,
+    driver_preparation: bool,
     snr_threshold: float,
     gpu_target: str,
     max_iters: int,
@@ -3436,6 +3438,12 @@ def _run_rewrite_via_cli(
     ``shapes`` is a list of per-case dimension mappings, not the generic
     forge-loop selector dict: the rewrite producer coerces this argument with
     ``list()``, so a mapping would degrade into a list of its keys.
+
+    ``invocation_spec_file`` is the evidence the producer's driver-preparation
+    stage reads when the handed-over driver does not conform. A synthesized
+    driver can also be found non-conforming and repaired from the same evidence,
+    so it is offered on both routes -- but only to a producer that advertised
+    ``driver_preparation``, since an older one rejects the options outright.
     """
     if deadline_unix <= 0:
         deadline_unix = time.time() + timeout_s
@@ -3496,6 +3504,10 @@ def _run_rewrite_via_cli(
         cmd += ["--target-functions", ",".join(target_functions)]
     if framework:
         cmd += ["--framework", framework]
+    if driver_preparation:
+        cmd += ["--prepare-driver"]
+        if invocation_spec_file and Path(invocation_spec_file).is_file():
+            cmd += ["--invocation-spec-file", str(Path(invocation_spec_file).resolve())]
 
     run_exc: Exception | None = None
     out = ""
@@ -3627,6 +3639,7 @@ def _run_rewrite_attempt(
     output_dir: Path,
     experiments_dir: Path,
     forge_log: Path,
+    invocation_spec_file: str,
     snr_threshold: float,
     max_iters: int,
     max_hours: float,
@@ -3652,6 +3665,8 @@ def _run_rewrite_attempt(
         result_json=output_dir / "forge_rewrite_result.json",
         target_functions=list(spec.implementation_symbols),
         shapes=[dict(case) for case in spec.shape_cases],
+        invocation_spec_file=invocation_spec_file,
+        driver_preparation=bool(route.capabilities and route.capabilities.driver_preparation),
         snr_threshold=snr_threshold,
         gpu_target=spec.gpu_target,
         max_iters=max_iters,
@@ -4080,16 +4095,24 @@ def submit(
         # fallback and will either create a conforming driver or fail explicitly.
         driver_from_adapter = False
         if rewrite_route.eligible:
-            driver = _flydsl_rewrite.build_rewrite_driver(
-                rewrite_driver_contract,
-                workspace=workspace,
-                writer=_write_generated_driver,
-            )
+            producer_prepared = rewrite_route.spec.driver_source == _flydsl_rewrite.DRIVER_SOURCE_PRODUCER
+            if producer_prepared:
+                driver = _flydsl_rewrite.build_rewrite_driver_seed(
+                    workspace=workspace,
+                    writer=_write_generated_driver,
+                )
+            else:
+                driver = _flydsl_rewrite.build_rewrite_driver(
+                    rewrite_driver_contract,
+                    workspace=workspace,
+                    writer=_write_generated_driver,
+                )
             rewrite_route = rewrite_route.with_driver(driver)
             log.info(
-                "forge driver: FlyDSL rewrite dual-mode driver for op=%s family=%s -> %s",
+                "forge driver: FlyDSL rewrite %s driver for op=%s family=%s -> %s",
+                "seed (producer authors from the invocation spec)" if producer_prepared else "dual-mode",
                 logical_operator or worktree_kernel,
-                rewrite_route.spec.operator_family,
+                rewrite_route.spec.operator_family or "unclassified",
                 driver,
             )
         elif requires_multi_case_driver:
@@ -4249,6 +4272,7 @@ def submit(
                 output_dir=output_dir,
                 experiments_dir=experiments_dir,
                 forge_log=forge_log,
+                invocation_spec_file=invocation_spec_file,
                 snr_threshold=snr_threshold,
                 max_iters=max_iters,
                 max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),
