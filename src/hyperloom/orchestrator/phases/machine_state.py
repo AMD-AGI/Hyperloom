@@ -1984,11 +1984,13 @@ def exit_normal_explore(
     )
     if remaining is not None and remaining <= 0:
         return "explore_phase_budget_exhausted", {
-            "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
         }
     if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
         return "explore_budget_cap", {
-            "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
         }
     return None
 
@@ -2059,12 +2061,14 @@ def exit_normal_kernel(
     )
     if remaining is not None and remaining <= 0:
         return "kernel_phase_budget_exhausted", {
-            "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
             "rejected_kernel_count": rejected_count,
         }
     if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
         return "kernel_budget_cap", {
-            "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
             "rejected_kernel_count": rejected_count,
         }
     return None
@@ -2110,11 +2114,13 @@ def exit_normal_sweep(
     )
     if remaining is not None and remaining <= 0:
         return "sweep_budget_exhausted", {
-            "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
         }
     if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
         return "sweep_budget_cap", {
-            "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
         }
     return None
 
@@ -2373,6 +2379,7 @@ def exit_normal_framework_agent(
             "evidence": "phase_budget_cap",
             "phase_cap_seconds": cap,
             "phase_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
             "pending_candidate_count": _framework_agent_pending_candidate_count(state),
         }
 

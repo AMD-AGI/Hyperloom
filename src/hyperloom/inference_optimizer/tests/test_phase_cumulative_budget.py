@@ -211,3 +211,33 @@ def test_history_rebuild_skips_unusable_rows():
     assert ps.phase_elapsed_totals_from_history(history) == {"SWEEP": 800.0}
     assert ps.phase_elapsed_totals_from_history(None) == {}
     assert ps.phase_elapsed_totals_from_history("nope") == {}
+
+
+def test_budget_exit_evidence_reports_the_time_it_judged_on():
+    """A cap decided on cumulative time must not be evidenced by one entry's clock.
+
+    The guards moved to cumulative accounting; the phase_history evidence kept
+    writing ``phase_elapsed_seconds``. On a re-entered phase that reads as a
+    contradiction — a row claiming the budget is spent while showing a few
+    minutes elapsed — and phase_history is the record a stalled run is
+    reconstructed from.
+    """
+    state = _kernel_state()
+    # Two entries already banked, a third under way: no single entry is over the
+    # cap, the total is.
+    state.phase_elapsed_totals = {ps.PHASE_KERNEL_AGENT: 2 * ENTRY_SEC}
+    state.phase = ps.PHASE_KERNEL_AGENT
+    state.phase_started_unix = T0
+    state.phase_started_ts = T0_ISO
+    now = T0 + ENTRY_SEC
+
+    result = ps.exit_normal_kernel(state, now_unix=now)
+
+    assert result is not None
+    reason, evidence = result
+    assert reason in {"kernel_budget_cap", "kernel_phase_budget_exhausted"}
+    assert evidence["entry_elapsed_seconds"] == pytest.approx(ENTRY_SEC)
+    assert evidence["cumulative_elapsed_seconds"] == pytest.approx(3 * ENTRY_SEC)
+    # The number that justifies the exit is the one over the cap.
+    assert evidence["cumulative_elapsed_seconds"] > KERNEL_CAP_SEC
+    assert evidence["entry_elapsed_seconds"] < KERNEL_CAP_SEC
