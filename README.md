@@ -76,6 +76,10 @@ feedback on how to improve Hyperloom by completing the
 - Main agent instructions: [`src/hyperloom/inference_optimizer/SKILL.md`](src/hyperloom/inference_optimizer/SKILL.md)
 - CLI entry point: `python -m hyperloom.inference_optimizer.cli optimize`
 - Operator tools: `python -m hyperloom.inference_optimizer.tools.*`
+- Platform/BIOS audit: `sudo python3 scripts/platform_audit.py` — checks the EPYC
+  tuning knobs (boost, determinism, NPS, APBDIS, DF C-states, SMT) that silently
+  change benchmark results. Runs on the host, not in the container, since the
+  BIOS-only knobs need the BMC. Exits non-zero when a knob is off target.
 - Documentation source: `docs/`
 
 For contribution workflow, testing, and linting, see

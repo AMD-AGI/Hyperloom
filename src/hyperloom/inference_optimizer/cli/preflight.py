@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -902,6 +904,71 @@ def _check_shm_disk() -> None:
         )
 
 
+def _read_sysfs(path: str) -> str:
+    """Read a sysfs scalar, returning ``""`` when absent or unreadable."""
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def _check_platform_tuning() -> None:
+    """Record host CPU tuning state and warn on settings that skew results.
+
+    Two runs on nodes whose BIOS differs are not comparable, and nothing else
+    in preflight notices: an A/B that attributes a delta to a code change can
+    just as easily be reading SMT, a NUMA layout, or a frequency governor.
+    Fingerprinting the platform puts that in the run log, so a suspicious
+    delta can be checked against it after the fact rather than re-run.
+
+    Deliberately sysfs-only and WARN-only. The container sees host sysfs but
+    has neither the MSR access to resolve a BIOS "Auto" nor a route to the
+    BMC, so the knobs reachable here (SMT, NPS, boost, governor) are the ones
+    reported. The remaining BIOS-only knobs -- APBDIS, DF C-states,
+    determinism -- need Redfish; ``scripts/platform_audit.py`` covers those
+    host-side. Their absence here is not worth failing a run over.
+
+    Only genuinely anomalous settings warn. SMT is recorded but never warned
+    about: it is on by default on EPYC, so alerting would fire on nearly every
+    node and train readers to ignore the check entirely. What would merit an
+    alert is a node whose knobs disagree with the others in the same session,
+    which needs the per-node collection this does not yet do.
+    """
+    smt_active = _read_sysfs("/sys/devices/system/cpu/smt/active")
+    if not smt_active:
+        return  # Not Linux sysfs, or a container without it; stay silent.
+
+    nodes = len(glob.glob("/sys/devices/system/node/node[0-9]*"))
+    sockets = len(
+        {
+            _read_sysfs(p)
+            for p in glob.glob("/sys/devices/system/cpu/cpu*/topology/physical_package_id")
+        }
+        - {""}
+    )
+    nps = f"NPS{nodes // sockets}" if sockets and nodes else "unknown"
+    smt = "on" if smt_active == "1" else "off"
+    governor = _read_sysfs("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor") or "unknown"
+    boost = _read_sysfs("/sys/devices/system/cpu/cpufreq/boost")
+
+    print(
+        f"Preflight: platform [{socket.gethostname()}] — SMT {smt}, {nps} "
+        f"({nodes} NUMA nodes / {sockets or '?'} sockets), governor {governor}"
+    )
+
+    if governor not in ("performance", "unknown"):
+        print(
+            f"Preflight: WARNING — cpufreq governor is {governor!r}, not 'performance'; "
+            f"clock ramp can distort latency percentiles and roofline measurements"
+        )
+    if boost == "0":
+        print(
+            "Preflight: WARNING — Core Performance Boost is disabled; CPU-side "
+            "work (sampling, scheduling, tokenization) will run below rated clocks"
+        )
+
+
 _TRACELENS_REQUIRED_CLIS: tuple[str, ...] = ("TraceLens_generate_perf_report_pytorch_inference",)
 
 
@@ -1422,6 +1489,7 @@ def _preflight(
     _unset_hip_visible_devices()
     _check_gpu_visibility()
     _check_shm_disk()
+    _check_platform_tuning()
 
     # --- Runtime dep install ---
     # 1. Ray — used broadly (multi-node scheduling, kernel/profile/recover
