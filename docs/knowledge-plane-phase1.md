@@ -57,13 +57,16 @@ lesson/pitfall amendment, atomic JSON live rows, history, attempt logs, and
 per-canonical-id file locks. Ambient KB Store credentials never trigger a
 remote write.
 
-Remote mode does not construct a `RecipeKB` dispatcher. T0 Recipe warm replay
-projects the champion's Explore args/env into the existing replay executor;
-Framework, Kernel, and patch replay are deferred. Runtime legacy amendments are
-no-ops, and CLOSE calls the KB Store final-session writer once. No local
-`recipe.json`, history, or attempt data is created. A KB Store transport failure
-is logged and remains non-fatal; invalid or missing startup configuration fails
-before the optimization run starts.
+Remote mode does not construct a `RecipeKB` dispatcher. It reads the complete
+best-session envelope directly from `GET /v1/kb/{canonical_id}` and uses that
+envelope's session ID only for file listing and download; it does not fetch a
+second session document. Candidate rollups live under `/sessions`. T0 Recipe
+warm replay projects the best record's Explore args/env into the existing
+replay executor; Framework, Kernel, and patch replay are deferred. Runtime
+legacy amendments are no-ops, and CLOSE calls the KB Store final-session writer
+once. No local `recipe.json`, history, or attempt data is created. A KB Store
+transport failure is logged and remains non-fatal; invalid or missing startup
+configuration fails before the optimization run starts.
 
 ## Local knowledge graph
 

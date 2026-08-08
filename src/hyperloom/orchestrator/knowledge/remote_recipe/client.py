@@ -91,6 +91,43 @@ def flatten_recipe_document(
     return {**business, **fixed}
 
 
+def _recommendation_metadata(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Keep valid service metadata or synthesize stable recommendation fields."""
+    session_id = str(envelope.get("session_id") or "").strip()
+    raw_champion = envelope.get("champion")
+    if isinstance(raw_champion, dict):
+        champion_session_id = str(raw_champion.get("session_id") or "").strip()
+        metric = str(raw_champion.get("metric") or "").strip()
+        raw_champion_value = raw_champion.get("value")
+        if (
+            champion_session_id == session_id
+            and metric == "optimized_throughput"
+            and not isinstance(raw_champion_value, bool)
+            and isinstance(raw_champion_value, (int, float))
+            and math.isfinite(float(raw_champion_value))
+        ):
+            return dict(raw_champion)
+    knowledge = envelope.get("knowledge") or {}
+    raw_value = (
+        knowledge.get("optimized_throughput", 0.0)
+        if isinstance(knowledge, dict)
+        else 0.0
+    )
+    try:
+        value = float(raw_value or 0.0)
+    except (TypeError, ValueError):
+        value = 0.0
+    if not math.isfinite(value):
+        raise RemoteRecipeValidationError(
+            f"recommendation value must be finite, got {raw_value!r}"
+        )
+    return {
+        "session_id": session_id,
+        "metric": "optimized_throughput",
+        "value": value,
+    }
+
+
 def _validate_session_envelope(
     envelope: Any,
     *,
@@ -109,9 +146,11 @@ def _validate_session_envelope(
         raise RemoteRecipeValidationError(
             "session envelope canonical_id does not match the requested identity"
         )
+    if not session_id:
+        raise RemoteRecipeValidationError("session envelope session_id is required")
     if str(envelope.get("session_id") or "") != session_id:
         raise RemoteRecipeValidationError(
-            "session envelope session_id does not match the champion session"
+            "session envelope session_id does not match the requested session"
         )
     if not str(envelope.get("record_id") or "").strip():
         raise RemoteRecipeValidationError("session envelope record_id is required")
@@ -243,19 +282,26 @@ class RemoteRecipeClient:
         return cls(KBStoreClient(base, token))
 
     def read(self, canonical_id: str, destination: str | Path) -> dict[str, Any] | None:
-        """Download champion files and emit only flattened recipe.json + files/."""
-        rollup = self.store.get_rollup(canonical_id)
-        session_id, _, champion = _champion(rollup, validate_metric=True)
-        if not session_id:
-            return None
-        envelope = self.store.get_session(canonical_id, session_id)
+        """Download the direct best record and emit flattened recipe.json + files/."""
+        get_best_record = getattr(self.store, "get_best_record", None)
+        if get_best_record is None:
+            # Transitional compatibility only: the old vendored SDK calls the
+            # same direct /v1/kb/{canonical_id} request ``get_rollup``.
+            get_best_record = self.store.get_rollup
+        envelope = get_best_record(canonical_id)
         if envelope is None:
             return None
+        session_id = (
+            str(envelope.get("session_id") or "").strip()
+            if isinstance(envelope, dict)
+            else ""
+        )
         envelope = _validate_session_envelope(
             envelope,
             canonical_id=canonical_id,
             session_id=session_id,
         )
+        champion = _recommendation_metadata(envelope)
         root = Path(destination)
         if root.is_symlink():
             raise RemoteRecipeValidationError(f"refusing symlink destination: {root}")
@@ -274,7 +320,26 @@ class RemoteRecipeClient:
                 f"downloaded recipe is not strict JSON: {exc}"
             ) from exc
         with self._store_lock:
-            listing = self.store.list_session_files(canonical_id, session_id)
+            artifacts = envelope.get("artifacts")
+            embedded_files = (
+                artifacts.get("files")
+                if isinstance(artifacts, dict) and isinstance(artifacts.get("files"), list)
+                else None
+            )
+            embedded_file_count = (
+                artifacts.get("file_count")
+                if isinstance(artifacts, dict)
+                else None
+            )
+            no_artifacts = (
+                embedded_files == []
+                and embedded_file_count in (None, 0)
+            )
+            listing = (
+                {"files": []}
+                if no_artifacts
+                else self.store.list_session_files(canonical_id, session_id)
+            )
             manifest = _validate_download_listing(listing)
             if files_root.is_symlink():
                 raise RemoteRecipeValidationError(f"refusing symlink destination: {files_root}")
@@ -284,29 +349,39 @@ class RemoteRecipeClient:
                     shutil.rmtree(stale_path)
                 else:
                     stale_path.unlink()
-            # The upstream SDK lists internally. Pin that call to the already
-            # validated snapshot while holding the client-shared store lock.
-            original_listing_method = self.store.list_session_files
+            if manifest:
+                # The upstream SDK lists internally. Pin that call to the already
+                # validated snapshot while holding the client-shared store lock.
+                original_listing_method = self.store.list_session_files
 
-            def validated_listing(
-                requested_canonical_id: str,
-                requested_session_id: str,
-                *,
-                kind: str = "",
-            ) -> dict[str, Any]:
-                if requested_canonical_id != canonical_id or requested_session_id != session_id or kind:
-                    return original_listing_method(
-                        requested_canonical_id,
-                        requested_session_id,
-                        kind=kind,
+                def validated_listing(
+                    requested_canonical_id: str,
+                    requested_session_id: str,
+                    *,
+                    kind: str = "",
+                ) -> dict[str, Any]:
+                    if (
+                        requested_canonical_id != canonical_id
+                        or requested_session_id != session_id
+                        or kind
+                    ):
+                        return original_listing_method(
+                            requested_canonical_id,
+                            requested_session_id,
+                            kind=kind,
+                        )
+                    return listing
+
+                self.store.list_session_files = validated_listing  # type: ignore[method-assign]
+                try:
+                    self.store.download_session(
+                        canonical_id,
+                        session_id,
+                        root,
+                        include_values=False,
                     )
-                return listing
-
-            self.store.list_session_files = validated_listing  # type: ignore[method-assign]
-            try:
-                self.store.download_session(canonical_id, session_id, root, include_values=False)
-            finally:
-                self.store.list_session_files = original_listing_method  # type: ignore[method-assign]
+                finally:
+                    self.store.list_session_files = original_listing_method  # type: ignore[method-assign]
             files_root.mkdir(parents=True, exist_ok=True)
             _verify_downloaded_files(files_root, manifest)
             for generated in list(root.iterdir()):

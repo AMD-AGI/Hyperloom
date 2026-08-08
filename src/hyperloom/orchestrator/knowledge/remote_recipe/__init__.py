@@ -31,7 +31,7 @@ def read_remote_recipe(
     *,
     client: RemoteRecipeClient | None = None,
 ) -> dict[str, Any] | None:
-    """Download the champion as flattened recipe.json + files/."""
+    """Download the direct best record as flattened recipe.json + files/."""
     resolved = client or RemoteRecipeClient.from_env_optional()
     if resolved is None:
         return None
@@ -102,7 +102,7 @@ class HyperloomRemoteKB:
         identity: str,
         destination: str | Path,
     ) -> dict[str, Any] | None:
-        """Download the champion for a Hyperloom inference canonical id."""
+        """Download the direct best record for an inference canonical id."""
         return read_remote_recipe(identity, destination, client=self._client)
 
     def write(
@@ -161,7 +161,7 @@ class RemoteWarmRecipeAdapter:
         canonical_id: str,
         version: int | None = None,
     ) -> dict[str, Any] | None:
-        """Return the exact champion projected into the legacy Recipe shape."""
+        """Return the exact best record projected into the legacy Recipe shape."""
         del version
         return self._read(canonical_id)
 
@@ -172,7 +172,7 @@ class RemoteWarmRecipeAdapter:
         version: int | None = None,
         prefer: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """Return the cached exact champion; relative-tier search is deferred."""
+        """Return the cached exact best record; relative-tier search is deferred."""
         del version, prefer
         return self._read(canonical_id)
 

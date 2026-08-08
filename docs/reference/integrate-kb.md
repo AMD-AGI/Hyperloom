@@ -89,12 +89,16 @@ export KB_STORE_TOKEN=...
 ```
 
 Both credentials are required; missing credentials fail at startup. Remote mode
-does not construct the legacy Recipe dispatcher, does not fall back to local
-Recipe data, and currently replays only the champion's Explore args/env through
-the existing T0/PRELUDE executor. Framework, Kernel, and patch replay remain
-deferred. Runtime amendments are skipped and CLOSE performs one best-effort
-final write. Optional `GBRAIN_*` credentials remain available only to
-non-Recipe KG and Framework PR capabilities.
+reads the direct best-session record returned by `GET /v1/kb/{canonical_id}`;
+candidate rollups remain under `/sessions`, and Hyperloom does not issue a
+second session-document GET. The selected session ID is still used to list and
+download its files. Remote mode does not construct the legacy Recipe
+dispatcher, does not fall back to local Recipe data, and currently replays only
+the best record's Explore args/env through the existing T0/PRELUDE executor.
+Framework, Kernel, and patch replay remain deferred. Runtime amendments are
+skipped and CLOSE performs one best-effort final write. Optional `GBRAIN_*`
+credentials remain available only to non-Recipe KG and Framework PR
+capabilities.
 
 Graceful teardown and Ctrl-C retry an unfinished CLOSE write through the T4
 fallback. No in-process hook can run after SIGKILL, container force-deletion,

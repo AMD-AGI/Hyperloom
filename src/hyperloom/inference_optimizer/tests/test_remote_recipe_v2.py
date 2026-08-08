@@ -190,17 +190,8 @@ def test_empty_phase_sections_do_not_copy_cumulative_current_best(tmp_path: Path
     assert value["framework"]["extra_envs"] == {}
 
 
-def test_geak_e2e_winner_serializes_config_and_artifacts(tmp_path: Path) -> None:
+def test_geak_results_are_excluded_from_remote_knowledge(tmp_path: Path) -> None:
     state = _state(tmp_path)
-    overlay = tmp_path / "geak-final" / "overlay"
-    overlay.mkdir(parents=True)
-    (overlay / "optimized_kernel.py").write_text("# optimized\n", encoding="utf-8")
-    report = tmp_path / "geak-report.json"
-    report.write_text('{"status":"ok"}\n', encoding="utf-8")
-    launch = tmp_path / "launch.sh"
-    launch.write_text("#!/bin/sh\n", encoding="utf-8")
-    bench = tmp_path / "bench.sh"
-    bench.write_text("#!/bin/sh\n", encoding="utf-8")
     state.optimization_stack = [
         {
             "action": "geak_e2e",
@@ -209,40 +200,17 @@ def test_geak_e2e_winner_serializes_config_and_artifacts(tmp_path: Path) -> None
             "tput": 135.0,
             "candidate_extra_server_args": "--geak-fast",
             "extra_envs": {"GEAK_OPT": "1"},
-            "final_overlay": str(overlay.parent),
             "accepted_kernels": ["attention"],
             "accepted_heads": ["decode"],
-            "report_path": str(report),
             "ts": "2026-08-08T00:00:00+00:00",
         }
     ]
-    state.current_best = {
-        "action": "geak_e2e",
-        "tput": 135.0,
-        "geak_launch_script": str(launch),
-        "geak_bench_script": str(bench),
-        "final_overlay": str(overlay.parent),
-        "geak_alignment": {"hot_speedup": 1.35},
-    }
     state.geak_result = {"status": "ok", "throughput_speedup": 1.34}
 
     bundle = build_remote_knowledge(state, tmp_path / "files-geak")
-    geak = bundle.knowledge["value"]["kernel"]["geak"]["items"][0]
-    assert geak["optimized_throughput"] == 135.0
-    assert geak["extra_envs"] == {"GEAK_OPT": "1"}
-    assert geak["report"].startswith("kernel/geak/reports/")
-    assert geak["launch_script"].startswith("kernel/geak/launch/")
-    assert geak["bench_script"].startswith("kernel/geak/launch/")
-    assert geak["overlay_files"] == [
-        "kernel/geak/overlay/optimized_kernel.py"
-    ]
-    for rel in (
-        geak["report"],
-        geak["launch_script"],
-        geak["bench_script"],
-        *geak["overlay_files"],
-    ):
-        assert (tmp_path / "files-geak" / rel).is_file()
+    kernel = bundle.knowledge["value"]["kernel"]
+    assert set(kernel) == {"gemm", "fusion", "rewrite"}
+    assert all(not artifact.path.startswith("kernel/geak/") for artifact in bundle.artifacts)
 
 
 def test_micro_keep_without_integrate_stack_is_not_written(tmp_path: Path) -> None:
@@ -366,24 +334,25 @@ def test_remote_client_internal_validation_error_paths(tmp_path: Path) -> None:
         _verify_downloaded_files(symlink, {})
 
     class _ReadStore:
-        def __init__(self, rollup, envelope=None) -> None:
-            self.rollup = rollup
+        def __init__(self, envelope=None) -> None:
             self.envelope = envelope
 
-        def get_rollup(self, _canonical_id):
-            return self.rollup
-
-        def get_session(self, _canonical_id, _session_id):
+        def get_best_record(self, _canonical_id):
             return self.envelope
 
+    class _LegacyReadStore:
+        def get_rollup(self, _canonical_id):
+            return None
+
+        def get_session(self, *_args):
+            raise AssertionError("read must not fetch a separate session document")
+
     identity = "inference:m:h:f:mt:a:v:p"
-    assert RemoteRecipeClient(_ReadStore({})).read(identity, tmp_path / "miss") is None  # type: ignore[arg-type]
-    assert (
-        RemoteRecipeClient(
-            _ReadStore({"champion": {"session_id": "missing", "value": 1.0}})
-        ).read(identity, tmp_path / "missing-session")  # type: ignore[arg-type]
-        is None
-    )
+    assert RemoteRecipeClient(_ReadStore()).read(identity, tmp_path / "miss") is None  # type: ignore[arg-type]
+    assert RemoteRecipeClient(_LegacyReadStore()).read(  # type: ignore[arg-type]
+        identity,
+        tmp_path / "legacy-method-name-miss",
+    ) is None
 
 
 def test_artifact_rejects_symlink_and_oversized_file(tmp_path: Path) -> None:
@@ -757,6 +726,10 @@ class _FakeStore:
             champion["metric"] = self.metric
         return {"champion": champion}
 
+    def get_best_record(self, canonical_id):
+        self.calls.append(("get_best_record", canonical_id))
+        return self.envelope
+
     def put_dir(self, canonical_id, session_id, files_dir):
         self.calls.append(("put_dir", canonical_id, session_id, Path(files_dir)))
         root = Path(files_dir)
@@ -775,10 +748,6 @@ class _FakeStore:
             self.conflict = False
             self.champion = value - 1
             raise KBStoreError("POST champion -> HTTP 409: write_conflict")
-
-    def get_session(self, canonical_id, session_id):
-        self.calls.append(("get_session", canonical_id, session_id))
-        return self.envelope
 
     def list_session_files(self, canonical_id, session_id):
         self.calls.append(("list_session_files", canonical_id, session_id))
@@ -890,8 +859,7 @@ def test_read_sequence_writes_flat_recipe_and_files_only(tmp_path: Path) -> None
         client=RemoteRecipeClient(store),  # type: ignore[arg-type]
     )
     assert [call[0] for call in store.calls] == [
-        "get_rollup",
-        "get_session",
+        "get_best_record",
         "list_session_files",
         "download_session",
     ]
@@ -913,6 +881,29 @@ def test_read_sequence_writes_flat_recipe_and_files_only(tmp_path: Path) -> None
         tmp_path / "bundle" / "files" / "kernel" / "rewrite" / "verified.bin"
     ).read_bytes() == _DOWNLOAD_BYTES
     assert {path.name for path in destination.iterdir()} == {"recipe.json", "files"}
+
+
+def test_read_supports_old_vendored_best_record_method_name(tmp_path: Path) -> None:
+    class _LegacyMethodStore(_FakeStore):
+        get_best_record = None
+
+        def get_rollup(self, canonical_id):
+            self.calls.append(("get_rollup", canonical_id))
+            return self.envelope
+
+    store = _LegacyMethodStore()
+    row = read_remote_recipe(
+        "inference:m:h:f:mt:a:v:p",
+        tmp_path / "legacy-method-name",
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+
+    assert row is not None
+    assert [call[0] for call in store.calls] == [
+        "get_rollup",
+        "list_session_files",
+        "download_session",
+    ]
 
 
 def test_read_rejects_existing_files_symlink(tmp_path: Path) -> None:
@@ -954,15 +945,24 @@ def test_shared_store_reuses_one_rlock() -> None:
     assert first._store_lock is store._hyperloom_remote_recipe_lock
 
 
-def test_read_champion_metric_must_be_throughput(tmp_path: Path) -> None:
+def test_read_does_not_consult_rollup_champion_metric(tmp_path: Path) -> None:
     store = _FakeStore(champion=125.0, metric="latency_ms")
-    with pytest.raises(RemoteRecipeValidationError, match="latency_ms"):
-        read_remote_recipe(
-            "inference:m:h:f:mt:a:v:p",
-            tmp_path / "wrong-read-metric",
-            client=RemoteRecipeClient(store),  # type: ignore[arg-type]
-        )
-    assert [call[0] for call in store.calls] == ["get_rollup"]
+    row = read_remote_recipe(
+        "inference:m:h:f:mt:a:v:p",
+        tmp_path / "direct-best-record",
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+    assert row is not None
+    assert row["champion"] == {
+        "session_id": "champion-session",
+        "metric": "optimized_throughput",
+        "value": 125.0,
+    }
+    assert [call[0] for call in store.calls] == [
+        "get_best_record",
+        "list_session_files",
+        "download_session",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1115,7 +1115,7 @@ def test_bad_envelope_does_not_clean_destination(
     elif mode == "canonical_id":
         store.envelope["canonical_id"] = "inference:wrong"
     elif mode == "session_id":
-        store.envelope["session_id"] = "wrong-session"
+        store.envelope["session_id"] = ""
     elif mode == "record_id":
         store.envelope["record_id"] = ""
     elif mode == "version":
@@ -1282,6 +1282,42 @@ def test_remote_warm_adapter_projects_and_caches_explore_config(
     assert first["prs_tested"] == []
     assert calls == [(identity, destination)]
     assert adapter.search(label_match={}, limit=5) == []
+
+
+def test_direct_v1_envelope_replays_legacy_explore_config(tmp_path: Path) -> None:
+    store = _FakeStore()
+    store.envelope["artifacts"] = {"file_count": 0, "files": []}
+    store.envelope["knowledge"] = {
+        "knowledge_schema_version": 1,
+        "optimized_throughput": 111.0,
+        "value": {
+            "legacy_recipe": {
+                "best_config": {
+                    "args": "--legacy-page-size 64",
+                    "envs": {"LEGACY_EXPLORE": "1"},
+                },
+                "best_throughput": 111.0,
+                "prs_tested": [{"number": 123, "patch": "must-not-replay"}],
+            }
+        },
+    }
+    adapter = RemoteWarmRecipeAdapter(
+        RemoteRecipeClient(store),  # type: ignore[arg-type]
+        tmp_path / "direct-v1",
+    )
+
+    row = adapter.get_authoritative_recipe(
+        canonical_id="inference:m:h:f:mt:a:v:p"
+    )
+
+    assert row is not None
+    assert row["best_config"] == {
+        "extra_server_args": "--legacy-page-size 64",
+        "extra_envs": {"LEGACY_EXPLORE": "1"},
+    }
+    assert row["prs_tested"] == []
+    assert [call[0] for call in store.calls] == ["get_best_record"]
+    assert (tmp_path / "direct-v1" / "files").is_dir()
 
 
 def test_remote_read_is_wired_into_cli_t0_and_close_write_remains() -> None:
