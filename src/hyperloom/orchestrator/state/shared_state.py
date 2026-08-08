@@ -1282,14 +1282,19 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             # of the session and no longer collide with the dedup key.
             stack = filtered.get("optimization_stack")
             if isinstance(stack, list):
-                for entry in stack:
-                    if not isinstance(entry, dict):
-                        continue
-                    if str(entry.get("action") or "") != _FRAMEWORK_STACK_ACTION_V5:
-                        continue
-                    name = str(entry.get("variant_name") or "")
-                    if name.startswith(_FRAMEWORK_VARIANT_PREFIX_V5):
-                        entry["variant_name"] = name[len(_FRAMEWORK_VARIANT_PREFIX_V5):]
+                # Rebuilt rather than edited in place: ``filtered`` is a shallow
+                # copy, so mutating an entry would also rewrite the caller's
+                # ``raw`` — and ``from_dict`` takes a mapping it does not own.
+                filtered["optimization_stack"] = [
+                    {**entry, "variant_name": str(entry["variant_name"])[len(_FRAMEWORK_VARIANT_PREFIX_V5):]}
+                    if (
+                        isinstance(entry, dict)
+                        and str(entry.get("action") or "") == _FRAMEWORK_STACK_ACTION_V5
+                        and str(entry.get("variant_name") or "").startswith(_FRAMEWORK_VARIANT_PREFIX_V5)
+                    )
+                    else entry
+                    for entry in stack
+                ]
 
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])

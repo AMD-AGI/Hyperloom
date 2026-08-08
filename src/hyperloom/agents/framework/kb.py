@@ -65,11 +65,6 @@ _DEFAULT_WORKSPACE_ROOT: str = "/workspace/hyperloom"
 _REMOVED_KB_ROOT_ENV: str = "FRAMEWORK_AGENT_KB_DIR"
 
 
-#: Marker written into the migrated partition so the copy happens exactly once
-#: and its provenance stays inspectable.
-_MIGRATION_MARKER: str = ".migrated-from-legacy-kb.json"
-
-
 def prepare_kb_environment() -> None:
     """Start-up sequence for the framework KB: report the environment, then migrate.
 
@@ -143,7 +138,7 @@ def migrate_legacy_partition_once() -> Path | None:
 
     workspace = Path(os.environ.get("USER_DATA_PATH", "").strip() or _DEFAULT_WORKSPACE_ROOT).expanduser()
     source = workspace / _LEGACY_WORKSPACE_KB_DIRNAME / _FRAMEWORK_OPTIMIZATION_ROOT
-    destination = mutable_kb_root() / _FRAMEWORK_OPTIMIZATION_ROOT
+    destination = framework_optimization_root()
 
     try:
         if not source.is_dir() or not any(source.iterdir()):
@@ -194,11 +189,10 @@ def _copy_partition_atomically(source: Path, destination: Path) -> None:
     root = destination.parent
     staging = root.with_name(f"{root.name}.migrating-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     try:
-        shutil.copytree(source, staging)
-        (staging / _MIGRATION_MARKER).write_text(
-            json.dumps({"version": 1, "source": str(source)}, sort_keys=True),
-            encoding="utf-8",
-        )
+        # symlinks=True: copy links as links. Following them would pull the
+        # content of whatever they point at — possibly outside the workspace —
+        # into a directory the KB reader serves as its own.
+        shutil.copytree(source, staging, symlinks=True)
         root.mkdir(parents=True, exist_ok=True)
         os.replace(staging, destination)
     except BaseException:
@@ -297,6 +291,19 @@ def mutable_kb_root() -> Path:
         return Path(override).expanduser()
     workspace = os.environ.get("USER_DATA_PATH", "").strip() or _DEFAULT_WORKSPACE_ROOT
     return Path(workspace).expanduser() / _MUTABLE_KB_DIRNAME
+
+
+def framework_optimization_root() -> Path:
+    """The partition holding the lessons ledger, for reader and writer alike.
+
+    ``kb_writeback`` resolves the ledger directory through here rather than
+    re-spelling the leaf, so the two halves cannot come to disagree about the
+    name the way they once disagreed about the root.
+
+    Returns:
+        ``<KB_ROOT>/framework_optimization``.
+    """
+    return mutable_kb_root() / _FRAMEWORK_OPTIMIZATION_ROOT
 
 
 def _resolve_kb_root() -> Path:

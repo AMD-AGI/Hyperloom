@@ -3455,12 +3455,15 @@ class WritebackCollaborator:
         if kept_flag and isinstance(new_tput, (int, float)) and new_tput > 0:
             if not cand_id:
                 # The name used to be prefixed, which made an empty key look
-                # non-empty to the stack's own guard and stacked a nameless
-                # entry. Dropping it is the better outcome, but a KEEP whose
-                # gain never reaches the stack must not vanish quietly.
+                # non-empty to the stack's guard and stacked a nameless entry.
+                # The bare key is falsy, so the append is skipped — current_best
+                # and cumulative_gain are set regardless, further down. The win
+                # therefore counts without leaving a step anything can reconcile,
+                # dedupe or replay, which is worth saying out loud.
                 log.warning(
                     "FRAMEWORK: KEEP carries no candidate key (candidate_id / pr_url / ref all "
-                    "empty, and task params had none either), so its gain cannot be stacked. task=%s",
+                    "empty, and task params had none either). current_best still advances, but "
+                    "no optimization_stack entry records how. task=%s",
                     getattr(task, "task_id", "") if task is not None else "",
                 )
             lift = {
