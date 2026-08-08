@@ -3827,6 +3827,263 @@ async def run_fusion_handler(payload: dict, *, session_dir: Path) -> HandlerResu
     return await _run_forge_fusion(payload, session_dir=session_dir)
 
 
+def _parse_forge_collective_sentinel(stdout: str) -> dict[str, Any] | None:
+    """Parse the ``FORGE_COLLECTIVE_RESULT_BEGIN/END`` block out of stdout."""
+    match = re.search(
+        r"FORGE_COLLECTIVE_RESULT_BEGIN\s*\n(.*?)\nFORGE_COLLECTIVE_RESULT_END",
+        stdout,
+        re.DOTALL,
+    )
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _enriched_kernel_candidates(state: Any) -> list[dict[str, Any]]:
+    """Load the full candidate rows the trace analysis wrote to disk.
+
+    ``hot_kernels_top15`` in shared state is a roofline-oriented projection: it
+    keeps gpu_pct, bound type and efficiency but drops ``kernel_contract``,
+    ``kernel_repo`` and the shapes. A collective cannot be recognised from it at
+    all, so the enriched rows are read from ``candidates_path`` and the
+    projection is only a fallback.
+
+    Args:
+        state: The shared state carrying ``last_trace_analyze``.
+
+    Returns:
+        The candidate rows, or ``[]`` when neither source is available.
+    """
+    analysis = getattr(state, "last_trace_analyze", None)
+    if not isinstance(analysis, dict):
+        return []
+    path = str(analysis.get("candidates_path") or "").strip()
+    if path:
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
+            rows = payload.get("hot_kernels") if isinstance(payload, dict) else None
+            if isinstance(rows, list):
+                return [r for r in rows if isinstance(r, dict)]
+        except (OSError, ValueError):
+            pass
+    rows = analysis.get("hot_kernels_top15")
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+
+def collective_analysis_key(state: Any) -> str:
+    """Identity of the trace analysis a collective verdict was drawn from.
+
+    ``candidates_path`` points into a per-run directory, so it changes with every
+    ``trace_analyze``. Recording it alongside a skip lets the gate distinguish
+    "this analysis has no collective" from "no analysis will ever have one".
+
+    Args:
+        state: The shared state carrying ``last_trace_analyze``.
+
+    Returns:
+        The analysis identity, or ``""`` when no analysis has run.
+    """
+    analysis = getattr(state, "last_trace_analyze", None)
+    if not isinstance(analysis, dict):
+        return ""
+    return str(analysis.get("candidates_path") or "").strip()
+
+
+def select_collective_candidate(state: Any) -> dict[str, Any] | None:
+    """Pick the hottest rewritable collective from the latest trace analysis.
+
+    Only aiter/framework collectives qualify: ``classify_patchability`` already
+    rejected nccl/rccl (precompiled vendor binaries with no editable source), so
+    a candidate that is still ``reusable_native_kernel`` and typed ``collective``
+    has device source we can hand to forge.
+
+    Args:
+        state: The shared state carrying ``last_trace_analyze``.
+
+    Returns:
+        The highest-``gpu_pct`` collective candidate, or ``None``.
+    """
+    best: dict[str, Any] | None = None
+    best_pct = -1.0
+    for entry in _enriched_kernel_candidates(state):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("reusable_native_kernel") is not True:
+            continue
+        contract = entry.get("kernel_contract")
+        if not isinstance(contract, dict) or str(contract.get("kind") or "") != "collective":
+            continue
+        if not str(entry.get("source_file") or "").strip():
+            continue
+        try:
+            pct = float(entry.get("gpu_pct") or 0.0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        if pct > best_pct:
+            best, best_pct = entry, pct
+    return best
+
+
+#: Minutes held back from the collective lane for the phases that follow it
+#: (kernel_opt, sweep, close). Without a reserve a long collective run would eat
+#: the whole session and leave no room to integrate or report what it found.
+_COLLECTIVE_BUDGET_RESERVE_MIN = 45.0
+
+
+def _collective_budget(state: Any, requested_hours: Any, timeout_sec: int) -> tuple[float | None, int]:
+    """Derive forge-loop's runtime budget from what the session has left.
+
+    ``forge-loop`` defaults to ONE hour when ``--max-hours`` is absent, so an
+    unset budget silently caps the lane no matter how long the session is: a
+    12-hour run once spent 1 hour here, produced a single iteration and exited
+    ``budget_exhausted``, while a collective typically needs several iterations
+    before it beats the baseline. An explicit caller value always wins.
+
+    Args:
+        state: SharedState view exposing ``remaining_minutes``.
+        requested_hours: Explicit ``max_hours`` from the payload, if any.
+        timeout_sec: Wrapper timeout to clamp against the same budget.
+
+    Returns:
+        ``(max_hours, timeout_sec)``; ``max_hours`` is ``None`` only when the
+        session is unbounded, which lets forge-loop apply its own default.
+    """
+    if requested_hours is not None:
+        return float(requested_hours), timeout_sec
+    remaining_fn = getattr(state, "remaining_minutes", None)
+    remaining = remaining_fn() if callable(remaining_fn) else None
+    if remaining is None:
+        return None, timeout_sec
+    usable_min = max(0.0, float(remaining) - _COLLECTIVE_BUDGET_RESERVE_MIN)
+    if usable_min <= 0.0:
+        return None, timeout_sec
+    # forge-loop clamps --max-hours up to 1.0, so a shorter window is enforced
+    # through the wrapper timeout instead of pretending the budget is larger.
+    return round(usable_min / 60.0, 2), min(timeout_sec, int(usable_min * 60.0))
+
+
+async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerResult:
+    """Optimise a multi-GPU collective kernel through the forge-loop CLI.
+
+    Builds an input-json, shells out to the ``forge_collective.py`` wrapper (which
+    generates the torchrun rig), and parses the result sentinel. A KEPT collective
+    carries kernel parity only, so ``requires_e2e_validation`` sends it through the
+    integrate gate.
+    """
+    from ..state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+
+    candidate = payload.get("candidate") or select_collective_candidate(state)
+    if not candidate:
+        return {
+            "status": "skipped",
+            "backend": "forge",
+            "engine": "forge_collective",
+            "error_class": "no_collective_candidate",
+            "error": (
+                "no rewritable collective in the latest trace analysis "
+                "(nccl/rccl are vendor binaries and never qualify)"
+            ),
+            "decision": "REVERT",
+            "kept": False,
+            # Scopes the skip to the analysis that produced it: a later
+            # trace_analyze may surface a collective this one did not.
+            "analysis_key": collective_analysis_key(state),
+        }
+
+    source_file = str(candidate.get("source_file") or "").strip()
+    kernel_repo = str(candidate.get("kernel_repo") or "").strip() or _find_repo_root_for_source(source_file)
+    if not kernel_repo:
+        return {
+            "status": "failed",
+            "backend": "forge",
+            "engine": "forge_collective",
+            "error_class": "kernel_repo_missing",
+            "error": f"cannot resolve a repo root for {source_file!r}",
+            "decision": "REVERT",
+            "kept": False,
+        }
+
+    tp = int(payload.get("tp") or getattr(state, "tp", 0) or os.environ.get("TP") or 8)
+    timeout = int(payload.get("timeout") or os.environ.get("FORGE_COLLECTIVE_TIMEOUT") or 14400)
+    max_hours, timeout = _collective_budget(state, payload.get("max_hours"), timeout)
+    workspace = session_dir / "runs" / "collective" / str(payload.get("task_id") or "kernel_entry_collective")
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    input_payload = {
+        "candidate": candidate,
+        "source_file": source_file,
+        "kernel_repo": kernel_repo,
+        "output_dir": str(workspace),
+        "tp": tp,
+        "timeout": timeout,
+        "gpu_target": str(payload.get("gpu_target") or getattr(state, "gpu_type", "") or ""),
+        "max_iters": payload.get("max_iters"),
+        "max_hours": max_hours,
+        "llm_model": payload.get("llm_model") or os.environ.get("CLAUDE_MODEL"),
+        "workload_key": payload.get("workload_key"),
+    }
+    input_json = workspace / "forge_collective_input.json"
+    input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
+
+    cmd = ["python3", str(_kernel_agent_tool_path("forge_collective.py")), "--input-json", str(input_json)]
+
+    # Leave the wrapper room to emit its sentinel after its own inner timeout.
+    wrapper_timeout = timeout + 300
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=wrapper_timeout)
+        result = _parse_forge_collective_sentinel(stdout)
+        if result is None:
+            result = _shape_tool_result(rc, stdout, stderr)
+    except subprocess.TimeoutExpired as exc:
+        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
+        result = {
+            "status": "failed",
+            "backend": "forge",
+            "engine": "forge_collective",
+            "error_class": "subprocess_timeout",
+            "error": f"TimeoutExpired after {wrapper_timeout}s: {cmd_repr[:1500]}",
+            "decision": "REVERT",
+            "kept": False,
+        }
+
+    result.setdefault("backend", "forge")
+    result.setdefault("engine", "forge_collective")
+    result.setdefault("workspace", str(workspace))
+    result.setdefault("kernel_id", candidate.get("kernel_id"))
+    result.setdefault("kernel_name", candidate.get("name"))
+    result.setdefault("source", "forge_collective")
+    return result
+
+
+def _find_repo_root_for_source(source_file: str) -> str:
+    """Nearest ancestor of ``source_file`` containing a ``.git`` directory."""
+    if not source_file:
+        return ""
+    try:
+        current = Path(source_file).resolve()
+    except OSError:
+        return ""
+    for parent in current.parents:
+        if (parent / ".git").exists():
+            return str(parent)
+    return ""
+
+
+async def run_collective_handler(payload: dict, *, session_dir: Path) -> HandlerResult:
+    """Optimise a multi-GPU collective kernel (registered as ``run_collective``).
+
+    Coordinator-driven only: the gate is deterministic (TP>1 with exposed
+    communication), so this lane is not exposed to the LLM action surface.
+    """
+    return await _run_forge_collective(payload, session_dir=session_dir)
+
+
 def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
     """Append one ``gemm_tuning.jsonl`` audit row for a GEMM-tuning run.
 
@@ -4380,12 +4637,26 @@ async def run_optimization_handler(
 def _optimization_budget_minutes(payload: dict) -> float:
     """Wall-clock budget mirrored by the kernel_optimization.py wrapper.
 
+    Priority: env ``KERNEL_OPT_BACKEND_BUDGET_MIN`` > payload ``budget_minutes``
+    > :data:`_DEFAULT_BACKEND_BUDGET_MINUTES`. The env wins because the payload
+    value is LLM-authored from a prompt template, so an operator raising the
+    budget must not be silently overridden by it. forge-loop reserves half this
+    window for finalize, so 60 leaves only ~30 min of actual iteration.
+
     Args:
         payload (dict): Request payload carrying an optional ``budget_minutes``.
 
     Returns:
         float: The wall-clock budget in minutes for this optimization.
     """
+    raw = os.environ.get("KERNEL_OPT_BACKEND_BUDGET_MIN", "").strip()
+    if raw:
+        try:
+            forced = float(raw)
+        except ValueError:
+            forced = 0.0
+        if forced > 0:
+            return forced
     return float(payload.get("budget_minutes", _DEFAULT_BACKEND_BUDGET_MINUTES))
 
 
@@ -5589,8 +5860,11 @@ async def _run_optimization_single(
         cmd += ["--test-command", str(payload["test_command"])]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
-    if payload.get("budget_minutes") is not None:
-        cmd += ["--budget-minutes", str(payload["budget_minutes"])]
+    # Always pass the resolved budget so the operator env override reaches the
+    # tool: reading payload directly here would bypass
+    # _optimization_budget_minutes and silently leave forge on its own 60-min
+    # default (of which forge-loop reserves half for finalize).
+    cmd += ["--budget-minutes", str(_optimization_budget_minutes(payload))]
     # Let the tool handle its own backend timeout and salvage partial artifacts.
     timeout_sec = _optimization_wrapper_timeout_sec(payload)
     if timeout_override_sec is not None:
@@ -6678,6 +6952,7 @@ KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
     "trace_analyze": trace_analyze_handler,
     "run_gemm_tuning": run_gemm_tuning_handler,
     "run_fusion": run_fusion_handler,
+    "run_collective": run_collective_handler,
     "run_optimization": run_optimization_handler,
     "integrate": integrate_handler,
     "apply_patch": integrate_handler,  # alias — same flow

@@ -732,6 +732,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # so resume does not rerun a completed fusion loop or lose the adoption audit.
     last_fusion: dict[str, Any] = field(default_factory=dict)
     last_fusion_integrate: dict[str, Any] = field(default_factory=dict)
+    # Most recent collective (multi-GPU comm kernel) forge-loop run; persisted so
+    # resume does not rerun a completed loop.
+    last_collective: dict[str, Any] = field(default_factory=dict)
     # Most recent run_optimization dispatch skipped with no eligible kernels;
     # recorded as a non-failure so the breakdown can surface it.
     last_kernel_opt_dispatch_skip: dict[str, Any] = field(default_factory=dict)
@@ -1827,6 +1830,39 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         if isinstance(latest, dict):
             return str(latest.get("top_bottleneck") or "")
         return ""
+
+    def current_comm_pct(self) -> float | None:
+        """Return the latest roofline snapshot's exposed-communication share.
+
+        Companion to :meth:`current_top_bottleneck`, reading the same
+        ``roofline_snapshots[-1]``. Gates the collective lane: communication that
+        is fully overlapped with compute is not worth a tuning round.
+
+        Returns:
+            float | None: Exposed communication as a percentage of E2E, or
+                ``None`` when no snapshot carries the figure.
+        """
+        snaps = self.roofline_snapshots if isinstance(self.roofline_snapshots, list) else []
+        if not snaps:
+            return None
+        latest = snaps[-1]
+        if not isinstance(latest, dict):
+            return None
+        try:
+            value = latest.get("comm_pct")
+            return None if value is None else float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def record_collective(self, result: dict[str, Any], session_dir: Path) -> None:
+        """Snapshot the most recent collective forge-loop run.
+
+        Args:
+            result: The handler result envelope.
+            session_dir: The session root the snapshot is persisted under.
+        """
+        self.last_collective = dict(result or {})
+        self.save(session_dir)
 
     def mark_bottleneck_switch(self, prev_bottleneck: str = "") -> None:
         """Flag that the next macro-cycle should redirect off ``prev_bottleneck`` (R3).

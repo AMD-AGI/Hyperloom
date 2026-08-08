@@ -6274,6 +6274,12 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any] |
         ("reduce_scatter", "reducescatter"),
         ("all_to_all", "alltoall"),
         ("broadcast",),
+        # aiter's custom all-reduce kernels are named cross_device_reduce_*
+        # (1stage / 2stage / half_butterfly). They implement all-reduce
+        # semantics, so they must be matched before the bare "reduce" tag
+        # below, which maps to a rank-0-only dist.reduce reference and would
+        # make the parity gate meaningless on every other rank.
+        ("cross_device_reduce",),
         ("reduce",),
     )
     _OPMAP = {
@@ -6286,6 +6292,7 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any] |
         "all_to_all": "all_to_all",
         "alltoall": "all_to_all",
         "broadcast": "broadcast",
+        "cross_device_reduce": "all_reduce",
         "reduce": "reduce",
     }
     if bool(item.get("is_multigpu")) or any(tag in name for grp in _COLL for tag in grp):

@@ -281,10 +281,12 @@ class KernelPhase(PhaseHandler):
             await self._run_geak_kernel_phase(from_phase=from_phase)
             return
         if not self._gemm_tuning_required_before_kernel_opt():
-            # GEMM tuning and fusion are independently gated; refresh the
-            # snapshot and run fusion when eligible before GEAK runs.
+            # GEMM tuning, fusion and collective tuning are independently gated.
+            # Refresh the snapshot, run the eligible ones, then let the LLM drive
+            # GEAK.
             await self._maybe_reprofile_for_kernel()
             await self._maybe_run_forge_fusion_before_kernel_opt()
+            await self._maybe_run_collective_before_kernel_opt()
             return
 
         # Refresh the snapshot before GEMM tuning targets the bottleneck.
@@ -359,6 +361,7 @@ class KernelPhase(PhaseHandler):
         # Capture explore + GEMM-tuning gains before inline GEAK.
         await self._maybe_reprofile_for_kernel()
         await self._maybe_run_forge_fusion_before_kernel_opt()
+        await self._maybe_run_collective_before_kernel_opt()
         if self._should_continue_kernel_after_gemm():
             await self._run_kernel_opt_after_gemm()
 
@@ -2441,6 +2444,94 @@ class KernelPhase(PhaseHandler):
             return
         await self._run_forge_fusion()
         await self._maybe_reprofile_for_kernel()
+
+    #: Exposed communication below this share of E2E is not worth a tuning round.
+    COLLECTIVE_COMM_PCT_FLOOR = 1.0
+
+    def _collective_required_before_kernel_opt(self) -> bool:
+        """Gate the collective-tuning step in KERNEL entry.
+
+        Runs only when: not disabled by ``HYPERLOOM_SKIP_COLLECTIVE``, TP>1 (a
+        single rank issues no collective), the latest roofline shows exposed
+        communication above the floor, and no collective loop already completed
+        this session (idempotent re-entry).
+        """
+        import os
+
+        if str(os.environ.get("HYPERLOOM_SKIP_COLLECTIVE", "")).strip().lower() in ("1", "true", "yes", "on"):
+            return False
+        try:
+            tp = int(getattr(self.shared_state, "tp", 0) or 0)
+        except (TypeError, ValueError):
+            tp = 0
+        if tp <= 1:
+            return False
+        comm_pct = self.shared_state.current_comm_pct()
+        if comm_pct is None:
+            log.info("KERNEL entry: skip collective (no roofline snapshot with comm_pct yet)")
+            return False
+        if comm_pct < self.COLLECTIVE_COMM_PCT_FLOOR:
+            log.info(
+                "KERNEL entry: skip collective (exposed comm %.2f%% < %.2f%% floor)",
+                comm_pct,
+                self.COLLECTIVE_COMM_PCT_FLOOR,
+            )
+            return False
+        # Candidate selection reads the trace analysis, so without one the lane
+        # can only report "no candidate" -- and that answer must not be recorded
+        # as terminal, or a later analysis would never get its turn.
+        if not (getattr(self.shared_state, "last_trace_analyze", None) or {}):
+            log.info("KERNEL entry: skip collective (no trace analysis yet)")
+            return False
+        last = getattr(self.shared_state, "last_collective", None)
+        if isinstance(last, dict):
+            status = str(last.get("status") or "").strip()
+            if status in ("ok", "complete", "kept"):
+                return False
+            if status == "skipped":
+                # A skip is scoped to the analysis that produced it, not to the
+                # session: re-deciding it every KERNEL re-entry is noise, but a
+                # later trace_analyze may surface a collective this one lacked,
+                # and nothing else clears ``last_collective``.
+                from ..kernel.request_handlers import collective_analysis_key
+
+                if str(last.get("analysis_key") or "") == collective_analysis_key(self.shared_state):
+                    return False
+        return True
+
+    async def _maybe_run_collective_before_kernel_opt(self) -> None:
+        """Run the independently gated collective-tuning stage before kernel_opt."""
+        if not self._collective_required_before_kernel_opt():
+            return
+        await self._run_forge_collective()
+
+    async def _run_forge_collective(self) -> None:
+        """Tune the hottest rewritable multi-GPU collective during KERNEL entry."""
+        log.info("KERNEL entry: running collective tuning (multi-GPU comm kernel)")
+        try:
+            from ..kernel.request_handlers import run_collective_handler
+
+            result = await run_collective_handler(
+                {"task_id": "kernel_entry_collective", "reason": "kernel_entry_auto"},
+                session_dir=self.session_dir,
+            )
+        except Exception:  # noqa: BLE001 - an advisory lane never breaks KERNEL entry
+            log.exception("KERNEL entry collective tuning failed")
+            return
+        self._handle_collective_result(result)
+
+    def _handle_collective_result(self, result: dict | None) -> None:
+        """Record a collective run and log its verdict."""
+        if not isinstance(result, dict):
+            return
+        self.shared_state.record_collective(result, self.session_dir)
+        log.info(
+            "collective tuning: status=%s decision=%s speedup=%s kernel=%s",
+            result.get("status"),
+            result.get("decision"),
+            result.get("kernel_speedup"),
+            result.get("kernel_name"),
+        )
 
     async def _run_forge_fusion(self) -> None:
         """Run autonomous kernel fusion during KERNEL entry."""
