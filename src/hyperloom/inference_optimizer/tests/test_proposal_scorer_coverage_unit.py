@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 
 import pytest
 
+from hyperloom.orchestrator.scoring import proposal_scorer as proposal_scorer_module
 from hyperloom.orchestrator.scoring.proposal_scorer import (
     ProposalScorer,
     _clip,
@@ -119,14 +121,39 @@ def test_ensure_client_refuses_anthropic_token(monkeypatch):
         scorer._ensure_client()
 
 
+def test_ensure_client_comes_from_the_shared_llm_gateway(monkeypatch):
+    """The scorer owns no credentials: it forwards its env-var contract to llm_config."""
+    captured: dict = {}
+    sentinel = object()
+    monkeypatch.setattr(
+        proposal_scorer_module,
+        "get_async_openai_client",
+        lambda **kwargs: captured.update(kwargs) or sentinel,
+    )
+    scorer = ProposalScorer(models=("m",), api_key_env="SCORER_KEY", base_url_env="SCORER_URL")
+    assert scorer._ensure_client() is sentinel
+    assert captured == {"api_key_env": "SCORER_KEY", "base_url_env": "SCORER_URL"}
+
+
+def test_ensure_client_without_openai_sdk_raises(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "tok")
+    monkeypatch.setitem(sys.modules, "openai", None)
+    scorer = ProposalScorer(models=("m",))
+    with pytest.raises(RuntimeError, match="openai SDK not installed"):
+        scorer._ensure_client()
+
+
 # ---- score: proposal cap + timeout + no-usable ----
 class _FakeCompletions:
     def __init__(self, behaviour):
         self._b = behaviour
         self.calls = []
+        self.params = []
 
-    async def create(self, *, model, messages, max_completion_tokens, stream=False, stream_options=None):
+    async def create(self, **params):
+        model = params["model"]
         self.calls.append(model)
+        self.params.append(params)
         r = self._b.get(model)
         if isinstance(r, BaseException):
             raise r
@@ -173,6 +200,19 @@ async def test_score_caps_proposals():
     await scorer.score(gap={"domain": "d"}, proposals=proposals)
     # one model call; prompt built from capped list (<=16)
     assert scorer._client.chat.completions.calls == ["m"]
+
+
+@pytest.mark.asyncio
+async def test_score_streams_with_usage_and_keeps_the_token_cap():
+    """The shared streaming helper adds stream + include_usage; the 4096 cap survives."""
+    client = _FakeClient({"m": '{"scores": {"p": {"score": 5, "reason": "ok"}}}'})
+    scorer = ProposalScorer(models=("m",), client_factory=lambda: client)
+    out = await scorer.score(gap={"domain": "d"}, proposals=[{"name": "p"}])
+    assert out["models"]["m"]["p"]["score"] == 5.0
+    params = client.chat.completions.params[0]
+    assert params["stream"] is True
+    assert params["stream_options"] == {"include_usage": True}
+    assert params["max_completion_tokens"] == 4096
 
 
 @pytest.mark.asyncio

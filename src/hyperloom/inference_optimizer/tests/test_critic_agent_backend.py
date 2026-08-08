@@ -24,6 +24,8 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.roles.base import BackendError
 from hyperloom.orchestrator.roles.critic_agent import (
+    CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
+    CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
     _anthropic_text_from_content,
     _extract_review_json,
     _reviewed_msg_ids_from_bundle,
@@ -362,6 +364,70 @@ def test_construct_prefers_explicit_openai_key_over_anthropic_token(monkeypatch,
         runtime_caller_factory=lambda: lambda call: None,
     )
     assert captured["api_key"] == "openai-user-key"
+
+
+def _construct_critic_capturing_sdk_kwargs(monkeypatch, tmp_path: Path) -> dict:
+    """Build a real-SDK-path CriticAgentBackend, capturing the AsyncOpenAI kwargs."""
+    import openai
+
+    captured: dict = {}
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: captured.update(kw) or object())
+    root = tmp_path / "critic-agent"
+    (root / "runtime").mkdir(parents=True)
+    (root / "runtime" / "cli.py").write_text("# stub", encoding="utf-8")
+    sd = tmp_path / "sd"
+    sd.mkdir()
+    CriticAgentBackend(
+        critic_agent_root=root,
+        session_dir=sd,
+        runtime_caller_factory=lambda: lambda call: None,
+    )
+    return captured
+
+
+def test_construct_forwards_llm_timeout_knobs_to_the_client(monkeypatch, tmp_path: Path):
+    """CRITIC_AGENT_LLM_* seconds reach the SDK as one httpx.Timeout."""
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-user-key")
+    monkeypatch.setenv("CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S", "3")
+    monkeypatch.setenv("CRITIC_AGENT_LLM_RW_TIMEOUT_S", "7")
+    timeout = _construct_critic_capturing_sdk_kwargs(monkeypatch, tmp_path)["timeout"]
+    assert (timeout.connect, timeout.read, timeout.write, timeout.pool) == (3.0, 7.0, 7.0, 7.0)
+
+
+def test_construct_defaults_llm_timeouts_without_env_knobs(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-user-key")
+    monkeypatch.delenv("CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("CRITIC_AGENT_LLM_RW_TIMEOUT_S", raising=False)
+    timeout = _construct_critic_capturing_sdk_kwargs(monkeypatch, tmp_path)["timeout"]
+    assert timeout.connect == CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC
+    assert timeout.read == CRITIC_AGENT_LLM_RW_TIMEOUT_SEC
+
+
+def test_construct_without_httpx_falls_back_to_sdk_default_timeouts(monkeypatch, tmp_path: Path):
+    """httpx is an optional extra; a missing one must not block review entirely."""
+    import sys
+
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-user-key")
+    monkeypatch.setitem(sys.modules, "httpx", None)
+    assert "timeout" not in _construct_critic_capturing_sdk_kwargs(monkeypatch, tmp_path)
+
+
+def test_construct_missing_openai_sdk_raises_backend_error(monkeypatch, tmp_path: Path):
+    import sys
+
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-user-key")
+    monkeypatch.setitem(sys.modules, "openai", None)
+    root = tmp_path / "critic-agent"
+    (root / "runtime").mkdir(parents=True)
+    (root / "runtime" / "cli.py").write_text("# stub", encoding="utf-8")
+    sd = tmp_path / "sd"
+    sd.mkdir()
+    with pytest.raises(BackendError, match="openai SDK not installed"):
+        CriticAgentBackend(
+            critic_agent_root=root,
+            session_dir=sd,
+            runtime_caller_factory=lambda: lambda call: None,
+        )
 
 
 def test_reviewed_msg_ids_from_bundle_dedups_and_orders():

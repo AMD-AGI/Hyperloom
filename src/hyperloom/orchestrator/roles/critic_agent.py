@@ -26,8 +26,10 @@ from typing import Any, Callable, Literal
 
 from hyperloom.common.llm_config import (
     LLMConfigError,
+    achat_completion,
     apply_reasoning_effort,
-    openai_client_kwargs,
+    build_http_timeout,
+    get_async_openai_client,
     parse_custom_headers,
 )
 from hyperloom.common.jsonio import extract_first_json_with_key
@@ -441,12 +443,11 @@ class CriticAgentBackend:
         elif self.codex_client_factory is not None:
             self._client = self.codex_client_factory()
         else:
+            connect_timeout_s, rw_timeout_s = self._resolve_llm_timeouts()
             try:
-                from openai import AsyncOpenAI  # type: ignore[import-not-found]
-            except ImportError as exc:  # pragma: no cover
-                raise BackendError("openai SDK not installed; run `pip install openai>=1.50`") from exc
-            try:
-                kwargs = openai_client_kwargs()
+                self._client = get_async_openai_client(
+                    timeout=build_http_timeout(connect=connect_timeout_s, read=rw_timeout_s),
+                )
             except LLMConfigError as exc:
                 raise BackendError(
                     str(exc).replace(
@@ -454,38 +455,6 @@ class CriticAgentBackend:
                         "CriticAgentBackend cannot reach Codex for review reasoning",
                     )
                 ) from exc
-            try:
-                import httpx
-            except ImportError:
-                # Best-effort fallback to SDK default timeouts.
-                log.warning("critic_agent_backend: httpx unavailable; falling back to AsyncOpenAI default timeouts")
-            else:
-                connect_timeout_s = parse_call_timeout_env(
-                    "CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S",
-                    default=CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
-                )
-                rw_timeout_s = parse_call_timeout_env(
-                    "CRITIC_AGENT_LLM_RW_TIMEOUT_S",
-                    default=CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
-                )
-                try:
-                    kwargs["timeout"] = httpx.Timeout(
-                        connect=connect_timeout_s,
-                        read=rw_timeout_s,
-                        write=rw_timeout_s,
-                        pool=rw_timeout_s,
-                    )
-                except (TypeError, ValueError) as exc:
-                    # Best-effort fallback to SDK defaults on rejected timeouts.
-                    log.warning(
-                        "critic_agent_backend: failed to build httpx.Timeout "
-                        "(connect=%s rw=%s): %r; falling back to AsyncOpenAI "
-                        "default timeouts",
-                        connect_timeout_s,
-                        rw_timeout_s,
-                        exc,
-                    )
-            self._client = AsyncOpenAI(**kwargs)
 
         # Resolve static per-session context once.
         if self.static_context is not None:
@@ -496,6 +465,24 @@ class CriticAgentBackend:
             "critic_agent_backend static_context source=%s keys=%s",
             "explicit" if self.static_context is not None else "manifest",
             sorted(self._static_context.keys()),
+        )
+
+    @staticmethod
+    def _resolve_llm_timeouts() -> tuple[float, float]:
+        """Return the ``(connect, read/write/pool)`` review-call timeouts in seconds.
+
+        Both transports (OpenAI-compatible and native Anthropic) honour the same
+        ``CRITIC_AGENT_LLM_*_TIMEOUT_S`` knobs, so the pair is resolved once.
+        """
+        return (
+            parse_call_timeout_env(
+                "CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S",
+                default=CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
+            ),
+            parse_call_timeout_env(
+                "CRITIC_AGENT_LLM_RW_TIMEOUT_S",
+                default=CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
+            ),
         )
 
     def _init_anthropic_client(self) -> None:
@@ -531,14 +518,7 @@ class CriticAgentBackend:
                 "CriticAgentBackend(protocol=anthropic) requires ANTHROPIC_API_KEY "
                 "or ANTHROPIC_AUTH_TOKEN for review reasoning"
             )
-        connect_timeout_s = parse_call_timeout_env(
-            "CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S",
-            default=CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
-        )
-        rw_timeout_s = parse_call_timeout_env(
-            "CRITIC_AGENT_LLM_RW_TIMEOUT_S",
-            default=CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
-        )
+        connect_timeout_s, rw_timeout_s = self._resolve_llm_timeouts()
         headers = {
             "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
@@ -1054,17 +1034,16 @@ class CriticAgentBackend:
         usage_acc = {"input_tokens": 0, "output_tokens": 0}
         _t0 = time.perf_counter()
         try:
-            resp = await self._client.chat.completions.create(**kwargs)
+            result = await achat_completion(self._client, **kwargs)
         except Exception as exc:  # noqa: BLE001
             raise self._llm_call_failed(
                 f"Codex API call failed (critic-agent reasoning): {exc!r}",
                 latency_ms=int((time.perf_counter() - _t0) * 1000),
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
-        self._accumulate_usage(usage_acc, getattr(resp, "usage", None))
+        self._accumulate_usage(usage_acc, result.usage)
         self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms)
-        choice = resp.choices[0]
-        return choice.message.content or "", getattr(choice, "finish_reason", None)
+        return result.text, result.finish_reason
 
     async def _run_anthropic_reasoning(
         self,
