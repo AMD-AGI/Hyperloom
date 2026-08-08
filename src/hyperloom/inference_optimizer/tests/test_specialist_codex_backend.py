@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Specialist agent-CLI selection by deployment credential shape.
+"""Specialist Codex CLI and Agent SDK integration.
 
 Pins the bug an OpenAI-only end-to-end run exposed: the specialist dispatcher
 hard-wired the Claude CLI, so an OpenAI-only deployment spawned a runtime with
@@ -11,14 +11,20 @@ without its research-scout and static-recon specialists.
 
 The dispatcher must spawn the Codex CLI when only the OpenAI side is
 configured, and must keep spawning the Claude CLI for the Anthropic-only and
-both-configured shapes.
+both-configured shapes. The same suite covers secure sandbox selection,
+stdin/role transport, provider env wiring, MCP translation, structured errors,
+model precedence, and true in-process Codex Agent SDK dispatch.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import stat
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -28,6 +34,7 @@ from hyperloom.orchestrator.specialists.subprocess_ import (
     AGENT_BACKEND_CODEX,
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
+    _build_specialist_env,
     resolve_codex_executable,
     resolve_specialist_agent_backend,
 )
@@ -46,6 +53,8 @@ _PROVIDER_ENV_KEYS: tuple[str, ...] = (
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_CUSTOM_HEADERS",
+    "HYPERLOOM_CODEX_EXTERNAL_SANDBOX",
+    "HYPERLOOM_CODEX_SANDBOX_MODE",
 )
 
 _OPENAI_ONLY_ENV: dict[str, str] = {
@@ -156,6 +165,8 @@ async def test_openai_only_deployment_runs_the_specialist_on_the_codex_cli(
     exhausted their retries and the session lost them silently.
     """
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+    monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
+    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
     bin_dir = _fake_agent_bin_dir(tmp_path)
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
 
@@ -211,6 +222,8 @@ async def test_codex_home_is_per_task_and_outside_any_temp_dir(
     every deployment.
     """
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+    monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
+    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
     bin_dir = tmp_path / "bin"
     _write_executable(
         bin_dir / "codex",
@@ -281,7 +294,7 @@ def _build_cmd(tmp_path: Path, **cfg_overrides: object) -> list[str]:
     for path in (workspace, worktree, framework):
         path.mkdir(parents=True, exist_ok=True)
     prompt_file = workspace / "prompt.md"
-    prompt_file.write_text("<!-- system_prompt -->\nbe a specialist\n", encoding="utf-8")
+    prompt_file.write_text("USER_PROMPT_SENTINEL", encoding="utf-8")
     cfg_overrides.setdefault("framework_source_roots", (str(framework),))
     dispatcher = SpecialistSubprocessDispatcher(SpecialistSubprocessConfig(**cfg_overrides))
     return dispatcher._build_agent_cmd(
@@ -289,6 +302,7 @@ def _build_cmd(tmp_path: Path, **cfg_overrides: object) -> list[str]:
         workspace=workspace,
         worktree=worktree,
         allowed_tools=("Read", "Bash", "emit_intent"),
+        system_prompt="SYSTEM_INSTRUCTION_SENTINEL",
     )
 
 
@@ -305,17 +319,24 @@ def test_openai_only_deployment_builds_a_codex_exec_argv(
     # ``--json`` replaces ``--print --output-format stream-json``.
     assert "--json" in cmd
     assert "--output-format" not in cmd and "--print" not in cmd
-    # A readonly specialist runs straight in its workspace, which is no checkout.
+    # A workspace-only task may run outside a git checkout.
     assert "--skip-git-repo-check" in cmd
     assert cmd[cmd.index("-m") + 1] == "gpt-5.5"
-    # The prompt travels in argv: the Ray GPU actor cannot pipe a stdin.
-    assert cmd[-1].startswith("<!-- system_prompt -->")
+    assert cmd[-1] == "-"
+    rendered_argv = " ".join(cmd)
+    assert "USER_PROMPT_SENTINEL" not in rendered_argv
+    assert "SYSTEM_INSTRUCTION_SENTINEL" not in rendered_argv
 
     workspace = tmp_path / "workspace"
     # ``-C`` is the write-isolated worktree; workspace + framework roots are added.
     assert cmd[cmd.index("-C") + 1] == str(workspace / "worktree")
     add_dirs = [cmd[i + 1] for i, value in enumerate(cmd[:-1]) if value == "--add-dir"]
     assert add_dirs == [str(workspace), str(tmp_path / "framework")]
+    codex_config = workspace / ".codex" / "config.toml"
+    assert codex_config.stat().st_mode & 0o777 == 0o600
+    config_text = codex_config.read_text(encoding="utf-8")
+    assert 'developer_instructions = "SYSTEM_INSTRUCTION_SENTINEL"' in config_text
+    assert "USER_PROMPT_SENTINEL" not in config_text
 
 
 def test_codex_argv_reuses_the_sdk_gateway_overrides(
@@ -327,13 +348,13 @@ def test_codex_argv_reuses_the_sdk_gateway_overrides(
     The API key crosses as an env-var NAME, never a value, so the secret stays
     out of the spawned process's argv.
     """
-    from hyperloom.common.codex_session import CODEX_PROVIDER_NAME, codex_provider_overrides
+    from hyperloom.common.codex_session import CODEX_PROVIDER_NAME, resolve_codex_provider_config
 
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
     cmd = _build_cmd(tmp_path, codex_executable="/usr/bin/codex")
 
     overrides = [cmd[i + 1] for i, value in enumerate(cmd[:-1]) if value == "-c"]
-    for expected in codex_provider_overrides():
+    for expected in resolve_codex_provider_config().overrides:
         assert expected in overrides
     assert f'model_provider="{CODEX_PROVIDER_NAME}"' in overrides
     # A specialist must not carry memory between tasks (matches the SDK session).
@@ -344,28 +365,47 @@ def test_codex_argv_reuses_the_sdk_gateway_overrides(
     assert _OPENAI_ONLY_ENV["OPENAI_API_KEY"] not in " ".join(cmd)
 
 
-def test_codex_argv_bypasses_the_sandbox_by_default(
+def test_codex_argv_uses_workspace_write_sandbox_by_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hyperloom's container ships no ``bwrap``, so every preset fails to start.
-
-    The specialist is already externally sandboxed (isolated worktree, curated
-    tools, Critic + PolicyGate review), which is exactly the case the flag
-    documents. It stays an explicit switch so a host with a working sandbox can
-    restore Codex's own confinement.
-    """
+    """The secure default is explicit workspace-write, never silent bypass."""
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
 
     default_cmd = _build_cmd(tmp_path, codex_executable="/usr/bin/codex")
-    assert "--dangerously-bypass-approvals-and-sandbox" in default_cmd
+    assert default_cmd[default_cmd.index("--sandbox") + 1] == "workspace-write"
+    assert "--dangerously-bypass-approvals-and-sandbox" not in default_cmd
 
-    confined_cmd = _build_cmd(
-        tmp_path,
-        codex_executable="/usr/bin/codex",
-        codex_bypass_sandbox=False,
-    )
-    assert "--dangerously-bypass-approvals-and-sandbox" not in confined_cmd
+
+def test_codex_argv_bypass_requires_both_operator_opt_ins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full access is available only under the canonical double opt-in."""
+    from hyperloom.orchestrator.specialists.subprocess_ import SpecialistAgentUnavailableError
+
+    _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+    monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
+    with pytest.raises(SpecialistAgentUnavailableError, match="EXTERNAL_SANDBOX"):
+        _build_cmd(tmp_path, codex_executable="/usr/bin/codex")
+
+    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
+    bypass_cmd = _build_cmd(tmp_path, codex_executable="/usr/bin/codex")
+    assert "--dangerously-bypass-approvals-and-sandbox" in bypass_cmd
+    assert "--sandbox" not in bypass_cmd
+
+
+def test_codex_specialist_rejects_read_only_sandbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A specialist cannot satisfy its result contract in read-only mode."""
+    from hyperloom.orchestrator.specialists.subprocess_ import SpecialistAgentUnavailableError
+
+    _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+    monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "read-only")
+    with pytest.raises(SpecialistAgentUnavailableError, match="read-only"):
+        _build_cmd(tmp_path, codex_executable="/usr/bin/codex")
 
 
 def test_codex_argv_appends_operator_escape_hatch_before_the_prompt(
@@ -380,7 +420,7 @@ def test_codex_argv_appends_operator_escape_hatch_before_the_prompt(
         extra_codex_args=("--ephemeral",),
     )
     assert cmd[-2] == "--ephemeral"
-    assert cmd[-1].startswith("<!-- system_prompt -->")
+    assert cmd[-1] == "-"
 
 
 @pytest.mark.parametrize("shape", [_ANTHROPIC_ONLY_ENV, _BOTH_CONFIGURED_ENV, {}])
@@ -487,6 +527,8 @@ async def test_missing_codex_runtime_fails_the_task_instead_of_spawning_claude(
     degraded the run; a deployment with no usable CLI has to say so.
     """
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+    monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
+    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
     monkeypatch.setattr(
         "hyperloom.orchestrator.specialists.subprocess_.resolve_codex_executable",
         lambda explicit="": "",
@@ -524,10 +566,12 @@ async def test_unconfigured_codex_gateway_fails_the_task(
 ) -> None:
     """An OpenAI key with no base URL cannot be expressed as a Codex provider.
 
-    ``codex_provider_overrides`` needs an explicit gateway URL, so this shape is
+    Codex provider setup needs an explicit gateway URL, so this shape is
     reported as a task failure rather than spawning a CLI that cannot route.
     """
     _pin_provider_env(monkeypatch, {"OPENAI_API_KEY": "openai-side-key"})
+    monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
+    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
     dispatcher = SpecialistSubprocessDispatcher(
         SpecialistSubprocessConfig(codex_executable="/usr/bin/codex", poll_interval_seconds=0.05)
     )
@@ -555,8 +599,6 @@ def test_cli_refuses_to_boot_an_openai_only_run_without_a_codex_runtime(
     Degrading to the in-process backend would hand every specialist task the
     Claude runtime that has no credential — the exact silent loss this fixes.
     """
-    import argparse
-
     from hyperloom.inference_optimizer.cli import executors
 
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
@@ -565,7 +607,8 @@ def test_cli_refuses_to_boot_an_openai_only_run_without_a_codex_runtime(
         lambda explicit="": "",
     )
     args = argparse.Namespace(
-        claude_model="gpt-5.5",
+        claude_model="claude-opus-5",
+        codex_model="gpt-5.5",
         specialist_model="",
         specialist_max_turns=2,
         specialist_per_turn_max_seconds=60.0,
@@ -748,3 +791,788 @@ def test_codex_usage_returns_none_when_no_counters_are_reported(tmp_path: Path) 
     )
     assert pu.parse_codex_jsonl_usage(log) is None
     assert pu.parse_codex_jsonl_turn_usages(log) == []
+
+
+# ---------------------------------------------------------------------------
+# Secure Codex specialist integration regressions
+# ---------------------------------------------------------------------------
+
+
+def _enable_codex_bypass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Select canonical bypass with both required operator opt-ins."""
+    monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
+    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
+
+
+def _successful_codex_script(path: Path) -> Path:
+    """Write a fake Codex CLI that consumes stdin and completes the contract."""
+    return _write_executable(
+        path,
+        "#!/usr/bin/env bash\n"
+        "set -e\n"
+        "cat >/dev/null\n"
+        "cat > \"$PWD/specialist_done.json\" <<'EOF'\n"
+        '{"proposal_set":[],"empty":true,"summary":"ok"}\n'
+        "EOF\n",
+    )
+
+
+class _NeverStartedGpuLease:
+    """Ray lease double that records an erroneous setup-time launch."""
+
+    def __init__(self) -> None:
+        self.start_calls = 0
+        self.kwargs: dict[str, Any] = {}
+
+    def start_async(self, _cmd: list[str], **kwargs: Any) -> None:
+        self.start_calls += 1
+        self.kwargs = dict(kwargs)
+        raise RuntimeError("setup failure must precede Ray submission")
+
+
+def test_specialist_env_keeps_llm_gateway_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gateway-only credentials must survive the specialist secret allowlist."""
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_GATEWAY_KEY", "gateway-key-value")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.invalid/Unified/v1")
+
+    child_env = _build_specialist_env()
+
+    assert child_env["LLM_GATEWAY_KEY"] == "gateway-key-value"
+
+
+@pytest.mark.asyncio
+async def test_codex_secret_opt_out_masks_parent_provider_secrets_before_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolver fallback cannot reintroduce parent secrets after explicit opt-out."""
+    import hyperloom.orchestrator.specialists.subprocess_ as sp
+
+    gateway_secret = "parent-gateway-secret"
+    header_secret = "parent-literal-header-secret"
+    _pin_provider_env(
+        monkeypatch,
+        {
+            "OPENAI_BASE_URL": "https://gateway.invalid/Unified/v1",
+            "LLM_GATEWAY_KEY": gateway_secret,
+            "OPENAI_CUSTOM_HEADERS": f"user: {header_secret}",
+        },
+    )
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", "0")
+    _enable_codex_bypass(monkeypatch)
+    resolver_overlays: list[dict[str, str]] = []
+    resolved_configs: list[Any] = []
+    real_resolver = sp.resolve_codex_provider_config
+
+    def _recording_resolver(**kwargs: Any) -> Any:
+        resolver_overlays.append(dict(kwargs.get("env") or {}))
+        resolved = real_resolver(**kwargs)
+        resolved_configs.append(resolved)
+        return resolved
+
+    monkeypatch.setattr(sp, "resolve_codex_provider_config", _recording_resolver)
+    popen_calls = 0
+
+    def _recording_popen(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal popen_calls
+        popen_calls += 1
+
+    monkeypatch.setattr(sp.subprocess, "Popen", _recording_popen)
+    lease = _NeverStartedGpuLease()
+    workspace = tmp_path / "workspace"
+    result = await SpecialistSubprocessDispatcher(
+        SpecialistSubprocessConfig(
+            agent_backend=AGENT_BACKEND_CODEX,
+            codex_executable="/usr/bin/codex",
+            poll_interval_seconds=0.01,
+        )
+    ).run(
+        task_id="secret-opt-out",
+        workspace=workspace,
+        worktree=None,
+        worktree_base=None,
+        system_prompt="system",
+        user_prompt="user",
+        allowed_tools=(),
+        max_turns=1,
+        wall_budget_sec=10.0,
+        gpu_lease=lease,
+    )
+
+    assert resolver_overlays
+    assert resolver_overlays[0].get("LLM_GATEWAY_KEY") == ""
+    assert resolver_overlays[0].get("OPENAI_CUSTOM_HEADERS") == ""
+    assert resolver_overlays[0].get("OPENAI_API_KEY") == ""
+    assert resolved_configs == []
+    assert "not configured" in result.error
+    assert gateway_secret not in result.error
+    assert header_secret not in result.error
+    assert not (workspace / ".codex" / "config.toml").exists()
+    assert popen_calls == 0
+    assert lease.start_calls == 0
+    assert gateway_secret not in repr(lease.kwargs)
+    assert header_secret not in repr(lease.kwargs)
+
+
+@pytest.mark.asyncio
+async def test_codex_child_receives_provider_env_without_secrets_or_prompt_in_argv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider additions and gateway credentials belong in env, never argv."""
+    import hyperloom.orchestrator.specialists.subprocess_ as sp
+
+    secret = "gateway-secret-value"
+    header_value = "private-gateway-user"
+    _pin_provider_env(
+        monkeypatch,
+        {
+            "OPENAI_BASE_URL": "https://gateway.invalid/Unified/v1",
+            "LLM_GATEWAY_KEY": secret,
+            "OPENAI_CUSTOM_HEADERS": f"user: {header_value}",
+        },
+    )
+    _enable_codex_bypass(monkeypatch)
+    fake_codex = _successful_codex_script(tmp_path / "bin" / "codex")
+    captured: dict[str, Any] = {}
+    real_popen = subprocess.Popen
+
+    def _recording_popen(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.Popen:
+        captured["cmd"] = list(cmd)
+        captured["env"] = dict(kwargs["env"])
+        captured["stdin"] = kwargs["stdin"]
+        return real_popen(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(sp.subprocess, "Popen", _recording_popen)
+    workspace = tmp_path / "workspace"
+    result = await SpecialistSubprocessDispatcher(
+        SpecialistSubprocessConfig(
+            agent_backend=AGENT_BACKEND_CODEX,
+            codex_executable=str(fake_codex),
+            poll_interval_seconds=0.01,
+        )
+    ).run(
+        task_id="provider-env",
+        workspace=workspace,
+        worktree=None,
+        worktree_base=None,
+        system_prompt="SYSTEM_ROLE_SENTINEL",
+        user_prompt="FULL_USER_PROMPT_SENTINEL",
+        allowed_tools=(),
+        max_turns=1,
+        wall_budget_sec=10.0,
+    )
+
+    assert result.exit_code == 0
+    assert captured["env"]["LLM_GATEWAY_KEY"] == secret
+    assert any(
+        name.startswith("HYPERLOOM_CODEX_HTTP_HEADER_") and value == header_value
+        for name, value in captured["env"].items()
+    )
+    rendered_argv = " ".join(captured["cmd"])
+    assert secret not in rendered_argv
+    assert header_value not in rendered_argv
+    assert "FULL_USER_PROMPT_SENTINEL" not in rendered_argv
+    assert "SYSTEM_ROLE_SENTINEL" not in rendered_argv
+    assert captured["cmd"][-1] == "-"
+    assert Path(captured["stdin"].name).read_text(encoding="utf-8") == "FULL_USER_PROMPT_SENTINEL"
+    assert captured["stdin"].closed is True
+
+
+@pytest.mark.asyncio
+async def test_workspace_write_fails_closed_when_bwrap_probe_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed containment probe must prevent the specialist from spawning."""
+    import hyperloom.orchestrator.specialists.subprocess_ as sp
+
+    _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+    fake_codex = _successful_codex_script(tmp_path / "bin" / "codex")
+    monkeypatch.setattr(
+        sp,
+        "probe_codex_sandbox_capability",
+        lambda **_kwargs: False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        sp.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("Codex must not spawn after a failed sandbox probe"),
+    )
+
+    result = await SpecialistSubprocessDispatcher(
+        SpecialistSubprocessConfig(
+            agent_backend=AGENT_BACKEND_CODEX,
+            codex_executable=str(fake_codex),
+            poll_interval_seconds=0.01,
+        )
+    ).run(
+        task_id="probe-failure",
+        workspace=tmp_path / "workspace",
+        worktree=None,
+        worktree_base=None,
+        system_prompt="system",
+        user_prompt="user",
+        allowed_tools=(),
+        max_turns=1,
+        wall_budget_sec=10.0,
+    )
+
+    assert "bubblewrap" in result.error
+    assert "refusing to fall back" in result.error
+
+
+class _RecordingGpuLease:
+    """Minimal Ray lease double recording replace-env and file-backed stdin."""
+
+    def __init__(self, workspace: Path) -> None:
+        self.workspace = workspace
+        self.started: dict[str, Any] = {}
+        self._alive = False
+
+    def start_async(self, cmd: list[str], **kwargs: Any) -> None:
+        self.started = {"cmd": list(cmd), **kwargs}
+        Path(kwargs["log_path"]).write_text("", encoding="utf-8")
+        (self.workspace / "specialist_done.json").write_text(
+            '{"proposal_set":[],"empty":true,"summary":"ray"}',
+            encoding="utf-8",
+        )
+
+    def poll_started(self) -> int:
+        return 4242
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def exit_code(self) -> int:
+        return 0
+
+    def stop(self) -> None:
+        self._alive = False
+
+    def close(self) -> None:
+        self._alive = False
+
+
+@pytest.mark.asyncio
+async def test_ray_codex_launch_uses_replace_env_and_prompt_file_stdin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ray must receive the same filtered env and stdin transport as local Popen."""
+    _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+    _enable_codex_bypass(monkeypatch)
+    workspace = tmp_path / "workspace"
+    lease = _RecordingGpuLease(workspace)
+    result = await SpecialistSubprocessDispatcher(
+        SpecialistSubprocessConfig(
+            agent_backend=AGENT_BACKEND_CODEX,
+            codex_executable="/usr/bin/codex",
+            poll_interval_seconds=0.01,
+        )
+    ).run(
+        task_id="ray-stdin",
+        workspace=workspace,
+        worktree=None,
+        worktree_base=None,
+        system_prompt="ray system",
+        user_prompt="ray user prompt",
+        allowed_tools=(),
+        max_turns=1,
+        gpu_ids=(0,),
+        wall_budget_sec=10.0,
+        gpu_lease=lease,
+    )
+
+    assert result.exit_code == 0
+    assert lease.started["env_mode"] == "replace"
+    assert lease.started["stdin_path"] == str(workspace / "prompt.md")
+    assert Path(lease.started["stdin_path"]).read_text(encoding="utf-8") == "ray user prompt"
+    assert lease.started["cmd"][-1] == "-"
+
+
+@pytest.mark.asyncio
+async def test_codex_mcp_config_is_translated_without_credentials_in_config_or_argv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTTP and stdio MCP definitions retain transport/env through private env refs."""
+    import hyperloom.orchestrator.specialists.subprocess_ as sp
+
+    _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+    _enable_codex_bypass(monkeypatch)
+    mcp_secret = "mcp-secret-value"
+    monkeypatch.setenv("SOURCE_MCP_TOKEN", mcp_secret)
+    mcp_path = tmp_path / "mcp.json"
+    mcp_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "pr_monitor": {
+                        "type": "http",
+                        "url": "https://mcp.invalid/rpc",
+                        "headers": {"Authorization": "Bearer ${SOURCE_MCP_TOKEN}"},
+                    },
+                    "local_tools": {
+                        "type": "stdio",
+                        "command": "python",
+                        "args": ["server.py", "--serve"],
+                        "env": {
+                            "MCP_TOKEN": "${SOURCE_MCP_TOKEN}",
+                            "MCP_MODE": "strict",
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_codex = _successful_codex_script(tmp_path / "bin" / "codex")
+    captured: dict[str, Any] = {}
+    real_popen = subprocess.Popen
+
+    def _recording_popen(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.Popen:
+        captured["cmd"] = list(cmd)
+        captured["env"] = dict(kwargs["env"])
+        return real_popen(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(sp.subprocess, "Popen", _recording_popen)
+    workspace = tmp_path / "workspace"
+    result = await SpecialistSubprocessDispatcher(
+        SpecialistSubprocessConfig(
+            agent_backend=AGENT_BACKEND_CODEX,
+            codex_executable=str(fake_codex),
+            mcp_config_path=str(mcp_path),
+            poll_interval_seconds=0.01,
+        )
+    ).run(
+        task_id="mcp-translation",
+        workspace=workspace,
+        worktree=None,
+        worktree_base=None,
+        system_prompt="mcp system",
+        user_prompt="mcp user",
+        allowed_tools=(),
+        max_turns=1,
+        wall_budget_sec=10.0,
+    )
+
+    assert result.exit_code == 0
+    config_text = (workspace / ".codex" / "config.toml").read_text(encoding="utf-8")
+    assert "[mcp_servers.pr_monitor]" in config_text
+    assert 'url = "https://mcp.invalid/rpc"' in config_text
+    assert "[mcp_servers.local_tools]" in config_text
+    assert 'command = "python"' in config_text
+    assert 'args = ["server.py", "--serve"]' in config_text
+    assert 'env_vars = ["MCP_TOKEN", "MCP_MODE"]' in config_text
+    assert "[mcp_servers.pr_monitor.env_http_headers]" in config_text
+    assert mcp_secret not in config_text
+    assert mcp_secret not in " ".join(captured["cmd"])
+    assert captured["env"]["MCP_TOKEN"] == mcp_secret
+    assert captured["env"]["MCP_MODE"] == "strict"
+    assert "Bearer " + mcp_secret in captured["env"].values()
+
+
+@pytest.mark.parametrize(
+    "collision_key",
+    [
+        "PATH",
+        "CODEX_HOME",
+        "OPENAI_API_KEY",
+        "LLM_GATEWAY_KEY",
+        "HYPERLOOM_CODEX_HTTP_HEADER_0",
+    ],
+)
+@pytest.mark.asyncio
+async def test_codex_mcp_env_rejects_control_and_provider_collisions_before_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    collision_key: str,
+) -> None:
+    """MCP stdio env cannot overwrite child control or provider variables."""
+    import hyperloom.orchestrator.specialists.subprocess_ as sp
+
+    _pin_provider_env(
+        monkeypatch,
+        {
+            "OPENAI_BASE_URL": "https://gateway.invalid/Unified/v1",
+            "OPENAI_API_KEY": "provider-openai-key",
+            "LLM_GATEWAY_KEY": "provider-gateway-key",
+            "OPENAI_CUSTOM_HEADERS": "user: provider-header-value",
+        },
+    )
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.delenv("HYPERLOOM_CODEX_HTTP_HEADER_0", raising=False)
+    _enable_codex_bypass(monkeypatch)
+    mcp_path = tmp_path / "mcp-collision.json"
+    mcp_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "collision": {
+                        "type": "stdio",
+                        "command": "python",
+                        "args": ["server.py"],
+                        "env": {collision_key: "mcp-override"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    popen_calls = 0
+
+    def _recording_popen(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal popen_calls
+        popen_calls += 1
+
+    monkeypatch.setattr(sp.subprocess, "Popen", _recording_popen)
+    lease = _NeverStartedGpuLease()
+    workspace = tmp_path / "workspace"
+    result = await SpecialistSubprocessDispatcher(
+        SpecialistSubprocessConfig(
+            agent_backend=AGENT_BACKEND_CODEX,
+            codex_executable="/usr/bin/codex",
+            mcp_config_path=str(mcp_path),
+            poll_interval_seconds=0.01,
+        )
+    ).run(
+        task_id=f"mcp-collision-{collision_key.lower()}",
+        workspace=workspace,
+        worktree=None,
+        worktree_base=None,
+        system_prompt="system",
+        user_prompt="user",
+        allowed_tools=(),
+        max_turns=1,
+        wall_budget_sec=10.0,
+        gpu_lease=lease,
+    )
+
+    assert collision_key in result.error
+    assert "collision" in result.error.lower() or "reserved" in result.error.lower()
+    assert not (workspace / ".codex" / "config.toml").exists()
+    assert popen_calls == 0
+    assert lease.start_calls == 0
+    assert "mcp-override" not in repr(lease.kwargs)
+
+
+def test_codex_mcp_env_accepts_identical_benign_existing_value(
+    tmp_path: Path,
+) -> None:
+    """An identical non-reserved child value is safe to forward by name."""
+    import hyperloom.orchestrator.specialists.subprocess_ as sp
+
+    mcp_path = tmp_path / "mcp-benign.json"
+    mcp_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "local": {
+                        "type": "stdio",
+                        "command": "python",
+                        "env": {"SHARED_BENIGN_SETTING": "same-value"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    lines, additions = sp._codex_mcp_config(
+        str(mcp_path),
+        source={"SHARED_BENIGN_SETTING": "same-value"},
+        child_env={"SHARED_BENIGN_SETTING": "same-value"},
+        protected_env_names=frozenset(),
+    )
+
+    assert 'env_vars = ["SHARED_BENIGN_SETTING"]' in lines
+    assert additions == {}
+
+
+def test_untranslatable_codex_mcp_server_fails_loudly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown MCP transports cannot silently disappear from a Codex specialist."""
+    from hyperloom.orchestrator.specialists.subprocess_ import SpecialistAgentUnavailableError
+
+    _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+    mcp_path = tmp_path / "mcp.json"
+    mcp_path.write_text(
+        json.dumps({"mcpServers": {"legacy": {"type": "sse", "url": "https://mcp.invalid/sse"}}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(SpecialistAgentUnavailableError, match="legacy"):
+        _build_cmd(
+            tmp_path,
+            codex_executable="/usr/bin/codex",
+            mcp_config_path=str(mcp_path),
+        )
+
+
+@pytest.mark.asyncio
+async def test_codex_structured_failure_is_propagated_and_redacted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The structured turn failure is more useful than a bare exit-code label."""
+    _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+    _enable_codex_bypass(monkeypatch)
+    raw_secret = "sk-supersecret123"
+    fake_codex = _write_executable(
+        tmp_path / "bin" / "codex",
+        "#!/usr/bin/env bash\n"
+        "cat >/dev/null\n"
+        "printf '%s\\n' "
+        + repr(
+            json.dumps(
+                {
+                    "type": "turn.failed",
+                    "error": {"message": f"provider rejected API_KEY={raw_secret}"},
+                }
+            )
+        )
+        + "\nexit 7\n",
+    )
+    result = await SpecialistSubprocessDispatcher(
+        SpecialistSubprocessConfig(
+            agent_backend=AGENT_BACKEND_CODEX,
+            codex_executable=str(fake_codex),
+            poll_interval_seconds=0.01,
+        )
+    ).run(
+        task_id="structured-error",
+        workspace=tmp_path / "workspace",
+        worktree=None,
+        worktree_base=None,
+        system_prompt="system",
+        user_prompt="user",
+        allowed_tools=(),
+        max_turns=1,
+        wall_budget_sec=10.0,
+    )
+
+    assert result.exit_code == 7
+    assert "provider rejected" in result.error
+    assert raw_secret not in result.error
+    assert "[REDACTED]" in result.error
+
+
+def _specialist_args(**overrides: Any) -> argparse.Namespace:
+    values = {
+        "claude_model": "claude-selected-model",
+        "codex_model": "gpt-selected-model",
+        "specialist_model": None,
+        "specialist_max_turns": 3,
+        "specialist_per_turn_max_seconds": 42.0,
+        "specialist_dispatch_mode": "subprocess",
+        "specialist_mcp_config": None,
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def _runner_from_executor(executor: Any) -> Any:
+    """Recover the SpecialistRunner captured by the CLI adapter closure."""
+    from hyperloom.orchestrator.specialists.runner import SpecialistRunner
+
+    for cell in executor.__closure__ or ():
+        if isinstance(cell.cell_contents, SpecialistRunner):
+            return cell.cell_contents
+    raise AssertionError("specialist executor did not capture a SpecialistRunner")
+
+
+@pytest.mark.parametrize(
+    ("shape", "expected_backend", "expected_model"),
+    [
+        (_OPENAI_ONLY_ENV, AGENT_BACKEND_CODEX, "gpt-selected-model"),
+        (_ANTHROPIC_ONLY_ENV, AGENT_BACKEND_CLAUDE, "claude-selected-model"),
+    ],
+)
+def test_selected_backend_uses_its_own_model_without_specialist_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: dict[str, str],
+    expected_backend: str,
+    expected_model: str,
+) -> None:
+    """Codex must not inherit a preflight-mutated Claude model."""
+    import shutil
+
+    from hyperloom.inference_optimizer.cli import executors
+    import hyperloom.orchestrator.specialists.subprocess_ as sp
+
+    _pin_provider_env(monkeypatch, shape)
+    monkeypatch.setattr(sp, "resolve_codex_executable", lambda explicit="": "/usr/bin/codex")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    runner = _runner_from_executor(
+        executors._build_specialist_executor(
+            _specialist_args(),
+            session_dir=tmp_path,
+            knowledge_plane=None,
+        )
+    )
+
+    assert runner.subprocess_config.agent_backend == expected_backend
+    assert runner.subprocess_config.model == expected_model
+
+
+@pytest.mark.parametrize("shape", [_OPENAI_ONLY_ENV, _ANTHROPIC_ONLY_ENV])
+def test_explicit_specialist_model_overrides_the_selected_backend_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: dict[str, str],
+) -> None:
+    """The generic override remains authoritative for either selected backend."""
+    import shutil
+
+    from hyperloom.inference_optimizer.cli import executors
+    import hyperloom.orchestrator.specialists.subprocess_ as sp
+
+    _pin_provider_env(monkeypatch, shape)
+    monkeypatch.setattr(sp, "resolve_codex_executable", lambda explicit="": "/usr/bin/codex")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    runner = _runner_from_executor(
+        executors._build_specialist_executor(
+            _specialist_args(specialist_model="specialist-override"),
+            session_dir=tmp_path,
+            knowledge_plane=None,
+        )
+    )
+    assert runner.subprocess_config.model == "specialist-override"
+
+
+def test_openai_only_inprocess_uses_codex_agent_sdk_not_claude(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenAI-only in-process dispatch must stay agentic without Claude fallback."""
+    from hyperloom.inference_optimizer.cli import executors
+    from hyperloom.orchestrator.roles.codex_agent import CodexAgentBackend
+
+    _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+    monkeypatch.setattr(
+        executors,
+        "ClaudeBackend",
+        lambda **_kwargs: pytest.fail("OpenAI-only in-process dispatch must not construct ClaudeBackend"),
+    )
+    runner = _runner_from_executor(
+        executors._build_specialist_executor(
+            _specialist_args(specialist_dispatch_mode="inprocess"),
+            session_dir=tmp_path,
+            knowledge_plane=None,
+        )
+    )
+    backend = runner.backend_factory(SimpleNamespace())
+
+    assert isinstance(backend, CodexAgentBackend)
+    assert backend.model == "gpt-selected-model"
+    assert Path(backend.cwd).is_relative_to(tmp_path)
+    assert Path(backend.cwd) in tuple(Path(root) for root in backend.writable_roots)
+
+
+def test_anthropic_inprocess_keeps_claude_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The new SDK backend changes only the OpenAI-only in-process shape."""
+    from hyperloom.inference_optimizer.cli import executors
+
+    _pin_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
+    monkeypatch.setattr(executors, "ClaudeBackend", lambda **kwargs: ("claude", kwargs))
+    runner = _runner_from_executor(
+        executors._build_specialist_executor(
+            _specialist_args(specialist_dispatch_mode="inprocess"),
+            session_dir=tmp_path,
+            knowledge_plane=None,
+        )
+    )
+    backend_name, kwargs = runner.backend_factory(SimpleNamespace())
+    assert backend_name == "claude"
+    assert kwargs["model"] == "claude-selected-model"
+
+
+@pytest.mark.asyncio
+async def test_codex_agent_backend_preserves_roles_and_returns_validated_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Agent SDK receives developer/user roles separately and returns intents."""
+    from hyperloom.common.codex_session import CodexSessionResult
+    from hyperloom.inference_optimizer.protocol.intent import IntentType
+    import hyperloom.orchestrator.roles.codex_agent as codex_agent
+
+    payload = {
+        "gap_canonical_id": "gap.sdk",
+        "domain": "serving_specialist",
+        "proposal_set": [],
+        "empty": True,
+        "summary": "sdk result",
+    }
+    captured: dict[str, Any] = {}
+
+    async def _fake_run_codex_turn(**kwargs: Any) -> CodexSessionResult:
+        captured.update(kwargs)
+        return CodexSessionResult(
+            text=json.dumps(
+                {
+                    "intents": [
+                        {
+                            "intent_type": "specialist_done",
+                            "payload": payload,
+                        }
+                    ]
+                }
+            ),
+            items=({"type": "commandExecution", "command": "pwd", "exitCode": 0},),
+            usage={
+                "input_tokens": 11,
+                "output_tokens": 7,
+                "cache_read_input_tokens": 3,
+                "reasoning_output_tokens": 2,
+            },
+            thread_id="thread-123",
+        )
+
+    monkeypatch.setattr(codex_agent, "run_codex_turn", _fake_run_codex_turn)
+    backend = codex_agent.CodexAgentBackend(
+        model="gpt-agent",
+        cwd=tmp_path,
+        writable_roots=(tmp_path,),
+        call_timeout_s=17.0,
+    )
+    result = await backend.run(
+        "SYSTEM_ROLE_SENTINEL\n---\nUSER_ROLE_SENTINEL",
+        system_prompt="SYSTEM_ROLE_SENTINEL",
+        tools=["Read", "Bash"],
+        max_turns=1,
+    )
+
+    assert captured["prompt"] == "USER_ROLE_SENTINEL"
+    assert captured["developer_instructions"].startswith("SYSTEM_ROLE_SENTINEL")
+    assert "USER_ROLE_SENTINEL" not in captured["developer_instructions"]
+    assert captured["cwd"] == tmp_path
+    assert captured["writable_roots"] == (tmp_path,)
+    assert captured["model"] == "gpt-agent"
+    assert captured["timeout_sec"] == 17.0
+    assert result.intents[0].type is IntentType.SPECIALIST_DONE
+    assert result.intents[0].payload == payload
+    assert result.metadata["thread_id"] == "thread-123"
+    assert result.metadata["input_tokens"] == 11
+    assert result.metadata["cache_read_input_tokens"] == 3
+    assert result.metadata["reasoning_output_tokens"] == 2
+    assert result.metadata["error"] == ""
+
+
+def test_specialist_model_help_describes_generic_selected_backend_override() -> None:
+    """The help text must not claim the generic override is Claude-only."""
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+    parser = _build_parser()
+    subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+    help_text = " ".join(subparsers.choices["optimize"].format_help().split())
+    assert "selected specialist backend" in help_text

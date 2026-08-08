@@ -1091,14 +1091,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "(OpenAI-compatible only) or when the model list is empty. "
         "Advisory only; never gates.",
     )
-    # specialist sub-agent backend selection: Claude (default), inherits orchestration model.
+    # Specialist model override; provider shape selects Claude or Codex.
     opt.add_argument(
         "--specialist-model",
         dest="specialist_model",
         type=str,
         default=None,
-        help="Claude model used for specialist sub-agents (defaults to "
-        "the orchestration --claude-model). KB_design §3.5 §6.",
+        help="Generic model override for the selected specialist backend. "
+        "When omitted, Codex specialists use --codex-model and Claude "
+        "specialists use --claude-model. KB_design §3.5 §6.",
     )
     opt.add_argument(
         "--specialist-max-turns",
@@ -1126,19 +1127,18 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("subprocess", "inprocess"),
         default="subprocess",
         help="Specialist execution shape. 'subprocess' (default) spawns "
-        "a fresh `claude` CLI per task inside a per-task git worktree "
-        "for isolation (PR-A2). 'inprocess' keeps the legacy M5 path "
-        "(claude-agent-sdk in the orchestrator process) for tests / "
-        "environments without the claude binary.",
+        "a fresh selected-provider agent CLI per task. 'inprocess' uses "
+        "the matching Claude or Codex Agent SDK backend in the orchestrator "
+        "process.",
     )
     opt.add_argument(
         "--specialist-mcp-config",
         dest="specialist_mcp_config",
         type=str,
         default=None,
-        help="Optional path to an MCP config JSON forwarded to the "
-        "subprocess claude (`--mcp-config`). Used to wire PR Monitor "
-        "MCP servers into specialists. Default: None.",
+        help="Optional MCP config JSON for specialist subprocesses. Claude "
+        "receives it via --mcp-config; Codex translates supported HTTP/stdio "
+        "servers into private task-local config. Default: None.",
     )
 
     # Integration toggles. Roofline refresh is unconditional (fires at PRELUDE

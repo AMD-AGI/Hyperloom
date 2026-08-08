@@ -108,8 +108,7 @@ def _build_specialist_executor(
     SpecialistRunner). Production uses the subprocess dispatcher, spawning the
     agent CLI the deployment's credentials can drive (``claude`` on the Anthropic
     side, ``codex`` on the OpenAI side) in a per-task worktree.
-    ``--specialist-dispatch-mode`` / a missing ``claude`` falls back to the
-    in-process ClaudeBackend.
+    Explicit in-process dispatch uses the matching agent SDK backend.
 
     Args:
         args: Parsed CLI arguments (specialist model, turns, dispatch mode).
@@ -121,10 +120,8 @@ def _build_specialist_executor(
         specialist and returns a result envelope dict.
 
     Raises:
-        RuntimeError: If the deployment can only authenticate the Codex CLI and
-            no Codex runtime is installed. There is no usable fallback in that
-            shape — the in-process backend is Claude too — so the run must fail
-            here rather than lose every specialist to an auth error per task.
+        RuntimeError: If subprocess dispatch selects Codex but no Codex runtime
+            is installed.
     """
     import shutil
 
@@ -141,7 +138,6 @@ def _build_specialist_executor(
         resolve_specialist_agent_backend,
     )
 
-    claude_model = (getattr(args, "specialist_model", None) or args.claude_model).strip()
     max_turns = int(getattr(args, "specialist_max_turns", DEFAULT_SPECIALIST_MAX_TURNS) or DEFAULT_SPECIALIST_MAX_TURNS)
     per_turn_max_seconds = float(getattr(args, "specialist_per_turn_max_seconds", 600.0) or 600.0)
     dispatch_mode = str(getattr(args, "specialist_dispatch_mode", "subprocess") or "subprocess").strip().lower()
@@ -151,6 +147,10 @@ def _build_specialist_executor(
     # Resolve the agent CLI once here so the backend, its executable and its
     # model are chosen together and a later dispatch cannot disagree with them.
     agent_backend = resolve_specialist_agent_backend()
+    specialist_override = str(getattr(args, "specialist_model", None) or "").strip()
+    selected_model = specialist_override or (
+        str(args.codex_model).strip() if agent_backend == AGENT_BACKEND_CODEX else str(args.claude_model).strip()
+    )
     codex_bin = ""
     claude_bin = ""
     if agent_backend == AGENT_BACKEND_CODEX:
@@ -192,24 +192,14 @@ def _build_specialist_executor(
             if generated is not None:
                 mcp_config_path = str(generated)
                 forced_mcp_servers = None
-        # Specialist subprocesses default to ``bypassPermissions`` (see
-        # SpecialistSubprocessConfig.permission_mode): they are autonomous and
-        # already sandboxed by an isolated worktree + curated ``--allowedTools``
-        # allowlist + Critic/PolicyGate review, so routing every Bash call
-        # through the claude-cli ``claude-sonnet-5`` safety classifier adds no
-        # real safety and becomes a hard dependency that stalls the specialist
-        # whenever that classifier is degraded. Operators can override per pod
-        # (e.g. ``HYPERLOOM_SPECIALIST_PERMISSION_MODE=auto`` to restore the
-        # classifier path); an empty/unset value keeps the config default.
+        # This setting controls the Claude runtime only. Codex containment is
+        # resolved independently through the canonical sandbox policy.
         specialist_permission_mode = os.environ.get("HYPERLOOM_SPECIALIST_PERMISSION_MODE", "").strip()
         sub_config_kwargs: dict[str, Any] = {
             "agent_backend": agent_backend,
             "claude_executable": claude_bin or "claude",
             "codex_executable": codex_bin,
-            # Preflight already collapses the run onto one model per credential
-            # shape (an OpenAI-only run rewrites --claude-model to --codex-model),
-            # so this carries whichever id the selected CLI needs.
-            "model": claude_model,
+            "model": selected_model,
             "framework_source_roots": framework_source_roots,
             "mcp_config_path": mcp_config_path,
             "per_turn_max_seconds": per_turn_max_seconds,
@@ -228,18 +218,25 @@ def _build_specialist_executor(
     else:
 
         def _backend_factory(domain: Any) -> Any:
-            """Build an in-process Claude backend for a specialist domain.
+            """Build the selected in-process agent SDK backend.
 
             Args:
                 domain: The specialist domain requesting a backend.
 
             Returns:
-                A configured :class:`ClaudeBackend` instance.
+                A configured Claude or Codex Agent SDK backend.
             """
-            return ClaudeBackend(
-                model=claude_model,
-                max_turns_default=max_turns,
-            )
+            if agent_backend == AGENT_BACKEND_CODEX:
+                from hyperloom.orchestrator.roles.codex_agent import CodexAgentBackend
+
+                runtime_root = session_dir / "runtime" / "codex-specialist"
+                return CodexAgentBackend(
+                    model=selected_model,
+                    cwd=runtime_root,
+                    writable_roots=(runtime_root,),
+                    call_timeout_s=per_turn_max_seconds,
+                )
+            return ClaudeBackend(model=selected_model, max_turns_default=max_turns)
 
         runner = SpecialistRunner(
             backend_factory=_backend_factory,
@@ -247,6 +244,7 @@ def _build_specialist_executor(
             default_tools=DEFAULT_SPECIALIST_TOOLS,
             default_max_turns=max_turns,
             knowledge_plane=knowledge_plane,
+            forced_mcp_servers=(() if agent_backend == AGENT_BACKEND_CODEX else None),
         )
 
     async def _executor(ctx: Any) -> dict:
