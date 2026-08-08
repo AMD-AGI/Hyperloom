@@ -465,6 +465,85 @@ def test_finalize_removes_staged_drivers_from_the_live_repo(tmp_path):
     assert tracked.read_text() == "TRACKED\n"
 
 
+def test_finalize_leaves_the_live_repo_exclude_file_as_it_found_it(tmp_path):
+    """Staging a driver edits the caller's repository, so cleanup undoes it.
+
+    ``--git-common-dir`` resolves to the live repository even from a worktree, so
+    the entry outlived the run and reached sessions that never enabled this
+    route. Pre-existing content has to survive the removal untouched.
+    """
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _git(workspace, "init", "-q")
+    exclude = workspace / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text("# user content\n*.log\n", encoding="utf-8")
+    output_dir = tmp_path / "attempt"
+    output_dir.mkdir()
+
+    driver = Path(forge_submit._write_generated_driver(workspace, "print('drive')\n"))
+    assert forge_submit._GENERATED_DRIVER_GLOB in exclude.read_text().split()
+
+    forge_submit._finalize_forge_workspace(
+        inplace=True,
+        restore_info=None,
+        driver=str(driver),
+        workspace=str(workspace),
+        output_dir=output_dir,
+        branch="forge/test",
+        nogit_scratch=False,
+    )
+
+    assert exclude.read_text() == "# user content\n*.log\n"
+
+
+def test_finalize_repoints_artifact_paths_at_the_relocated_campaign(tmp_path):
+    """Relocating the campaign moves the producer's bundle with it.
+
+    The producer publishes inside ``<workspace>/forge_experiments``, so the paths
+    a caller receives named a directory this cleanup had just emptied -- and the
+    consumer that builds the deploy snapshot afterwards silently found nothing.
+    """
+    workspace = tmp_path / "repo"
+    published = workspace / "forge_experiments" / "rewrite_applyback" / "best"
+    published.mkdir(parents=True)
+    (published / "forge.patch").write_text("PATCH\n")
+    output_dir = tmp_path / "attempt"
+    output_dir.mkdir()
+    result = {
+        "canonical_patch_path": str(published / "forge.patch"),
+        "canonical_files_root": str(published / "files"),
+        "artifacts": [str(published / "forge.patch")],
+        "flydsl_applyback": {
+            "canonical_manifest": str(published / "manifest.json"),
+        },
+        "output_dir": str(output_dir),
+    }
+
+    forge_submit._finalize_forge_workspace(
+        inplace=True,
+        restore_info=None,
+        driver="",
+        workspace=str(workspace),
+        output_dir=output_dir,
+        branch="forge/test",
+        nogit_scratch=False,
+        result=result,
+    )
+
+    relocated = output_dir / "forge_experiments" / "rewrite_applyback" / "best"
+    assert result["canonical_patch_path"] == str(relocated / "forge.patch")
+    assert result["canonical_files_root"] == str(relocated / "files")
+    assert result["artifacts"] == [str(relocated / "forge.patch")]
+    assert result["flydsl_applyback"]["canonical_manifest"] == str(
+        relocated / "manifest.json"
+    )
+    # The repointed path is the one that actually holds the artifact now.
+    assert Path(result["canonical_patch_path"]).read_text() == "PATCH\n"
+    # Paths outside the moved tree are left exactly as they were.
+    assert result["output_dir"] == str(output_dir)
+
+
 def test_finalize_keeps_both_campaigns_when_the_destination_is_populated(tmp_path):
     """A populated ``forge_experiments`` no longer aborts in-place cleanup.
 
@@ -2135,11 +2214,19 @@ _NO_PREPARATION_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
 )
 
 
+def _written_invocation_spec(tmp_path) -> Path:
+    """The invocation evidence the producer authors its driver from."""
+    invocation_spec = tmp_path / "invocation_spec.json"
+    invocation_spec.write_text(json.dumps({"op": "vllm::fused_gemm", "calls": []}))
+    return invocation_spec
+
+
 def _rewrite_route_kwargs(tmp_path, **overrides) -> dict:
     workspace = tmp_path / "worktree"
     kernel = workspace / "vllm" / "fused_gemm.py"
     kernel.parent.mkdir(parents=True, exist_ok=True)
     kernel.write_text("TRITON\n")
+    invocation_spec = _written_invocation_spec(tmp_path)
     kwargs = {
         "candidate": {"name": "fused_gemm", "source_symbol": "matmul"},
         "source_type": "triton",
@@ -2156,6 +2243,7 @@ def _rewrite_route_kwargs(tmp_path, **overrides) -> dict:
         "branch": "forge/session/fused-gemm-abc123def456",
         "attempt_id": "attempt-1",
         "timeout_s": 7200,
+        "invocation_spec_file": str(invocation_spec),
     }
     kwargs.update(overrides)
     return kwargs
@@ -2399,6 +2487,30 @@ def test_the_route_requires_a_producer_that_authors_the_driver(tmp_path, monkeyp
     assert declined.reason == "driver_preparation_unsupported"
 
 
+@pytest.mark.parametrize("spec_file", ["", "/nonexistent/invocation_spec.json"])
+def test_the_route_declines_without_the_invocation_evidence(
+    tmp_path,
+    monkeypatch,
+    spec_file,
+):
+    """The same requirement as driver preparation, seen from the other side.
+
+    Preparation is only possible against a real invocation spec. Admitting the
+    route without one hands the producer nothing to author from and leaves it the
+    placeholder driver, which exits 1 -- so the whole budget would be spent
+    reaching a failure that is knowable at admission.
+    """
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=_RecordingProbe(_SUPPORTED_CAPABILITIES),
+        **_rewrite_route_kwargs(tmp_path, invocation_spec_file=spec_file),
+    )
+
+    assert decision.eligible is False
+    assert decision.reason == "invocation_spec_missing"
+
+
 @pytest.mark.parametrize(
     ("overrides", "reason"),
     [
@@ -2589,6 +2701,9 @@ def _submit_with_rewrite_route(tmp_path, monkeypatch, captured=None, **submit_ov
         },
         "timeout_s": 7200,
         "kernel_repo": str(repo),
+        # The rewrite route declines without it: the producer's driver-preparation
+        # stage has nothing to author a measurement driver from.
+        "invocation_spec_file": str(_written_invocation_spec(tmp_path)),
     }
     submit_kwargs.update(submit_overrides)
     return forge_submit.submit(**submit_kwargs)
@@ -2969,8 +3084,6 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         "--snr-threshold": "30.0",
         "--gpu-target": "gfx950",
         "--max-iters": "8",
-        "--max-hours": "2.0",
-        "--deadline-unix": str(deadline),
         "--framework": "vllm",
         "--git-branch": "forge/session/fused-gemm",
         "--result-json": str(result_json),
@@ -2980,6 +3093,17 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         assert command[command.index(flag) + 1] == value, flag
     # A boolean switch carries no value, so it is checked apart from the pairs.
     assert "--prepare-driver" in command
+    # The producer is aimed one reserve short of this process's hard kill, so it
+    # publishes the apply-back inside its own budget instead of racing the kill.
+    producer_deadline = float(command[command.index("--deadline-unix") + 1])
+    assert producer_deadline == pytest.approx(
+        deadline - _flydsl_rewrite.APPLYBACK_RESERVE_SEC
+    )
+    producer_hours = float(command[command.index("--max-hours") + 1])
+    assert producer_hours == pytest.approx(
+        (7200 - _flydsl_rewrite.APPLYBACK_RESERVE_SEC) / 3600.0, abs=1e-3
+    )
+    assert producer_hours < 2.0
     # Options that only exist on the generic loop must never be smuggled across.
     for forbidden in (
         "--kernel",

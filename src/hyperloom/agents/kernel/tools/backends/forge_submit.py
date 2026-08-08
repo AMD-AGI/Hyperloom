@@ -27,7 +27,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 _TOOLS_DIR = str(Path(__file__).resolve().parent.parent)
 _TOOLS_DIR_INSERTED = _TOOLS_DIR not in sys.path
@@ -1248,17 +1248,16 @@ def _exclude_generated_drivers(workspace: Path) -> None:
     so a broad ``git add`` would otherwise sweep one into the framework patch.
     Registering the pattern in the repository's own exclude file is idempotent
     and leaves the working tree untouched.
+
+    ``--git-common-dir`` means this lands in the live repository even from a
+    linked worktree, so it is a real edit to the caller's repository and
+    :func:`_restore_generated_driver_exclude` takes it back out at the end of the
+    run. It is deliberately narrow: the entry only exists while a driver could be
+    staged, and the pattern names a file only Hyperloom ever creates.
     """
-    probe = _run(
-        ["git", "-C", str(workspace), "rev-parse", "--git-common-dir"],
-        timeout=30,
-    )
-    if probe.returncode != 0:
+    exclude = _git_exclude_file(workspace)
+    if exclude is None:
         return
-    common = Path(probe.stdout.strip())
-    if not common.is_absolute():
-        common = (Path(workspace) / common).resolve()
-    exclude = common / "info" / "exclude"
     try:
         existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
         if _GENERATED_DRIVER_GLOB in existing.split():
@@ -1270,6 +1269,41 @@ def _exclude_generated_drivers(workspace: Path) -> None:
             handle.write(_GENERATED_DRIVER_GLOB + "\n")
     except OSError as error:
         log.warning("forge: could not exclude generated drivers from git: %s", error)
+
+
+def _git_exclude_file(workspace: Path) -> Path | None:
+    """Resolve the exclude file git actually reads for ``workspace``."""
+    probe = _run(
+        ["git", "-C", str(workspace), "rev-parse", "--git-common-dir"],
+        timeout=30,
+    )
+    if probe.returncode != 0:
+        return None
+    common = Path(probe.stdout.strip())
+    if not common.is_absolute():
+        common = (Path(workspace) / common).resolve()
+    return common / "info" / "exclude"
+
+
+def _restore_generated_driver_exclude(workspace: Path) -> None:
+    """Drop the driver pattern again so the live repository is left as found.
+
+    Paired with :func:`_exclude_generated_drivers` and run beside the deletion of
+    the drivers themselves, so the entry never outlives the files it was there to
+    hide. Only the exact pattern line is removed and any other content is written
+    back untouched.
+    """
+    exclude = _git_exclude_file(workspace)
+    if exclude is None or not exclude.is_file():
+        return
+    try:
+        lines = exclude.read_text(encoding="utf-8").splitlines(keepends=True)
+        kept = [line for line in lines if line.strip() != _GENERATED_DRIVER_GLOB]
+        if len(kept) == len(lines):
+            return
+        exclude.write_text("".join(kept), encoding="utf-8")
+    except OSError as error:
+        log.warning("forge: could not restore the git exclude file: %s", error)
 
 
 def _write_generated_driver(workspace: str | Path, content: str) -> str:
@@ -2804,17 +2838,25 @@ def _rewrite_contained_path(
 
 
 def _patch_touched_paths(patch_path: Path) -> set[str] | None:
-    """Return the repo-relative paths a git patch claims to touch."""
+    """Return the repo-relative paths a git patch claims to touch.
+
+    Only the post-image side of each header is collected, which is what the
+    producer's ``git diff --name-only`` declares in ``changed_files``. For an
+    add, a modify, or a delete both sides name the same file, so the distinction
+    only shows up on a rename or a copy: there the header reads
+    ``diff --git a/<source> b/<destination>`` while the declaration lists the
+    destination alone. Counting the source too made the two sets unequal and
+    discarded an otherwise valid artifact.
+    """
     try:
         text = patch_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     touched: set[str] = set()
-    for old, new in _PATCH_HEADER_RE.findall(text):
-        for raw in (old, new):
-            path = raw.strip().strip('"')
-            if path and path != "/dev/null":
-                touched.add(path)
+    for _old, new in _PATCH_HEADER_RE.findall(text):
+        path = new.strip().strip('"')
+        if path and path != "/dev/null":
+            touched.add(path)
     return touched
 
 
@@ -2823,6 +2865,7 @@ def _validated_rewrite_applyback_result(
     *,
     workspace: str,
     base_commit: str,
+    problems: list[str] | None = None,
 ) -> dict | None:
     """Return normalized evidence only for a published framework apply-back.
 
@@ -2836,26 +2879,49 @@ def _validated_rewrite_applyback_result(
         payload: The outer result read from the caller-chosen result file.
         workspace: The git workspace every reported path must stay inside.
         base_commit: The commit this attempt started from.
+        problems: Collector for the clause that refused the artifact. Every
+            refusal here otherwise reaches an operator as the same sentence, and
+            with forty of them a campaign that ran for an hour reports only that
+            it produced nothing -- so the specific clause is named instead.
 
     Returns:
         dict | None: Normalized apply-back evidence, or ``None`` when any part
             of the two-document contract does not hold.
     """
+
+    def _reject(reason: str) -> dict | None:
+        if problems is not None:
+            problems.append(reason)
+        log.warning("forge rewrite: apply-back refused: %s", reason)
+        return None
+
     if not isinstance(payload, dict):
-        return None
+        return _reject("the producer wrote no result object")
     if payload.get("success") is not True or payload.get("applyback_ok") is not True:
-        return None
+        return _reject(
+            f"the producer did not report success (success={payload.get('success')!r} "
+            f"applyback_ok={payload.get('applyback_ok')!r})"
+        )
     if payload.get("artifact_kind") != _REWRITE_ARTIFACT_KIND:
-        return None
+        return _reject(
+            f"result artifact_kind={payload.get('artifact_kind')!r} is not "
+            f"{_REWRITE_ARTIFACT_KIND!r}"
+        )
     try:
         artifact_schema_version = int(payload.get("artifact_schema_version"))
     except (TypeError, ValueError):
-        return None
+        return _reject(
+            "result artifact_schema_version is not an integer: "
+            f"{payload.get('artifact_schema_version')!r}"
+        )
     if artifact_schema_version != _REWRITE_ARTIFACT_SCHEMA_VERSION:
-        return None
+        return _reject(
+            f"result artifact_schema_version={artifact_schema_version} is not the "
+            f"supported {_REWRITE_ARTIFACT_SCHEMA_VERSION}"
+        )
     outer_commit = str(payload.get("best_commit") or "").strip()
     if not outer_commit:
-        return None
+        return _reject("the result names no best_commit")
 
     workspace_root = Path(workspace).resolve()
     manifest_path = _rewrite_contained_path(
@@ -2868,48 +2934,86 @@ def _validated_rewrite_applyback_result(
         workspace_root, payload.get("canonical_files_root"), allow_absolute=True
     )
     if manifest_path is None or not manifest_path.is_file():
-        return None
+        return _reject(
+            "canonical_manifest is not a readable file inside the workspace: "
+            f"{payload.get('canonical_manifest')!r}"
+        )
     if patch_path is None or not patch_path.is_file():
-        return None
+        return _reject(
+            "canonical_patch_path is not a readable file inside the workspace: "
+            f"{payload.get('canonical_patch_path')!r}"
+        )
     if files_root is None or not files_root.is_dir():
-        return None
+        return _reject(
+            "canonical_files_root is not a directory inside the workspace: "
+            f"{payload.get('canonical_files_root')!r}"
+        )
 
     # Reclaiming these paths is destructive and keys off this declaration alone,
     # so an absent or non-relative one fails the result rather than defaulting.
     declared_temporary = payload.get("temporary_paths")
     if not isinstance(declared_temporary, list):
-        return None
+        return _reject(
+            f"temporary_paths is not a list: {declared_temporary!r}"
+        )
     temporary_paths: list[str] = []
     for raw in declared_temporary:
         resolved = _rewrite_contained_path(workspace_root, raw, allow_absolute=False)
         if resolved is None:
-            return None
+            return _reject(
+                f"declared temporary path escapes the workspace or is absolute: {raw!r}"
+            )
         temporary_paths.append(str(resolved))
 
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    except (OSError, json.JSONDecodeError) as error:
+        return _reject(f"the manifest at {manifest_path} is unreadable: {error}")
     if not isinstance(manifest, dict):
-        return None
+        return _reject(f"the manifest at {manifest_path} is not a JSON object")
     if not _rewrite_manifest_has_producer_shape(manifest):
-        return None
+        return _reject(
+            "the manifest is missing producer-owned fields, so it was not written "
+            "by the rewrite producer"
+        )
     if manifest.get("schema_version") != _REWRITE_ARTIFACT_SCHEMA_VERSION:
-        return None
+        return _reject(
+            f"manifest schema_version={manifest.get('schema_version')!r} is not the "
+            f"supported {_REWRITE_ARTIFACT_SCHEMA_VERSION}"
+        )
     if manifest.get("artifact_kind") != _REWRITE_ARTIFACT_KIND:
-        return None
+        return _reject(
+            f"manifest artifact_kind={manifest.get('artifact_kind')!r} is not "
+            f"{_REWRITE_ARTIFACT_KIND!r}"
+        )
     if manifest.get("validation_scope") != _REWRITE_VALIDATION_SCOPE:
-        return None
+        return _reject(
+            f"manifest validation_scope={manifest.get('validation_scope')!r} is not "
+            f"{_REWRITE_VALIDATION_SCOPE!r}"
+        )
     if str(manifest.get("framework") or "") not in _REWRITE_SUPPORTED_FRAMEWORKS:
-        return None
+        return _reject(
+            f"manifest framework={manifest.get('framework')!r} is not one this "
+            f"consumer can apply back {sorted(_REWRITE_SUPPORTED_FRAMEWORKS)}"
+        )
     if manifest.get("reference_correctness_passed") is not True:
-        return None
+        return _reject("the manifest does not claim reference correctness passed")
     if manifest.get("integration_validation_required") is not True:
-        return None
+        return _reject(
+            "the manifest does not require integration validation, which only a "
+            "producer claiming to have proven the integration itself would do"
+        )
     if str(manifest.get("integration_validation_status") or "") != _REWRITE_INTEGRATION_PENDING:
-        return None
+        return _reject(
+            "manifest integration_validation_status="
+            f"{manifest.get('integration_validation_status')!r} is not "
+            f"{_REWRITE_INTEGRATION_PENDING!r}; only the consumer may record a verdict"
+        )
     if str(manifest.get("base_commit") or "").strip() != base_commit:
-        return None
+        return _reject(
+            f"manifest base_commit={manifest.get('base_commit')!r} is not the commit "
+            f"this attempt started from ({base_commit})"
+        )
     manifest_artifact_dir = _rewrite_contained_path(
         workspace_root / "forge_experiments",
         manifest.get("artifact_dir"),
@@ -2921,9 +3025,15 @@ def _validated_rewrite_applyback_result(
         allow_absolute=False,
     )
     if manifest_artifact_dir is None or manifest_artifact_dir != files_root.parent:
-        return None
+        return _reject(
+            f"manifest artifact_dir={manifest.get('artifact_dir')!r} does not resolve "
+            f"to the parent of the declared canonical_files_root ({files_root.parent})"
+        )
     if manifest_patch_path is None or manifest_patch_path != patch_path:
-        return None
+        return _reject(
+            f"manifest patch_path={manifest.get('patch_path')!r} does not resolve to "
+            f"the declared canonical_patch_path ({patch_path})"
+        )
 
     lineage = _validated_commit_lineage_and_timing(
         manifest,
@@ -2931,10 +3041,16 @@ def _validated_rewrite_applyback_result(
         base_commit=base_commit,
     )
     if lineage is None:
-        return None
+        return _reject(
+            "the manifest's commit lineage or its reference timings did not validate "
+            "against the workspace"
+        )
     best_commit, baseline_ms, best_ms = lineage
     if best_commit != outer_commit:
-        return None
+        return _reject(
+            f"the manifest's best commit ({best_commit[:12]}) is not the one the "
+            f"result names ({outer_commit[:12]})"
+        )
     # Whether the rewrite is *faster* is not part of the producer contract: it
     # may publish a correct-but-not-faster port. That is a consumer policy call,
     # graded by the caller so a rejected win is not reported as a bad artifact.
@@ -2943,25 +3059,34 @@ def _validated_rewrite_applyback_result(
     for raw in manifest.get("changed_files") or []:
         relative = str(raw or "").strip()
         if not relative:
-            return None
+            return _reject("the manifest declares an empty changed_files entry")
         parts = Path(relative)
         if parts.is_absolute() or ".." in parts.parts:
-            return None
+            return _reject(
+                f"the manifest declares a changed file outside the framework: {relative!r}"
+            )
         changed_files.append(parts.as_posix())
     if not changed_files:
-        return None
-    if _patch_touched_paths(patch_path) != set(changed_files):
-        return None
+        return _reject("the manifest declares no changed files")
+    touched = _patch_touched_paths(patch_path)
+    if touched != set(changed_files):
+        return _reject(
+            "the patch and the manifest disagree on which files change (patch: "
+            f"{sorted(touched or [])}, manifest: {sorted(changed_files)})"
+        )
 
     commit_ref = str(manifest.get("commit_ref") or "").strip()
     if not commit_ref:
-        return None
+        return _reject("the manifest names no commit_ref to pin the artifact to")
     pinned = _run(
         ["git", "-C", workspace, "rev-parse", "--verify", f"{commit_ref}^{{commit}}"],
         timeout=30,
     )
     if pinned.returncode != 0 or pinned.stdout.strip() != best_commit:
-        return None
+        return _reject(
+            f"commit_ref {commit_ref!r} does not resolve to the best commit "
+            f"({best_commit[:12]}) in the workspace"
+        )
 
     return {
         "best_commit": best_commit,
@@ -3446,6 +3571,21 @@ def _run_rewrite_via_cli(
     """
     if deadline_unix <= 0:
         deadline_unix = time.time() + timeout_s
+    # Spend the reserve instead of only charging admission for it. The producer
+    # is aimed at a deadline one reserve short of the hard kill, so committing
+    # and publishing the apply-back happens inside its own budget rather than
+    # racing this process's absolute deadline. Admission already refuses a
+    # budget that cannot leave the producer its minimum after the deduction, and
+    # the floor keeps a caller-side rounding error from ever passing a
+    # ``--max-hours`` the producer would reject outright.
+    producer_deadline_unix = max(
+        time.time() + 1.0,
+        deadline_unix - _flydsl_rewrite.APPLYBACK_RESERVE_SEC,
+    )
+    max_hours = max(
+        _flydsl_rewrite.PRODUCER_MIN_BUDGET_SEC / 3600.0,
+        min(max_hours, (producer_deadline_unix - time.time()) / 3600.0),
+    )
     try:
         result_json.unlink(missing_ok=True)
     except OSError as exc:
@@ -3491,7 +3631,7 @@ def _run_rewrite_via_cli(
         "--max-hours",
         str(max_hours),
         "--deadline-unix",
-        str(deadline_unix),
+        str(producer_deadline_unix),
         "--git-branch",
         branch,
         "--result-json",
@@ -3678,10 +3818,12 @@ def _run_rewrite_attempt(
     )
     # The producer is never given an experiment id, so it writes no forge-loop
     # checkpoint: a published apply-back is the only evidence this route takes.
+    applyback_problems: list[str] = []
     applyback = _validated_rewrite_applyback_result(
         outcome.result,
         workspace=workspace,
         base_commit=base_commit,
+        problems=applyback_problems,
     )
     def _rejected(detail: str) -> tuple[dict, list[str]]:
         """Report a rewrite attempt that produced nothing this route can keep."""
@@ -3699,6 +3841,8 @@ def _run_rewrite_attempt(
             if outcome.timed_out
             else "forge rewrite returned without a validated apply-back patch"
         )
+        if applyback_problems:
+            detail = f"{detail}: {applyback_problems[-1]}"
         if outcome.error is not None:
             detail = f"{detail}: {outcome.error}"
         return _rejected(detail)
@@ -3789,6 +3933,52 @@ def _run_rewrite_attempt(
     return res, applyback["temporary_paths"]
 
 
+_RELOCATABLE_ARTIFACT_KEYS = (
+    "canonical_patch_path",
+    "canonical_files_root",
+    "canonical_manifest",
+    "best_manifest",
+    "checkpoint_path",
+)
+
+
+def _repoint_relocated_artifacts(
+    result: dict[str, Any] | None,
+    *,
+    moved_from: Path,
+    moved_to: Path,
+) -> None:
+    """Rewrite artifact paths in ``result`` that a directory move just invalidated."""
+    if not result:
+        return
+
+    def relocated(raw: Any) -> str | None:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        try:
+            relative = Path(text).relative_to(moved_from)
+        except ValueError:
+            return None
+        return str(moved_to / relative)
+
+    for key in _RELOCATABLE_ARTIFACT_KEYS:
+        moved = relocated(result.get(key))
+        if moved:
+            result[key] = moved
+    artifacts = result.get("artifacts")
+    if isinstance(artifacts, list):
+        result["artifacts"] = [
+            relocated(entry) or str(entry) for entry in artifacts
+        ]
+    applyback = result.get("flydsl_applyback")
+    if isinstance(applyback, dict):
+        for key in _RELOCATABLE_ARTIFACT_KEYS:
+            moved = relocated(applyback.get(key))
+            if moved:
+                applyback[key] = moved
+
+
 def _finalize_forge_workspace(
     *,
     inplace: bool,
@@ -3799,12 +3989,18 @@ def _finalize_forge_workspace(
     branch: str,
     nogit_scratch: bool,
     temporary_paths: list[str] | None = None,
+    result: dict[str, Any] | None = None,
 ) -> None:
     """Restore live repos, but retain isolated Forge workspaces for inspection.
 
     ``temporary_paths`` are scratch files a producer declared in a validated
     result. They are reclaimed only in place, and only after re-confirming
     containment, so an unvalidated run never deletes anything it merely guessed.
+
+    ``result`` is the dict about to be returned to the caller. Relocating an
+    in-place campaign directory moves the producer's published bundle with it, so
+    the artifact paths in there are repointed at the new location; left alone they
+    would name a directory this function had just emptied.
     """
     if inplace:
         cleanup_errors: list[str] = []
@@ -3835,6 +4031,11 @@ def _finalize_forge_workspace(
                     destination = preserved
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(campaign_root), str(destination))
+                _repoint_relocated_artifacts(
+                    result,
+                    moved_from=campaign_root,
+                    moved_to=destination,
+                )
             except OSError as error:
                 cleanup_errors.append(
                     f"failed to preserve in-place campaign artifacts: {error}"
@@ -3859,6 +4060,7 @@ def _finalize_forge_workspace(
                 cleanup_errors.append(
                     f"failed to remove generated in-place driver: {error}"
                 )
+        _restore_generated_driver_exclude(Path(workspace))
         workspace_root = Path(workspace).resolve()
         for raw in temporary_paths or []:
             declared = Path(str(raw))
@@ -4033,6 +4235,11 @@ def submit(
 
     driver = ""
     producer_temporary_paths: list[str] = []
+    # Handed to finalization so the paths a caller receives still resolve after an
+    # in-place campaign directory is relocated. Finalization runs in this
+    # function's ``finally``, which is before the value reaches the caller, so
+    # repointing this dict in place is visible to them.
+    finalized_result: dict[str, Any] = {}
     try:
         # Locate the Kernel-Forge code via $FORGE_PATH (the loop runs in a
         # subprocess, so kernel_agents need not be importable in this process).
@@ -4074,6 +4281,7 @@ def submit(
             branch=branch,
             attempt_id=output_dir.name,
             timeout_s=timeout_s,
+            invocation_spec_file=invocation_spec_file,
             forge_root=forge_root,
         )
         if not rewrite_route.eligible and rewrite_route.reason != "route_disabled":
@@ -4267,6 +4475,7 @@ def submit(
                 timeout_s=timeout_s,
                 started=started,
             )
+            finalized_result = rewrite_result
             return rewrite_result
 
         loop_outcome = _run_loop_via_cli(
@@ -4490,6 +4699,7 @@ def submit(
             res["checkpoint_path"] = str(
                 experiments_dir / f"{_FORGE_EXPERIMENT_ID}.json"
             )
+        finalized_result = res
         return res
     except Exception as exc:  # noqa: BLE001
         return _normalized(1, "", f"forge submit failed: {type(exc).__name__}: {exc}", time.time() - started)
@@ -4505,6 +4715,7 @@ def submit(
                 branch=branch,
                 nogit_scratch=nogit_scratch,
                 temporary_paths=producer_temporary_paths,
+                result=finalized_result,
             )
         except Exception:
             log.exception("forge workspace finalization failed")

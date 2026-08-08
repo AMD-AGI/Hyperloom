@@ -317,6 +317,68 @@ def test_canonical_applyback_is_accepted_with_both_documents_agreeing(repo):
     assert validated["temporary_paths"] == [str(workspace / _ARTIFACT_DIR / "scratch.py")]
 
 
+def test_a_renaming_patch_is_not_discarded_for_naming_its_source(repo):
+    """The producer declares destinations; a rename header names both ends.
+
+    ``git diff --name-only`` reports a rename as its destination alone, while the
+    header reads ``diff --git a/<source> b/<destination>``. Counting the source
+    too made the declared and parsed sets differ, so an artifact that had already
+    run a whole campaign was thrown away. Add, modify and delete were unaffected,
+    because there both ends name the same file.
+    """
+    workspace, base_commit = repo
+    renaming_patch = (
+        "diff --git a/kernel.py b/flydsl_kernel.py\n"
+        "similarity index 100%\n"
+        "rename from kernel.py\n"
+        "rename to flydsl_kernel.py\n"
+    )
+    outer = _publish_applyback(
+        workspace,
+        base_commit,
+        patch_body=renaming_patch,
+        manifest_overrides={"changed_files": ["flydsl_kernel.py"]},
+    )
+    problems: list[str] = []
+
+    validated = forge_submit._validated_rewrite_applyback_result(
+        outer,
+        workspace=str(workspace),
+        base_commit=base_commit,
+        problems=problems,
+    )
+
+    assert validated is not None, problems
+    assert validated["changed_files"] == ["flydsl_kernel.py"]
+
+
+def test_a_refused_applyback_names_the_clause_that_refused_it(repo):
+    """Forty refusals used to reach an operator as one sentence.
+
+    A campaign that spent an hour reported only that it produced nothing, which
+    made every other failure in this route harder to place than it needed to be.
+    """
+    workspace, base_commit = repo
+    outer = _publish_applyback(
+        workspace,
+        base_commit,
+        manifest_overrides={"framework": "torch"},
+    )
+    problems: list[str] = []
+
+    validated = forge_submit._validated_rewrite_applyback_result(
+        outer,
+        workspace=str(workspace),
+        base_commit=base_commit,
+        problems=problems,
+    )
+
+    assert validated is None
+    assert len(problems) == 1
+    assert "framework" in problems[0]
+    assert "torch" in problems[0]
+
+
 def test_installed_producer_contract_is_consumed_without_a_local_fixture(repo):
     """Materialize the real producer documents and pass them through this consumer."""
     producer_root = forge_submit._ensure_forge_on_path()
