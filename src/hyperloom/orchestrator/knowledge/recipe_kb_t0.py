@@ -77,37 +77,17 @@ def _build_warm_prefer(shared_state: Any, framework_version: str) -> dict[str, A
 
 
 def _warm_recipe_source(row: Mapping[str, Any] | None, kb: Any) -> str:
-    """Tag the warm-recipe source by the dispatcher's active remote type.
+    """Return the source tag for a Recipe warm-start row.
 
     Args:
-        row (Mapping[str, Any] | None): The identity-match warm recipe row;
-            unused, retained for call-site compatibility.
-        kb (Any): The RecipeKB dispatcher whose remote type is inspected.
+        row: Unused; retained for call-site compatibility.
+        kb: Recipe backend or read-only compatibility adapter.
 
     Returns:
-        str: A short source tag, e.g. ``gbrain`` / ``recipe-kb``.
+        A stable backend source tag.
     """
-    return "gbrain" if _remote_is_gbrain(kb) else "recipe-kb"
-
-
-def _remote_is_gbrain(kb: Any) -> bool:
-    """Best-effort source tag for the WarmStartContext.
-
-    Reports ``True`` when the dispatcher's active remote is the gbrain
-    adapter; otherwise the source is the recipe kb-service (or local-only
-    fallback, which we still label ``recipe-kb`` since that is the
-    configured remote contract).
-
-    Args:
-        kb: The recipe-KB dispatcher whose active remote is inspected.
-
-    Returns:
-        ``True`` when the active remote is the gbrain adapter.
-    """
-    if str(getattr(kb, "mode", "")).lower() == "remote":
-        return True
-    remote = getattr(kb, "remote", None)
-    return type(remote).__name__ == "GbrainRemoteRecipeClient"
+    del row
+    return str(getattr(kb, "backend_name", "") or "recipe-kb")
 
 
 def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
