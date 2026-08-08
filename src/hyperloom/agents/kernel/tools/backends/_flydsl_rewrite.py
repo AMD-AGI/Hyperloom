@@ -52,6 +52,12 @@ RESULT_SENTINEL = "__FORGE_RESULT__"
 SUPPORTED_SOURCE_TYPES = frozenset({"triton"})
 SUPPORTED_FRAMEWORKS = frozenset({"aiter", "vllm", "sglang"})
 
+# Who authored the measurement driver an attempt runs with. Synthesized drivers
+# rebuild the invocation from traced shapes; a producer-prepared one is written
+# by the producer from the invocation spec when this consumer cannot.
+DRIVER_SOURCE_SYNTHESIZED = "synthesized"
+DRIVER_SOURCE_PRODUCER = "producer_prepared"
+
 # Mirrors kernel_agents.cli MIN_MAX_HOURS (1.0h): the producer rejects a shorter
 # --max-hours outright, so a budget that cannot reach it is ineligible rather
 # than a child-process hard failure.
@@ -76,6 +82,9 @@ class RewriteCapabilities:
     reason: str
     detail: str = ""
     frameworks: tuple[str, ...] = ()
+    # Optional and additive: a producer predating driver preparation simply
+    # omits it, which keeps the route on its own synthesized driver.
+    driver_preparation: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -83,6 +92,7 @@ class RewriteCapabilities:
             "reason": self.reason,
             "detail": self.detail,
             "frameworks": list(self.frameworks),
+            "driver_preparation": self.driver_preparation,
         }
 
 
@@ -101,6 +111,7 @@ class RewriteCandidateSpec:
     driver: str
     branch: str
     attempt_id: str
+    driver_source: str = DRIVER_SOURCE_SYNTHESIZED
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -113,6 +124,7 @@ class RewriteCandidateSpec:
             "gpu_target": self.gpu_target,
             "operator_family": self.operator_family,
             "driver": self.driver,
+            "driver_source": self.driver_source,
             "branch": self.branch,
             "attempt_id": self.attempt_id,
         }
@@ -259,7 +271,13 @@ def _validated_capabilities(payload: dict[str, Any] | None) -> RewriteCapabiliti
             "capability_frameworks_missing",
             "producer advertises no apply-back frameworks",
         )
-    return RewriteCapabilities(True, "capability_ok", "", frameworks)
+    return RewriteCapabilities(
+        True,
+        "capability_ok",
+        "",
+        frameworks,
+        driver_preparation=payload.get("driver_preparation") is True,
+    )
 
 
 def probe_capabilities(*, forge_root: str = "") -> RewriteCapabilities:
@@ -602,6 +620,47 @@ main()
 '''
 
 
+# The producer requires --driver to name an existing file before it will decide
+# whether to prepare one, so an attempt with no synthesizable contract still has
+# to hand over something. This exits non-zero without printing a timing or a
+# rejected-argument phrase, which is exactly the non-conforming answer that
+# sends the producer into driver preparation.
+REWRITE_DRIVER_SEED_TEMPLATE = '''#!/usr/bin/env python3
+"""Placeholder rewrite driver, replaced by the producer's preparation stage.
+
+Hyperloom could not rebuild a faithful invocation for this operator from traced
+shapes, so it handed the producer the invocation spec and this stub instead.
+Nothing here is meant to run.
+"""
+import sys
+
+print(
+    "rewrite_driver_error: placeholder driver; the producer's driver-preparation "
+    "stage must author the real one from the invocation spec",
+    file=sys.stderr,
+)
+raise SystemExit(1)
+'''
+
+
+def build_rewrite_driver_seed(
+    *,
+    workspace: str,
+    writer: Callable[[str, str], str],
+) -> str:
+    """Write the placeholder driver the producer's preparation stage replaces.
+
+    Args:
+        workspace: The prepared Forge workspace the driver must live in.
+        writer: Allocator for a driver file inside ``workspace``, sharing the
+            naming and cleanup contract of every other generated driver.
+
+    Returns:
+        str: The path of the generated placeholder.
+    """
+    return writer(workspace, REWRITE_DRIVER_SEED_TEMPLATE)
+
+
 def build_rewrite_driver(
     contract: Mapping[str, Any],
     *,
@@ -779,22 +838,18 @@ def evaluate_rewrite_route(
         return RewriteDecision(False, "target_functions_missing", "no implementation symbol resolved")
 
     contract = dict(driver_contract or {})
-    if not contract.get("cases"):
-        return RewriteDecision(
-            False,
-            "driver_unavailable",
-            "no rewrite driver contract for this operator family",
-        )
-    try:
-        contract_version = int(contract.get("contract_version") or 0)
-    except (TypeError, ValueError):
-        contract_version = 0
-    if contract_version != DRIVER_CONTRACT_VERSION:
-        return RewriteDecision(
-            False,
-            "driver_contract_unsupported",
-            f"driver contract version {contract_version} is not {DRIVER_CONTRACT_VERSION}",
-        )
+    synthesizable = bool(contract.get("cases"))
+    if synthesizable:
+        try:
+            contract_version = int(contract.get("contract_version") or 0)
+        except (TypeError, ValueError):
+            contract_version = 0
+        if contract_version != DRIVER_CONTRACT_VERSION:
+            return RewriteDecision(
+                False,
+                "driver_contract_unsupported",
+                f"driver contract version {contract_version} is not {DRIVER_CONTRACT_VERSION}",
+            )
 
     probe = capability_probe or probe_capabilities
     capabilities = probe(forge_root=forge_root)
@@ -808,6 +863,20 @@ def evaluate_rewrite_route(
             capabilities=capabilities,
         )
 
+    # Only a few operator families reduce to an invocation this consumer can
+    # rebuild from traced shapes alone; quantized and routed operators carry
+    # scale and index operands whose meaning the trace does not describe. For
+    # those the producer authors the driver from the invocation spec, so a
+    # missing contract is only fatal when the producer cannot do that.
+    if not synthesizable and not capabilities.driver_preparation:
+        return RewriteDecision(
+            False,
+            "driver_unavailable",
+            "no rewrite driver contract for this operator family, and the "
+            "producer does not advertise driver preparation",
+            capabilities=capabilities,
+        )
+
     spec = RewriteCandidateSpec(
         logical_operator=logical_operator,
         source_kernel=source_kernel,
@@ -818,6 +887,7 @@ def evaluate_rewrite_route(
         gpu_target=gpu_target,
         operator_family=str(contract.get("operator_family") or ""),
         driver="",
+        driver_source=DRIVER_SOURCE_SYNTHESIZED if synthesizable else DRIVER_SOURCE_PRODUCER,
         branch=branch,
         attempt_id=attempt_id,
     )
@@ -828,6 +898,8 @@ __all__ = [
     "APPLYBACK_RESERVE_SEC",
     "ARTIFACT_SCHEMA_VERSION",
     "DRIVER_CONTRACT_VERSION",
+    "DRIVER_SOURCE_PRODUCER",
+    "DRIVER_SOURCE_SYNTHESIZED",
     "ENV_BUILDER_SYMBOL",
     "ENV_CANDIDATE_KERNEL",
     "ENV_LOGICAL_OP",
@@ -836,6 +908,7 @@ __all__ = [
     "PROTOCOL_VERSION",
     "RESULT_SENTINEL",
     "REWRITE_COMMAND",
+    "REWRITE_DRIVER_SEED_TEMPLATE",
     "REWRITE_DRIVER_TEMPLATE",
     "REWRITE_ENV",
     "SUPPORTED_FRAMEWORKS",
@@ -844,6 +917,7 @@ __all__ = [
     "RewriteCapabilities",
     "RewriteDecision",
     "build_rewrite_driver",
+    "build_rewrite_driver_seed",
     "evaluate_rewrite_route",
     "probe_capabilities",
     "reset_capability_cache",
