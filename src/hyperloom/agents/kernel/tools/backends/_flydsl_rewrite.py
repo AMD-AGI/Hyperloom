@@ -512,12 +512,16 @@ def _selected_cases(shape):
 
 
 def _run_bench(entry, cases, args):
-    """Time one implementation over every case and report the workload total."""
+    """Time one implementation over every case and report the workload total.
+
+    The per-case line is the producer's authority on which cases a bench run
+    actually covered, and it only reads the ``case_ms:`` spelling.
+    """
     total = 0.0
     for case in cases:
         tensors = _build_inputs(case)
         median = _median_ms(functools.partial(entry, *tensors), args.warmup, args.iters)
-        print("[case] %s ms=%.6f" % (case.get("case_id"), median))
+        print("case_ms: %s %.6f" % (case.get("case_id"), median))
         total += median
     print("median_ms: %.6f" % total)
     print("wall_ms: %.6f" % total)

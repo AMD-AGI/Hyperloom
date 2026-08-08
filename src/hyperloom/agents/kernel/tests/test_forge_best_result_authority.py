@@ -479,8 +479,6 @@ def test_empty_temporary_path_declaration_is_accepted(repo):
         pytest.param({"integration_validation_required": False}, id="integration_not_required"),
         pytest.param({"integration_validation_status": "passed"}, id="integration_prematurely_passed"),
         pytest.param({"base_commit": "0" * 40}, id="base_commit_mismatch"),
-        pytest.param({"best_wall_ms": 2.5}, id="no_micro_gain"),
-        pytest.param({"best_wall_ms": 2.0}, id="micro_gain_is_a_tie"),
         pytest.param({"baseline_wall_ms": 0.0}, id="unusable_baseline"),
         pytest.param({"changed_files": []}, id="no_changed_files"),
         pytest.param({"changed_files": ["../outside.py"]}, id="changed_file_escapes"),
@@ -499,6 +497,32 @@ def test_manifest_that_breaks_the_contract_is_rejected(repo, overrides):
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"best_wall_ms": 2.5}, id="slower_than_the_source"),
+        pytest.param({"best_wall_ms": 2.0}, id="tied_with_the_source"),
+    ],
+)
+def test_an_apply_back_that_is_not_faster_stays_contract_valid(repo, overrides):
+    """Being faster is consumer policy, not part of the producer contract.
+
+    The producer may publish a correct-but-not-faster port, so this validator
+    must still describe it. ``_run_rewrite_attempt`` is what declines it, with a
+    reason that says "not faster" rather than "malformed artifact".
+    """
+    workspace, base_commit = repo
+    outer = _publish_applyback(workspace, base_commit, manifest_overrides=overrides)
+
+    validated = forge_submit._validated_rewrite_applyback_result(
+        outer, workspace=str(workspace), base_commit=base_commit
+    )
+
+    assert validated is not None
+    assert validated["best_ms"] >= validated["baseline_ms"]
+    assert validated["integration_validation_status"] == "pending"
 
 
 def test_manifest_commit_disagreeing_with_the_outer_result_is_rejected(repo):

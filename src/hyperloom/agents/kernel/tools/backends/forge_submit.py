@@ -2934,8 +2934,11 @@ def _validated_rewrite_applyback_result(
     if lineage is None:
         return None
     best_commit, baseline_ms, best_ms = lineage
-    if best_commit != outer_commit or best_ms >= baseline_ms:
+    if best_commit != outer_commit:
         return None
+    # Whether the rewrite is *faster* is not part of the producer contract: it
+    # may publish a correct-but-not-faster port. That is a consumer policy call,
+    # graded by the caller so a rejected win is not reported as a bad artifact.
 
     changed_files: list[str] = []
     for raw in manifest.get("changed_files") or []:
@@ -3412,7 +3415,7 @@ def _run_rewrite_via_cli(
     experiments_dir: Path,
     result_json: Path,
     target_functions: list[str] | None,
-    shapes: dict,
+    shapes: list[dict],
     snr_threshold: float,
     gpu_target: str,
     max_iters: int,
@@ -3429,6 +3432,10 @@ def _run_rewrite_via_cli(
     isolated process group, absolute deadline and escalating termination -- but
     builds the producer's own argv rather than stripping options off the
     generic one, and reads only the caller-chosen result file.
+
+    ``shapes`` is a list of per-case dimension mappings, not the generic
+    forge-loop selector dict: the rewrite producer coerces this argument with
+    ``list()``, so a mapping would degrade into a list of its keys.
     """
     if deadline_unix <= 0:
         deadline_unix = time.time() + timeout_s
@@ -3620,7 +3627,6 @@ def _run_rewrite_attempt(
     output_dir: Path,
     experiments_dir: Path,
     forge_log: Path,
-    shapes: dict,
     snr_threshold: float,
     max_iters: int,
     max_hours: float,
@@ -3645,7 +3651,7 @@ def _run_rewrite_attempt(
         experiments_dir=experiments_dir,
         result_json=output_dir / "forge_rewrite_result.json",
         target_functions=list(spec.implementation_symbols),
-        shapes=shapes,
+        shapes=[dict(case) for case in spec.shape_cases],
         snr_threshold=snr_threshold,
         gpu_target=spec.gpu_target,
         max_iters=max_iters,
@@ -3663,6 +3669,16 @@ def _run_rewrite_attempt(
         workspace=workspace,
         base_commit=base_commit,
     )
+    def _rejected(detail: str) -> tuple[dict, list[str]]:
+        """Report a rewrite attempt that produced nothing this route can keep."""
+        failed = _normalized(1, "", detail, time.time() - started)
+        failed["timed_out"] = outcome.timed_out
+        failed["salvaged"] = False
+        failed["output_dir"] = str(output_dir)
+        failed["cli_workspace"] = str(output_dir)
+        failed["flydsl_rewrite"] = route.as_dict()
+        return failed, []
+
     if applyback is None:
         detail = (
             "forge rewrite timed out before publishing an apply-back patch"
@@ -3671,13 +3687,24 @@ def _run_rewrite_attempt(
         )
         if outcome.error is not None:
             detail = f"{detail}: {outcome.error}"
-        failed = _normalized(1, "", detail, time.time() - started)
-        failed["timed_out"] = outcome.timed_out
-        failed["salvaged"] = False
-        failed["output_dir"] = str(output_dir)
-        failed["cli_workspace"] = str(output_dir)
-        failed["flydsl_rewrite"] = route.as_dict()
-        return failed, []
+        return _rejected(detail)
+
+    # A contract-valid apply-back that is not faster is a policy rejection, not
+    # a malformed artifact. Naming it separately keeps the two apart in the log,
+    # and keeps the producer's scratch unreclaimed on any rejection.
+    if applyback["best_ms"] >= applyback["baseline_ms"]:
+        log.info(
+            "forge rewrite: rejecting a valid apply-back that is not faster "
+            "(best=%sms baseline=%sms commit=%s)",
+            applyback["best_ms"],
+            applyback["baseline_ms"],
+            applyback["best_commit"][:12],
+        )
+        return _rejected(
+            "forge rewrite published a reference-verified apply-back that is not "
+            f"faster than the source: best={applyback['best_ms']}ms vs "
+            f"baseline={applyback['baseline_ms']}ms"
+        )
 
     salvaged = bool(outcome.error)
     _, changed_files = _export_best_artifacts(
@@ -4222,7 +4249,6 @@ def submit(
                 output_dir=output_dir,
                 experiments_dir=experiments_dir,
                 forge_log=forge_log,
-                shapes=shapes,
                 snr_threshold=snr_threshold,
                 max_iters=max_iters,
                 max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),

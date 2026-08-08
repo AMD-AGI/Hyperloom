@@ -983,6 +983,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_extract_gaps_from_attempts": "phase_explore",
         "_gap_layer_for_action": "phase_explore",
         "_record_explore_round_gaps": "phase_explore",
+        "_record_explore_variant_failures": "phase_explore",
         "_task_id_from_specialist_source": "phase_explore",
         "_maybe_materialize_mn_explore": "phase_explore",
         "_maybe_autosubmit_specialist_patches": "phase_explore",
