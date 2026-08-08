@@ -37,10 +37,6 @@ from hyperloom.common.env_safety import (
 from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
 from hyperloom.orchestrator.framework.paths import flydsl_extra_source_dirs
-from ._forge_kernel_patcher import ENV_ENABLED_PACKS as ENV_FORGE_KERNEL_PACKS
-from ._forge_kernel_patcher import ensure_framework_patched_for_forge_kernels
-from ._forge_kernel_patcher import pack_envs as forge_pack_envs
-from ._forge_kernel_patcher import packs_requested_from_env
 from ._grid_runner import (
     compact_json_server_args,
     dedup_vllm_server_args,
@@ -1269,32 +1265,6 @@ def materialize_config_with_envs(
                 "CK fp8 block-scale patch could not be applied; "
                 "SGLANG_FP8_BLOCKSCALE_CK_MAX_M will no-op on the unpatched "
                 "sglang fp8_utils.py (serving run continues unaffected)."
-            )
-    # KernelForge optimized-kernel packs: install the pack, gate it on a real
-    # GPU, and patch the framework call site into it. Same fail-soft contract as
-    # the CK patch above, plus one extra rule -- the env is narrowed to the
-    # packs that actually landed, so the serving process never asks for a pack
-    # whose patch or preflight failed (the dispatcher would decline anyway, but
-    # a truthful env keeps the benchmark record honest).
-    if _tracelens_patch_enabled() and ENV_FORGE_KERNEL_PACKS in envs:
-        _requested = packs_requested_from_env(envs)
-        _landed = ensure_framework_patched_for_forge_kernels(_fw, _requested)
-        if _landed:
-            envs.update(forge_pack_envs(_landed))
-            if set(_landed) != set(_requested):
-                log.warning(
-                    "Forge kernel packs %s did not land (install/preflight/patch failed); continuing with %s",
-                    sorted(set(_requested) - set(_landed)),
-                    list(_landed),
-                )
-        else:
-            envs.pop(ENV_FORGE_KERNEL_PACKS, None)
-            log.warning(
-                "No KernelForge optimized-kernel pack out of %s could be landed "
-                "on %s; dropping %s so the run reflects stock framework kernels.",
-                list(_requested),
-                _fw or "the framework",
-                ENV_FORGE_KERNEL_PACKS,
             )
     # FlyDSL folds only same-directory helpers into its JIT cache key, so a
     # patched helper one directory over is silently served from a stale binary.
