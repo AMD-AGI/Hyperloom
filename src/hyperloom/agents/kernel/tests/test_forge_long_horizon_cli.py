@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -2123,38 +2122,17 @@ _SUPPORTED_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
     "capability_ok",
     "",
     ("aiter", "sglang", "vllm"),
+    driver_preparation=True,
 )
 
-# The same producer, additionally advertising that it can author a driver.
-_PREPARING_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
+# A producer predating driver preparation: it cannot author the measurement
+# driver, which is the one thing this route cannot supply itself.
+_NO_PREPARATION_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
     True,
     "capability_ok",
     "",
     ("aiter", "sglang", "vllm"),
-    driver_preparation=True,
 )
-
-
-def _rewrite_driver_contract(**overrides) -> dict:
-    contract = {
-        "contract_version": 1,
-        "operator_family": "gemm",
-        "logical_operator": "vllm::fused_gemm",
-        "entry_symbols": ["matmul"],
-        "case_selector_key": "CASE_ID",
-        "cases": [
-            {
-                "case_id": "case_001",
-                "selector": {"CASE_ID": "case_001"},
-                "inputs": [
-                    {"shape": [64, 32], "dtype": "fp16"},
-                    {"shape": [32, 16], "dtype": "fp16"},
-                ],
-            }
-        ],
-    }
-    contract.update(overrides)
-    return contract
 
 
 def _rewrite_route_kwargs(tmp_path, **overrides) -> dict:
@@ -2173,7 +2151,6 @@ def _rewrite_route_kwargs(tmp_path, **overrides) -> dict:
         "implementation_symbols": ["matmul"],
         "framework": "vllm",
         "gpu_target": "gfx942",
-        "driver_contract": _rewrite_driver_contract(),
         "shape_cases": [{"M": 8, "N": 16}],
         "shapes": {"M": 8},
         "branch": "forge/session/fused-gemm-abc123def456",
@@ -2212,7 +2189,6 @@ def test_capability_probe_reads_the_declared_rewrite_contract(monkeypatch):
         ({"rewrite_protocol_version": 1}, "capability_protocol_unsupported"),
         ({"rewrite_protocol_version": 3}, "capability_protocol_unsupported"),
         ({"artifact_schema_versions": [1]}, "capability_artifact_schema_unsupported"),
-        ({"driver_contract_versions": [2]}, "capability_driver_contract_unsupported"),
         ({"result_sentinel": "__FORGE_REWRITE_RESULT__"}, "capability_sentinel_mismatch"),
         ({"frameworks": []}, "capability_frameworks_missing"),
     ],
@@ -2339,7 +2315,6 @@ def test_capability_payload_matches_the_installed_producer():
         assert type(published[key]) is type(expected), key
     assert published["rewrite_protocol_version"] == _flydsl_rewrite.PROTOCOL_VERSION
     assert _flydsl_rewrite.ARTIFACT_SCHEMA_VERSION in published["artifact_schema_versions"]
-    assert _flydsl_rewrite.DRIVER_CONTRACT_VERSION in published["driver_contract_versions"]
     assert published["result_sentinel"] == _flydsl_rewrite.RESULT_SENTINEL
 
 
@@ -2400,60 +2375,28 @@ def test_a_flydsl_kernel_is_declined_whatever_its_language_says(tmp_path, monkey
     assert decision.reason == "already_flydsl_source"
 
 
-def test_an_unsynthesizable_operator_is_handed_to_the_producer(tmp_path, monkeypatch):
-    """No driver contract is a hand-over, not a decline, when the producer can author one.
+def test_the_route_requires_a_producer_that_authors_the_driver(tmp_path, monkeypatch):
+    """An operator's real invocation is not rebuildable from traced shapes.
 
-    Quantized and routed operators carry scale and index operands whose meaning
-    traced shapes do not describe, so this consumer cannot rebuild their
-    invocation. Declining them here is what kept the whole route off every hot
-    kernel of an MXFP8 MoE model.
+    Quantized and routed operands carry scale and index meanings the trace does
+    not describe, so the producer writes the driver from the invocation spec. A
+    producer that cannot do that leaves this route with nothing to measure.
     """
     monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
-    probe = _RecordingProbe(_PREPARING_CAPABILITIES)
 
-    decision = _flydsl_rewrite.evaluate_rewrite_route(
-        capability_probe=probe,
-        **_rewrite_route_kwargs(tmp_path, driver_contract={}),
+    granted = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=_RecordingProbe(_SUPPORTED_CAPABILITIES),
+        **_rewrite_route_kwargs(tmp_path),
     )
-
-    assert decision.eligible is True
-    assert decision.reason == "eligible"
-    assert decision.spec.driver_source == _flydsl_rewrite.DRIVER_SOURCE_PRODUCER
-    # Nothing was classified, so no family may be claimed on this route.
-    assert decision.spec.operator_family == ""
-
-
-def test_an_unsynthesizable_operator_still_declines_without_producer_preparation(
-    tmp_path,
-    monkeypatch,
-):
-    """An older producer cannot author a driver, so the decline must stand."""
-    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
-    probe = _RecordingProbe(_SUPPORTED_CAPABILITIES)
-
-    decision = _flydsl_rewrite.evaluate_rewrite_route(
-        capability_probe=probe,
-        **_rewrite_route_kwargs(tmp_path, driver_contract={}),
-    )
-
-    assert decision.eligible is False
-    assert decision.reason == "driver_unavailable"
-    assert "does not advertise driver preparation" in decision.detail
-
-
-def test_a_synthesizable_operator_keeps_its_own_driver(tmp_path, monkeypatch):
-    """Driver preparation must not take work away from a contract that exists."""
-    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
-    probe = _RecordingProbe(_PREPARING_CAPABILITIES)
-
-    decision = _flydsl_rewrite.evaluate_rewrite_route(
-        capability_probe=probe,
+    declined = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=_RecordingProbe(_NO_PREPARATION_CAPABILITIES),
         **_rewrite_route_kwargs(tmp_path),
     )
 
-    assert decision.eligible is True
-    assert decision.spec.driver_source == _flydsl_rewrite.DRIVER_SOURCE_SYNTHESIZED
-    assert decision.spec.operator_family == "gemm"
+    assert granted.eligible is True
+    assert granted.reason == "eligible"
+    assert declined.eligible is False
+    assert declined.reason == "driver_preparation_unsupported"
 
 
 @pytest.mark.parametrize(
@@ -2469,7 +2412,6 @@ def test_a_synthesizable_operator_keeps_its_own_driver(tmp_path, monkeypatch):
         ({"framework": "torch"}, "framework_unsupported"),
         ({"timeout_s": 3600}, "budget_insufficient"),
         ({"implementation_symbols": []}, "target_functions_missing"),
-        ({"driver_contract": _rewrite_driver_contract(contract_version=2)}, "driver_contract_unsupported"),
     ],
 )
 def test_rewrite_route_rejects_candidates_before_probing_the_producer(
@@ -2575,10 +2517,8 @@ def test_eligible_rewrite_route_carries_the_producer_candidate_fields(tmp_path, 
         "shape_cases": [{"M": 8, "N": 16}],
         "framework": "vllm",
         "gpu_target": "gfx942",
-            "operator_family": "gemm",
             # The driver is generated only after the route is granted.
             "driver": "",
-            "driver_source": "synthesized",
             "branch": "forge/session/fused-gemm-abc123def456",
             "attempt_id": "attempt-1",
         }
@@ -2821,7 +2761,6 @@ def test_submit_consumes_a_canonical_applyback_instead_of_the_forge_loop(
     assert loop_call == {}
     verdict = result["flydsl_rewrite"]
     assert verdict["eligible"] is True
-    assert verdict["spec"]["operator_family"] == "gemm"
     driver = Path(verdict["spec"]["driver"])
     assert driver.name.startswith(".forge_driver_")
     assert rewrite_call["driver"] == str(driver)
@@ -3257,240 +3196,3 @@ def test_submit_falls_back_to_forge_loop_on_an_incompatible_producer(tmp_path, m
     assert verdict["eligible"] is False
     assert verdict["reason"] == "capability_artifact_schema_unsupported"
     assert result["best_ms"] == 1.0
-
-
-_SOURCE_MODULE = """
-import os
-
-
-def matmul(a, b):
-    with open(os.environ["REWRITE_CALL_LOG"], "a") as log:
-        log.write("source\\n")
-    return a @ b
-"""
-
-_CANDIDATE_MODULE = """
-import os
-
-
-def build_gemm_module():
-    def launch(a, b):
-        with open(os.environ["REWRITE_CALL_LOG"], "a") as log:
-            log.write("candidate\\n")
-        return (a.float() @ b.float()).to(a.dtype)
-
-    return launch
-"""
-
-
-def _rewrite_driver_workspace(tmp_path, *, contract=None, candidate_module=_CANDIDATE_MODULE):
-    pytest.importorskip("torch")
-    workspace = tmp_path / "rewrite-ws"
-    workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "source.py").write_text(_SOURCE_MODULE)
-    (workspace / "candidate.py").write_text(candidate_module)
-    driver = _flydsl_rewrite.build_rewrite_driver(
-        contract or _rewrite_driver_contract(),
-        workspace=str(workspace),
-        writer=forge_submit._write_generated_driver,
-    )
-    return workspace, driver
-
-
-def _run_rewrite_driver(workspace, driver, *args, candidate=True, builder="build_gemm_module"):
-    env = dict(os.environ)
-    env["REWRITE_CALL_LOG"] = str(workspace / "calls.log")
-    env[_flydsl_rewrite.ENV_SOURCE_KERNEL] = str(workspace / "source.py")
-    env[_flydsl_rewrite.ENV_BUILDER_SYMBOL] = builder
-    env[_flydsl_rewrite.ENV_LOGICAL_OP] = "vllm::fused_gemm"
-    if candidate:
-        env[_flydsl_rewrite.ENV_CANDIDATE_KERNEL] = str(workspace / "candidate.py")
-    else:
-        env.pop(_flydsl_rewrite.ENV_CANDIDATE_KERNEL, None)
-    return subprocess.run(
-        [sys.executable, driver, *args],
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=str(workspace),
-    )
-
-
-def _called_implementations(workspace) -> list[str]:
-    log = workspace / "calls.log"
-    return sorted(set(log.read_text().split())) if log.exists() else []
-
-
-def test_rewrite_driver_bench_modes_measure_different_implementations(tmp_path):
-    workspace, driver = _rewrite_driver_workspace(tmp_path)
-
-    reference = _run_rewrite_driver(workspace, driver, "--ref-bench-mode", "--warmup", "1", "--iters", "2")
-    assert reference.returncode == 0, reference.stderr
-    assert _called_implementations(workspace) == ["source"]
-
-    (workspace / "calls.log").unlink()
-    candidate = _run_rewrite_driver(workspace, driver, "--bench-mode", "--warmup", "1", "--iters", "2")
-    assert candidate.returncode == 0, candidate.stderr
-    assert _called_implementations(workspace) == ["candidate"]
-
-
-def test_rewrite_driver_timing_is_readable_by_the_producer_parser(tmp_path):
-    workspace, driver = _rewrite_driver_workspace(tmp_path)
-
-    proc = _run_rewrite_driver(workspace, driver, "--ref-bench-mode", "--warmup", "1", "--iters", "3")
-
-    assert proc.returncode == 0, proc.stderr
-    # Same expression the generic harness adapter uses to recover a latency.
-    match = re.search(r"(?:median_ms|wall_ms)\s*[:=]\s*([0-9.]+)", proc.stdout)
-    assert match is not None, proc.stdout
-    assert float(match.group(1)) > 0.0
-    # Per-case detail must not collide with the aggregate the parser reads.
-    assert match.group(1) == re.search(r"^median_ms:\s*([0-9.]+)$", proc.stdout, re.M).group(1)
-
-
-def test_rewrite_driver_correctness_covers_every_grouped_case(tmp_path):
-    contract = _rewrite_driver_contract(
-        cases=[
-            {
-                "case_id": "case_001",
-                "selector": {"CASE_ID": "case_001"},
-                "inputs": [
-                    {"shape": [64, 32], "dtype": "fp16"},
-                    {"shape": [32, 16], "dtype": "fp16"},
-                ],
-            },
-            {
-                "case_id": "case_002",
-                "selector": {"CASE_ID": "case_002"},
-                "inputs": [
-                    {"shape": [128, 64], "dtype": "fp32"},
-                    {"shape": [64, 8], "dtype": "fp32"},
-                ],
-            },
-        ]
-    )
-    workspace, driver = _rewrite_driver_workspace(tmp_path, contract=contract)
-
-    proc = _run_rewrite_driver(workspace, driver)
-
-    assert proc.returncode == 0, proc.stderr
-    assert "[case] case_001 output=0 snr_db=" in proc.stdout
-    assert "[case] case_002 output=0 snr_db=" in proc.stdout
-    reported = float(re.search(r"^SNR:\s*([-0-9.]+) dB$", proc.stdout, re.M).group(1))
-    per_case = [float(value) for value in re.findall(r"snr_db=([-0-9.]+)", proc.stdout)]
-    assert len(per_case) == 2
-    assert reported == pytest.approx(min(per_case), abs=0.01)
-    assert _called_implementations(workspace) == ["candidate", "source"]
-
-
-def test_rewrite_driver_selects_a_single_grouped_case(tmp_path):
-    contract = _rewrite_driver_contract(
-        cases=[
-            {
-                "case_id": "case_001",
-                "selector": {"CASE_ID": "case_001"},
-                "inputs": [{"shape": [64, 32], "dtype": "fp16"}, {"shape": [32, 16], "dtype": "fp16"}],
-            },
-            {
-                "case_id": "case_002",
-                "selector": {"CASE_ID": "case_002"},
-                "inputs": [{"shape": [16, 8], "dtype": "fp16"}, {"shape": [8, 4], "dtype": "fp16"}],
-            },
-        ]
-    )
-    workspace, driver = _rewrite_driver_workspace(tmp_path, contract=contract)
-
-    proc = _run_rewrite_driver(
-        workspace, driver, "--ref-bench-mode", "--warmup", "1", "--iters", "2", "--shape", "CASE_ID=case_002"
-    )
-
-    assert proc.returncode == 0, proc.stderr
-    # The producer reads bench-mode case coverage from ``case_ms: <id> <ms>``
-    # only; any other spelling leaves its coverage cross-check with no ids and
-    # silently passing.
-    assert re.search(r"^case_ms:[ \t]*case_002[ \t]+[-+\d.eE]+$", proc.stdout, re.M), proc.stdout
-    assert "case_001" not in proc.stdout
-
-
-def test_rewrite_driver_reports_a_missing_candidate_without_a_metric(tmp_path):
-    workspace, driver = _rewrite_driver_workspace(tmp_path)
-
-    proc = _run_rewrite_driver(workspace, driver, candidate=False)
-
-    assert proc.returncode == 1
-    assert _flydsl_rewrite.ENV_CANDIDATE_KERNEL in proc.stderr
-    # A harness failure is never reported as a correctness verdict.
-    assert "SNR:" not in proc.stdout
-    assert "allclose:" not in proc.stdout
-
-
-def test_rewrite_driver_fails_closed_when_the_candidate_shape_diverges(tmp_path):
-    diverging = """
-import os
-
-
-def build_gemm_module():
-    def launch(a, b):
-        with open(os.environ["REWRITE_CALL_LOG"], "a") as log:
-            log.write("candidate\\n")
-        return (a.float() @ b.float()).to(a.dtype)[:1]
-
-    return launch
-"""
-    workspace, driver = _rewrite_driver_workspace(tmp_path, candidate_module=diverging)
-
-    proc = _run_rewrite_driver(workspace, driver)
-
-    assert proc.returncode == 1
-    assert "allclose: False" in proc.stdout
-    assert "SNR:" not in proc.stdout
-
-
-def test_rewrite_driver_calls_a_parameterised_builder_symbol_directly(tmp_path):
-    direct = """
-import os
-
-
-def flydsl_gemm(a, b):
-    with open(os.environ["REWRITE_CALL_LOG"], "a") as log:
-        log.write("candidate\\n")
-    return (a.float() @ b.float()).to(a.dtype)
-"""
-    workspace, driver = _rewrite_driver_workspace(tmp_path, candidate_module=direct)
-
-    proc = _run_rewrite_driver(workspace, driver, builder="flydsl_gemm")
-
-    assert proc.returncode == 0, proc.stderr
-    assert "SNR:" in proc.stdout
-    assert _called_implementations(workspace) == ["candidate", "source"]
-
-
-def test_rewrite_driver_is_staged_and_reclaimed_like_every_generated_driver(tmp_path):
-    repo, kernel = _make_repo(tmp_path)
-    driver = _flydsl_rewrite.build_rewrite_driver(
-        _rewrite_driver_contract(),
-        workspace=str(repo),
-        writer=forge_submit._write_generated_driver,
-    )
-    staged = Path(driver)
-
-    assert staged.parent == repo
-    assert staged.name.startswith(".forge_driver_")
-    # Excluded from git, so even a broad producer `git add` cannot carry the
-    # driver into the framework patch.
-    assert staged.name not in _git(repo, "status", "--porcelain")
-    _git(repo, "add", "-A")
-    assert staged.name not in _git(repo, "ls-files")
-
-    forge_submit._finalize_forge_workspace(
-        inplace=True,
-        restore_info=None,
-        driver=driver,
-        workspace=str(repo),
-        output_dir=tmp_path / "attempt",
-        branch="forge/session/kernel",
-        nogit_scratch=False,
-    )
-
-    assert not staged.exists()
-    assert kernel.exists()

@@ -33,7 +33,6 @@ _TOOLS_DIR = str(Path(__file__).resolve().parent.parent)
 _TOOLS_DIR_INSERTED = _TOOLS_DIR not in sys.path
 if _TOOLS_DIR_INSERTED:
     sys.path.insert(0, _TOOLS_DIR)
-from _invocation_spec import build_rewrite_driver_contract  # noqa: E402
 from _task_group_contract import (  # noqa: E402
     forge_shapes_from_candidate,
     logical_operator_name,
@@ -4057,8 +4056,6 @@ def submit(
         )
         source_framework = _resolve_framework(candidate, source_file)
         gpu_target = _resolve_gpu_target(candidate)
-        rewrite_driver_contract = build_rewrite_driver_contract(candidate)
-
         # Decided before any driver exists, because the rewrite route brings its
         # own dual-mode driver rather than the generic harness.
         rewrite_route = _flydsl_rewrite.evaluate_rewrite_route(
@@ -4072,7 +4069,6 @@ def submit(
             implementation_symbols=implementation_symbols,
             framework=source_framework,
             gpu_target=gpu_target,
-            driver_contract=rewrite_driver_contract,
             shape_cases=grouped_cases,
             shapes=shapes,
             branch=branch,
@@ -4095,24 +4091,15 @@ def submit(
         # fallback and will either create a conforming driver or fail explicitly.
         driver_from_adapter = False
         if rewrite_route.eligible:
-            producer_prepared = rewrite_route.spec.driver_source == _flydsl_rewrite.DRIVER_SOURCE_PRODUCER
-            if producer_prepared:
-                driver = _flydsl_rewrite.build_rewrite_driver_seed(
-                    workspace=workspace,
-                    writer=_write_generated_driver,
-                )
-            else:
-                driver = _flydsl_rewrite.build_rewrite_driver(
-                    rewrite_driver_contract,
-                    workspace=workspace,
-                    writer=_write_generated_driver,
-                )
+            driver = _flydsl_rewrite.build_rewrite_driver_seed(
+                workspace=workspace,
+                writer=_write_generated_driver,
+            )
             rewrite_route = rewrite_route.with_driver(driver)
             log.info(
-                "forge driver: FlyDSL rewrite %s driver for op=%s family=%s -> %s",
-                "seed (producer authors from the invocation spec)" if producer_prepared else "dual-mode",
+                "forge driver: FlyDSL rewrite seed for op=%s -> %s "
+                "(the producer authors the real one from the invocation spec)",
                 logical_operator or worktree_kernel,
-                rewrite_route.spec.operator_family or "unclassified",
                 driver,
             )
         elif requires_multi_case_driver:
