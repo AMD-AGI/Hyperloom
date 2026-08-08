@@ -1379,6 +1379,17 @@ class TestCompactJsonServerArgs:
             "nested": {"a": 1},
         }
 
+    def test_shell_single_quote_wrappers_are_removed(self):
+        out = _grid_runner.compact_json_server_args(
+            """--speculative-config '{"method":"ngram","num_speculative_tokens":7}' """,
+            "vllm",
+        )
+        assert out.strip() == (
+            "--speculative-config "
+            '{"method":"ngram","num_speculative_tokens":7}'
+        )
+        json.loads(out.split(" ", 1)[1].strip())
+
     def test_unrepairable_json_left_verbatim(self):
         # Genuinely broken blobs that cannot be repaired to valid JSON are left
         # verbatim (no worse than before), never raising.

@@ -115,3 +115,26 @@ def test_recipe_json_strips_secrets_and_internal_paths_but_keeps_safe_replay_fie
         "/tmp/session/",
     ):
         assert secret_or_path not in content
+
+
+def test_sanitize_server_args_preserves_json_without_shell_wrappers() -> None:
+    raw = (
+        "--speculative-config "
+        """'{"method":"ngram","num_speculative_tokens":16}' """
+        "--compilation-config "
+        """'{"pass_config":{"enable_sp":true}}'"""
+    )
+
+    sanitized = gi._sanitize_server_args(raw, drop_paths=False)
+    tokens = sanitized.split()
+
+    assert tokens == [
+        "--speculative-config",
+        '{"method":"ngram","num_speculative_tokens":16}',
+        "--compilation-config",
+        '{"pass_config":{"enable_sp":true}}',
+    ]
+    json.loads(tokens[1])
+    json.loads(tokens[3])
+    assert "'{" not in sanitized
+    assert "}'" not in sanitized

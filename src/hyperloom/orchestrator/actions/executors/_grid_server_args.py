@@ -311,6 +311,16 @@ def _reserialize_json_blobs(args: str) -> str:
     while i < n:
         ch = args[i]
         if ch in "{[":
+            # A prior shlex.join can wrap a JSON token in shell single quotes.
+            # These args are later expanded from an environment variable
+            # without eval, so the wrappers become literal argv characters.
+            # Strip only directly-adjacent wrappers around the balanced blob.
+            single_quote_wrapped = (
+                i > 0
+                and args[i - 1] == "'"
+                and out
+                and out[-1] == "'"
+            )
             # Walk to the balanced close, honouring quoted strings.
             depth = 0
             in_str = False
@@ -335,6 +345,13 @@ def _reserialize_json_blobs(args: str) -> str:
                         j += 1
                         break
                 j += 1
+            single_quote_wrapped = bool(
+                single_quote_wrapped
+                and j < n
+                and args[j] == "'"
+            )
+            if single_quote_wrapped:
+                out.pop()
             blob = args[i:j]
             try:
                 out.append(json.dumps(json.loads(blob), separators=(",", ":")))
@@ -346,7 +363,7 @@ def _reserialize_json_blobs(args: str) -> str:
                 # does not parse (never worse than before).
                 repaired = _repair_unquoted_json(blob)
                 out.append(repaired if repaired is not None else blob)
-            i = j
+            i = j + 1 if single_quote_wrapped else j
         else:
             out.append(ch)
             i += 1
