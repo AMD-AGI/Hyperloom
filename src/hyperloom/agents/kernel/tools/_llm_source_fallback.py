@@ -355,12 +355,10 @@ def _safe_exception_label(exc: BaseException) -> str:
 
 def _complete_openai(prompt: str, model: str, timeout_sec: float) -> str:
     """Run one completion against the configured OpenAI-compatible endpoint."""
-    from openai import OpenAI  # noqa: PLC0415 - optional dependency
+    from hyperloom.common import llm_config  # noqa: PLC0415 - optional dependency
 
-    from hyperloom.common.llm_config import openai_client_kwargs  # noqa: PLC0415
-
-    client = OpenAI(**openai_client_kwargs())
-    response = client.chat.completions.create(
+    return llm_config.chat_completion(
+        llm_config.get_openai_client(),
         model=model,
         messages=[
             {"role": "system", "content": _SYSTEM_PROMPT},
@@ -368,8 +366,7 @@ def _complete_openai(prompt: str, model: str, timeout_sec: float) -> str:
         ],
         temperature=0.0,
         timeout=timeout_sec,
-    )
-    return str(response.choices[0].message.content or "")
+    ).text
 
 
 def _message_text(message: Any) -> list[str]:
