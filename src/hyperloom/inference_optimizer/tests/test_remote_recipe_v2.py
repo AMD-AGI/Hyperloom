@@ -516,6 +516,37 @@ def test_facade_write_explicit_session_overrides_state(monkeypatch) -> None:
     assert seen == ["explicit-session"]
 
 
+def test_degraded_kb_skips_remote_close_writer(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class _Journal:
+        def finalize(self, **kwargs) -> None:
+            pass
+
+    coordinator = SimpleNamespace(
+        shared_state=SimpleNamespace(current_best={"tput": 10.0}),
+        session_dir=tmp_path,
+        recipe_kb=None,
+        knowledge_plane=SimpleNamespace(kb_disabled=True),
+        _ensure_journal=lambda: _Journal(),
+    )
+    from hyperloom.orchestrator.knowledge import remote_recipe
+
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    monkeypatch.setattr(
+        remote_recipe.HyperloomRemoteKB,
+        "from_env",
+        classmethod(
+            lambda cls: (_ for _ in ()).throw(
+                AssertionError("degraded CLOSE constructed HyperloomRemoteKB")
+            )
+        ),
+    )
+
+    WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+
+
 def test_local_close_ignores_ambient_kb_store(
     tmp_path: Path,
     monkeypatch,

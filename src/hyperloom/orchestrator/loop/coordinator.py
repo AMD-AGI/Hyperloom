@@ -1410,6 +1410,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     async def _recipe_kb_t4_hook(self) -> None:
         """T4 — finalize recipe at session end. Safety net for crash/Ctrl-C where CLOSE sequencer didn't run; no-op when close_sequence_done."""
+        if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
+            return
         if getattr(self.shared_state, "close_sequence_done", False):
             return
         try:
