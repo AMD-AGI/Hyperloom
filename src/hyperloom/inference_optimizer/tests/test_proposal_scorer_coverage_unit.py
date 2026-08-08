@@ -110,15 +110,21 @@ def test_ensure_client_prefers_explicit_openai_key(monkeypatch):
     assert captured["api_key"] == "openai-user-key"
 
 
-def test_ensure_client_refuses_anthropic_token(monkeypatch):
-    """The scorer speaks the OpenAI protocol, so it raises with no OpenAI-side key."""
+def test_ensure_client_works_in_an_anthropic_only_deployment(monkeypatch):
+    """The scorer used to raise here, which disabled scoring for Anthropic-only users."""
+    import openai
+
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("LLM_GATEWAY_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-token")
-    monkeypatch.setenv("OPENAI_BASE_URL", "http://proxy")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/Anthropic")
+    captured: dict = {}
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: captured.update(kw) or object())
     scorer = ProposalScorer(models=("m",))
-    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
-        scorer._ensure_client()
+    assert scorer._ensure_client() is not None
+    assert captured["api_key"] == "anthropic-token"
+    assert captured["base_url"] == "https://llm-api.amd.com/Unified/v1"
 
 
 def test_ensure_client_comes_from_the_shared_llm_gateway(monkeypatch):

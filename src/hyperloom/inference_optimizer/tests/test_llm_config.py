@@ -13,14 +13,21 @@ from typing import Any
 import pytest
 
 import hyperloom
+from hyperloom.common import llm_config
 from hyperloom.common.llm_config import (
+    DEFAULT_ANTHROPIC_BASE_URL,
+    DEFAULT_ANTHROPIC_VERSION,
     LLMConfigError,
+    aanthropic_messages,
     achat_completion,
+    anthropic_messages,
     apply_reasoning_effort,
     aresponse,
     build_http_timeout,
     claude_sdk_env_options,
     derive_openai_base_url,
+    get_anthropic_client,
+    get_async_anthropic_client,
     get_async_openai_client,
     get_openai_client,
     openai_client_kwargs,
@@ -89,9 +96,9 @@ def test_openai_kwargs_reads_openai_custom_headers():
     assert kwargs["default_headers"] == {"Ocp-Apim-Subscription-Key": "ak-header"}
 
 
-def test_openai_kwargs_ignores_anthropic_custom_headers_and_host():
-    """The OpenAI/Codex client reads only the OpenAI side; Anthropic headers and
-    host are ignored."""
+def test_openai_kwargs_ignores_anthropic_custom_headers():
+    """The OpenAI/Codex client never reads ANTHROPIC_CUSTOM_HEADERS, and explicit
+    OpenAI-side config wins over the Anthropic host."""
     kwargs = openai_client_kwargs(
         env={
             "_".join(("OPENAI", "API", "KEY")): "openai-token",
@@ -107,15 +114,75 @@ def test_openai_kwargs_ignores_anthropic_custom_headers_and_host():
     assert "default_headers" not in kwargs
 
 
-def test_openai_kwargs_refuse_anthropic_only_env():
-    """Anthropic-only credentials cannot auth an OpenAI-protocol client."""
-    with pytest.raises(LLMConfigError):
-        openai_client_kwargs(
-            env={
-                "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
-                "ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic",
-            }
-        )
+# ---- the three deployment shapes ----
+# Anthropic-only, codex-only (OpenAI-compatible only), and both configured.
+_ANTHROPIC_ONLY_ENV = {
+    "_".join(("ANTHROPIC", "AUTH", "TOKEN")): "gateway-token",
+    "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
+    "ANTHROPIC_BASE_URL": "https://llm-api.amd.com/Anthropic",
+}
+_CODEX_ONLY_ENV = {
+    "_".join(("OPENAI", "API", "KEY")): "openai-token",
+    "OPENAI_BASE_URL": "https://llm-api.amd.com/Unified/v1",
+}
+
+
+def test_anthropic_only_deployment_resolves_through_derivation():
+    """No OpenAI-side config at all: derive the base URL, auth with the gateway token."""
+    kwargs = openai_client_kwargs(env=dict(_ANTHROPIC_ONLY_ENV))
+    assert kwargs["base_url"] == "https://llm-api.amd.com/Unified/v1"
+    assert kwargs["api_key"] == "gateway-token"
+
+
+def test_anthropic_only_deployment_falls_back_to_anthropic_api_key():
+    """ANTHROPIC_AUTH_TOKEN is preferred, but ANTHROPIC_API_KEY alone also authenticates."""
+    env = dict(_ANTHROPIC_ONLY_ENV)
+    del env["_".join(("ANTHROPIC", "AUTH", "TOKEN"))]
+    assert openai_client_kwargs(env=env)["api_key"] == "ak-anthropic"
+
+
+def test_codex_only_deployment_is_unchanged():
+    """No Anthropic side present: resolution is exactly the explicit OpenAI config."""
+    assert openai_client_kwargs(env=dict(_CODEX_ONLY_ENV)) == {
+        "api_key": "openai-token",
+        "base_url": "https://llm-api.amd.com/Unified/v1",
+    }
+
+
+def test_both_configured_prefers_the_explicit_openai_side():
+    """With both shapes present the Anthropic fallback must never be consulted."""
+    kwargs = openai_client_kwargs(env={**_ANTHROPIC_ONLY_ENV, **_CODEX_ONLY_ENV})
+    assert kwargs == {
+        "api_key": "openai-token",
+        "base_url": "https://llm-api.amd.com/Unified/v1",
+    }
+
+
+def test_explicit_openai_side_wins_key_and_url_independently():
+    """A half-configured OpenAI side takes what it has and derives only the rest."""
+    key_only = openai_client_kwargs(env={**_ANTHROPIC_ONLY_ENV, "_".join(("OPENAI", "API", "KEY")): "openai-token"})
+    assert key_only["api_key"] == "openai-token"
+    assert key_only["base_url"] == "https://llm-api.amd.com/Unified/v1"
+
+    url_only = openai_client_kwargs(
+        env={**_ANTHROPIC_ONLY_ENV, "OPENAI_BASE_URL": "https://explicit.example.invalid/v1"}
+    )
+    assert url_only["api_key"] == "gateway-token"
+    assert url_only["base_url"] == "https://explicit.example.invalid/v1"
+
+
+def test_llm_gateway_key_still_outranks_the_anthropic_fallback():
+    env = {**_ANTHROPIC_ONLY_ENV, "LLM_GATEWAY_KEY": "gw-key"}
+    assert openai_client_kwargs(env=env)["api_key"] == "gw-key"
+
+
+def test_openai_kwargs_error_names_every_searched_key():
+    """The message has to list what was actually searched, Anthropic side included."""
+    with pytest.raises(LLMConfigError) as excinfo:
+        openai_client_kwargs(env={"ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic"})
+    message = str(excinfo.value)
+    for name in ("OPENAI_API_KEY", "LLM_GATEWAY_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+        assert name in message
 
 
 def test_openai_kwargs_preserves_explicit_openai_config():
@@ -298,10 +365,221 @@ def test_get_client_raises_clearly_without_the_openai_sdk(monkeypatch):
         get_openai_client(env={_OPENAI_KEY: "tok"})
 
 
-def test_get_client_requires_an_openai_side_key(monkeypatch):
+def test_get_client_requires_some_gateway_key(monkeypatch):
     _install_fake_openai_sdk(monkeypatch)
     with pytest.raises(LLMConfigError, match="OPENAI_API_KEY"):
-        get_async_openai_client(env={"_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic"})
+        get_async_openai_client(env={"OPENAI_BASE_URL": "https://api.openai.com/v1"})
+
+
+# ---- Anthropic client construction ----
+class _FakeHttpxClient:
+    """Stand-in for an ``httpx`` client class; records its kwargs."""
+
+    kind = ""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+
+class _FakeSyncHttpxClient(_FakeHttpxClient):
+    kind = "Client"
+
+
+class _FakeAsyncHttpxClient(_FakeHttpxClient):
+    kind = "AsyncClient"
+
+
+def _install_fake_httpx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the lazy ``import httpx`` at recording stand-ins."""
+    module = types.ModuleType("httpx")
+    module.Client = _FakeSyncHttpxClient
+    module.AsyncClient = _FakeAsyncHttpxClient
+    monkeypatch.setitem(sys.modules, "httpx", module)
+
+
+_ANTHROPIC_KEY = "_".join(("ANTHROPIC", "API", "KEY"))
+_ANTHROPIC_TOKEN = "_".join(("ANTHROPIC", "AUTH", "TOKEN"))
+
+
+def test_get_anthropic_client_sets_auth_version_and_base_url(monkeypatch):
+    _install_fake_httpx(monkeypatch)
+    client = get_anthropic_client(
+        env={_ANTHROPIC_KEY: "ak-anthropic", "ANTHROPIC_BASE_URL": "https://llm-api.amd.com/Anthropic/"}
+    )
+    assert client.kind == "Client"
+    # The Anthropic base URL is used as-is; only the OpenAI side derives.
+    assert client.kwargs["base_url"] == "https://llm-api.amd.com/Anthropic"
+    assert client.kwargs["headers"]["x-api-key"] == "ak-anthropic"
+    assert client.kwargs["headers"]["anthropic-version"] == DEFAULT_ANTHROPIC_VERSION
+    assert client.kwargs["headers"]["Content-Type"] == "application/json"
+
+
+def test_get_async_anthropic_client_defaults_the_public_base_url(monkeypatch):
+    _install_fake_httpx(monkeypatch)
+    client = get_async_anthropic_client(env={_ANTHROPIC_KEY: "ak-anthropic"})
+    assert client.kind == "AsyncClient"
+    assert client.kwargs["base_url"] == DEFAULT_ANTHROPIC_BASE_URL
+
+
+def test_get_anthropic_client_falls_back_to_the_auth_token(monkeypatch):
+    _install_fake_httpx(monkeypatch)
+    client = get_anthropic_client(env={_ANTHROPIC_TOKEN: "gateway-token"})
+    assert client.kwargs["headers"]["x-api-key"] == "gateway-token"
+
+
+def test_get_anthropic_client_merges_custom_gateway_headers(monkeypatch):
+    """AMD's gateway requires ANTHROPIC_CUSTOM_HEADERS; dropping them is a regression."""
+    _install_fake_httpx(monkeypatch)
+    client = get_anthropic_client(
+        env={
+            _ANTHROPIC_KEY: "ak-anthropic",
+            "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}\nX-Team: hyperloom",
+        }
+    )
+    assert client.kwargs["headers"]["Ocp-Apim-Subscription-Key"] == "ak-anthropic"
+    assert client.kwargs["headers"]["X-Team"] == "hyperloom"
+
+
+def test_custom_headers_can_override_the_api_version(monkeypatch):
+    """Merged last on purpose: a gateway pinned to another version stays reachable."""
+    _install_fake_httpx(monkeypatch)
+    client = get_anthropic_client(
+        env={_ANTHROPIC_KEY: "ak-anthropic", "ANTHROPIC_CUSTOM_HEADERS": "anthropic-version: 2099-01-01"}
+    )
+    assert client.kwargs["headers"]["anthropic-version"] == "2099-01-01"
+
+
+def test_get_anthropic_client_timeout_plumbing(monkeypatch):
+    _install_fake_httpx(monkeypatch)
+    assert "timeout" not in get_anthropic_client(env={_ANTHROPIC_KEY: "k"}).kwargs
+    sentinel = object()
+    assert get_async_anthropic_client(env={_ANTHROPIC_KEY: "k"}, timeout=sentinel).kwargs["timeout"] is sentinel
+
+
+def test_get_anthropic_client_is_never_cached(monkeypatch):
+    _install_fake_httpx(monkeypatch)
+    env = {_ANTHROPIC_KEY: "k"}
+    assert get_anthropic_client(env=env) is not get_anthropic_client(env=env)
+    assert get_async_anthropic_client(env=env) is not get_async_anthropic_client(env=env)
+
+
+def test_get_anthropic_client_requires_a_key(monkeypatch):
+    _install_fake_httpx(monkeypatch)
+    with pytest.raises(LLMConfigError, match="ANTHROPIC_API_KEY"):
+        get_anthropic_client(env={"ANTHROPIC_BASE_URL": "https://api.anthropic.com"})
+
+
+def test_get_anthropic_client_raises_clearly_without_httpx(monkeypatch):
+    monkeypatch.setitem(sys.modules, "httpx", None)
+    with pytest.raises(LLMConfigError, match="httpx not installed"):
+        get_anthropic_client(env={_ANTHROPIC_KEY: "k"})
+    with pytest.raises(LLMConfigError, match="httpx not installed"):
+        get_async_anthropic_client(env={_ANTHROPIC_KEY: "k"})
+
+
+# ---- anthropic_messages / aanthropic_messages ----
+class _FakeAnthropicResponse:
+    def __init__(self, *, status_code: int = 200, body: Any = None, text: str = "") -> None:
+        self.status_code = status_code
+        self._body = {} if body is None else body
+        self.text = text
+
+    def json(self) -> Any:
+        if isinstance(self._body, BaseException):
+            raise self._body
+        return self._body
+
+
+class _FakeAnthropicTransport:
+    """Records ``/v1/messages`` POSTs; the async twin awaits the same recorder."""
+
+    def __init__(self, outcome: Any) -> None:
+        self._outcome = outcome
+        self.calls: list[dict[str, Any]] = []
+
+    def post(self, path: str, *, json: Any) -> Any:
+        self.calls.append({"path": path, "json": json})
+        if isinstance(self._outcome, BaseException):
+            raise self._outcome
+        return self._outcome
+
+
+class _FakeAsyncAnthropicTransport(_FakeAnthropicTransport):
+    async def post(self, path: str, *, json: Any) -> Any:  # type: ignore[override]
+        return _FakeAnthropicTransport.post(self, path, json=json)
+
+
+_MESSAGE_BODY = {
+    "content": [
+        {"type": "text", "text": "hello "},
+        {"type": "tool_use", "id": "x"},
+        {"type": "text", "text": "world"},
+    ],
+    "stop_reason": "end_turn",
+    "usage": {"input_tokens": 21, "output_tokens": 7},
+}
+
+
+def test_anthropic_messages_posts_to_the_messages_path_and_flattens():
+    client = _FakeAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
+    result = anthropic_messages(client, model="claude", messages=[{"role": "user", "content": "hi"}], max_tokens=8)
+    assert result.text == "hello world"
+    assert result.stop_reason == "end_turn"
+    assert result.usage == {"input_tokens": 21, "output_tokens": 7}
+    assert client.calls[0]["path"] == "/v1/messages"
+    assert client.calls[0]["json"] == {
+        "model": "claude",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 8,
+    }
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_messages_flattens_the_same_way():
+    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
+    result = await aanthropic_messages(client, model="claude", system="sys")
+    assert (result.text, result.stop_reason) == ("hello world", "end_turn")
+    assert client.calls[0]["json"] == {"model": "claude", "system": "sys"}
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_messages_raises_on_non_2xx_with_status_and_body():
+    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(status_code=401, body={}, text="unauthorized"))
+    with pytest.raises(RuntimeError, match="status=401") as excinfo:
+        await aanthropic_messages(client, model="claude")
+    assert "unauthorized" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_messages_raises_on_non_json_body():
+    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(body=ValueError("not json")))
+    with pytest.raises(RuntimeError, match="non-JSON body"):
+        await aanthropic_messages(client, model="claude")
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_messages_propagates_transport_errors():
+    client = _FakeAsyncAnthropicTransport(RuntimeError("gateway down"))
+    with pytest.raises(RuntimeError, match="gateway down"):
+        await aanthropic_messages(client, model="claude")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [{}, {"content": "nope"}, ["not", "a", "dict"]])
+async def test_aanthropic_messages_tolerates_unreadable_reply_shapes(body):
+    """An unreadable reply yields empty text; the caller decides whether that is fatal."""
+    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(body=body))
+    result = await aanthropic_messages(client, model="claude")
+    assert result.text == ""
+    assert result.stop_reason is None
+    assert result.usage is None
+
+
+def test_anthropic_version_is_defined_once_in_llm_config():
+    """The header value must live here alone; four modules used to hardcode it."""
+    source = Path(llm_config.__file__).read_text(encoding="utf-8")
+    assert source.count('"2023-06-01"') == 1
+    assert DEFAULT_ANTHROPIC_VERSION == "2023-06-01"
 
 
 # ---- build_http_timeout ----

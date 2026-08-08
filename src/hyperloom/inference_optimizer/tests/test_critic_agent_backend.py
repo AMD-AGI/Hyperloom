@@ -22,11 +22,11 @@ from hyperloom.orchestrator.roles import (
     CriticAgentBackend,
     RuntimeCall,
 )
+from hyperloom.orchestrator.roles import critic_agent as critic_agent_module
 from hyperloom.orchestrator.roles.base import BackendError
 from hyperloom.orchestrator.roles.critic_agent import (
     CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
     CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
-    _anthropic_text_from_content,
     _extract_review_json,
     _reviewed_msg_ids_from_bundle,
     _verdict_references_kb,
@@ -327,9 +327,9 @@ def test_construct_invalid_kb_mode(fake_critic_root: Path, fake_session_dir: Pat
 
 
 def test_construct_no_creds_no_factory_raises(monkeypatch, tmp_path: Path):
-    """No codex_client_factory and no Codex creds -> construction fails fast."""
-    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    """No codex_client_factory and no gateway creds at all -> construction fails fast."""
+    for var in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "LLM_GATEWAY_KEY"):
+        monkeypatch.delenv(var, raising=False)
     root = tmp_path / "critic-agent"
     (root / "runtime").mkdir(parents=True)
     (root / "runtime" / "cli.py").write_text("# stub", encoding="utf-8")
@@ -1683,15 +1683,85 @@ async def test_anthropic_protocol_non_2xx_raises(
         await backend.run("prompt", system_prompt="critic system")
 
 
-def test_anthropic_text_from_content_joins_text_blocks():
-    content = [
-        {"type": "text", "text": "hello "},
-        {"type": "tool_use", "id": "x"},
-        {"type": "text", "text": "world"},
-    ]
-    assert _anthropic_text_from_content(content) == "hello world"
-    assert _anthropic_text_from_content(None) == ""
-    assert _anthropic_text_from_content("nope") == ""
+def test_anthropic_client_comes_from_the_shared_llm_gateway(monkeypatch, tmp_path: Path):
+    """The critic owns no Anthropic transport: base URL, auth and headers are llm_config's."""
+    captured: dict = {}
+    sentinel = object()
+    monkeypatch.setattr(
+        critic_agent_module,
+        "get_async_anthropic_client",
+        lambda **kwargs: captured.update(kwargs) or sentinel,
+    )
+    monkeypatch.setenv("CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S", "3")
+    monkeypatch.setenv("CRITIC_AGENT_LLM_RW_TIMEOUT_S", "7")
+    root = tmp_path / "critic-agent"
+    (root / "runtime").mkdir(parents=True)
+    (root / "runtime" / "cli.py").write_text("# stub", encoding="utf-8")
+    sd = tmp_path / "sd"
+    sd.mkdir()
+    backend = CriticAgentBackend(
+        critic_agent_root=root,
+        session_dir=sd,
+        protocol="anthropic",
+        claude_model="claude-opus-4-8",
+        anthropic_base_url="https://explicit.example.invalid/anthropic",
+        anthropic_api_key="explicit-key",
+        runtime_caller_factory=lambda: lambda call: None,
+    )
+    assert backend._client is sentinel
+    # The explicit fields are overlaid on the env so they outrank ambient ANTHROPIC_*.
+    assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://explicit.example.invalid/anthropic"
+    assert captured["env"]["_".join(("ANTHROPIC", "API", "KEY"))] == "explicit-key"
+    timeout = captured["timeout"]
+    assert (timeout.connect, timeout.read) == (3.0, 7.0)
+
+
+def test_anthropic_construct_without_creds_raises_backend_error(monkeypatch, tmp_path: Path):
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    root = tmp_path / "critic-agent"
+    (root / "runtime").mkdir(parents=True)
+    (root / "runtime" / "cli.py").write_text("# stub", encoding="utf-8")
+    sd = tmp_path / "sd"
+    sd.mkdir()
+    with pytest.raises(BackendError, match=r"CriticAgentBackend\(protocol=anthropic\) review reasoning"):
+        CriticAgentBackend(
+            critic_agent_root=root,
+            session_dir=sd,
+            protocol="anthropic",
+            claude_model="claude-opus-4-8",
+            runtime_caller_factory=lambda: lambda call: None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_anthropic_protocol_non_json_body_raises(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+):
+    """A 200 with an unparseable body is still a call that produced nothing usable."""
+
+    class _NonJsonResponse:
+        status_code = 200
+        text = "<html>proxy error</html>"
+
+        def json(self) -> dict[str, Any]:
+            raise ValueError("no json here")
+
+    judge_bundle = {
+        "kind": "coordinator_inbox",
+        "merged_context": {"model": "m", "framework": "sglang"},
+        "proposals": [{"msg_id": "p1", "from_agent": "orchestration", "action_name": "baseline", "payload": {}}],
+        "review_constraints": {},
+    }
+    backend, _ = _make_anthropic_backend(
+        fake_critic_root,
+        fake_session_dir,
+        responses=[_NonJsonResponse()],
+        judge_bundle=judge_bundle,
+    )
+    with pytest.raises(BackendError, match="non-JSON body"):
+        await backend.run("prompt", system_prompt="critic system")
 
 
 def test_accumulate_anthropic_usage_folds_tokens_and_tolerates_garbage():
