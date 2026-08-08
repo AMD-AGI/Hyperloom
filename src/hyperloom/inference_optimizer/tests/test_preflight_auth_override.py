@@ -669,9 +669,34 @@ class _Completed:
 
 
 def test_ensure_python_sdks_skips_when_all_present(monkeypatch, capsys):
-    """All three import-checks return rc=0 → no pip install fires."""
+    """All four import-checks return rc=0 → no pip install fires."""
+    runner = _RecordingRun([_Completed(returncode=0) for _ in range(4)])
+    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
+
+    cli_preflight._ensure_python_sdks("/opt/venv/bin/python", [])
+
+    assert len(runner.calls) == 4
+    for call in runner.calls:
+        assert call[0] == "/opt/venv/bin/python"
+        assert call[1] == "-c"
+        assert call[2].startswith("import ")
+    captured = capsys.readouterr().out
+    assert "claude_agent_sdk OK" in captured
+    assert "openai_codex OK" in captured
+    assert "openai OK" in captured
+    assert "httpx OK" in captured
+
+
+def test_ensure_python_sdks_installs_missing_openai_codex(monkeypatch, capsys):
+    """Both agent runtimes are provisioned: a missing codex SDK is installed too.
+
+    Without it an OpenAI-only deployment reaches the TraceLens skill runner and the
+    forge fellow with no runtime to execute them.
+    """
     runner = _RecordingRun(
         [
+            _Completed(returncode=0),
+            _Completed(returncode=1),
             _Completed(returncode=0),
             _Completed(returncode=0),
             _Completed(returncode=0),
@@ -681,15 +706,11 @@ def test_ensure_python_sdks_skips_when_all_present(monkeypatch, capsys):
 
     cli_preflight._ensure_python_sdks("/opt/venv/bin/python", [])
 
-    assert len(runner.calls) == 3
-    for call in runner.calls:
-        assert call[0] == "/opt/venv/bin/python"
-        assert call[1] == "-c"
-        assert call[2].startswith("import ")
+    install_call = runner.calls[2]
+    assert install_call[1:4] == ["-m", "pip", "install"]
+    assert any(arg.startswith("openai-codex") for arg in install_call)
     captured = capsys.readouterr().out
-    assert "claude_agent_sdk OK" in captured
-    assert "openai OK" in captured
-    assert "httpx OK" in captured
+    assert "installed openai-codex" in captured
 
 
 def test_ensure_python_sdks_installs_missing_claude_agent_sdk(monkeypatch, capsys):
@@ -700,13 +721,14 @@ def test_ensure_python_sdks_installs_missing_claude_agent_sdk(monkeypatch, capsy
             _Completed(returncode=0),
             _Completed(returncode=0),
             _Completed(returncode=0),
+            _Completed(returncode=0),
         ]
     )
     monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
 
     cli_preflight._ensure_python_sdks("/opt/venv/bin/python", ["--break-system-packages"])
 
-    assert len(runner.calls) == 4
+    assert len(runner.calls) == 5
     install_call = runner.calls[1]
     assert install_call[0] == "/opt/venv/bin/python"
     assert install_call[1:4] == ["-m", "pip", "install"]
