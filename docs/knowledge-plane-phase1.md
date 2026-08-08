@@ -58,7 +58,8 @@ per-canonical-id file locks. Ambient KB Store credentials never trigger a
 remote write.
 
 Remote mode does not construct a `RecipeKB` dispatcher. T0 Recipe warm replay
-is intentionally skipped for this release, runtime legacy amendments are
+projects the champion's Explore args/env into the existing replay executor;
+Framework, Kernel, and patch replay are deferred. Runtime legacy amendments are
 no-ops, and CLOSE calls the KB Store final-session writer once. No local
 `recipe.json`, history, or attempt data is created. A KB Store transport failure
 is logged and remains non-fatal; invalid or missing startup configuration fails
