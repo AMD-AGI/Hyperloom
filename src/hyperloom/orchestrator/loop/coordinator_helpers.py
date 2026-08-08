@@ -18,6 +18,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..actions.executors._grid_server_args import (
+    tokenize_server_args_preserving_json,
+)
+
 log = logging.getLogger(__name__)
 
 # Constants below are read from other modules; listed here to mark them as
@@ -418,38 +422,29 @@ def _merge_cumulative_extra_server_args(
     return _dedupe_extra_server_args(merged)
 
 
-_SPACE_VALUE_FLAGS = (
-    "--json-model-override-args",
-    "--override-generation-config",
-    "--tool-call-parser",
-    "--compilation-config",
-    "--speculative-config",
-    "--hf-overrides",
-    "--kv-transfer-config",
-)
-
-
 def _dedupe_extra_server_args(args_str: str) -> str:
     """Collapse repeated ``--flag value`` pairs into a unique launch string.
 
     Keep each flag once with its last value (first-seen order preserved),
     since argparse ``action="store"`` only honors the last value. Flags in
-    ``_MULTI_VALUE_SGLANG_FLAGS`` keep their multi-value runs. Args with
-    JSON/space-valued flags are left untouched because downstream launch
-    scripts expand them unquoted.
+    ``_MULTI_VALUE_SGLANG_FLAGS`` keep their multi-value runs. Valid JSON blobs
+    are treated as opaque tokens, so their inner quotes survive while unrelated
+    duplicated flags are still collapsed. Actual whitespace-bearing argv
+    values fail closed because downstream launch scripts expand them unquoted.
 
     Args:
         args_str: The extra server-args string to dedupe.
 
     Returns:
-        The deduped args string, or the input unchanged when it contains a
-        JSON/space-valued flag; ``""`` for empty input.
+        The deduped args string, or the input unchanged when it cannot be safely
+        tokenized; ``""`` for empty input.
     """
     if not args_str:
         return ""
-    if any(flag in args_str for flag in _SPACE_VALUE_FLAGS):
+    parsed = tokenize_server_args_preserving_json(args_str)
+    if parsed is None:
         return args_str
-    tokens = args_str.split()
+    normalized, tokens = parsed
     pair_by_flag: dict[str, list[str]] = {}
     order: list[str] = []
     i = 0
@@ -484,7 +479,8 @@ def _dedupe_extra_server_args(args_str: str) -> str:
     out: list[str] = []
     for k in order:
         out.extend(pair_by_flag[k])
-    return " ".join(out)
+    rendered = " ".join(out)
+    return rendered if rendered != normalized else normalized
 
 
 # Advisory fields carried on a Critic ``review_verdict`` payload beyond the
