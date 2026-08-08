@@ -175,6 +175,8 @@ def test_rewrite_candidate_identity_reuses_the_shared_resolvers(tmp_path, monkey
             "capability_ok",
             "",
             ("aiter", "sglang", "vllm"),
+            source_languages=("triton", "hip", "cuda", "cpp"),
+            source_kinds=("triton", "hip_cpp"),
             driver_preparation=True,
         ),
     )

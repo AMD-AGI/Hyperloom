@@ -6389,6 +6389,13 @@ async def integrate_handler(
             "timeout_sec": rebaseline_timeout_sec,
             "extra_server_args": extra_args,
             "extra_envs": dict(payload.get("extra_envs") or {}),
+            # A framework apply-back is the only artifact that patches FlyDSL
+            # sources, and only this run reads them before they are compiled, so
+            # the JIT cache key is widened here and nowhere else.
+            "flydsl_source_dirs": (
+                str(payload.get("artifact_kind") or "")
+                == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
+            ),
             "defer_accuracy_until_after_measure": True,
             "post_measure_accuracy_min_tput": base_tput
             * (1.0 + keep_threshold_pct / 100.0),
