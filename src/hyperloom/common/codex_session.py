@@ -25,13 +25,16 @@ an external sandbox is already enforcing isolation with
 Provider credentials and headers remain environment-backed. Config overrides
 contain variable names only, because the SDK forwards every override through
 the app-server command line. Each run also gets a private ``CODEX_HOME`` under
-the configured runtime/output area; it is removed after the SDK client closes.
+the configured runtime/output area. Cleanup waits briefly for late helper
+writers, retries transient busy errors, and fails explicitly rather than
+silently leaking state.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import os
 import re
@@ -39,6 +42,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,6 +88,16 @@ _BWRAP_PROBE_CACHE_LOCK = threading.Lock()
 # Grace period for tearing a timed-out turn down before giving up on it.
 _INTERRUPT_TIMEOUT_SEC = 5.0
 
+# AsyncCodex can finish closing before a short-lived helper has released or
+# stopped writing CODEX_HOME. Cleanup is bounded so cancellation and failures
+# cannot hang indefinitely, but it waits long enough to absorb that exit race.
+_CODEX_HOME_CLEANUP_TIMEOUT_SEC = 1.0
+_CODEX_HOME_CLEANUP_GRACE_SEC = 0.1
+_CODEX_HOME_CLEANUP_SETTLE_SEC = 0.05
+_CODEX_HOME_CLEANUP_INITIAL_BACKOFF_SEC = 0.02
+_CODEX_HOME_CLEANUP_MAX_BACKOFF_SEC = 0.2
+_CODEX_HOME_TRANSIENT_ERRNOS = frozenset({errno.ENOTEMPTY, errno.EBUSY})
+
 
 class CodexSessionError(RuntimeError):
     """Raised when a Codex SDK turn cannot start or does not complete."""
@@ -95,6 +109,24 @@ class CodexSessionUnavailableError(CodexSessionError):
 
 class CodexSessionTimeoutError(CodexSessionError):
     """Raised when a Codex turn outlived its timeout and was interrupted."""
+
+
+class CodexHomeCleanupError(CodexSessionError):
+    """Raised when a private CODEX_HOME cannot be removed within the bound.
+
+    The exception message deliberately includes only the generated directory
+    and a coarse status. Files written under CODEX_HOME may contain sensitive
+    state, so the underlying cleanup exception and child names are not exposed.
+    ``completed_result`` preserves a successful turn when cleanup failed after
+    completion; ``operation_error`` preserves a failed or cancelled operation.
+    """
+
+    def __init__(self, path: Path, status: str) -> None:
+        self.path = path
+        self.status = status
+        self.completed_result: CodexSessionResult | None = None
+        self.operation_error: BaseException | None = None
+        super().__init__(f"CODEX_HOME cleanup failed for {path}: {status}")
 
 
 @dataclass(frozen=True)
@@ -639,6 +671,78 @@ def _codex_home_parent(
     return fallback
 
 
+def _cleanup_codex_home(
+    temporary: tempfile.TemporaryDirectory[str],
+    *,
+    timeout_sec: float | None = None,
+    grace_sec: float | None = None,
+    settle_sec: float | None = None,
+    initial_backoff_sec: float | None = None,
+    max_backoff_sec: float | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    """Remove exactly one generated CODEX_HOME despite transient late writers.
+
+    Cleanup first grants helpers a short exit grace period. It then retries
+    ``ENOTEMPTY``/``EBUSY`` with bounded exponential backoff and requires the
+    path to remain absent for a short settle window, catching writers that
+    recreate it immediately after a successful removal. The synchronous wait
+    is intentional: cleanup must complete even while the surrounding asyncio
+    task is being cancelled.
+
+    Raises:
+        CodexHomeCleanupError: If the path remains busy past the bound or a
+            non-transient removal error occurs.
+    """
+    path = Path(temporary.name)
+    timeout = max(0.0, _CODEX_HOME_CLEANUP_TIMEOUT_SEC if timeout_sec is None else timeout_sec)
+    grace = max(0.0, _CODEX_HOME_CLEANUP_GRACE_SEC if grace_sec is None else grace_sec)
+    settle = max(0.0, _CODEX_HOME_CLEANUP_SETTLE_SEC if settle_sec is None else settle_sec)
+    initial_backoff = max(
+        0.001,
+        _CODEX_HOME_CLEANUP_INITIAL_BACKOFF_SEC if initial_backoff_sec is None else initial_backoff_sec,
+    )
+    maximum_backoff = max(
+        initial_backoff,
+        _CODEX_HOME_CLEANUP_MAX_BACKOFF_SEC if max_backoff_sec is None else max_backoff_sec,
+    )
+    deadline = monotonic() + timeout
+
+    def _sleep_within_deadline(duration: float) -> None:
+        remaining = max(0.0, deadline - monotonic())
+        delay = min(max(0.0, duration), remaining)
+        if delay:
+            sleeper(delay)
+
+    _sleep_within_deadline(grace)
+    backoff = initial_backoff
+    last_status = "still-present"
+    while True:
+        try:
+            temporary.cleanup()
+        except FileNotFoundError:
+            last_status = "already-removed"
+        except OSError as exc:
+            if exc.errno not in _CODEX_HOME_TRANSIENT_ERRNOS:
+                error_number = exc.errno if exc.errno is not None else "unknown"
+                raise CodexHomeCleanupError(path, f"non-transient-error-errno-{error_number}") from None
+            last_status = "directory-not-empty" if exc.errno == errno.ENOTEMPTY else "resource-busy"
+        else:
+            last_status = "removed"
+
+        if not path.exists():
+            _sleep_within_deadline(settle)
+            if not path.exists():
+                return
+            last_status = "recreated-by-late-writer"
+
+        if monotonic() >= deadline:
+            raise CodexHomeCleanupError(path, f"{last_status}-after-{timeout:g}s")
+        _sleep_within_deadline(backoff)
+        backoff = min(maximum_backoff, backoff * 2)
+
+
 @contextlib.contextmanager
 def _private_codex_home(
     *,
@@ -646,7 +750,7 @@ def _private_codex_home(
     writable_roots: Sequence[Path],
     source: Mapping[str, str],
 ) -> Iterator[Path]:
-    """Create and clean up one private mode-0700 Codex state directory."""
+    """Create and deterministically clean one private mode-0700 state directory."""
     parent = _codex_home_parent(cwd=cwd, writable_roots=writable_roots, source=source)
     try:
         temporary = tempfile.TemporaryDirectory(prefix=".hyperloom-codex-home-", dir=parent)
@@ -658,10 +762,20 @@ def _private_codex_home(
     except OSError as exc:
         temporary.cleanup()
         raise CodexSessionUnavailableError(f"cannot secure private CODEX_HOME {codex_home}: {exc}") from exc
+    operation_error: BaseException | None = None
     try:
         yield codex_home
+    except BaseException as exc:
+        operation_error = exc
+        raise
     finally:
-        temporary.cleanup()
+        try:
+            _cleanup_codex_home(temporary)
+        except CodexHomeCleanupError as cleanup_error:
+            cleanup_error.operation_error = operation_error
+            if operation_error is not None:
+                raise cleanup_error from operation_error
+            raise
 
 
 def _item_dict(item: Any) -> dict[str, Any]:
@@ -852,6 +966,8 @@ async def run_codex_turn(
     Raises:
         CodexSessionUnavailableError: If the SDK is missing, or its gateway
             config or sandbox mode is unusable.
+        CodexHomeCleanupError: If the private state directory remains busy
+            after bounded retries.
         CodexSessionTimeoutError: If the turn outlived ``timeout_sec``.
         CodexSessionError: If the SDK failed for any other reason.
     """
@@ -889,64 +1005,72 @@ async def run_codex_turn(
     )
     thread_id = ""
     turn_task: asyncio.Task[Any] | None = None
+    sdk_result: Any | None = None
 
-    with _private_codex_home(
-        cwd=cwd,
-        writable_roots=writable_roots,
-        source=effective_env,
-    ) as codex_home:
-        child_env = effective_env.copy()
-        child_env.update(provider_config.env_additions)
-        child_env["CODEX_HOME"] = str(codex_home)
-        config = sdk.CodexConfig(
-            codex_bin=codex_bin or None,
-            config_overrides=config_overrides,
-            cwd=str(cwd),
-            env=child_env,
-            client_name=_CLIENT_NAME,
-            client_title=_CLIENT_TITLE,
-        )
-        try:
-            async with sdk.AsyncCodex(config) as client:
-                thread = await client.thread_start(
-                    approval_mode=sdk.ApprovalMode.deny_all,
-                    cwd=str(cwd),
-                    developer_instructions=developer_instructions,
-                    model=model,
-                    model_provider=CODEX_PROVIDER_NAME,
-                    sandbox=sandbox,
-                )
-                thread_id = str(getattr(thread, "id", "") or "")
-                turn_handle = await thread.turn(
-                    prompt,
-                    approval_mode=sdk.ApprovalMode.deny_all,
-                    cwd=str(cwd),
-                    model=model,
-                    sandbox=sandbox,
-                )
-                turn_task = asyncio.create_task(turn_handle.run())
-                completed, _pending = await asyncio.wait({turn_task}, timeout=timeout_sec)
-                if not completed:
-                    # Teardown of an already-failed turn: the timeout below is
-                    # the reported failure, so interrupt errors add no signal.
-                    with contextlib.suppress(Exception):
-                        await asyncio.wait_for(turn_handle.interrupt(), timeout=_INTERRUPT_TIMEOUT_SEC)
-                    with contextlib.suppress(Exception):
-                        await asyncio.wait_for(asyncio.shield(turn_task), timeout=_INTERRUPT_TIMEOUT_SEC)
-                    raise CodexSessionTimeoutError(f"Codex turn timed out after {timeout_sec:g}s")
-                sdk_result = turn_task.result()
-        except CodexSessionError:
-            raise
-        except Exception as exc:
-            raise CodexSessionError(f"Codex SDK turn failed: {exc}") from exc
-        finally:
-            if turn_task is not None and not turn_task.done():
-                turn_task.cancel()
-                # Let the cancellation settle. The turn's own outcome is already
-                # decided, so the task's result is discarded rather than raised;
-                # a cancellation of *this* task still propagates.
-                await asyncio.gather(turn_task, return_exceptions=True)
+    try:
+        with _private_codex_home(
+            cwd=cwd,
+            writable_roots=writable_roots,
+            source=effective_env,
+        ) as codex_home:
+            child_env = effective_env.copy()
+            child_env.update(provider_config.env_additions)
+            child_env["CODEX_HOME"] = str(codex_home)
+            config = sdk.CodexConfig(
+                codex_bin=codex_bin or None,
+                config_overrides=config_overrides,
+                cwd=str(cwd),
+                env=child_env,
+                client_name=_CLIENT_NAME,
+                client_title=_CLIENT_TITLE,
+            )
+            try:
+                async with sdk.AsyncCodex(config) as client:
+                    thread = await client.thread_start(
+                        approval_mode=sdk.ApprovalMode.deny_all,
+                        cwd=str(cwd),
+                        developer_instructions=developer_instructions,
+                        model=model,
+                        model_provider=CODEX_PROVIDER_NAME,
+                        sandbox=sandbox,
+                    )
+                    thread_id = str(getattr(thread, "id", "") or "")
+                    turn_handle = await thread.turn(
+                        prompt,
+                        approval_mode=sdk.ApprovalMode.deny_all,
+                        cwd=str(cwd),
+                        model=model,
+                        sandbox=sandbox,
+                    )
+                    turn_task = asyncio.create_task(turn_handle.run())
+                    completed, _pending = await asyncio.wait({turn_task}, timeout=timeout_sec)
+                    if not completed:
+                        # Teardown of an already-failed turn: the timeout below is
+                        # the reported failure, so interrupt errors add no signal.
+                        with contextlib.suppress(Exception):
+                            await asyncio.wait_for(turn_handle.interrupt(), timeout=_INTERRUPT_TIMEOUT_SEC)
+                        with contextlib.suppress(Exception):
+                            await asyncio.wait_for(asyncio.shield(turn_task), timeout=_INTERRUPT_TIMEOUT_SEC)
+                        raise CodexSessionTimeoutError(f"Codex turn timed out after {timeout_sec:g}s")
+                    sdk_result = turn_task.result()
+            except CodexSessionError:
+                raise
+            except Exception as exc:
+                raise CodexSessionError(f"Codex SDK turn failed: {exc}") from exc
+            finally:
+                if turn_task is not None and not turn_task.done():
+                    turn_task.cancel()
+                    # Let the cancellation settle. The turn's own outcome is already
+                    # decided, so the task's result is discarded rather than raised;
+                    # a cancellation of *this* task still propagates.
+                    await asyncio.gather(turn_task, return_exceptions=True)
+    except CodexHomeCleanupError as cleanup_error:
+        if sdk_result is not None:
+            with contextlib.suppress(Exception):
+                cleanup_error.completed_result = normalize_codex_result(sdk_result, thread_id)
+        raise
 
+    assert sdk_result is not None
     return normalize_codex_result(sdk_result, thread_id)
 
 
@@ -955,6 +1079,7 @@ __all__ = [
     "CODEX_PROVIDER_NAME",
     "CODEX_SANDBOX_MODES",
     "CODEX_SANDBOX_MODE_ENV",
+    "CodexHomeCleanupError",
     "CodexProviderConfig",
     "CodexSessionError",
     "CodexSessionResult",
