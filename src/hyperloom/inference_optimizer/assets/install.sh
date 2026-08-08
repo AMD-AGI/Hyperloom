@@ -795,7 +795,7 @@ ensure_kernel_agents() {
   # pod that already has kernel_agents but no openai_codex would skip the install
   # and leave the OpenAI-only side with a codex provider it cannot construct.
   if "$PYTHON" -c "import kernel_agents.cli, openai_codex" >/dev/null 2>&1; then
-    log "kernel_agents + codex SDK already importable; skipping install"
+    log "kernel_agents already importable; skipping install (codex SDK present)"
     return 0
   fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
@@ -824,7 +824,7 @@ ensure_kernel_agents() {
   # dies at its first turn on "Not logged in".
   "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "${root}[claude,codex]"
   "$PYTHON" -c "import kernel_agents, kernel_agents.cli, openai_codex" \
-    && log "kernel_agents + codex SDK installed OK from ${root}" \
+    && log "kernel_agents installed OK from ${root} (claude + codex extras)" \
     || die "kernel_agents / codex SDK import failed after install from ${root}"
 }
 
