@@ -62,6 +62,27 @@ def stub_install_steps(monkeypatch, tmp_path):
     return None
 
 
+@pytest.fixture(autouse=True)
+def _restore_environ():
+    """Roll back direct ``os.environ`` writes after every test in this module.
+
+    Several tests here exercise the real `_load_dotenv_fallback`, which writes
+    straight into ``os.environ`` — monkeypatch cannot undo that. One of them clears
+    ``REPO_ROOT`` on purpose, and the fallback then walks up to the repository root
+    and finds the `.env` that `install.sh` generates there. On a machine where the
+    installer has run, that leaked `ANTHROPIC_BASE_URL` into the environment and
+    four later auth tests in this file failed — a real defect in the suite's
+    hermeticity that only appears after a real deployment step, which is the worst
+    time to be chasing a phantom failure.
+    """
+    snapshot = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(snapshot)
+
+
 @pytest.fixture
 def clean_url_env(monkeypatch):
     """Strip URL env vars and fully restore os.environ afterwards.

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Guards for ensure_xdit_quality_deps()'s torch-clobber protection.
+"""Guards for ensure_scriptable_quality_deps()'s torch-clobber protection.
 
-The bug: ensure_xdit_quality_deps() ran a bare `pip install scikit-image lpips`.
+The bug: ensure_scriptable_quality_deps() ran a bare `pip install scikit-image lpips`.
 lpips declares `torch>=0.4.0`, so pip's resolver pulled a PyPI (CUDA) torch and
 REPLACED the vendor ROCm torch (and triton) already installed in the shared
 venv. The command exited 0; the only signal was a cosmetic "not importable"
@@ -124,13 +124,13 @@ def _harness() -> str:
         "DRY_RUN=0",
         "PIP_EXTRA=()",
         'PYTHON="$FAKE_PYTHON"',
-        _extract_array("_XDIT_QUALITY_DEPS"),
-        _extract_array("_XDIT_CORE_PINS"),
+        _extract_array("_SCRIPTABLE_QUALITY_DEPS"),
+        _extract_array("_SHARED_VENV_CORE_PINS"),
         _extract_func("_write_core_constraints"),
         _extract_func("_torch_hip_version"),
         _extract_func("_guard_torch_not_clobbered"),
-        _extract_func("ensure_xdit_quality_deps"),
-        "ensure_xdit_quality_deps",
+        _extract_func("ensure_scriptable_quality_deps"),
+        "ensure_scriptable_quality_deps",
     ]
     return "\n\n".join(parts) + "\n"
 
@@ -198,7 +198,7 @@ def test_tripwire_aborts_when_torch_clobbered(tmp_path: Path) -> None:
 
 
 def test_static_no_unconstrained_install_remains() -> None:
-    body = _extract_func("ensure_xdit_quality_deps")
+    body = _extract_func("ensure_scriptable_quality_deps")
     # The dep install must carry the constraints file...
     assert '-c "$constraints"' in body, "dep install must pass the -c constraints file"
     # ...and the tripwire must run.

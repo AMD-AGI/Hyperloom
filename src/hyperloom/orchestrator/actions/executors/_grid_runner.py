@@ -34,7 +34,6 @@ from hyperloom.common.env_safety import (
 
 from ...roles.robustness_pulse import pulse as _robustness_pulse
 from ._subprocess_kill import (
-    AGENTX_PREFLIGHT_RETURNCODE,
     DETOKENIZER_STALL_RETURNCODE,
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
@@ -716,6 +715,65 @@ def _parse_report(workspace: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+# How long to keep re-reading ``benchmark_report.json`` when the process exited
+# cleanly but the report does not yet parse into a valid measurement.
+#
+# The report is written by the benchmark subprocess as it shuts down, and the
+# reader runs the moment that subprocess is reaped — so on a loaded filesystem the
+# two race. Measured on a live 24-hour session: six of thirteen variants aborted
+# as ``benchmark_report_invalid_metric`` while every one of those reports, read
+# afterwards, held valid throughput. Two of the six were authored patches worth
+# +4.4% and +4.7% whose switch-off parity legs had already passed, so the race
+# did not just cost measurements, it discarded accepted work.
+#
+# Only a clean exit is worth waiting on: a non-zero return code means the run
+# genuinely failed and there is nothing to settle.
+REPORT_SETTLE_SECONDS = 30.0
+REPORT_SETTLE_POLL_SECONDS = 1.0
+
+
+async def _settled_measurement(
+    workspace: Path,
+    *,
+    subprocess_started_unix: float | None,
+    settle_seconds: float = REPORT_SETTLE_SECONDS,
+    poll_seconds: float = REPORT_SETTLE_POLL_SECONDS,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Read the benchmark report, re-reading briefly while it is still settling.
+
+    Args:
+        workspace: Benchmark workspace holding ``benchmark_report.json``.
+        subprocess_started_unix: Launch time, forwarded to the leak-salvage pass.
+        settle_seconds: How long to keep retrying an invalid measurement. Pass
+            ``0`` to read exactly once (the run already failed, so waiting only
+            delays the verdict).
+        poll_seconds: Delay between attempts.
+
+    Returns:
+        The parsed report (or ``None``) and the extracted measurement, from the
+        first attempt that yielded a valid measurement, else from the last.
+    """
+    deadline = time.monotonic() + max(0.0, float(settle_seconds))
+    attempts = 0
+    while True:
+        report = _parse_report(workspace)
+        measurement = extract_benchmark_measurement(
+            report,
+            workspace=workspace,
+            subprocess_started_unix=subprocess_started_unix,
+        )
+        attempts += 1
+        if measurement.get("valid_measurement") or time.monotonic() >= deadline:
+            if attempts > 1 and measurement.get("valid_measurement"):
+                log.info(
+                    "grid_runner: benchmark_report became valid after %d read(s); "
+                    "the report was still being written when the subprocess was reaped",
+                    attempts,
+                )
+            return report, measurement
+        await asyncio.sleep(max(0.01, float(poll_seconds)))
+
+
 def _run_grid_warmup_enabled() -> bool:
     """Whether ``run_grid`` should discard a cold warmup round when possible."""
     raw = os.environ.get("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP")
@@ -1177,13 +1235,12 @@ async def run_grid(
     except Exception as exc:  # noqa: BLE001 — best-effort hygiene, never blocks the grid
         log.debug("grid_runner: aiter lock sweep swallowed: %r", exc)
 
-    # Reference-recipe server envs, resolved once for the whole grid. Single-node
-    # gets these from the materialized YAML (materialize_config_with_envs seeds
-    # them) because Magpie launches the server from that YAML; multi-node launches
-    # through restart_server_for_round, which never reads it. The baseline already
-    # forwards them explicitly, so without this every variant runs on a server
-    # missing the envs the baseline was measured with and the gain is misattributed
-    # -- the env twin of the skewed-baseline bug the operator-args folding fixed.
+    # Multi-node: the reference recipe's server envs do not reach the variant
+    # restart through restart_server_for_round, which never reads them. The
+    # baseline forwards them explicitly, so without this every variant runs on a
+    # server missing the envs the baseline was measured with and the gain is
+    # misattributed — the env twin of the skewed-baseline bug the operator-args
+    # folding fixed.
     from ._multi_node_env import is_multi_node as _mn_is_multi_node
 
     _mn_ref_envs: dict[str, str] = {}
@@ -1467,12 +1524,18 @@ async def run_grid(
                 warmup_workspace,
                 subprocess_started_unix=warmup_started_unix,
             )
-            warmup_report = _parse_report(warmup_workspace) if warmup_candidates else None
-            warmup_measurement = extract_benchmark_measurement(
-                warmup_report,
-                workspace=warmup_workspace,
-                subprocess_started_unix=warmup_started_unix,
-            )
+            if warmup_candidates:
+                _, warmup_measurement = await _settled_measurement(
+                    warmup_workspace,
+                    subprocess_started_unix=warmup_started_unix,
+                    settle_seconds=REPORT_SETTLE_SECONDS if warmup_rc == 0 else 0.0,
+                )
+            else:
+                warmup_measurement = extract_benchmark_measurement(
+                    None,
+                    workspace=warmup_workspace,
+                    subprocess_started_unix=warmup_started_unix,
+                )
             if warmup_rc != 0 or not warmup_measurement.get("valid_measurement"):
                 from ._server_lifecycle import teardown_lifecycle_server
 
@@ -1568,10 +1631,10 @@ async def run_grid(
             _restart_env = _mn_restart_env(_mn_ref_envs, variant, _variant_unset)
             await restart_server_for_round(
                 extra_server_args=_mn_effective_args,
-                # Per-variant env overrides (e.g. MORI_* MoE-dispatch
-                # tuning) so server-side env knobs proposed by specialists
-                # actually take effect on the restarted sglang. Empty dict
-                # for arg-only variants → forwarded as a no-op.
+                # Reference recipe envs under this variant's own overrides (e.g.
+                # MORI_* MoE-dispatch tuning) so server-side env knobs proposed
+                # by specialists take effect on the restarted sglang without
+                # dropping the envs the baseline was measured with.
                 extra_env=_restart_env,
                 unset_env=_variant_unset,
                 model_path=model_path,
@@ -1769,29 +1832,6 @@ async def run_grid(
                 break
             continue
 
-        # AgentX preflight failed at the execution boundary (aiperf missing or
-        # not weka-trace capable) before any benchmark launched. Fail this
-        # variant with a dedicated error_class so the operator sees the guidance;
-        # the grid is not crashed.
-        if rc == AGENTX_PREFLIGHT_RETURNCODE:
-            results.append(
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="failed",
-                    returncode=rc,
-                    runtime_sec=round(max(0.0, time.time() - variant_started_unix), 2),
-                    error=(stderr or stdout or "AgentX preflight failed")[-2000:],
-                    error_class="agentx_preflight",
-                    note=variant.note,
-                )
-            )
-            await _pulse_after_variant(i)
-            if not keep_going_on_failure:
-                break
-            continue
-
         # Detokenizer-stall watchdog fired: the server came up healthy but then
         # went silent (hung engine / wedged detokenizer). Fast-prune with a
         # distinct ``error_class`` and harvest leaks for RCA.
@@ -1955,12 +1995,13 @@ async def run_grid(
                 break
             continue
         workspace = candidates[-1]
-        report = _parse_report(workspace)
         report_path = workspace / "benchmark_report.json"
-        measurement = extract_benchmark_measurement(
-            report,
-            workspace=workspace,
+        # A clean exit is worth waiting on: the report is written during shutdown
+        # and the reader runs the moment the subprocess is reaped.
+        report, measurement = await _settled_measurement(
+            workspace,
             subprocess_started_unix=variant_started_unix,
+            settle_seconds=REPORT_SETTLE_SECONDS if rc == 0 else 0.0,
         )
         warnings = list(measurement.pop("nonfatal_warnings", []) or [])
         if rc != 0:
@@ -1975,6 +2016,14 @@ async def run_grid(
             death_excerpt = server_log_death_excerpt(str(server_log))
             if rc != 0:
                 error = death_excerpt or redact_secret_values((stderr or stdout)[-2000:])
+                # The bypass/scriptable path runs the customer body in a child
+                # whose stderr is redirected to benchmark_stderr.log, not the
+                # parent pipe — so `stderr`/`stdout` here are often empty and the
+                # real diagnostic (e.g. argparse "unrecognized arguments") is
+                # only on disk. Fall back to it so abort_reason.json carries the
+                # actual failure instead of a blank `error`.
+                if not error.strip():
+                    error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
                 invalid_class = "magpie_nonzero_invalid_measurement"
             elif not report:
                 error = death_excerpt or "benchmark_report missing"
@@ -2112,6 +2161,61 @@ def _write_variant_abort_marker(
 
     Lets final-report / post-mortem tools distinguish "tested-but-failed" from
     "untested" and find an explicit reason. Failure to write it is non-fatal.
+    """
+    _write_variant_abort_marker_impl(
+        slot,
+        variant_name=variant_name,
+        error_class=error_class,
+        error_summary=error_summary,
+        extra_args=extra_args,
+    )
+
+
+def _on_disk_stderr_tail(*dirs: Path, limit: int = 2000) -> str:
+    """Return the tail of the first non-empty on-disk benchmark log.
+
+    The piped ``stderr``/``stdout`` from :func:`run_with_session_kill` is empty
+    for the bypass/scriptable path — the customer body (torchrun/bench_fps.py)
+    writes its own stderr (e.g. an argparse ``unrecognized arguments`` error)
+    to ``benchmark_stderr.log`` in the workspace, NOT the parent's pipe. Without
+    this, ``magpie_nonzero_invalid_measurement`` aborts land in
+    ``abort_reason.json`` with an empty ``error`` and the real diagnostic is
+    only discoverable by hand. Scans the given dirs for
+    ``benchmark_stderr.log`` then ``benchmark_stdout.log`` and returns the tail
+    of the first with content.
+
+    Args:
+        *dirs (Path): Directories to search (workspace, slot), in order.
+        limit (int): Max characters returned (tail).
+
+    Returns:
+        str: The log tail, or ``""`` if none found / all empty.
+    """
+    for d in dirs:
+        if not d:
+            continue
+        for name in ("benchmark_stderr.log", "benchmark_stdout.log"):
+            try:
+                p = d / name
+                if not p.is_file():
+                    continue
+                text = p.read_text(encoding="utf-8", errors="replace").strip()
+                if text:
+                    return f"[{name}] {text[-limit:]}"
+            except OSError:
+                continue
+    return ""
+
+
+def _write_variant_abort_marker_impl(
+    slot: Path,
+    *,
+    variant_name: str,
+    error_class: str,
+    error_summary: str,
+    extra_args: str,
+) -> None:
+    """Implementation body for :func:`_write_variant_abort_marker`.
 
     Args:
         slot (Path): Variant slot directory the marker is written into.

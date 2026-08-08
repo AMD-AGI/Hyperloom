@@ -133,6 +133,7 @@ class _Stub:
     _record_framework_agent_authored_outcome = Coordinator._record_framework_agent_authored_outcome
     _recover_framework_agent_authoring_outcome = Coordinator._recover_framework_agent_authoring_outcome
     _record_framework_agent_authoring_empty_outcome = Coordinator._record_framework_agent_authoring_empty_outcome
+    _record_framework_agent_dispatch_failure = Coordinator._record_framework_agent_dispatch_failure
     _record_framework_agent_audit_skip = Coordinator._record_framework_agent_audit_skip
     _framework_agent_audit_seed_lines = staticmethod(Coordinator._framework_agent_audit_seed_lines)
     _framework_audit_use_llm_mode = staticmethod(FrameworkPhase._framework_audit_use_llm_mode)
@@ -146,6 +147,9 @@ class _Stub:
     _framework_local_explore_arm_enabled = FrameworkPhase._framework_local_explore_arm_enabled
     _make_local_explore_pseudo_candidate = FrameworkPhase._make_local_explore_pseudo_candidate
     _maybe_dispatch_local_explore = FrameworkPhase._maybe_dispatch_local_explore
+    # Authoring routes by framework kind; this suite's state is sglang, so the
+    # router resolves to the serving domain.
+    _authoring_specialist_domain = FrameworkPhase._authoring_specialist_domain
     # Stub has no GPU pool, so ``_framework_gpu_params`` degrades to ``{}``.
     _coerce_needs_gpu = staticmethod(Coordinator._coerce_needs_gpu)
     _framework_authoring_lanes_ttl = Coordinator._framework_authoring_lanes_ttl
@@ -1149,6 +1153,10 @@ def test_framework_agent_repo_url_origin_framework_known() -> None:
     assert Coordinator._framework_agent_repo_url_origin_framework("https://github.com/ROCm/vllm.git") == "vllm"
     assert (
         Coordinator._framework_agent_repo_url_origin_framework("https://github.com/sgl-project/sglang.git") == "sglang"
+    )
+    assert (
+        Coordinator._framework_agent_repo_url_origin_framework("https://github.com/xdit-project/xDiT.git")
+        == "xdit"
     )
 
 

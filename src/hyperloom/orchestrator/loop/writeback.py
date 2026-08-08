@@ -2735,6 +2735,17 @@ class WritebackCollaborator:
             changed = True
             audit_extras["trace_path"] = str(trace_path)
             audit_extras["profile_args"] = profile_args
+        # Host-side rewrite evidence is independent of the trace: it answers
+        # "which host-side work is redundant", which no kernel timeline can, and
+        # a run whose trace was unusable can still have produced good evidence.
+        # So promote it on its own, outside the trace_path branch.
+        from ..actions.executors._framework_rewrite_evidence import promote_evidence_path
+
+        evidence_path = promote_evidence_path(self.shared_state, result)
+        if evidence_path:
+            audit_extras["framework_rewrite_evidence"] = evidence_path
+            audit_extras["framework_rewrite_candidate_count"] = result.get("framework_rewrite_candidate_count")
+            changed = True
         # profile result may include a tput; promote into current_best on the +1% rule.
         tput = result.get("output_throughput")
         cb = self.shared_state.current_best or {}
@@ -2822,10 +2833,25 @@ class WritebackCollaborator:
             # Reset the roofline failure streak on a successful snapshot.
             if hasattr(self.shared_state, "roofline_failure_streak"):
                 self.shared_state.roofline_failure_streak = 0
-            # Re-anchor the 10% watermark step on the projected current tput.
-            anchor_tput = self._current_tput_from_validated_gain()
-            if anchor_tput > 0:
-                self.shared_state.last_roofline_tput = float(anchor_tput)
+            # Re-anchor the 10% watermark step on the projected current tput --
+            # but only for a roofline that actually produced an analysis. The
+            # anchor is what stops the watermark firing again until throughput
+            # climbs another 10%, so anchoring on an empty one buys a whole
+            # cycle of silence for a snapshot that says nothing: the specialist
+            # keeps reading "(none)" while the anchor insists a roofline was
+            # taken here. Leaving the anchor alone lets the watermark re-arm and
+            # take a real one.
+            if str((self.shared_state.last_trace_analyze or {}).get("analysis_md_text") or ""):
+                anchor_tput = self._current_tput_from_validated_gain()
+                if anchor_tput > 0:
+                    self.shared_state.last_roofline_tput = float(anchor_tput)
+            else:
+                log.warning(
+                    "roofline %s produced no analysis; leaving the watermark "
+                    "anchor at %.4f so a real one can still be taken",
+                    task.task_id if task else "?",
+                    float(self.shared_state.last_roofline_tput or 0.0),
+                )
             changed = True
         else:
             audit_decision = "discarded"
@@ -2887,6 +2913,19 @@ class WritebackCollaborator:
             if err:
                 self.shared_state.discovered_flags_error = str(err)
             changed = True
+        # Per-lever attribution from this round. Recorded regardless of whether
+        # the lever variant won: a rewrite measured at +0.1% is as useful to know
+        # as one measured at +8%, and without the number the lever would be
+        # re-benched every round.
+        for attribution in result.get("framework_lever_attributions") or []:
+            if not isinstance(attribution, dict):
+                continue
+            if self.shared_state.record_framework_lever_attribution(
+                str(attribution.get("switch") or ""),
+                gain_pct=attribution.get("gain_pct"),
+                source=str(attribution.get("source") or ""),
+            ):
+                changed = True
         # 3. Per-winner record_explore_accepted (Coordinator is sole writer).
         winners = result.get("winners") or []
         round_id = str(result.get("round_id") or "")
@@ -3227,6 +3266,24 @@ class WritebackCollaborator:
         status = str(result.get("status") or "")
         new_tput = result.get("output_throughput")
         kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
+        # Register framework-rewrite switches as search levers. Done for both KEEP
+        # verdicts: a bundle that cleared the gate is on and gets leave-one-out
+        # attribution, while an inert KEEP is dormant and gets additive
+        # attribution. ``kept_inert`` deliberately does not lift current_best —
+        # the code is applied but every switch is off, so the running
+        # configuration is unchanged.
+        levers = result.get("framework_levers")
+        if isinstance(levers, list) and levers:
+            lever_outcome = str(result.get("framework_lever_outcome") or "")
+            if self.shared_state.record_authored_framework_levers(
+                levers,
+                default_on=(lever_outcome == "default_on"),
+                specialist_task_id=str(result.get("specialist_task_id") or ""),
+                stack_delta_pct=result.get("delta_pct"),
+            ):
+                changed = True
+            audit_extras["framework_levers"] = [str(row.get("switch") or "") for row in levers]
+            audit_extras["framework_lever_outcome"] = lever_outcome
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         prebaseline_enablement = bool(
             kept_flag
@@ -3349,9 +3406,14 @@ class WritebackCollaborator:
             audit_decision = "promoted"
         elif kept_flag:
             audit_decision = "no_promote"
+        elif status == "kept_inert":
+            # Applied but every switch off: nothing was promoted, yet the patch
+            # stays on disk as registered levers, so it is not a discard either.
+            audit_decision = "kept_inert"
         else:
             audit_decision = "discarded"
         audit_extras = {
+            **audit_extras,
             "status": status,
             "specialist_task_id": result.get("specialist_task_id"),
             "output_throughput": new_tput,

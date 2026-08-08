@@ -96,5 +96,8 @@ runtime-env/
 run_kernel_forge.sh
 resume_kernel_forge.sh
 
+# Sky-segmentation model HY-World-2.0 downloads at run time. inference_utils
+# resolves it by relative path, so it lands in whatever CWD the bench ran from.
+skyseg.onnx
 # Local prompt-audit scratch (rendered prompts, session dumps, audit notes)
 .prompt-audit/

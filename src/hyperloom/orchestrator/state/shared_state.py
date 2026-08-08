@@ -252,6 +252,9 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
 # How many hot / skipped kernels ``record_trace_analyze`` keeps in the trace
 # summary (matches the ``*_top15`` field names).
 _TRACE_HOT_KERNEL_TOP_N = 15
+# Session-level kernel-roofline report the analyzer writes for a non-close run;
+# read back when the trace_analyze envelope arrives without its payload keys.
+_DEFAULT_ROOFLINE_REPORT_NAME = "kernel_roofline_current.json"
 
 # Global ``last_action_failures`` rolling-log cap.
 _DEFAULT_LAST_FAILURES = 30
@@ -581,6 +584,30 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     discovered_flags_error: str = ""
     # Server EXTRA_SGLANG_ARGS in effect when last_profile_trace was captured; identical args means the same trace.
     last_profile_args: str = ""
+    # Per-kernel GPU time breakdown JSON from the most recent profile. Read by
+    # ``_framework_gap_composer`` to add a bottleneck keyword to the framework
+    # arm's gap description.
+    last_profile_kernel_breakdown: str = ""
+    # Merged host-side rewrite evidence document from the most recent profile
+    # (see ``_framework_rewrite_evidence``). Distinct from the kernel breakdown:
+    # it reports redundant *host* work — collective round-trips, device-to-host
+    # syncs, repeated host-to-device copies, recomputed loop invariants — none of
+    # which appears in a kernel timeline, and which is where framework-level
+    # source rewrites (as opposed to kernel rewrites) find their wins.
+    last_framework_rewrite_evidence: str = ""
+    # Why the field above is empty, when it is. "No candidates" and "the probe
+    # never ran" both render as no evidence, and only one of them means the
+    # workload has nothing left to rewrite; without this the framework phase
+    # cannot tell a genuine negative from a broken instrument.
+    last_framework_rewrite_evidence_status: str = ""
+    # Environment switches behind accepted framework-level source rewrites,
+    # registered as search levers. Each row carries its rewrite category, its
+    # dependency edges, whether it is currently on (``default_on``), and its
+    # individually measured contribution once the explore phase has attributed
+    # it. This is what turns an authored bundle of rewrites into per-rewrite
+    # numbers and a searchable combination space, instead of a patch that is
+    # kept or reverted whole.
+    authored_framework_levers: list[dict[str, Any]] = field(default_factory=list)
 
     # Roofline-v2 trace-analyze cache written by record_trace_analyze; ``roofline_snapshot_id`` mirrors the nested value for hot-path access.
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
@@ -780,11 +807,26 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     rejected_kernel_patches: list[dict[str, Any]] = field(default_factory=list)
     # Kernel ids with no remaining automated path (from REVERTs + exhausted integrate attempts).
     rejected_kernel_ids: list[str] = field(default_factory=list)
-    # Consecutive KERNEL_AGENT ticks with no actionable work pending. Lets the
-    # phase machine wind down to SWEEP instead of spinning on hallucinated
-    # kernel-id requests / no-intent turns until the wall-clock cap. Reset to 0
-    # whenever kernel work is pending or the phase is not KERNEL_AGENT.
+    # Consecutive KERNEL_AGENT ticks that observed no forward motion AND no
+    # kernel-lane task in flight. Lets the phase machine wind down to SWEEP
+    # instead of spinning on hallucinated kernel-id requests / no-intent turns
+    # until the wall-clock cap. Reset to 0 outside KERNEL_AGENT and whenever
+    # ``kernel_progress_fingerprint`` changes.
     kernel_idle_ticks: int = 0
+    # Digest of the KERNEL progress signals (attempt ledger, rejected ids, last
+    # kernel_opt, stack depth, in-flight kernel task ids) seen on the tick that
+    # opened the current idle streak. The streak used to be driven by
+    # ``kernel_work_pending``, which reports whether the ledger still holds
+    # anything unresolved — attempts that can never be advanced answer "yes"
+    # forever, so the counter was pinned at 0 through 1130 idle ticks. A digest
+    # answers the question that actually matters: did anything change?
+    kernel_progress_fingerprint: str = ""
+    # Unix time the current idle streak opened. Ticks alone are a poor stall
+    # measure (a few seconds each, and the phase machine advances more than once
+    # per coordinator tick), so the wind-down also requires the streak to have
+    # lasted ``KERNEL_IDLE_MIN_SECONDS``. Rebased to now while a kernel-lane task
+    # is in flight so a 30-minute build never accrues idle time.
+    kernel_idle_since_unix: float = 0.0
 
     # Search-space expansion ledger surfaced in the Orchestration prompt.
     discovered_flags: dict[str, Any] = field(default_factory=dict)
@@ -808,6 +850,17 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # segment is added at status-render time; accumulating completed segments
     # avoids undercounting long macro-cycle runs after phase_history is capped.
     explore_elapsed_accum_s: float | None = 0.0
+    # Durable per-phase sum of COMPLETED segments, keyed by phase name.
+    # ``phase_started_unix`` is reset on EVERY phase entry, so a budget guard
+    # reading it alone measures the CURRENT entry only — and each phase is
+    # re-entered once per macro-cycle. That turned "KERNEL gets 15% of the run"
+    # into "KERNEL gets 15% of the run every time it is entered": three entries
+    # burned 288% of the cap while the other phases starved. The guards read
+    # this total plus the live segment instead. ``record_phase_transition`` is
+    # the only writer; unlike ``explore_elapsed_accum_s`` there is no "unknown"
+    # sentinel, because a budget guard must never read "unknown" as "no cap"
+    # (see ``from_raw`` for how a pre-upgrade state is reconstructed).
+    phase_elapsed_totals: dict[str, float] = field(default_factory=dict)
     # Append-only operator-facing lifecycle log. Each row (built by
     # :func:`machine_state.make_lifecycle_event`) records a phase/step boundary
     # plus artifact paths. Coordinator-only writer; capped at ``_LIFECYCLE_CAP``.
@@ -1195,6 +1248,18 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         # partial zero after resume. Fresh states still start from 0.0.
         if "explore_elapsed_accum_s" not in raw:
             filtered["explore_elapsed_accum_s"] = None
+        # A state written before per-phase totals existed still records every
+        # transition in phase_history, so the completed segments are
+        # reconstructible. Rebuilding beats defaulting to an empty dict: an empty
+        # dict silently re-arms the per-entry bug for the rest of a resumed run.
+        # phase_history is capped, so the rebuild is a LOWER bound — the safe
+        # direction, since it can only under-charge a phase, never invent time.
+        if not isinstance(filtered.get("phase_elapsed_totals"), dict):
+            from ..phases.machine_state import phase_elapsed_totals_from_history
+
+            filtered["phase_elapsed_totals"] = phase_elapsed_totals_from_history(
+                filtered.get("phase_history"),
+            )
         if not isinstance(filtered.get("specialist_patch_verdicts"), dict):
             filtered["specialist_patch_verdicts"] = {}
         if not isinstance(filtered.get("kernel_opt_attempts"), dict):
@@ -2411,12 +2476,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     def _roofline_throughput_unit(self) -> str:
         """Return the throughput unit for roofline snapshots of this workload.
 
-        Diffusion (xDiT) ceilings are images/sec; text-gen is tokens/sec. The
-        numeric ``*_tok_per_sec`` fields keep their names for wire stability;
-        this unit tells consumers how to render them.
+        Delegates to the framework registry (xDiT = img/s,
+        text-gen = tok/s, …). The numeric ``*_tok_per_sec`` fields keep their
+        names for wire stability; this unit tells consumers how to render them.
         """
+        from hyperloom.inference_optimizer import framework_registry
+
         framework = str(getattr(self, "framework", "") or "").strip().lower()
-        return "img/s" if framework == "xdit" else "tok/s"
+        return framework_registry.throughput_unit(framework)
 
     def record_baseline_roofline_ceiling(self) -> dict[str, Any]:
         """Compute a standalone baseline-arm roofline ceiling and cache it.
@@ -2501,6 +2568,23 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         kernel_roofline_path = result.get("kernel_roofline_path") or ""
         if not kernel_roofline_path:
             kernel_roofline_path = artifacts.get("kernel_roofline", "") or ""
+        disk = self._read_session_roofline_report(payload, kernel_roofline_path)
+        if disk:
+            kernel_roofline_path = kernel_roofline_path or str(disk["path"])
+            candidates_path = candidates_path or str(disk["payload"].get("kernel_candidates_path") or "")
+            if not result.get("trace_report_path"):
+                result = dict(result)
+                result["trace_report_path"] = str(disk["payload"].get("analysis_md_path") or "")
+            if not (result.get("hot_kernels") or result.get("hot_kernels_top15")):
+                result = dict(result)
+                result["hot_kernels"] = disk["kernels"]
+                log.warning(
+                    "record_trace_analyze: envelope carried no hot kernels; "
+                    "recovered %d from %s. The analysis succeeded — the result "
+                    "envelope lost its payload in transit.",
+                    len(disk["kernels"]),
+                    disk["path"],
+                )
         steady_state_trace = (
             result.get("steady_state_trace")
             or artifacts.get("tracelens_steady_state_trace")
@@ -2589,6 +2673,43 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             trace_input=trace_input,
             kernel_roofline_path=kernel_roofline_path,
         )
+
+    def _read_session_roofline_report(
+        self,
+        payload: dict[str, Any],
+        kernel_roofline_path: str,
+    ) -> "dict[str, Any] | None":
+        """Read the session-level kernel-roofline report written by TraceLens.
+
+        The analyzer writes this report as a side effect of a successful run, so
+        it survives a result envelope that lost its payload keys in transit.
+
+        Args:
+            payload (dict[str, Any]): The trace_analyze task payload; supplies
+                ``roofline_output_name`` when the envelope named no path.
+            kernel_roofline_path (str): Report path recovered from the envelope,
+                or ``""`` to resolve the session default.
+
+        Returns:
+            ``{"path", "payload", "kernels"}`` with kernels ordered by
+            descending GPU share, or ``None`` when no report is readable.
+        """
+        path = Path(kernel_roofline_path) if kernel_roofline_path else None
+        if path is None:
+            session_dir = getattr(self, "_session_dir", None)
+            if not session_dir:
+                return None
+            name = str((payload or {}).get("roofline_output_name") or "").strip()
+            path = Path(session_dir) / "reports" / (name or _DEFAULT_ROOFLINE_REPORT_NAME)
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(report, dict):
+            return None
+        rows = [row for row in (report.get("kernels") or []) if isinstance(row, dict)]
+        rows.sort(key=lambda row: float(row.get("gpu_pct") or 0.0), reverse=True)
+        return {"path": path, "payload": report, "kernels": rows}
 
     def _build_hot_kernel_summaries(
         self,

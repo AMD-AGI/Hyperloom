@@ -24,7 +24,26 @@ _FA_MODULE = fac._FA_MODULE
 # -- repo_url_for_framework -----------------------------------------------
 def test_repo_url_for_framework_known_and_unknown() -> None:
     assert fac.repo_url_for_framework("sglang").endswith("sglang.git")
+    assert fac.repo_url_for_framework("xdit") == "https://github.com/xdit-project/xDiT.git"
+    assert fac.repo_url_for_framework("xdit") == "https://github.com/xdit-project/xDiT.git"
     assert fac.repo_url_for_framework("nope") == ""
+
+
+def test_scriptable_framework_registry_specs() -> None:
+    from hyperloom.inference_optimizer import framework_registry
+
+    xdit_spec = framework_registry.FRAMEWORKS["xdit"]
+    assert xdit_spec.repo_url == "https://github.com/xdit-project/xDiT.git"
+    assert xdit_spec.kind == framework_registry.SCRIPTABLE
+    assert xdit_spec.extra_args_env == "EXTRA_XDIT_ARGS"
+    assert xdit_spec.throughput_unit == "img/s"
+    assert framework_registry.primary_metric_name("xdit") == "e2el_mean_ms"
+
+    # An operator's own workload: no upstream to discover PRs from, and the
+    # entrypoint's report is the only thing that knows what the number counts.
+    custom_spec = framework_registry.FRAMEWORKS["custom"]
+    assert custom_spec.kind == framework_registry.SCRIPTABLE
+    assert custom_spec.repo_url is None
 
 
 # -- _resolve_fa_command ---------------------------------------------------

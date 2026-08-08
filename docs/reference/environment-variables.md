@@ -115,7 +115,8 @@ that degraded path.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RUN_EVAL` | `true` | Whether a serving benchmark runs the GSM8K eval. Turning it off removes the per-candidate accuracy signal entirely — accuracy regressions stop being caught. Ignored by scriptable (xDiT) workloads, whose correctness signal is the image `quality_gate` in `benchmark_report.json`. |
+| `RUN_EVAL` | `true` | Whether a serving benchmark runs the GSM8K eval. Turning it off removes the per-candidate accuracy signal entirely — accuracy regressions stop being caught. Ignored by scriptable workloads, whose correctness signal is the `quality_gate` in `benchmark_report.json`. |
+| `HYPERLOOM_QUALITY_REF`<br>`HYPERLOOM_QUALITY_REF_WRITE` | Derived under the session dir | The scriptable quality gate's reference artifact: `_WRITE` establishes it on the baseline, the other compares against it on every later candidate. What the artifact holds is the workload's own business — xDiT stores an image, an operator-supplied `custom` workload stores whatever its script compares. Also emitted as `XDIT_QUALITY_REF` / `XDIT_QUALITY_REF_WRITE` for bench scripts written before the rename; either name is read, both are written. |
 | `INFERENCE_OPTIMIZER`<br>`_REQUIRE_KERNEL`<br>`_ACCURACY` | On | Gates the `KEEP` for a kernel patch integrated by the kernel lane. Set to `0` / `false` / `no` / `off` to fall back to a throughput-only `KEEP`. Disable only when the eval lane is known-broken: this gate is what stops a faster-but-wrong kernel from being kept. |
 | `INFERENCE_OPTIMIZER`<br>`_REQUIRE_FRAMEWORK`<br>`_ACCURACY` | On | Same gate for a framework source patch authored by a specialist. Same disable spellings. |
 | `MAGPIE_EVAL_LIMIT` | Unset (full task set) | Caps the number of eval problems (`lm_eval --limit`). Useful for smoke runs; see the noise caveat below before using it on a run whose `KEEP` decisions matter. |
