@@ -76,9 +76,9 @@ class RewriteCapabilities:
     reason: str
     detail: str = ""
     frameworks: tuple[str, ...] = ()
-    # What the producer can port from. Two vocabularies because a candidate
-    # carries both: the language of the file on disk and the curated kind a
-    # profiler assigned it, and for a traced Triton kernel those disagree.
+    # The file languages and the curated kinds the producer can port from. Kept
+    # apart in the payload because they disagree: a traced Triton kernel is
+    # ``python`` with ``kernel_kind=triton``.
     source_languages: tuple[str, ...] = ()
     source_kinds: tuple[str, ...] = ()
     # Optional and additive: a producer predating driver preparation simply
@@ -97,24 +97,12 @@ class RewriteCapabilities:
         }
 
     def accepted_sources(self) -> frozenset[str]:
-        """Every source name the producer said it can port from.
-
-        The two lists are checked as one set because the vocabularies overlap:
-        ``triton`` is both a language and a curated kind, while ``hip_cpp`` is
-        only ever a kind. Keeping them apart in the payload lets the producer say
-        which is which; a consumer only needs to know whether the name its
-        candidate carries is one the producer will accept.
-        """
+        """Every source name the producer said it can port from."""
         return frozenset(self.source_kinds) | frozenset(self.source_languages)
 
     def resolved_source(self, *, language: str, kind: str) -> str:
-        """The source identity this candidate resolves to, kind before language."""
+        """The source identity a candidate resolves to, kind before language."""
         return _rewritable_source(language, kind, self.accepted_sources())
-
-    def accepts_source(self, *, language: str, kind: str) -> bool:
-        """Whether the producer can port a candidate with this language/kind."""
-        accepted = self.accepted_sources()
-        return _rewritable_source(language, kind, accepted) in accepted
 
 
 @dataclass(frozen=True)
@@ -131,9 +119,8 @@ class RewriteCandidateSpec:
     driver: str
     branch: str
     attempt_id: str
-    # Stated rather than left for the producer to infer: this consumer resolved it
-    # from a profile of the kernel actually running, which beats reading the file
-    # -- a traced Triton kernel lives in a ``.py`` that names no language.
+    # Resolved from the trace, which knows more than the file: a traced Triton
+    # kernel lives in a ``.py`` that names no language.
     source_language: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -465,17 +452,6 @@ def _is_multi_node() -> bool:
             sys.path.remove(tools_dir)
 
 
-def _readable_file(path: str) -> bool:
-    """Whether ``path`` names a file this process can actually read."""
-    candidate = str(path or "").strip()
-    if not candidate:
-        return False
-    try:
-        return Path(candidate).is_file() and os.access(candidate, os.R_OK)
-    except OSError:
-        return False
-
-
 def _mapped_into_workspace(paths: Sequence[str], workspace: str) -> str:
     """Return the first path that does not resolve inside ``workspace``."""
     root = Path(workspace).resolve()
@@ -546,9 +522,8 @@ def evaluate_rewrite_route(
     language = str(source_type or "").strip().lower()
     if "flydsl" in kind or language == "flydsl":
         return RewriteDecision(False, "already_flydsl_source", "candidate is already a FlyDSL kernel")
-    # Refused here rather than left to the handshake. There is nothing to port
-    # without readable source, so no producer capability can make this eligible
-    # and widening the advertised languages must never reach it.
+    # Ahead of the handshake: there is nothing to port without readable source, so
+    # widening the producer's advertised languages must never reach this.
     if "asm" in kind or "prebuilt" in kind:
         return RewriteDecision(False, "prebuilt_binary_unsupported", f"kernel_kind={kernel_kind}")
 
@@ -597,10 +572,10 @@ def evaluate_rewrite_route(
             f"producer frameworks {list(capabilities.frameworks)} exclude {canonical_framework}",
             capabilities=capabilities,
         )
-    # Which languages can be ported is the producer's to state, not this
-    # consumer's to hardcode: it owns the port prompt, the anti-cheat gate and the
-    # entry resolution that have to understand the source.
-    if not capabilities.accepts_source(language=language, kind=kind):
+    # Which languages are portable is the producer's to state: it owns the port
+    # prompt and the entry resolution that have to read the source.
+    resolved_source = capabilities.resolved_source(language=language, kind=kind)
+    if resolved_source not in capabilities.accepted_sources():
         return RewriteDecision(
             False,
             "source_type_unsupported",
@@ -620,16 +595,13 @@ def evaluate_rewrite_route(
             "the producer does not advertise driver preparation",
             capabilities=capabilities,
         )
-    # The same requirement seen from the other side: preparation is only possible
-    # against real invocation evidence. Proceeding without it hands the producer
-    # nothing to author from, and the placeholder driver it would fall back on
-    # exits 1 -- so the entire budget would be spent to arrive at a failure that
-    # is knowable now.
-    if not _readable_file(invocation_spec_file):
+    # Preparation needs the invocation evidence; without it the producer keeps the
+    # placeholder driver, which exits 1 after burning the whole budget.
+    if not (invocation_spec_file and Path(invocation_spec_file).is_file()):
         return RewriteDecision(
             False,
             "invocation_spec_missing",
-            f"no readable invocation spec at {invocation_spec_file or '<unset>'}",
+            f"no invocation spec at {invocation_spec_file or '<unset>'}",
             capabilities=capabilities,
         )
 
@@ -644,14 +616,12 @@ def evaluate_rewrite_route(
         driver="",
         branch=branch,
         attempt_id=attempt_id,
-        source_language=capabilities.resolved_source(language=language, kind=kind),
+        source_language=resolved_source,
     )
     return RewriteDecision(True, "eligible", "", spec=spec, capabilities=capabilities)
 
 
-# What ``forge_submit`` -- the only consumer outside this module -- depends on.
-# Everything else here is an internal the tests reach into directly and is
-# deliberately absent, so a name entering this list is a decision to support it.
+# What ``forge_submit``, the only consumer outside this module, depends on.
 __all__ = [
     "APPLYBACK_RESERVE_SEC",
     "PRODUCER_MIN_BUDGET_SEC",

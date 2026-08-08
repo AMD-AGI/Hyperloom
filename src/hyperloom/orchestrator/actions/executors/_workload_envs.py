@@ -763,10 +763,8 @@ def materialize_config_with_envs(
             merged args whatever source it came from (the one-shot fallback
             after a launch failure blamed on that backend).
         flydsl_source_dirs: When True, name the FlyDSL source roots in
-            ``$FLYDSL_EXTRA_SOURCE_DIRS`` so a patched helper in a sibling
-            directory invalidates the JIT cache key instead of being served from
-            a stale binary. Only the run that just applied such a patch is
-            exposed to that, so it is off by default.
+            ``$FLYDSL_EXTRA_SOURCE_DIRS`` so a patched helper invalidates the JIT
+            cache key. Off by default: only a run that applied such a patch needs it.
 
     Returns:
         The materialized YAML path (stable file name across calls).
@@ -1476,13 +1474,10 @@ def materialize_config_with_envs(
                 "SGLANG_FP8_BLOCKSCALE_CK_MAX_M will no-op on the unpatched "
                 "sglang fp8_utils.py (serving run continues unaffected)."
             )
-    # FlyDSL folds only same-directory helpers into its JIT cache key, so a
-    # patched helper one directory over is silently served from a stale binary.
-    # Naming the kernel roots here folds every .py under them into the key, which
-    # re-compiles exactly the kernels that changed instead of dropping the cache.
-    # Only the run that just applied such a patch has that hazard, so it is asked
-    # for rather than applied to every benchmark; and setdefault, so an
-    # operator-set value (YAML / extra_envs) always wins.
+    # FlyDSL folds only same-directory helpers into its JIT cache key, so a patched
+    # helper one directory over is served from a stale binary. Naming the roots
+    # folds their sources into the key. Only the run that applied such a patch has
+    # that hazard; setdefault so an operator-set value (YAML / extra_envs) wins.
     if flydsl_source_dirs:
         _flydsl_dirs = flydsl_extra_source_dirs()
         if _flydsl_dirs:
