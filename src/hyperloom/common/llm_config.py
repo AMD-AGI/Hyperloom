@@ -1,16 +1,37 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""LLM gateway environment resolution shared by LLM SDK callers."""
+"""LLM gateway ownership: env resolution *and* client construction.
+
+:func:`get_openai_client` / :func:`get_async_openai_client` are the only
+sanctioned places in Hyperloom that instantiate an OpenAI-compatible SDK
+client. Callers ask this module for a client instead of reading credentials and
+calling the SDK themselves, so provider selection stays one decision rather
+than one per call site.
+
+Clients are deliberately **not** cached or shared. An ``AsyncOpenAI`` wraps an
+``httpx.AsyncClient`` whose connection pool binds to the event loop that first
+uses it, and Hyperloom starts a fresh loop per run / phase, so a process-wide
+cache would hand a second loop a pool it cannot use. Credentials are also not
+stable for the life of the process: preflight rewrites the provider env, and
+callers may pass an explicit ``env`` mapping. Owning objects (``CodexBackend``,
+``ProposalScorer``, ``CriticAgentBackend``) already hold one client each for
+their own lifetime, which is the scope that actually matches an event loop.
+"""
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
 from typing import Mapping
 from urllib.parse import urlsplit, urlunsplit
+
+log = logging.getLogger(__name__)
+
+_OPENAI_SDK_MISSING = "openai SDK not installed; run `pip install openai>=1.50`"
 
 
 class LLMConfigError(RuntimeError):
@@ -159,6 +180,154 @@ def openai_client_kwargs(
     return resolve_openai_client_config(api_key_env=api_key_env, base_url_env=base_url_env, env=env).as_kwargs()
 
 
+def build_http_timeout(
+    *,
+    connect: float,
+    read: float,
+    write: float | None = None,
+    pool: float | None = None,
+) -> object | None:
+    """Build an ``httpx.Timeout`` to hand to :func:`get_openai_client`.
+
+    ``write`` and ``pool`` default to ``read``. Returns ``None`` — logging a
+    warning — when ``httpx`` is not importable, so the caller still gets a
+    working client on the SDK's default timeouts instead of failing to construct
+    one at all. A timeout ``httpx`` itself rejects is a caller bug and raises:
+    silently dropping it would turn a bad knob into an unbounded stall.
+
+    Args:
+        connect: Connect-phase timeout in seconds.
+        read: Read-phase timeout in seconds.
+        write: Write-phase timeout in seconds; defaults to ``read``.
+        pool: Pool-acquire timeout in seconds; defaults to ``read``.
+
+    Returns:
+        An ``httpx.Timeout``, or ``None`` when ``httpx`` is unavailable.
+    """
+    try:
+        import httpx
+    except ImportError:
+        log.warning("llm_config: httpx unavailable; falling back to SDK default timeouts")
+        return None
+    return httpx.Timeout(
+        connect=connect,
+        read=read,
+        write=read if write is None else write,
+        pool=read if pool is None else pool,
+    )
+
+
+def _openai_sdk_client_class(class_name: str) -> object:
+    """Resolve one OpenAI SDK client class, importing the SDK on demand.
+
+    ``openai`` is imported lazily so importing this module (a dependency of the
+    whole orchestrator) does not pay the SDK import cost.
+
+    Args:
+        class_name: SDK attribute to read, ``"OpenAI"`` or ``"AsyncOpenAI"``.
+
+    Returns:
+        The requested SDK client class.
+
+    Raises:
+        LLMConfigError: If the ``openai`` package is not installed.
+    """
+    try:
+        import openai  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise LLMConfigError(_OPENAI_SDK_MISSING) from exc
+    return getattr(openai, class_name)
+
+
+def _openai_sdk_kwargs(
+    *,
+    api_key_env: str,
+    base_url_env: str,
+    env: dict[str, str] | None,
+    timeout: object | None,
+) -> dict[str, object]:
+    """Resolve credentials and fold in an optional per-caller ``timeout``."""
+    kwargs = openai_client_kwargs(api_key_env=api_key_env, base_url_env=base_url_env, env=env)
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    return kwargs
+
+
+def get_openai_client(
+    *,
+    api_key_env: str = "OPENAI_API_KEY",
+    base_url_env: str = "OPENAI_BASE_URL",
+    env: dict[str, str] | None = None,
+    timeout: object | None = None,
+) -> object:
+    """Construct the synchronous ``openai.OpenAI`` client.
+
+    One of the two sanctioned client constructors (see the module docstring):
+    credentials, base URL and gateway headers all come from
+    :func:`resolve_openai_client_config`, so no caller reads provider env itself.
+
+    Args:
+        api_key_env: Env var consulted first for the API key.
+        base_url_env: Env var consulted first for the base URL.
+        env: Env mapping to read instead of ``os.environ``.
+        timeout: Transport timeout forwarded to the SDK verbatim; build one with
+            :func:`build_http_timeout`. ``None`` keeps the SDK default.
+
+    Returns:
+        A new ``openai.OpenAI``; clients are never cached (module docstring).
+
+    Raises:
+        LLMConfigError: If the ``openai`` package is missing, or no OpenAI-side
+            API key is configured.
+    """
+    factory = _openai_sdk_client_class("OpenAI")
+    return factory(  # type: ignore[operator]
+        **_openai_sdk_kwargs(
+            api_key_env=api_key_env,
+            base_url_env=base_url_env,
+            env=env,
+            timeout=timeout,
+        )
+    )
+
+
+def get_async_openai_client(
+    *,
+    api_key_env: str = "OPENAI_API_KEY",
+    base_url_env: str = "OPENAI_BASE_URL",
+    env: dict[str, str] | None = None,
+    timeout: object | None = None,
+) -> object:
+    """Construct the asynchronous ``openai.AsyncOpenAI`` client.
+
+    The async twin of :func:`get_openai_client`; see it for the argument
+    contract and the module docstring for why clients are not shared.
+
+    Args:
+        api_key_env: Env var consulted first for the API key.
+        base_url_env: Env var consulted first for the base URL.
+        env: Env mapping to read instead of ``os.environ``.
+        timeout: Transport timeout forwarded to the SDK verbatim; build one with
+            :func:`build_http_timeout`. ``None`` keeps the SDK default.
+
+    Returns:
+        A new ``openai.AsyncOpenAI``; clients are never cached.
+
+    Raises:
+        LLMConfigError: If the ``openai`` package is missing, or no OpenAI-side
+            API key is configured.
+    """
+    factory = _openai_sdk_client_class("AsyncOpenAI")
+    return factory(  # type: ignore[operator]
+        **_openai_sdk_kwargs(
+            api_key_env=api_key_env,
+            base_url_env=base_url_env,
+            env=env,
+            timeout=timeout,
+        )
+    )
+
+
 def claude_sdk_env_options(
     *,
     model: str | None = None,
@@ -219,6 +388,48 @@ def apply_reasoning_effort(
     return params
 
 
+@dataclass(frozen=True)
+class ChatCompletionResult:
+    """One non-streaming chat completion, flattened for Hyperloom callers.
+
+    Attributes:
+        text: The assistant message content, ``""`` when the model sent none.
+        finish_reason: The chosen completion's ``finish_reason``, when present.
+        usage: The SDK ``usage`` object verbatim — providers disagree on which
+            counters they report, so mapping it stays with the caller that owns
+            the token accounting.
+    """
+
+    text: str
+    finish_reason: str | None
+    usage: object | None
+
+
+async def achat_completion(
+    client: object,
+    **params: object,
+) -> ChatCompletionResult:
+    """Async non-streaming chat completion; returns text, finish reason and usage.
+
+    Transport and API errors propagate: each caller tags them with its own role
+    context, and absorbing them here would hide an unreachable gateway.
+
+    Args:
+        client: A client from :func:`get_async_openai_client`.
+        **params: ``chat.completions.create`` parameters.
+
+    Returns:
+        The flattened :class:`ChatCompletionResult` for the first choice.
+    """
+    resp = await client.chat.completions.create(**params)  # type: ignore[union-attr]
+    choice = resp.choices[0]
+    return ChatCompletionResult(
+        text=choice.message.content or "",
+        finish_reason=getattr(choice, "finish_reason", None),
+        usage=getattr(resp, "usage", None),
+    )
+
+
 def stream_chat_completion_text(
     client: object,
     **params: object,
@@ -263,12 +474,17 @@ __all__ = [
     "CLAUDE_GATEWAY_SIGNAL_KEYS",
     "DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL",
     "DEFAULT_DEEPSEEK_MODEL",
+    "ChatCompletionResult",
     "LLMConfigError",
     "OpenAIClientConfig",
+    "achat_completion",
     "apply_reasoning_effort",
     "astream_chat_completion_text",
+    "build_http_timeout",
     "claude_sdk_env_options",
     "derive_openai_base_url",
+    "get_async_openai_client",
+    "get_openai_client",
     "openai_client_kwargs",
     "parse_custom_headers",
     "resolve_openai_client_config",

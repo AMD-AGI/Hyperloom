@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.roles import CodexBackend
+from hyperloom.orchestrator.roles import codex as codex_module
 from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed
 from hyperloom.orchestrator.roles.codex import _extract_envelope, _extract_responses_output
 from hyperloom.inference_optimizer.protocol.intent import (
@@ -293,6 +294,29 @@ def _construct_real_codex_capturing_kwargs(monkeypatch):
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
     CodexBackend(client_factory=None)
     return captured
+
+
+def test_codex_client_comes_from_the_shared_llm_gateway(monkeypatch):
+    """Codex owns no credentials: it forwards its env-var contract to llm_config."""
+    captured: dict[str, Any] = {}
+    sentinel = object()
+    monkeypatch.setattr(
+        codex_module,
+        "get_async_openai_client",
+        lambda **kwargs: captured.update(kwargs) or sentinel,
+    )
+    backend = CodexBackend(api_key_env="CODEX_KEY", base_url_env="CODEX_URL", client_factory=None)
+    assert backend._client is sentinel
+    assert captured == {"api_key_env": "CODEX_KEY", "base_url_env": "CODEX_URL"}
+
+
+def test_codex_missing_openai_sdk_raises_backend_error(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "openai", None)
+    monkeypatch.setenv("OPENAI_API_KEY", "tok")
+    with pytest.raises(BackendError, match="openai SDK not installed"):
+        CodexBackend(client_factory=None)
 
 
 def test_codex_prefers_explicit_openai_key_over_safe_filled_anthropic(monkeypatch):

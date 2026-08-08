@@ -27,7 +27,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from hyperloom.common.env import env_bool, env_str
-from hyperloom.common.llm_config import LLMConfigError, apply_reasoning_effort, openai_client_kwargs
+from hyperloom.common.llm_config import (
+    LLMConfigError,
+    achat_completion,
+    apply_reasoning_effort,
+    get_async_openai_client,
+)
 from hyperloom.common.jsonio import extract_first_json_with_key
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
@@ -168,9 +173,8 @@ class CodexBackend:
         """Construct the OpenAI client (or use the test factory).
 
         When ``client_factory`` is set it builds the client directly (test
-        seam). Otherwise it imports the OpenAI SDK, resolves the API key and
-        base URL from the configured env vars (with legacy fallbacks), and
-        creates an :class:`AsyncOpenAI` client.
+        seam). Otherwise it asks the shared LLM gateway for an async client
+        keyed on the configured env vars.
 
         Raises:
             BackendError: If the ``openai`` SDK is not installed or no API key
@@ -180,15 +184,12 @@ class CodexBackend:
             self._client = self.client_factory()
             return
         try:
-            from openai import AsyncOpenAI  # type: ignore[import-not-found]
-        except ImportError as exc:  # pragma: no cover
-            raise BackendError("openai SDK not installed; run `pip install openai>=1.50`") from exc
-
-        try:
-            kwargs = openai_client_kwargs(api_key_env=self.api_key_env, base_url_env=self.base_url_env)
+            self._client = get_async_openai_client(
+                api_key_env=self.api_key_env,
+                base_url_env=self.base_url_env,
+            )
         except LLMConfigError as exc:
             raise BackendError(str(exc).replace("OpenAI-compatible client", "CodexBackend")) from exc
-        self._client = AsyncOpenAI(**kwargs)
 
     # ------------------------------------------------------------------
     async def run(
@@ -289,8 +290,8 @@ class CodexBackend:
             }
         )
         try:
-            resp = await asyncio.wait_for(
-                self._client.chat.completions.create(**create_params),
+            result = await asyncio.wait_for(
+                achat_completion(self._client, **create_params),
                 timeout=self.call_timeout_s,
             )
         except asyncio.TimeoutError as exc:
@@ -300,15 +301,11 @@ class CodexBackend:
         except Exception as exc:  # noqa: BLE001
             raise LLMCallFailed(f"Codex API call failed: {exc!r}") from exc
 
-        choice = resp.choices[0]
-        text = choice.message.content or ""
-        finish = getattr(choice, "finish_reason", None)
         # Map OpenAI usage onto the SAME metadata keys ClaudeBackend uses so the
         # Coordinator's accumulator stays backend-agnostic; cache_* counters are 0.
-        usage = getattr(resp, "usage", None)
-        input_tokens = safe_int(getattr(usage, "prompt_tokens", None))
-        output_tokens = safe_int(getattr(usage, "completion_tokens", None))
-        return text, finish, input_tokens, output_tokens, {}
+        input_tokens = safe_int(getattr(result.usage, "prompt_tokens", None))
+        output_tokens = safe_int(getattr(result.usage, "completion_tokens", None))
+        return result.text, result.finish_reason, input_tokens, output_tokens, {}
 
     # ------------------------------------------------------------------
     async def _run_responses(
