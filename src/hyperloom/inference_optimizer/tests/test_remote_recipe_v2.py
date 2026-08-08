@@ -488,8 +488,10 @@ def test_facade_delegates_read_and_write_with_session_fallback(
 
     identity = "inference:m:h:f:mt:a:v:p"
     destination = tmp_path / "download"
-    assert facade.read(identity, destination) is read_result
-    assert facade.write(identity, state) is write_result
+    actual_read_result = facade.read(identity, destination)
+    actual_write_result = facade.write(identity, state)
+    assert actual_read_result is read_result
+    assert actual_write_result is write_result
     assert calls == [
         ("read", identity, destination, client),
         ("write", state, identity, expected, client),
@@ -512,7 +514,12 @@ def test_facade_write_explicit_session_overrides_state(monkeypatch) -> None:
         return expected_result
 
     monkeypatch.setattr(remote_recipe, "write_final_remote_recipe", _write)
-    assert facade.write("inference:m:h:f:mt:a:v:p", state, "explicit-session") is expected_result
+    actual_result = facade.write(
+        "inference:m:h:f:mt:a:v:p",
+        state,
+        "explicit-session",
+    )
+    assert actual_result is expected_result
     assert seen == ["explicit-session"]
 
 
