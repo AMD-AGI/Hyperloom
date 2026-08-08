@@ -168,6 +168,12 @@ def _maybe_build_localization_candidate(
         return None
 
 
+#: Progress-row status for a candidate the Critic rejected. The gate writes it
+#: and the working-memory and priors readers select on it, so the ledger is the
+#: only record of a denial and the three sites agree by construction.
+FRAMEWORK_CRITIC_DENIED_STATUS: str = "critic_denied"
+
+
 class FrameworkPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
@@ -2879,8 +2885,9 @@ class FrameworkPhase(PhaseHandler):
         learned", so discovery and the candidate ranker can be biased away from
         repeating failed candidates. No new data source — it aggregates
         ``framework_agent_phase_progress`` (terminal rows, reliably populated
-        after the P0 fix), ``framework_agent_critic_decisions`` (recent Critic
-        verdicts) and the batch dedup set.
+        after the P0 fix) and the batch dedup set. Critic denials are part of
+        that ledger: the gate stamps them as ``critic_denied`` rows carrying
+        the rationale.
 
         Returns:
             A dict with:
@@ -2909,14 +2916,15 @@ class FrameworkPhase(PhaseHandler):
                 }
             )
         # Learnings: distinct Critic denial rationales (negative priors), capped.
+        # Read from the progress ledger, the only place a denial is recorded:
+        # ``_record_framework_agent_critic_denied`` stamps a ``critic_denied``
+        # row carrying the Critic's reasoning.
         learnings: list[str] = []
         seen_learn: set[str] = set()
-        for dec in getattr(state, "framework_agent_critic_decisions", None) or []:
-            if not isinstance(dec, dict):
+        for row in rows:
+            if str(row.get("status") or "").strip().lower() != FRAMEWORK_CRITIC_DENIED_STATUS:
                 continue
-            if str(dec.get("verdict") or "").strip().lower() not in ("reject", "critic_denied", "deny"):
-                continue
-            rationale = str(dec.get("rationale") or "").strip()
+            rationale = str(row.get("rationale") or "").strip()
             if rationale and rationale not in seen_learn:
                 seen_learn.add(rationale)
                 learnings.append(rationale[:200])
@@ -3332,7 +3340,7 @@ class FrameworkPhase(PhaseHandler):
         timeout_sec = float(
             getattr(self, "framework_agent_discover_timeout_sec", 0.0) or _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC
         )
-        max_candidates = int(getattr(state, "framework_max_candidates", 0) or 0) or DEFAULT_FRAMEWORK_MAX_CANDIDATES
+        max_candidates = DEFAULT_FRAMEWORK_MAX_CANDIDATES
         # Cross-repo: query every pr_intel_specialist repo so discovery isn't confined to one framework repo.
         repo_urls = self._framework_agent_discover_repo_urls(framework)
         # Step A/B — feed the session working memory into discovery so fa
@@ -3513,13 +3521,13 @@ class FrameworkPhase(PhaseHandler):
         return True
 
     async def _enqueue_framework_agent_task(self, candidate: dict[str, Any]) -> None:
-        """Enqueue a single ``framework`` task for ``candidate``.
+        """Enqueue a single ``framework_agent`` task for ``candidate``.
 
         Builds the task params (candidate, batch id, baseline throughput,
-        framework) and creates an idempotent ``framework`` task holding the
-        server / workspace / benchmark lanes. On enqueue failure, records an
-        ``enqueue_failed`` progress row so the pump skips the candidate next
-        tick instead of spinning.
+        framework) and creates an idempotent ``framework_agent`` task whose
+        lanes and lease TTL come from the action registry. On enqueue failure,
+        records an ``enqueue_failed`` progress row so the pump skips the
+        candidate next tick instead of spinning.
 
         Args:
             candidate (dict[str, Any]): The discovered PR candidate to apply
@@ -3540,16 +3548,24 @@ class FrameworkPhase(PhaseHandler):
         }
         cand_id = self._framework_candidate_key(candidate)
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
+        lanes, ttl = self._registry_lanes_ttl("framework_agent")
         try:
+            # A framework candidate rebuilds and benchmarks, so it cannot share
+            # the GPU. ``_registry_lanes_ttl`` also answers ([], 0) when the
+            # registry failed to load, and enqueueing then would run this
+            # unserialised against every other task; refuse instead. The
+            # handler below turns it into a warning plus a progress row.
+            if not lanes:
+                raise RuntimeError(
+                    "framework_agent resolved to no lanes — the action registry is missing "
+                    "or failed to load, so the task would run without GPU exclusivity."
+                )
             await self.tasks.create_or_return_existing(
                 kind="framework_agent",
                 params=params,
                 idempotency_key=idem,
-                requires_lanes=[
-                    "server_lifecycle",
-                    "workspace_mutation",
-                    "benchmark_lane",
-                ],
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
             )
             log.info(
                 "FRAMEWORK: enqueued candidate=%s batch=%s",
@@ -3574,46 +3590,41 @@ class FrameworkPhase(PhaseHandler):
             )
 
     def _collect_framework_agent_candidate_priors(self) -> dict[str, Any]:
-        """Return compact session-local priors for the Critic gate (recent_decisions + recent_outcomes); best-effort.
+        """Return compact session-local priors for the Critic gate.
+
+        Everything the Critic needs about earlier candidates lives in the
+        progress ledger, denials included, so the outcomes carry the rationale
+        rather than being paired with a separate decision list. Only the rows
+        that were stamped with a reason have one — bench results record their
+        numbers instead — so the key is omitted rather than sent empty.
 
         Returns:
-            A dict with ``recent_decisions`` (recent critic verdicts) and
-            ``recent_outcomes`` (recent terminal apply/bench results), each
+            A dict with ``recent_outcomes`` (recent terminal apply/bench
+            results, each with the reason recorded for it, where there is one),
             bounded to a short tail.
         """
-        state = self.shared_state
-        decisions: list[dict[str, Any]] = []
-        try:
-            raw_decisions = getattr(state, "framework_agent_critic_decisions", None) or []
-            for row in raw_decisions[-self._CRITIC_PRIORS_DECISION_TAIL :]:
-                if not isinstance(row, dict):
-                    continue
-                decisions.append(
-                    {
-                        "candidate_id": str(row.get("candidate_id") or ""),
-                        "verdict": str(row.get("verdict") or ""),
-                        "rationale": str(row.get("rationale") or "")[:200],
-                    }
-                )
-        except Exception:  # noqa: BLE001
-            decisions = []
+        raw_progress = getattr(self.shared_state, "framework_agent_phase_progress", None) or []
+        terminal = {
+            "kept",
+            "kept_inert",
+            "reverted",
+            "no_patch",
+            "enqueue_failed",
+            FRAMEWORK_CRITIC_DENIED_STATUS,
+        }
+        tail = [r for r in raw_progress if isinstance(r, dict) and str(r.get("status") or "") in terminal]
         outcomes: list[dict[str, Any]] = []
-        try:
-            raw_progress = getattr(state, "framework_agent_phase_progress", None) or []
-            terminal = {"kept", "kept_inert", "reverted", "no_patch", "enqueue_failed", "critic_denied"}
-            tail = [r for r in raw_progress if isinstance(r, dict) and str(r.get("status") or "") in terminal]
-            for row in tail[-self._CRITIC_PRIORS_OUTCOME_TAIL :]:
-                outcomes.append(
-                    {
-                        "candidate_id": str(row.get("candidate_id") or ""),
-                        "status": str(row.get("status") or ""),
-                        "gain_pct": row.get("gain_pct"),
-                    }
-                )
-        except Exception:  # noqa: BLE001
-            outcomes = []
+        for row in tail[-self._CRITIC_PRIORS_OUTCOME_TAIL :]:
+            entry: dict[str, Any] = {
+                "candidate_id": str(row.get("candidate_id") or ""),
+                "status": str(row.get("status") or ""),
+                "gain_pct": row.get("gain_pct"),
+            }
+            rationale = str(row.get("rationale") or "")[:200]
+            if rationale:
+                entry["rationale"] = rationale
+            outcomes.append(entry)
         return {
-            "recent_decisions": decisions,
             "recent_outcomes": outcomes,
         }
 
@@ -3936,7 +3947,7 @@ class FrameworkPhase(PhaseHandler):
         self._stamp_framework_progress(
             candidate_id=cand_id,
             batch_id=batch_id,
-            status="critic_denied",
+            status=FRAMEWORK_CRITIC_DENIED_STATUS,
             kept=False,
             rationale=str(reasoning or ""),
             provenance="critic",

@@ -69,6 +69,12 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
+# FRAMEWORK_AGENT KEEPs are stacked under the ``framework`` attribution family
+# label rather than under their task kind, because that label is what
+# ``phase_breakdown`` and the action-family table publish. Anything that
+# reconciles a ``framework_agent`` task against the stack has to translate.
+_FRAMEWORK_STACK_ACTION = "framework"
+
 
 @dataclass
 class _PromoteOutcome:
@@ -3509,9 +3515,24 @@ class WritebackCollaborator:
         changed = True
         lifted = False
         if kept_flag and isinstance(new_tput, (int, float)) and new_tput > 0:
+            if not cand_id:
+                # The name used to be prefixed, which made an empty key look
+                # non-empty to the stack's guard and stacked a nameless entry.
+                # The bare key is falsy, so the append is skipped — current_best
+                # and cumulative_gain are set regardless, further down. The win
+                # therefore counts without leaving a step anything can reconcile,
+                # dedupe or replay, which is worth saying out loud.
+                log.warning(
+                    "FRAMEWORK: KEEP carries no candidate key (candidate_id / pr_url / ref all "
+                    "empty, and task params had none either). current_best still advances, but "
+                    "no optimization_stack entry records how. task=%s",
+                    getattr(task, "task_id", "") if task is not None else "",
+                )
             lift = {
-                "name": f"framework:{cand_id}",
-                "variant_name": cand_id,
+                # The canonical candidate key, unadorned: it becomes the stack
+                # entry's variant_name, which resume reconciliation matches
+                # against the KEEP recorded on the event log.
+                "name": cand_id,
                 "task_id": getattr(task, "task_id", "") if task is not None else "",
                 "candidate_extra_server_args": "",
                 "extra_envs": {},
@@ -3521,7 +3542,7 @@ class WritebackCollaborator:
                 "source_phase": "FRAMEWORK_AGENT",
                 "provenance": "framework_agent",
             }
-            lifted = self._lift_to_current_best("framework", float(new_tput), lift)
+            lifted = self._lift_to_current_best(_FRAMEWORK_STACK_ACTION, float(new_tput), lift)
             if lifted and self.shared_state.baseline_tput > 0:
                 self._update_cumulative_gain_validated(new_tput)
                 await self._maybe_enqueue_watermark_roofline(
@@ -4246,21 +4267,21 @@ class WritebackCollaborator:
                 res = payload.get("result") or {}
                 if not isinstance(res, dict) or str(res.get("status") or "").lower() != "kept":
                     continue
+                stack_action = kind
                 if kind == "integrate_patch":
                     variant = str(res.get("specialist_task_id") or "")
                 elif kind == "framework_agent":
-                    cand = res.get("candidate") or {}
-                    variant = str(
-                        (cand.get("candidate_id") if isinstance(cand, dict) else "")
-                        or (cand.get("pr_url") if isinstance(cand, dict) else "")
-                        or ""
-                    )
+                    # This kind stacks under the framework family label, keyed
+                    # by the canonical candidate key, so reconcile on both.
+                    stack_action = _FRAMEWORK_STACK_ACTION
+                    cand = res.get("candidate")
+                    variant = self._framework_candidate_key(cand if isinstance(cand, dict) else None)
                 elif kind == "explore":
                     bv = res.get("best_variant") or {}
                     variant = str((bv.get("name") if isinstance(bv, dict) else "") or "")
                 else:
                     continue
-                key = (kind, variant)
+                key = (stack_action, variant)
                 if not variant or key in stack_keys or key in seen:
                     continue
                 seen.add(key)

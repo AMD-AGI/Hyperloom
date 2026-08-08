@@ -304,7 +304,32 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 
 
 #: top-level state.json schema version; absent key treated as v1 and migrated to LATEST_STATE_SCHEMA_VERSION on first save.
-LATEST_STATE_SCHEMA_VERSION: int = 4
+LATEST_STATE_SCHEMA_VERSION: int = 5
+
+#: FRAMEWORK fields renamed by the framework_agent rename, old name -> current
+#: name. A state written before that rename spells them the old way, and the
+#: unknown-key filter in ``from_dict`` drops anything not in this table, which
+#: is why an un-migrated resume silently restarted the phase from scratch.
+#: ``framework_pr_max_candidates`` and ``framework_pr_critic_decisions`` are
+#: deliberately absent: both fields have since been removed, so there is
+#: nothing left to migrate them into.
+_FRAMEWORK_FIELD_RENAMES_V5: dict[str, str] = {
+    "framework_phase_enabled": "framework_agent_phase_enabled",
+    "framework_pr_phase_progress": "framework_agent_phase_progress",
+    "framework_pr_batches": "framework_agent_batches",
+    "framework_pr_phase_done": "framework_agent_phase_done",
+    "framework_pr_discover_failures": "framework_agent_discover_failures",
+    "framework_pr_consecutive_empty_discoveries": "framework_consecutive_empty_discoveries",
+    "framework_pr_authoring_enabled": "framework_agent_authoring_enabled",
+    "framework_pr_specialist_candidate_map": "framework_agent_specialist_candidate_map",
+}
+
+#: Stack action label for FRAMEWORK entries, and the prefix promote used to glue
+#: onto their ``variant_name``. Resume reconciliation keys on the bare candidate
+#: key, so an entry still carrying the prefix reads as an orphaned KEEP and
+#: misses the ``(action, variant_name)`` dedup that stops a second append.
+_FRAMEWORK_STACK_ACTION_V5: str = "framework"
+_FRAMEWORK_VARIANT_PREFIX_V5: str = "framework:"
 
 
 def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
@@ -639,12 +664,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # (empty_discovery). Drives the Step-1 advisory ("framework phase ineffective");
     # reset whenever a phase completes having tested >=1 candidate.
     framework_consecutive_empty_discoveries: int = 0
-    # Per-repo candidate cap for ``fa phase-discover``; 0 => DEFAULT_FRAMEWORK_MAX_CANDIDATES.
-    framework_max_candidates: int = 0
-    # FRAMEWORK Critic-gate decisions; cache lets resume avoid re-calling the Critic.
-    framework_agent_critic_decisions: list[dict[str, Any]] = field(
-        default_factory=list,
-    )
     # Default True: FRAMEWORK pump dispatches a write-capable serving_specialist per candidate alongside diff-only track. False restores diff-only.
     framework_agent_authoring_enabled: bool = True
     # Default True: when PR discovery is empty/exhausted (or the ranker prefers
@@ -1311,6 +1330,36 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             else:
                 for k, v in flat.items():
                     filtered["enablement"].setdefault(k, v)
+
+        if incoming_version < 5:
+            # Carry the pre-rename FRAMEWORK fields over. Read from ``raw``:
+            # the old spellings are not dataclass fields, so the filter above
+            # has already discarded them. A state holding both spellings is
+            # mid-migration, and the current one wins.
+            for legacy, current in _FRAMEWORK_FIELD_RENAMES_V5.items():
+                if legacy in raw and current not in raw:
+                    filtered[current] = raw[legacy]
+
+            # Renaming the fields is not enough: a session that already promoted
+            # a FRAMEWORK KEEP has stack entries whose variant_name still carries
+            # the promote-side prefix, and reconciliation keys on the bare
+            # candidate key. Left alone they read as orphaned KEEPs for the rest
+            # of the session and no longer collide with the dedup key.
+            stack = filtered.get("optimization_stack")
+            if isinstance(stack, list):
+                # Rebuilt rather than edited in place: ``filtered`` is a shallow
+                # copy, so mutating an entry would also rewrite the caller's
+                # ``raw`` — and ``from_dict`` takes a mapping it does not own.
+                filtered["optimization_stack"] = [
+                    {**entry, "variant_name": str(entry["variant_name"])[len(_FRAMEWORK_VARIANT_PREFIX_V5):]}
+                    if (
+                        isinstance(entry, dict)
+                        and str(entry.get("action") or "") == _FRAMEWORK_STACK_ACTION_V5
+                        and str(entry.get("variant_name") or "").startswith(_FRAMEWORK_VARIANT_PREFIX_V5)
+                    )
+                    else entry
+                    for entry in stack
+                ]
 
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])

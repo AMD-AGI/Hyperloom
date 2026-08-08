@@ -104,7 +104,6 @@ class _State:
         self.framework_agent_empty_discoveries = 0
         self.framework_agent_batches: list[dict[str, Any]] = []
         self.framework_agent_phase_progress: list[dict[str, Any]] = []
-        self.framework_agent_critic_decisions: list[dict[str, Any]] = []
         self.framework_agent_specialist_candidate_map: dict[str, str] = {}
         self.phase_history: list[dict[str, Any]] = []
         self.gaps: list[dict[str, Any]] = []

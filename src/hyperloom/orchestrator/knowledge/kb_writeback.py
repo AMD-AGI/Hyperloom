@@ -4,18 +4,16 @@
 """KB writeback adapters for specialist outcomes.
 
 Appends structured records as JSON-Lines to ``<KB_ROOT>/lessons.jsonl``
-(the ``fa`` CLI reads them to skip already-integrated PRs). :data:`KB_ROOT`
-resolves at import to ``$INFERENCE_OPTIMIZER_FA_KB_PATH/framework_optimization``
-when set, else ``$USER_DATA_PATH/kb/framework_optimization`` (default
-``/workspace/hyperloom/kb/framework_optimization``); it is monkeypatchable in
-tests. Local append only.
+(the ``fa`` CLI reads them to skip already-integrated PRs). The root comes
+from :func:`hyperloom.agents.framework.kb.mutable_kb_root`, the same owner the
+reader uses, so both halves move together; resolving it here independently is
+what left written lessons unreadable by the next session. Local append only.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
-import os
 import time
 from pathlib import Path
 
@@ -23,24 +21,19 @@ from hyperloom.common.io import append_jsonl
 
 
 def _default_kb_root() -> Path:
-    """Resolve the default KB root for framework-PR lessons.
+    """Resolve the framework-PR lessons directory.
 
-    Honours the ``INFERENCE_OPTIMIZER_FA_KB_PATH`` override when set;
-    otherwise writes under the operator workspace root so framework-agent
-    lessons never appear in the source checkout during tests or live runs.
+    Delegates the root to the reader's owner so a deployment that redirects
+    the KB redirects both halves. Resolved per call rather than at import,
+    because the environment is not fully settled at import time.
 
     Returns:
         Path: The ``framework_optimization`` directory under the resolved
             KB root.
     """
-    override = os.environ.get("INFERENCE_OPTIMIZER_FA_KB_PATH", "").strip()
-    if override:
-        return Path(override) / "framework_optimization"
-    workspace = os.environ.get("USER_DATA_PATH", "").strip() or "/workspace/hyperloom"
-    return Path(workspace) / "kb" / "framework_optimization"
+    from hyperloom.agents.framework.kb import framework_optimization_root
 
-
-KB_ROOT: Path = _default_kb_root()
+    return framework_optimization_root()
 
 #: Filename for the JSONL append log; stable so the fa CLI can hard-code it
 #: (single POSIX append is atomic).
@@ -152,7 +145,7 @@ def _record(
 
 
 def _append_record_sync(record: dict) -> Path:
-    """Append a single JSONL record under :data:`KB_ROOT`.
+    """Append a single JSONL record under the resolved KB root.
 
     Creates the KB root directory if needed, then appends one JSON line.
 
@@ -163,7 +156,7 @@ def _append_record_sync(record: dict) -> Path:
         Path: The on-disk path of the ``lessons.jsonl`` file so callers
             can log / surface it.
     """
-    path = KB_ROOT / LESSONS_FILE
+    path = _default_kb_root() / LESSONS_FILE
     append_jsonl(path, record, make_parents=True, sort_keys=True)
     return path
 
@@ -308,7 +301,6 @@ async def write_framework_record(
 __all__ = [
     "ALLOWED_OUTCOMES",
     "OUTCOME_ALREADY_PRESENT",
-    "KB_ROOT",
     "LESSONS_FILE",
     "OUTCOME_INTEGRATED",
     "OUTCOME_REJECTED_APPLY_FAIL",

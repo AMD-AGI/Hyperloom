@@ -1903,7 +1903,9 @@ class ExplorePhase(PhaseHandler):
                     )
                     return True
         except Exception:  # noqa: BLE001 — advisory gate must never block dispatch
-            log.debug("FRAMEWORK: config-lever ledger check failed", exc_info=True)
+            # Warning, not debug: swallowing this re-dispatches config levers
+            # that already lost an accuracy gate, so it must be visible.
+            log.warning("FRAMEWORK: config-lever ledger check failed", exc_info=True)
         return False
 
     def _build_specialist_round_entry(
