@@ -1431,6 +1431,7 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert "analysis-orchestrator" in captured["prompt"] or "skill.md" in captured["prompt"]
     assert "Bash" in captured["options"]["allowed_tools"]
     assert "Task" in captured["options"]["allowed_tools"]
+    assert res.runner == "claude_agent_sdk"
 
 
 def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
@@ -1498,54 +1499,51 @@ def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
     assert child_env["ANTHROPIC_SMALL_FAST_MODEL"] == "claude-sonnet-4-5-20250929"
 
 
-def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkeypatch):
-    """OpenAI-only deployments must run TraceLens without Claude SDK."""
-    import asyncio
-    from types import SimpleNamespace
-
-    output_dir = tmp_path / "out"
-    calls: list[dict] = []
-
-    class _Completions:
-        async def create(self, **kwargs):
-            calls.append(kwargs)
-            tool_calls = [
-                SimpleNamespace(
-                    id="call_write",
-                    function=SimpleNamespace(
-                        name="write_file",
-                        arguments=json.dumps(
-                            {
-                                "path": str(output_dir / "analysis.md"),
-                                "content": "# Codex TraceLens report\n",
-                            }
-                        ),
-                    ),
-                )
-            ]
-            return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(content="", tool_calls=tool_calls),
-                        finish_reason="tool_calls",
-                    )
-                ],
-                usage=SimpleNamespace(prompt_tokens=3, completion_tokens=5),
-            )
-
-    class _Client:
-        def __init__(self):
-            self.chat = SimpleNamespace(completions=_Completions())
-
-    def _no_claude_query(**_kwargs):
-        raise AssertionError("OpenAI-only TraceLens path must not use Claude SDK")
-
+def _use_openai_only_env(monkeypatch) -> None:
+    """Pin the process env to the OpenAI-only credential shape."""
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-token")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
     monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
+
+
+def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkeypatch):
+    """OpenAI-only deployments must run TraceLens on the Codex Agent SDK.
+
+    Hyperloom makes no bare LLM API calls, so this path must go through an
+    agent runtime whose tools, sandbox and turn management come from the SDK.
+    """
+    import asyncio
+
+    from hyperloom.common.codex_session import CodexSessionResult
+
+    output_dir = tmp_path / "out"
+    calls: list[dict] = []
+
+    async def _fake_codex_turn(**kwargs):
+        calls.append(kwargs)
+        (output_dir / "analysis.md").write_text("# Codex TraceLens report\n", encoding="utf-8")
+        return CodexSessionResult(
+            text="wrote analysis.md",
+            items=(
+                {
+                    "type": "commandExecution",
+                    "command": "TraceLens_generate_perf_report_pytorch --help",
+                    "exitCode": 0,
+                },
+                {"type": "fileChange", "changes": [{"path": str(output_dir / "analysis.md"), "kind": "add"}]},
+                {"type": "agentMessage", "text": "wrote analysis.md"},
+            ),
+            usage={"input_tokens": 11, "output_tokens": 7, "reasoning_output_tokens": 900},
+            thread_id="thread-123",
+        )
+
+    def _no_claude_query(**_kwargs):
+        raise AssertionError("OpenAI-only TraceLens path must not use Claude SDK")
+
+    _use_openai_only_env(monkeypatch)
 
     res = asyncio.run(
         tlr.run_tracelens_skill(
@@ -1558,93 +1556,223 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
             framework="vllm",
             analysis_mode="inference",
             capture_folder=None,
-            budget_minutes=1,
+            budget_minutes=30,
             model="gpt-5.5",
             sdk_query_factory=_no_claude_query,
             sdk_options_cls=object,
-            openai_client_factory=_Client,
+            codex_turn_runner=_fake_codex_turn,
         )
     )
 
     assert res.report_path == output_dir / "analysis.md"
     assert res.report_path.read_text(encoding="utf-8") == "# Codex TraceLens report\n"
-    assert calls
-    assert calls[0]["model"] == "gpt-5.5"
-    assert calls[0]["tools"]
+    # The result carries the runner that actually ran, so the caller reports the
+    # real provider instead of hardcoding one.
+    assert res.runner == "codex"
+    assert res.raw_text == "wrote analysis.md"
     assert "tracelens_agent_report" in res.artifact_paths
+    assert res.artifact_paths["tracelens_cmd_prefix"] == str(output_dir / "cache" / "cmd_prefix.txt")
     assert "tracelens_agent_transcript" in res.artifact_paths
+    # A clean turn records no SDK error.
+    assert "tracelens_agent_sdk_error" not in res.artifact_paths
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["model"] == "gpt-5.5"
+    # The session works out of the TraceLens root so the skill's command-prefix
+    # cache and relative paths resolve as they do on the Claude path.
+    assert call["cwd"] == tmp_path
+    # The output dir is the only extra writable root: nothing else is mutable.
+    assert call["writable_roots"] == (output_dir,)
+    assert call["timeout_sec"] == 30 * 60.0
+    assert "TraceLens analysis runner" in call["developer_instructions"]
+    assert str(tmp_path / "skill.md") in call["prompt"]
 
 
-def test_openai_tool_runner_rejects_out_of_scope_files_and_shell_strings(tmp_path):
-    scope = tlr._OpenAIToolScope(
-        tracelens_root=tmp_path / "tracelens",
-        output_dir=tmp_path / "out",
-        read_roots=(tmp_path / "tracelens", tmp_path / "out"),
-    )
-    scope.tracelens_root.mkdir()
-    scope.output_dir.mkdir()
+def test_run_tracelens_skill_codex_floors_the_turn_timeout(tmp_path, monkeypatch):
+    """A sub-minute budget must not translate into an instant Codex timeout."""
+    import asyncio
 
-    read_out = json.loads(
-        tlr._execute_openai_tool(
-            "read_file",
-            json.dumps({"path": "/etc/passwd"}),
-            scope=scope,
-        )
-    )
-    write_out = json.loads(
-        tlr._execute_openai_tool(
-            "write_file",
-            json.dumps({"path": str(tmp_path / "escape.md"), "content": "bad"}),
-            scope=scope,
-        )
-    )
-    shell_out = json.loads(
-        tlr._execute_openai_tool(
-            "run_shell",
-            json.dumps({"command": "rm -rf /"}),
-            scope=scope,
-        )
-    )
+    from hyperloom.common.codex_session import CodexSessionResult
 
-    assert read_out["ok"] is False
-    assert "outside allowed roots" in read_out["error"]
-    assert write_out["ok"] is False
-    assert "outside allowed roots" in write_out["error"]
-    assert shell_out["ok"] is False
-    assert "argv" in shell_out["error"]
-    assert not (tmp_path / "escape.md").exists()
+    output_dir = tmp_path / "out"
+    calls: list[dict] = []
 
+    async def _fake_codex_turn(**kwargs):
+        calls.append(kwargs)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        return CodexSessionResult(text="done")
 
-def test_openai_tool_runner_allows_output_write_and_tracelens_python(tmp_path):
-    scope = tlr._OpenAIToolScope(
-        tracelens_root=tmp_path / "tracelens",
-        output_dir=tmp_path / "out",
-        read_roots=(tmp_path / "tracelens", tmp_path / "out"),
-    )
-    scope.tracelens_root.mkdir()
-    scope.output_dir.mkdir()
-    script = scope.tracelens_root / "ok.py"
-    script.write_text("print('ok')\n", encoding="utf-8")
+    _use_openai_only_env(monkeypatch)
 
-    write_out = json.loads(
-        tlr._execute_openai_tool(
-            "write_file",
-            json.dumps({"path": "analysis.md", "content": "# ok\n"}),
-            scope=scope,
-        )
-    )
-    shell_out = json.loads(
-        tlr._execute_openai_tool(
-            "run_shell",
-            json.dumps({"argv": ["python3", str(script)]}),
-            scope=scope,
+    asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=None,
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=None,
+            budget_minutes=0.1,
+            codex_turn_runner=_fake_codex_turn,
         )
     )
 
-    assert write_out["ok"] is True
-    assert (scope.output_dir / "analysis.md").read_text(encoding="utf-8") == "# ok\n"
-    assert shell_out["ok"] is True
-    assert "ok" in shell_out["stdout"]
+    assert calls[0]["timeout_sec"] == 60.0
+
+
+def test_run_tracelens_skill_codex_transcript_records_typed_items(tmp_path, monkeypatch):
+    """The transcript must be derived from the SDK's typed thread items."""
+    import asyncio
+
+    from hyperloom.common.codex_session import CodexSessionResult
+
+    output_dir = tmp_path / "out"
+
+    async def _fake_codex_turn(**_kwargs):
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        return CodexSessionResult(
+            text="final answer",
+            items=(
+                {"type": "commandExecution", "command": "ls", "exitCode": 0},
+                {"type": "fileChange", "changes": [{"path": str(output_dir / "analysis.md"), "kind": "add"}]},
+            ),
+            usage={"input_tokens": 5, "output_tokens": 6},
+            thread_id="thread-abc",
+        )
+
+    _use_openai_only_env(monkeypatch)
+    logged: list[str] = []
+
+    res = asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=None,
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=None,
+            budget_minutes=5,
+            codex_turn_runner=_fake_codex_turn,
+            log=logged.append,
+        )
+    )
+
+    transcript = Path(res.artifact_paths["tracelens_agent_transcript"])
+    records = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
+    assert [r["type"] for r in records] == ["commandExecution", "fileChange", "TurnResult"]
+    assert records[0]["item"]["command"] == "ls"
+    assert records[-1]["result"] == "final answer"
+    assert records[-1]["usage"] == {"input_tokens": 5, "output_tokens": 6}
+    assert records[-1]["thread_id"] == "thread-abc"
+    assert any("$ ls (exit 0)" in line for line in logged)
+
+
+def test_run_tracelens_skill_codex_raises_when_report_missing(tmp_path, monkeypatch):
+    """A Codex failure with no report must surface the SDK error, not a bare miss."""
+    import asyncio
+
+    from hyperloom.common.codex_session import CodexSessionTimeoutError
+
+    output_dir = tmp_path / "out"
+
+    async def _failing_codex_turn(**_kwargs):
+        raise CodexSessionTimeoutError("Codex turn timed out after 300s")
+
+    _use_openai_only_env(monkeypatch)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(
+            tlr.run_tracelens_skill(
+                skill_path=tmp_path / "skill.md",
+                trace_path=tmp_path / "trace.json.gz",
+                output_dir=output_dir,
+                tracelens_root=tmp_path,
+                tracelens_internal_root=None,
+                platform="MI355X",
+                framework="vllm",
+                analysis_mode="inference",
+                capture_folder=None,
+                budget_minutes=5,
+                codex_turn_runner=_failing_codex_turn,
+            )
+        )
+
+    assert "timed out after 300s" in str(excinfo.value)
+    assert str(output_dir / "analysis.md") in str(excinfo.value)
+
+
+def test_run_tracelens_skill_codex_keeps_report_written_before_failure(tmp_path, monkeypatch):
+    """analysis.md is the source of truth: a late SDK error is metadata."""
+    import asyncio
+
+    from hyperloom.common.codex_session import CodexSessionError
+
+    output_dir = tmp_path / "out"
+
+    async def _late_failure(**_kwargs):
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        raise CodexSessionError("app-server transport closed")
+
+    _use_openai_only_env(monkeypatch)
+
+    res = asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=None,
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=None,
+            budget_minutes=5,
+            codex_turn_runner=_late_failure,
+        )
+    )
+
+    assert res.runner == "codex"
+    assert "app-server transport closed" in res.artifact_paths["tracelens_agent_sdk_error"]
+
+
+def test_run_tracelens_skill_codex_reports_in_band_turn_error(tmp_path, monkeypatch):
+    """A turn that completes carrying an SDK error must not look successful."""
+    import asyncio
+
+    from hyperloom.common.codex_session import CodexSessionResult
+
+    output_dir = tmp_path / "out"
+
+    async def _in_band_error(**_kwargs):
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        return CodexSessionResult(text="", error="rate limit exceeded")
+
+    _use_openai_only_env(monkeypatch)
+
+    res = asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=None,
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=None,
+            budget_minutes=5,
+            codex_turn_runner=_in_band_error,
+        )
+    )
+
+    assert res.artifact_paths["tracelens_agent_sdk_error"] == "rate limit exceeded"
 
 
 def test_run_tracelens_skill_aborts_on_stream_idle_timeout(tmp_path, monkeypatch):

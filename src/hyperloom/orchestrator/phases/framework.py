@@ -2784,8 +2784,10 @@ class FrameworkPhase(PhaseHandler):
 
         Reuses the ProposalScorer's client when present (same gateway/auth),
         then the orchestration backend's own client (so the LLM ranker is on by
-        default whenever orchestration has LLM credentials); otherwise builds one
-        from ``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``. Returns ``None`` when the
+        default whenever orchestration has LLM credentials); otherwise asks
+        :func:`hyperloom.common.llm_config.get_async_openai_client` -- the only
+        sanctioned owner of provider client construction -- for one built from
+        ``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``. Returns ``None`` when the
         OpenAI side is unconfigured, which leaves the LLM ranker disabled.
         Cached on first successful build.
         """
@@ -2812,25 +2814,20 @@ class FrameworkPhase(PhaseHandler):
         if backend_client is not None and hasattr(backend_client, "chat"):
             self._coord._fa_ranker_client = backend_client
             return backend_client
-        try:
-            from openai import AsyncOpenAI  # type: ignore[import-not-found]
-        except ImportError:
-            return None
+        from hyperloom.common import llm_config as _llm_cfg
+
         # This client speaks the OpenAI protocol, so it authenticates from the
         # OpenAI side only. The orchestration backend's own ``api_key_env`` is not
         # consulted: the orchestration role is Claude, so it names the Anthropic
-        # key, which must never reach an OpenAI-protocol endpoint.
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
+        # key, which must never reach an OpenAI-protocol endpoint. The explicit
+        # gate keeps ``llm_config``'s ``LLM_GATEWAY_KEY`` fallback out of play.
+        if not os.environ.get("OPENAI_API_KEY"):
             log.debug("FRAMEWORK: LLM ranker disabled (OPENAI_API_KEY not set; ranker needs the OpenAI side)")
             return None
-        base_url = os.environ.get("OPENAI_BASE_URL")
-        kwargs: dict[str, Any] = {"api_key": api_key}
-        if base_url:
-            kwargs["base_url"] = base_url.strip()
         try:
-            client = AsyncOpenAI(**kwargs)
-        except Exception:  # noqa: BLE001
+            client = _llm_cfg.get_async_openai_client()
+        except Exception:  # noqa: BLE001 — the ranker is optional, so it degrades to off
+            log.debug("FRAMEWORK: LLM ranker disabled (async OpenAI client unavailable)", exc_info=True)
             return None
         self._coord._fa_ranker_client = client
         return client

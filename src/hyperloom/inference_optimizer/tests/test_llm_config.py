@@ -3,20 +3,46 @@
 
 from __future__ import annotations
 
+import ast
+import logging
+import sys
+import types
+from pathlib import Path
+from typing import Any
+
 import pytest
 
+import hyperloom
+from hyperloom.common import llm_config
 from hyperloom.common.llm_config import (
+    DEFAULT_ANTHROPIC_BASE_URL,
+    DEFAULT_ANTHROPIC_VERSION,
     LLMConfigError,
+    aanthropic_messages,
+    achat_completion,
+    chat_completion,
+    anthropic_messages,
     apply_reasoning_effort,
+    aresponse,
+    build_http_timeout,
     claude_sdk_env_options,
     deepseek_compat_env,
     derive_openai_base_url,
+    get_anthropic_client,
+    has_anthropic_side,
+    has_openai_side,
+    is_anthropic_only,
+    is_openai_only,
+    get_async_anthropic_client,
+    get_async_openai_client,
+    get_openai_client,
     openai_client_kwargs,
     parse_custom_headers,
     provider_model_defaults,
 )
 
 _LEGACY_KEY = "_".join(("DEEPSEEK", "API", "KEY"))
+_OPENAI_KEY = "_".join(("OPENAI", "API", "KEY"))
 
 
 def test_apply_reasoning_effort_is_noop_without_env():
@@ -78,9 +104,9 @@ def test_openai_kwargs_reads_openai_custom_headers():
     assert kwargs["default_headers"] == {"Ocp-Apim-Subscription-Key": "ak-header"}
 
 
-def test_openai_kwargs_ignores_anthropic_custom_headers_and_host():
-    """The OpenAI/Codex client reads only the OpenAI side; Anthropic headers and
-    host are ignored."""
+def test_openai_kwargs_ignores_anthropic_custom_headers():
+    """The OpenAI/Codex client never reads ANTHROPIC_CUSTOM_HEADERS, and explicit
+    OpenAI-side config wins over the Anthropic host."""
     kwargs = openai_client_kwargs(
         env={
             "_".join(("OPENAI", "API", "KEY")): "openai-token",
@@ -96,15 +122,157 @@ def test_openai_kwargs_ignores_anthropic_custom_headers_and_host():
     assert "default_headers" not in kwargs
 
 
-def test_openai_kwargs_refuse_anthropic_only_env():
-    """Anthropic-only credentials cannot auth an OpenAI-protocol client."""
-    with pytest.raises(LLMConfigError):
-        openai_client_kwargs(
-            env={
-                "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
-                "ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic",
-            }
-        )
+# ---- the three deployment shapes ----
+# Anthropic-only, codex-only (OpenAI-compatible only), and both configured.
+_ANTHROPIC_ONLY_ENV = {
+    "_".join(("ANTHROPIC", "AUTH", "TOKEN")): "gateway-token",
+    "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
+    "ANTHROPIC_BASE_URL": "https://llm-api.amd.com/Anthropic",
+    # AMD's gateway rejects a call without this, and the setup skill only ever
+    # writes it here -- so the shape is not realistic without it.
+    "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}",
+}
+_CODEX_ONLY_ENV = {
+    "_".join(("OPENAI", "API", "KEY")): "openai-token",
+    "OPENAI_BASE_URL": "https://llm-api.amd.com/Unified/v1",
+}
+
+
+def test_anthropic_only_deployment_resolves_through_derivation():
+    """No OpenAI-side config at all: derive the base URL, auth with the gateway token."""
+    kwargs = openai_client_kwargs(env=dict(_ANTHROPIC_ONLY_ENV))
+    assert kwargs["base_url"] == "https://llm-api.amd.com/Unified/v1"
+    assert kwargs["api_key"] == "gateway-token"
+
+
+def test_anthropic_only_deployment_falls_back_to_anthropic_api_key():
+    """ANTHROPIC_AUTH_TOKEN is preferred, but ANTHROPIC_API_KEY alone also authenticates."""
+    env = dict(_ANTHROPIC_ONLY_ENV)
+    del env["_".join(("ANTHROPIC", "AUTH", "TOKEN"))]
+    assert openai_client_kwargs(env=env)["api_key"] == "ak-anthropic"
+
+
+def test_codex_only_deployment_is_unchanged():
+    """No Anthropic side present: resolution is exactly the explicit OpenAI config."""
+    assert openai_client_kwargs(env=dict(_CODEX_ONLY_ENV)) == {
+        "api_key": "openai-token",
+        "base_url": "https://llm-api.amd.com/Unified/v1",
+    }
+
+
+def test_both_configured_prefers_the_explicit_openai_side():
+    """With both shapes present the Anthropic fallback must never be consulted."""
+    kwargs = openai_client_kwargs(env={**_ANTHROPIC_ONLY_ENV, **_CODEX_ONLY_ENV})
+    assert kwargs == {
+        "api_key": "openai-token",
+        "base_url": "https://llm-api.amd.com/Unified/v1",
+    }
+
+
+def test_explicit_openai_side_wins_key_and_url_independently():
+    """A half-configured OpenAI side takes what it has and derives only the rest."""
+    key_only = openai_client_kwargs(env={**_ANTHROPIC_ONLY_ENV, "_".join(("OPENAI", "API", "KEY")): "openai-token"})
+    assert key_only["api_key"] == "openai-token"
+    assert key_only["base_url"] == "https://llm-api.amd.com/Unified/v1"
+
+    url_only = openai_client_kwargs(
+        env={**_ANTHROPIC_ONLY_ENV, "OPENAI_BASE_URL": "https://explicit.example.invalid/v1"}
+    )
+    assert url_only["api_key"] == "gateway-token"
+    assert url_only["base_url"] == "https://explicit.example.invalid/v1"
+
+
+def test_llm_gateway_key_still_outranks_the_anthropic_fallback():
+    env = {**_ANTHROPIC_ONLY_ENV, "LLM_GATEWAY_KEY": "gw-key"}
+    assert openai_client_kwargs(env=env)["api_key"] == "gw-key"
+
+
+_SUBSCRIPTION_HEADER = "Ocp-Apim-Subscription-Key"
+
+
+# ---- credential-shape predicates ----
+def test_shape_predicates_classify_all_three_deployments():
+    """One shape test for backend selection, the TraceLens runner and the fellow."""
+    assert is_anthropic_only(_ANTHROPIC_ONLY_ENV)
+    assert not is_openai_only(_ANTHROPIC_ONLY_ENV)
+
+    assert is_openai_only(_CODEX_ONLY_ENV)
+    assert not is_anthropic_only(_CODEX_ONLY_ENV)
+
+    both = {**_ANTHROPIC_ONLY_ENV, **_CODEX_ONLY_ENV}
+    assert not is_anthropic_only(both)
+    assert not is_openai_only(both)
+
+
+def test_shape_predicates_report_no_side_on_an_empty_env():
+    """Neither shape holds when nothing is configured; both sides read false."""
+    assert not has_anthropic_side({})
+    assert not has_openai_side({})
+    assert not is_anthropic_only({})
+    assert not is_openai_only({})
+
+
+@pytest.mark.parametrize("key", ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"])
+def test_any_anthropic_variable_alone_marks_that_side_configured(key):
+    assert has_anthropic_side({key: "value"})
+
+
+@pytest.mark.parametrize("key", ["OPENAI_BASE_URL", "OPENAI_API_KEY"])
+def test_any_openai_variable_alone_marks_that_side_configured(key):
+    assert has_openai_side({key: "value"})
+
+
+def test_shape_predicates_ignore_the_retired_deepseek_variables():
+    """DeepSeek is migrated onto the standard pair, so it is not a third side.
+
+    The forge fellow used to read these directly and would therefore disagree
+    with backend selection about a legacy-only configuration.
+    """
+    legacy = {_LEGACY_KEY: "dk", "DEEPSEEK_BASE_URL": "https://api.deepseek.com"}
+    assert not has_anthropic_side(legacy)
+    assert not has_openai_side(legacy)
+    assert not is_anthropic_only(legacy)
+    # With DeepSeek ignored, an OpenAI side alongside it is still openai-only --
+    # the fellow previously read these keys and answered False here.
+    assert is_openai_only({**legacy, **_CODEX_ONLY_ENV})
+
+
+def test_derived_base_url_carries_the_anthropic_gateway_headers():
+    """An anthropic-only deployment must still send the gateway's subscription key.
+
+    The derived URL is the same host as ANTHROPIC_BASE_URL, so without this the
+    run resolves a client that the gateway rejects on every call -- worse than
+    the clean configuration error it used to raise.
+    """
+    kwargs = openai_client_kwargs(env=dict(_ANTHROPIC_ONLY_ENV))
+    assert kwargs["base_url"] == "https://llm-api.amd.com/Unified/v1"
+    assert kwargs["default_headers"] == {_SUBSCRIPTION_HEADER: "ak-anthropic"}
+
+
+def test_explicit_openai_base_url_does_not_borrow_anthropic_headers():
+    """An explicit OpenAI URL may be a different host, whose headers we cannot guess."""
+    kwargs = openai_client_kwargs(
+        env={**_ANTHROPIC_ONLY_ENV, "OPENAI_BASE_URL": "https://other-host.example/v1"}
+    )
+    assert kwargs["base_url"] == "https://other-host.example/v1"
+    assert "default_headers" not in kwargs
+
+
+def test_openai_custom_headers_win_over_the_derived_gateway_headers():
+    """An operator who set the OpenAI side explicitly keeps that exact header set."""
+    kwargs = openai_client_kwargs(
+        env={**_ANTHROPIC_ONLY_ENV, "OPENAI_CUSTOM_HEADERS": f"{_SUBSCRIPTION_HEADER}: openai-sub"}
+    )
+    assert kwargs["default_headers"] == {_SUBSCRIPTION_HEADER: "openai-sub"}
+
+
+def test_openai_kwargs_error_names_every_searched_key():
+    """The message has to list what was actually searched, Anthropic side included."""
+    with pytest.raises(LLMConfigError) as excinfo:
+        openai_client_kwargs(env={"ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic"})
+    message = str(excinfo.value)
+    for name in ("OPENAI_API_KEY", "LLM_GATEWAY_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+        assert name in message
 
 
 def test_openai_kwargs_preserves_explicit_openai_config():
@@ -395,6 +563,602 @@ def test_claude_sdk_env_options_does_not_copy_openai_custom_headers():
         }
     )
     assert "ANTHROPIC_CUSTOM_HEADERS" not in opts["env"]
+
+
+# ---- client construction (get_openai_client / get_async_openai_client) ----
+class _FakeSDKClient:
+    """Stand-in for an ``openai`` SDK client class; records its kwargs."""
+
+    kind = ""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+
+class _FakeSyncSDKClient(_FakeSDKClient):
+    kind = "OpenAI"
+
+
+class _FakeAsyncSDKClient(_FakeSDKClient):
+    kind = "AsyncOpenAI"
+
+
+def _install_fake_openai_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the lazy ``import openai`` at recording stand-ins."""
+    module = types.ModuleType("openai")
+    module.OpenAI = _FakeSyncSDKClient
+    module.AsyncOpenAI = _FakeAsyncSDKClient
+    monkeypatch.setitem(sys.modules, "openai", module)
+
+
+def test_get_openai_client_resolves_credentials_and_headers(monkeypatch):
+    _install_fake_openai_sdk(monkeypatch)
+    client = get_openai_client(
+        env={
+            _OPENAI_KEY: "openai-token",
+            "OPENAI_BASE_URL": "https://llm.example.invalid/Unified/v1",
+            "OPENAI_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: ak-header",
+        }
+    )
+    assert client.kind == "OpenAI"
+    assert client.kwargs == {
+        "api_key": "openai-token",
+        "base_url": "https://llm.example.invalid/Unified/v1",
+        "default_headers": {"Ocp-Apim-Subscription-Key": "ak-header"},
+    }
+
+
+def test_get_async_openai_client_honours_custom_env_var_names(monkeypatch):
+    _install_fake_openai_sdk(monkeypatch)
+    client = get_async_openai_client(
+        api_key_env="SCORER_KEY",
+        base_url_env="SCORER_URL",
+        env={"SCORER_KEY": "scorer-token", "SCORER_URL": "https://scorer.example.invalid/v1"},
+    )
+    assert client.kind == "AsyncOpenAI"
+    assert client.kwargs["api_key"] == "scorer-token"
+    assert client.kwargs["base_url"] == "https://scorer.example.invalid/v1"
+
+
+def test_get_client_omits_timeout_when_unset(monkeypatch):
+    """No ``timeout`` kwarg at all, so the SDK applies its own default."""
+    _install_fake_openai_sdk(monkeypatch)
+    assert "timeout" not in get_async_openai_client(env={_OPENAI_KEY: "tok"}).kwargs
+
+
+def test_get_client_forwards_timeout_verbatim(monkeypatch):
+    _install_fake_openai_sdk(monkeypatch)
+    sentinel = object()
+    client = get_async_openai_client(env={_OPENAI_KEY: "tok"}, timeout=sentinel)
+    assert client.kwargs["timeout"] is sentinel
+
+
+def test_get_client_is_never_cached(monkeypatch):
+    """An AsyncOpenAI's httpx pool binds to one event loop, so sharing is unsafe."""
+    _install_fake_openai_sdk(monkeypatch)
+    env = {_OPENAI_KEY: "tok"}
+    assert get_async_openai_client(env=env) is not get_async_openai_client(env=env)
+    assert get_openai_client(env=env) is not get_openai_client(env=env)
+
+
+def test_get_client_raises_clearly_without_the_openai_sdk(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", None)
+    with pytest.raises(LLMConfigError, match="openai SDK not installed"):
+        get_async_openai_client(env={_OPENAI_KEY: "tok"})
+    with pytest.raises(LLMConfigError, match="openai SDK not installed"):
+        get_openai_client(env={_OPENAI_KEY: "tok"})
+
+
+def test_get_client_requires_some_gateway_key(monkeypatch):
+    _install_fake_openai_sdk(monkeypatch)
+    with pytest.raises(LLMConfigError, match="OPENAI_API_KEY"):
+        get_async_openai_client(env={"OPENAI_BASE_URL": "https://api.openai.com/v1"})
+
+
+# ---- Anthropic client construction ----
+class _FakeHttpxClient:
+    """Stand-in for an ``httpx`` client class; records its kwargs."""
+
+    kind = ""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+
+class _FakeSyncHttpxClient(_FakeHttpxClient):
+    kind = "Client"
+
+
+class _FakeAsyncHttpxClient(_FakeHttpxClient):
+    kind = "AsyncClient"
+
+
+def _install_fake_httpx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the lazy ``import httpx`` at recording stand-ins."""
+    module = types.ModuleType("httpx")
+    module.Client = _FakeSyncHttpxClient
+    module.AsyncClient = _FakeAsyncHttpxClient
+    monkeypatch.setitem(sys.modules, "httpx", module)
+
+
+_ANTHROPIC_KEY = "_".join(("ANTHROPIC", "API", "KEY"))
+_ANTHROPIC_TOKEN = "_".join(("ANTHROPIC", "AUTH", "TOKEN"))
+
+
+def test_get_anthropic_client_sets_auth_version_and_base_url(monkeypatch):
+    _install_fake_httpx(monkeypatch)
+    client = get_anthropic_client(
+        env={_ANTHROPIC_KEY: "ak-anthropic", "ANTHROPIC_BASE_URL": "https://llm-api.amd.com/Anthropic/"}
+    )
+    assert client.kind == "Client"
+    # The Anthropic base URL is used as-is; only the OpenAI side derives.
+    assert client.kwargs["base_url"] == "https://llm-api.amd.com/Anthropic"
+    assert client.kwargs["headers"]["x-api-key"] == "ak-anthropic"
+    assert client.kwargs["headers"]["anthropic-version"] == DEFAULT_ANTHROPIC_VERSION
+    assert client.kwargs["headers"]["Content-Type"] == "application/json"
+
+
+def test_get_async_anthropic_client_defaults_the_public_base_url(monkeypatch):
+    _install_fake_httpx(monkeypatch)
+    client = get_async_anthropic_client(env={_ANTHROPIC_KEY: "ak-anthropic"})
+    assert client.kind == "AsyncClient"
+    assert client.kwargs["base_url"] == DEFAULT_ANTHROPIC_BASE_URL
+
+
+def test_get_anthropic_client_falls_back_to_the_auth_token(monkeypatch):
+    _install_fake_httpx(monkeypatch)
+    client = get_anthropic_client(env={_ANTHROPIC_TOKEN: "gateway-token"})
+    assert client.kwargs["headers"]["x-api-key"] == "gateway-token"
+
+
+def test_get_anthropic_client_merges_custom_gateway_headers(monkeypatch):
+    """AMD's gateway requires ANTHROPIC_CUSTOM_HEADERS; dropping them is a regression."""
+    _install_fake_httpx(monkeypatch)
+    client = get_anthropic_client(
+        env={
+            _ANTHROPIC_KEY: "ak-anthropic",
+            "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}\nX-Team: hyperloom",
+        }
+    )
+    assert client.kwargs["headers"]["Ocp-Apim-Subscription-Key"] == "ak-anthropic"
+    assert client.kwargs["headers"]["X-Team"] == "hyperloom"
+
+
+def test_custom_headers_can_override_the_api_version(monkeypatch):
+    """Merged last on purpose: a gateway pinned to another version stays reachable."""
+    _install_fake_httpx(monkeypatch)
+    client = get_anthropic_client(
+        env={_ANTHROPIC_KEY: "ak-anthropic", "ANTHROPIC_CUSTOM_HEADERS": "anthropic-version: 2099-01-01"}
+    )
+    assert client.kwargs["headers"]["anthropic-version"] == "2099-01-01"
+
+
+def test_get_anthropic_client_timeout_plumbing(monkeypatch):
+    _install_fake_httpx(monkeypatch)
+    assert "timeout" not in get_anthropic_client(env={_ANTHROPIC_KEY: "k"}).kwargs
+    sentinel = object()
+    assert get_async_anthropic_client(env={_ANTHROPIC_KEY: "k"}, timeout=sentinel).kwargs["timeout"] is sentinel
+
+
+def test_get_anthropic_client_is_never_cached(monkeypatch):
+    _install_fake_httpx(monkeypatch)
+    env = {_ANTHROPIC_KEY: "k"}
+    assert get_anthropic_client(env=env) is not get_anthropic_client(env=env)
+    assert get_async_anthropic_client(env=env) is not get_async_anthropic_client(env=env)
+
+
+def test_get_anthropic_client_requires_a_key(monkeypatch):
+    _install_fake_httpx(monkeypatch)
+    with pytest.raises(LLMConfigError, match="ANTHROPIC_API_KEY"):
+        get_anthropic_client(env={"ANTHROPIC_BASE_URL": "https://api.anthropic.com"})
+
+
+def test_get_anthropic_client_raises_clearly_without_httpx(monkeypatch):
+    monkeypatch.setitem(sys.modules, "httpx", None)
+    with pytest.raises(LLMConfigError, match="httpx not installed"):
+        get_anthropic_client(env={_ANTHROPIC_KEY: "k"})
+    with pytest.raises(LLMConfigError, match="httpx not installed"):
+        get_async_anthropic_client(env={_ANTHROPIC_KEY: "k"})
+
+
+# ---- anthropic_messages / aanthropic_messages ----
+class _FakeAnthropicResponse:
+    """One canned reply; ``error`` makes ``json()`` fail as a non-JSON body would."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        body: Any = None,
+        text: str = "",
+        error: BaseException | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self._body = {} if body is None else body
+        self._error = error
+        self.text = text
+
+    def json(self) -> Any:
+        if self._error is not None:
+            raise self._error
+        return self._body
+
+
+class _FakeAnthropicTransport:
+    """Records ``/v1/messages`` POSTs; the async twin awaits the same recorder."""
+
+    def __init__(self, response: Any = None, *, error: BaseException | None = None) -> None:
+        self._response = response
+        self._error = error
+        self.calls: list[dict[str, Any]] = []
+
+    def post(self, path: str, *, json: Any) -> Any:
+        self.calls.append({"path": path, "json": json})
+        if self._error is not None:
+            raise self._error
+        return self._response
+
+
+class _FakeAsyncAnthropicTransport(_FakeAnthropicTransport):
+    async def post(self, path: str, *, json: Any) -> Any:  # type: ignore[override]
+        return _FakeAnthropicTransport.post(self, path, json=json)
+
+
+_MESSAGE_BODY = {
+    "content": [
+        {"type": "text", "text": "hello "},
+        {"type": "tool_use", "id": "x"},
+        {"type": "text", "text": "world"},
+    ],
+    "stop_reason": "end_turn",
+    "usage": {"input_tokens": 21, "output_tokens": 7},
+}
+
+
+def test_anthropic_messages_posts_to_the_messages_path_and_flattens():
+    client = _FakeAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
+    result = anthropic_messages(client, model="claude", messages=[{"role": "user", "content": "hi"}], max_tokens=8)
+    assert result.text == "hello world"
+    assert result.stop_reason == "end_turn"
+    assert result.usage == {"input_tokens": 21, "output_tokens": 7}
+    assert client.calls[0]["path"] == "/v1/messages"
+    assert client.calls[0]["json"] == {
+        "model": "claude",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 8,
+    }
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_messages_flattens_the_same_way():
+    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
+    result = await aanthropic_messages(client, model="claude", system="sys")
+    assert (result.text, result.stop_reason) == ("hello world", "end_turn")
+    assert client.calls[0]["json"] == {"model": "claude", "system": "sys"}
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_messages_raises_on_non_2xx_with_status_and_body():
+    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(status_code=401, body={}, text="unauthorized"))
+    with pytest.raises(RuntimeError, match="status=401") as excinfo:
+        await aanthropic_messages(client, model="claude")
+    assert "unauthorized" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_messages_raises_on_non_json_body():
+    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(error=ValueError("not json")))
+    with pytest.raises(RuntimeError, match="non-JSON body"):
+        await aanthropic_messages(client, model="claude")
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_messages_propagates_transport_errors():
+    client = _FakeAsyncAnthropicTransport(error=RuntimeError("gateway down"))
+    with pytest.raises(RuntimeError, match="gateway down"):
+        await aanthropic_messages(client, model="claude")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [{}, {"content": "nope"}, ["not", "a", "dict"]])
+async def test_aanthropic_messages_tolerates_unreadable_reply_shapes(body):
+    """An unreadable reply yields empty text; the caller decides whether that is fatal."""
+    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(body=body))
+    result = await aanthropic_messages(client, model="claude")
+    assert result.text == ""
+    assert result.stop_reason is None
+    assert result.usage is None
+
+
+def test_anthropic_version_is_defined_once_in_llm_config():
+    """The header value must live here alone; four modules used to hardcode it."""
+    source = Path(llm_config.__file__).read_text(encoding="utf-8")
+    assert source.count('"2023-06-01"') == 1
+    assert DEFAULT_ANTHROPIC_VERSION == "2023-06-01"
+
+
+# ---- build_http_timeout ----
+def test_build_http_timeout_defaults_write_and_pool_to_read():
+    timeout = build_http_timeout(connect=3.0, read=7.0)
+    assert (timeout.connect, timeout.read, timeout.write, timeout.pool) == (3.0, 7.0, 7.0, 7.0)
+
+
+def test_build_http_timeout_takes_explicit_write_and_pool():
+    timeout = build_http_timeout(connect=1.0, read=2.0, write=3.0, pool=4.0)
+    assert (timeout.write, timeout.pool) == (3.0, 4.0)
+
+
+def test_build_http_timeout_without_httpx_degrades_to_sdk_defaults(monkeypatch, caplog):
+    monkeypatch.setitem(sys.modules, "httpx", None)
+    with caplog.at_level(logging.WARNING, logger="hyperloom.common.llm_config"):
+        assert build_http_timeout(connect=1.0, read=2.0) is None
+    assert "httpx unavailable" in caplog.text
+
+
+# ---- achat_completion ----
+class _StubCompletions:
+    def __init__(self, outcome: Any) -> None:
+        self._outcome = outcome
+        self.calls: list[dict[str, Any]] = []
+
+    async def create(self, **params: Any) -> Any:
+        self.calls.append(params)
+        if isinstance(self._outcome, BaseException):
+            raise self._outcome
+        return self._outcome
+
+
+class _StubClient:
+    def __init__(self, outcome: Any) -> None:
+        self.completions = _StubCompletions(outcome)
+        self.chat = types.SimpleNamespace(completions=self.completions)
+
+
+@pytest.mark.asyncio
+async def test_achat_completion_flattens_choice_and_keeps_usage_verbatim():
+    usage = types.SimpleNamespace(prompt_tokens=11, completion_tokens=7)
+    choice = types.SimpleNamespace(message=types.SimpleNamespace(content="hello"), finish_reason="stop")
+    client = _StubClient(types.SimpleNamespace(choices=[choice], usage=usage))
+    result = await achat_completion(client, model="m", messages=[])
+    assert (result.text, result.finish_reason) == ("hello", "stop")
+    assert result.usage is usage
+    assert client.completions.calls == [{"model": "m", "messages": []}]
+
+
+@pytest.mark.asyncio
+async def test_achat_completion_tolerates_missing_content_finish_and_usage():
+    choice = types.SimpleNamespace(message=types.SimpleNamespace(content=None))
+    client = _StubClient(types.SimpleNamespace(choices=[choice]))
+    result = await achat_completion(client, model="m")
+    assert result.text == ""
+    assert result.finish_reason is None
+    assert result.usage is None
+
+
+@pytest.mark.asyncio
+async def test_achat_completion_propagates_transport_errors():
+    """A dead gateway must reach the caller that tags it with role context."""
+    with pytest.raises(RuntimeError, match="gateway down"):
+        await achat_completion(_StubClient(RuntimeError("gateway down")), model="m")
+
+
+# ---- chat_completion ----
+class _SyncStubCompletions:
+    def __init__(self, outcome: Any) -> None:
+        self._outcome = outcome
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **params: Any) -> Any:
+        self.calls.append(params)
+        if isinstance(self._outcome, BaseException):
+            raise self._outcome
+        return self._outcome
+
+
+class _SyncStubClient:
+    def __init__(self, outcome: Any) -> None:
+        self.completions = _SyncStubCompletions(outcome)
+        self.chat = types.SimpleNamespace(completions=self.completions)
+
+
+def test_chat_completion_flattens_choice_and_keeps_usage_verbatim():
+    usage = types.SimpleNamespace(prompt_tokens=11, completion_tokens=7)
+    choice = types.SimpleNamespace(message=types.SimpleNamespace(content="hello"), finish_reason="stop")
+    client = _SyncStubClient(types.SimpleNamespace(choices=[choice], usage=usage))
+    result = chat_completion(client, model="m", messages=[])
+    assert (result.text, result.finish_reason) == ("hello", "stop")
+    assert result.usage is usage
+    assert client.completions.calls == [{"model": "m", "messages": []}]
+
+
+def test_chat_completion_tolerates_missing_content_finish_and_usage():
+    choice = types.SimpleNamespace(message=types.SimpleNamespace(content=None))
+    client = _SyncStubClient(types.SimpleNamespace(choices=[choice]))
+    result = chat_completion(client, model="m")
+    assert result.text == ""
+    assert result.finish_reason is None
+    assert result.usage is None
+
+
+def test_chat_completion_propagates_transport_errors():
+    """A dead gateway must reach the caller that tags it with role context."""
+    with pytest.raises(RuntimeError, match="gateway down"):
+        chat_completion(_SyncStubClient(RuntimeError("gateway down")), model="m")
+
+
+def test_chat_completion_does_not_request_a_stream():
+    """The non-streaming entry point must not turn into a streamed request.
+
+    Callers such as the breakdown reporter depend on the plain request shape,
+    which some gateways treat differently from a streamed one.
+    """
+    choice = types.SimpleNamespace(message=types.SimpleNamespace(content="x"))
+    client = _SyncStubClient(types.SimpleNamespace(choices=[choice]))
+    chat_completion(client, model="m", messages=[])
+    assert "stream" not in client.completions.calls[0]
+
+
+# ---- aresponse ----
+class _StubResponses:
+    def __init__(self, outcome: Any) -> None:
+        self._outcome = outcome
+        self.calls: list[dict[str, Any]] = []
+
+    async def create(self, **params: Any) -> Any:
+        self.calls.append(params)
+        if isinstance(self._outcome, BaseException):
+            raise self._outcome
+        return self._outcome
+
+
+class _StubResponsesClient:
+    def __init__(self, outcome: Any) -> None:
+        self.responses = _StubResponses(outcome)
+
+
+def _message_item(text: str, *, citations: list[str] | None = None) -> dict[str, Any]:
+    annotations = [{"type": "url_citation", "url": u} for u in (citations or [])]
+    return {
+        "type": "message",
+        "content": [{"type": "output_text", "text": text, "annotations": annotations}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_aresponse_flattens_text_citations_status_and_tokens():
+    resp = {
+        "output": [
+            {"type": "reasoning", "content": []},
+            {"type": "web_search_call", "action": {"query": "x"}},
+            _message_item("the answer", citations=["https://a.example", "https://b.example"]),
+        ],
+        "status": "completed",
+        "usage": {"input_tokens": 11, "output_tokens": 7},
+    }
+    client = _StubResponsesClient(resp)
+    result = await aresponse(client, model="m", input="prompt")
+    assert result.text == "the answer"
+    assert result.citations == ["https://a.example", "https://b.example"]
+    assert result.status == "completed"
+    assert (result.input_tokens, result.output_tokens) == (11, 7)
+    assert client.responses.calls == [{"model": "m", "input": "prompt"}]
+
+
+@pytest.mark.asyncio
+async def test_aresponse_joins_multiple_message_items_with_newlines():
+    resp = {"output": [_message_item("first"), _message_item("second")]}
+    result = await aresponse(_StubResponsesClient(resp), model="m")
+    assert result.text == "first\nsecond"
+
+
+@pytest.mark.asyncio
+async def test_aresponse_skips_non_output_text_content_blocks():
+    resp = {
+        "output": [
+            {
+                "type": "message",
+                "content": [
+                    {"type": "refusal", "text": "ignored"},
+                    {"type": "output_text", "text": "kept", "annotations": []},
+                ],
+            }
+        ]
+    }
+    result = await aresponse(_StubResponsesClient(resp), model="m")
+    assert (result.text, result.citations) == ("kept", [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resp", [{"output": []}, {}])
+async def test_aresponse_tolerates_empty_output_and_missing_usage(resp):
+    result = await aresponse(_StubResponsesClient(resp), model="m")
+    assert result.text == ""
+    assert result.citations == []
+    assert result.status is None
+    assert (result.input_tokens, result.output_tokens) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_aresponse_reads_attribute_carrying_sdk_objects():
+    """The real SDK returns pydantic models, not dicts."""
+    block = types.SimpleNamespace(
+        type="output_text",
+        text="from sdk",
+        annotations=[types.SimpleNamespace(type="url_citation", url="https://sdk.example")],
+    )
+    resp = types.SimpleNamespace(
+        output=[types.SimpleNamespace(type="message", content=[block])],
+        status="incomplete",
+        usage=types.SimpleNamespace(input_tokens=3, output_tokens=4),
+    )
+    result = await aresponse(_StubResponsesClient(resp), model="m")
+    assert result.text == "from sdk"
+    assert result.citations == ["https://sdk.example"]
+    assert result.status == "incomplete"
+    assert (result.input_tokens, result.output_tokens) == (3, 4)
+
+
+@pytest.mark.asyncio
+async def test_aresponse_treats_unusable_token_counts_as_zero():
+    resp = {"output": [], "usage": {"input_tokens": "abc", "output_tokens": None}}
+    result = await aresponse(_StubResponsesClient(resp), model="m")
+    assert (result.input_tokens, result.output_tokens) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_aresponse_propagates_transport_errors():
+    with pytest.raises(RuntimeError, match="gateway down"):
+        await aresponse(_StubResponsesClient(RuntimeError("gateway down")), model="m")
+
+
+# ---- client-ownership guard ----
+_MIGRATED_CALL_SITES = (
+    "orchestrator/roles/codex.py",
+    "orchestrator/roles/critic_agent.py",
+    "orchestrator/scoring/proposal_scorer.py",
+)
+
+# ``a.b.create`` attribute chains that only llm_config may call directly.
+_SANCTIONED_ONLY_ENDPOINTS = ("chat.completions.create", "responses.create")
+
+
+def _call_site_trees() -> list[tuple[str, ast.Module]]:
+    root = Path(hyperloom.__file__).resolve().parent
+    return [(rel, ast.parse((root / rel).read_text(encoding="utf-8"))) for rel in _MIGRATED_CALL_SITES]
+
+
+def _dotted_attribute_chain(node: ast.AST) -> str:
+    """Render the trailing attribute chain of a call target, e.g. ``responses.create``."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    return ".".join(reversed(parts))
+
+
+def test_migrated_call_sites_do_not_import_the_openai_sdk():
+    """Client ownership is llm_config's; these call sites ask it for a client."""
+    offenders: list[str] = []
+    for rel, tree in _call_site_trees():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                offenders += [f"{rel}:{node.lineno}" for a in node.names if a.name.split(".")[0] == "openai"]
+            elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "openai":
+                offenders.append(f"{rel}:{node.lineno}")
+    assert not offenders, f"OpenAI clients must come from llm_config.get_*_openai_client(): {offenders}"
+
+
+def test_migrated_call_sites_make_no_bare_llm_api_calls():
+    """No call site may reach an LLM endpoint itself; llm_config owns every call."""
+    offenders: list[str] = []
+    for rel, tree in _call_site_trees():
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            chain = _dotted_attribute_chain(node.func)
+            if any(chain.endswith(endpoint) for endpoint in _SANCTIONED_ONLY_ENDPOINTS):
+                offenders.append(f"{rel}:{node.lineno} calls .{chain}(")
+    assert not offenders, f"LLM calls must go through llm_config's entry points: {offenders}"
 
 
 def test_claude_sdk_env_options_disables_advisor_tool_by_default():
