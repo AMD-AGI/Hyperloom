@@ -548,14 +548,28 @@ def main(argv: list[str] | None = None) -> int:
             "ops": [],
             "aggregation_scope": "full_trace",
         }
-    elif not analyze.get("kernels"):
-        trace_health_warnings.append(
-            {
-                "code": "bypass_no_gpu_kernels",
-                "severity": "warning",
-                "message": "bypass reader found no GPU kernel events in the trace",
-            }
-        )
+    else:
+        stream_errors = [str(error) for error in (analyze.get("stream_errors") or [])]
+        if stream_errors:
+            analysis_degraded = True
+            trace_health_warnings.append(
+                {
+                    "code": "bypass_trace_stream_incomplete",
+                    "severity": "warning",
+                    "message": (
+                        "bypass reader recovered an incomplete trace stream: "
+                        + "; ".join(stream_errors[:3])
+                    ),
+                }
+            )
+        if not analyze.get("kernels"):
+            trace_health_warnings.append(
+                {
+                    "code": "bypass_no_gpu_kernels",
+                    "severity": "warning",
+                    "message": "bypass reader found no GPU kernel events in the trace",
+                }
+            )
 
     # Aggregation scope is driven by the reader (steady_state vs full_trace).
     scope = analyze.get("aggregation_scope", AGGREGATION_SCOPE_FULL)
