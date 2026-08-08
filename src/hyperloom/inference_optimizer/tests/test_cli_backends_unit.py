@@ -120,18 +120,42 @@ def test_build_backends_deepseek_only_uses_openai_compatible_critic_agent(monkey
     assert callable(b["critic"][1]["codex_client_factory"])
 
 
+def _capture_deepseek_client_config(monkeypatch) -> dict:
+    """Stub ``llm_config``'s async-client contract; return the resolved config.
+
+    The factory only resolves DeepSeek credentials -- construction belongs to
+    ``llm_config`` -- so the stub replays ``resolve_openai_client_config`` on the
+    kwargs it receives and records the outcome. ``raising=False``: the contract is
+    owned by ``llm_config``, and stubbing it keeps this test off the ``openai`` SDK.
+    """
+    from hyperloom.common import llm_config
+
+    captured: dict = {}
+
+    def _fake(**kwargs):
+        kwargs.pop("timeout", None)
+        captured["kwargs"] = kwargs
+        cfg = llm_config.resolve_openai_client_config(**kwargs)
+        captured["api_key"] = cfg.api_key
+        captured["base_url"] = cfg.base_url
+        captured["default_headers"] = cfg.default_headers
+        return object()
+
+    monkeypatch.setattr(llm_config, "get_async_openai_client", _fake, raising=False)
+    return captured
+
+
 def test_deepseek_factory_default_base_url_carries_v1(monkeypatch) -> None:
     """The OpenAI SDK appends the route verbatim (no /v1 auto-insertion), so the
     DeepSeek default base URL must carry the conventional /v1 suffix."""
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
-    import openai
-
-    captured: dict = {}
-    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: captured.update(kw))
+    captured = _capture_deepseek_client_config(monkeypatch)
     clib._deepseek_openai_client_factory()()
     assert captured["base_url"] == "https://api.deepseek.com/v1"
     assert captured["api_key"] == "test-deepseek-key"
+    assert captured["kwargs"]["api_key_env"] == "DEEPSEEK_API_KEY"
+    assert captured["kwargs"]["base_url_env"] == "DEEPSEEK_BASE_URL"
 
 
 def test_deepseek_factory_respects_explicit_base_url(monkeypatch) -> None:
@@ -139,12 +163,35 @@ def test_deepseek_factory_respects_explicit_base_url(monkeypatch) -> None:
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
     monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://gw.example/openai/v2/")
-    import openai
-
-    captured: dict = {}
-    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: captured.update(kw))
+    captured = _capture_deepseek_client_config(monkeypatch)
     clib._deepseek_openai_client_factory()()
     assert captured["base_url"] == "https://gw.example/openai/v2"
+
+
+def test_deepseek_factory_never_falls_back_to_a_foreign_credential(monkeypatch) -> None:
+    """The env handed to ``llm_config`` holds only the resolved DeepSeek pair, so
+    the OPENAI_API_KEY / LLM_GATEWAY_KEY / OPENAI_CUSTOM_HEADERS fallbacks cannot
+    route another provider's credential to the DeepSeek endpoint."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("LLM_GATEWAY_KEY", "gateway-key-must-not-leak")
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "X-Leak: yes")
+    captured = _capture_deepseek_client_config(monkeypatch)
+    clib._deepseek_openai_client_factory()()
+    assert captured["api_key"] == "test-deepseek-key"
+    assert captured["default_headers"] == {}
+    assert set(captured["kwargs"]["env"]) == {"DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"}
+
+
+def test_deepseek_factory_fails_loudly_without_a_key(monkeypatch) -> None:
+    """A DeepSeek base URL with no key is a misconfiguration, not a silent 401."""
+    from hyperloom.common import llm_config
+
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://gw.example/openai/v1")
+    _capture_deepseek_client_config(monkeypatch)
+    with pytest.raises(llm_config.LLMConfigError, match="DEEPSEEK_API_KEY"):
+        clib._deepseek_openai_client_factory()()
 
 
 def test_build_backends_openai_only_uses_codex_for_orchestration(monkeypatch) -> None:
