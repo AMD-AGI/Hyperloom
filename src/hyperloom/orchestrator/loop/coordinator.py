@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import shlex
 import signal
 import time
 import traceback
@@ -17,6 +16,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from hyperloom.orchestrator.actions.executors._grid_server_args import (
+    tokenize_server_args_preserving_json,
+)
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
 
 # Recipe snapshot severity tags (schema has no fixed enum).
@@ -241,10 +243,42 @@ def _framework_config_levers_from_done(
         args = entry.get("extra_args")
         extra_server_args = ""
         if isinstance(args, str) and args.strip():
-            extra_server_args = args
+            parsed_args = tokenize_server_args_preserving_json(args)
+            if parsed_args is None:
+                log.warning(
+                    "FRAMEWORK config lever %r has server args unsupported by "
+                    "Magpie's unquoted argv transport; dropping the args%s",
+                    entry.get("name"),
+                    " while preserving its environment overrides" if extra_envs else "",
+                )
+                if not extra_envs:
+                    continue
+            else:
+                extra_server_args = parsed_args[0]
         elif isinstance(args, (list, tuple)):
             arg_tokens = [str(a) for a in args if str(a).strip()]
-            extra_server_args = shlex.join(arg_tokens)
+            if any(any(ch.isspace() for ch in token) for token in arg_tokens):
+                log.warning(
+                    "FRAMEWORK config lever %r has a whitespace-bearing argv "
+                    "token; dropping the args%s",
+                    entry.get("name"),
+                    " while preserving its environment overrides" if extra_envs else "",
+                )
+                if not extra_envs:
+                    continue
+            else:
+                parsed_args = tokenize_server_args_preserving_json(" ".join(arg_tokens))
+                if parsed_args is None:
+                    log.warning(
+                        "FRAMEWORK config lever %r has unparseable server args; "
+                        "dropping the args%s",
+                        entry.get("name"),
+                        " while preserving its environment overrides" if extra_envs else "",
+                    )
+                    if not extra_envs:
+                        continue
+                else:
+                    extra_server_args = parsed_args[0]
         if extra_server_args or extra_envs:
             return {
                 "extra_server_args": extra_server_args,
