@@ -1385,6 +1385,32 @@ def _fill_integrate_snapshot_from_bundle(resolved: dict, bundle: Any) -> None:
             resolved["patch_write_paths"] = write_paths
 
 
+def _fill_integrate_provenance(
+    resolved: dict,
+    *,
+    framework_applyback: Any,
+    integration_validation_status: Any,
+) -> None:
+    """Backfill artifact provenance for an integrate resolved from a ledger entry.
+
+    These two fields are what arms the strict accuracy gate, and only the pending
+    record used to supply them. Every KEEP that takes a fallback instead -- the
+    ones the ``source_file`` dedup drops from the pending queue, so the second
+    and later KEEPs against one file -- arrived with the fields absent, which
+    reads exactly like an ordinary kernel patch. An apply-back proven correct
+    only against its standalone reference could then win on throughput alone,
+    which is the one outcome the gate exists to prevent.
+    """
+    if not resolved.get("artifact_kind") and isinstance(framework_applyback, dict):
+        kind = str(framework_applyback.get("artifact_kind") or "")
+        if kind:
+            resolved["artifact_kind"] = kind
+    if not resolved.get("integration_validation_status"):
+        status = str(integration_validation_status or "")
+        if status:
+            resolved["integration_validation_status"] = status
+
+
 def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dict, HandlerResult | None]:
     """Fill integrate inputs from SharedState when Orchestration sends only kernel_id (artifact in ``last_kernel_opt``, source in ``last_trace_analyze``).
 
@@ -1475,6 +1501,11 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
                 resolved["patch_path"] = str(artifact)
         if not resolved.get("source_file") and last_kernel.get("source_file"):
             resolved["source_file"] = str(last_kernel["source_file"])
+        _fill_integrate_provenance(
+            resolved,
+            framework_applyback=last_kernel.get("framework_applyback"),
+            integration_validation_status=last_kernel.get("integration_validation_status"),
+        )
 
     # Multi-KEEP queue fallback: pull patch_path/source_file from the per-kernel
     # ledger for KEEPs other than the strongest pending one.
@@ -1491,6 +1522,11 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
             resolved["patch_path"] = str(attempt["last_artifact_path"])
         if not resolved.get("source_file") and attempt.get("last_source_file"):
             resolved["source_file"] = str(attempt["last_source_file"])
+        _fill_integrate_provenance(
+            resolved,
+            framework_applyback=attempt.get("last_framework_applyback"),
+            integration_validation_status=attempt.get("last_integration_validation_status"),
+        )
 
     if kernel_id and not (resolved.get("target_file") or resolved.get("source_file")):
         source = _find_selected_kernel_source(state, kernel_id)
@@ -6541,9 +6577,11 @@ async def integrate_handler(
     # that loses accuracy short-circuits before they run.
     # An apply-back carries only reference correctness, so this run is the sole
     # end-to-end evidence it will ever get.
+    # Anything other than a recorded pass still owes the verdict, so an absent or
+    # unrecognised status keeps the gate armed rather than disarming it.
     applyback_pending = (
         str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
-        and str(payload.get("integration_validation_status") or "") == "pending"
+        and str(payload.get("integration_validation_status") or "") != "passed"
     )
     accuracy_gate: dict[str, Any] | None = None
     if decision == "KEEP":

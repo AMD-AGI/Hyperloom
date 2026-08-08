@@ -421,6 +421,17 @@ def _is_multi_node() -> bool:
             sys.path.remove(tools_dir)
 
 
+def _readable_file(path: str) -> bool:
+    """Whether ``path`` names a file this process can actually read."""
+    candidate = str(path or "").strip()
+    if not candidate:
+        return False
+    try:
+        return Path(candidate).is_file() and os.access(candidate, os.R_OK)
+    except OSError:
+        return False
+
+
 def _mapped_into_workspace(paths: Sequence[str], workspace: str) -> str:
     """Return the first path that does not resolve inside ``workspace``."""
     root = Path(workspace).resolve()
@@ -451,6 +462,7 @@ def evaluate_rewrite_route(
     branch: str,
     attempt_id: str,
     timeout_s: int,
+    invocation_spec_file: str = "",
     forge_root: str = "",
     capability_probe: Callable[..., RewriteCapabilities] | None = None,
 ) -> RewriteDecision:
@@ -475,6 +487,8 @@ def evaluate_rewrite_route(
         branch: Unique branch created for this attempt.
         attempt_id: Unique attempt identity.
         timeout_s: Remaining wall-clock budget for the attempt.
+        invocation_spec_file: Recorded invocation evidence the producer's
+            driver-preparation stage authors the measurement driver from.
         forge_root: Directory holding ``kernel_agents`` for the probe child.
         capability_probe: Injection point for the capability probe.
 
@@ -551,6 +565,18 @@ def evaluate_rewrite_route(
             False,
             "driver_preparation_unsupported",
             "the producer does not advertise driver preparation",
+            capabilities=capabilities,
+        )
+    # The same requirement seen from the other side: preparation is only possible
+    # against real invocation evidence. Proceeding without it hands the producer
+    # nothing to author from, and the placeholder driver it would fall back on
+    # exits 1 -- so the entire budget would be spent to arrive at a failure that
+    # is knowable now.
+    if not _readable_file(invocation_spec_file):
+        return RewriteDecision(
+            False,
+            "invocation_spec_missing",
+            f"no readable invocation spec at {invocation_spec_file or '<unset>'}",
             capabilities=capabilities,
         )
 

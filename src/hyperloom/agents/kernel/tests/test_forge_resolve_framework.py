@@ -147,6 +147,8 @@ def test_rewrite_candidate_identity_reuses_the_shared_resolvers(tmp_path, monkey
         "operation": "vllm :: unified_attention",
         "kernel_sources": [str(source)],
     }
+    invocation_spec = tmp_path / "invocation_spec.json"
+    invocation_spec.write_text("{}", encoding="utf-8")
 
     decision = _flydsl_rewrite.evaluate_rewrite_route(
         candidate=candidate,
@@ -167,6 +169,7 @@ def test_rewrite_candidate_identity_reuses_the_shared_resolvers(tmp_path, monkey
         branch="forge/session/attention-0011223344",
         attempt_id="attempt-7",
         timeout_s=7200,
+        invocation_spec_file=str(invocation_spec),
         capability_probe=lambda **_kwargs: _flydsl_rewrite.RewriteCapabilities(
             True,
             "capability_ok",
