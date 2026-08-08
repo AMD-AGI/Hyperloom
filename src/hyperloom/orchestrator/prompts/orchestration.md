@@ -349,9 +349,21 @@ map to actions — **follow them**:
 <!-- phase: EXPLORE -->
 ### Choosing specialist domain by bottleneck
 
+First split on what the workload *is*, because the two authoring domains share
+almost no surface. A request-serving framework (sglang / vllm / atom) has a
+scheduler, continuous batching and a KV cache; a scriptable pipeline (xdit /
+custom, i.e. diffusion or autoregressive rollout) has none of those, and its
+wins are redundant work the loop creates — step-invariant computations redone
+every step, collectives that round-trip through the host to agree on a shape,
+tables rebuilt and re-uploaded. Sending a scriptable pipeline to
+`serving_specialist` aims it at a hot path that does not exist there.
+
+* **host overhead, `torch.compile`, GPU idle %, and any other
+  framework-layer authoring** → `serving_specialist` for a serving framework,
+  `framework_rewrite_specialist` for a scriptable one
+* **cuda graph misses, KV-cache pressure, queue depth** → `serving_specialist`
+  (serving frameworks only; these do not exist in a scriptable pipeline)
 * **attention / AllReduce / MoE expert dispatch** → `kernel_switch_specialist`
-* **host overhead, cuda graph misses, KV-cache pressure, queue depth,
-  `torch.compile`, GPU idle %** → `serving_specialist`
 * **AllReduce / RCCL / QuickReduce hot kernels** → `comm_specialist`
 * **register pressure, inductor advice** → `compiler_specialist`
 * **launch latency, dispatch overhead, device sync, host-blocking /

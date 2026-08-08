@@ -1437,3 +1437,95 @@ class TestRemoveServerArgsPreservesJson:
         assert json.loads(out.split("--compilation-config ", 1)[1].strip()) == {
             "cudagraph_mode": "FULL"
         }
+
+
+# ---------------------------------------------------------------------------
+# benchmark_report settling (real-run race)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_report_read_waits_for_a_report_still_being_written(tmp_path):
+    """A report that lands a moment after the process exits must not abort the variant.
+
+    Observed on a live 24-hour session: the reader ran in the same second the
+    benchmark finished, read a ``benchmark_report.json`` that was not fully on disk
+    yet, and aborted the variant as ``benchmark_report_invalid_metric``. Six of
+    thirteen variants died that way while their reports, read afterwards, all held
+    valid throughput — including two authored patches worth +4.4% and +4.7% whose
+    switch-off parity legs had passed. The measurement was fine; only the moment of
+    reading was wrong.
+    """
+    workspace = tmp_path / "benchmark_ws"
+    workspace.mkdir()
+    report_path = workspace / "benchmark_report.json"
+    # First read sees a truncated file, exactly as a partial flush leaves it.
+    report_path.write_text('{"throughput": {"output_th', encoding="utf-8")
+
+    reads = {"n": 0}
+    real_parse = _grid_runner._parse_report
+
+    def _parse_then_complete(ws):
+        reads["n"] += 1
+        result = real_parse(ws)
+        if reads["n"] == 1:
+            report_path.write_text(
+                json.dumps({"throughput": {"output_throughput": 0.351, "completed_requests": 3}}),
+                encoding="utf-8",
+            )
+        return result
+
+    with patch.object(_grid_runner, "_parse_report", _parse_then_complete):
+        report, measurement = await _grid_runner._settled_measurement(
+            workspace,
+            subprocess_started_unix=None,
+            settle_seconds=5.0,
+            poll_seconds=0.01,
+        )
+
+    assert reads["n"] >= 2, "a truncated report must be re-read, not accepted as final"
+    assert measurement.get("valid_measurement") is True
+    assert report is not None
+
+
+@pytest.mark.asyncio
+async def test_report_read_gives_up_on_a_genuinely_invalid_report(tmp_path):
+    """Settling must be bounded: a report that never becomes valid still aborts."""
+    workspace = tmp_path / "benchmark_ws"
+    workspace.mkdir()
+    (workspace / "benchmark_report.json").write_text(
+        json.dumps({"throughput": {"output_throughput": 0.0, "completed_requests": 0}}),
+        encoding="utf-8",
+    )
+    started = time.monotonic()
+    _report, measurement = await _grid_runner._settled_measurement(
+        workspace,
+        subprocess_started_unix=None,
+        settle_seconds=0.05,
+        poll_seconds=0.01,
+    )
+    assert not measurement.get("valid_measurement")
+    assert time.monotonic() - started < 3.0, "a dead report must not stall the grid"
+
+
+@pytest.mark.asyncio
+async def test_report_read_does_not_wait_when_the_process_already_failed(tmp_path):
+    """With settling disabled the reader takes one look, so a crashed run fails fast."""
+    workspace = tmp_path / "benchmark_ws"
+    workspace.mkdir()
+    reads = {"n": 0}
+    real_parse = _grid_runner._parse_report
+
+    def _counting_parse(ws):
+        reads["n"] += 1
+        return real_parse(ws)
+
+    with patch.object(_grid_runner, "_parse_report", _counting_parse):
+        _report, measurement = await _grid_runner._settled_measurement(
+            workspace,
+            subprocess_started_unix=None,
+            settle_seconds=0.0,
+            poll_seconds=0.01,
+        )
+    assert reads["n"] == 1
+    assert not measurement.get("valid_measurement")

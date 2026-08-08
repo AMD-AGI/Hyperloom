@@ -83,6 +83,14 @@ def test_repo_urls_cover_global_allowlist_with_framework_primary():
     assert len(urls) == len(set(urls))
 
 
+def test_scriptable_repo_urls_skip_serving_allowlist_when_primary_repo_exists():
+    """Scriptable model repos are not compatible with serving-framework PR diffs."""
+    stub = _CoordinatorStub(Path("/tmp"))
+    urls = stub._framework_agent_discover_repo_urls("xdit")
+
+    assert urls == ["https://github.com/xdit-project/xDiT.git"]
+
+
 def test_discover_merges_candidates_across_repos(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

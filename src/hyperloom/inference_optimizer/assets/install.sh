@@ -377,8 +377,8 @@ acquire_install_lock() {
 }
 
 # Preflight credential validation. Mirrors src/hyperloom/agents/kernel/scripts/install.sh:
-# a usable setup needs Anthropic or DeepSeek credentials. The installer gate
-# intentionally does not default or require OpenAI.
+# a usable setup needs at least one self-consistent provider side. A
+# dual-protocol gateway such as DeepSeek configures both sides on one host.
 #
 # Loader (env wins; never overwrites a key that is already set):
 #   env > $REPO_ROOT/.env
@@ -392,15 +392,56 @@ preflight_load_dotenv() {
   fi
 }
 
+# Translate a retired DEEPSEEK_* configuration into the standard variables.
+# DeepSeek is a dual-protocol gateway, not a third provider: /anthropic speaks
+# the Anthropic API and /v1 speaks OpenAI chat-completions, both with the same
+# key. Endpoint and model derivation matches
+# hyperloom.common.llm_config.deepseek_compat_env.
+normalize_legacy_deepseek_env() {
+  [ -n "${DEEPSEEK_API_KEY:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || return 0
+  # Adopt the gateway whole or not at all. Anything already on the Anthropic
+  # side means the retired variables are stale leftovers: half-adopting them
+  # would send an explicit Anthropic credential to DeepSeek's host.
+  if [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+    warn "DEEPSEEK_* is retired and ignored here: the Anthropic side is already configured"
+    return 0
+  fi
+  local base lowered anthropic_url openai_url model
+  base="${DEEPSEEK_BASE_URL:-}"
+  base="${base%/}"
+  # Case-insensitive match (AMD spells it /Anthropic); ${base%/*} drops the
+  # final segment whatever its casing.
+  lowered="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')"
+  case "$lowered" in
+    "")           anthropic_url="https://api.deepseek.com/anthropic"; openai_url="https://api.deepseek.com/v1" ;;
+    */anthropic)  anthropic_url="$base"; openai_url="${base%/*}/v1" ;;
+    */v1)         anthropic_url="${base%/*}/anthropic"; openai_url="$base" ;;
+    https://api.deepseek.com|http://api.deepseek.com)
+                  anthropic_url="${base}/anthropic"; openai_url="${base}/v1" ;;
+    *)            anthropic_url="$base"; openai_url="${base}/v1" ;;
+  esac
+  model="${DEEPSEEK_MODEL:-deepseek-v4-pro}"
+  export ANTHROPIC_BASE_URL="$anthropic_url"
+  [ -n "${DEEPSEEK_API_KEY:-}" ] && export ANTHROPIC_API_KEY="$DEEPSEEK_API_KEY"
+  [ -n "${CLAUDE_MODEL:-}" ] || export CLAUDE_MODEL="$model"
+  # GEAKv4 follows whichever Claude model is actually in effect.
+  [ -n "${GEAK_CLAUDE_MODEL:-}" ] || export GEAK_CLAUDE_MODEL="${CLAUDE_MODEL:-$model}"
+  # The OpenAI side is adopted only when it is entirely free; otherwise some
+  # other gateway already runs there and keeps its own key and model.
+  if [ -z "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+    export OPENAI_BASE_URL="$openai_url"
+    [ -n "${DEEPSEEK_API_KEY:-}" ] && export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
+    [ -n "${CODEX_MODEL:-}" ] || export CODEX_MODEL="$model"
+  fi
+  unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL
+  warn "DEEPSEEK_* is retired; normalized to ANTHROPIC_*/OPENAI_*"
+}
+
 # Reject one provider's base URL paired with only the other provider's key.
-# DeepSeek serves its own Anthropic-compatible endpoint, so its key counts as one.
 preflight_reject_cross_provider() {
   local a_key a_endpoint conflict=""
-  a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${DEEPSEEK_API_KEY:-}}}"
+  a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
   a_endpoint="${ANTHROPIC_BASE_URL:-}"
-  if [ -z "$a_endpoint" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; then
-    a_endpoint="${DEEPSEEK_BASE_URL:-https://api.deepseek.com/anthropic}"
-  fi
   if [ -n "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -n "$a_key" ]; then
     conflict="OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an Anthropic-side key is configured"
   elif [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ -z "$a_key" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
@@ -426,11 +467,12 @@ EOF
 
 preflight_validate_credentials() {
   preflight_load_dotenv
+  normalize_legacy_deepseek_env
   local missing=()
   local has_anthropic=0 has_openai=0
   # Each side needs its own base URL and key; an unset side is fine.
-  { { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } &&
-    { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; }; } &&
+  { [ -n "${ANTHROPIC_BASE_URL:-}" ] &&
+    { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; }; } &&
     has_anthropic=1
   { [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; } && has_openai=1
   preflight_reject_cross_provider || return 1
@@ -438,7 +480,7 @@ preflight_validate_credentials() {
     log "credentials preflight: at least one self-consistent provider side present"
     return 0
   fi
-  missing+=("a self-consistent provider side: ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY (DeepSeek may omit the URL), or OPENAI_BASE_URL + OPENAI_API_KEY")
+  missing+=("a self-consistent provider side: ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY, or OPENAI_BASE_URL + OPENAI_API_KEY")
   local env_file_status
   if [ -f "$REPO_ROOT/.env" ]; then
     env_file_status="present"
@@ -463,9 +505,13 @@ Fix one of:
   1. Anthropic:
        export ANTHROPIC_BASE_URL=https://api.anthropic.com
        export ANTHROPIC_API_KEY=sk-ant-...
-  2. DeepSeek:
-       export DEEPSEEK_API_KEY=sk-...
-       # optional: export DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic
+  2. A dual-protocol gateway such as DeepSeek (same key, both sides):
+       export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+       export OPENAI_BASE_URL=https://api.deepseek.com/v1
+       export ANTHROPIC_API_KEY=sk-...  OPENAI_API_KEY=sk-...
+     A gateway serving only its own models also needs the model ids. Known
+     hosts default themselves; otherwise set CLAUDE_MODEL (Anthropic side)
+     and CODEX_MODEL (OpenAI side).
   3. Copy .env from a working worktree into this one:
        cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
 EOF
@@ -1332,19 +1378,25 @@ ensure_bench_serving_deps() {
   log "bench_serving deps installed OK"
 }
 
-# --- 4b. xDiT image-quality gate deps (SSIM + LPIPS) ---
+# --- 4b. Scriptable quality-gate deps (SSIM + LPIPS) ---
 #
-# The scriptable xDiT bench wrapper computes an image-quality gate
-# (LPIPS / SSIM / MSE vs a BF16 reference). torch/torchvision/numpy ship
-# with the pytorch-xdit image, but scikit-image (SSIM) and lpips (LPIPS)
-# do NOT — so without this step the gate silently degrades to MSE-only
-# (the wrapper now reports ssim_available/lpips_available=false). These
-# are pip-name != import-name, so we map them explicitly.
+# Every scriptable workload with a visual output computes its gate the same way
+# (LPIPS / SSIM / MSE vs a reference): xDiT does, and so does an
+# operator-supplied `--framework custom` bench script. torch/torchvision/numpy
+# ship with the ROCm images, but scikit-image (SSIM) and lpips (LPIPS) do NOT —
+# so without this step the gate silently degrades to MSE-only (the wrapper
+# reports ssim_available/lpips_available=false). These are pip-name !=
+# import-name, so we map them explicitly.
+#
+# Installed unconditionally rather than per framework: the framework is not
+# known at install time, and an operator's own script is free to import either
+# one. Gating these on `xdit` would disarm the gate for every other scriptable
+# workload, and a workload whose gate cannot run scores every candidate zero.
 #
 # Fail-soft: lpips also pulls AlexNet weights on first use (network), so a
 # failed install must NOT abort the whole install — the wrapper degrades
 # gracefully (honest *_available=false) rather than crashing the run.
-_XDIT_QUALITY_DEPS=(
+_SCRIPTABLE_QUALITY_DEPS=(
   "scikit-image:skimage"
   "lpips:lpips"
 )
@@ -1354,7 +1406,7 @@ _XDIT_QUALITY_DEPS=(
 # a PyPI (CUDA) torch to satisfy e.g. lpips' `torch>=0.4.0` silently bricks GPU
 # access for EVERY framework sharing this venv (that is exactly how this brick
 # shipped: a CUDA torch replaced the ROCm one, exit 0, no visible error).
-_XDIT_CORE_PINS=(torch torchvision torchaudio triton)
+_SHARED_VENV_CORE_PINS=(torch torchvision torchaudio triton)
 
 # Write a pip constraints file pinning each installed core package to its exact
 # current version. `pip install -c <file>` then forbids the resolver from moving
@@ -1362,7 +1414,7 @@ _XDIT_CORE_PINS=(torch torchvision torchaudio triton)
 _write_core_constraints() {
   local dest="$1" pkg ver
   : > "$dest"
-  for pkg in "${_XDIT_CORE_PINS[@]}"; do
+  for pkg in "${_SHARED_VENV_CORE_PINS[@]}"; do
     ver="$("$PYTHON" -c "import importlib.metadata as m; print(m.version('$pkg'))" 2>/dev/null || true)"
     [ -n "$ver" ] && printf '%s==%s\n' "$pkg" "$ver" >> "$dest"
   done
@@ -1384,18 +1436,18 @@ _guard_torch_not_clobbered() {
   [ -n "$hip_before" ] || return 0
   hip_after="$(_torch_hip_version)"
   [ -n "$hip_after" ] && return 0
-  warn "xDiT quality deps swapped the ROCm torch for a non-ROCm build; attempting rollback to: $(tr '\n' ' ' < "$constraints")"
+  warn "scriptable quality deps swapped the ROCm torch for a non-ROCm build; attempting rollback to: $(tr '\n' ' ' < "$constraints")"
   "$PYTHON" -m pip install --quiet --no-cache-dir --force-reinstall --no-deps \
     "${PIP_EXTRA[@]}" -r "$constraints" \
     || warn "rollback reinstall failed (pinned ROCm wheels may need the vendor index); restore torch manually"
-  die "optional xDiT quality deps clobbered the load-bearing ROCm torch (was hip=${hip_before}, now a non-ROCm build). Aborting instead of poisoning every framework in this shared venv. Preinstall scikit-image/lpips in the image, or extend _XDIT_CORE_PINS."
+  die "optional scriptable quality deps clobbered the load-bearing ROCm torch (was hip=${hip_before}, now a non-ROCm build). Aborting instead of poisoning every framework in this shared venv. Preinstall scikit-image/lpips in the image, or extend _SHARED_VENV_CORE_PINS."
 }
 
-ensure_xdit_quality_deps() {
-  log "ensuring xDiT image-quality gate deps (SSIM/LPIPS) in $PYTHON"
+ensure_scriptable_quality_deps() {
+  log "ensuring scriptable quality-gate deps (SSIM/LPIPS) in $PYTHON"
   local missing=()
   local pair pip_name import_name
-  for pair in "${_XDIT_QUALITY_DEPS[@]}"; do
+  for pair in "${_SCRIPTABLE_QUALITY_DEPS[@]}"; do
     pip_name="${pair%%:*}"
     import_name="${pair##*:}"
     if ! "$PYTHON" -c "import ${import_name}" >/dev/null 2>&1; then
@@ -1403,18 +1455,18 @@ ensure_xdit_quality_deps() {
     fi
   done
   if [ ${#missing[@]} -eq 0 ]; then
-    log "xDiT quality deps already satisfied"
+    log "scriptable quality deps already satisfied"
     return 0
   fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "check-only mode; would install xDiT quality deps: ${missing[*]}"
+    warn "check-only mode; would install scriptable quality deps: ${missing[*]}"
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "dry-run; skipping xDiT quality dep install"
+    log "dry-run; skipping scriptable quality dep install"
     return 0
   fi
-  log "installing missing xDiT quality deps: ${missing[*]}"
+  log "installing missing scriptable quality deps: ${missing[*]}"
   # Pin the load-bearing core so this optional install can never move
   # torch/torchvision/triton, and snapshot torch's ROCm build so the tripwire
   # can abort loudly if it got swapped anyway.
@@ -1424,13 +1476,13 @@ ensure_xdit_quality_deps() {
   hip_before="$(_torch_hip_version)"
   "$PYTHON" -m pip install --quiet --no-cache-dir -c "$constraints" \
     "${PIP_EXTRA[@]}" "${missing[@]}" \
-    || warn "failed to install xDiT quality deps: ${missing[*]} (gate degrades to MSE-only)"
+    || warn "failed to install scriptable quality deps: ${missing[*]} (gate degrades to MSE-only)"
   _guard_torch_not_clobbered "$constraints" "$hip_before"
   rm -f "$constraints"
-  for pair in "${_XDIT_QUALITY_DEPS[@]}"; do
+  for pair in "${_SCRIPTABLE_QUALITY_DEPS[@]}"; do
     import_name="${pair##*:}"
     "$PYTHON" -c "import ${import_name}" >/dev/null 2>&1 \
-      || warn "xDiT quality dep '${import_name}' not importable after install (gate excludes it)"
+      || warn "scriptable quality dep '${import_name}' not importable after install (gate excludes it)"
   done
 }
 
@@ -1480,6 +1532,41 @@ ensure_langfuse_when_enabled() {
   else
     warn "langfuse: SDK install failed; live push will degrade to a no-op (local jsonl ledger still written). Preinstall 'langfuse' in the image or run: \"\$PYTHON\" -m pip install 'langfuse>=2.0'"
   fi
+}
+
+# --- 4d. Per-framework runtime deps (manifest-driven) ---
+#
+# Scriptable frameworks execute the model author's own code (HY-World-2.0 for
+# an operator's own), which imports packages no ROCm serving image ships. A framework
+# declares what it needs in assets/framework_deps/<framework>.txt, so onboarding
+# the next one is a data file rather than new code, and a framework with no
+# manifest (sglang / vllm / atom) is a no-op.
+#
+# Manifest parsing, the load-bearing refusal list and the torch-clobber
+# tripwire all live in hyperloom.inference_optimizer.framework_deps, which the
+# CLI preflight also calls, so the two passes cannot drift.
+#
+# $FRAMEWORK is normally only known at launch (--framework), not at install
+# time, which is why preflight owns the pass that covers the documented flow.
+# This one is the fast path for operators who export it before installing.
+ensure_framework_deps() {
+  if [ -z "${FRAMEWORK:-}" ]; then
+    log "framework deps: \$FRAMEWORK unset at install time; CLI preflight will handle it at launch"
+    return 0
+  fi
+  local args=(--framework "$FRAMEWORK" --python "$PYTHON" --prefix "[inference-optimizer] framework deps")
+  [ "$CHECK_ONLY" -eq 1 ] && args+=(--check-only)
+  [ "$DRY_RUN" -eq 1 ] && args+=(--dry-run)
+  # Each flag attaches with =: a bare --pip-extra would leave a dashed value
+  # unconsumed, and argparse then rejects it as an unrecognized argument.
+  if [ ${#PIP_EXTRA[@]} -gt 0 ]; then
+    local pip_flag
+    for pip_flag in "${PIP_EXTRA[@]}"; do
+      args+=("--pip-extra=${pip_flag}")
+    done
+  fi
+  "$PYTHON" -m hyperloom.inference_optimizer.framework_deps "${args[@]}" \
+    || die "framework deps for '${FRAMEWORK}' failed fatally; see the error above"
 }
 
 # --- 5. Chain to kernel-agent ---
@@ -1565,7 +1652,8 @@ if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
   esac
 fi
 ensure_bench_serving_deps
-ensure_xdit_quality_deps
+ensure_scriptable_quality_deps
+ensure_framework_deps
 chain_kernel_agent
 # rocprof-compute + pandas<3 pin runs LAST — strictly AFTER every pip-installing
 # step (chain_kernel_agent included; nothing below installs packages). This makes
