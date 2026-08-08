@@ -73,7 +73,7 @@ def test_config_levers_preserve_envs_and_args() -> None:
         }
     )
     assert levers == {
-        "extra_server_args": extra_args,
+        "extra_server_args": '--enable-x --compilation-config {"mode":"max-autotune"} --bare',
         "extra_envs": {"VLLM_FOO": "1"},
     }
 
@@ -81,8 +81,43 @@ def test_config_levers_preserve_envs_and_args() -> None:
 def test_config_levers_args_as_list() -> None:
     f = coord_mod._framework_config_levers_from_done
     levers = f({"proposal_set": [{"extra_args": ["--flag", "value with space"]}]})
+    assert levers == {}
+
+
+def test_invalid_config_args_preserve_independent_env_overrides() -> None:
+    f = coord_mod._framework_config_levers_from_done
+    levers = f(
+        {
+            "proposal_set": [
+                {
+                    "extra_args": ["--flag", "value with space"],
+                    "extra_envs": {"SAFE_ENV": "1"},
+                }
+            ]
+        }
+    )
     assert levers == {
-        "extra_server_args": "--flag 'value with space'",
+        "extra_server_args": "",
+        "extra_envs": {"SAFE_ENV": "1"},
+    }
+
+
+def test_config_levers_json_args_as_list_stay_unquoted() -> None:
+    f = coord_mod._framework_config_levers_from_done
+    levers = f(
+        {
+            "proposal_set": [
+                {
+                    "extra_args": [
+                        "--json-model-override-args",
+                        '{"rope_scaling":null}',
+                    ],
+                }
+            ]
+        }
+    )
+    assert levers == {
+        "extra_server_args": '--json-model-override-args {"rope_scaling":null}',
         "extra_envs": {},
     }
 

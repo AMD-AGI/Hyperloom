@@ -270,38 +270,38 @@ def compact_json_server_args(
     server_args: str | None,
     framework: str | None,
 ) -> str:
-    """Strip separator spaces inside JSON-valued vLLM/atom server args.
+    """Normalize JSON-valued server args for unquoted Magpie expansion.
 
-    Magpie's scripts expand ``vllm serve ... $EXTRA_VLLM_ARGS`` UNQUOTED, so any
-    token with an embedded space is word-split by the shell before vLLM sees it.
-    Re-serialising each JSON object/array with compact separators removes the
-    SEPARATOR spaces only — ``json.dumps`` preserves spaces *inside* string
-    values.
+    Magpie's scripts expand ``$EXTRA_*_ARGS`` UNQUOTED, so shell quote wrappers
+    stored by a prior ``shlex.join`` become literal argv bytes and separator
+    spaces inside JSON values are word-split. Re-serialising each valid JSON
+    object/array removes both hazards for every framework, including sglang
+    (the default when ``framework`` is missing).
 
     JSON string values that themselves contain spaces cannot survive unquoted
-    expansion and are left intact rather than corrupted; callers must avoid
-    them for vLLM/atom.
+    expansion and are left intact rather than corrupted; callers must reject
+    those values before launch.
 
-    No-op for sglang, for empty strings, and for strings with no ``{``/``[``.
-    Any blob that does not parse as JSON is left verbatim.
+    Empty strings and strings with no ``{``/``[`` are returned unchanged. Any
+    blob that does not parse (and cannot be safely repaired) retains its complete
+    original substring, including balanced shell wrappers.
     """
     args = str(server_args or "").strip()
     if not args or ("{" not in args and "[" not in args):
-        return args
-    if server_args_env_name(framework) == "EXTRA_SGLANG_ARGS":
         return args
     return _reserialize_json_blobs(args)
 
 
 def _reserialize_json_blobs(args: str) -> str:
-    """Compact (and, when needed, repair) every JSON object/array in ``args``.
+    """Normalize every JSON object/array while preserving invalid substrings.
 
-    Framework-agnostic core shared by :func:`compact_json_server_args` and
-    :func:`remove_server_args`. Each balanced ``{...}``/``[...]`` blob is
-    re-serialised with compact separators; a blob whose inner double quotes were
-    stripped by an earlier shlex round-trip is repaired via
-    :func:`_repair_unquoted_json`, and anything that still does not parse is left
-    verbatim (never worse than the input).
+    Framework-agnostic core shared by :func:`compact_json_server_args`,
+    :func:`remove_server_args`, and the GBrain recipe sanitizer. Each balanced
+    ``{...}``/``[...]`` blob is re-serialised with compact separators; a blob
+    whose inner double quotes were stripped by an earlier shlex round-trip is
+    repaired via :func:`_repair_unquoted_json`. Directly-adjacent shell single
+    quotes are removed only when parsing or repair succeeds. Otherwise the full
+    original substring is retained byte-for-byte.
     """
     if "{" not in args and "[" not in args:
         return args
@@ -311,6 +311,16 @@ def _reserialize_json_blobs(args: str) -> str:
     while i < n:
         ch = args[i]
         if ch in "{[":
+            # A prior shlex.join can wrap a JSON token in shell single quotes.
+            # These args are later expanded from an environment variable
+            # without eval, so the wrappers become literal argv characters.
+            # Strip only directly-adjacent wrappers around the balanced blob.
+            single_quote_wrapped = (
+                i > 0
+                and args[i - 1] == "'"
+                and out
+                and out[-1] == "'"
+            )
             # Walk to the balanced close, honouring quoted strings.
             depth = 0
             in_str = False
@@ -335,27 +345,43 @@ def _reserialize_json_blobs(args: str) -> str:
                         j += 1
                         break
                 j += 1
+            single_quote_wrapped = bool(
+                single_quote_wrapped
+                and j < n
+                and args[j] == "'"
+            )
             blob = args[i:j]
+            rendered: str | None = None
             try:
-                out.append(json.dumps(json.loads(blob), separators=(",", ":")))
+                rendered = json.dumps(json.loads(blob), separators=(",", ":"))
             except Exception:
                 # A prior shlex round-trip can strip the JSON double quotes,
                 # leaving an unquoted-bareword object (``{"m":"ngram"}`` ->
                 # ``{m:ngram}``) that vLLM's json.loads rejects at boot. Try to
-                # re-quote bare keys/values; fall back to verbatim if that still
-                # does not parse (never worse than before).
-                repaired = _repair_unquoted_json(blob)
-                out.append(repaired if repaired is not None else blob)
-            i = j
+                # re-quote bare keys/values.
+                rendered = _repair_unquoted_json(blob)
+            if rendered is None:
+                # Keep both wrappers when the content is not valid/repairable.
+                # The opening quote is already in ``out``; leave the closing
+                # quote for the next loop iteration.
+                out.append(blob)
+                i = j
+            else:
+                if single_quote_wrapped:
+                    out.pop()
+                out.append(rendered)
+                i = j + 1 if single_quote_wrapped else j
         else:
             out.append(ch)
             i += 1
     return "".join(out)
 
 
-# Flags whose value can contain spaces / JSON; never tokenize-dedupe these.
-# If any is present, the dedup helpers leave the whole arg string untouched.
-_SPACE_VALUE_FLAGS = (
+# Flags whose values may be JSON or otherwise space-bearing. Kept public so the
+# coordinator and launch paths share one catalogue; JSON presence must NOT make
+# dedup abandon the entire arg string. Actual whitespace-bearing argv tokens are
+# detected by :func:`tokenize_server_args_preserving_json` and fail closed.
+SPACE_VALUE_FLAGS = (
     "--json-model-override-args",
     "--override-generation-config",
     "--tool-call-parser",
@@ -372,6 +398,8 @@ _SPACE_VALUE_FLAGS = (
     "--hf-overrides",
     "--kv-transfer-config",
 )
+# Compatibility export used by ``_grid_runner`` and out-of-tree tests.
+_SPACE_VALUE_FLAGS = SPACE_VALUE_FLAGS
 
 _MULTI_VALUE_FLAGS = (
     "--cuda-graph-bs",
@@ -399,6 +427,60 @@ _VLLM_SINGLE_VALUE_FLAGS = frozenset(
 )
 
 
+def tokenize_server_args_preserving_json(
+    server_args: str | None,
+) -> tuple[str, list[str]] | None:
+    """Tokenize server args without stripping JSON's inner double quotes.
+
+    Valid JSON blobs are normalized first, then ``shlex``'s non-POSIX mode keeps
+    their quote bytes intact. The unquoted ``EXTRA_*_ARGS`` transport cannot
+    represent an argv token containing whitespace; those inputs (including JSON
+    strings with spaces and quoted non-JSON values) return ``None`` so callers
+    can fail closed rather than silently changing token boundaries.
+
+    Returns:
+        ``(normalized_text, tokens)`` when every token is transport-safe;
+        otherwise ``None``.
+    """
+    normalized = _reserialize_json_blobs(str(server_args or "").strip())
+    if not normalized:
+        return "", []
+    try:
+        tokens = shlex.split(normalized, posix=False)
+    except ValueError:
+        return None
+    for token in tokens:
+        # A balanced JSON value must remain one token. Non-zero depth at a token
+        # boundary means an embedded whitespace split it.
+        depth = 0
+        in_string = False
+        escaped = False
+        for char in token:
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char in "{[":
+                depth += 1
+            elif char in "}]":
+                depth -= 1
+        if depth != 0:
+            return None
+        if any(ch.isspace() for ch in token):
+            return None
+        # ``shlex.split(..., posix=False)`` can fracture a quoted operand with
+        # whitespace into edge-quoted pieces (``"my`` / ``parser"``). Reject
+        # any such edge, not only a token carrying both wrappers.
+        if token.startswith(("'", '"')) or token.endswith(("'", '"')):
+            return None
+    return normalized, tokens
+
+
 def dedup_vllm_server_args(
     server_args: str | None,
     framework: str | None,
@@ -411,10 +493,10 @@ def dedup_vllm_server_args(
     token is preserved verbatim and in order. For each affected flag the LAST
     occurrence wins, matching the override intent of :func:`merge_server_args`.
 
-    Returns ``server_args`` unchanged when the framework is sglang, the string
-    is empty, it carries a space/JSON-valued flag (see
-    :data:`_SPACE_VALUE_FLAGS` / :data:`_MULTI_VALUE_FLAGS`), or it cannot be
-    shell-parsed.
+    JSON values are treated as opaque, quote-preserving tokens while unrelated
+    duplicated flags are still collapsed. Returns ``server_args`` unchanged
+    when the framework is sglang, the string is empty, carries a multi-value
+    flag, or cannot be represented by Magpie's unquoted argv transport.
 
     Args:
         server_args (str | None): The server-arg string to dedupe.
@@ -430,13 +512,12 @@ def dedup_vllm_server_args(
         return args
     if server_args_env_name(framework) == "EXTRA_SGLANG_ARGS":
         return args
-    # Never tokenize a string carrying a space/JSON-valued (or multi-value) flag.
-    if any(f in args for f in _SPACE_VALUE_FLAGS + _MULTI_VALUE_FLAGS):
+    if any(f in args for f in _MULTI_VALUE_FLAGS):
         return args
-    try:
-        tokens = shlex.split(args)
-    except ValueError:
+    parsed = tokenize_server_args_preserving_json(args)
+    if parsed is None:
         return args
+    normalized, tokens = parsed
     # Collect the token span of every recognized single-value flag.
     spans: list[tuple[str, int, int]] = []
     i = 0
@@ -465,7 +546,7 @@ def dedup_vllm_server_args(
         for _name, start, end in occurrences[:-1]:
             drop.update(range(start, end + 1))
     if not drop:
-        return args
+        return normalized
     kept = [tok for idx, tok in enumerate(tokens) if idx not in drop]
     return " ".join(kept)
 
@@ -474,21 +555,24 @@ def _shell_safe_dedupe(args: str) -> str:
     """Last-wins dedupe for single-token-valued flags only.
 
     Collapses repeated ``--flag value`` (or ``--flag=value``) pairs whose value
-    is a single whitespace-free token, keeping the last occurrence. Returns the
-    string unchanged when it contains a flag known to carry a space/JSON value.
+    is a single whitespace-free token, keeping the last occurrence. JSON values
+    remain opaque tokens; actual whitespace-bearing argv values fail closed.
 
     Args:
         args (str): The server-arg string to dedupe.
 
     Returns:
-        str: The last-wins deduped string, or the input unchanged when it
-        carries a space/JSON-valued flag.
+        str: The last-wins deduped string, or the input unchanged when it cannot
+        be represented by the unquoted argv transport.
     """
     if not args.strip():
         return ""
-    if any(f in args for f in _SPACE_VALUE_FLAGS + _MULTI_VALUE_FLAGS):
+    if any(f in args for f in _MULTI_VALUE_FLAGS):
         return args
-    tokens = args.split()
+    parsed = tokenize_server_args_preserving_json(args)
+    if parsed is None:
+        return args
+    normalized, tokens = parsed
     pairs: dict[str, list[str]] = {}
     order: list[str] = []
     i = 0
@@ -518,7 +602,8 @@ def _shell_safe_dedupe(args: str) -> str:
     out: list[str] = []
     for k in order:
         out.extend(pairs[k])
-    return " ".join(out)
+    rendered = " ".join(out)
+    return rendered if rendered != normalized else normalized
 
 
 # sglang scheduler watchdog timeout injection: the first request's JIT compile
