@@ -6,8 +6,7 @@
 Deliberately avoids importing ``hyperloom.inference_optimizer`` /
 ``hyperloom.orchestrator`` so framework-agent has no reverse dependency on the
 orchestrator layer (shared ``hyperloom.common`` helpers are fine). The MCP/SSE
-contract mirrors
-``hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client``.
+contract mirrors the orchestrator's retained GBrain KG MCP transport.
 
 Exposes only the read surface PR KB consumption needs: ``get_page`` /
 ``query`` (MCP ``search`` tool) / ``list_pages``. All failures raise
