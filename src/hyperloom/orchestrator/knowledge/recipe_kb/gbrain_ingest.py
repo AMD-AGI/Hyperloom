@@ -137,7 +137,7 @@ def _is_absolute_path_text(value: str) -> bool:
 
 
 def _sanitize_server_args(value: str, *, drop_paths: bool) -> str:
-    """Remove secret options and, for non-replay metadata, local paths."""
+    """Remove unsafe options without adding shell syntax to stored argv text."""
 
     try:
         tokens = shlex.split(value)
@@ -161,7 +161,14 @@ def _sanitize_server_args(value: str, *, drop_paths: bool) -> str:
         if drop_paths and separator and _is_absolute_path_text(operand):
             continue
         safe.append(token)
-    return shlex.join(safe)
+    # These args are later expanded from ``$EXTRA_VLLM_ARGS`` without ``eval``.
+    # Quotes emitted by shlex.join therefore become literal argv characters
+    # rather than shell syntax (breaking JSON-valued flags at vLLM argparse).
+    # Store the plain argv text and repair any JSON quotes stripped by the token
+    # walk. Import locally to keep the recipe codec lightweight at module load.
+    from ...actions.executors._grid_server_args import _reserialize_json_blobs
+
+    return _reserialize_json_blobs(" ".join(safe))
 
 
 def _sanitize_gbrain_value(

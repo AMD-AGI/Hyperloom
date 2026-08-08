@@ -196,6 +196,15 @@ def test_dedupe_leaves_json_arg_untouched():
     assert ch._dedupe_extra_server_args(args) == args
 
 
+def test_dedupe_leaves_warm_replay_json_flags_untouched():
+    args = (
+        """--speculative-config '{"method":"ngram","num_speculative_tokens":7}' """
+        """--compilation-config '{"pass_config":{"enable_sp":true}}' """
+        "--max-num-seqs 512 --max-num-seqs 1024"
+    )
+    assert ch._dedupe_extra_server_args(args) == args
+
+
 # ---- _merge_cumulative_extra_server_args ----
 
 _merge = ch._merge_cumulative_extra_server_args

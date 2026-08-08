@@ -422,6 +422,10 @@ _SPACE_VALUE_FLAGS = (
     "--json-model-override-args",
     "--override-generation-config",
     "--tool-call-parser",
+    "--compilation-config",
+    "--speculative-config",
+    "--hf-overrides",
+    "--kv-transfer-config",
 )
 
 
