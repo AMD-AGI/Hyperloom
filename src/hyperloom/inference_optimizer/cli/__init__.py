@@ -131,6 +131,65 @@ def _normalise_framework_name(value: str | None) -> str:
     return str(value or "").strip().lower().replace("_", "-")
 
 
+def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
+    """Publish ``--framework-path`` / ``--benchmark-scripts-dir`` as env.
+
+    Both flags are friendlier spellings of env vars the executors already read,
+    so this only forwards them; an explicitly exported env still wins, matching
+    how every other path override in the loop behaves.
+
+    ``custom`` has no shipped checkout or entrypoint to fall back on, so a
+    missing or non-existent directory is fatal here rather than at the first
+    benchmark, half an hour in. The benchmark backend is checked for the same
+    reason: it defaults to Magpie, which cannot run an operator's script at all,
+    and nothing downstream rejects the combination — the run would simply take
+    the wrong executor and fail somewhere less obvious.
+    """
+    fatal: list[str] = []
+    if framework == "custom":
+        from hyperloom.orchestrator.actions.executors.benchmark_backend import (
+            BENCHMARK_BACKEND_ENV,
+            DEFAULT_BENCHMARK_BACKEND,
+        )
+
+        # Matches install.sh's normalisation so the two gates agree on a value
+        # like " Bypass "; anything else, including unset, is refused.
+        backend = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip().lower()
+        if backend != "bypass":
+            shown = f"{backend!r}" if backend else f"unset (defaults to {DEFAULT_BENCHMARK_BACKEND!r})"
+            fatal.append(
+                f"--framework custom requires {BENCHMARK_BACKEND_ENV}=bypass; it is {shown}. "
+                "The default backend cannot run an operator-supplied script."
+            )
+    for flag, value, env_name in (
+        ("--framework-path", getattr(args, "framework_path", None), "FRAMEWORK_REPO_PATH"),
+        (
+            "--benchmark-scripts-dir",
+            getattr(args, "benchmark_scripts_dir", None),
+            "HYPERLOOM_BYPASS_SCRIPTS_DIR",
+        ),
+    ):
+        raw = str(value or "").strip()
+        # An exported-but-empty var is not a choice, it is an unset one; treating
+        # it as set would let a stray `export FRAMEWORK_REPO_PATH=` silently
+        # swallow the flag.
+        already = os.environ.get(env_name, "").strip()
+        if raw:
+            path = Path(raw).expanduser()
+            if not path.is_dir():
+                fatal.append(f"{flag}={raw!r} is not a directory")
+                continue
+            if not already:
+                os.environ[env_name] = str(path.resolve())
+        elif framework == "custom" and not already:
+            fatal.append(f"{flag} is required for --framework custom (or export {env_name})")
+
+    if fatal:
+        for line in fatal:
+            print(f"ERROR: {line}", file=sys.stderr)
+        sys.exit(2)
+
+
 def _enforce_expected_framework(
     framework: str,
     *,
@@ -1754,6 +1813,23 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             override_note = " (--force-resume override)" if force_resume and prior_stop in gated_terminal else ""
             print(f"  → cleared stop_reason and reset crash_count (was {prior_crash}) for fresh resume{override_note}")
             print(f"  → reset start_ts to {state.start_ts} (resume budget)")
+        else:
+            # A clean stop (no stop_reason, crash_count < 3) keeps start_ts, so
+            # --max-hours is measured from the ORIGINAL session start and the
+            # earlier legs' wall-clock is already spent. Say so: an operator who
+            # stops a run by hand reads --max-hours as "from now".
+            elapsed_h = state.elapsed_minutes() / 60.0
+            budget_h = float(getattr(args, "max_hours", 0) or 0)
+            print(
+                f"  → start_ts kept at {state.start_ts} (clean stop, no stop_reason): "
+                f"--max-hours counts from the original session start"
+            )
+            print(f"  → budget: {elapsed_h:.2f}h already elapsed of {budget_h:.2f}h → {budget_h - elapsed_h:.2f}h left")
+            if budget_h and elapsed_h >= budget_h:
+                print(
+                    "  → WARNING: this budget is already exhausted; raise --max-hours "
+                    "or start a fresh session, or the run stops almost immediately"
+                )
         # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.
         recipe_kb_client = _bootstrap_recipe_kb(
             args,
@@ -1804,6 +1880,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _enforce_expected_framework(framework)
         os.environ["FRAMEWORK"] = framework
         print(f"Framework       : {framework}")
+        _apply_operator_supplied_paths(args, framework)
 
         # B3: --framework atom auto-tightens incompatible phases (see _apply_atom_auto_tighten).
         if framework == "atom":

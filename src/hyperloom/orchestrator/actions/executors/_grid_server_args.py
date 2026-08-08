@@ -1057,11 +1057,20 @@ def apply_runtime_benchmark_overrides(
     # a materialize-time AgentX swap (grid/baseline/profile executors rebuild via
     # this function). No-op when HYPERLOOM_AGENTX is off. Lazy import avoids a
     # module-load cycle with _workload_envs.
-    from ._workload_envs import apply_agentx_switch
+    from ._workload_envs import apply_agentx_switch, apply_scriptable_runtime_defaults
 
     apply_agentx_switch(bench, model_path)
 
     envs = bench.setdefault("envs", {})
+    # Same hazard as the AgentX swap above: the gpu_type block re-pins the bare
+    # {framework}_{gpu_type}.sh over the bundled absolute path the materialize
+    # path resolved, so grid variants must re-apply the scriptable defaults.
+    apply_scriptable_runtime_defaults(
+        bench,
+        envs,
+        gpu_type=gpu_type,
+        explicit_benchmark_script=bool(benchmark_script),
+    )
     for env_key in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC"):
         val = os.environ.get(env_key, "").strip()
         if not val:

@@ -135,6 +135,35 @@ async def test_warm_specialist_params_noop_when_analysis_md_text_empty(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_warm_specialist_params_packs_hot_kernels_without_analysis_md(tmp_path):
+    """Hot kernels with no analysis.md still reach the specialist."""
+    state = _BareState(
+        last_trace_analyze={
+            "analysis_md_text": "",
+            "analysis_md_path": "",
+            "roofline_snapshot_id": 4,
+            "hot_kernels_top15": [
+                {
+                    "kernel_id": "k1",
+                    "name": "aten::_flash_attention_forward",
+                    "gpu_pct": 40.0,
+                    "bottleneck": "compute",
+                    "source_file": "attention.py(243)",
+                },
+            ],
+        },
+    )
+    coord = _make_coord(tmp_path, state=state)
+    params: dict[str, Any] = {"domain": "framework_rewrite_specialist"}
+    await coord._warm_specialist_params(params)
+
+    ev = params["roofline_evidence"]
+    assert ev["roofline_snapshot_id"] == 4
+    assert ev["hot_kernels_top15"][0]["name"] == "aten::_flash_attention_forward"
+    assert ev["executive_summary"] == {}
+
+
+@pytest.mark.asyncio
 async def test_warm_specialist_params_respects_existing_evidence(tmp_path):
     """A caller-supplied ``roofline_evidence`` is not overwritten (setdefault)."""
     analysis_path = tmp_path / "analysis.md"

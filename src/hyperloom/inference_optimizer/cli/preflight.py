@@ -611,6 +611,37 @@ def _ensure_bench_serving_deps(python_exe: str, pip_extra: list[str]) -> None:
     print("Preflight: benchmark_serving client deps installed OK")
 
 
+def _ensure_framework_deps(args, python_exe: str, pip_extra: list[str]) -> None:
+    """Install the selected framework's declared runtime deps into python_exe.
+
+    Resolution mirrors the CLI's own order (``--framework`` > ``$FRAMEWORK`` >
+    default) rather than reading ``os.environ["FRAMEWORK"]``, which the CLI only
+    pins after preflight has run.
+
+    Args:
+        args: Parsed CLI namespace; only ``framework`` is read.
+        python_exe (str): Interpreter the benchmark imports these from.
+        pip_extra (list[str]): Extra ``pip install`` arguments.
+    """
+    from hyperloom.inference_optimizer import framework_deps, framework_registry
+
+    framework = (
+        getattr(args, "framework", None) or os.environ.get("FRAMEWORK", "")
+    ).strip().lower() or framework_registry.DEFAULT_FRAMEWORK
+    try:
+        outcome = framework_deps.ensure(
+            framework, python_exe=python_exe, pip_extra=tuple(pip_extra)
+        )
+    except framework_deps.TorchClobberedError as exc:
+        print(f"Preflight: FATAL {exc}", file=sys.stderr)
+        sys.exit(2)
+    # Frameworks that ship no manifest are the common case; stay quiet unless
+    # the manifest actually asked for something or was partly rejected.
+    if outcome.skipped_reason and not (outcome.refused or outcome.invalid):
+        return
+    framework_deps.report(outcome, prefix="Preflight: framework deps")
+
+
 # RUN_EVAL values that disable the accuracy gate (mirrors _workload_envs).
 _RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
 
@@ -1465,6 +1496,12 @@ def _preflight(
     # the harness, so every RUN_EVAL=true baseline there would otherwise abort
     # with baseline_accuracy_failed.
     _ensure_lm_eval_dep(benchmark_python, pip_extra, eval_disabled=_resolved_eval_disabled(args))
+
+    # 1d. Per-framework runtime deps declared in assets/framework_deps/. This is
+    # the pass that covers the documented flow: install.sh runs before
+    # --framework is known, so its own attempt usually no-ops and a scriptable
+    # framework would otherwise reach baseline with nothing installed.
+    _ensure_framework_deps(args, benchmark_python, pip_extra)
 
     # 2. Magpie — the benchmark engine the Magpie backend shells out to.
     # Skipped entirely when the

@@ -296,7 +296,30 @@ def _build_parser() -> argparse.ArgumentParser:
         "The auto-tighten guard only enforces ``--nodes 1``. "
         "--framework xdit is a server-less (scriptable) diffusion "
         "workload (xDiT): no serving server, throughput is img/s, and "
-        "the accuracy gate is an image-quality gate (LPIPS/SSIM/MSE).",
+        "the accuracy gate is an image-quality gate (LPIPS/SSIM/MSE). "
+        "--framework custom is your own workload: pass --framework-path and "
+        "--benchmark-scripts-dir instead of shipping a framework definition.",
+    )
+    opt.add_argument(
+        "--framework-path",
+        default=None,
+        metavar="DIR",
+        help="Checkout of the framework to optimize. Sets FRAMEWORK_REPO_PATH, "
+        "which is what puts the tree on PolicyGate's patch allowlist, so a "
+        "specialist may only edit source you pointed at. Required for "
+        "--framework custom; for the built-in frameworks it overrides the "
+        "checkout they would otherwise clone.",
+    )
+    opt.add_argument(
+        "--benchmark-scripts-dir",
+        default=None,
+        metavar="DIR",
+        help="Directory holding your benchmark entrypoint. Sets "
+        "HYPERLOOM_BYPASS_SCRIPTS_DIR. The entrypoint is taken as "
+        "custom_<gpu-type>.sh, or the single .sh in the directory. It must "
+        "emit a quality_gate block in its report: for a server-less workload "
+        "that gate is the only correctness signal, and a missing one scores "
+        "zero, so every candidate is rejected.",
     )
     opt.add_argument(
         "--nodes",

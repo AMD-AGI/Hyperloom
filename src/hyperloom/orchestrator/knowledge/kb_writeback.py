@@ -52,12 +52,23 @@ OUTCOME_REVERTED_SMOKE_FAIL: str = "reverted_smoke_fail"
 OUTCOME_REJECTED_APPLY_FAIL: str = "rejected_apply_fail"
 # Candidate skipped: semantic audit found it already in the live tree.
 OUTCOME_ALREADY_PRESENT: str = "already_present"
+# An env-gated rewrite whose switch-off parity leg measured a behavioural change:
+# with every switch unset the patch did not reproduce the base. A property of the
+# patch, and a genuine lesson for later sessions.
+OUTCOME_REVERTED_SWITCH_OFF_PARITY: str = "reverted_switch_off_parity"
+# The parity leg produced no usable measurement, so the invariant was never tested.
+# Kept separate from the verdict above on purpose: recording an unmeasured run as a
+# parity violation would teach every later session that a rewrite breaks when
+# disabled on the strength of a failed measurement.
+OUTCOME_REVERTED_PARITY_INCONCLUSIVE: str = "reverted_parity_inconclusive"
 ALLOWED_OUTCOMES: frozenset[str] = frozenset(
     {
         OUTCOME_INTEGRATED,
         OUTCOME_REVERTED_SMOKE_FAIL,
         OUTCOME_REJECTED_APPLY_FAIL,
         OUTCOME_ALREADY_PRESENT,
+        OUTCOME_REVERTED_SWITCH_OFF_PARITY,
+        OUTCOME_REVERTED_PARITY_INCONCLUSIVE,
     }
 )
 
@@ -301,6 +312,8 @@ __all__ = [
     "LESSONS_FILE",
     "OUTCOME_INTEGRATED",
     "OUTCOME_REJECTED_APPLY_FAIL",
+    "OUTCOME_REVERTED_PARITY_INCONCLUSIVE",
     "OUTCOME_REVERTED_SMOKE_FAIL",
+    "OUTCOME_REVERTED_SWITCH_OFF_PARITY",
     "write_framework_record",
 ]

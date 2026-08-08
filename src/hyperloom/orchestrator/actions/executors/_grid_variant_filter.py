@@ -355,8 +355,6 @@ def xdit_blacklist_reason(
     return None
 
 
-# Per-framework cache for ``_probe_server_help_text`` (avoids a subprocess per
-# variant). Empty results are NOT cached so a transient failure re-probes.
 _HELP_TEXT_CACHE: dict[str, str] = {}
 
 # Per-framework ``--help`` extraction commands. Each is a single-shot
