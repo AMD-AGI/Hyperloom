@@ -17,6 +17,7 @@ Used by ``baseline.py`` (materializes once, surfaces the path) and the
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -34,7 +35,8 @@ from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     valid_env_key,
 )
-from hyperloom.inference_optimizer.session.paths import asset_root
+from hyperloom.inference_optimizer.session.paths import asset_root, deps_cache_root
+from hyperloom.orchestrator.framework.paths import GENERIC_FRAMEWORK_ROOT_ENV
 from ._grid_runner import (
     compact_json_server_args,
     dedup_vllm_server_args,
@@ -45,7 +47,6 @@ from ._grid_runner import (
     server_args_env_name,
 )
 from ._grid_server_args import remove_server_args
-from ._grid_server_args import strip_aiter_args_for_unaligned_moe
 from ._grid_server_args import validate_server_args_shell_safe
 from ._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
@@ -60,120 +61,6 @@ from hyperloom.inference_optimizer.model_config_utils import (
 )
 
 log = logging.getLogger(__name__)
-
-_AGENTX_TRUE = {"1", "true", "yes", "on"}
-_AGENTX_FALSE = {"", "0", "false", "no", "off"}
-
-
-def agentx_enabled(env: "dict[str, str] | None" = None) -> bool:
-    """Return whether ``HYPERLOOM_AGENTX`` selects the AgentX benchmark sub-path.
-
-    Defensive: any unrecognized value is treated as OFF (warned, not raised).
-    Shared by the config switch here and the run_grid execution hook so the two
-    parse the flag identically. Lives in this module (already imported on the
-    default path) so the OFF path never imports the ``agentx`` package.
-    """
-    e = os.environ if env is None else env
-    raw = str(e.get("HYPERLOOM_AGENTX", "")).strip()
-    low = raw.lower()
-    if low in _AGENTX_TRUE:
-        return True
-    if raw and low not in _AGENTX_FALSE:
-        log.warning("HYPERLOOM_AGENTX=%r not recognized; treating as OFF", raw)
-    return False
-
-
-_AGENTX_PASSTHROUGH_ENVS = (
-    "AGENTX_DATASET",
-    "AGENTX_MAX_CTX",
-    "AGENTX_NUM_ENTRIES",
-    "AGENTX_WARMUP_DURATION",
-    "AGENTX_NUM_WARMUP_SESSIONS",
-    "AGENTX_KEEP_SERVER",
-    "AGENTX_SERVER_SCRIPT",
-    "AGENTX_PROFILE_WARMUP_S",
-    "AGENTX_PROFILE_WINDOW_S",
-    "AIPERF_BIN",
-)
-
-
-def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) -> bool:
-    """Authoritatively swap a serving benchmark to the AgentX aiperf client.
-
-    When ``HYPERLOOM_AGENTX`` is on and ``bench``'s framework is a serving
-    framework (vllm/sglang, not a server-less scriptable one), overwrite
-    ``benchmark_script`` to ``aiperf_client.sh`` (whatever the gpu_type block
-    pinned) and inject the AgentX env knobs. No-op otherwise.
-
-    Shared by :func:`materialize_config_with_envs` AND
-    ``apply_runtime_benchmark_overrides`` (the per-variant/baseline/profile
-    rebuild) so EVERY executor path honors the switch — a materialize-only swap
-    was silently reverted to the synthetic script by the grid rebuild.
-
-    Returns:
-        True if the swap was applied, else False.
-    """
-    if not agentx_enabled():
-        return False
-    from hyperloom.inference_optimizer import framework_registry as _fw_reg
-
-    if _fw_reg.is_scriptable(bench.get("framework")):
-        return False
-    _prev_script = bench.get("benchmark_script")
-    bench["benchmark_script"] = "aiperf_client.sh"
-    envs = bench.setdefault("envs", {})
-    # Pass the resolved framework so aiperf_client.sh delegates to the correct
-    # builtin ({framework}_{gpu}.sh); without it the wrapper cannot tell vllm
-    # from sglang and would fall back to a default and boot the wrong server.
-    envs.setdefault("FRAMEWORK", str(bench.get("framework") or ""))
-    # AgentX is a DISTINCT benchmark mode (agentic-trace replay), not the
-    # synthetic InferenceX workload: RUN_EVAL defaults off (the GSM8K accuracy
-    # gate does not apply to trace replay; set RUN_EVAL=1 to force it), so Arbor
-    # compares throughput under the agentic workload -- not apples-to-apples
-    # with a synthetic-workload baseline.
-    envs.setdefault("RUN_EVAL", os.environ.get("RUN_EVAL", "false"))
-    envs.setdefault("MODEL", str(model_path or bench.get("model") or ""))
-    for _ax in _AGENTX_PASSTHROUGH_ENVS:
-        _axv = os.environ.get(_ax)
-        if _axv is not None:
-            envs.setdefault(_ax, _axv)
-    log.info(
-        "AgentX mode ON (HYPERLOOM_AGENTX): authoritatively set benchmark_script"
-        " -> aiperf_client.sh%s (dataset=%s); overrides any framework/gpu default."
-        " Unset HYPERLOOM_AGENTX to restore the synthetic path.",
-        f" (was {_prev_script})" if _prev_script and _prev_script != "aiperf_client.sh" else "",
-        envs.get("AGENTX_DATASET", "default-corpus"),
-    )
-    return True
-
-
-def prepare_agentx_runtime(*, env, inferencex_path: str, config_path) -> "str | None":
-    """Deploy the AgentX client + capability-preflight aiperf for a run.
-
-    Shared by EVERY Magpie launch path (grid via _run_magpie AND the
-    baseline/profile shell-out) so a materialize-time swap to
-    aiperf_client.sh is always backed by a deployed script + a preflighted
-    aiperf -- otherwise the first Arbor step (baseline) points at a script
-    that was never copied into InferenceX benchmarks/.
-
-    No-op (returns None) under pytest, without an InferenceX path, or when
-    HYPERLOOM_AGENTX is off -- so the OFF path never imports the agentx
-    package (A2). Returns None on success/no-op, or an error string when
-    the aiperf preflight fails (the caller decides how to surface it).
-    """
-    if os.environ.get("PYTEST_CURRENT_TEST") or not inferencex_path:
-        return None
-    if not agentx_enabled(os.environ):
-        return None
-    from hyperloom.inference_optimizer.agentx.preflight import AgentXPreflightError
-    from hyperloom.inference_optimizer.agentx.runtime import maybe_prepare_agentx
-
-    try:
-        maybe_prepare_agentx(env=env, inferencex_path=inferencex_path, config_path=config_path)
-    except AgentXPreflightError as exc:
-        return f"AgentX preflight failed: {exc}"
-    return None
-
 
 # gfx942 / CDNA3 dies (MI300X, MI308X, MI325X) that ship the aiter CK
 # gemm_a8w8_bpreshuffle kernel. MI355X is gfx950 and excluded.
@@ -193,6 +80,320 @@ _DEFAULT_PROFILE_MAX_STEPS = 128
 # Default profile OSL ceiling when --profile-osl / PROFILE_OSL is unset: the
 # profile reuses min(served OSL, this) so its trace stays light.
 _PROFILE_DEFAULT_OSL = 1024
+_AGENTX_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+# Quality-reference env names, in resolution order. Every scriptable workload
+# needs this gate, so the contract is the framework-neutral ``HYPERLOOM_`` pair.
+# The ``XDIT_`` pair predates ``--framework custom`` and is still both read and
+# written because operator bench scripts live outside this repo and cannot be
+# renamed in lockstep; drop it once those scripts have moved over.
+_QUALITY_REF_ENVS = ("HYPERLOOM_QUALITY_REF", "XDIT_QUALITY_REF")
+_QUALITY_REF_WRITE_ENVS = ("HYPERLOOM_QUALITY_REF_WRITE", "XDIT_QUALITY_REF_WRITE")
+
+
+def _first_env(names: tuple[str, ...]) -> str:
+    """Return the first non-empty stripped value among ``names`` in ``os.environ``.
+
+    Args:
+        names (tuple[str, ...]): Env var names in resolution order.
+
+    Returns:
+        str: The first non-empty value, or ``""`` when none is set.
+    """
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def agentx_enabled(env: dict[str, str] | None = None) -> bool:
+    """Return whether the AgentX benchmark wrapper is explicitly enabled."""
+    raw = (env or os.environ).get("HYPERLOOM_AGENTX", "")
+    return str(raw).strip().lower() in _AGENTX_TRUE_VALUES
+
+
+def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) -> None:
+    """Switch serving-framework benchmarks to the AgentX aiperf client."""
+    if not agentx_enabled():
+        return
+    from hyperloom.inference_optimizer import framework_registry
+
+    framework = str(bench.get("framework") or "").strip().lower()
+    if not framework or framework_registry.is_scriptable(framework):
+        return
+    envs = bench.setdefault("envs", {})
+    bench["benchmark_script"] = "aiperf_client.sh"
+    envs["RUN_EVAL"] = "false"
+    envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
+    envs["FRAMEWORK"] = framework
+    for key, value in os.environ.items():
+        if key.startswith("AGENTX_") or key == "AIPERF_BIN":
+            envs[key] = value
+
+
+def prepare_agentx_runtime(
+    *,
+    env: dict[str, str] | None = None,
+    inferencex_path: str | None = None,
+    config_path: Path | str | None = None,
+    output_dir: Path | str | None = None,
+) -> str | None:
+    """Deploy and preflight AgentX assets for baseline/profile runs."""
+    runtime_env = env or os.environ
+    if not agentx_enabled(runtime_env):
+        return None
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return None
+    try:
+        from hyperloom.inference_optimizer.agentx.preflight import AgentXPreflightError
+        from hyperloom.inference_optimizer.agentx.runtime import maybe_prepare_agentx
+
+        maybe_prepare_agentx(
+            env=runtime_env,
+            inferencex_path=str(inferencex_path or ""),
+            config_path=Path(config_path) if config_path else "",
+        )
+    except AgentXPreflightError as exc:
+        return f"AgentX preflight failed: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return f"AgentX runtime preparation failed: {type(exc).__name__}: {exc}"
+    return None
+
+
+def _scriptable_runner_type(bench: dict[str, Any], gpu_type: str | None) -> str:
+    """Resolve the runner suffix a scriptable entrypoint is named after.
+
+    Framework-independent: the suffix names the machine, not the workload.
+    """
+    return (
+        str(gpu_type or "").strip().lower()
+        or str(bench.get("runner_type") or "").strip().lower()
+        or os.environ.get("GPU_TYPE", "").strip().lower()
+        or os.environ.get("RUNNER_TYPE", "").strip().lower()
+        or "mi355x"
+    )
+
+
+
+def _sync_repo_aliases(
+    bench: dict[str, Any],
+    envs: dict[str, Any],
+    *,
+    framework: str,
+    prefer_dir: bool = False,
+) -> None:
+    """Keep ``<FRAMEWORK>_REPO_PATH`` and ``<FRAMEWORK>_DIR`` on one checkout.
+
+    Both spellings reach the benchmark and a script may read either, so letting
+    them drift points one half of a run at a different tree than the other.
+
+    Args:
+        bench: The ``benchmark`` section; the sync applies only to its framework.
+        envs: The ``benchmark.envs`` mapping, updated in place.
+        framework: Framework whose prefix the two aliases carry.
+        prefer_dir: Resolve ``_DIR`` first, for the caller that saw the operator
+            supply only that spelling.
+    """
+    if str(bench.get("framework") or "").strip().lower() != framework.strip().lower():
+        return
+    prefix = framework.strip().upper()
+    order = (f"{prefix}_DIR", f"{prefix}_REPO_PATH") if prefer_dir else (f"{prefix}_REPO_PATH", f"{prefix}_DIR")
+    repo_path = str(envs.get(order[0]) or envs.get(order[1]) or "").strip()
+    if repo_path:
+        envs[f"{prefix}_REPO_PATH"] = repo_path
+        envs[f"{prefix}_DIR"] = repo_path
+
+
+
+def _publish_scriptable_repo_root(framework: str, repo_path: str) -> None:
+    """Publish a scriptable framework's checkout into the orchestrator's own env.
+
+    A scriptable framework runs out of a repo checkout rather than a pip-installed
+    package, so ``resolve_source_file_allowlist`` can only find it through
+    ``<FRAMEWORK>_REPO_PATH`` / ``<FRAMEWORK>_DIR`` in ``os.environ``. Writing the
+    resolved path into the materialized YAML reaches the *benchmark* subprocess
+    but not the orchestrator, and it is the orchestrator that runs PolicyGate — so
+    without this the source root is absent from the allowlist and every patch a
+    specialist writes against the framework's own code is rejected, on a session
+    that otherwise looks correctly configured.
+
+    An operator-provided value always wins; this only fills the gap when the
+    checkout was resolved (or is about to be cloned) by Hyperloom itself. The path
+    is published even when it does not exist yet, because the benchmark wrapper
+    clones on first use and the allowlist is recomputed per call.
+
+    Args:
+        framework: Framework name, used for the env prefix.
+        repo_path: The resolved checkout path.
+    """
+    name = str(framework or "").strip().upper()
+    path = str(repo_path or "").strip()
+    if not name or not path:
+        return
+    for var in (f"{name}_REPO_PATH", f"{name}_DIR"):
+        if not os.environ.get(var, "").strip():
+            os.environ[var] = path
+            log.info(
+                "%s: published %s=%s so the framework source root reaches PolicyGate",
+                framework,
+                var,
+                path,
+            )
+
+
+def _resolve_framework_repo_path(
+    envs: dict[str, Any],
+    *,
+    framework: str,
+    extra_aliases: tuple[str, ...] = (),
+) -> str:
+    """Resolve the framework checkout a session may patch, prefixed forms first.
+
+    Resolution order is ``<FRAMEWORK>_REPO_PATH`` > ``<FRAMEWORK>_DIR`` > any
+    per-framework alias > :data:`GENERIC_FRAMEWORK_ROOT_ENV`, with ``os.environ``
+    ahead of the materialized ``envs`` at each rung. The prefixed names keep
+    precedence because they are the more specific statement, so adding the generic
+    form changes no existing behaviour; it exists because a session is
+    single-framework by construction and an operator should not have to know the
+    framework's name to point at its source.
+
+    Args:
+        envs: The materialized ``benchmark.envs`` mapping.
+        framework: Framework name, used for the env prefix.
+        extra_aliases: Additional per-framework spellings to accept, in order.
+
+    Returns:
+        The resolved path, or ``""`` when nothing was supplied.
+    """
+    prefix = str(framework or "").strip().upper()
+    names = (f"{prefix}_REPO_PATH", f"{prefix}_DIR", *extra_aliases, GENERIC_FRAMEWORK_ROOT_ENV)
+    for name in names:
+        value = os.environ.get(name, "").strip() or str(envs.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+
+
+def _custom_script_path(runner_type: str) -> str:
+    """Locate the operator's entrypoint inside ``$HYPERLOOM_BYPASS_SCRIPTS_DIR``.
+
+    Prefers the ``custom_{runner_type}.sh`` convention, then a lone ``.sh`` in
+    the directory, which is what an operator who wrote one script for one
+    machine actually has. Returns ``""`` when neither applies, leaving the
+    resolution chain in ``bypass_scriptable`` to report the miss.
+    """
+    raw = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
+    if not raw:
+        return ""
+    scripts_dir = Path(raw)
+    if not scripts_dir.is_dir():
+        return ""
+    preferred = scripts_dir / f"custom_{runner_type}.sh"
+    if preferred.is_file():
+        return str(preferred)
+    candidates = sorted(p for p in scripts_dir.glob("*.sh") if p.is_file())
+    return str(candidates[0]) if len(candidates) == 1 else ""
+
+
+def _operator_extra_env() -> dict[str, str]:
+    """Return the ``--extra-env`` pins the CLI serialized, or ``{}``.
+
+    Args:
+        None.
+
+    Returns:
+        The operator's ``NAME=VALUE`` pins; empty when unset or unparseable,
+        because a malformed pin must not take the run down with it.
+    """
+    raw = os.environ.get("INFERENCE_OPTIMIZER_EXTRA_ENV", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        log.warning("custom: ignoring unparseable INFERENCE_OPTIMIZER_EXTRA_ENV")
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(k).strip(): str(v) for k, v in parsed.items() if str(k).strip()}
+
+
+def _apply_custom_runtime_defaults(
+    bench: dict[str, Any],
+    envs: dict[str, Any],
+    *,
+    gpu_type: str | None,
+    explicit_benchmark_script: bool,
+) -> None:
+    """Resolve an operator-supplied workload's checkout, entrypoint and pins.
+
+    The other scriptable helpers know their framework's repo URL and shipped
+    script; here both arrive at launch, so this only wires what was given and
+    leaves anything missing to fail where it is diagnosable.
+
+    ``--extra-env`` is the only channel an operator has for the knobs their own
+    script reads, so those pins are written into ``benchmark.envs`` rather than
+    left in the orchestrator's environment: the materialized config is what the
+    measurement contract is read from, and a pin that never lands there is
+    neither delivered to the benchmark nor protected from being overwritten by
+    a variant.
+    """
+    if str(bench.get("framework") or "").strip().lower() != "custom":
+        return
+
+    runner_type = _scriptable_runner_type(bench, gpu_type)
+    bench["runner_type"] = runner_type
+    if not explicit_benchmark_script:
+        script = _custom_script_path(runner_type)
+        if script:
+            bench["benchmark_script"] = script
+
+    # A variant's own overrides are applied after this hook, so they still win
+    # for keys the operator did not pin; setdefault only fills the gaps.
+    for key, value in _operator_extra_env().items():
+        envs.setdefault(key, value)
+
+    repo_path = _resolve_framework_repo_path(envs, framework="custom")
+    if not repo_path:
+        return
+    envs["CUSTOM_REPO_PATH"] = repo_path
+    envs["CUSTOM_DIR"] = repo_path
+    # Also under the framework-agnostic name, and in the config rather than only
+    # in os.environ. An entrypoint Hyperloom did not write can only be expected
+    # to know the generic spelling, and the benchmark inherits its environment
+    # from whichever process launched the runner — a Ray worker carries the
+    # environment the raylet booted with, hours or days earlier, so a stale
+    # <FRAMEWORK>_DIR there outranks anything published later. Config envs are
+    # applied on top of that inherited environment, so this is what actually
+    # reaches the script.
+    envs["FRAMEWORK_REPO_PATH"] = repo_path
+    _publish_scriptable_repo_root("custom", repo_path)
+
+
+def apply_scriptable_runtime_defaults(
+    bench: dict[str, Any],
+    envs: dict[str, Any],
+    *,
+    gpu_type: str | None,
+    explicit_benchmark_script: bool,
+) -> None:
+    """Re-pin an operator's scriptable entrypoint and its runtime paths.
+
+    Every config path that re-derives ``benchmark_script`` from ``gpu_type``
+    must call this, otherwise the bare ``{framework}_{gpu_type}.sh`` it writes
+    replaces the resolved absolute path. Each helper is a no-op for frameworks
+    other than its own, so a new one is added here once.
+    """
+    for apply in (_apply_custom_runtime_defaults,):
+        apply(
+            bench,
+            envs,
+            gpu_type=gpu_type,
+            explicit_benchmark_script=explicit_benchmark_script,
+        )
 
 
 def _remove_moe_runner_backend_arg(args: str) -> str:
@@ -347,6 +548,7 @@ _BASELINE_CONFIG_BY_FRAMEWORK: dict[str, Path] = {
     "vllm": Path("assets/configs/baseline_vllm.yaml"),
     "xdit": Path("assets/configs/baseline_xdit.yaml"),
     "hunyuan_image3": Path("assets/configs/baseline_hunyuan_image3.yaml"),
+    "custom": Path("assets/configs/baseline_custom.yaml"),
 }
 _DEFAULT_BASELINE_CONFIG = Path("assets/configs/baseline_sglang.yaml")
 
@@ -473,15 +675,6 @@ def _finalize_framework_server_args(
             bench.get("model"),
             gpu_type=gpu_type or bench.get("runner_type"),
         )
-    # 4b. aiter shape gate: an unaligned MoE shape faults inside aiter's asm
-    #     MoE path regardless of the runner backend picked above, so remove the
-    #     flags that route work there.
-    resolved_server_args = strip_aiter_args_for_unaligned_moe(
-        resolved_server_args,
-        bench.get("framework"),
-        bench.get("model"),
-        envs.get("TP"),
-    )
     resolved_server_args = inject_vllm_expert_parallel(
         resolved_server_args,
         bench.get("framework"),
@@ -601,6 +794,14 @@ def materialize_config_with_envs(
             bench.pop("benchmark_script", None)
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
+    envs = bench.setdefault("envs", {})
+    apply_scriptable_runtime_defaults(
+        bench,
+        envs,
+        gpu_type=gpu_type,
+        explicit_benchmark_script=bool(benchmark_script),
+    )
+    apply_agentx_switch(bench, model_path)
     # Fail fast on framework/script mismatch (e.g. vllm image + sglang script).
     # Only trip when the script carries a DIFFERENT known framework's prefix, so
     # custom/non-prefixed scripts are not falsely rejected.
@@ -622,15 +823,6 @@ def materialize_config_with_envs(
         # Persist the resolved InferenceX checkout so Magpie's runtime checkout
         # matches Hyperloom's patch target.
         bench["inferencex_path"] = effective_inferencex_path
-    envs = bench.setdefault("envs", {})
-    # ── AgentX mode (HYPERLOOM_AGENTX) ───────────────────────────────────────
-    # Swap Magpie's synthetic InferenceX client for the agentic aiperf client on
-    # serving frameworks. Env-gated; default OFF leaves the synthetic path
-    # byte-for-byte unchanged. Parsing is defensive: any unrecognized value is
-    # treated as OFF and never raises (an unknown non-empty value warns).
-    # Asset deployment + AIPERF_BIN capability preflight run at the execution
-    # boundary (run_grid), not in this pure config materializer.
-    apply_agentx_switch(bench, model_path)
     for env_key in (
         "CONC",
         "ISL",
@@ -1027,6 +1219,12 @@ def materialize_config_with_envs(
         log.warning("Dropping invalid extra_envs key %s before benchmark materialization", _dk)
     for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
+    _sync_repo_aliases(
+        bench,
+        envs,
+        framework="custom",
+        prefer_dir="CUSTOM_DIR" in safe_extra_envs and "CUSTOM_REPO_PATH" not in safe_extra_envs,
+    )
     framework_env = server_args_env_name(bench.get("framework"))
     # Final dedup after reference/server_args merges: collapse repeated
     # vLLM/atom single-value flags to last-wins so recipe/variant values
@@ -1036,9 +1234,11 @@ def materialize_config_with_envs(
         envs[framework_env] = dedup_vllm_server_args(_final_args, bench.get("framework"))
     # ── Quality-reference wiring (scriptable / server-less workloads) ──────
     # Magpie forwards only ``benchmark.envs`` to the wrapper subprocess, so
-    # re-inject the image-quality reference here (the single scriptable choke
-    # point) or the shipped empty YAML default silently skips the gate. When the
-    # operator configures nothing, derive a stable per-session reference path
+    # re-inject the quality reference here (the single scriptable choke point)
+    # or the shipped empty YAML default silently skips the gate. What the
+    # reference holds is the workload's business — an xDiT image, an operator's
+    # own artifact — so the default filename is a convention, not a contract.
+    # When the operator configures nothing, derive a stable reference path
     # under ``session_dir()`` (pinned via
     # ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR``) so baseline + variants
     # resolve the same file:
@@ -1048,28 +1248,33 @@ def materialize_config_with_envs(
     #     variant can never overwrite the baseline reference).
     #   * Profiling / roofline (is_profile): no gate and never write.
     if framework_registry.is_scriptable(bench.get("framework")):
-        _qref = os.environ.get("XDIT_QUALITY_REF", "").strip()
+        _qref = _first_env(_QUALITY_REF_ENVS)
         if not _qref:
             from hyperloom.inference_optimizer.session.paths import session_dir
 
             _qref = str(session_dir() / "storage" / "quality_ref" / "baseline.png")
         if is_profile:
-            envs["XDIT_QUALITY_REF"] = ""
-            envs["XDIT_QUALITY_REF_WRITE"] = ""
+            _ref_compare, _ref_write = "", ""
         elif establish_quality_ref:
-            envs["XDIT_QUALITY_REF"] = ""
-            envs["XDIT_QUALITY_REF_WRITE"] = os.environ.get("XDIT_QUALITY_REF_WRITE", "").strip() or _qref
+            _ref_compare, _ref_write = "", (_first_env(_QUALITY_REF_WRITE_ENVS) or _qref)
         else:
-            envs["XDIT_QUALITY_REF"] = _qref
-            envs["XDIT_QUALITY_REF_WRITE"] = ""
-        # ── Model-arg wiring (scriptable xDiT registry resolution) ────────
+            _ref_compare, _ref_write = _qref, ""
+        for _name in _QUALITY_REF_ENVS:
+            envs[_name] = _ref_compare
+        for _name in _QUALITY_REF_WRITE_ENVS:
+            envs[_name] = _ref_write
+    # ── xDiT-only wiring ───────────────────────────────────────────────────
+    # These three are read by the xDiT runner and by nothing else, so they are
+    # keyed on the framework rather than on scriptability: an operator-supplied
+    # ``custom`` workload must not have its baseline altered by settings it
+    # never declared, least of all an attention backend.
+    if str(bench.get("framework") or "").strip().lower() == "xdit":
         # The xDiT runner resolves models via MODEL_REGISTRY keys, not
         # filesystem paths. XDIT_MODEL_ARG selects the basename ("name",
         # registry-correct) vs the full path ("path", which fails lookup). Force
         # it onto benchmark.envs here so per-task overrides can't break model
         # resolution. Default "name".
         envs["XDIT_MODEL_ARG"] = os.environ.get("XDIT_MODEL_ARG", "").strip() or "name"
-        # ── Global model root for xDiT local-snapshot resolution ──────────
         # If set, the baked hyperloom_local_aliases map each registered name to
         # a local snapshot dir rooted at $XDIT_MODEL_ROOT/<slug>. Leave unset in
         # public/default deployments so the operator chooses the model cache
@@ -1077,7 +1282,6 @@ def materialize_config_with_envs(
         _xdit_model_root = os.environ.get("XDIT_MODEL_ROOT", "").strip()
         if _xdit_model_root:
             envs["XDIT_MODEL_ROOT"] = _xdit_model_root
-        # ── Baseline attention-backend guard (scriptable xDiT) ────────────
         # For the baseline only, force the operator-pinned backend (default
         # 'aiter', the MI300X-verified path) so an invalid agent override cannot
         # poison the reference measurement. Explore/sweep variants keep their

@@ -423,9 +423,9 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
     if meta.name == "specialist":
         return (
             "delegate{action_name='specialist', params={"
-            "domain=<one of serving_specialist|kernel_switch_specialist|"
-            "comm_specialist|compiler_specialist|system_specialist|"
-            "pr_intel_specialist|research_scout_specialist|"
+            "domain=<one of serving_specialist|framework_rewrite_specialist|"
+            "kernel_switch_specialist|comm_specialist|compiler_specialist|"
+            "system_specialist|pr_intel_specialist|research_scout_specialist|"
             "static_recon_specialist>, "
             "gap_canonical_id=<stable gap id>, "
             "gap_symptom?=<str>, gap_layer?=<str>, "

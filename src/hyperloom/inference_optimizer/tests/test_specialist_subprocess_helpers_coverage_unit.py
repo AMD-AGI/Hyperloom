@@ -41,6 +41,51 @@ def test_pick_worktree_base_finds_git(tmp_path: Path) -> None:
     assert _pick_worktree_base(("/nonexistent", str(repo))) == repo
 
 
+def test_pick_worktree_base_prefers_the_framework_under_optimisation(tmp_path: Path) -> None:
+    """The session's own framework wins over whatever trusted root sorts first.
+
+    ``roots`` is the source-file allowlist — a *permission* list whose order
+    carries no information about which framework the session is optimising.
+    Choosing the base from it by position is how a WorldPlay session ended up
+    with an aiter worktree: the pod shipped aiter as a git checkout, so it
+    sorted first, and every patch the specialist wrote against ``hyvideo/``
+    paths was dropped by patch-safety as ``missing_target``.
+    """
+    other = tmp_path / "aiter"
+    other.mkdir()
+    (other / ".git").mkdir()
+    framework = tmp_path / "HY-WorldPlay"
+    framework.mkdir()
+    (framework / ".git").mkdir()
+
+    picked = _pick_worktree_base((str(other), str(framework)), preferred=str(framework))
+
+    assert picked == framework
+
+
+def test_pick_worktree_base_ignores_a_preferred_root_that_is_not_a_checkout(
+    tmp_path: Path,
+) -> None:
+    """A framework that is pip-installed rather than checked out must not
+    disable isolation; the allowlist order still supplies a usable base."""
+    other = tmp_path / "aiter"
+    other.mkdir()
+    (other / ".git").mkdir()
+
+    picked = _pick_worktree_base((str(other),), preferred=str(tmp_path / "absent"))
+
+    assert picked == other
+
+
+def test_pick_worktree_base_without_a_preference_is_unchanged(tmp_path: Path) -> None:
+    """Domains with no framework checkout of their own keep the old behaviour."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+
+    assert _pick_worktree_base(("/nonexistent", str(repo)), preferred="") == repo
+
+
 # -- _setup_worktree -------------------------------------------------------
 def test_setup_worktree_reuses_existing(tmp_path: Path) -> None:
     wt = tmp_path / "wt"

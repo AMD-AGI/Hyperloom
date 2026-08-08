@@ -1,0 +1,50 @@
+# Baseline benchmark config for an operator-supplied workload ($FRAMEWORK=custom).
+# Resolved by default_baseline_config() when $FRAMEWORK=custom.
+#
+# Unlike the other configs in this directory, this one describes no workload. It
+# cannot: the workload lives in the operator's own checkout and is driven by
+# their own entrypoint. What this file supplies is the scriptable contract every
+# framework shares — server-less, quality-gated, one command per measurement —
+# and nothing else.
+#
+# Supplied at launch:
+#   - benchmark.model             <- --model / $MODEL_PATH
+#   - benchmark.runner_type       <- --gpu-type / $GPU_TYPE / RUNNER_TYPE
+#   - benchmark.benchmark_script  <- --benchmark-scripts-dir (entrypoint lookup)
+#   - the checkout to optimize    <- --framework-path / $FRAMEWORK_REPO_PATH
+#   - every knob the script reads <- --extra-env
+#
+# Whatever --extra-env pins here becomes part of the measurement contract: a
+# variant may add new keys but may not overwrite a pinned one, because the
+# baseline number was measured with it. Pin what must not move.
+#
+# The entrypoint MUST emit a quality_gate block in its report. Correctness for a
+# scriptable framework is fail-closed: a missing or unparseable gate scores 0.0
+# and every candidate is rejected.
+
+benchmark:
+  framework: custom
+  workload_kind: scriptable
+  model: /models/custom
+  precision: bf16
+  run_mode: local
+
+  envs:
+    TP: 1
+    PATH: "/venv/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+  gpu_selection:
+    auto: false
+
+  server_lifecycle:
+    enabled: false
+
+  timeout_seconds: 7200
+
+  profiler:
+    torch_profiler:
+      enabled: false
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false

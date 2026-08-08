@@ -22,9 +22,13 @@ from hyperloom.common.env_safety import (
     is_allowed_dotenv_key,
     is_allowed_kernel_agent_env_key,
 )
+from hyperloom.common.llm_config import (
+    LEGACY_DEEPSEEK_ENV_KEYS,
+    deepseek_compat_env,
+    provider_model_defaults,
+)
 
 from .credentials import (
-    _is_deepseek_anthropic_url,
     _is_stale_proxy_url,
     _resolve_llm_endpoints,
     _reset_claude_config_to_upstream,
@@ -46,11 +50,14 @@ _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "OPENAI_API_KEY",
     "OPENAI_CUSTOM_HEADERS",
     "LLM_GATEWAY_KEY",
-    "DEEPSEEK_BASE_URL",
     "GEAK_BASE_URL",
     "LLM_API_BASE",
     # Legacy: not consumed anymore, still stripped if present.
     "SAFE_API_KEY",
+    # A retired DeepSeek config normalizes to BOTH protocol sides, so it is
+    # stripped in either single-provider mode: neither an Anthropic-only nor an
+    # OpenAI-only shell may acquire the other side from a stale .env.
+    *LEGACY_DEEPSEEK_ENV_KEYS,
 )
 
 _ANTHROPIC_FALLBACK_KEYS: tuple[str, ...] = (
@@ -58,8 +65,7 @@ _ANTHROPIC_FALLBACK_KEYS: tuple[str, ...] = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_CUSTOM_HEADERS",
-    "DEEPSEEK_BASE_URL",
-    "DEEPSEEK_API_KEY",
+    *LEGACY_DEEPSEEK_ENV_KEYS,
 )
 
 
@@ -85,7 +91,12 @@ def _resolve_dotenv_file() -> Path | None:
 
 
 def _provider_only_mode() -> str:
-    """Detect explicit single-provider intent from the current environment."""
+    """Detect explicit single-provider intent from the current environment.
+
+    Runs ahead of :func:`_normalize_legacy_deepseek_env`, so a retired
+    ``DEEPSEEK_*`` shell export is still read here and counts as Anthropic-side
+    intent.
+    """
     has_anthropic = bool(
         os.environ.get("ANTHROPIC_BASE_URL")
         or os.environ.get("ANTHROPIC_API_KEY")
@@ -100,6 +111,31 @@ def _provider_only_mode() -> str:
     if has_openai and not has_anthropic and not has_gateway:
         return "openai"
     return ""
+
+
+def _normalize_legacy_deepseek_env() -> None:
+    """Rewrite a retired ``DEEPSEEK_*`` configuration into the standard variables.
+
+    DeepSeek serves the Anthropic protocol on ``/anthropic`` and the OpenAI
+    protocol on ``/v1`` from one gateway with one key, so it is expressed with
+    ``ANTHROPIC_*`` + ``OPENAI_*`` like any other dual-protocol gateway. This is
+    the only place in the runtime that reads the retired variables; everything
+    downstream sees just the two protocol sides.
+    """
+    updates = deepseek_compat_env()
+    if updates:
+        for key, value in updates.items():
+            os.environ[key] = value
+        print(
+            "Preflight: DEEPSEEK_* is deprecated; normalized to "
+            f"{', '.join(sorted(updates))}. Re-run setup to migrate your .env."
+        )
+    # A gateway that serves only its own models supplies the model ids too.
+    # Exported (not just resolved) so subprocesses, GEAKv4 and the kernel-agent
+    # installer inherit them instead of falling back to an AMD Claude id.
+    for key, value in provider_model_defaults().items():
+        os.environ[key] = value
+        print(f"Preflight: {key} <unset> -> {value} (implied by the configured gateway)")
 
 
 def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | None]) -> None:
@@ -573,6 +609,37 @@ def _ensure_bench_serving_deps(python_exe: str, pip_extra: list[str]) -> None:
         check=True,
     )
     print("Preflight: benchmark_serving client deps installed OK")
+
+
+def _ensure_framework_deps(args, python_exe: str, pip_extra: list[str]) -> None:
+    """Install the selected framework's declared runtime deps into python_exe.
+
+    Resolution mirrors the CLI's own order (``--framework`` > ``$FRAMEWORK`` >
+    default) rather than reading ``os.environ["FRAMEWORK"]``, which the CLI only
+    pins after preflight has run.
+
+    Args:
+        args: Parsed CLI namespace; only ``framework`` is read.
+        python_exe (str): Interpreter the benchmark imports these from.
+        pip_extra (list[str]): Extra ``pip install`` arguments.
+    """
+    from hyperloom.inference_optimizer import framework_deps, framework_registry
+
+    framework = (
+        getattr(args, "framework", None) or os.environ.get("FRAMEWORK", "")
+    ).strip().lower() or framework_registry.DEFAULT_FRAMEWORK
+    try:
+        outcome = framework_deps.ensure(
+            framework, python_exe=python_exe, pip_extra=tuple(pip_extra)
+        )
+    except framework_deps.TorchClobberedError as exc:
+        print(f"Preflight: FATAL {exc}", file=sys.stderr)
+        sys.exit(2)
+    # Frameworks that ship no manifest are the common case; stay quiet unless
+    # the manifest actually asked for something or was partly rejected.
+    if outcome.skipped_reason and not (outcome.refused or outcome.invalid):
+        return
+    framework_deps.report(outcome, prefix="Preflight: framework deps")
 
 
 # RUN_EVAL values that disable the accuracy gate (mirrors _workload_envs).
@@ -1299,6 +1366,7 @@ def _preflight(
     _load_kernel_agent_env_fallback()
     _derive_runtime_paths()
     _restore_provider_only_mode(provider_mode, provider_snapshot)
+    _normalize_legacy_deepseek_env()
 
     # Fail fast on missing credentials after the fallback loaders.
     _validate_credentials()
@@ -1355,12 +1423,6 @@ def _preflight(
     resolved_urls: tuple[str, str] | None = None
     anthropic_url, openai_url = _resolve_llm_endpoints()
     if anthropic_url or openai_url:
-        deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
-        if deepseek_key and _is_deepseek_anthropic_url(anthropic_url):
-            for alias in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
-                if not os.environ.get(alias):
-                    os.environ[alias] = deepseek_key
-                    print(f"Preflight: filled {alias} from DEEPSEEK_API_KEY")
         for var, want in (
             ("ANTHROPIC_BASE_URL", anthropic_url),
             ("OPENAI_BASE_URL", openai_url),
@@ -1372,19 +1434,10 @@ def _preflight(
                 os.environ[var] = want
                 print(f"Preflight: {var} {prev or '<unset>'} -> {want} (resolved endpoint)")
         # Claude CLI primary key: Anthropic-side credentials only.
-        claude_primary_key = (
-            os.environ.get("ANTHROPIC_API_KEY", "")
-            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-            or os.environ.get("DEEPSEEK_API_KEY", "")
-        )
+        claude_primary_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
         _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
         if anthropic_url and not openai_url and not os.environ.get("GEAK_CLAUDE_MODEL"):
-            geak_claude_model = (
-                os.environ.get("CLAUDE_MODEL", "").strip()
-                or os.environ.get("DEEPSEEK_MODEL", "").strip()
-                or ("deepseek-v4-pro" if os.environ.get("DEEPSEEK_API_KEY", "").strip() else "")
-                or "claude-opus-5"
-            )
+            geak_claude_model = os.environ.get("CLAUDE_MODEL", "").strip() or "claude-opus-5"
             os.environ["GEAK_CLAUDE_MODEL"] = geak_claude_model
             print(f"Preflight: GEAK_CLAUDE_MODEL <unset> -> {geak_claude_model} (GEAKv4 Claude workflow)")
         resolved_urls = (anthropic_url, openai_url)
@@ -1449,6 +1502,12 @@ def _preflight(
     # the harness, so every RUN_EVAL=true baseline there would otherwise abort
     # with baseline_accuracy_failed.
     _ensure_lm_eval_dep(benchmark_python, pip_extra, eval_disabled=_resolved_eval_disabled(args))
+
+    # 1d. Per-framework runtime deps declared in assets/framework_deps/. This is
+    # the pass that covers the documented flow: install.sh runs before
+    # --framework is known, so its own attempt usually no-ops and a scriptable
+    # framework would otherwise reach baseline with nothing installed.
+    _ensure_framework_deps(args, benchmark_python, pip_extra)
 
     # 2. Magpie — the benchmark engine the Magpie backend shells out to.
     # Skipped entirely when the

@@ -4741,3 +4741,54 @@ def test_deterministic_extract_tolerates_null_efficiency_and_impact(tmp_path):
     # member impact_score is null -> falls back to the finding-level score.
     assert result[0]["impact_score"] == 12.5
     assert result[0]["duration_us"] == 520223.0
+
+
+# --- idle gate must honor cuda/HIP-graph under-recording (regression) ---
+# A graph-mode capture under-records replays (profiler activity-buffer overflow),
+# so idle% is inflated. The bypass route already skips its idle gate in that
+# case; the TraceLens route must do the same instead of suppressing every hot
+# kernel on a workload that is actually compute-bound.
+
+def test_idle_gate_graph_guard_skips_suppression_when_under_recorded(monkeypatch):
+    monkeypatch.setattr(
+        tla,
+        "_graph_coverage_from_raw_trace",
+        lambda _tp: {"graph_under_recorded": True, "graph_launch_count": 8},
+    )
+    threshold, high_idle, graph_warn = tla._evaluate_idle_gate_with_graph_guard(
+        95.0, Path("analysis.md"), "raw.trace.json"
+    )
+    assert threshold == 80.0
+    assert high_idle is None  # NOT suppressed
+    assert graph_warn is not None
+    assert graph_warn["code"] == "bypass_graph_under_recorded"
+    assert graph_warn["graph_launch_count"] == 8
+
+
+def test_idle_gate_graph_guard_applies_gate_when_not_under_recorded(monkeypatch):
+    monkeypatch.setattr(tla, "_graph_coverage_from_raw_trace", lambda _tp: {})
+    threshold, high_idle, graph_warn = tla._evaluate_idle_gate_with_graph_guard(
+        95.0, Path("analysis.md"), "raw.trace.json"
+    )
+    assert threshold == 80.0
+    assert graph_warn is None
+    assert high_idle is not None  # genuinely idle -> suppress
+    assert high_idle["code"] == "high_gpu_idle_pct"
+
+
+def test_idle_gate_graph_guard_noop_below_threshold(monkeypatch):
+    # Below the threshold the guard must not even probe the trace.
+    def _boom(_tp):  # pragma: no cover - must not be called
+        raise AssertionError("graph coverage probed below threshold")
+
+    monkeypatch.setattr(tla, "_graph_coverage_from_raw_trace", _boom)
+    threshold, high_idle, graph_warn = tla._evaluate_idle_gate_with_graph_guard(
+        10.0, Path("analysis.md"), "raw.trace.json"
+    )
+    assert (high_idle, graph_warn) == (None, None)
+
+
+def test_graph_coverage_from_raw_trace_never_raises():
+    # Missing/unreadable trace must degrade to {} (fall back to the plain gate).
+    assert tla._graph_coverage_from_raw_trace(None) == {}
+    assert tla._graph_coverage_from_raw_trace("/no/such/trace.json") == {}

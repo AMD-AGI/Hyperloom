@@ -1,0 +1,36 @@
+# Profile benchmark config for an operator-supplied workload ($FRAMEWORK=custom).
+# Same contract as baseline_custom.yaml, with the torch profiler on so TraceLens
+# can attribute GPU time.
+#
+# The envs here must stay a superset of whatever the baseline leg pinned, or the
+# trace describes a different run than the headline number was measured on. The
+# launch-time injection applies to both configs identically, so they only differ
+# by PROFILE and the profiler block.
+
+benchmark:
+  framework: custom
+  workload_kind: scriptable
+  model: /models/custom
+  precision: bf16
+  run_mode: local
+
+  envs:
+    TP: 1
+    PROFILE: 1
+    PATH: "/venv/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+  gpu_selection:
+    auto: false
+
+  server_lifecycle:
+    enabled: false
+
+  timeout_seconds: 7200
+
+  profiler:
+    torch_profiler:
+      enabled: true
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: true

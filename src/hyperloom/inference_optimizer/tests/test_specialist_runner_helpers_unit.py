@@ -246,6 +246,71 @@ def test_maybe_setup_worktree_readonly(tmp_path):
     assert r._maybe_setup_worktree(ctx, workspace=tmp_path) == (None, None, "")
 
 
+def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, monkeypatch):
+    """A framework specialist must get a worktree of the framework it patches.
+
+    ``framework_source_roots`` is the source-file allowlist, and its order is
+    arbitrary with respect to the session: on a pod that ships aiter as a git
+    checkout, aiter sorts first. A WorldPlay session then handed its specialist
+    an aiter worktree, the specialist authored correct patches against
+    ``hyvideo/`` paths that are absent from it, and patch-safety dropped every
+    one as ``missing_target`` — leaving an env-only proposal that toggled a
+    switch with no code behind it and measured 0.0% five rounds running.
+    """
+    aiter = tmp_path / "aiter"
+    aiter.mkdir()
+    (aiter / ".git").mkdir()
+    worldplay = tmp_path / "HY-WorldPlay"
+    worldplay.mkdir()
+    (worldplay / ".git").mkdir()
+    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(worldplay))
+
+    cfg = sr.SpecialistSubprocessConfig(
+        framework_source_roots=(str(aiter), str(worldplay)),
+    )
+    r = _runner(backend_factory=None, subprocess_config=cfg)
+    seen: dict = {}
+
+    def _fake_setup(base, worktree_path, branch):
+        seen["base"] = base
+        return worktree_path, ""
+
+    monkeypatch.setattr(sr, "_setup_worktree", _fake_setup)
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(
+            task_id="t",
+            params={"framework": "worldplay", "domain": "framework_rewrite_specialist"},
+        )
+    )
+
+    _wt, base, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
+
+    assert err == ""
+    assert base == worldplay, f"specialist would patch {seen.get('base')}, not the framework"
+
+
+def test_maybe_setup_worktree_falls_back_when_the_framework_is_not_a_checkout(
+    tmp_path, monkeypatch
+):
+    """A pip-installed framework must not cost the specialist its isolation."""
+    aiter = tmp_path / "aiter"
+    aiter.mkdir()
+    (aiter / ".git").mkdir()
+    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(tmp_path / "not-a-checkout"))
+
+    cfg = sr.SpecialistSubprocessConfig(framework_source_roots=(str(aiter),))
+    r = _runner(backend_factory=None, subprocess_config=cfg)
+    monkeypatch.setattr(sr, "_setup_worktree", lambda base, path, branch: (path, ""))
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(task_id="t", params={"framework": "worldplay"})
+    )
+
+    _wt, base, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
+
+    assert err == ""
+    assert base == aiter
+
+
 def test_patch_path_within_bases_accepts_sandbox_paths(tmp_path):
     # Legitimate patch paths stay inside the worktree/workspace.
     worktree = tmp_path / "worktree"

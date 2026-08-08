@@ -186,6 +186,29 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         ),
     ),
     SpecialistDomain(
+        key="framework_rewrite_specialist",
+        layer="iterative-model pipeline source rewrites (diffusion / autoregressive video)",
+        kb_anchor="framework",
+        available_in="M6",
+        description=(
+            "Authoring specialist for framework-level source rewrites on an "
+            "ITERATIVE model pipeline — a diffusion or autoregressive rollout "
+            "that runs the same transformer stack once per block per denoising "
+            "step per chunk. The wins there are not the serving concerns "
+            "serving_specialist targets (there is no scheduler, no continuous "
+            "batching, no KV-cache admission policy); they are redundant work "
+            "the loop structure creates: step-invariant computations repeated "
+            "every step, collectives that round-trip through the host to agree "
+            "on a shape, tables rebuilt on the host and re-uploaded, adjacent "
+            "same-shape collectives that could be one. Works from measured "
+            "host-side evidence plus a rewrite-pattern taxonomy, and must "
+            "deliver every rewrite behind a default-off environment switch with "
+            "a declared manifest so each one can be attributed and composed "
+            "independently. Distinct from serving_specialist (request-serving "
+            "frameworks) and kernel_switch_specialist (operator kernels)."
+        ),
+    ),
+    SpecialistDomain(
         key="cross_framework_rewrite_specialist",
         layer="cross-framework feature port (sglang <-> vllm), rewrite not git-apply",
         kb_anchor="framework",
@@ -341,6 +364,32 @@ def get_domain(key: str) -> SpecialistDomain | None:
         if d.key == key:
             return d
     return None
+
+
+def authoring_domain_for_framework(framework: str | None) -> str:
+    """Return the authoring domain that matches a framework's kind.
+
+    A request-serving framework and an iterative model pipeline have almost no
+    optimization surface in common: one is scheduling, batching and KV-cache
+    admission, the other is redundant work created by running the same stack
+    once per block per denoising step. Steering a scriptable pipeline at
+    ``serving_specialist`` points it at a hot path that does not exist there, so
+    every place that names an authoring domain resolves it through here rather
+    than hard-coding one.
+
+    Args:
+        framework (str | None): The session's framework name.
+
+    Returns:
+        str: ``"framework_rewrite_specialist"`` for a scriptable (server-less)
+        framework, else ``"serving_specialist"``.
+    """
+    name = str(framework or "").strip().lower()
+    if not name:
+        return "serving_specialist"
+    from hyperloom.inference_optimizer import framework_registry
+
+    return "framework_rewrite_specialist" if framework_registry.is_scriptable(name) else "serving_specialist"
 
 
 # Synthetic domain for ``scope='freeform'`` dispatches. NOT part of

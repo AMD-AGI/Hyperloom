@@ -336,10 +336,21 @@ class TestPromoteGemmTuningKeep:
 
 
 class TestPromoteFusionIntegrateKeep:
-    def test_records_patch_envs_and_current_best(self, tmp_path):
+    def test_records_incremental_gain_but_preserves_baseline_total(self, tmp_path):
         coord = _coord(
             tmp_path,
             baseline_tput=100.0,
+            cumulative_gain=20.0,
+            cumulative_gain_validated=20.0,
+            cumulative_gain_validated_stack_len=1,
+            optimization_stack=[
+                {
+                    "action": "replay_warm_recipe",
+                    "tput": 120.0,
+                    "gain_pct": 20.0,
+                }
+            ],
+            gain_per_stack_entry=[20.0],
             current_best={
                 "action": "replay_warm_recipe",
                 "tput": 120.0,
@@ -359,7 +370,9 @@ class TestPromoteFusionIntegrateKeep:
                 "status": "ok",
                 "decision": "KEEP",
                 "new_tput": 180.0,
-                "gain_pct": 80.0,
+                # integrate's gain is relative to current_best=120, not the
+                # original baseline=100.
+                "gain_pct": 50.0,
                 "workspace": "/tmp/run",
                 "extra_server_args": "--moe-runner-backend aiter",
             },
@@ -367,20 +380,22 @@ class TestPromoteFusionIntegrateKeep:
         )
 
         stack = coord.shared_state.optimization_stack
-        assert len(stack) == 1
-        assert stack[0]["action"] == "fusion"
-        assert stack[0]["backend"] == "forge"
-        assert stack[0]["engine"] == "forge_fusion"
-        assert stack[0]["patch_path"] == "/tmp/fusion.patch"
-        assert stack[0]["extra_envs"]["SGLANG_USE_AITER"] == "1"
-        assert stack[0]["extra_envs"]["ZAYA_FUSED_HYBRID_RESIDUAL"] == "1"
-        assert stack[0]["kernel_speedup"] == 3.05
+        assert len(stack) == 2
+        assert stack[1]["action"] == "fusion"
+        assert stack[1]["backend"] == "forge"
+        assert stack[1]["engine"] == "forge_fusion"
+        assert stack[1]["patch_path"] == "/tmp/fusion.patch"
+        assert stack[1]["gain_pct"] == pytest.approx(50.0)
+        assert stack[1]["extra_envs"]["SGLANG_USE_AITER"] == "1"
+        assert stack[1]["extra_envs"]["ZAYA_FUSED_HYBRID_RESIDUAL"] == "1"
+        assert stack[1]["kernel_speedup"] == 3.05
         assert coord.shared_state.current_best["action"] == "fusion"
         assert coord.shared_state.current_best["backend"] == "forge"
         assert coord.shared_state.current_best["engine"] == "forge_fusion"
         assert coord.shared_state.current_best["tput"] == 180.0
         assert coord.shared_state.cumulative_gain_validated == 80.0
-        assert coord.shared_state.cumulative_gain_validated_stack_len == 1
+        assert coord.shared_state.gain_per_stack_entry == [20.0, 80.0]
+        assert coord.shared_state.cumulative_gain_validated_stack_len == 2
 
     def test_guard_paths_do_not_promote(self, tmp_path):
         coord = _coord(tmp_path, baseline_tput=100.0)
