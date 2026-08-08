@@ -28,7 +28,9 @@ from hyperloom.orchestrator.knowledge.remote_recipe import (
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor import kb_store_client
 from hyperloom.orchestrator.knowledge.remote_recipe.client import (
     _champion,
+    _recommendation_metadata,
     _validate_download_listing,
+    _validate_session_envelope,
     _verify_downloaded_files,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe.models import (
@@ -332,6 +334,20 @@ def test_remote_client_internal_validation_error_paths(tmp_path: Path) -> None:
     symlink.symlink_to(target, target_is_directory=True)
     with pytest.raises(RemoteRecipeValidationError, match="symlink"):
         _verify_downloaded_files(symlink, {})
+
+    with pytest.raises(RemoteRecipeValidationError, match="requested session"):
+        _validate_session_envelope(
+            {
+                "schema_version": 2,
+                "canonical_id": "inference:m:h:f:mt:a:v:p",
+                "session_id": "actual-session",
+                "record_id": "record",
+                "revision": 1,
+                "knowledge": {},
+            },
+            canonical_id="inference:m:h:f:mt:a:v:p",
+            session_id="expected-session",
+        )
 
     class _ReadStore:
         def __init__(self, envelope=None) -> None:
@@ -749,8 +765,8 @@ class _FakeStore:
             self.champion = value - 1
             raise KBStoreError("POST champion -> HTTP 409: write_conflict")
 
-    def list_session_files(self, canonical_id, session_id):
-        self.calls.append(("list_session_files", canonical_id, session_id))
+    def list_session_files(self, canonical_id, session_id, *, kind=""):
+        self.calls.append(("list_session_files", canonical_id, session_id, kind))
         return self.files_listing
 
     def download_session(self, canonical_id, session_id, destination, *, include_values):
@@ -906,6 +922,57 @@ def test_read_supports_old_vendored_best_record_method_name(tmp_path: Path) -> N
     ]
 
 
+def test_read_pins_manifest_against_download_relisting(tmp_path: Path) -> None:
+    class _RelistingStore(_FakeStore):
+        def download_session(
+            self,
+            canonical_id,
+            session_id,
+            destination,
+            *,
+            include_values,
+        ):
+            assert self.list_session_files(canonical_id, session_id) is self.files_listing
+            self.list_session_files("other:identity", session_id, kind="patch")
+            return super().download_session(
+                canonical_id,
+                session_id,
+                destination,
+                include_values=include_values,
+            )
+
+    store = _RelistingStore()
+    row = read_remote_recipe(
+        "inference:m:h:f:mt:a:v:p",
+        tmp_path / "pinned-manifest",
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+
+    assert row is not None
+    assert ("list_session_files", "other:identity", "champion-session", "patch") in store.calls
+
+
+def test_read_rejects_non_json_knowledge_before_destination_cleanup(
+    tmp_path: Path,
+) -> None:
+    store = _FakeStore()
+    store.envelope["knowledge"]["not_json"] = object()
+    destination = tmp_path / "strict-json"
+    destination.mkdir()
+    sentinel = destination / "keep-me"
+    sentinel.write_text("unchanged", encoding="utf-8")
+
+    with pytest.raises(RemoteRecipeValidationError, match="strict JSON"):
+        read_remote_recipe(
+            "inference:m:h:f:mt:a:v:p",
+            destination,
+            client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+        )
+
+    assert sentinel.read_text(encoding="utf-8") == "unchanged"
+    assert [call[0] for call in store.calls] == ["get_best_record"]
+
+
 def test_read_rejects_existing_files_symlink(tmp_path: Path) -> None:
     store = _FakeStore(champion=125.0)
     destination = tmp_path / "bundle-link"
@@ -963,6 +1030,39 @@ def test_read_does_not_consult_rollup_champion_metric(tmp_path: Path) -> None:
         "list_session_files",
         "download_session",
     ]
+
+
+def test_recommendation_metadata_validates_or_normalizes_service_fields() -> None:
+    valid = {
+        "session_id": "best-session",
+        "champion": {
+            "session_id": "best-session",
+            "metric": "optimized_throughput",
+            "value": 125.0,
+            "promoted_at": "2026-08-08T00:00:00Z",
+        },
+        "knowledge": {"optimized_throughput": 124.0},
+    }
+    assert _recommendation_metadata(valid) == valid["champion"]
+
+    malformed = {
+        "session_id": "best-session",
+        "champion": {
+            "session_id": "other-session",
+            "metric": "latency",
+            "value": True,
+        },
+        "knowledge": {"optimized_throughput": "not-a-number"},
+    }
+    assert _recommendation_metadata(malformed) == {
+        "session_id": "best-session",
+        "metric": "optimized_throughput",
+        "value": 0.0,
+    }
+
+    malformed["knowledge"]["optimized_throughput"] = float("nan")
+    with pytest.raises(RemoteRecipeValidationError, match="finite"):
+        _recommendation_metadata(malformed)
 
 
 @pytest.mark.parametrize(
