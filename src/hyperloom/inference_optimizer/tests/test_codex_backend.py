@@ -10,9 +10,11 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.llm_config import ResponsesResult
 from hyperloom.orchestrator.roles import CodexBackend
+from hyperloom.orchestrator.roles import codex as codex_module
 from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed
-from hyperloom.orchestrator.roles.codex import _extract_envelope, _extract_responses_output
+from hyperloom.orchestrator.roles.codex import _extract_envelope
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentType,
     NoIntentEmitted,
@@ -295,6 +297,29 @@ def _construct_real_codex_capturing_kwargs(monkeypatch):
     return captured
 
 
+def test_codex_client_comes_from_the_shared_llm_gateway(monkeypatch):
+    """Codex owns no credentials: it forwards its env-var contract to llm_config."""
+    captured: dict[str, Any] = {}
+    sentinel = object()
+    monkeypatch.setattr(
+        codex_module,
+        "get_async_openai_client",
+        lambda **kwargs: captured.update(kwargs) or sentinel,
+    )
+    backend = CodexBackend(api_key_env="CODEX_KEY", base_url_env="CODEX_URL", client_factory=None)
+    assert backend._client is sentinel
+    assert captured == {"api_key_env": "CODEX_KEY", "base_url_env": "CODEX_URL"}
+
+
+def test_codex_missing_openai_sdk_raises_backend_error(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "openai", None)
+    monkeypatch.setenv("OPENAI_API_KEY", "tok")
+    with pytest.raises(BackendError, match="openai SDK not installed"):
+        CodexBackend(client_factory=None)
+
+
 def test_codex_prefers_explicit_openai_key_over_safe_filled_anthropic(monkeypatch):
     """Plan B: a user-set OPENAI_API_KEY wins over SAFE-filled ANTHROPIC_AUTH_TOKEN."""
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "safe-key-from-safe")
@@ -306,65 +331,68 @@ def test_codex_prefers_explicit_openai_key_over_safe_filled_anthropic(monkeypatc
     assert captured["base_url"] == "https://api.openai.com/v1"
 
 
-def test_codex_refuses_to_auth_with_anthropic_token(monkeypatch):
-    """Codex speaks the OpenAI protocol, so an Anthropic token alone fails to
-    construct it."""
+def test_codex_authenticates_with_the_anthropic_gateway_token(monkeypatch):
+    """Anthropic-only deployment: the gateway token authenticates the OpenAI protocol."""
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-token")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_GATEWAY_KEY", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
-    with pytest.raises(BackendError, match="OPENAI_API_KEY"):
-        _construct_real_codex_capturing_kwargs(monkeypatch)
+    captured = _construct_real_codex_capturing_kwargs(monkeypatch)
+    assert captured["api_key"] == "anthropic-token"
+    assert captured["base_url"] == "https://gateway.example/v1"
+
+
+def test_codex_derives_its_base_url_in_an_anthropic_only_deployment(monkeypatch):
+    for var in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "LLM_GATEWAY_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-token")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/Anthropic")
+    captured = _construct_real_codex_capturing_kwargs(monkeypatch)
+    assert captured["base_url"] == "https://llm-api.amd.com/Unified/v1"
 
 
 # ---------------------------------------------------------------------------
 # Web search (Responses API) path
 
 
-def test_extract_responses_output_text_and_citations():
-    resp = {
-        "output": [
-            {"type": "reasoning", "content": []},
-            {"type": "web_search_call", "action": {"query": "x"}},
-            {
-                "type": "message",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "text": "the answer",
-                        "annotations": [
-                            {"type": "url_citation", "url": "https://a.example"},
-                            {"type": "url_citation", "url": "https://b.example"},
-                        ],
-                    }
-                ],
-            },
-        ]
-    }
-    text, citations = _extract_responses_output(resp)
-    assert text == "the answer"
-    assert citations == ["https://a.example", "https://b.example"]
+@pytest.mark.asyncio
+async def test_web_search_routes_through_the_shared_responses_entry_point(monkeypatch):
+    """The Responses call is llm_config's; codex only supplies params and maps the result."""
+    captured: dict[str, Any] = {}
+    result = ResponsesResult(
+        text='{"intents": [{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}]}',
+        citations=["https://cited.example"],
+        status="completed",
+        input_tokens=13,
+        output_tokens=5,
+    )
+
+    async def _fake_aresponse(client, **params):
+        captured["client"] = client
+        captured["params"] = params
+        return result
+
+    monkeypatch.setattr(codex_module, "aresponse", _fake_aresponse)
+    backend = _make_ws_backend([])
+    res = await backend.run("p", system_prompt="sys")
+
+    assert captured["client"] is backend._client
+    assert captured["params"]["tools"][0]["type"] == "web_search"
+    assert captured["params"]["instructions"] == "sys"
+    # No bare SDK call was made: the fake stood in for the whole endpoint.
+    assert backend._client.responses.calls == []
+    assert res.metadata["finish_reason"] == "completed"
+    assert res.metadata["input_tokens"] == 13
+    assert res.metadata["output_tokens"] == 5
+    assert res.metadata["web_search_citations"] == ["https://cited.example"]
 
 
-def test_extract_responses_output_empty():
-    assert _extract_responses_output({"output": []}) == ("", [])
-    assert _extract_responses_output({}) == ("", [])
-
-
-def test_extract_responses_output_skips_non_text_content_block():
-    # A message whose content mixes a non-output_text block (skipped) with a
-    # real output_text block -> only the text survives.
-    resp = {
-        "output": [
-            {
-                "type": "message",
-                "content": [
-                    {"type": "refusal", "text": "ignored"},
-                    {"type": "output_text", "text": "kept", "annotations": []},
-                ],
-            }
-        ]
-    }
-    assert _extract_responses_output(resp) == ("kept", [])
+@pytest.mark.asyncio
+async def test_web_search_omits_citations_metadata_when_there_are_none():
+    reply = '```json\n{"intents": [{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}]}\n```'
+    b = _make_ws_backend([reply])
+    res = await b.run("p")
+    assert "web_search_citations" not in res.metadata
 
 
 @pytest.mark.asyncio
