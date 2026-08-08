@@ -604,6 +604,29 @@ def _kernel_idle_max_ticks() -> int:
 
 
 KERNEL_IDLE_MAX_TICKS: int = _kernel_idle_max_ticks()
+
+
+def _kernel_idle_min_seconds() -> float:
+    """Wall-clock seconds a KERNEL idle streak must last before winding down.
+
+    Env-overridable via ``INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS``. Ticks
+    are the wrong unit on their own: a coordinator tick is a handful of seconds
+    and the phase machine advances more than once per tick, so
+    :data:`KERNEL_IDLE_MAX_TICKS` alone would wind KERNEL down after roughly
+    twenty seconds of quiet — shorter than the gap between a kernel result
+    landing and the next dispatch being reasoned out. The default 600s is far
+    longer than any dispatch gap a healthy phase produces, while still cutting
+    hours off a phase that has genuinely stopped moving.
+    """
+    raw = (_os_fw_ratio.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", "") or "").strip()
+    try:
+        val = float(raw)
+        return val if val > 0.0 else 600.0
+    except (TypeError, ValueError):
+        return 600.0
+
+
+KERNEL_IDLE_MIN_SECONDS: float = _kernel_idle_min_seconds()
 ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
 ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
 
@@ -787,6 +810,27 @@ def _phase_started_unix(state: Any) -> float:
         return 0.0
 
 
+def _kernel_idle_since_unix(state: Any) -> float:
+    """Return when the current KERNEL idle streak opened, defensively coerced.
+
+    Returns ``0.0`` when the field is missing or non-numeric, which the idle
+    guard reads as "no measured idle window" and refuses to act on — a resumed
+    or partially-initialised state must not be able to wind the phase down
+    before the phase machine has observed a single streak of its own.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        float: Streak start in seconds since the epoch, or ``0.0``.
+    """
+    raw = getattr(state, "kernel_idle_since_unix", 0.0)
+    try:
+        return max(0.0, float(raw or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _pending_escalate_hint(state: Any) -> str:
     """Return a pending escalate hint to act on this tick (unknown hints → empty).
 
@@ -867,6 +911,85 @@ def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float
         return 0.0
     now = float(now_unix if now_unix is not None else _now_unix(state))
     return max(0.0, now - started)
+
+
+def phase_elapsed_totals_from_history(history: Any) -> dict[str, float]:
+    """Rebuild per-phase completed-segment totals from a ``phase_history`` log.
+
+    Used when resuming a state written before ``phase_elapsed_totals`` existed.
+    Every history row records the phase it entered and when, so consecutive rows
+    bound one completed segment. The trailing row is the still-active segment and
+    is deliberately excluded: :func:`phase_cumulative_seconds` adds the live
+    segment itself, and double-counting it would over-charge the phase.
+
+    ``phase_history`` is capped, so a very long session reconstructs a LOWER
+    bound. That is the safe direction for a budget guard — it can under-charge a
+    resumed phase, but it can never invent time the phase did not spend.
+
+    Args:
+        history (Any): The ``phase_history`` list; any other type yields ``{}``.
+
+    Returns:
+        dict[str, float]: Phase name -> completed seconds. Rows with no phase,
+        no entry timestamp, or a non-advancing timestamp are skipped.
+    """
+    if not isinstance(history, list):
+        return {}
+    rows = [row for row in history if isinstance(row, dict)]
+    totals: dict[str, float] = {}
+    for idx in range(len(rows) - 1):
+        phase = str(rows[idx].get("to_phase") or "").strip().upper()
+        try:
+            entered = float(rows[idx].get("ts_unix") or 0.0)
+            exited = float(rows[idx + 1].get("ts_unix") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if not phase or entered <= 0.0 or exited <= entered:
+            continue
+        totals[phase] = totals.get(phase, 0.0) + (exited - entered)
+    return totals
+
+
+def phase_cumulative_seconds(
+    state: Any,
+    *,
+    phase: str | None = None,
+    now_unix: float | None = None,
+) -> float:
+    """Return wall-clock seconds spent in ``phase``, summed over EVERY entry.
+
+    :func:`phase_elapsed_seconds` measures the CURRENT entry only, because
+    ``phase_started_unix`` is reset on every phase entry. Each phase is re-entered
+    once per macro-cycle, so a budget guard built on it hands the phase a fresh
+    full allotment on every re-entry. This reads the durable
+    ``phase_elapsed_totals`` banked at each transition out of the phase and adds
+    the live segment when ``phase`` is the phase currently running.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``phase_elapsed_totals``.
+        phase (str | None): Phase to total; defaults to the current phase.
+        now_unix (float | None): Override for the current time.
+
+    Returns:
+        float: Non-negative seconds spent in ``phase`` across the whole run.
+    """
+    current = (getattr(state, "phase", "") or "").strip().upper()
+    target = (phase or current or "").strip().upper()
+    if not target:
+        return 0.0
+    accumulated = 0.0
+    totals = getattr(state, "phase_elapsed_totals", None)
+    if isinstance(totals, dict):
+        try:
+            accumulated = max(0.0, float(totals.get(target, 0.0) or 0.0))
+        except (TypeError, ValueError):
+            # A malformed banked total degrades to "nothing banked", i.e. the
+            # pre-fix per-entry behaviour for this phase. Under-charging is the
+            # only tolerable direction: over-charging would end a phase early.
+            accumulated = 0.0
+    if target == current:
+        accumulated += phase_elapsed_seconds(state, now_unix=now_unix)
+    return accumulated
 
 
 def explore_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float | None:
@@ -969,6 +1092,14 @@ def phase_budget_remaining_seconds(
 ) -> float | None:
     """Return seconds remaining in the current phase's budget (``None`` when budget window 0 = unlimited).
 
+    Charges the phase's CUMULATIVE spend (:func:`phase_cumulative_seconds`), not
+    just the current entry: the budget fraction is the phase's share of the run,
+    so a phase re-entered on a later macro-cycle resumes from what it has already
+    spent instead of being handed its whole allotment again. Note the allotment
+    itself (:func:`_phase_budget_total_seconds`) still reconstructs the base from
+    the CURRENT entry — it charges back against the clock at this entry's start,
+    which is a per-entry quantity by construction.
+
     Args:
         state (Any): Frozen SharedState view.
         budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
@@ -983,7 +1114,7 @@ def phase_budget_remaining_seconds(
     total = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
     if total is None:
         return None
-    return max(0.0, total - phase_elapsed_seconds(state, now_unix=now_unix))
+    return max(0.0, total - phase_cumulative_seconds(state, now_unix=now_unix))
 
 
 def effective_max_minutes(state: Any) -> float:
@@ -1036,6 +1167,12 @@ def phase_cap_exceeded(
 ) -> bool:
     """True when time spent in the current phase has reached its absolute cap.
 
+    Measures CUMULATIVE time across every entry into the phase
+    (:func:`phase_cumulative_seconds`). :func:`phase_cap_seconds` exists so "no
+    single phase can monopolise the run", which is a statement about the run —
+    comparing it against the current entry alone made it re-arm on each re-entry
+    and left the cap unenforceable in a cyclic session.
+
     Args:
         state (Any): Frozen SharedState view.
         budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
@@ -1043,13 +1180,13 @@ def phase_cap_exceeded(
         now_unix (float | None): Override for the current time.
 
     Returns:
-        bool: True when phase-elapsed time has reached the absolute cap; False
-        when no cap applies.
+        bool: True when cumulative phase time has reached the absolute cap;
+        False when no cap applies.
     """
     cap = phase_cap_seconds(state, budget_pct=budget_pct)
     if cap is None:
         return False
-    return phase_elapsed_seconds(state, now_unix=now_unix) >= cap
+    return phase_cumulative_seconds(state, now_unix=now_unix) >= cap
 
 
 # EXPLORE hard force-exit (HARD time gate)
@@ -1457,6 +1594,93 @@ def _geak_phase_terminal(state: Any) -> bool:
     }
 
 
+# Ledger subfields that change when a kernel attempt actually advances. Listed
+# explicitly rather than digesting whole entries so incidental churn (a
+# re-rendered field, a refreshed timestamp) cannot masquerade as forward
+# progress and keep restarting the idle streak.
+_KERNEL_ATTEMPT_PROGRESS_FIELDS: tuple[str, ...] = (
+    "current_kernel_id",
+    "failure_count",
+    "integration_status",
+    "last_decision",
+    "last_source_file",
+    "last_status",
+    "rejected_reason",
+    "task_group_key",
+)
+
+# ``last_kernel_opt`` subfields that identify WHICH result is the latest one; a
+# new result always changes at least one of them.
+_LAST_KERNEL_OPT_PROGRESS_FIELDS: tuple[str, ...] = (
+    "best_artifact_path",
+    "decision",
+    "kernel_id",
+    "task_group_key",
+    "ts",
+)
+
+
+def compute_kernel_progress_fingerprint(
+    state: Any,
+    *,
+    inflight_task_ids: Any = (),
+) -> str:
+    """Digest the KERNEL signals that change if and only if something moved.
+
+    The idle-spin guard needs to know whether the phase is making forward
+    progress. :func:`kernel_work_pending` cannot answer that — it reports whether
+    the ledger still holds anything unresolved, so attempts that can never be
+    advanced keep answering "yes" indefinitely. A digest over the observable
+    outcome fields answers the right question: an unchanged digest means nothing
+    happened between two ticks.
+
+    In-flight task ids are part of the digest so a dispatch starting or a task
+    finishing both count as progress in their own right, even before the ledger
+    records an outcome.
+
+    Args:
+        state (Any): Frozen SharedState view exposing the kernel ledgers.
+        inflight_task_ids (Any): Task ids of kernel-lane work currently queued or
+            running; any iterable of strings.
+
+    Returns:
+        str: A stable hex digest. Equal digests on consecutive ticks mean no
+        observable kernel progress happened in between.
+    """
+    import hashlib
+    import json
+
+    attempts: list[list[str]] = []
+    for ledger in (
+        getattr(state, "kernel_opt_task_attempts", None),
+        getattr(state, "kernel_opt_attempts", None),
+    ):
+        if not isinstance(ledger, dict):
+            continue
+        for ledger_id, attempt in ledger.items():
+            if not isinstance(attempt, dict):
+                continue
+            attempts.append(
+                [str(ledger_id)] + [str(attempt.get(field, "")) for field in _KERNEL_ATTEMPT_PROGRESS_FIELDS]
+            )
+    attempts.sort()
+
+    last_opt = getattr(state, "last_kernel_opt", None)
+    last_opt = last_opt if isinstance(last_opt, dict) else {}
+    stack = getattr(state, "optimization_stack", None)
+    pending = getattr(state, "pending_kernel_integrations", None)
+    payload = {
+        "attempts": attempts,
+        "inflight": sorted(str(task_id) for task_id in (inflight_task_ids or ())),
+        "last_kernel_opt": [str(last_opt.get(field, "")) for field in _LAST_KERNEL_OPT_PROGRESS_FIELDS],
+        "pending_integrations": sorted(str(key) for key in pending) if isinstance(pending, dict) else [],
+        "rejected": sorted(str(kid) for kid in (getattr(state, "rejected_kernel_ids", None) or [])),
+        "stack_len": len(stack) if isinstance(stack, list) else 0,
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+
+
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain.
 
@@ -1798,18 +2022,33 @@ def exit_normal_kernel(
             }
     # Idle-spin guard: the escalate-hint handoff above needs the kernel_agent to
     # emit ``escalate_strategy_change``, but PolicyGate denies that intent for the
-    # kernel_agent role — so when candidates are exhausted the phase can otherwise
-    # spin (hallucinated kernel-id requests / no-intent turns) until the wall-clock
-    # cap. When work has been unavailable for KERNEL_IDLE_MAX_TICKS consecutive
-    # ticks, wind down to SWEEP without the hint. (kernel_idle_ticks is maintained
-    # per-tick by the phase machine.)
-    if not kernel_work_pending(state):
-        idle_ticks = int(getattr(state, "kernel_idle_ticks", 0) or 0)
-        if idle_ticks >= KERNEL_IDLE_MAX_TICKS:
+    # kernel_agent role — so when the phase stops moving it can otherwise spin
+    # (hallucinated kernel-id requests / no-intent turns) until the wall-clock cap.
+    #
+    # The streak is deliberately NOT gated on ``kernel_work_pending``. That
+    # predicate reports whether the ledger still holds anything unresolved, so a
+    # session carrying attempts that can never be advanced answers "yes" forever
+    # and pins the streak at zero — which is exactly how a real run spun for
+    # 10.4h with every GPU idle. ``kernel_idle_ticks`` / ``kernel_idle_since_unix``
+    # are maintained per-tick by the phase machine off an observable progress
+    # fingerprint, and only advance when nothing changed AND no kernel-lane task
+    # is in flight.
+    #
+    # Both a tick count and a wall-clock floor must be satisfied: ticks prove we
+    # sampled repeatedly, the floor proves enough real time passed that a healthy
+    # dispatch gap cannot be mistaken for a stall.
+    idle_ticks = int(getattr(state, "kernel_idle_ticks", 0) or 0)
+    idle_since = _kernel_idle_since_unix(state)
+    if idle_ticks >= KERNEL_IDLE_MAX_TICKS and idle_since > 0.0:
+        now = float(now_unix if now_unix is not None else _now_unix(state))
+        idle_seconds = max(0.0, now - idle_since)
+        if idle_seconds >= KERNEL_IDLE_MIN_SECONDS:
             return "kernel_no_more_leverage", {
                 "evidence": "kernel_idle_no_progress",
                 "idle_ticks": idle_ticks,
                 "idle_max_ticks": KERNEL_IDLE_MAX_TICKS,
+                "idle_seconds": round(idle_seconds, 3),
+                "idle_min_seconds": KERNEL_IDLE_MIN_SECONDS,
             }
     rejected = getattr(state, "rejected_kernel_ids", None) or []
     rejected_count = len(rejected) if isinstance(rejected, list) else 0
@@ -2566,6 +2805,23 @@ def record_phase_transition(
     now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
     now_unix = float(ts_unix if ts_unix is not None else _time.time())
     from_phase = (state.phase or "").strip().upper()
+    if from_phase:
+        # Bank the finished segment for EVERY phase so the budget guards can
+        # charge a phase for the whole run instead of the current entry. Empty
+        # ``from_phase`` is the very first transition of a fresh session, which
+        # has no segment to bank.
+        totals = getattr(state, "phase_elapsed_totals", None)
+        totals = dict(totals) if isinstance(totals, dict) else {}
+        try:
+            banked = max(0.0, float(totals.get(from_phase, 0.0) or 0.0))
+        except (TypeError, ValueError):
+            banked = 0.0
+        totals[from_phase] = banked + phase_elapsed_seconds(state, now_unix=now_unix)
+        state.phase_elapsed_totals = totals
+    # EXPLORE keeps its own accumulator: it carries a tri-state "unknown" for
+    # legacy resumes that status telemetry reports as absent, whereas
+    # ``phase_elapsed_totals`` must never report "unknown" — a budget guard
+    # would read that as "no cap". The two answer different questions.
     if from_phase == PHASE_EXPLORE:
         raw_accumulated = getattr(state, "explore_elapsed_accum_s", 0.0)
         if raw_accumulated is not None:
@@ -2760,12 +3016,15 @@ __all__ = [
     "is_valid_escalate_hint",
     "is_valid_phase_exit_reason",
     "is_valid_stop_reason",
+    "compute_kernel_progress_fingerprint",
     "kernel_work_pending",
     "make_history_row",
     "explore_elapsed_seconds",
     "normalize_budget_pct",
     "phase_budget_remaining_seconds",
+    "phase_cumulative_seconds",
     "phase_elapsed_seconds",
+    "phase_elapsed_totals_from_history",
     "phase_index",
     "session_remaining_seconds",
     "should_force_exit_explore",

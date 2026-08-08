@@ -566,6 +566,13 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "phase_history",
         "phase_budget_pct",
         "explore_elapsed_accum_s",
+        "phase_elapsed_totals",
+        # KERNEL idle-streak bookkeeping. Forging these is how a model could talk
+        # the phase machine into winding KERNEL down early, or hold it open while
+        # nothing runs; the Coordinator measures all three from observed facts.
+        "kernel_idle_ticks",
+        "kernel_progress_fingerprint",
+        "kernel_idle_since_unix",
         # Cyclic phase-machine state; Coordinator-only writers. Locked so an LLM
         # update_state cannot forge the macro-cycle counter, budget window, gain
         # anchor / no-gain streak, or bottleneck-switch handoff.
