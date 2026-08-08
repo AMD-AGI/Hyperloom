@@ -29,6 +29,10 @@ from hyperloom.common.llm_config import (
     deepseek_compat_env,
     derive_openai_base_url,
     get_anthropic_client,
+    has_anthropic_side,
+    has_openai_side,
+    is_anthropic_only,
+    is_openai_only,
     get_async_anthropic_client,
     get_async_openai_client,
     get_openai_client,
@@ -124,6 +128,9 @@ _ANTHROPIC_ONLY_ENV = {
     "_".join(("ANTHROPIC", "AUTH", "TOKEN")): "gateway-token",
     "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
     "ANTHROPIC_BASE_URL": "https://llm-api.amd.com/Anthropic",
+    # AMD's gateway rejects a call without this, and the setup skill only ever
+    # writes it here -- so the shape is not realistic without it.
+    "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}",
 }
 _CODEX_ONLY_ENV = {
     "_".join(("OPENAI", "API", "KEY")): "openai-token",
@@ -178,6 +185,85 @@ def test_explicit_openai_side_wins_key_and_url_independently():
 def test_llm_gateway_key_still_outranks_the_anthropic_fallback():
     env = {**_ANTHROPIC_ONLY_ENV, "LLM_GATEWAY_KEY": "gw-key"}
     assert openai_client_kwargs(env=env)["api_key"] == "gw-key"
+
+
+_SUBSCRIPTION_HEADER = "Ocp-Apim-Subscription-Key"
+
+
+# ---- credential-shape predicates ----
+def test_shape_predicates_classify_all_three_deployments():
+    """One shape test for backend selection, the TraceLens runner and the fellow."""
+    assert is_anthropic_only(_ANTHROPIC_ONLY_ENV)
+    assert not is_openai_only(_ANTHROPIC_ONLY_ENV)
+
+    assert is_openai_only(_CODEX_ONLY_ENV)
+    assert not is_anthropic_only(_CODEX_ONLY_ENV)
+
+    both = {**_ANTHROPIC_ONLY_ENV, **_CODEX_ONLY_ENV}
+    assert not is_anthropic_only(both)
+    assert not is_openai_only(both)
+
+
+def test_shape_predicates_report_no_side_on_an_empty_env():
+    """Neither shape holds when nothing is configured; both sides read false."""
+    assert not has_anthropic_side({})
+    assert not has_openai_side({})
+    assert not is_anthropic_only({})
+    assert not is_openai_only({})
+
+
+@pytest.mark.parametrize("key", ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"])
+def test_any_anthropic_variable_alone_marks_that_side_configured(key):
+    assert has_anthropic_side({key: "value"})
+
+
+@pytest.mark.parametrize("key", ["OPENAI_BASE_URL", "OPENAI_API_KEY"])
+def test_any_openai_variable_alone_marks_that_side_configured(key):
+    assert has_openai_side({key: "value"})
+
+
+def test_shape_predicates_ignore_the_retired_deepseek_variables():
+    """DeepSeek is migrated onto the standard pair, so it is not a third side.
+
+    The forge fellow used to read these directly and would therefore disagree
+    with backend selection about a legacy-only configuration.
+    """
+    legacy = {_LEGACY_KEY: "dk", "DEEPSEEK_BASE_URL": "https://api.deepseek.com"}
+    assert not has_anthropic_side(legacy)
+    assert not has_openai_side(legacy)
+    assert not is_anthropic_only(legacy)
+    # With DeepSeek ignored, an OpenAI side alongside it is still openai-only --
+    # the fellow previously read these keys and answered False here.
+    assert is_openai_only({**legacy, **_CODEX_ONLY_ENV})
+
+
+def test_derived_base_url_carries_the_anthropic_gateway_headers():
+    """An anthropic-only deployment must still send the gateway's subscription key.
+
+    The derived URL is the same host as ANTHROPIC_BASE_URL, so without this the
+    run resolves a client that the gateway rejects on every call -- worse than
+    the clean configuration error it used to raise.
+    """
+    kwargs = openai_client_kwargs(env=dict(_ANTHROPIC_ONLY_ENV))
+    assert kwargs["base_url"] == "https://llm-api.amd.com/Unified/v1"
+    assert kwargs["default_headers"] == {_SUBSCRIPTION_HEADER: "ak-anthropic"}
+
+
+def test_explicit_openai_base_url_does_not_borrow_anthropic_headers():
+    """An explicit OpenAI URL may be a different host, whose headers we cannot guess."""
+    kwargs = openai_client_kwargs(
+        env={**_ANTHROPIC_ONLY_ENV, "OPENAI_BASE_URL": "https://other-host.example/v1"}
+    )
+    assert kwargs["base_url"] == "https://other-host.example/v1"
+    assert "default_headers" not in kwargs
+
+
+def test_openai_custom_headers_win_over_the_derived_gateway_headers():
+    """An operator who set the OpenAI side explicitly keeps that exact header set."""
+    kwargs = openai_client_kwargs(
+        env={**_ANTHROPIC_ONLY_ENV, "OPENAI_CUSTOM_HEADERS": f"{_SUBSCRIPTION_HEADER}: openai-sub"}
+    )
+    assert kwargs["default_headers"] == {_SUBSCRIPTION_HEADER: "openai-sub"}
 
 
 def test_openai_kwargs_error_names_every_searched_key():

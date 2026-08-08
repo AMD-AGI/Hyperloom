@@ -112,6 +112,39 @@ _ANTHROPIC_SIDE_KEYS: tuple[str, ...] = (
 )
 _OPENAI_SIDE_KEYS: tuple[str, ...] = ("OPENAI_BASE_URL", "OPENAI_API_KEY")
 
+
+def has_anthropic_side(env: Mapping[str, str] | None = None) -> bool:
+    """True when an Anthropic-side endpoint or key is configured."""
+    source = env if env is not None else os.environ
+    return any((source.get(name) or "").strip() for name in _ANTHROPIC_SIDE_KEYS)
+
+
+def has_openai_side(env: Mapping[str, str] | None = None) -> bool:
+    """True when an OpenAI-side endpoint or key is configured."""
+    source = env if env is not None else os.environ
+    return any((source.get(name) or "").strip() for name in _OPENAI_SIDE_KEYS)
+
+
+def is_anthropic_only(env: Mapping[str, str] | None = None) -> bool:
+    """True when the Anthropic side is the only configured provider.
+
+    The canonical credential-shape test, so that backend selection, the TraceLens
+    runner and the forge fellow cannot disagree about which shape they are in.
+    Retired provider variables (``DEEPSEEK_*``) are deliberately not consulted:
+    :func:`deepseek_compat_env` migrates those onto the standard pair first.
+    """
+    return has_anthropic_side(env) and not has_openai_side(env)
+
+
+def is_openai_only(env: Mapping[str, str] | None = None) -> bool:
+    """True when the OpenAI side is the only configured provider.
+
+    The counterpart of :func:`is_anthropic_only`; see it for why the retired
+    DeepSeek variables are out of scope.
+    """
+    return has_openai_side(env) and not has_anthropic_side(env)
+
+
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 # The Anthropic Messages API version, defined once for the whole repository.
 # Per-deployment overrides go through ANTHROPIC_CUSTOM_HEADERS, which is merged
@@ -185,7 +218,7 @@ def deepseek_compat_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     legacy_url = (source.get("DEEPSEEK_BASE_URL") or "").strip()
     if not api_key and not legacy_url:
         return {}
-    if any((source.get(name) or "").strip() for name in _ANTHROPIC_SIDE_KEYS):
+    if has_anthropic_side(source):
         return {}
 
     anthropic_url, openai_url = dual_protocol_endpoint_pair(legacy_url)
@@ -205,7 +238,7 @@ def deepseek_compat_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     # The OpenAI side is adopted only when it is entirely free. Otherwise the
     # operator already runs some other gateway there, and neither its key nor
     # its model may be replaced with DeepSeek's.
-    if not any((source.get(name) or "").strip() for name in _OPENAI_SIDE_KEYS):
+    if not has_openai_side(source):
         candidates["OPENAI_BASE_URL"] = openai_url
         candidates["CODEX_MODEL"] = model
         if api_key:
@@ -338,8 +371,9 @@ def resolve_openai_client_config(
     Explicit OpenAI-side configuration always wins, so codex-only and
     dual-configured deployments resolve exactly as they did before the Anthropic
     fallback existed. Only once the OpenAI side comes up empty is the Anthropic
-    side consulted: the base URL is derived with :func:`derive_openai_base_url`
-    and the key falls back to the Anthropic gateway tokens. That is what lets the
+    side consulted: the base URL is derived with :func:`derive_openai_base_url`,
+    the key falls back to the Anthropic gateway tokens, and -- because that derived
+    URL is the same gateway host -- so do its custom headers. That is what lets the
     single-shot OpenAI-protocol call sites (proposal scorer, framework ranker,
     audit refinement) work in an Anthropic-only deployment instead of failing to
     configure.
@@ -367,15 +401,19 @@ def resolve_openai_client_config(
         )
         raise LLMConfigError(f"{key_names} not set in env (OpenAI-compatible client cannot auth)")
 
-    base_url = (
-        (source.get(base_url_env) or "").strip()
-        or (source.get("OPENAI_BASE_URL") or "").strip()
-        or (derive_openai_base_url(source.get("ANTHROPIC_BASE_URL")) or "").strip()
-    )
-    base_url = base_url or None
+    explicit_base_url = (source.get(base_url_env) or "").strip() or (source.get("OPENAI_BASE_URL") or "").strip()
+    derived_base_url = (derive_openai_base_url(source.get("ANTHROPIC_BASE_URL")) or "").strip()
+    base_url = explicit_base_url or derived_base_url or None
 
-    # OpenAI/Codex side reads only OPENAI_CUSTOM_HEADERS; gateway headers are operator-supplied.
+    # Gateway headers are operator-supplied, and they belong to an endpoint rather
+    # than to a protocol: AMD's gateway rejects a call without its subscription
+    # header, and that header is only ever written to ANTHROPIC_CUSTOM_HEADERS.
+    # So the Anthropic side is consulted exactly when the base URL was derived
+    # from it -- an explicit OPENAI_BASE_URL may well be a different host, whose
+    # headers we must not guess at.
     headers = parse_custom_headers(source.get("OPENAI_CUSTOM_HEADERS"), env=source)
+    if not headers and not explicit_base_url and derived_base_url:
+        headers = parse_custom_headers(source.get("ANTHROPIC_CUSTOM_HEADERS"), env=source)
     return OpenAIClientConfig(api_key=api_key, base_url=base_url, default_headers=headers)
 
 
@@ -1037,6 +1075,10 @@ __all__ = [
     "get_async_anthropic_client",
     "get_async_openai_client",
     "get_openai_client",
+    "has_anthropic_side",
+    "has_openai_side",
+    "is_anthropic_only",
+    "is_openai_only",
     "openai_client_kwargs",
     "parse_custom_headers",
     "provider_model_defaults",

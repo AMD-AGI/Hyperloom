@@ -431,22 +431,17 @@ def _import_sdk() -> tuple[Any, Any]:
     return sdk.query, sdk.ClaudeAgentOptions
 
 
-def _should_use_openai_tool_runner() -> bool:
-    """Return true when only an OpenAI-compatible provider is configured.
+def _should_use_codex_runner() -> bool:
+    """Return true when the Codex Agent SDK runner should run this skill.
 
-    Selects the Codex Agent SDK runner over the Claude one. Kept under its
-    original name because ``forge_submit._openai_only_provider`` documents
-    itself as mirroring this predicate.
+    An OpenAI-only deployment has no Claude credentials to drive the Claude
+    Agent SDK, so the Codex runner is the only one that can execute. The shape
+    test itself belongs to :mod:`hyperloom.common.llm_config`, so this cannot
+    disagree with backend selection or the forge fellow.
     """
-    has_openai = bool(
-        (os.environ.get("OPENAI_API_KEY") or "").strip() or (os.environ.get("OPENAI_BASE_URL") or "").strip()
-    )
-    has_anthropic = bool(
-        (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-        or (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-    )
-    return has_openai and not has_anthropic
+    from hyperloom.common import llm_config  # local import: keep module import-light
+
+    return llm_config.is_openai_only()
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:
@@ -814,7 +809,7 @@ async def run_tracelens_skill(
     )
 
     resolved_model = (model or "").strip()
-    if _should_use_openai_tool_runner() and (
+    if _should_use_codex_runner() and (
         codex_turn_runner is not None or (sdk_query_factory is None and sdk_options_cls is None)
     ):
         codex_model = resolved_model or (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
