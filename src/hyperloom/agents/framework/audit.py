@@ -400,6 +400,10 @@ def _maybe_llm_refine(
     escalates an ``already_*`` claim the static layer didn't already back with
     evidence.
 
+    The client comes from :mod:`hyperloom.common.llm_config`, the only sanctioned
+    owner of provider client construction; every skip path appends a ``risks``
+    entry and returns the static verdict unchanged.
+
     Args:
         request: The phase-audit request (carries ``model`` / creds overrides).
         static_result: The static-layer verdict.
@@ -422,8 +426,9 @@ def _maybe_llm_refine(
     if req_url:
         env_override["OPENAI_BASE_URL"] = req_url
 
+    env = {**os.environ, **env_override}
     try:
-        cfg = _llm_cfg.resolve_openai_client_config(env={**os.environ, **env_override})
+        cfg = _llm_cfg.resolve_openai_client_config(env=env)
     except _llm_cfg.LLMConfigError:
         static_result.setdefault("risks", []).append("llm refine skipped: missing OPENAI_API_KEY/OPENAI_BASE_URL")
         return static_result
@@ -433,9 +438,8 @@ def _maybe_llm_refine(
         return static_result
 
     try:
-        from openai import OpenAI  # lazy: only when use_llm
-        client: object = OpenAI(**cfg.as_kwargs())
-    except Exception:  # noqa: BLE001
+        client: object = _llm_cfg.get_openai_client(env=env)
+    except Exception:  # noqa: BLE001 — a missing/broken SDK degrades to the static verdict
         static_result.setdefault("risks", []).append("llm refine skipped: openai sdk unavailable")
         return static_result
 

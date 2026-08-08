@@ -1,0 +1,240 @@
+"""Provider selection for the forge-loop child under each credential shape.
+
+KernelForge ships both a ``claude`` and a ``codex`` agent provider, and its
+``Config.agent_backend`` defaults to ``auto``, which resolves to ``claude``. An
+OpenAI-only deployment has no Anthropic credential and no Claude CLI auth, so
+leaving the selection at ``auto`` sends every forge attempt to a provider that
+cannot authenticate. These tests lock the selection to the credential shape and
+lock out the silent provider fallback that would otherwise turn a missing Codex
+SDK back into an unauthenticated Claude run.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+_BACKENDS_DIR = Path(__file__).resolve().parent.parent / "tools" / "backends"
+sys.path.insert(0, str(_BACKENDS_DIR))
+import forge_submit  # noqa: E402
+
+_PROVIDER_ENV = (
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "CODEX_MODEL",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_provider_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in _PROVIDER_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+
+def _use_openai_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/api/v1/llm-proxy/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "ak-openai")
+
+
+def _use_anthropic_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/api/v1/llm-proxy")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ak-anthropic")
+
+
+def _capture_forge_loop_argv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[str]:
+    """Run ``_run_loop_via_cli`` with a stubbed child and return its argv."""
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    kernel = workspace / "kernel.py"
+    driver = workspace / "driver.py"
+    kernel.write_text("pass\n")
+    driver.write_text("pass\n")
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
+    captured: dict[str, list[str]] = {}
+
+    class FakeProcess:
+        pid = 4321
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            payload = {"baseline_ms": 2.0, "best_ms": 1.0}
+            return f"__FORGE_RESULT__{json.dumps(payload)}__FORGE_RESULT__", ""
+
+    def fake_popen(command, **_kwargs):
+        captured["command"] = command
+        return FakeProcess()
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
+
+    forge_submit._run_loop_via_cli(
+        worktree_kernel=str(kernel),
+        driver=str(driver),
+        workspace=str(workspace),
+        shapes={},
+        snr_threshold=30.0,
+        max_iters=1,
+        max_hours=1.0,
+        branch="forge/test/provider",
+        gpu_target="gfx950",
+        fellow="triton-fellow",
+        program_md_file="",
+        invocation_spec_file="",
+        experiments_dir=experiments,
+        forge_log=tmp_path / "forge.log",
+        timeout_s=60,
+    )
+    return captured["command"]
+
+
+def _flag_value(command: list[str], flag: str) -> str:
+    assert flag in command, f"{flag} missing from {command}"
+    return command[command.index(flag) + 1]
+
+
+def test_openai_only_selects_the_codex_provider(tmp_path, monkeypatch):
+    """OpenAI-only must pick codex explicitly instead of inheriting ``auto``."""
+    _use_openai_only(monkeypatch)
+
+    command = _capture_forge_loop_argv(tmp_path, monkeypatch)
+
+    assert _flag_value(command, "--agent-backend") == "codex"
+
+
+def test_openai_only_forwards_the_session_codex_model(tmp_path, monkeypatch):
+    """The session's CODEX_MODEL wins over KernelForge's own codex default."""
+    _use_openai_only(monkeypatch)
+    monkeypatch.setenv("CODEX_MODEL", "gpt-5.5")
+
+    command = _capture_forge_loop_argv(tmp_path, monkeypatch)
+
+    assert _flag_value(command, "--model") == "gpt-5.5"
+
+
+def test_openai_only_omits_the_model_flag_without_codex_model(tmp_path, monkeypatch):
+    """With no CODEX_MODEL pinned, defer to the codex provider's own default."""
+    _use_openai_only(monkeypatch)
+
+    command = _capture_forge_loop_argv(tmp_path, monkeypatch)
+
+    assert "--model" not in command
+
+
+def test_openai_only_disables_the_silent_claude_fallback(tmp_path, monkeypatch):
+    """A missing Codex SDK must fail loudly, not degrade into unauthenticated Claude.
+
+    KernelForge's ``agent_fallback_provider`` defaults to ``claude``, so without
+    this flag an OpenAI-only run whose Codex SDK is absent silently produces a
+    ClaudeBackend whose availability probe passes (it checks the binary, not the
+    auth) and only fails at the first real turn, as "Not logged in".
+    """
+    _use_openai_only(monkeypatch)
+
+    command = _capture_forge_loop_argv(tmp_path, monkeypatch)
+
+    assert _flag_value(command, "--agent-fallback-provider") == "none"
+
+
+def test_anthropic_only_leaves_provider_selection_untouched(tmp_path, monkeypatch):
+    """The Anthropic-side shape keeps KernelForge's own resolution."""
+    _use_anthropic_only(monkeypatch)
+
+    command = _capture_forge_loop_argv(tmp_path, monkeypatch)
+
+    assert "--agent-backend" not in command
+    assert "--agent-fallback-provider" not in command
+
+
+def test_both_sides_configured_leaves_provider_selection_untouched(tmp_path, monkeypatch):
+    """With an Anthropic credential present, the claude fellow still works."""
+    _use_openai_only(monkeypatch)
+    _use_anthropic_only(monkeypatch)
+
+    command = _capture_forge_loop_argv(tmp_path, monkeypatch)
+
+    assert "--agent-backend" not in command
+
+
+def test_openai_only_child_env_does_not_pin_the_claude_cli(monkeypatch):
+    """OpenAI-only child env must not advertise a Claude CLI it cannot authenticate."""
+    import _llm_stability_env
+
+    monkeypatch.setattr(_llm_stability_env, "apply_llm_stability_env", lambda env: None)
+    monkeypatch.setattr(forge_submit.shutil, "which", lambda _name: "/usr/local/bin/claude")
+    _use_openai_only(monkeypatch)
+    forge_submit._reset_knowledge_config_cache()
+
+    env: dict[str, str] = {}
+    forge_submit._apply_fellow_env(env)
+
+    assert "FORGE_CLAUDE_BIN" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_anthropic_only_child_env_still_pins_the_claude_cli(monkeypatch):
+    """The Anthropic-side path keeps its existing claude CLI discovery."""
+    import _llm_stability_env
+
+    monkeypatch.setattr(_llm_stability_env, "apply_llm_stability_env", lambda env: None)
+    monkeypatch.setattr(forge_submit.shutil, "which", lambda _name: "/usr/local/bin/claude")
+    monkeypatch.setattr(forge_submit.os.path, "isfile", lambda path: path == "/usr/local/bin/claude")
+    _use_anthropic_only(monkeypatch)
+    forge_submit._reset_knowledge_config_cache()
+
+    env: dict[str, str] = {}
+    forge_submit._apply_fellow_env(env)
+
+    assert env["FORGE_CLAUDE_BIN"] == "/usr/local/bin/claude"
+
+
+def test_install_sh_installs_the_codex_extra():
+    """install.sh must install kernel_agents with the codex SDK extra.
+
+    Without it ``FORGE_AGENT_BACKEND=codex`` raises CodexUnavailableError
+    ("Codex Python SDK is not installed; install kernel-agents[codex]"), which
+    the provider fallback then converts into a silent Claude run.
+    """
+    install_sh = (
+        Path(__file__).resolve().parents[3]
+        / "inference_optimizer"
+        / "assets"
+        / "install.sh"
+    )
+    text = install_sh.read_text(encoding="utf-8")
+
+    assert "[claude,codex]" in text, (
+        "kernel_agents must be installed with both provider extras so either "
+        "credential shape has a working forge fellow"
+    )
+
+
+def test_forge_loop_cli_accepts_the_provider_flags():
+    """Guard the contract: these flags must exist in the installed KernelForge CLI.
+
+    Passing an unknown option makes click exit 2 and every forge attempt REVERT,
+    so a KernelForge upgrade that renames them must fail here, not in a session.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-m", "kernel_agents.cli", "forge-loop", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        pytest.skip(f"kernel_agents CLI unavailable (rc={proc.returncode})")
+    for flag in ("--agent-backend", "--model", "--agent-fallback-provider"):
+        assert flag in proc.stdout, flag

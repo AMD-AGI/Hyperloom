@@ -837,16 +837,19 @@ ensure_kernel_agents() {
     log "kernel_agents: FORGE_PATH not set / no KernelForge checkout there; skipping optional forge-loop install"
     return 0
   fi
-  if "$PYTHON" -c "import kernel_agents.cli" >/dev/null 2>&1; then
-    log "kernel_agents already importable; skipping install"
+  # The provider SDK is part of the readiness check, not just the CLI import: a
+  # pod that already has kernel_agents but no openai_codex would skip the install
+  # and leave the OpenAI-only side with a codex provider it cannot construct.
+  if "$PYTHON" -c "import kernel_agents.cli, openai_codex" >/dev/null 2>&1; then
+    log "kernel_agents already importable; skipping install (codex SDK present)"
     return 0
   fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "kernel_agents not importable (check-only; would install from ${root})"
+    warn "kernel_agents / codex SDK not importable (check-only; would install from ${root})"
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "would run: ${PYTHON} -m pip install ${root}"
+    log "would run: ${PYTHON} -m pip install ${root}[claude,codex]"
     return 0
   fi
   log "ensuring kernel_agents from ${root} (forge-loop backend)"
@@ -859,10 +862,16 @@ ensure_kernel_agents() {
   # checkout"). Installing the root also provides forge_gemm_tune + forge_fusion,
   # so the carrier's later `import forge_fusion` guard short-circuits (verified:
   # it logs "forge kernel backend ready" with no reinstall).
-  "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "${root}"
-  "$PYTHON" -c "import kernel_agents, kernel_agents.cli" \
-    && log "kernel_agents installed OK from ${root}" \
-    || die "kernel_agents import failed after install from ${root}"
+  #
+  # Both provider extras: the forge fellow runs on the claude CLI when an
+  # Anthropic side is configured and on the codex SDK when the deployment is
+  # OpenAI-only. Installing only the base package leaves openai_codex absent, and
+  # KernelForge's provider fallback then turns that into a silent claude run that
+  # dies at its first turn on "Not logged in".
+  "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "${root}[claude,codex]"
+  "$PYTHON" -c "import kernel_agents, kernel_agents.cli, openai_codex" \
+    && log "kernel_agents installed OK from ${root} (claude + codex extras)" \
+    || die "kernel_agents / codex SDK import failed after install from ${root}"
 }
 
 # --- 1d. rocprof-compute (rocprofiler-compute) for the forge profiling stage ---

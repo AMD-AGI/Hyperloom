@@ -361,7 +361,16 @@ def test_ranker_client_none_for_anthropic_only_deploy(coord: Coordinator, monkey
 
 
 def test_ranker_client_builds_from_env(coord: Coordinator, monkeypatch) -> None:
-    pytest.importorskip("openai")
+    from hyperloom.common import llm_config
+
+    # ``raising=False``: get_async_openai_client is llm_config's client-construction
+    # contract, so stubbing it keeps this test off the real ``openai`` SDK.
+    monkeypatch.setattr(
+        llm_config,
+        "get_async_openai_client",
+        lambda **_kw: types.SimpleNamespace(chat=object()),
+        raising=False,
+    )
     coord._fa_ranker_client = None  # type: ignore[attr-defined]
     coord._proposal_scorer = None  # type: ignore[attr-defined]
     monkeypatch.setenv("OPENAI_API_KEY", "safe-test-key")

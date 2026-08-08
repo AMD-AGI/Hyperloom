@@ -14,7 +14,8 @@ Modules:
 * :mod:`llm_trace` — :class:`LLMCallRecord` closed-schema dataclass and
   :func:`append_llm_call`, the best-effort single-line appender.
 * :mod:`parse_usage` — parsers that recover ``usage`` token counts from
-  out-of-process child output (Claude CLI ``stream-json``).
+  out-of-process child output (Claude CLI ``stream-json``, Codex CLI
+  ``codex exec --json``), plus sanitized Codex failure messages.
 * :mod:`conversation_trace` — :class:`ConversationRecord` rows plus
   :func:`redact_secrets` for the conversation ledger.
 * :mod:`langfuse_emitter` — the live push sink (:func:`get_emitter`,
@@ -48,6 +49,8 @@ from .langfuse_emitter import flush_session, get_emitter
 from .parse_usage import (
     normalize_usage,
     parse_claude_stream_json_usage,
+    parse_codex_jsonl_error,
+    parse_codex_jsonl_usage,
 )
 from .trace_env import langfuse_live_enabled
 
@@ -66,6 +69,8 @@ __all__ = [
     "langfuse_live_enabled",
     "normalize_usage",
     "parse_claude_stream_json_usage",
+    "parse_codex_jsonl_error",
+    "parse_codex_jsonl_usage",
     "redact_secrets",
     "write_mcp_setup_once",
 ]
