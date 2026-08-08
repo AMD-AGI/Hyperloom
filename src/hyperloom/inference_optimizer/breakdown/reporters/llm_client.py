@@ -75,7 +75,7 @@ class OpenAIHttpClient:
         Returns:
             The reply text.
         """
-        text, _usage = llm_config.stream_chat_completion_text(
+        return llm_config.chat_completion(
             self.client,
             model=self.model,
             messages=[
@@ -84,8 +84,7 @@ class OpenAIHttpClient:
             ],
             max_tokens=self.max_output_tokens,
             temperature=0.2,
-        )
-        return text
+        ).text
 
 
 @dataclass

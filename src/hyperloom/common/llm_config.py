@@ -246,9 +246,7 @@ def provider_model_defaults(env: Mapping[str, str] | None = None) -> dict[str, s
     claude_model = (resolved.get("CLAUDE_MODEL") or "").strip() or endpoint_default_model(
         resolved.get("ANTHROPIC_BASE_URL")
     )
-    codex_model = (resolved.get("CODEX_MODEL") or "").strip() or endpoint_default_model(
-        resolved.get("OPENAI_BASE_URL")
-    )
+    codex_model = (resolved.get("CODEX_MODEL") or "").strip() or endpoint_default_model(resolved.get("OPENAI_BASE_URL"))
     candidates = {
         "CLAUDE_MODEL": claude_model,
         "CODEX_MODEL": codex_model,
@@ -741,6 +739,35 @@ class ChatCompletionResult:
     usage: object | None
 
 
+def _chat_completion_result(resp: object) -> ChatCompletionResult:
+    """Flatten one chat-completions response onto :class:`ChatCompletionResult`."""
+    choice = resp.choices[0]  # type: ignore[attr-defined]
+    return ChatCompletionResult(
+        text=choice.message.content or "",
+        finish_reason=getattr(choice, "finish_reason", None),
+        usage=getattr(resp, "usage", None),
+    )
+
+
+def chat_completion(
+    client: object,
+    **params: object,
+) -> ChatCompletionResult:
+    """Non-streaming chat completion; returns text, finish reason and usage.
+
+    Transport and API errors propagate: each caller tags them with its own role
+    context, and absorbing them here would hide an unreachable gateway.
+
+    Args:
+        client: A client from :func:`get_openai_client`.
+        **params: ``chat.completions.create`` parameters.
+
+    Returns:
+        The flattened :class:`ChatCompletionResult` for the first choice.
+    """
+    return _chat_completion_result(client.chat.completions.create(**params))  # type: ignore[union-attr]
+
+
 async def achat_completion(
     client: object,
     **params: object,
@@ -757,13 +784,7 @@ async def achat_completion(
     Returns:
         The flattened :class:`ChatCompletionResult` for the first choice.
     """
-    resp = await client.chat.completions.create(**params)  # type: ignore[union-attr]
-    choice = resp.choices[0]
-    return ChatCompletionResult(
-        text=choice.message.content or "",
-        finish_reason=getattr(choice, "finish_reason", None),
-        usage=getattr(resp, "usage", None),
-    )
+    return _chat_completion_result(await client.chat.completions.create(**params))  # type: ignore[union-attr]
 
 
 def _sdk_field(obj: object, key: str) -> object:
@@ -1006,6 +1027,7 @@ __all__ = [
     "aresponse",
     "astream_chat_completion_text",
     "build_http_timeout",
+    "chat_completion",
     "claude_sdk_env_options",
     "deepseek_compat_env",
     "derive_openai_base_url",

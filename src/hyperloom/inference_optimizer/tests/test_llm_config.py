@@ -20,6 +20,7 @@ from hyperloom.common.llm_config import (
     LLMConfigError,
     aanthropic_messages,
     achat_completion,
+    chat_completion,
     anthropic_messages,
     apply_reasoning_effort,
     aresponse,
@@ -842,6 +843,62 @@ async def test_achat_completion_propagates_transport_errors():
     """A dead gateway must reach the caller that tags it with role context."""
     with pytest.raises(RuntimeError, match="gateway down"):
         await achat_completion(_StubClient(RuntimeError("gateway down")), model="m")
+
+
+# ---- chat_completion ----
+class _SyncStubCompletions:
+    def __init__(self, outcome: Any) -> None:
+        self._outcome = outcome
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **params: Any) -> Any:
+        self.calls.append(params)
+        if isinstance(self._outcome, BaseException):
+            raise self._outcome
+        return self._outcome
+
+
+class _SyncStubClient:
+    def __init__(self, outcome: Any) -> None:
+        self.completions = _SyncStubCompletions(outcome)
+        self.chat = types.SimpleNamespace(completions=self.completions)
+
+
+def test_chat_completion_flattens_choice_and_keeps_usage_verbatim():
+    usage = types.SimpleNamespace(prompt_tokens=11, completion_tokens=7)
+    choice = types.SimpleNamespace(message=types.SimpleNamespace(content="hello"), finish_reason="stop")
+    client = _SyncStubClient(types.SimpleNamespace(choices=[choice], usage=usage))
+    result = chat_completion(client, model="m", messages=[])
+    assert (result.text, result.finish_reason) == ("hello", "stop")
+    assert result.usage is usage
+    assert client.completions.calls == [{"model": "m", "messages": []}]
+
+
+def test_chat_completion_tolerates_missing_content_finish_and_usage():
+    choice = types.SimpleNamespace(message=types.SimpleNamespace(content=None))
+    client = _SyncStubClient(types.SimpleNamespace(choices=[choice]))
+    result = chat_completion(client, model="m")
+    assert result.text == ""
+    assert result.finish_reason is None
+    assert result.usage is None
+
+
+def test_chat_completion_propagates_transport_errors():
+    """A dead gateway must reach the caller that tags it with role context."""
+    with pytest.raises(RuntimeError, match="gateway down"):
+        chat_completion(_SyncStubClient(RuntimeError("gateway down")), model="m")
+
+
+def test_chat_completion_does_not_request_a_stream():
+    """The non-streaming entry point must not turn into a streamed request.
+
+    Callers such as the breakdown reporter depend on the plain request shape,
+    which some gateways treat differently from a streamed one.
+    """
+    choice = types.SimpleNamespace(message=types.SimpleNamespace(content="x"))
+    client = _SyncStubClient(types.SimpleNamespace(choices=[choice]))
+    chat_completion(client, model="m", messages=[])
+    assert "stream" not in client.completions.calls[0]
 
 
 # ---- aresponse ----
