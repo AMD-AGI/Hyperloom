@@ -602,6 +602,33 @@ def test_parse_failure_flags_analysis_degraded(tmp_path, capsys, monkeypatch):
     assert manifest["analysis_degraded"] is True
 
 
+def test_truncated_stream_is_recovered_but_marked_degraded(tmp_path, capsys):
+    """Partial recovery must not make a truncated trace look healthy."""
+    good = {
+        "cat": "kernel",
+        "ph": "X",
+        "name": "recovered_kernel",
+        "ts": 10,
+        "dur": 20,
+        "args": {"correlation": 1},
+    }
+    trace = tmp_path / "truncated.trace.json"
+    trace.write_text(
+        '{"traceEvents": [' + json.dumps(good) + ', {"cat": "kernel", "name": "cut',
+        encoding="utf-8",
+    )
+    _, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert result["analysis_degraded"] is True
+    assert {row["name"] for row in result["hot_kernels"]} == {"recovered_kernel"}
+    codes = {warning["code"] for warning in result["trace_health_warnings"]}
+    assert "bypass_trace_stream_incomplete" in codes
+    assert "bypass_trace_parse_failed" not in codes
+    summary = json.loads(Path(result["artifact_paths"]["tracelens_summary"]).read_text())
+    assert summary["analysis_degraded"] is True
+    manifest = json.loads(Path(result["artifact_paths"]["trace_input_manifest"]).read_text())
+    assert manifest["analysis_degraded"] is True
+
+
 def test_healthy_trace_is_not_degraded(tmp_path, capsys, monkeypatch):
     trace = tmp_path / "ok.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
