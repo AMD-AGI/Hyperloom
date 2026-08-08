@@ -31,6 +31,7 @@ from hyperloom.common.llm_config import (
     LLMConfigError,
     achat_completion,
     apply_reasoning_effort,
+    aresponse,
     get_async_openai_client,
 )
 from hyperloom.common.jsonio import extract_first_json_with_key
@@ -91,48 +92,6 @@ _BARE_JSON_RE = re.compile(r"(\{.*?\"intents\".*\})", re.DOTALL)
 def _extract_envelope(text: str) -> dict | None:
     """Pull the first valid ``{"intents": ...}`` envelope out of a model reply."""
     return extract_first_json_with_key(text, "intents", _BARE_JSON_RE)
-
-
-def _field(obj: Any, key: str) -> Any:
-    """Read ``key`` from a dict or an attribute-carrying object (SDK model).
-
-    The OpenAI SDK returns pydantic objects; tests use plain dicts/dataclasses.
-    This tolerates both shapes.
-    """
-    if isinstance(obj, dict):
-        return obj.get(key)
-    return getattr(obj, key, None)
-
-
-def _extract_responses_output(resp: Any) -> tuple[str, list[str]]:
-    """Extract assistant text + web_search citation URLs from a Responses result.
-
-    Walks the ``output`` array, concatenating every ``output_text`` block found
-    on ``message`` items and collecting any ``url_citation`` annotation URLs.
-
-    Args:
-        resp: A Responses API result (SDK object or dict).
-
-    Returns:
-        ``(text, citations)`` — the joined assistant text and the ordered list of
-        cited URLs (possibly empty).
-    """
-    texts: list[str] = []
-    citations: list[str] = []
-    for item in _field(resp, "output") or []:
-        if _field(item, "type") != "message":
-            continue
-        for block in _field(item, "content") or []:
-            if _field(block, "type") != "output_text":
-                continue
-            chunk = _field(block, "text") or ""
-            if chunk:
-                texts.append(chunk)
-            for ann in _field(block, "annotations") or []:
-                url = _field(ann, "url")
-                if isinstance(url, str) and url:
-                    citations.append(url)
-    return "\n".join(texts), citations
 
 
 @dataclass
@@ -340,8 +299,8 @@ class CodexBackend:
         if "reasoning_effort" in _eff:
             params["reasoning"] = {"effort": _eff["reasoning_effort"]}
         try:
-            resp = await asyncio.wait_for(
-                self._client.responses.create(**params),
+            result = await asyncio.wait_for(
+                aresponse(self._client, **params),
                 timeout=self.call_timeout_s,
             )
         except asyncio.TimeoutError as exc:
@@ -351,15 +310,10 @@ class CodexBackend:
         except Exception as exc:  # noqa: BLE001
             raise LLMCallFailed(f"Codex Responses API call failed: {exc!r}") from exc
 
-        text, citations = _extract_responses_output(resp)
-        finish = _field(resp, "status")
-        usage = _field(resp, "usage")
-        input_tokens = safe_int(_field(usage, "input_tokens"))
-        output_tokens = safe_int(_field(usage, "output_tokens"))
         extra_meta: dict[str, Any] = {}
-        if citations:
-            extra_meta["web_search_citations"] = citations
-        return text, finish, input_tokens, output_tokens, extra_meta
+        if result.citations:
+            extra_meta["web_search_citations"] = result.citations
+        return result.text, result.status, result.input_tokens, result.output_tokens, extra_meta
 
 
-__all__ = ["CodexBackend", "_extract_envelope", "_extract_responses_output"]
+__all__ = ["CodexBackend", "_extract_envelope"]

@@ -10,10 +10,11 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.llm_config import ResponsesResult
 from hyperloom.orchestrator.roles import CodexBackend
 from hyperloom.orchestrator.roles import codex as codex_module
 from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed
-from hyperloom.orchestrator.roles.codex import _extract_envelope, _extract_responses_output
+from hyperloom.orchestrator.roles.codex import _extract_envelope
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentType,
     NoIntentEmitted,
@@ -344,51 +345,44 @@ def test_codex_refuses_to_auth_with_anthropic_token(monkeypatch):
 # Web search (Responses API) path
 
 
-def test_extract_responses_output_text_and_citations():
-    resp = {
-        "output": [
-            {"type": "reasoning", "content": []},
-            {"type": "web_search_call", "action": {"query": "x"}},
-            {
-                "type": "message",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "text": "the answer",
-                        "annotations": [
-                            {"type": "url_citation", "url": "https://a.example"},
-                            {"type": "url_citation", "url": "https://b.example"},
-                        ],
-                    }
-                ],
-            },
-        ]
-    }
-    text, citations = _extract_responses_output(resp)
-    assert text == "the answer"
-    assert citations == ["https://a.example", "https://b.example"]
+@pytest.mark.asyncio
+async def test_web_search_routes_through_the_shared_responses_entry_point(monkeypatch):
+    """The Responses call is llm_config's; codex only supplies params and maps the result."""
+    captured: dict[str, Any] = {}
+    result = ResponsesResult(
+        text='{"intents": [{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}]}',
+        citations=["https://cited.example"],
+        status="completed",
+        input_tokens=13,
+        output_tokens=5,
+    )
+
+    async def _fake_aresponse(client, **params):
+        captured["client"] = client
+        captured["params"] = params
+        return result
+
+    monkeypatch.setattr(codex_module, "aresponse", _fake_aresponse)
+    backend = _make_ws_backend([])
+    res = await backend.run("p", system_prompt="sys")
+
+    assert captured["client"] is backend._client
+    assert captured["params"]["tools"][0]["type"] == "web_search"
+    assert captured["params"]["instructions"] == "sys"
+    # No bare SDK call was made: the fake stood in for the whole endpoint.
+    assert backend._client.responses.calls == []
+    assert res.metadata["finish_reason"] == "completed"
+    assert res.metadata["input_tokens"] == 13
+    assert res.metadata["output_tokens"] == 5
+    assert res.metadata["web_search_citations"] == ["https://cited.example"]
 
 
-def test_extract_responses_output_empty():
-    assert _extract_responses_output({"output": []}) == ("", [])
-    assert _extract_responses_output({}) == ("", [])
-
-
-def test_extract_responses_output_skips_non_text_content_block():
-    # A message whose content mixes a non-output_text block (skipped) with a
-    # real output_text block -> only the text survives.
-    resp = {
-        "output": [
-            {
-                "type": "message",
-                "content": [
-                    {"type": "refusal", "text": "ignored"},
-                    {"type": "output_text", "text": "kept", "annotations": []},
-                ],
-            }
-        ]
-    }
-    assert _extract_responses_output(resp) == ("kept", [])
+@pytest.mark.asyncio
+async def test_web_search_omits_citations_metadata_when_there_are_none():
+    reply = '```json\n{"intents": [{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}]}\n```'
+    b = _make_ws_backend([reply])
+    res = await b.run("p")
+    assert "web_search_citations" not in res.metadata
 
 
 @pytest.mark.asyncio

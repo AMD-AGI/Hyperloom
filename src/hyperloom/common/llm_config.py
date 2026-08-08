@@ -430,6 +430,94 @@ async def achat_completion(
     )
 
 
+def _sdk_field(obj: object, key: str) -> object:
+    """Read ``key`` off a dict or an attribute-carrying object.
+
+    Responses-API results arrive as pydantic models from the SDK and as plain
+    dicts from fixtures and pass-through gateways; both shapes reach here.
+    """
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+
+def _sdk_token_count(usage: object, key: str) -> int:
+    """Read one ``usage`` counter as an int; ``0`` when absent or not numeric."""
+    try:
+        return int(_sdk_field(usage, key) or 0)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+@dataclass(frozen=True)
+class ResponsesResult:
+    """One Responses-API result, flattened for Hyperloom callers.
+
+    Token counters are flattened here, unlike :class:`ChatCompletionResult`
+    which hands ``usage`` back untouched: the Responses API fixes their names,
+    whereas chat-completions callers still map provider-specific spellings.
+
+    Attributes:
+        text: The ``output_text`` blocks of every ``message`` item, newline-joined.
+        citations: Ordered ``url_citation`` URLs annotated on those blocks, which
+            is where server-side tools such as ``web_search`` report sources.
+        status: The response ``status``, standing in for the ``finish_reason`` a
+            chat completion would carry.
+        input_tokens: Prompt tokens from ``usage``.
+        output_tokens: Generated tokens from ``usage``.
+    """
+
+    text: str
+    citations: list[str]
+    status: str | None
+    input_tokens: int
+    output_tokens: int
+
+
+async def aresponse(
+    client: object,
+    **params: object,
+) -> ResponsesResult:
+    """Async Responses-API call; returns text, citations, status and token counts.
+
+    Server-side tools resolve within this single call, so there is no
+    client-side tool loop to drive. Transport and API errors propagate: each
+    caller tags them with its own role context, and absorbing them here would
+    hide an unreachable gateway.
+
+    Args:
+        client: A client from :func:`get_async_openai_client`.
+        **params: ``responses.create`` parameters.
+
+    Returns:
+        The flattened :class:`ResponsesResult`.
+    """
+    resp = await client.responses.create(**params)  # type: ignore[union-attr]
+    texts: list[str] = []
+    citations: list[str] = []
+    for item in _sdk_field(resp, "output") or []:  # type: ignore[union-attr]
+        if _sdk_field(item, "type") != "message":
+            continue
+        for block in _sdk_field(item, "content") or []:  # type: ignore[union-attr]
+            if _sdk_field(block, "type") != "output_text":
+                continue
+            chunk = _sdk_field(block, "text") or ""
+            if chunk:
+                texts.append(str(chunk))
+            for ann in _sdk_field(block, "annotations") or []:  # type: ignore[union-attr]
+                url = _sdk_field(ann, "url")
+                if isinstance(url, str) and url:
+                    citations.append(url)
+    usage = _sdk_field(resp, "usage")
+    return ResponsesResult(
+        text="\n".join(texts),
+        citations=citations,
+        status=_sdk_field(resp, "status"),  # type: ignore[arg-type]
+        input_tokens=_sdk_token_count(usage, "input_tokens"),
+        output_tokens=_sdk_token_count(usage, "output_tokens"),
+    )
+
+
 def stream_chat_completion_text(
     client: object,
     **params: object,
@@ -477,8 +565,10 @@ __all__ = [
     "ChatCompletionResult",
     "LLMConfigError",
     "OpenAIClientConfig",
+    "ResponsesResult",
     "achat_completion",
     "apply_reasoning_effort",
+    "aresponse",
     "astream_chat_completion_text",
     "build_http_timeout",
     "claude_sdk_env_options",
