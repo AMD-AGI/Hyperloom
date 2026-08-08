@@ -391,10 +391,13 @@ def is_high_accuracy_risk(
 def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
     """Read a scriptable (server-less) quality gate from the bench report.
 
-    Scriptable workloads (e.g. xDiT diffusion) cannot run a GSM8K eval; their
-    bench script computes an image-quality gate (LPIPS/SSIM/MSE vs a fixed
-    reference) embedded in ``benchmark_report.json`` as a ``quality_gate``
-    block. This reads the most recent such block in ``workspace``.
+    Scriptable workloads cannot run a GSM8K eval, so their bench script decides
+    for itself what correctness means and embeds the verdict in
+    ``benchmark_report.json`` as a ``quality_gate`` block. xDiT diffusion
+    compares an image (LPIPS/SSIM/MSE vs a fixed reference); an operator-supplied
+    ``custom`` workload may use any measure it likes and report only ``passed``.
+    This reads the most recent such block in ``workspace`` without interpreting
+    it — see :func:`quality_gate_passed` for how a verdict is derived.
 
     Args:
         workspace (Path | str): The benchmark workspace to search recursively

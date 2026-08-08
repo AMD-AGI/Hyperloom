@@ -108,27 +108,91 @@ class MachinePhase(PhaseHandler):
         # Mirror persisted explore_enabled flag; --no-explore collapses to KERNEL/SWEEP. EXPLORE is a phase, not a role.
         return bool(self.shared_state.explore_enabled)
 
+    async def _inflight_kernel_task_ids(self) -> tuple[str, ...]:
+        """Return the ids of queued/running tasks doing KERNEL-lane work.
+
+        The task registry, not the kernel ledger, is what tells the idle guard
+        whether the phase is genuinely busy: a kernel build or benchmark can
+        occupy half an hour without touching a single ledger field while ticks
+        keep advancing every few seconds. Queued counts as in flight alongside
+        running, because a task waiting on a resource lane is work the phase is
+        committed to, not dead air.
+
+        The kind filter is ``PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]`` — the same
+        allowlist the transition path uses to cancel work incompatible with a
+        phase — so any action kind newly admitted to KERNEL is covered without a
+        second list to keep in sync.
+
+        Returns:
+            tuple[str, ...]: Sorted ids of in-flight kernel-lane tasks.
+        """
+        kinds = _phase_state.PHASE_ALLOWED_ACTIONS.get(
+            _phase_state.PHASE_KERNEL_AGENT,
+            frozenset(),
+        )
+        tasks = list(await self.tasks.queued()) + list(await self.tasks.running())
+        return tuple(
+            sorted(str(task.task_id) for task in tasks if str(getattr(task, "kind", "") or "").strip() in kinds)
+        )
+
+    async def _track_kernel_idle_streak(self) -> None:
+        """Advance or reset the KERNEL idle-streak counters for this tick.
+
+        ``exit_normal_kernel`` winds KERNEL down to SWEEP once the streak proves
+        the phase has stopped moving. The streak is measured against an
+        observable progress fingerprint rather than ``kernel_work_pending``: that
+        predicate answers "does the ledger still list something unresolved",
+        which stays true forever once an attempt can no longer be advanced, and
+        it was resetting the counter on every one of 1130 consecutive idle ticks.
+
+        Three outcomes per tick:
+
+        * the fingerprint changed — something moved, so the streak restarts;
+        * kernel-lane work is in flight — the phase is legitimately busy, so the
+          streak is frozen AND its clock rebased, or a long build would silently
+          accumulate idle time and trip the guard mid-build;
+        * otherwise — nothing happened and nothing is running, so the streak
+          grows.
+
+        The tick counter can advance more than once per coordinator tick (the
+        phase machine is scanned several times per tick); that imprecision is
+        harmless because the wall-clock floor, not the tick count, is what
+        actually decides when the guard may fire.
+        """
+        state = self.shared_state
+        if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_KERNEL_AGENT:
+            state.kernel_idle_ticks = 0
+            state.kernel_progress_fingerprint = ""
+            state.kernel_idle_since_unix = 0.0
+            return
+        import time as _time
+
+        now = _time.time()
+        inflight = await self._inflight_kernel_task_ids()
+        fingerprint = _phase_state.compute_kernel_progress_fingerprint(
+            state,
+            inflight_task_ids=inflight,
+        )
+        if fingerprint != str(getattr(state, "kernel_progress_fingerprint", "") or ""):
+            state.kernel_progress_fingerprint = fingerprint
+            state.kernel_idle_ticks = 0
+            state.kernel_idle_since_unix = now
+            return
+        if inflight:
+            state.kernel_idle_since_unix = now
+            return
+        # Only reachable after a tick that opened the streak above, so
+        # ``kernel_idle_since_unix`` is already stamped whenever the counter is
+        # non-zero — the pairing the guard's wall-clock floor relies on.
+        state.kernel_idle_ticks = int(getattr(state, "kernel_idle_ticks", 0) or 0) + 1
+
     async def _advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick.
 
         Priority order (Inv-8.2): abort > exit_terminal > exit_normal, per phase_state.compute_next_phase.
         """
         state = self.shared_state
-        # KERNEL_AGENT idle-spin bookkeeping: count consecutive ticks with no
-        # actionable kernel work so exit_normal_kernel can wind down to SWEEP
-        # instead of spinning until the wall-clock cap (the escalate-hint handoff
-        # is unavailable — PolicyGate denies escalate_strategy_change for the
-        # kernel_agent role). Reset outside KERNEL or whenever work reappears.
-        try:
-            if str(getattr(state, "phase", "") or "").upper() == _phase_state.PHASE_KERNEL_AGENT:
-                if _phase_state.kernel_work_pending(state):
-                    state.kernel_idle_ticks = 0
-                else:
-                    state.kernel_idle_ticks = int(getattr(state, "kernel_idle_ticks", 0) or 0) + 1
-            elif int(getattr(state, "kernel_idle_ticks", 0) or 0):
-                state.kernel_idle_ticks = 0
-        except Exception:  # noqa: BLE001 — advisory bookkeeping is best-effort
-            log.debug("kernel idle-tick bookkeeping failed", exc_info=True)
+        await self._track_kernel_idle_streak()
         max_hours_arg: float | None = None
         mm = float(getattr(state, "max_minutes", 0) or 0.0)
         if mm > 0:

@@ -297,6 +297,63 @@ def test_deterministic_main_fails_before_high_idle_gate(
     assert "Deterministic TraceLens pipeline failed" in result["error"]
 
 
+def test_agent_dry_run_initializes_route_and_writes_resolution_artifact(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    """Dry-run must not read a route variable initialized only in live mode."""
+    import json as _json
+
+    trace = tmp_path / "trace.json"
+    trace.write_text('{"traceEvents": []}', encoding="utf-8")
+    source = tmp_path / "kernel.py"
+    source.write_text("def kernel():\n    pass\n", encoding="utf-8")
+    report = tmp_path / "trace_report.json"
+    monkeypatch.setattr(
+        tla,
+        "analyze_trace_files",
+        lambda *_args, **_kwargs: [
+            {
+                "kernel_id": "k001",
+                "name": "kernel",
+                "gpu_pct": 100.0,
+                "duration_us": 1.0,
+                "source_file": str(source),
+                "source_type": "python",
+                "source_resolution_method": "name_grep",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        tla,
+        "write_reports",
+        lambda *_args, **_kwargs: {"trace_report_path": str(report)},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "tracelens_analysis.py",
+            "--trace-input",
+            str(trace),
+            "--workspace-path",
+            str(tmp_path / "workspace"),
+            "--analysis-route",
+            "agent",
+            "--dry-run",
+        ],
+    )
+
+    assert tla.main() == 0
+    result = _json.loads(capsys.readouterr().out)
+    resolution_path = Path(result["artifact_paths"]["kernel_source_resolution"])
+    assert resolution_path.is_file()
+    assert _json.loads(resolution_path.read_text(encoding="utf-8"))["entries"][0][
+        "source_file"
+    ] == str(source)
+
+
 # A path — is_kernel_event strict cat == 'kernel'
 def test_a_filters_python_function_synchronize():
     """The exact event that ranked first in the buggy resume trace."""
@@ -3059,13 +3116,14 @@ def test_resolve_launcher_via_hardcoded_fallback(tmp_path, monkeypatch):
     assert func == "rmsnorm2d_fwd_with_add"
 
 
-def test_resolve_launcher_returns_none_for_absolute_path():
-    """Already-absolute launcher paths return None so the caller preserves the original string."""
-    assert (
-        tlr._resolve_launcher_to_abs_source(
-            "/sgl-workspace/aiter/aiter/ops/rmsnorm.py(62): fn",
-        )
-        is None
+def test_resolve_launcher_splits_an_absolute_annotated_path():
+    """Absolute launchers keep their path while separating line and function."""
+    assert tlr._resolve_launcher_to_abs_source(
+        "/sgl-workspace/aiter/aiter/ops/rmsnorm.py(62): fn",
+    ) == (
+        "/sgl-workspace/aiter/aiter/ops/rmsnorm.py",
+        62,
+        "fn",
     )
 
 
@@ -4741,3 +4799,54 @@ def test_deterministic_extract_tolerates_null_efficiency_and_impact(tmp_path):
     # member impact_score is null -> falls back to the finding-level score.
     assert result[0]["impact_score"] == 12.5
     assert result[0]["duration_us"] == 520223.0
+
+
+# --- idle gate must honor cuda/HIP-graph under-recording (regression) ---
+# A graph-mode capture under-records replays (profiler activity-buffer overflow),
+# so idle% is inflated. The bypass route already skips its idle gate in that
+# case; the TraceLens route must do the same instead of suppressing every hot
+# kernel on a workload that is actually compute-bound.
+
+def test_idle_gate_graph_guard_skips_suppression_when_under_recorded(monkeypatch):
+    monkeypatch.setattr(
+        tla,
+        "_graph_coverage_from_raw_trace",
+        lambda _tp: {"graph_under_recorded": True, "graph_launch_count": 8},
+    )
+    threshold, high_idle, graph_warn = tla._evaluate_idle_gate_with_graph_guard(
+        95.0, Path("analysis.md"), "raw.trace.json"
+    )
+    assert threshold == 80.0
+    assert high_idle is None  # NOT suppressed
+    assert graph_warn is not None
+    assert graph_warn["code"] == "bypass_graph_under_recorded"
+    assert graph_warn["graph_launch_count"] == 8
+
+
+def test_idle_gate_graph_guard_applies_gate_when_not_under_recorded(monkeypatch):
+    monkeypatch.setattr(tla, "_graph_coverage_from_raw_trace", lambda _tp: {})
+    threshold, high_idle, graph_warn = tla._evaluate_idle_gate_with_graph_guard(
+        95.0, Path("analysis.md"), "raw.trace.json"
+    )
+    assert threshold == 80.0
+    assert graph_warn is None
+    assert high_idle is not None  # genuinely idle -> suppress
+    assert high_idle["code"] == "high_gpu_idle_pct"
+
+
+def test_idle_gate_graph_guard_noop_below_threshold(monkeypatch):
+    # Below the threshold the guard must not even probe the trace.
+    def _boom(_tp):  # pragma: no cover - must not be called
+        raise AssertionError("graph coverage probed below threshold")
+
+    monkeypatch.setattr(tla, "_graph_coverage_from_raw_trace", _boom)
+    threshold, high_idle, graph_warn = tla._evaluate_idle_gate_with_graph_guard(
+        10.0, Path("analysis.md"), "raw.trace.json"
+    )
+    assert (high_idle, graph_warn) == (None, None)
+
+
+def test_graph_coverage_from_raw_trace_never_raises():
+    # Missing/unreadable trace must degrade to {} (fall back to the plain gate).
+    assert tla._graph_coverage_from_raw_trace(None) == {}
+    assert tla._graph_coverage_from_raw_trace("/no/such/trace.json") == {}

@@ -3,28 +3,201 @@
 
 """Knowledge-base selector + contributor for framework-agent.
 
-``KB_ROOT`` is resolved at call time via ``_resolve_kb_root()`` (under
-``${FRAMEWORK_AGENT_KB_DIR}``, with a test fallback) so tests can monkeypatch
-the environment. :func:`synthesize_findings` distils :class:`Finding` records
-into a markdown blob for ``contribute_to_kb``; the default path is pure-Python
-(zero deps), ``with_llm=True`` lazy-imports ``claude_agent_sdk``. Per-domain
-priority order is ``empirical_kb.md`` -> ``shared_pitfalls.md`` -> rest.
+The KB splits in two. :func:`packaged_kb_root` is read-only seed data shipped
+in the wheel; :func:`mutable_kb_root` is the per-deployment partition this
+session reads and writes, and is the single owner of that path for both this
+module and the orchestrator's ``kb_writeback``. Both resolve at call time so
+tests can monkeypatch the environment. :func:`synthesize_findings` distils
+:class:`Finding` records into a markdown blob for ``contribute_to_kb``; the
+default path is pure-Python (zero deps), ``with_llm=True`` lazy-imports
+``claude_agent_sdk``. Per-domain priority order is ``empirical_kb.md`` ->
+``shared_pitfalls.md`` -> rest.
 """
 
 from __future__ import annotations
 
 import datetime
 import json
+import logging
 import os
+import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from .models import Finding
 
+_log = logging.getLogger(__name__)
+
 
 # Per-framework KB partition root under ``<KB_ROOT>/framework_optimization/``.
 _FRAMEWORK_OPTIMIZATION_ROOT: str = "framework_optimization"
+
+#: The only supported override for the mutable KB root; both this module and
+#: ``kb_writeback`` honour it. It reaches the process through the
+#: ``INFERENCE_OPTIMIZER_`` prefix rule in the ``common/env_safety`` dotenv
+#: allowlist, which is a prefix rule rather than an entry for this name.
+KB_ROOT_ENV: str = "INFERENCE_OPTIMIZER_FA_KB_PATH"
+
+#: Workspace subdirectory holding this KB. Deliberately not ``kb``: that is the
+#: legacy recipe root (``inference_optimizer.cli.kb._legacy_recipe_root``, still
+#: read by the one-time recipe migration), and ``list_domains`` reports every
+#: directory under this root as a framework domain, so sharing it would surface
+#: recipe trees as framework domains. The current recipe root is
+#: ``<workspace>/knowledge`` and never collided.
+_MUTABLE_KB_DIRNAME: str = "framework-kb"
+
+#: Where the writer put this partition before it was given its own directory.
+#: Same value as ``inference_optimizer.cli.kb._legacy_recipe_root``'s leaf, which
+#: this package cannot import; the guard test asserts they still agree.
+_LEGACY_WORKSPACE_KB_DIRNAME: str = "kb"
+
+#: Workspace root when ``USER_DATA_PATH`` is unset. Mirrors
+#: ``session.paths.DEFAULT_SESSION_DIR``, which this package cannot import:
+#: the ``fa`` CLI runs standalone and must not depend on inference_optimizer.
+_DEFAULT_WORKSPACE_ROOT: str = "/workspace/hyperloom"
+
+#: Withdrawn override. Only the reader honoured it, so setting it split the KB
+#: in two. ``FRAMEWORK_AGENT_ROOT`` is deliberately absent: it means "where
+#: this skill is installed", is used for other purposes, and never reached the
+#: reader anyway because no installer exports it.
+_REMOVED_KB_ROOT_ENV: str = "FRAMEWORK_AGENT_KB_DIR"
+
+
+def prepare_kb_environment() -> None:
+    """Start-up sequence for the framework KB: report the environment, then migrate.
+
+    Both entry points that can reach this KB — the inference_optimizer preflight
+    and the standalone ``fa`` CLI — call this one function, so a future start-up
+    step is added in one place instead of being remembered in two.
+
+    **Cannot stop a session.** Nothing this KB does at start-up is worth refusing
+    to run over: the phase treats an unreadable or empty ledger as a cold start,
+    and a session that disabled the phase never reads it at all. The guarantee is
+    enforced here rather than left to each step, so a step added later inherits
+    it; ``test_start_up_never_raises`` holds the line. Problems are announced at
+    warning level, which is where an operator can act on them.
+    """
+    try:
+        check_kb_configuration()
+        migrate_legacy_partition_once()
+    except Exception:  # noqa: BLE001 — start-up for an advisory KB may not fail a run
+        _log.warning("FRAMEWORK KB: start-up preparation failed; continuing without it", exc_info=True)
+
+
+def check_kb_configuration() -> None:
+    """Report an environment naming a KB variable this build no longer reads.
+
+    Announced, not rejected. The withdrawn override was dangerous because only
+    the reader honoured it, so setting it split the KB in two without saying so.
+    Now that the reader and ``kb_writeback`` both resolve through
+    :func:`mutable_kb_root`, it is inert: the KB lands in the same correct place
+    whether or not it is exported. Refusing to start would guard nothing and
+    would strand a deployment still carrying it in a file someone forgot about.
+
+    Names the resolved root as well as the replacement, so an operator who did
+    mean to move the KB can see where it actually went.
+    """
+    if not os.environ.get(_REMOVED_KB_ROOT_ENV, "").strip():
+        return
+    _log.warning(
+        "FRAMEWORK KB: %s is set but no longer read. It only ever redirected the reader, which is "
+        "how reads and writes came to point at different places; it is now ignored and this KB "
+        "resolves to %s. Use %s instead — that one moves both halves together.",
+        _REMOVED_KB_ROOT_ENV,
+        mutable_kb_root(),
+        KB_ROOT_ENV,
+    )
+
+
+def migrate_legacy_partition_once() -> Path | None:
+    """Carry the framework partition over from the legacy ``<workspace>/kb`` root.
+
+    Until this KB was given its own directory, the writer put the ledger under
+    ``<workspace>/kb/framework_optimization``. The writer was working, so every
+    deployment that ever ran a FRAMEWORK phase has real data there — leaving it
+    behind silently empties the dedup ledger and re-proposes PRs that already
+    lost an accuracy gate.
+
+    Never raises. A missing ledger is a cold start, which the phase handles, so
+    this is a convenience and must not be able to stop a session — least of all
+    a ``--no-framework-agent`` one that will never read this KB. A full disk or
+    one unreadable file therefore costs a warning, not the run.
+
+    Only runs when the destination has no framework data yet, so it can never
+    overwrite a live partition. Skipped entirely when :data:`KB_ROOT_ENV` is
+    set: the operator named a location, and the legacy default was never theirs.
+    The source is left in place.
+
+    Returns:
+        The destination partition when data was migrated, else ``None``.
+    """
+    if os.environ.get(KB_ROOT_ENV, "").strip():
+        return None
+
+    workspace = Path(os.environ.get("USER_DATA_PATH", "").strip() or _DEFAULT_WORKSPACE_ROOT).expanduser()
+    source = workspace / _LEGACY_WORKSPACE_KB_DIRNAME / _FRAMEWORK_OPTIMIZATION_ROOT
+    destination = framework_optimization_root()
+
+    try:
+        if not source.is_dir() or not any(source.iterdir()):
+            return None
+        if destination.exists() and any(destination.iterdir()):
+            return None
+        _copy_partition_atomically(source, destination)
+    except Exception:  # noqa: BLE001 — a convenience copy may not stop the run
+        _log.warning(
+            "FRAMEWORK KB: could not carry the legacy partition over from %s; continuing with "
+            "whatever is at %s. The FRAMEWORK phase treats a missing ledger as a cold start, so "
+            "it may re-propose PRs it has already tried.",
+            source,
+            destination,
+            exc_info=True,
+        )
+        return None
+
+    _log.warning(
+        "FRAMEWORK KB: migrated the legacy partition %s -> %s. The source is left in place; "
+        "remove it once the new location looks right.",
+        source,
+        destination,
+    )
+    return destination
+
+
+def _copy_partition_atomically(source: Path, destination: Path) -> None:
+    """Copy ``source`` onto a not-yet-existing ``destination`` in one visible step.
+
+    Staged and renamed so an interrupted copy cannot leave a half-populated
+    destination that the next start-up would read as a live partition.
+
+    The staging directory is unique per process and sits beside the KB root
+    rather than inside it. Two starts sharing a ``USER_DATA_PATH`` (the
+    orchestrator and the ``fa`` CLI, say) would otherwise stage onto the same
+    path and delete each other's work; and ``list_domains`` reports every
+    directory under the root as a framework domain, so one left behind by a
+    crash would surface as a domain.
+
+    The rename is what serialises concurrent migrations: whoever arrives second
+    finds a non-empty destination and fails, which the caller downgrades.
+
+    Args:
+        source: The populated legacy partition.
+        destination: The path to create; must not already hold data.
+    """
+    root = destination.parent
+    staging = root.with_name(f"{root.name}.migrating-{os.getpid()}-{uuid.uuid4().hex[:8]}")
+    try:
+        # symlinks=True: copy links as links. Following them would pull the
+        # content of whatever they point at — possibly outside the workspace —
+        # into a directory the KB reader serves as its own.
+        shutil.copytree(source, staging, symlinks=True)
+        root.mkdir(parents=True, exist_ok=True)
+        os.replace(staging, destination)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
 
 
 def path_for_framework(framework: str) -> Path:
@@ -80,28 +253,71 @@ class KBFile:
     content: str
 
 
+def packaged_kb_root() -> Path:
+    """Root of the read-only KB shipped inside the wheel.
+
+    Holds seed data seeded at build time, currently just the cross-framework
+    module map. Nothing writes here: an installed package may sit on a
+    read-only filesystem, and an upgrade would overwrite whatever was added.
+
+    Returns:
+        The packaged KB root path.
+    """
+    return Path(__file__).resolve().parent / "kb"
+
+
+def mutable_kb_root() -> Path:
+    """Root of the KB partition this session reads and writes.
+
+    The single owner of that path. Both the ``fa`` reader and the
+    orchestrator's ``kb_writeback`` resolve through here, so a deployment that
+    moves the KB moves both halves at once; resolving it independently on each
+    side is what left written lessons unreadable by the next session.
+
+    Resolved per call rather than at import, because the environment is not
+    fully settled when this module is first imported.
+
+    Deliberately not ``<workspace>/kb``: that is the legacy recipe root, and
+    this reader enumerates whatever directories sit under its own root, so
+    sharing one would present recipe trees as framework domains.
+
+    Returns:
+        ``$INFERENCE_OPTIMIZER_FA_KB_PATH`` when set, else
+        ``<workspace>/framework-kb`` where the workspace is ``$USER_DATA_PATH``
+        or the pod-local default.
+    """
+    override = os.environ.get(KB_ROOT_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    workspace = os.environ.get("USER_DATA_PATH", "").strip() or _DEFAULT_WORKSPACE_ROOT
+    return Path(workspace).expanduser() / _MUTABLE_KB_DIRNAME
+
+
+def framework_optimization_root() -> Path:
+    """The partition holding the lessons ledger, for reader and writer alike.
+
+    ``kb_writeback`` resolves the ledger directory through here rather than
+    re-spelling the leaf, so the two halves cannot come to disagree about the
+    name the way they once disagreed about the root.
+
+    Returns:
+        ``<KB_ROOT>/framework_optimization``.
+    """
+    return mutable_kb_root() / _FRAMEWORK_OPTIMIZATION_ROOT
+
+
 def _resolve_kb_root() -> Path:
     """Resolve the active KB root each call (so tests can monkeypatch env).
 
-    Order: (1) ``FRAMEWORK_AGENT_KB_DIR``; (2) IO's
-    ``INFERENCE_OPTIMIZER_FA_KB_PATH`` compatibility override;
-    (3) ``${FRAMEWORK_AGENT_ROOT}/kb``; (4) ``<hyperloom package>/kb``, a
-    last-resort path that does not exist in the tree or in an install --
-    installs always set ``FRAMEWORK_AGENT_ROOT``, so step (3) wins.
+    Never raises: read paths swallow their own failures by design, so an
+    exception here would be absorbed rather than surfaced. The withdrawn
+    override is reported by :func:`check_kb_configuration` at start-up and
+    otherwise ignored.
 
     Returns:
         The resolved KB root path.
     """
-    explicit = os.environ.get("FRAMEWORK_AGENT_KB_DIR", "").strip()
-    if explicit:
-        return Path(explicit).expanduser()
-    io_override = os.environ.get("INFERENCE_OPTIMIZER_FA_KB_PATH", "").strip()
-    if io_override:
-        return Path(io_override).expanduser()
-    root = os.environ.get("FRAMEWORK_AGENT_ROOT", "").strip()
-    if root:
-        return Path(root).expanduser() / "kb"
-    return Path(__file__).resolve().parents[2] / "kb"
+    return mutable_kb_root()
 
 
 def list_domains() -> list[str]:

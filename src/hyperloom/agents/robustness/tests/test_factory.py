@@ -89,14 +89,46 @@ async def test_factory_uses_noop_engine_when_credentials_missing(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_config_discover_uses_deepseek_anthropic_defaults(monkeypatch, tmp_path: Path):
+async def test_config_discover_normalizes_retired_deepseek_env(monkeypatch, tmp_path: Path):
+    """Standalone robustness runs never reach CLI preflight, so it normalizes too.
+
+    Without this the legacy sandbox would resolve no credentials and RCA would
+    silently degrade to a no-op engine.
+    """
     monkeypatch.setenv("SESSION_DIR", str(tmp_path))
     monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
     monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
+    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
     monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
     monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
+    monkeypatch.delenv("CLAUDE_MODEL", raising=False)
+    monkeypatch.delenv("ROBUSTNESS_LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setattr("hyperloom.agents.robustness.config._probe_robustness_server", lambda: _async_value(""))
+
+    config = await Config.discover()
+
+    # The OpenAI side is filled too, and it is checked first.
+    assert config.llm_provider == "openai"
+    assert config.llm_base_url == "https://api.deepseek.com/v1"
+    assert config.llm_api_key == "deepseek-token"
+    assert config.llm_model == "deepseek-v4-pro"
+
+
+@pytest.mark.asyncio
+async def test_config_discover_uses_dual_protocol_gateway_anthropic_side(monkeypatch, tmp_path: Path):
+    """RCA reads the Anthropic side of a dual-protocol gateway like any other."""
+    monkeypatch.setenv("SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "deepseek-token")
+    monkeypatch.setenv("CLAUDE_MODEL", "deepseek-v4-pro")
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
     monkeypatch.setattr("hyperloom.agents.robustness.config._probe_robustness_server", lambda: _async_value(""))
 
     config = await Config.discover()

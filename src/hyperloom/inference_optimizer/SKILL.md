@@ -250,7 +250,7 @@ brief:
 
 Inserted between PRELUDE and EXPLORE (`--no-framework-agent` opts out). The
 Coordinator owns the loop end-to-end — the LLM never proposes the
-`framework` action. It discovers a candidate batch **once** via
+`framework_agent` action. It discovers a candidate batch **once** via
 `fa phase-discover`; then each exploration processes exactly **one**
 candidate, with the agent ranking the still-available candidates and
 picking the one most likely to raise throughput (LLM ranker, with a
@@ -287,7 +287,7 @@ Rules that look reasonable but break the current flow:
   `prompts/orchestration.md` — conflicts with the EXPLORE
   specialist-informed flow.
   Framework-agent runs in the dedicated **FRAMEWORK** phase
-  before EXPLORE; the LLM never proposes the `framework`
+  before EXPLORE; the LLM never proposes the `framework_agent`
   action — it is Coordinator-managed and absent from
   `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 denies any
   LLM-side propose / delegate with `rule='phase_incompatible'`.
@@ -447,7 +447,7 @@ when the file is absent, invalid, or stale.
 ```bash
 python3 -m hyperloom.inference_optimizer.cli optimize \
   --model "$MODEL_PATH" \
-  --framework vllm \           # sglang (default) / vllm / atom / xdit
+  --framework vllm \           # sglang (default) / vllm / atom / xdit / custom
   --gpu-type MI300X \          # or omit for rocm-smi auto-detect
   --model-class moe_mla \      # dense / moe_mla / moe_swa / moe_mla_nsa; categorical key for atom seed grid + framework gap token + recipe key + prompt label
   --isl 512 --osl 512 \        # workload shape — pass whatever the prompt states; omitting them uses defaults ISL=1024/OSL=1024
@@ -469,7 +469,9 @@ and the operator's stated value is lost:
 | Surface | CLI flag | Notes |
 |---|---|---|
 | Model path | `--model` | required |
-| Framework | `--framework` | `sglang` (default) / `vllm` / `atom` / `xdit` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server) |
+| Framework | `--framework` | `sglang` (default) / `vllm` / `atom` / `xdit` / `custom` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server); `custom` is an operator-supplied workload and **additionally requires `--framework-path` and `--benchmark-scripts-dir`** (see below) |
+| Custom source tree | `--framework-path` | **Required for `--framework custom`.** The workload's own checkout; patches are authored against it. |
+| Custom bench scripts | `--benchmark-scripts-dir` | **Required for `--framework custom`.** Holds the entrypoint, looked up as `custom_<gpu-type>.sh`. Every knob it reads must be forwarded as `--extra-env`; the throughput unit is whatever its report declares. |
 | GPU type | `--gpu-type` | rocm-smi auto-detect when unset |
 | Model class | `--model-class` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | Input seq length | `--isl` | Pass the prompt's ISL. Default `1024` when omitted. |

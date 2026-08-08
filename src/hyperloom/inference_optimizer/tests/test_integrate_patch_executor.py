@@ -281,6 +281,118 @@ def test_resolve_framework_root_picks_explicit_when_dir(tmp_path: Path, monkeypa
     assert root.samefile(repo)
 
 
+def _patch_for(rel_path: str) -> str:
+    """A minimal unified diff naming ``rel_path`` as its modify target."""
+    return (
+        f"diff --git a/{rel_path} b/{rel_path}\n"
+        f"index 0000000..1111111 100644\n"
+        f"--- a/{rel_path}\n"
+        f"+++ b/{rel_path}\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+
+def _root_resolution_repos(tmp_path: Path, monkeypatch):
+    """The live layout: an unrelated repo heading the allowlist, and the
+    session's own framework tree further down it."""
+    unrelated = tmp_path / "aiter"
+    (unrelated / "csrc").mkdir(parents=True)
+    (unrelated / "csrc" / "kernel.cpp").write_text("old\n")
+    init_git_repo(unrelated)
+
+    session = tmp_path / "HY-WorldPlay-e2e"
+    (session / "hyvideo").mkdir(parents=True)
+    (session / "hyvideo" / "attention.py").write_text("old\n")
+    init_git_repo(session)
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.integrate_patch.resolve_source_file_allowlist",
+        lambda: [str(unrelated), str(session)],
+    )
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(session))
+    return unrelated, session
+
+
+def test_unresolvable_patch_target_does_not_divert_to_an_unrelated_repo(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """The incident this guards against, stated directly.
+
+    Target-aware matching is all-or-nothing across the patch set, so a single
+    path that resolves nowhere rejects the tree that holds all the others. The
+    next choice used to be the head of the allowlist — ``/sgl-workspace/aiter/``,
+    which leads the static defaults whatever the session is optimising. Patches
+    naming the real tree's files then could not apply, and two of the first six
+    candidates in a live session were written off as ``rejected_apply_fail`` at
+    +0.00% with nothing in the log to say they had been aimed at the wrong
+    repository.
+    """
+    unrelated, session = _root_resolution_repos(tmp_path, monkeypatch)
+    patches = []
+    for name, body in (
+        ("known.patch", _patch_for("hyvideo/attention.py")),
+        ("new_file.patch", _patch_for("hyvideo/not_yet_here.py")),
+    ):
+        p = tmp_path / name
+        p.write_text(body)
+        patches.append(p)
+
+    root = _resolve_framework_root(None, patches)
+
+    assert root is not None
+    assert root.samefile(session)
+    assert not root.samefile(unrelated)
+
+
+def test_target_aware_match_still_wins_when_one_tree_holds_everything(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """The session root is a fallback, not an override: a patch set that does
+    resolve must keep going to the tree that actually holds it."""
+    unrelated, session = _root_resolution_repos(tmp_path, monkeypatch)
+    patch = tmp_path / "kernel.patch"
+    patch.write_text(_patch_for("csrc/kernel.cpp"))
+
+    root = _resolve_framework_root(None, [patch])
+
+    assert root is not None
+    assert root.samefile(unrelated)
+
+
+def test_session_framework_root_is_named_not_guessed(tmp_path: Path, monkeypatch):
+    """``resolve_session_framework_root`` answers "which tree is this session
+    optimising", which is a different question from "what may be edited"."""
+    from hyperloom.orchestrator.framework.paths import (
+        _scriptable_frameworks,
+        resolve_session_framework_root,
+    )
+
+    scriptable = _scriptable_frameworks()
+    assert scriptable, "no scriptable framework registered to exercise the prefixed path"
+    prefix = scriptable[0].upper()
+
+    session = tmp_path / "session-checkout"
+    session.mkdir()
+    monkeypatch.delenv(f"{prefix}_REPO_PATH", raising=False)
+    monkeypatch.delenv(f"{prefix}_DIR", raising=False)
+
+    monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
+    assert resolve_session_framework_root() == ""
+
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(session))
+    assert resolve_session_framework_root() == f"{session}/"
+
+    # The framework-prefixed name is the more specific statement and wins.
+    prefixed = tmp_path / "prefixed-checkout"
+    prefixed.mkdir()
+    monkeypatch.setenv(f"{prefix}_REPO_PATH", str(prefixed))
+    assert resolve_session_framework_root() == f"{prefixed}/"
+
+
 def test_resolve_framework_root_returns_none_when_no_candidate(monkeypatch, tmp_path: Path):
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",

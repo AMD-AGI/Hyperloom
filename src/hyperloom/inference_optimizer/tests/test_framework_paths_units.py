@@ -280,9 +280,98 @@ class TestDefaultSourceRootsIncludesXdit:
         """xdit must be in _FRAMEWORK_BUCKETS for summarise_framework_root_discovery."""
         assert "xdit" in fp._FRAMEWORK_BUCKETS
 
+    def test_custom_in_framework_buckets(self):
+        """custom must be in _FRAMEWORK_BUCKETS for root discovery summaries."""
+        assert "custom" in fp._FRAMEWORK_BUCKETS
+
     def test_xdit_in_static_patch_fallback_roots(self):
         """/app/xDiT/ must be in the static patch fallback roots."""
         assert any("/app/xDiT" in r for r in fp._STATIC_PATCH_FALLBACK_ROOTS)
+
+
+class TestScriptableRepoRootDiscovery:
+    """A scriptable framework runs from a checkout, not an installed package.
+
+    A live session probed the framework as ``missing`` with the checkout
+    checkout on disk, so PolicyGate would have rejected any patch against
+    ``hyvideo/`` and framework-agent had no source to work on.
+    """
+
+    def test_repo_path_env_lands_in_allowlist(self, tmp_path, monkeypatch):
+        checkout = tmp_path / "my-framework"
+        (checkout / "hyvideo").mkdir(parents=True)
+        monkeypatch.setenv("CUSTOM_REPO_PATH", str(checkout))
+
+        assert f"{checkout}/" in fp.resolve_source_file_allowlist()
+
+    def test_dir_alias_also_discovered(self, tmp_path, monkeypatch):
+        checkout = tmp_path / "my-framework"
+        checkout.mkdir()
+        monkeypatch.delenv("CUSTOM_REPO_PATH", raising=False)
+        monkeypatch.setenv("CUSTOM_DIR", str(checkout))
+
+        assert f"{checkout}/" in fp.resolve_source_file_allowlist()
+
+    def test_missing_checkout_is_ignored(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CUSTOM_REPO_PATH", str(tmp_path / "absent"))
+
+        assert not any("absent" in r for r in fp.resolve_source_file_allowlist())
+
+
+class TestGenericFrameworkRepoPath:
+    """A session is single-framework, so the operator should not need the prefix.
+
+    ``<FRAMEWORK>_REPO_PATH`` requires knowing the framework name before the right
+    variable can be set, and switching frameworks means switching variable names —
+    for a value that cannot collide, since the CLI locks ``$FRAMEWORK`` for the run.
+    The generic form is also the only way to point at a framework that is neither
+    pip-installed nor registered as scriptable, such as an editable vllm checkout.
+    """
+
+    def test_generic_env_lands_in_allowlist(self, tmp_path, monkeypatch):
+        checkout = tmp_path / "some-framework"
+        (checkout / "pkg").mkdir(parents=True)
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(checkout))
+
+        assert f"{checkout}/" in fp.resolve_source_file_allowlist()
+
+    def test_generic_env_works_for_a_non_scriptable_framework(self, tmp_path, monkeypatch):
+        """An editable vllm tree is not discoverable by importlib or site-packages."""
+        checkout = tmp_path / "vllm-src"
+        (checkout / "vllm").mkdir(parents=True)
+        monkeypatch.delenv("CUSTOM_REPO_PATH", raising=False)
+        monkeypatch.setenv("FRAMEWORK", "vllm")
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(checkout))
+
+        assert f"{checkout}/" in fp.resolve_source_file_allowlist()
+
+    def test_prefixed_value_still_wins_so_nothing_existing_changes(self, tmp_path, monkeypatch):
+        """Both are accepted, and the prefixed one keeps its precedence."""
+        prefixed = tmp_path / "prefixed"
+        (prefixed / "hyvideo").mkdir(parents=True)
+        generic = tmp_path / "generic"
+        generic.mkdir()
+        monkeypatch.setenv("CUSTOM_REPO_PATH", str(prefixed))
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(generic))
+
+        roots = fp.resolve_source_file_allowlist()
+        assert f"{prefixed}/" in roots
+        assert roots.index(f"{prefixed}/") < roots.index(f"{generic}/")
+
+    def test_missing_generic_checkout_is_ignored(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(tmp_path / "absent"))
+
+        assert not any("absent" in r for r in fp.resolve_source_file_allowlist())
+
+    def test_summary_accepts_repo_dirname(self, tmp_path, monkeypatch):
+        """The checkout dir is xDiT, not xdit — summary must still say ok."""
+        checkout = tmp_path / "xDiT"
+        checkout.mkdir()
+        monkeypatch.setenv("XDIT_REPO_PATH", str(checkout))
+
+        summary = fp.summarise_framework_root_discovery(fp.probe_framework_source_roots_for_env())
+
+        assert "xdit=ok" in summary
 
 
 class TestProbeIncludesXditWhenInstalled:

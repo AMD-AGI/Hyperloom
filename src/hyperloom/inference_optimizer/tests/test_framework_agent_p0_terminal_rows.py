@@ -142,6 +142,9 @@ class _BusStub:
 
 
 class _ReviewCoord(_MiniCoord):
+    # Borrowed alongside the method that reads it: the stub used to get away
+    # without it because the helper swallowed its own AttributeError.
+    _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
     _collect_framework_agent_candidate_priors = Coordinator._collect_framework_agent_candidate_priors
     _submit_framework_agent_candidate_for_review = Coordinator._submit_framework_agent_candidate_for_review
 

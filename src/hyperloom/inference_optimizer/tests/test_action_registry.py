@@ -119,6 +119,55 @@ def test_registry_get_unknown_returns_none(registry):
     assert registry.get("does_not_exist") is None
 
 
+def _framework_agent_bench_cap_sec() -> int:
+    """The fixed per-variant bench cap ``framework_agent``'s executor grants.
+
+    Read out of the executor's own signature rather than restated here, so the
+    assertion tracks it if that default moves.
+    """
+    import inspect
+
+    from hyperloom.orchestrator.actions.executors.framework_agent import FrameworkAgentExecutor
+
+    param = inspect.signature(FrameworkAgentExecutor.__init__).parameters.get("variant_timeout_sec")
+    assert param is not None, "framework_agent executor no longer takes variant_timeout_sec"
+    assert isinstance(param.default, int), "framework_agent no longer declares a fixed bench cap"
+    return param.default
+
+
+def test_action_registry_lease_covers_bench_timeout(registry):
+    """``framework_agent``'s lease must outlast the bench its executor grants.
+
+    ``reclaim_expired_running`` measures ``now - updated_at``, and ``updated_at``
+    only advances on a state transition — nothing refreshes it while the task
+    runs. The lease is therefore a total wall-clock budget, so a lease shorter
+    than the bench cap marks a healthy task ``failed`` and releases its lanes
+    while its benchmark is still on the GPU, letting the next task restart the
+    server underneath it.
+
+    ``framework_agent`` is assertable because its executor benches exactly one
+    variant under a fixed cap, so the task's own upper bound is a static number.
+
+    Two known instances are deliberately out of scope here, neither introduced
+    nor worsened by the change this guards:
+
+    * ``integrate_patch`` shares that fixed cap and declares 3600.
+    * ``explore`` declares 7200 while ``_compute_explore_variant_timeout`` can
+      return up to 14400, and ``grid_session_deadline_sec()`` does not bound it
+      — that comes from the remaining session budget, not the lease. Its cap
+      exists only at runtime, and it benches a grid rather than one variant, so
+      no static number bounds it at all.
+
+    The margin above the cap covers the clone, the source rebuild and the
+    accuracy eval that bracket the bench; those are not separately bounded, so
+    this asserts only the part that is a contradiction between two static
+    declarations.
+    """
+    meta = registry.get("framework_agent")
+    assert meta is not None
+    assert meta.lease_ttl_sec >= _framework_agent_bench_cap_sec()
+
+
 def test_registry_load_missing_dir_raises(tmp_path):
     bogus = ActionRegistry(actions_dir=tmp_path / "nope")
     with pytest.raises(ActionRegistryError, match="not found"):

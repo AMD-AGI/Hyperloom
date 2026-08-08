@@ -78,6 +78,57 @@ def test_collect_optimizations_unifies_warm_framework_and_explore():
     assert source_breakdown["unattributed_pct_of_total"] == 0.0
 
 
+def test_fusion_after_warm_replay_is_attributed_to_kernel_agent():
+    state = {
+        "session_id": "warm-then-fusion",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 80.0,
+        "cumulative_gain_validated_stack_len": 2,
+        "optimization_stack": [
+            {
+                "action": "replay_warm_recipe",
+                "source_phase": "PRELUDE",
+                "variant_name": "warm",
+                "tput": 120.0,
+                "gain_pct": 20.0,
+                "ts": "1970-01-01T00:00:10+00:00",
+            },
+            {
+                "action": "fusion",
+                "source_phase": "KERNEL_AGENT",
+                "variant_name": "forge_fusion",
+                "backend": "forge",
+                "tput": 180.0,
+                # The stack entry retains integrate's increment relative to
+                # warm=120; the authoritative ledger remains baseline-relative.
+                "gain_pct": 50.0,
+                "ts": "1970-01-01T00:00:20+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [20.0, 80.0],
+        "phase_history": [
+            {"to_phase": "PRELUDE", "ts_unix": 0.0},
+            {"to_phase": "KERNEL_AGENT", "ts_unix": 15.0},
+        ],
+    }
+    warnings: list[str] = []
+
+    attribution = collect_attribution(state, [], [], warnings)
+    result = collect_optimizations(state, attribution, [], [], warnings)
+
+    source_breakdown = attribution["source_breakdown"]
+    assert source_breakdown["replay_warm_recipe_pct_of_total"] == 20.0
+    assert source_breakdown["kernel_unattributed_pct_of_total"] == 60.0
+    assert source_breakdown["unattributed_pct_of_total"] == 0.0
+    assert attribution["phase_breakdown"]["kernel_agent"]["total_gain_pct"] == 60.0
+    assert not any("actions: fusion" in warning for warning in warnings)
+    assert [entry["source"] for entry in result["entries"]] == [
+        "warm_replay",
+        "kernel_agent",
+    ]
+    assert result["entries"][1]["optimization_kind"] == "kernel_fusion"
+
+
 def test_prebaseline_enablement_is_not_framework_gain_before_warm_replay():
     """A runnable-baseline patch is config provenance, not a Framework gain."""
     state = {
@@ -322,6 +373,78 @@ def test_direct_framework_action_ignores_delayed_completion_phase():
     assert attribution["source_breakdown"]["framework_pct_of_total"] == 10.0
     assert result["entries"][0]["source"] == "framework_agent"
     assert result["entries"][0]["source_method"] == "action_family"
+
+
+def test_framework_stack_label_is_credited_by_both_collectors():
+    """Both readers must credit the exact label the promote path stamps.
+
+    The fixture takes its label from the writer's own constant instead of
+    spelling it out, so renaming one side without the other fails here rather
+    than silently routing FRAMEWORK gain into ``unattributed``. The entry
+    deliberately carries no ``source_phase``: that field lets the optimizations
+    collector resolve the owner without consulting the action label at all, and
+    would therefore hide exactly the mismatch this test exists to catch.
+    """
+    from hyperloom.orchestrator.loop.writeback import _FRAMEWORK_STACK_ACTION
+
+    state = {
+        "session_id": "framework-label-contract",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 10.0,
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": _FRAMEWORK_STACK_ACTION,
+                "variant_name": "https://example.com/pull/1",
+                "tput": 110.0,
+                "ts": "1970-01-01T00:00:10+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [10.0],
+    }
+
+    attribution = collect_attribution(state, [], [], [])
+    result = collect_optimizations(state, attribution, [], [], [])
+
+    assert attribution["source_breakdown"]["framework_pct_of_total"] == 10.0
+    assert attribution["source_breakdown"]["unattributed_pct_of_total"] == 0.0
+    assert attribution["phase_breakdown"]["framework"]["total_gain_pct"] == 10.0
+    assert result["entries"][0]["source"] == "framework_agent"
+    assert result["entries"][0]["source_method"] == "action_family"
+
+
+def test_phase_breakdown_schema_declares_every_emitted_bucket():
+    """The declared shape must cover the keys the collector actually writes.
+
+    ``session_breakdown.json`` is a published contract, and the TypedDict is
+    what downstream code reads it through, so a bucket the producer emits but
+    the schema omits shows up as an empty section rather than an error. The
+    KERNEL_AGENT bucket sat in exactly that state.
+    """
+    from hyperloom.inference_optimizer.breakdown.schema import PhaseBreakdown
+
+    state = {
+        "session_id": "phase-bucket-contract",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 10.0,
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": "kernel_opt",
+                "source_phase": "KERNEL_AGENT",
+                "variant_name": "k1",
+                "kernel_id": "fused_moe",
+                "tput": 110.0,
+                "ts": "1970-01-01T00:00:10+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [10.0],
+    }
+
+    emitted = set(collect_attribution(state, [], [], [])["phase_breakdown"])
+    undeclared = sorted(emitted - set(PhaseBreakdown.__annotations__))
+
+    assert not undeclared, f"phase_breakdown buckets missing from the schema: {undeclared}"
 
 
 def test_integrate_patch_projects_source_manifest_and_changed_files():

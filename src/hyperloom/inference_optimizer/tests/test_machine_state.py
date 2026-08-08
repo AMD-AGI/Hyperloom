@@ -153,3 +153,41 @@ def test_make_history_row() -> None:
     assert row["reason"] == "plateau"
     assert row["evidence"] == {"k": 1}
     assert row["ts_unix"] == 12.0
+
+
+def test_phase_budget_help_quotes_the_real_default() -> None:
+    """``--help`` must quote the default the run will actually use.
+
+    These flags default to None and fall through to DEFAULT_PHASE_BUDGET_PCT,
+    so the number in the help text is the only place a user can read the real
+    value, and nothing recomputes it. Both the KERNEL_AGENT and SWEEP shares
+    had been retuned without the help text following.
+    """
+    import re
+
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+    # The flags live on the ``optimize`` subparser, so walk the tree.
+    pending = [_build_parser()]
+    quoted: dict[str, float] = {}
+    while pending:
+        for action in pending.pop()._actions:
+            choices = getattr(action, "choices", None)
+            if isinstance(choices, dict):
+                pending.extend(sub for sub in choices.values() if hasattr(sub, "_actions"))
+                continue
+            match = re.fullmatch(r"phase_budget_(\w+)_pct", action.dest or "")
+            if not match:
+                continue
+            default_text = re.search(r"Default:\s*([0-9.]+)\.", action.help or "")
+            assert default_text, f"{action.dest} help does not quote a default"
+            quoted[match.group(1).upper()] = float(default_text.group(1))
+
+    assert quoted, "no phase-budget flags found; this guard would pass vacuously"
+
+    real = {phase.upper(): value for phase, value in ps.DEFAULT_PHASE_BUDGET_PCT.items()}
+    # The FRAMEWORK_AGENT flag is spelled --phase-budget-framework-pct.
+    real["FRAMEWORK"] = real.pop("FRAMEWORK_AGENT")
+    real["KERNEL"] = real.pop("KERNEL_AGENT")
+
+    assert quoted == real

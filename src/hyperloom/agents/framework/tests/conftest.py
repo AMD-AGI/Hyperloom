@@ -12,8 +12,8 @@ import pytest
 
 @pytest.fixture
 def kb_tmp_root(tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect the KB resolver to a clean tmp_path via FRAMEWORK_AGENT_KB_DIR (and unset FRAMEWORK_AGENT_ROOT)."""
+    """Redirect the KB resolver to a clean tmp_path through the supported override."""
     root = Path(str(tmp_path))
-    monkeypatch.setenv("FRAMEWORK_AGENT_KB_DIR", str(root))
-    monkeypatch.delenv("FRAMEWORK_AGENT_ROOT", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(root))
+    monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
     return root
