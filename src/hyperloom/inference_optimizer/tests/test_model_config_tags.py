@@ -124,7 +124,7 @@ class _FakeSharedState:
 
 @pytest.fixture
 def kb(tmp_path: Path) -> RecipeKB:
-    return RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"), remote=None)
+    return RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"))
 
 
 def _cid(state: _FakeSharedState, workload: str, hw: str) -> str:

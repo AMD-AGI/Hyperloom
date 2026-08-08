@@ -28,6 +28,8 @@ def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
         "USER_DATA_PATH",
         "GBRAIN_BASE_URL",
         "GBRAIN_TOKEN",
+        "KB_STORE_URL",
+        "KB_STORE_TOKEN",
         "KNOWLEDGE_LOCAL_ROOT",
         "KNOWLEDGE_STORE_MODE",
         "RECIPE_KB_MIRROR_MODE",
@@ -129,41 +131,28 @@ def test_build_dispatcher_no_remote_when_degraded_kb(
     assert _build_recipe_kb_dispatcher(args) is None
 
 
-def test_build_dispatcher_no_remote_when_gbrain_unconfigured(
+def test_build_dispatcher_is_local_without_remote_credentials(
     env_clean: None,
     tmp_path: Path,
 ) -> None:
-    """No gbrain configured → local-only; the dispatcher wires ``remote=None``."""
+    """Local mode wires only the local store."""
     args = _ns(local_kb_root=str(tmp_path))
     kb = _build_recipe_kb_dispatcher(args)
-    assert kb.remote is None
+    assert kb.mode == "local"
 
 
-def test_build_dispatcher_wires_gbrain_remote_store(
+def test_build_dispatcher_remote_returns_none(
     env_clean: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Remote mode uses one direct GBrain store and no local fallback."""
-
-    class _Store:
-        backend_name = "gbrain"
-
-    from hyperloom.orchestrator.knowledge.recipe_kb import GbrainRecipeStore
-
+    """Remote mode uses the KB Store CLOSE writer, not a dispatcher."""
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
-    monkeypatch.setenv("GBRAIN_BASE_URL", "https://gbrain.test")
-    monkeypatch.setenv("GBRAIN_TOKEN", "token")
-    monkeypatch.setattr(
-        GbrainRecipeStore,
-        "from_credentials",
-        classmethod(lambda cls, **kwargs: _Store()),
-    )
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.test")
+    monkeypatch.setenv("KB_STORE_TOKEN", "token")
     args = _ns(local_kb_root=str(tmp_path))
     kb = _build_recipe_kb_dispatcher(args)
-    assert isinstance(kb.local, _Store)
-    assert kb.remote is None
-    assert kb.mode == "remote"
+    assert kb is None
 
 
 def test_build_dispatcher_idempotent(
@@ -176,7 +165,7 @@ def test_build_dispatcher_idempotent(
     b = _build_recipe_kb_dispatcher(args)
     assert a is not b
     assert a.local.root == b.local.root
-    assert a.remote is None and b.remote is None
+    assert a.mode == b.mode == "local"
 
 
 def test_parser_accepts_local_kb_root_flag() -> None:

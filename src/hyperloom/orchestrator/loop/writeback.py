@@ -1582,7 +1582,7 @@ class WritebackCollaborator:
         }
 
     def finalize_recipe_and_journal(self) -> None:
-        """CLOSE-time fact finalize: final update_recipe + journal finalize (total_gain_pct + final_throughput); idempotent (CLOSE sequencer + _recipe_kb_t4_hook safety net)."""
+        """Finalize the journal and exactly one mode-selected Recipe backend."""
         try:
             journal = self._ensure_journal()
             ss = self.shared_state
@@ -1598,6 +1598,41 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("optimization_journal.finalize failed")
 
+        from ..knowledge.config import KnowledgeConfig, KnowledgeStoreMode
+
+        config = (
+            getattr(getattr(self, "knowledge_plane", None), "config", None)
+            or KnowledgeConfig.from_env()
+        )
+        if config.mode is KnowledgeStoreMode.REMOTE:
+            # Remote mode has one Recipe sink: the KB Store final session
+            # writer. T0 and runtime amendment are intentionally absent.
+            try:
+                from ..knowledge.remote_recipe import write_final_remote_recipe
+
+                remote_cid = self._workload_canonical_id()
+                remote_sid = str(
+                    getattr(self.shared_state, "recipe_kb_session_id", "")
+                    or getattr(self.shared_state, "session_id", "")
+                    or self.session_dir.name
+                )
+                remote_result = write_final_remote_recipe(
+                    self.shared_state,
+                    remote_cid,
+                    remote_sid,
+                )
+                log.info(
+                    "Remote Recipe KB finalize: status=%s reason=%s cid=%s sid=%s",
+                    remote_result.status,
+                    remote_result.reason,
+                    remote_cid,
+                    remote_sid,
+                )
+            except Exception:  # noqa: BLE001 - remote transport is best-effort
+                log.exception("Remote Recipe KB finalize failed (non-fatal)")
+            return
+
+        # Local mode never consults ambient KB_STORE_* credentials.
         if self.recipe_kb is None:
             return
         ss = self.shared_state
@@ -1624,8 +1659,7 @@ class WritebackCollaborator:
             if self.recipe_kb is not None:
                 try:
                     cid = self._workload_canonical_id()
-                    # Read exactly the selected store's authority row. Remote
-                    # mode must not enter warm-start search/list pagination.
+                    # Read exactly the local store's authority row.
                     existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
                     existing_sessions: list[dict[str, Any]] = []
                     for row in existing_row.get("sessions") or []:

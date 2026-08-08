@@ -69,18 +69,35 @@ class KnowledgePlane:
         """Return secret-free Recipe, graph, and KernelForge status."""
 
         config = self.config or KnowledgeConfig.from_env()
+        gbrain_configured = bool(
+            config.gbrain_base_url and config.gbrain_token
+        )
         graph_status = {
             "mode": config.mode.value,
-            "backend": "local-filesystem" if config.mode is KnowledgeStoreMode.LOCAL else "gbrain",
+            "backend": (
+                "local-filesystem"
+                if config.mode is KnowledgeStoreMode.LOCAL
+                else ("gbrain" if gbrain_configured else "disabled")
+            ),
             "root": (
                 str(Path(config.local_root) / "hyperloom" / "kg")
                 if config.mode is KnowledgeStoreMode.LOCAL
                 else ""
             ),
-            "remote_configured": config.mode is KnowledgeStoreMode.REMOTE,
+            "remote_configured": (
+                config.mode is KnowledgeStoreMode.REMOTE
+                and gbrain_configured
+            ),
         }
         return {
-            "recipe": {**config.public_dict(), "enabled": self.recipe_kb is not None},
+            "recipe": {
+                **config.public_dict(),
+                "enabled": (
+                    self.recipe_kb is not None
+                    or config.mode is KnowledgeStoreMode.REMOTE
+                ),
+                "read_enabled": self.recipe_kb is not None,
+            },
             "kg": graph_status,
             "kernel_experience": (
                 self.kernel_experience.status.to_dict()

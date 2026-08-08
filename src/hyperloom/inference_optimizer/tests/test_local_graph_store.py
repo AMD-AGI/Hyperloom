@@ -263,6 +263,8 @@ def test_remote_factory_preserves_gbrain_native_compatibility(
 
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path))
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
+    monkeypatch.setenv("KB_STORE_TOKEN", "kb-secret")
     monkeypatch.setenv("GBRAIN_BASE_URL", "https://gbrain.example")
     monkeypatch.setenv("GBRAIN_TOKEN", "secret")
     monkeypatch.setenv("GBRAIN_KG_NATIVE", native)

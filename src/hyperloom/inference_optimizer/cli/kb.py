@@ -215,11 +215,11 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
 
 
 def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
-    """Wire ``RecipeKB.audit_hook`` to append remote-read trace events.
+    """Wire ``RecipeKB.audit_hook`` to append local Recipe trace events.
 
-    Each recipe-snapshot remote read (``get_recipe`` / ``search``) is appended
-    to ``recipe_snapshot/.audit.jsonl`` so the trace records whether the
-    gbrain snapshot KB was consulted, the request, and how it resolved.
+    Each recipe-snapshot read/write is appended to
+    ``recipe_snapshot/.audit.jsonl`` so the trace records the request and how
+    the local store resolved it.
     Best-effort and never raises into the KB op. No-op without a session dir
     or when the dispatcher predates ``audit_hook``.
 
@@ -229,8 +229,6 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
     """
     if session_dir is None:
         return
-    # Unwrap the inline gbrain-mirroring wrapper so the hook lands on the
-    # RecipeKB whose reads emit the audit events.
     target = getattr(kb, "_inner", kb)
     if not hasattr(target, "audit_hook"):
         return
@@ -262,57 +260,41 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
 def _build_recipe_kb_dispatcher(
     args: argparse.Namespace,
 ) -> Any:
-    """Build RecipeKB over exactly one selected local or remote store.
+    """Build the local RecipeKB dispatcher, or validate remote mode.
 
     Args:
         args: Parsed CLI arguments (``degraded_kb`` etc.).
 
     Returns:
-        Any: A configured ``RecipeKB``, or ``None`` for ``--degraded-kb``.
+        Any: A configured local ``RecipeKB``. Remote and degraded modes return
+        ``None`` because remote Recipe writes use KB Store at CLOSE only.
     """
     from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
-    from hyperloom.orchestrator.knowledge.recipe_kb import (
-        GbrainRecipeStore,
-        LocalRecipeStore,
-        RecipeKB,
-    )
+    from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
 
     if bool(getattr(args, "degraded_kb", False)):
         return None
-
     config = KnowledgeConfig.from_env()
-    if os.environ.get("RECIPE_KB_MIRROR_MODE"):
-        log.warning("RECIPE_KB_MIRROR_MODE is deprecated and ignored; use KNOWLEDGE_STORE_MODE=local|remote")
-        warnings.warn(
-            "RECIPE_KB_MIRROR_MODE is deprecated and ignored by KnowledgePlane; "
-            "select KNOWLEDGE_STORE_MODE=local|remote",
-            DeprecationWarning,
-            stacklevel=2,
+
+    if config.mode is KnowledgeStoreMode.REMOTE:
+        return None
+
+    # No remote client is constructed in local mode, even when ambient
+    # KB Store or GBrain credentials are present.
+    explicit_compatibility_root = getattr(args, "local_kb_root", None) or os.environ.get(
+        "HYPERLOOM_LOCAL_KB_ROOT"
+    )
+    explicit_knowledge_root = str(os.environ.get("KNOWLEDGE_LOCAL_ROOT") or "").strip()
+    if not explicit_knowledge_root and explicit_compatibility_root:
+        config = replace(config, local_root=str(_resolve_local_kb_root(args)))
+    if not explicit_knowledge_root and not explicit_compatibility_root:
+        _migrate_legacy_recipe_kb_once(
+            destination=Path(config.local_root),
+            source=_legacy_recipe_root(os.environ),
         )
-    if config.mode is KnowledgeStoreMode.LOCAL:
-        # No GBrain client is constructed in local mode, even when ambient
-        # credentials are present.
-        explicit_compatibility_root = getattr(args, "local_kb_root", None) or os.environ.get(
-            "HYPERLOOM_LOCAL_KB_ROOT"
-        )
-        explicit_knowledge_root = str(os.environ.get("KNOWLEDGE_LOCAL_ROOT") or "").strip()
-        if not explicit_knowledge_root and explicit_compatibility_root:
-            config = replace(config, local_root=str(_resolve_local_kb_root(args)))
-        if not explicit_knowledge_root and not explicit_compatibility_root:
-            _migrate_legacy_recipe_kb_once(
-                destination=Path(config.local_root),
-                source=_legacy_recipe_root(os.environ),
-            )
-        store: Any = LocalRecipeStore(root=Path(config.local_root))
-    else:
-        store = GbrainRecipeStore.from_credentials(
-            base_url=config.gbrain_base_url,
-            token=config.gbrain_token,
-            lock_root=Path(config.local_root) / ".remote-locks" / "recipes",
-        )
+    store: Any = LocalRecipeStore(root=Path(config.local_root))
     kb = RecipeKB(
         local=store,
-        remote=None,
         mode=config.mode.value,
         backend_name=config.backend,
     )
@@ -348,7 +330,6 @@ def _bootstrap_recipe_kb(
         return None
 
     kb = _build_recipe_kb_dispatcher(args)
-    _attach_recipe_audit_hook(kb, session_dir)
 
     state = SharedState.load_or_init(session_dir)
     workload = (
@@ -371,6 +352,11 @@ def _bootstrap_recipe_kb(
             merged_meta["image_digest"] = image_digest
         if merged_meta:
             state.stack_fingerprint_meta = merged_meta
+    if kb is None:
+        state.save(session_dir)
+        print("Recipe KB       : REMOTE (KB Store CLOSE write; T0 warm replay skipped)")
+        return None
+    _attach_recipe_audit_hook(kb, session_dir)
     extra_attrs = {
         "framework_name": state.framework or manifest.get("framework", ""),
         "model_class": state.model_class or "",
@@ -475,7 +461,9 @@ def _bootstrap_knowledge_plane(
                 exc,
             )
 
-    config = getattr(recipe_kb_client, "knowledge_config", None)
+    from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
+
+    config = getattr(recipe_kb_client, "knowledge_config", None) or KnowledgeConfig.from_env()
     return KnowledgePlane.from_clients(
         pr_monitor=pr_client,
         pr_monitor_mcp_url=pr_mcp_url,

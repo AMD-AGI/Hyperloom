@@ -7,10 +7,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import (
     MockBackend,
@@ -505,3 +507,138 @@ async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Pa
     coord.finalize_recipe_and_journal = _spy  # type: ignore[method-assign]
     await coord._recipe_kb_t4_hook()
     assert finalize_calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
+    backends = {
+        "orchestration": MockBackend(idle_plan),
+        "critic": MockBackend(idle_plan),
+        "robustness": MockBackend(idle_plan),
+    }
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    monkeypatch.setenv("KB_STORE_URL", "https://kb-store.example.test")
+    monkeypatch.setenv("KB_STORE_TOKEN", "test-token")
+    coord = Coordinator(
+        session_dir=session_dir,
+        backends=backends,
+        role_registry=default_role_registry(),
+        recipe_kb=None,
+        knowledge_plane=None,
+    )
+    coord.shared_state.recipe_kb_session_id = ""
+    coord.shared_state.close_sequence_done = False
+
+    finalize_calls: list[int] = []
+    save_calls: list[Path] = []
+    coord.finalize_recipe_and_journal = lambda: finalize_calls.append(1)  # type: ignore[method-assign]
+    coord.shared_state.save = lambda path: save_calls.append(path)  # type: ignore[method-assign]
+
+    await coord._recipe_kb_t4_hook()
+
+    assert finalize_calls == [1]
+    assert save_calls == [session_dir]
+
+
+@pytest.mark.asyncio
+async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path: Path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
+    backends = {
+        "orchestration": MockBackend(idle_plan),
+        "critic": MockBackend(idle_plan),
+        "robustness": MockBackend(idle_plan),
+    }
+    config = KnowledgeConfig(
+        mode=KnowledgeStoreMode.REMOTE,
+        local_root=str(tmp_path / "knowledge"),
+        kb_store_url="https://kb-store.example.test",
+        kb_store_token="test-token",
+    )
+    coord = Coordinator(
+        session_dir=session_dir,
+        backends=backends,
+        role_registry=default_role_registry(),
+        recipe_kb=None,
+        knowledge_plane=SimpleNamespace(config=config),
+    )
+    coord.shared_state.recipe_kb_session_id = ""
+    coord.shared_state.close_sequence_done = True
+
+    finalize_calls: list[int] = []
+    coord.finalize_recipe_and_journal = lambda: finalize_calls.append(1)  # type: ignore[method-assign]
+
+    await coord._recipe_kb_t4_hook()
+
+    assert finalize_calls == []
+
+
+@pytest.mark.asyncio
+async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb(tmp_path: Path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
+    backends = {
+        "orchestration": MockBackend(idle_plan),
+        "critic": MockBackend(idle_plan),
+        "robustness": MockBackend(idle_plan),
+    }
+    config = KnowledgeConfig(
+        mode=KnowledgeStoreMode.LOCAL,
+        local_root=str(tmp_path / "knowledge"),
+    )
+    coord = Coordinator(
+        session_dir=session_dir,
+        backends=backends,
+        role_registry=default_role_registry(),
+        recipe_kb=None,
+        knowledge_plane=SimpleNamespace(config=config),
+    )
+    coord.shared_state.recipe_kb_session_id = "local-session"
+    coord.shared_state.close_sequence_done = False
+
+    finalize_calls: list[int] = []
+    coord.finalize_recipe_and_journal = lambda: finalize_calls.append(1)  # type: ignore[method-assign]
+
+    await coord._recipe_kb_t4_hook()
+
+    assert finalize_calls == []
+
+
+@pytest.mark.asyncio
+async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb_sid(tmp_path: Path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
+    backends = {
+        "orchestration": MockBackend(idle_plan),
+        "critic": MockBackend(idle_plan),
+        "robustness": MockBackend(idle_plan),
+    }
+    config = KnowledgeConfig(
+        mode=KnowledgeStoreMode.LOCAL,
+        local_root=str(tmp_path / "knowledge"),
+    )
+    coord = Coordinator(
+        session_dir=session_dir,
+        backends=backends,
+        role_registry=default_role_registry(),
+        recipe_kb=_StubRecipeKB(),
+        knowledge_plane=SimpleNamespace(config=config),
+    )
+    coord.shared_state.recipe_kb_session_id = "  "
+    coord.shared_state.close_sequence_done = False
+
+    finalize_calls: list[int] = []
+    coord.finalize_recipe_and_journal = lambda: finalize_calls.append(1)  # type: ignore[method-assign]
+
+    await coord._recipe_kb_t4_hook()
+
+    assert finalize_calls == []

@@ -4,9 +4,7 @@
 """recipe-snapshot v2 HTTP wire constants — single source of truth.
 
 Mirrors the contract documented in
-the internal recipe snapshot API reference. The
-recipe-KB remote clients (see :mod:`hyperloom.orchestrator.knowledge.recipe_kb`
-and :mod:`hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client`) build requests as
+the internal recipe snapshot API reference. Recipe producers build requests as
 plain dicts keyed by these ``Final[str]`` constants so a backend rename surfaces
 at one easy-to-grep call-site instead of being scattered across the codebase.
 """
@@ -19,8 +17,8 @@ from typing import Final
 log = logging.getLogger(__name__)
 
 
-# No DEFAULT_KB_URL by design: the optimizer never silently connects to a
-# remote KB; the optional read side is gbrain (`GBRAIN_BASE_URL` / `GBRAIN_TOKEN`).
+# No default remote URL by design: Recipe remote mode requires explicit
+# ``KB_STORE_URL`` and ``KB_STORE_TOKEN`` configuration.
 
 # Request body field names — PUT /recipes/{canonical_id}. Server validates
 # only authority + provenance (rest are caller-defined).
