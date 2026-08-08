@@ -11,18 +11,19 @@ interaction goes through one of two sanctioned paths:
   backends built on top of it;
 * **single-shot inference** -- ``hyperloom.common.llm_config``, which is also
   the only module allowed to construct a provider SDK client
-  (``get_openai_client`` / ``get_async_openai_client``) and the only module
-  allowed to speak a raw completion API.
+  (``get_openai_client`` / ``get_async_openai_client`` and their
+  ``get_anthropic_client`` counterparts) and the only module allowed to speak a
+  raw completion API.
 
 This module parses every first-party Python source file and fails when a module
 outside :data:`_ALLOWLISTED_OWNERS` imports or constructs a provider SDK
 client, calls a bare completion endpoint, or hand-rolls the provider HTTP
 protocol.
 
-Known violations, pending migration
------------------------------------
-Retiring every pre-existing call site is staged across several changes, so the
-violations that already exist are pinned in :data:`_KNOWN_VIOLATIONS` as a
+Known violations
+----------------
+Retiring the pre-existing call sites was staged across several changes, so each
+surviving violation was pinned in :data:`_KNOWN_VIOLATIONS` as a
 ``(repo-relative path, rule code) -> occurrence count`` map. The scan result is
 compared to that map for **exact equality**, which turns it into a ratchet:
 
@@ -32,7 +33,8 @@ compared to that map for **exact equality**, which turns it into a ratchet:
   so migrating a call site without shrinking the map fails and forces the entry
   to be dropped.
 
-The map can therefore only ever shrink. Never add an entry to unblock new code
+Every call site has now been migrated, so the map is empty and the scan must
+find nothing. It can only ever shrink: never add an entry to unblock new code
 -- route the new code through a sanctioned path instead.
 """
 
@@ -142,39 +144,10 @@ _ALLOWLISTED_OWNERS = frozenset(
 )
 
 # ---------------------------------------------------------------------------
-# Known violations, pending migration -- see the module docstring. Shrink only.
+# Known violations -- see the module docstring. Empty, and shrink only.
 # ---------------------------------------------------------------------------
 
-_KNOWN_VIOLATIONS: dict[tuple[str, str], int] = {
-    # Kernel-agent TraceLens skill runner: builds its own AsyncOpenAI client and
-    # calls chat.completions directly.
-    ("src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py", "LLM001"): 1,
-    ("src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py", "LLM002"): 1,
-    ("src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py", "LLM003"): 1,
-    # Robustness LLM RCA engines: hand-rolled httpx clients for both the
-    # OpenAI-compatible and the Anthropic Messages protocol.
-    ("src/hyperloom/agents/robustness/decision/rca_engine.py", "LLM004"): 1,
-    ("src/hyperloom/agents/robustness/decision/rca_engine.py", "LLM005"): 1,
-    # Shared HTTP protocol adapters, superseded by llm_config's client +
-    # streaming helpers.
-    ("src/hyperloom/common/llm.py", "LLM004"): 1,
-    ("src/hyperloom/common/llm.py", "LLM005"): 1,
-    # Codex role backend: owns its own AsyncOpenAI client plus bare
-    # chat.completions / responses calls.
-    ("src/hyperloom/orchestrator/roles/codex.py", "LLM001"): 1,
-    ("src/hyperloom/orchestrator/roles/codex.py", "LLM002"): 1,
-    ("src/hyperloom/orchestrator/roles/codex.py", "LLM003"): 2,
-    # Critic-agent role backend: own AsyncOpenAI client, bare chat.completions,
-    # and a hand-rolled Anthropic Messages POST.
-    ("src/hyperloom/orchestrator/roles/critic_agent.py", "LLM001"): 1,
-    ("src/hyperloom/orchestrator/roles/critic_agent.py", "LLM002"): 1,
-    ("src/hyperloom/orchestrator/roles/critic_agent.py", "LLM003"): 1,
-    ("src/hyperloom/orchestrator/roles/critic_agent.py", "LLM004"): 1,
-    # Advisory proposal scorer: own AsyncOpenAI client + bare chat.completions.
-    ("src/hyperloom/orchestrator/scoring/proposal_scorer.py", "LLM001"): 1,
-    ("src/hyperloom/orchestrator/scoring/proposal_scorer.py", "LLM002"): 1,
-    ("src/hyperloom/orchestrator/scoring/proposal_scorer.py", "LLM003"): 1,
-}
+_KNOWN_VIOLATIONS: dict[tuple[str, str], int] = {}
 
 # ---------------------------------------------------------------------------
 # Detector
