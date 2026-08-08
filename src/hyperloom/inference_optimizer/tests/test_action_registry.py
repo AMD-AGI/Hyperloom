@@ -129,9 +129,10 @@ def _framework_agent_bench_cap_sec() -> int:
 
     from hyperloom.orchestrator.actions.executors.framework_agent import FrameworkAgentExecutor
 
-    default = inspect.signature(FrameworkAgentExecutor.__init__).parameters["variant_timeout_sec"].default
-    assert isinstance(default, int), "framework_agent no longer declares a fixed bench cap"
-    return default
+    param = inspect.signature(FrameworkAgentExecutor.__init__).parameters.get("variant_timeout_sec")
+    assert param is not None, "framework_agent executor no longer takes variant_timeout_sec"
+    assert isinstance(param.default, int), "framework_agent no longer declares a fixed bench cap"
+    return param.default
 
 
 def test_action_registry_lease_covers_bench_timeout(registry):

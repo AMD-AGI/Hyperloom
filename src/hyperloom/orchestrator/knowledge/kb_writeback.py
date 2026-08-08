@@ -31,9 +31,9 @@ def _default_kb_root() -> Path:
         Path: The ``framework_optimization`` directory under the resolved
             KB root.
     """
-    from hyperloom.agents.framework.kb import mutable_kb_root
+    from hyperloom.agents.framework.kb import framework_optimization_root
 
-    return mutable_kb_root() / "framework_optimization"
+    return framework_optimization_root()
 
 #: Filename for the JSONL append log; stable so the fa CLI can hard-code it
 #: (single POSIX append is atomic).

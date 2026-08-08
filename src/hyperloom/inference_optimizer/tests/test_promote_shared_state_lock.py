@@ -545,6 +545,56 @@ async def test_promote_framework_agent_kept_lifts_and_records_progress(session_d
 
 
 @pytest.mark.asyncio
+async def test_promote_framework_agent_kept_without_a_candidate_key_is_skipped_loudly(
+    session_dir,
+    caplog,
+):
+    """A KEEP with no identity advances current_best but leaves no stack entry.
+
+    Promote used to name the stack entry ``f"framework:{cand_id}"``, which is
+    truthy even when the key is empty, so a candidate carrying no candidate_id,
+    pr_url or ref was stacked under the bare name ``"framework:"``. The
+    undecorated key is falsy, so ``_lift_to_current_best``'s guard now skips the
+    append instead.
+
+    Only the append: current_best and cumulative_gain are set unconditionally
+    further down, so the win still counts — it just is not recorded as a step
+    anything can later reconcile, dedupe or replay. Pinned because that split is
+    easy to misread in either direction, and because a KEEP that leaves no trace
+    in the stack has to at least leave one in the log.
+    """
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.current_best = {"action": "baseline", "tput": 100.0}
+
+    with caplog.at_level("WARNING"):
+        await coord._promote_to_shared_state(
+            "framework_agent",
+            {
+                "status": "kept",
+                "output_throughput": 130.0,
+                "delta_pct": 30.0,
+                "batch_id": "b1",
+                # No candidate_id, no pr_url, no ref — and no task params to
+                # recover one from either.
+                "candidate": {},
+            },
+            task=_task("framework_agent", task_id="t-nameless"),
+        )
+
+    # The win lands, ...
+    assert s.current_best["action"] == "framework"
+    assert s.current_best["tput"] == 130.0
+    # ... but nothing in the stack says how it was reached.
+    assert not [e for e in s.optimization_stack if str(e.get("action")) == "framework"]
+    assert "no candidate key" in caplog.text
+    # The outcome is still recorded, so the pump does not re-select it.
+    assert len(s.framework_agent_phase_progress) == 1
+    assert s.framework_agent_phase_progress[0]["status"] == "kept"
+
+
+@pytest.mark.asyncio
 async def test_promote_framework_agent_failed_records_progress_no_lift(session_dir):
     coord = _coord(session_dir)
     s = coord.shared_state

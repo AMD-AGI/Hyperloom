@@ -167,6 +167,37 @@ class TestMigrateLegacyPartition:
         assert (destination / "lessons.jsonl").read_text(encoding="utf-8") == '{"pr_url": "PR-1"}'
         assert kb.read_pr_ledger() == [{"pr_url": "PR-1"}]
 
+    def test_adds_nothing_of_its_own_to_the_partition(self, tmp_path: Path) -> None:
+        """The partition is a served KB domain, so the migration may not litter it.
+
+        ``get_domain_files`` returns every entry under the domain unfiltered and
+        hands them to the KB readers as content, so bookkeeping dropped in here
+        would come back out as a KB file. Being once-only comes from refusing a
+        populated destination, not from a marker, so there is nothing to drop.
+        """
+        self._seed_legacy(tmp_path)
+
+        destination = kb.migrate_legacy_partition_once()
+
+        assert destination is not None
+        assert sorted(p.name for p in destination.iterdir()) == ["lessons.jsonl"]
+        assert [p.name for p in kb.get_domain_files("framework_optimization")] == ["lessons.jsonl"]
+
+    def test_copies_links_as_links(self, tmp_path: Path) -> None:
+        """Following a link would pull outside content into a directory the KB serves."""
+        legacy = self._seed_legacy(tmp_path)
+        outside = tmp_path / "outside.md"
+        outside.write_text("not mine", encoding="utf-8")
+        try:
+            (legacy / "link.md").symlink_to(outside)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks unavailable on this platform/account")
+
+        destination = kb.migrate_legacy_partition_once()
+
+        assert destination is not None
+        assert (destination / "link.md").is_symlink()
+
     def test_leaves_the_source_in_place(self, tmp_path: Path) -> None:
         """A copy, not a move: the operator decides when the old root goes."""
         legacy = self._seed_legacy(tmp_path)
