@@ -1249,11 +1249,9 @@ def _exclude_generated_drivers(workspace: Path) -> None:
     Registering the pattern in the repository's own exclude file is idempotent
     and leaves the working tree untouched.
 
-    ``--git-common-dir`` means this lands in the live repository even from a
-    linked worktree, so it is a real edit to the caller's repository and
-    :func:`_restore_generated_driver_exclude` takes it back out at the end of the
-    run. It is deliberately narrow: the entry only exists while a driver could be
-    staged, and the pattern names a file only Hyperloom ever creates.
+    ``--git-common-dir`` lands this in the live repository even from a linked
+    worktree, so :func:`_restore_generated_driver_exclude` takes it back out when
+    the run ends.
     """
     exclude = _git_exclude_file(workspace)
     if exclude is None:
@@ -1288,10 +1286,8 @@ def _git_exclude_file(workspace: Path) -> Path | None:
 def _restore_generated_driver_exclude(workspace: Path) -> None:
     """Drop the driver pattern again so the live repository is left as found.
 
-    Paired with :func:`_exclude_generated_drivers` and run beside the deletion of
-    the drivers themselves, so the entry never outlives the files it was there to
-    hide. Only the exact pattern line is removed and any other content is written
-    back untouched.
+    Run beside the deletion of the drivers themselves, so the entry never outlives
+    the files it hid. Only the exact pattern line is removed.
     """
     exclude = _git_exclude_file(workspace)
     if exclude is None or not exclude.is_file():
@@ -2840,13 +2836,9 @@ def _rewrite_contained_path(
 def _patch_touched_paths(patch_path: Path) -> set[str] | None:
     """Return the repo-relative paths a git patch claims to touch.
 
-    Only the post-image side of each header is collected, which is what the
-    producer's ``git diff --name-only`` declares in ``changed_files``. For an
-    add, a modify, or a delete both sides name the same file, so the distinction
-    only shows up on a rename or a copy: there the header reads
-    ``diff --git a/<source> b/<destination>`` while the declaration lists the
-    destination alone. Counting the source too made the two sets unequal and
-    discarded an otherwise valid artifact.
+    Only the post-image side of each header, matching the producer's
+    ``git diff --name-only`` declaration. The two differ only on a rename or copy,
+    where the header names both ends but the declaration names the destination.
     """
     try:
         text = patch_path.read_text(encoding="utf-8", errors="replace")
@@ -2879,10 +2871,8 @@ def _validated_rewrite_applyback_result(
         payload: The outer result read from the caller-chosen result file.
         workspace: The git workspace every reported path must stay inside.
         base_commit: The commit this attempt started from.
-        problems: Collector for the clause that refused the artifact. Every
-            refusal here otherwise reaches an operator as the same sentence, and
-            with forty of them a campaign that ran for an hour reports only that
-            it produced nothing -- so the specific clause is named instead.
+        problems: Collector for the clause that refused the artifact. Without it
+            every refusal here reaches an operator as the same sentence.
 
     Returns:
         dict | None: Normalized apply-back evidence, or ``None`` when any part
@@ -3569,16 +3559,16 @@ def _run_rewrite_via_cli(
     driver can also be found non-conforming and repaired from the same evidence,
     so it is offered on both routes -- but only to a producer that advertised
     ``driver_preparation``, since an older one rejects the options outright.
+
+    ``source_language`` is stated rather than left for the producer to infer: this
+    consumer resolved it from a trace, and a traced Triton kernel lives in a ``.py``
+    that names no language.
     """
     if deadline_unix <= 0:
         deadline_unix = time.time() + timeout_s
-    # Spend the reserve instead of only charging admission for it. The producer
-    # is aimed at a deadline one reserve short of the hard kill, so committing
-    # and publishing the apply-back happens inside its own budget rather than
-    # racing this process's absolute deadline. Admission already refuses a
-    # budget that cannot leave the producer its minimum after the deduction, and
-    # the floor keeps a caller-side rounding error from ever passing a
-    # ``--max-hours`` the producer would reject outright.
+    # Aim the producer one reserve short of the hard kill so it publishes the
+    # apply-back inside its own budget instead of racing the kill. The floor keeps
+    # a rounding error from passing a ``--max-hours`` the producer would reject.
     producer_deadline_unix = max(
         time.time() + 1.0,
         deadline_unix - _flydsl_rewrite.APPLYBACK_RESERVE_SEC,
@@ -4001,10 +3991,9 @@ def _finalize_forge_workspace(
     result. They are reclaimed only in place, and only after re-confirming
     containment, so an unvalidated run never deletes anything it merely guessed.
 
-    ``result`` is the dict about to be returned to the caller. Relocating an
-    in-place campaign directory moves the producer's published bundle with it, so
-    the artifact paths in there are repointed at the new location; left alone they
-    would name a directory this function had just emptied.
+    ``result`` is the dict about to be returned. Relocating an in-place campaign
+    directory moves the producer's published bundle with it, so its artifact paths
+    are repointed rather than left naming a directory this just emptied.
     """
     if inplace:
         cleanup_errors: list[str] = []
@@ -4239,10 +4228,8 @@ def submit(
 
     driver = ""
     producer_temporary_paths: list[str] = []
-    # Handed to finalization so the paths a caller receives still resolve after an
-    # in-place campaign directory is relocated. Finalization runs in this
-    # function's ``finally``, which is before the value reaches the caller, so
-    # repointing this dict in place is visible to them.
+    # Repointed by finalization, which runs in this function's ``finally`` -- before
+    # the value reaches the caller, so mutating it there is visible to them.
     finalized_result: dict[str, Any] = {}
     try:
         # Locate the Kernel-Forge code via $FORGE_PATH (the loop runs in a

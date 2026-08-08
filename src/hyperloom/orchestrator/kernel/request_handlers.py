@@ -1393,13 +1393,9 @@ def _fill_integrate_provenance(
 ) -> None:
     """Backfill artifact provenance for an integrate resolved from a ledger entry.
 
-    These two fields are what arms the strict accuracy gate, and only the pending
-    record used to supply them. Every KEEP that takes a fallback instead -- the
-    ones the ``source_file`` dedup drops from the pending queue, so the second
-    and later KEEPs against one file -- arrived with the fields absent, which
-    reads exactly like an ordinary kernel patch. An apply-back proven correct
-    only against its standalone reference could then win on throughput alone,
-    which is the one outcome the gate exists to prevent.
+    These two fields arm the strict accuracy gate. A KEEP the ``source_file`` dedup
+    drops from the pending queue resolves through a fallback instead, and without
+    them a reference-only apply-back reads as an ordinary kernel patch.
     """
     if not resolved.get("artifact_kind") and isinstance(framework_applyback, dict):
         kind = str(framework_applyback.get("artifact_kind") or "")
@@ -6389,9 +6385,8 @@ async def integrate_handler(
             "timeout_sec": rebaseline_timeout_sec,
             "extra_server_args": extra_args,
             "extra_envs": dict(payload.get("extra_envs") or {}),
-            # A framework apply-back is the only artifact that patches FlyDSL
-            # sources, and only this run reads them before they are compiled, so
-            # the JIT cache key is widened here and nowhere else.
+            # The only artifact that patches FlyDSL sources, so the only run that
+            # needs the JIT cache key widened.
             "flydsl_source_dirs": (
                 str(payload.get("artifact_kind") or "")
                 == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
