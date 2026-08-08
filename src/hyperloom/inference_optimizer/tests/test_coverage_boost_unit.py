@@ -53,7 +53,7 @@ def test_kb_writeback_default_root_uses_user_data_path(monkeypatch, tmp_path) ->
     monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
 
-    assert kb_writeback._default_kb_root() == tmp_path / "workspace" / "kb" / "framework_optimization"
+    assert kb_writeback._default_kb_root() == tmp_path / "workspace" / "framework-kb" / "framework_optimization"
 
 
 async def test_kb_writeback_rejects_unknown_outcome() -> None:
@@ -73,7 +73,7 @@ async def test_kb_writeback_rejects_unknown_outcome() -> None:
 async def test_kb_writeback_appends_record(monkeypatch, tmp_path) -> None:
     from hyperloom.orchestrator.knowledge import kb_writeback
 
-    monkeypatch.setattr(kb_writeback, "KB_ROOT", tmp_path / "fa")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "fa"))
     path = await kb_writeback.write_framework_record(
         pr_url="https://x/pr/1",
         pr_sha="abc",

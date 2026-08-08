@@ -9,10 +9,14 @@ from hyperloom.common.llm_config import (
     LLMConfigError,
     apply_reasoning_effort,
     claude_sdk_env_options,
+    deepseek_compat_env,
     derive_openai_base_url,
     openai_client_kwargs,
     parse_custom_headers,
+    provider_model_defaults,
 )
+
+_LEGACY_KEY = "_".join(("DEEPSEEK", "API", "KEY"))
 
 
 def test_apply_reasoning_effort_is_noop_without_env():
@@ -121,6 +125,200 @@ def test_openai_kwargs_preserves_explicit_openai_config():
 def test_openai_kwargs_requires_a_key():
     with pytest.raises(LLMConfigError):
         openai_client_kwargs(env={"ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic"})
+
+
+def test_deepseek_compat_env_is_empty_without_legacy_vars():
+    assert deepseek_compat_env({}) == {}
+    assert deepseek_compat_env({"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}) == {}
+
+
+def test_deepseek_compat_env_key_only_fills_both_protocol_sides():
+    """One key, two endpoints: DeepSeek is a gateway, not a third provider."""
+    updates = deepseek_compat_env({_LEGACY_KEY: "deepseek-token"})
+    assert updates["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    assert updates["OPENAI_BASE_URL"] == "https://api.deepseek.com/v1"
+    assert updates["_".join(("ANTHROPIC", "API", "KEY"))] == "deepseek-token"
+    assert updates["_".join(("OPENAI", "API", "KEY"))] == "deepseek-token"
+    assert updates["CLAUDE_MODEL"] == "deepseek-v4-pro"
+    assert updates["CODEX_MODEL"] == "deepseek-v4-pro"
+    assert updates["GEAK_CLAUDE_MODEL"] == "deepseek-v4-pro"
+
+
+@pytest.mark.parametrize(
+    ("legacy_url", "anthropic_url", "openai_url"),
+    [
+        ("https://gw.example/anthropic", "https://gw.example/anthropic", "https://gw.example/v1"),
+        ("https://gw.example/v1", "https://gw.example/anthropic", "https://gw.example/v1"),
+        ("https://gw.example/anthropic/", "https://gw.example/anthropic", "https://gw.example/v1"),
+        ("https://gw.example", "https://gw.example", "https://gw.example/v1"),
+    ],
+)
+def test_deepseek_compat_env_derives_the_sibling_endpoint(legacy_url, anthropic_url, openai_url):
+    """The legacy URL named only one side; the other is derived, never guessed wrong."""
+    updates = deepseek_compat_env({_LEGACY_KEY: "t", "DEEPSEEK_BASE_URL": legacy_url})
+    assert updates["ANTHROPIC_BASE_URL"] == anthropic_url
+    assert updates["OPENAI_BASE_URL"] == openai_url
+
+
+def test_deepseek_compat_env_bare_known_host_gets_both_segments():
+    """``https://api.deepseek.com`` is the documented OpenAI base, not a root."""
+    updates = deepseek_compat_env({_LEGACY_KEY: "t", "DEEPSEEK_BASE_URL": "https://api.deepseek.com"})
+    assert updates["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    assert updates["OPENAI_BASE_URL"] == "https://api.deepseek.com/v1"
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [
+        {"_".join(("ANTHROPIC", "API", "KEY")): "sk-explicit"},
+        {"_".join(("ANTHROPIC", "AUTH", "TOKEN")): "sk-explicit"},
+        {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"},
+    ],
+)
+def test_deepseek_compat_env_ignores_leftovers_once_anthropic_side_exists(configured):
+    """A stale legacy key must never re-point an explicit Anthropic credential.
+
+    Half-adopting the gateway would put ANTHROPIC_BASE_URL on DeepSeek's host
+    while the operator's own key is what gets sent there, and would invent an
+    OpenAI side they never asked for.
+    """
+    assert deepseek_compat_env({**configured, _LEGACY_KEY: "sk-legacy"}) == {}
+
+
+def test_deepseek_compat_env_leaves_official_anthropic_endpoint_alone():
+    """Regression: an explicit key alone still implies the OFFICIAL endpoint.
+
+    ``_resolve_llm_endpoints`` fills ``ANTHROPIC_BASE_URL`` from an explicit
+    Anthropic key; the shim must not get there first with DeepSeek's host.
+    """
+    env = {"_".join(("ANTHROPIC", "API", "KEY")): "sk-real-anthropic", _LEGACY_KEY: "sk-legacy"}
+    updates = deepseek_compat_env(env)
+    assert "ANTHROPIC_BASE_URL" not in updates
+    assert "OPENAI_BASE_URL" not in updates
+    assert "CLAUDE_MODEL" not in updates
+
+
+def test_claude_sdk_env_options_does_not_mix_legacy_and_explicit_keys():
+    """End-to-end guard for the same hazard through the Claude SDK options."""
+    api_key_var = "_".join(("ANTHROPIC", "API", "KEY"))
+    auth_token_var = "_".join(("ANTHROPIC", "AUTH", "TOKEN"))
+    child_env = claude_sdk_env_options(
+        env={
+            api_key_var: "sk-explicit",
+            "ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic",
+            _LEGACY_KEY: "sk-legacy",
+        }
+    )["env"]
+    assert child_env[api_key_var] == "sk-explicit"
+    assert child_env[auth_token_var] == "sk-explicit"
+
+
+def test_provider_model_defaults_supplies_a_model_for_a_known_gateway():
+    """A gateway serving only its own models must not get the AMD Claude id.
+
+    This is the shape the docs now recommend: both sides pointed at DeepSeek
+    with the standard variables and no ``DEEPSEEK_*`` anywhere.
+    """
+    defaults = provider_model_defaults(
+        {
+            "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+            "OPENAI_BASE_URL": "https://api.deepseek.com/v1",
+            "_".join(("ANTHROPIC", "API", "KEY")): "sk-ds",
+            "_".join(("OPENAI", "API", "KEY")): "sk-ds",
+        }
+    )
+    assert defaults == {
+        "CLAUDE_MODEL": "deepseek-v4-pro",
+        "CODEX_MODEL": "deepseek-v4-pro",
+        "GEAK_CLAUDE_MODEL": "deepseek-v4-pro",
+    }
+
+
+def test_provider_model_defaults_resolves_a_retired_config_too():
+    """The legacy spelling must reach the same model, without preflight."""
+    defaults = provider_model_defaults({_LEGACY_KEY: "sk-ds"})
+    assert defaults["CLAUDE_MODEL"] == "deepseek-v4-pro"
+    assert defaults["CODEX_MODEL"] == "deepseek-v4-pro"
+
+
+def test_provider_model_defaults_never_overrides_explicit_models():
+    defaults = provider_model_defaults(
+        {
+            "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+            "OPENAI_BASE_URL": "https://api.deepseek.com/v1",
+            "CLAUDE_MODEL": "my-claude",
+            "CODEX_MODEL": "my-codex",
+        }
+    )
+    assert "CLAUDE_MODEL" not in defaults
+    assert "CODEX_MODEL" not in defaults
+    # GEAKv4 still follows the Anthropic-side model in effect.
+    assert defaults["GEAK_CLAUDE_MODEL"] == "my-claude"
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"},
+        {"OPENAI_BASE_URL": "https://api.openai.com/v1"},
+        {
+            "ANTHROPIC_BASE_URL": "https://llm.amd.example/Anthropic",
+            "OPENAI_BASE_URL": "https://llm.amd.example/Unified/v1",
+        },
+        {},
+    ],
+)
+def test_provider_model_defaults_is_silent_for_unknown_gateways(env):
+    """Only hosts we know the catalog of get a model; everything else is left alone."""
+    assert provider_model_defaults(env) == {}
+
+
+def test_deepseek_compat_env_never_overrides_explicit_values():
+    updates = deepseek_compat_env(
+        {
+            _LEGACY_KEY: "deepseek-token",
+            "OPENAI_BASE_URL": "https://gateway.example/v1",
+            "_".join(("OPENAI", "API", "KEY")): "gateway-token",
+            "CLAUDE_MODEL": "claude-opus-4-8",
+        }
+    )
+    assert "OPENAI_BASE_URL" not in updates
+    assert "_".join(("OPENAI", "API", "KEY")) not in updates
+    assert "CLAUDE_MODEL" not in updates
+    assert updates["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+
+
+def test_deepseek_compat_env_leaves_a_foreign_openai_side_alone():
+    """Another gateway on the OpenAI side keeps its own key AND its own model.
+
+    Replacing only ``CODEX_MODEL`` would leave that gateway being asked for
+    ``deepseek-v4-pro``, which it does not serve.
+    """
+    updates = deepseek_compat_env(
+        {
+            _LEGACY_KEY: "sk-legacy",
+            "OPENAI_BASE_URL": "https://gateway.example/v1",
+            "_".join(("OPENAI", "API", "KEY")): "sk-gateway",
+        }
+    )
+    assert "OPENAI_BASE_URL" not in updates
+    assert "_".join(("OPENAI", "API", "KEY")) not in updates
+    assert "CODEX_MODEL" not in updates
+    # The Anthropic side is still free, so it is adopted.
+    assert updates["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+
+
+def test_deepseek_compat_env_geak_model_follows_explicit_claude_model():
+    """GEAKv4 must not be pointed at a model the operator overrode."""
+    updates = deepseek_compat_env({_LEGACY_KEY: "sk-legacy", "CLAUDE_MODEL": "claude-opus-5"})
+    assert "CLAUDE_MODEL" not in updates
+    assert updates["GEAK_CLAUDE_MODEL"] == "claude-opus-5"
+
+
+def test_deepseek_compat_env_is_idempotent():
+    env = {_LEGACY_KEY: "deepseek-token"}
+    env.update(deepseek_compat_env(env))
+    assert deepseek_compat_env(env) == {}
 
 
 def test_claude_sdk_env_options_from_deepseek_key_only():

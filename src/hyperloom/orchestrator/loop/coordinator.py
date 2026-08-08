@@ -983,6 +983,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_extract_gaps_from_attempts": "phase_explore",
         "_gap_layer_for_action": "phase_explore",
         "_record_explore_round_gaps": "phase_explore",
+        "_record_explore_variant_failures": "phase_explore",
         "_task_id_from_specialist_source": "phase_explore",
         "_maybe_materialize_mn_explore": "phase_explore",
         "_maybe_autosubmit_specialist_patches": "phase_explore",
@@ -1046,6 +1047,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_record_framework_agent_authored_outcome": "phase_framework",
         "_recover_framework_agent_authoring_outcome": "phase_framework",
         "_record_framework_agent_authoring_empty_outcome": "phase_framework",
+        "_record_framework_agent_dispatch_failure": "phase_framework",
         "_framework_agent_repo_url_origin_framework": "phase_framework",
         "_build_framework_config_grid": "phase_framework",
         "_framework_config_explore_params": "phase_framework",
@@ -1108,6 +1110,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_resolve_serving_tp": "dispatcher",
         "_gpu_lease_ttl_sec": "dispatcher",
         "_reap_dispatched_task": "dispatcher",
+        "_account_dead_holder_failures": "dispatcher",
         "_lanes_fit": "dispatcher",
         "_sequence_denial_for_action": "dispatcher",
         "_sequence_denial_for_request": "dispatcher",
@@ -1395,7 +1398,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
     # Max tried-candidate rows fed into the ranker/discovery working memory.
     _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
 
-    _CRITIC_PRIORS_DECISION_TAIL: int = 5
     _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
 
     # Auto-roofline — PRELUDE bootstrap + 10% watermark refresh.

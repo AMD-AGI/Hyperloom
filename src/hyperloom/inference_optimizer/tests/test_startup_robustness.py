@@ -292,18 +292,32 @@ def test_openai_only_critic_agent_runtime_needed(clean_creds_env):
     assert cli._critic_agent_runtime_needed("agent") is True
 
 
-def test_resolve_llm_endpoints_deepseek_key_only(clean_creds_env):
+def test_resolve_llm_endpoints_ignores_retired_deepseek_key(clean_creds_env):
+    """``_resolve_llm_endpoints`` no longer knows DeepSeek; the shim does."""
     clean_creds_env.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-fake-token")
-    anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
-    assert anthropic_url == "https://api.deepseek.com/anthropic"
-    assert openai_url == ""
+    assert cli_credentials._resolve_llm_endpoints() == ("", "")
 
 
-def test_resolve_llm_endpoints_deepseek_explicit_url_kept(clean_creds_env):
-    clean_creds_env.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-fake-token")
-    clean_creds_env.setenv("DEEPSEEK_BASE_URL", "https://deepseek.example/anthropic")
+def test_resolve_llm_endpoints_dual_protocol_gateway_keeps_both_sides(clean_creds_env):
+    """A normalized DeepSeek config is an ordinary two-sided gateway."""
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://deepseek.example/anthropic")
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://deepseek.example/v1")
     anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
     assert anthropic_url == "https://deepseek.example/anthropic"
+    assert openai_url == "https://deepseek.example/v1"
+
+
+def test_resolve_llm_endpoints_deepseek_anthropic_only_leaves_openai_unset(clean_creds_env):
+    """A DeepSeek Anthropic endpoint no longer implies anything about the other side.
+
+    Endpoint derivation across sides was removed; when the OpenAI side matters
+    the caller goes through ``derive_openai_base_url``, which knows DeepSeek
+    serves ``/v1`` and not AMD's ``/Unified/v1``.
+    """
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "deepseek-fake-token")
+    anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
+    assert anthropic_url == "https://api.deepseek.com/anthropic"
     assert openai_url == ""
 
 

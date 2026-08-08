@@ -104,7 +104,6 @@ class _State:
         self.framework_agent_empty_discoveries = 0
         self.framework_agent_batches: list[dict[str, Any]] = []
         self.framework_agent_phase_progress: list[dict[str, Any]] = []
-        self.framework_agent_critic_decisions: list[dict[str, Any]] = []
         self.framework_agent_specialist_candidate_map: dict[str, str] = {}
         self.phase_history: list[dict[str, Any]] = []
         self.gaps: list[dict[str, Any]] = []
@@ -119,6 +118,7 @@ class _Tasks:
         self._queued: list[Any] = []
         self._running: list[Any] = []
         self.created: list[dict[str, Any]] = []
+        self._by_idem: dict[str, Any] = {}
 
     async def queued(self) -> list[Any]:
         return list(self._queued)
@@ -128,6 +128,10 @@ class _Tasks:
 
     async def create_or_return_existing(self, **kwargs: Any) -> tuple[Any, bool]:
         self.created.append(kwargs)
+        key = str(kwargs.get("idempotency_key") or "")
+        existing = self._by_idem.get(key)
+        if existing is not None:
+            return existing, True
         task = SimpleNamespace(
             kind=kwargs.get("kind"),
             task_id=f"t-{len(self.created)}",
@@ -135,6 +139,7 @@ class _Tasks:
             state="queued",
         )
         self._queued.append(task)
+        self._by_idem[key] = task
         return task, False
 
 
@@ -145,6 +150,8 @@ class _Stub:
     _framework_candidate_key = staticmethod(FrameworkPhase._framework_candidate_key)
     _framework_local_explore_arm_enabled = FrameworkPhase._framework_local_explore_arm_enabled
     _compose_framework_local_explore_gap = FrameworkPhase._compose_framework_local_explore_gap
+    _authoring_specialist_domain = FrameworkPhase._authoring_specialist_domain
+    _render_rewrite_evidence_for_prompt = FrameworkPhase._render_rewrite_evidence_for_prompt
     _next_local_explore_candidate_id = FrameworkPhase._next_local_explore_candidate_id
     _make_local_explore_pseudo_candidate = FrameworkPhase._make_local_explore_pseudo_candidate
     _maybe_dispatch_local_explore = FrameworkPhase._maybe_dispatch_local_explore
@@ -162,6 +169,10 @@ class _Stub:
         self.tasks = _Tasks()
 
     # Overrides to keep the specialist dispatch hermetic (no GPU pool / warmup).
+    def _cycle_idem_suffix(self) -> str:
+        """Macro-cycle 0, as the Coordinator would report it."""
+        return ""
+
     def _framework_gpu_params(self) -> dict[str, Any]:
         return {}
 
@@ -250,6 +261,48 @@ def test_maybe_dispatch_local_explore_enabled_creates_specialist(tmp_path: Path)
     assert created["idempotency_key"] == "framework_agent_local_explore:local_explore:0"
     # The specialist->candidate provenance map is recorded.
     assert stub.shared_state.framework_agent_specialist_candidate_map == {"t-1": "local_explore:0"}
+
+
+def test_a_candidate_whose_specialist_failed_is_dispatched_again(tmp_path: Path):
+    """One interrupted run must not retire a candidate.
+
+    The registry de-duplicates by key and returns whatever row it finds, so a
+    candidate whose specialist failed kept resolving to that failure: the phase
+    re-selected it every tick, logged a dispatch, and nothing ran. A restart
+    reclaims an in-flight specialist as failed, so a single stop was enough to
+    park the phase on a candidate it could never start — and it held the whole
+    framework budget while doing it.
+    """
+    stub = _Stub(tmp_path, authoring=True, local_explore=True)
+    assert asyncio.run(stub._maybe_dispatch_local_explore(reason="discover_exhausted")) is True
+    first = stub.tasks._queued[-1]
+    first.state = "failed"
+
+    stub.shared_state.framework_agent_specialist_candidate_map = {}
+    assert asyncio.run(stub._maybe_dispatch_local_explore(reason="discover_exhausted")) is True
+
+    retry = stub.tasks.created[-1]
+    assert retry["idempotency_key"] != "framework_agent_local_explore:local_explore:0"
+    assert retry["idempotency_key"].startswith("framework_agent_local_explore:local_explore:0")
+    assert stub.tasks._queued[-1] is not first
+
+
+def test_a_candidate_that_keeps_failing_is_left_for_the_phase_to_replace(tmp_path: Path):
+    """Retrying is bounded: a candidate that cannot author is not worth the
+    wall clock the framework budget is there to spend."""
+    from hyperloom.orchestrator.phases.framework import _LOCAL_EXPLORE_MAX_ATTEMPTS
+
+    stub = _Stub(tmp_path, authoring=True, local_explore=True)
+    for _ in range(_LOCAL_EXPLORE_MAX_ATTEMPTS):
+        stub.shared_state.framework_agent_specialist_candidate_map = {}
+        asyncio.run(stub._maybe_dispatch_local_explore(reason="discover_exhausted"))
+        stub.tasks._queued[-1].state = "failed"
+
+    before = len(stub.tasks._queued)
+    stub.shared_state.framework_agent_specialist_candidate_map = {}
+    asyncio.run(stub._maybe_dispatch_local_explore(reason="discover_exhausted"))
+
+    assert len(stub.tasks._queued) == before
 
 
 # --------------------------------------------------------------------------- #

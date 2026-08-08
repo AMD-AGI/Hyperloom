@@ -146,6 +146,10 @@ hyperloom = [
     "assets/*.sh",
     "assets/*.example",
     "assets/configs/*.yaml",
+    # Host-side evidence probe, injected into the benchmark process via a
+    # PYTHONPATH prefix (see _framework_rewrite_evidence). Shipped so wheel
+    # installs can arm it.
+    "assets/host_probe/*.py",
     # Slurm submission bundle (see docs/install/slurm.md).
     "assets/slurm/*.sh",
     "assets/slurm/*.sbatch",
@@ -174,7 +178,6 @@ hyperloom = [
     "examples/*.json",
     "examples/*.py",
     "kb/framework_optimization/*.jsonl",
-    "scripts/*.sh",
 ]
 "hyperloom.agents.quantization" = [
     "SKILL.md",

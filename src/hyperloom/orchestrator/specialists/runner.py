@@ -16,6 +16,7 @@ from __future__ import annotations
 import enum
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -145,6 +146,32 @@ _TOKEN_VALUE_RES = (
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
 )
+
+
+def _framework_checkout(framework: str) -> str:
+    """Return the checkout of the framework this session optimises, if published.
+
+    A scriptable framework runs out of a repo checkout, and
+    ``_publish_scriptable_repo_root`` puts that path in ``os.environ`` as
+    ``<FRAMEWORK>_REPO_PATH`` / ``<FRAMEWORK>_DIR`` so it reaches PolicyGate. The
+    specialist worktree needs the same answer: it must branch off the tree whose
+    files the patches name, not off whichever allowlisted root happens to be a
+    checkout.
+
+    Args:
+        framework: Session framework name, e.g. ``worldplay``.
+
+    Returns:
+        The resolved path, or ``""`` when the framework publishes none (the
+        pip-installed case, where the allowlist order is the right fallback).
+    """
+    name = str(framework or "").strip().upper()
+    candidates = (f"{name}_REPO_PATH", f"{name}_DIR") if name else ()
+    for var in (*candidates, "FRAMEWORK_REPO_PATH"):
+        value = os.environ.get(var, "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _patch_path_within_bases(path: Path, bases: list[Path]) -> bool:
@@ -1448,7 +1475,10 @@ class SpecialistRunner:
                 return None, None, ""
         elif bool((ctx.task.params or {}).get("readonly")):
             return None, None, ""
-        base = _pick_worktree_base(self.subprocess_config.framework_source_roots)
+        base = _pick_worktree_base(
+            self.subprocess_config.framework_source_roots,
+            preferred=_framework_checkout(str((ctx.task.params or {}).get("framework") or "")),
+        )
         if base is None:
             return None, None, "no_git_framework_source_root"
         worktree_path = workspace / "worktree"

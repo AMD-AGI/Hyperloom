@@ -5823,6 +5823,20 @@ def _shape_tool_result(rc: int, stdout: str, stderr: str) -> HandlerResult:
         synthesized failure result when stdout has no parseable JSON.
     """
     parsed = _parse_tool_stdout(stdout)
+    if parsed and set(parsed) == {"raw_stdout_tail"}:
+        # Unparseable output is not a result. Inferring ``ok`` from rc==0 here
+        # made a tool whose output we could not read indistinguishable from one
+        # that succeeded: the roofline executor read status=ok, recorded an
+        # empty analysis over the real one, and the leg reported success while
+        # twenty minutes of GPU evidence went in the bin.
+        return {
+            "status": "failed",
+            "error_class": "tool_output_unparseable",
+            "error": ("tool exited rc=%d but its stdout held no JSON object" % rc),
+            "returncode": rc,
+            "raw_stdout_tail": parsed["raw_stdout_tail"],
+            "stderr_tail": stderr[-2000:] if stderr.strip() else "",
+        }
     if parsed:
         # Trust the tool's own status; else infer from rc.
         if "status" not in parsed:
@@ -5872,6 +5886,22 @@ def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
                     return obj
             except json.JSONDecodeError:
                 continue
+    # Last: a pretty-printed object opening at the start of a line. A tool that
+    # indents its result spans many lines, so neither whole-text nor per-line
+    # parsing sees it, and it is exactly the tools with a lot to say that
+    # indent. tracelens_analysis returned a megabyte of hot-kernel analysis this
+    # way, interleaved with progress chatter and followed by an import banner;
+    # every field of it was dropped and the run still reported ``ok``.
+    # ``raw_decode`` stops at the end of the object, so trailing noise is fine.
+    decoder = json.JSONDecoder()
+    starts = [m.start() for m in re.finditer(r"^\{", text, re.MULTILINE)]
+    for start in reversed(starts):
+        try:
+            obj, _end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
     return {"raw_stdout_tail": text[-2000:]}
 
 

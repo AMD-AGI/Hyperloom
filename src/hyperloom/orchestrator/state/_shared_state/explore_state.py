@@ -643,6 +643,143 @@ class _ExploreStateMixin:
         search["winners_history"] = wh[-_shared_state_module()._WINNERS_HISTORY_CAP :]
         self.explore_search = search
 
+    def record_authored_framework_levers(
+        self,
+        switches: list[dict[str, Any]],
+        *,
+        default_on: bool,
+        specialist_task_id: str = "",
+        stack_delta_pct: float | None = None,
+    ) -> bool:
+        """Register accepted framework-rewrite switches as search levers.
+
+        Each switch behind an accepted rewrite becomes a lever the explore phase
+        can toggle, which is what turns an authored bundle into per-rewrite
+        attribution and a searchable combination space instead of a take-it-or-
+        leave-it patch.
+
+        ``default_on`` records whether the switch is part of the running
+        configuration. It is ``False`` for an inert KEEP — the patch cleared
+        correctness but the bundle did not clear the throughput gate, so the code
+        is kept dormant and the levers are registered for the explore phase to
+        try one bundle at a time. Keeping default-off code costs nothing, and
+        discarding it would throw away the rewrites that do pay along with the
+        one that does not.
+
+        Existing rows are updated in place, keyed by switch name, so a re-run of
+        the same rewrite does not duplicate its lever.
+
+        Args:
+            switches: Parsed manifest entries (see ``_framework_switch_manifest``).
+            default_on: Whether these switches are on in the current best config.
+            specialist_task_id: The authoring specialist, for provenance.
+            stack_delta_pct: Throughput delta measured with the whole bundle on.
+
+        Returns:
+            ``True`` when any lever row was added or changed.
+        """
+        if not isinstance(switches, list) or not switches:
+            return False
+        rows = list(getattr(self, "authored_framework_levers", None) or [])
+        by_switch = {str(r.get("switch") or ""): i for i, r in enumerate(rows) if isinstance(r, dict)}
+        now = _shared_state_module()._now_iso()
+        changed = False
+        for entry in switches:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("switch") or "").strip().upper()
+            if not name:
+                continue
+            row = {
+                "switch": name,
+                "value": str(entry.get("value") or "1"),
+                "category": str(entry.get("category") or ""),
+                "target": str(entry.get("target") or ""),
+                "evidence": str(entry.get("evidence") or ""),
+                "depends_on": list(entry.get("depends_on") or []),
+                "enables": list(entry.get("enables") or []),
+                "enabler": bool(entry.get("enabler")),
+                "default_on": bool(default_on),
+                "specialist_task_id": str(specialist_task_id or ""),
+                "stack_delta_pct": (float(stack_delta_pct) if isinstance(stack_delta_pct, (int, float)) else None),
+                # Filled in by the explore phase once the lever has been
+                # measured on its own; ``None`` means "registered, not yet
+                # attributed".
+                "attributed_gain_pct": None,
+                "attribution_source": "",
+                "ts": now,
+                "cycle": int(getattr(self, "macro_cycle", 0) or 0),
+            }
+            index = by_switch.get(name)
+            if index is None:
+                rows.append(row)
+                by_switch[name] = len(rows) - 1
+                changed = True
+                continue
+            prior = rows[index] if isinstance(rows[index], dict) else {}
+            # Preserve an attribution already measured for this lever; the
+            # measurement is more informative than this registration.
+            row["attributed_gain_pct"] = prior.get("attributed_gain_pct")
+            row["attribution_source"] = str(prior.get("attribution_source") or "")
+            if prior != row:
+                rows[index] = row
+                changed = True
+        if changed:
+            self.authored_framework_levers = rows
+        return changed
+
+    def record_framework_lever_attribution(
+        self,
+        switch: str,
+        *,
+        gain_pct: float | None,
+        source: str,
+    ) -> bool:
+        """Record a lever's individually measured contribution.
+
+        Args:
+            switch: Switch name.
+            gain_pct: Measured contribution; ``None`` clears a prior value.
+            source: How it was measured — ``"additive"`` (lever switched on
+                against the running base) or ``"leave_one_out"`` (lever removed
+                from a stack that already had it).
+
+        Returns:
+            ``True`` when a lever row was updated.
+        """
+        name = str(switch or "").strip().upper()
+        if not name:
+            return False
+        rows = list(getattr(self, "authored_framework_levers", None) or [])
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict) or str(row.get("switch") or "") != name:
+                continue
+            updated = dict(row)
+            updated["attributed_gain_pct"] = float(gain_pct) if isinstance(gain_pct, (int, float)) else None
+            updated["attribution_source"] = str(source or "")
+            if updated != row:
+                rows[index] = updated
+                self.authored_framework_levers = rows
+                return True
+            return False
+        return False
+
+    def framework_levers_by_state(self, *, default_on: bool) -> list[dict[str, Any]]:
+        """Return registered levers filtered by whether they are currently on.
+
+        Args:
+            default_on: Select levers that are on (``True``) or dormant
+                (``False``).
+
+        Returns:
+            The matching lever rows, in registration order.
+        """
+        return [
+            row
+            for row in (getattr(self, "authored_framework_levers", None) or [])
+            if isinstance(row, dict) and bool(row.get("default_on")) is bool(default_on)
+        ]
+
     def record_discovered_flags(
         self,
         *,
