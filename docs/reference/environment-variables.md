@@ -51,6 +51,7 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `TRACELENS_ROOT`                          | No (installer auto-clones) | `${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}/Tr`<br>`aceLens@<resolved-sha>` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `src/hyperloom/agents/kernel/scripts/install.sh` clones the public repo into the repo-local cache root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
 | `GEAK_CLAUDE_BIN`                          | No (installer auto-resolves) | First of `$HOME/.local/bin/claude`, `/usr/local/bin/claude`, `$(command -v claude)`; written to `kernel-agent.env.sh` | Pins the Claude Code binary the GEAK SDK path uses, so `claude_agent_sdk` doesn't fall back to its older bundled CLI. Export to force a specific build. |
 | `USER_DATA_PATH`                          | No                   | `/workspace/hyperloom`                                             | Session directory root (logs, runs, mirrors, breakdown). Replaces the retired `INFERENCE_OPTIMIZER_SESSION_DIR` and `WORKSPACE_PATH`.                                                |
+| `HYPERLOOM_`<br>`RUNTIME_DIR`             | No                   | `$USER_DATA_PATH/runtime` (installer)                               | Private writable runtime state. Codex SDK turns create a unique mode-`0700` `CODEX_HOME` here and remove it after the SDK client closes. When unset, Codex uses the first safe declared output root, then a run-local working directory; it never falls back to `/tmp` or a source checkout. |
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_CU`<br>`RRENT_S`<br>`ESSION_DIR` | No (set by CLI) | Set at session boot | Absolute path to the active session directory. Written by the CLI when a session starts and inherited by every benchmark subprocess; session-path resolution prefers it over scanning `USER_DATA_PATH`. Do not set by hand. |
 | `HYPERLOOM_ROOT`                          | No                   | `$HYPER`<br>`LOOM_R`<br>`UNTIME_`<br>`DIR/sou`<br>`rce-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the repo-local cache root (`${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}`), not this path. |
 | `HYPERLOOM`<br>`_CACHE_`<br>`DIR`                          | No                   | `$REPO_ROOT`<br>`/.cache`                      | Writable, repo-local base for auto-cloned open-source deps (TraceLens, Magpie, etc.), cloned per revision as `<name>@<sha>`. Not under `$TMPDIR` so a reaper cannot wipe it mid-run. |
@@ -332,6 +333,34 @@ endpoint is OpenAI-compatible and supports the Responses API `web_search` tool.
 |----------|---------|-------------|
 | `HYPERLOOM_CODEX_WEB_SEARCH` | Unset (off) | Set to `1`/`true` to route every Codex turn through the OpenAI Responses API with the built-in `web_search` tool. Default keeps the existing `chat.completions` path unchanged. |
 | `HYPERLOOM_`<br>`CODEX_WEB_SEARCH`<br>`_CONTEXT_SIZE` | `medium` | Passed through as the `web_search` tool's `search_context_size` (`low` / `medium` / `high`). Ignored unless `HYPERLOOM_CODEX_WEB_SEARCH` is on. |
+
+---
+
+## Codex (OpenAI) agent sandbox
+
+Selects how a Codex agent session (TraceLens analysis and every future
+Codex-based agent) is contained. The secure default is `workspace-write`.
+Codex implements both contained presets with bubblewrap, so Hyperloom executes
+a real namespace-and-mount capability probe before starting the SDK. Merely
+finding a `bwrap` executable is insufficient: if the current kernel or
+container prevents it from establishing the sandbox, `workspace-write` and
+`read-only` fail closed before the app-server starts. There is no automatic
+fallback to `bypass`.
+
+`bypass` is a deliberate double opt-in. Set both
+`HYPERLOOM_CODEX_SANDBOX_MODE=bypass` and
+`HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1`; the second variable confirms that an
+external container or sandbox already enforces the required isolation. It does
+not create that boundary. A confirmed bypass maps to Codex full access even
+when no writable roots are declared, because the external sandbox is
+authoritative. Under the contained modes, no writable roots remains
+`read-only`. Unknown modes and incomplete bypass configuration fail
+immediately.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYPERLOOM_`<br>`CODEX_SANDBOX_MODE` | `workspace-write` | `workspace-write` restricts writes to the session directory plus declared output roots; `read-only` forbids writes; `bypass` selects Codex full access only when the external-sandbox confirmation below is also set. |
+| `HYPERLOOM_`<br>`CODEX_EXTERNAL_`<br>`SANDBOX` | Unset | Set exactly to `1` only when an external isolation boundary is already active and `HYPERLOOM_CODEX_SANDBOX_MODE=bypass`. Setting this alone has no effect and never weakens the default sandbox. |
 
 ---
 

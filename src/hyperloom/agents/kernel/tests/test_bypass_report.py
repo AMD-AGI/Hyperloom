@@ -863,7 +863,7 @@ def test_render_surfaces_source_dispatchability_and_task_groups(monkeypatch):
     # resolved source surfaced with method
     assert "/opt/aiter/csrc/act.cu" in md and "via op_to_source" in md
     # unresolved reusable candidate flagged as not auto-dispatchable
-    assert "not auto-dispatchable" in md
+    assert "not auto-dispatchable" in md.lower()
     # Task Groups section rendered (act.cu group exists)
     assert "## Task Groups" in md and "act.cu" in md
 

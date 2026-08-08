@@ -28,29 +28,18 @@ from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 
 
 
-def _has_anthropic_side() -> bool:
-    """True when an Anthropic-side endpoint or key is configured."""
-    base_url = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-    api_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-    auth_token = (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-    return bool(base_url or api_key or auth_token)
-
-
-def _has_openai_side() -> bool:
-    """True when an OpenAI-side endpoint or key is configured."""
-    base_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
-    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-    return bool(base_url or api_key)
-
-
 def _official_anthropic_only() -> bool:
     """True when only the Anthropic-side endpoint is available."""
-    return _has_anthropic_side() and not _has_openai_side()
+    from hyperloom.common import llm_config  # local import: keep module import-light
+
+    return llm_config.is_anthropic_only()
 
 
 def _official_openai_only() -> bool:
     """True when only the OpenAI-side endpoint is available."""
-    return _has_openai_side() and not _has_anthropic_side()
+    from hyperloom.common import llm_config  # local import: keep module import-light
+
+    return llm_config.is_openai_only()
 
 
 def _load_action_verdict_policy() -> dict[str, str]:

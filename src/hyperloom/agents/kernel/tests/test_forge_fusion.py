@@ -14,6 +14,11 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.codex_session import (
+    CODEX_EXTERNAL_SANDBOX_ENV,
+    CODEX_SANDBOX_MODE_ENV,
+)
+
 
 _MODULE_PATH = Path(__file__).resolve().parent.parent / "tools" / "forge_fusion.py"
 _SPEC = importlib.util.spec_from_file_location("forge_fusion_tool", _MODULE_PATH)
@@ -26,10 +31,11 @@ _SPEC.loader.exec_module(forge_fusion)
 def _isolate_environ():
     """Restore ``os.environ`` after every test.
 
-    ``_inject_author_gateway_env`` (exercised directly and via ``main``) mutates
-    ``os.environ`` in place by design. ``monkeypatch`` does not revert keys the
-    function writes directly, so without this snapshot the leaked ``ANTHROPIC_*``
-    / stability vars pollute later auth/endpoint tests in a full-suite run.
+    The Claude branch of ``_inject_author_gateway_env`` (exercised directly and
+    via ``main``) mutates ``os.environ`` in place by design; the Codex branch is
+    a no-op. ``monkeypatch`` does not revert keys the function writes directly,
+    so without this snapshot the Claude auth aliases and stability variables
+    pollute later auth/endpoint tests in a full-suite run.
     """
     saved = dict(os.environ)
     try:
@@ -46,7 +52,9 @@ def _payload(output_dir: Path) -> dict:
         "framework": "sglang",
         "output_dir": str(output_dir),
         "discover_mode": "llm",
+        "agent_backend": "claude",
         "llm_model": "claude-opus-4-6",
+        "agent_sandbox_mode": "workspace-write",
         "max_turns": 7,
         "gpu": "0",
         "timeout": 9,
@@ -67,6 +75,9 @@ def test_build_cmd_maps_core_options(tmp_path):
     assert cmd[cmd.index("--model-path") + 1] == "/models/zaya"
     assert cmd[cmd.index("--framework") + 1] == "sglang"
     assert cmd[cmd.index("--output-dir") + 1] == str(tmp_path)
+    assert cmd[cmd.index("--agent-backend") + 1] == "claude"
+    assert cmd[cmd.index("--llm-model") + 1] == "claude-opus-4-6"
+    assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "workspace-write"
     assert cmd[cmd.index("--max-turns") + 1] == "7"
     assert "--fuse-all-confirmed" in cmd
 
@@ -88,7 +99,7 @@ def test_inject_author_gateway_env_adds_stability_defaults(monkeypatch):
     # so the sandbox default is exercised.
     monkeypatch.setattr(forge_fusion.os, "geteuid", lambda: 0, raising=False)
 
-    forge_fusion._inject_author_gateway_env()
+    forge_fusion._inject_author_gateway_env("claude")
 
     assert os.environ["ANTHROPIC_BASE_URL"] == "https://gateway.example/api/v1/llm-proxy"
     assert os.environ["ANTHROPIC_API_KEY"] == "anthropic-token"
@@ -108,9 +119,80 @@ def test_inject_author_gateway_env_skips_sandbox_when_non_root(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "safe-token")
     monkeypatch.setattr(forge_fusion.os, "geteuid", lambda: 1000, raising=False)
 
-    forge_fusion._inject_author_gateway_env()
+    forge_fusion._inject_author_gateway_env("claude")
 
     assert "IS_SANDBOX" not in os.environ
+
+
+def test_inject_author_gateway_env_leaves_codex_environment_untouched(monkeypatch):
+    """Codex must not inherit Claude auth aliases, sandboxing, or stability knobs."""
+    for name in (
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "IS_SANDBOX",
+        "API_TIMEOUT_MS",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        "DISABLE_AUTOUPDATER",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/Unified/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-token")
+    monkeypatch.setattr(forge_fusion.os, "geteuid", lambda: 0, raising=False)
+    before = dict(os.environ)
+
+    forge_fusion._inject_author_gateway_env("codex")
+
+    assert dict(os.environ) == before
+
+
+def test_build_cmd_rejects_invalid_agent_backend(tmp_path):
+    payload = _payload(tmp_path)
+    payload["agent_backend"] = "anthropic"
+
+    with pytest.raises(ValueError, match="agent_backend"):
+        forge_fusion._build_cmd(payload)
+
+
+def test_build_cmd_forwards_read_only_agent_sandbox(tmp_path):
+    payload = _payload(tmp_path)
+    payload["agent_backend"] = "codex"
+    payload["agent_sandbox_mode"] = "read-only"
+
+    cmd = forge_fusion._build_cmd(payload)
+
+    assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "read-only"
+
+
+def test_build_cmd_forwards_confirmed_bypass_agent_sandbox(tmp_path, monkeypatch):
+    monkeypatch.setenv(CODEX_SANDBOX_MODE_ENV, "bypass")
+    monkeypatch.setenv(CODEX_EXTERNAL_SANDBOX_ENV, "1")
+    payload = _payload(tmp_path)
+    payload["agent_backend"] = "codex"
+    payload["agent_sandbox_mode"] = "bypass"
+
+    cmd = forge_fusion._build_cmd(payload)
+
+    assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "bypass"
+
+
+def test_build_cmd_rejects_unconfirmed_bypass_agent_sandbox(tmp_path, monkeypatch):
+    monkeypatch.setenv(CODEX_SANDBOX_MODE_ENV, "bypass")
+    monkeypatch.delenv(CODEX_EXTERNAL_SANDBOX_ENV, raising=False)
+    payload = _payload(tmp_path)
+    payload["agent_backend"] = "codex"
+    payload["agent_sandbox_mode"] = "bypass"
+
+    with pytest.raises(RuntimeError, match=CODEX_EXTERNAL_SANDBOX_ENV):
+        forge_fusion._build_cmd(payload)
+
+
+def test_build_cmd_rejects_invalid_agent_sandbox_mode(tmp_path):
+    payload = _payload(tmp_path)
+    payload["agent_sandbox_mode"] = "unconfined"
+
+    with pytest.raises(RuntimeError, match="unknown Codex sandbox mode"):
+        forge_fusion._build_cmd(payload)
 
 
 def test_main_passes_timeout_to_tree_runner(tmp_path, monkeypatch, capsys):
@@ -365,11 +447,13 @@ def test_main_relays_the_outage_sentinel_despite_a_non_zero_exit(tmp_path, monke
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     (output_dir / "fusion_manifest.json").write_text(
-        json.dumps({
-            "schema_version": 2,
-            "verdict": "llm_unavailable",
-            "error": {"kind": "api_error", "attempts": 5, "message": "gateway 400 x5"},
-        }),
+        json.dumps(
+            {
+                "schema_version": 2,
+                "verdict": "llm_unavailable",
+                "error": {"kind": "api_error", "attempts": 5, "message": "gateway 400 x5"},
+            }
+        ),
         encoding="utf-8",
     )
     input_json = tmp_path / "input.json"
@@ -492,8 +576,7 @@ def test_git_toplevel_success(tmp_path):
     (repo / "pkg").mkdir(parents=True)
     src = repo / "pkg" / "foo.py"
     src.write_text("x = 1\n", encoding="utf-8")
-    for args in (["init", "-q"], ["add", "-A"],
-                 ["-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "b"]):
+    for args in (["init", "-q"], ["add", "-A"], ["-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "b"]):
         sp.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
     assert forge_fusion._git_toplevel(str(src)) == str(repo.resolve())
 
@@ -513,10 +596,13 @@ def test_git_toplevel_untracked_in_git_uses_package_root(tmp_path):
     src.write_text("x = 1\n", encoding="utf-8")
     sp.run(["git", "-C", str(project), "init", "-q"], check=True, capture_output=True, text=True)
     (project / ".gitignore").write_text(".venv/\n", encoding="utf-8")
-    sp.run(["git", "-C", str(project), "add", ".gitignore"], check=True,
-           capture_output=True, text=True)
-    sp.run(["git", "-C", str(project), "-c", "user.email=a@b.c", "-c", "user.name=t",
-            "commit", "-qm", "b"], check=True, capture_output=True, text=True)
+    sp.run(["git", "-C", str(project), "add", ".gitignore"], check=True, capture_output=True, text=True)
+    sp.run(
+        ["git", "-C", str(project), "-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "b"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     assert forge_fusion._git_toplevel(str(src)) == str(site.resolve())
 
 
