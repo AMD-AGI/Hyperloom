@@ -2074,6 +2074,13 @@ def test_nogit_scratch_uses_supplied_non_main_branch(tmp_path):
 
 
 def _capabilities_payload(**overrides) -> dict:
+    """One capability payload, spelled exactly as the producer emits it.
+
+    Copied from ``kernel_agents.rewrite_by_flydsl.protocol.capabilities()``.
+    ``test_capability_payload_matches_the_installed_producer`` re-derives it from
+    a real producer when one is on disk, so a rename on either side cannot leave
+    these tests passing against a payload nobody emits.
+    """
     payload = {
         "rewrite_protocol_version": 2,
         "artifact_schema_versions": [2],
@@ -2210,6 +2217,11 @@ def test_capability_probe_rejects_an_incompatible_producer(monkeypatch, override
 
 
 def test_capability_probe_rejects_a_renamed_protocol_field(monkeypatch):
+    """A producer that spells the version under any other key is unreadable.
+
+    The consumer once read a ``protocol_versions`` list no producer has ever
+    emitted, which made every real handshake decline the route silently.
+    """
     payload = _capabilities_payload()
     del payload["rewrite_protocol_version"]
     payload["protocol_versions"] = [2]
@@ -2248,6 +2260,77 @@ def test_capability_probe_reports_a_producer_that_rejects_the_flag(monkeypatch):
     assert capabilities.supported is False
     assert capabilities.reason == "capability_probe_failed"
     assert "rc=2" in capabilities.detail
+
+
+def _installed_producer_root() -> str:
+    """Return the source root of a KernelForge that speaks the rewrite command.
+
+    Resolves ``$FORGE_PATH`` the same way ``forge_submit`` does, then requires
+    the rewrite command itself: a checkout predating the rewrite route answers
+    the module but not the command, and must skip rather than fail.
+    """
+    root = forge_submit._ensure_forge_on_path()
+    if not root:
+        return ""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kernel_agents.cli",
+            _flydsl_rewrite.REWRITE_COMMAND,
+            _flydsl_rewrite.CAPABILITIES_FLAG,
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": root + os.pathsep + os.environ.get("PYTHONPATH", "")},
+        timeout=_flydsl_rewrite.CAPABILITY_PROBE_TIMEOUT_SEC,
+    )
+    return root if proc.returncode == 0 else ""
+
+
+def test_capability_payload_matches_the_installed_producer():
+    """The real producer must satisfy this consumer, unstubbed.
+
+    Every other capability test builds the payload itself, so both halves of
+    this cross-repo contract can drift into agreeing only with their own
+    fixtures. This runs the installed producer and pins its payload against the
+    fixture, which is the one check that catches a rename on either side.
+    """
+    root = _installed_producer_root()
+    if not root:
+        pytest.skip("no KernelForge with forge-rewrite-by-flydsl resolvable from $FORGE_PATH")
+
+    capabilities = _flydsl_rewrite.probe_capabilities(forge_root=root)
+
+    assert capabilities.supported is True, f"{capabilities.reason}: {capabilities.detail}"
+    assert capabilities.reason == "capability_ok"
+    assert set(capabilities.frameworks) >= {"aiter", "sglang", "vllm"}
+
+    # Ordering is not contractual, but the key set and value shapes are: a
+    # fixture that no longer mirrors them stops protecting the other tests.
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kernel_agents.cli",
+            _flydsl_rewrite.REWRITE_COMMAND,
+            _flydsl_rewrite.CAPABILITIES_FLAG,
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": root + os.pathsep + os.environ.get("PYTHONPATH", "")},
+        timeout=_flydsl_rewrite.CAPABILITY_PROBE_TIMEOUT_SEC,
+    )
+    published = _flydsl_rewrite._decode_capability_payload(proc.stdout)
+    fixture = _capabilities_payload()
+    assert published is not None
+    assert set(published) == set(fixture)
+    for key, expected in fixture.items():
+        assert type(published[key]) is type(expected), key
+    assert published["rewrite_protocol_version"] == _flydsl_rewrite.PROTOCOL_VERSION
+    assert _flydsl_rewrite.ARTIFACT_SCHEMA_VERSION in published["artifact_schema_versions"]
+    assert _flydsl_rewrite.DRIVER_CONTRACT_VERSION in published["driver_contract_versions"]
+    assert published["result_sentinel"] == _flydsl_rewrite.RESULT_SENTINEL
 
 
 def test_capability_probe_answers_once_per_process(monkeypatch):
@@ -2483,7 +2566,13 @@ _REWRITE_ARTIFACT_DIR = "forge_experiments/rewrite"
 _REWRITE_PINNED_REF = "refs/hyperloom/applyback/attempt-1"
 
 
-def _publish_applyback_in(workspace: str, base_commit: str, **outer_overrides) -> dict:
+def _publish_applyback_in(
+    workspace: str,
+    base_commit: str,
+    *,
+    manifest_overrides: dict | None = None,
+    **outer_overrides,
+) -> dict:
     """Commit an apply-back in the producer workspace and report its artifacts."""
     root = Path(workspace)
     (root / "kernel.py").write_text("def kernel(x):\n    return flydsl_kernel(x)\n")
@@ -2503,34 +2592,31 @@ def _publish_applyback_in(workspace: str, base_commit: str, **outer_overrides) -
     )
     scratch = artifact_dir / "scratch_port.py"
     scratch.write_text("SCRATCH\n")
-    (artifact_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "artifact_kind": "framework_applyback",
-                "validation_scope": "reference",
-                "logical_op_name": "vllm::fused_gemm",
-                "operator_slug": "vllm_fused_gemm",
-                "source_entry": "matmul",
-                "reference_correctness_passed": True,
-                "reference_snr_db": 51.0,
-                "integration_validation_required": True,
-                "integration_validation_status": "pending",
-                "base_commit": base_commit,
-                "commit_hash": best_commit,
-                "commit_ref": _REWRITE_PINNED_REF,
-                "builder_symbol": "build_fused_gemm_module",
-                "flydsl_best_commit": "f" * 40,
-                "baseline_wall_ms": 4.0,
-                "best_wall_ms": 2.0,
-                "framework": "vllm",
-                "changed_files": changed_files,
-                "artifact_dir": "rewrite",
-                "patch_path": "rewrite/forge.patch",
-            }
-        ),
-        encoding="utf-8",
-    )
+    manifest = {
+        "schema_version": 2,
+        "artifact_kind": "framework_applyback",
+        "validation_scope": "reference",
+        "logical_op_name": "vllm::fused_gemm",
+        "operator_slug": "vllm_fused_gemm",
+        "source_entry": "matmul",
+        "reference_correctness_passed": True,
+        "reference_snr_db": 51.0,
+        "integration_validation_required": True,
+        "integration_validation_status": "pending",
+        "base_commit": base_commit,
+        "commit_hash": best_commit,
+        "commit_ref": _REWRITE_PINNED_REF,
+        "builder_symbol": "build_fused_gemm_module",
+        "flydsl_best_commit": "f" * 40,
+        "baseline_wall_ms": 4.0,
+        "best_wall_ms": 2.0,
+        "framework": "vllm",
+        "changed_files": changed_files,
+        "artifact_dir": "rewrite",
+        "patch_path": "rewrite/forge.patch",
+    }
+    manifest.update(manifest_overrides or {})
+    (artifact_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     outer = {
         "success": True,
         "applyback_required": True,
@@ -2547,7 +2633,14 @@ def _publish_applyback_in(workspace: str, base_commit: str, **outer_overrides) -
     return outer
 
 
-def _stub_rewrite_runner(monkeypatch, *, publish=True, error=None, timed_out=False):
+def _stub_rewrite_runner(
+    monkeypatch,
+    *,
+    publish=True,
+    error=None,
+    timed_out=False,
+    manifest_overrides=None,
+):
     captured: dict = {}
 
     def fake_runner(**kwargs):
@@ -2555,7 +2648,11 @@ def _stub_rewrite_runner(monkeypatch, *, publish=True, error=None, timed_out=Fal
         result = None
         if publish:
             base_commit = _git(Path(kwargs["workspace"]), "rev-parse", "HEAD")
-            result = _publish_applyback_in(kwargs["workspace"], base_commit)
+            result = _publish_applyback_in(
+                kwargs["workspace"],
+                base_commit,
+                manifest_overrides=manifest_overrides,
+            )
         return forge_submit.RewriteRunOutcome(
             result=result,
             output="forge rewrite ran",
@@ -2565,6 +2662,42 @@ def _stub_rewrite_runner(monkeypatch, *, publish=True, error=None, timed_out=Fal
 
     monkeypatch.setattr(forge_submit, "_run_rewrite_via_cli", fake_runner)
     return captured
+
+
+@pytest.mark.parametrize(
+    ("best_wall_ms", "case_id"),
+    # The published baseline is 4.0ms, so these are slower and exactly tied.
+    [(5.0, "slower_than_the_source"), (4.0, "tied_with_the_source")],
+)
+def test_submit_declines_a_valid_applyback_that_is_not_faster(
+    tmp_path,
+    monkeypatch,
+    best_wall_ms,
+    case_id,
+):
+    """The decline must name the policy, not impugn the producer's artifact.
+
+    A contract-valid apply-back that is not faster is something the producer is
+    allowed to publish. Reporting it as "no validated apply-back patch" sends
+    whoever reads the log hunting a producer bug that does not exist.
+    """
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    monkeypatch.setattr(
+        _flydsl_rewrite,
+        "probe_capabilities",
+        lambda **_kwargs: _SUPPORTED_CAPABILITIES,
+    )
+    _stub_rewrite_runner(monkeypatch, manifest_overrides={"best_wall_ms": best_wall_ms})
+
+    result = _submit_with_rewrite_route(tmp_path, monkeypatch)
+
+    assert result["returncode"] == 1
+    assert "is not faster than the source" in result["stderr_tail"]
+    assert f"best={best_wall_ms}ms" in result["stderr_tail"]
+    assert "without a validated apply-back patch" not in result["stderr_tail"]
+    # Declined, so nothing downstream may read it as a keepable apply-back.
+    assert "flydsl_applyback" not in result
+    assert result["flydsl_rewrite"]["eligible"] is True
 
 
 def test_submit_consumes_a_canonical_applyback_instead_of_the_forge_loop(
@@ -3159,7 +3292,10 @@ def test_rewrite_driver_selects_a_single_grouped_case(tmp_path):
     )
 
     assert proc.returncode == 0, proc.stderr
-    assert "[case] case_002 ms=" in proc.stdout
+    # The producer reads bench-mode case coverage from ``case_ms: <id> <ms>``
+    # only; any other spelling leaves its coverage cross-check with no ids and
+    # silently passing.
+    assert re.search(r"^case_ms:[ \t]*case_002[ \t]+[-+\d.eE]+$", proc.stdout, re.M), proc.stdout
     assert "case_001" not in proc.stdout
 
 
