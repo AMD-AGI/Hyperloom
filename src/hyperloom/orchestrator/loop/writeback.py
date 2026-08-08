@@ -1608,7 +1608,7 @@ class WritebackCollaborator:
             # Remote mode has one Recipe sink: the KB Store final session
             # writer. T0 and runtime amendment are intentionally absent.
             try:
-                from ..knowledge.remote_recipe import write_final_remote_recipe
+                from ..knowledge.remote_recipe import HyperloomRemoteKB
 
                 remote_cid = self._workload_canonical_id()
                 remote_sid = str(
@@ -1616,17 +1616,17 @@ class WritebackCollaborator:
                     or getattr(self.shared_state, "session_id", "")
                     or self.session_dir.name
                 )
-                remote_result = write_final_remote_recipe(
-                    self.shared_state,
+                remote_result = HyperloomRemoteKB.from_env().write(
                     remote_cid,
-                    remote_sid,
+                    self.shared_state,
+                    session_id=remote_sid,
                 )
                 log.info(
                     "Remote Recipe KB finalize: status=%s reason=%s cid=%s sid=%s",
                     remote_result.status,
                     remote_result.reason,
                     remote_cid,
-                    remote_sid,
+                    remote_result.session_id,
                 )
             except Exception:  # noqa: BLE001 - remote transport is best-effort
                 log.exception("Remote Recipe KB finalize failed (non-fatal)")
