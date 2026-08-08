@@ -237,6 +237,8 @@ omit = [
     "*/tests/*",
     "*/__init__.py",
     "*/__main__.py",
+    # Byte-identical upstream KB Store SDK; guarded by a blob checksum test.
+    "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/*",
     # CLI drivers.
     "src/hyperloom/inference_optimizer/cli/__init__.py",
     "src/hyperloom/inference_optimizer/multi_node/cli.py",

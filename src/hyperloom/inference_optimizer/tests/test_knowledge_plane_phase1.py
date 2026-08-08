@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,45 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
 
 def _args(**kwargs) -> argparse.Namespace:
     return argparse.Namespace(degraded_kb=False, local_kb_root=None, **kwargs)
+
+
+def _legacy_recipe(root: Path, *, model: str = "model") -> Path:
+    recipe_dir = (
+        root
+        / model
+        / "mi300x"
+        / "sglang"
+        / "qwen3"
+        / "qwen3"
+        / "1.0"
+        / "fp8"
+    )
+    recipe_dir.mkdir(parents=True)
+    (recipe_dir / "recipe.json").write_text(
+        '{"canonical_id":"legacy"}',
+        encoding="utf-8",
+    )
+    (recipe_dir / "attempts.ndjson").write_text('{"id":1}\n', encoding="utf-8")
+    (recipe_dir / "metadata.json").write_text('{"safe":true}', encoding="utf-8")
+    (recipe_dir / ".lock").write_text("live lock", encoding="utf-8")
+    (recipe_dir / ".recipe.json.partial.tmp").write_text(
+        "temporary",
+        encoding="utf-8",
+    )
+    history = recipe_dir / "history"
+    history.mkdir()
+    (history / "v1.json").write_text('{"version":1}', encoding="utf-8")
+    return recipe_dir
+
+
+def _clear_root_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "KNOWLEDGE_STORE_MODE",
+        "KNOWLEDGE_LOCAL_ROOT",
+        "HYPERLOOM_LOCAL_KB_ROOT",
+        "USER_DATA_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_config_defaults_local_under_user_data_path() -> None:
@@ -134,6 +174,190 @@ def test_local_dispatcher_ignores_ambient_remote_credentials(
     recipe_kb = cli_kb._build_recipe_kb_dispatcher(_args())
     assert isinstance(recipe_kb.local, LocalRecipeStore)
     assert recipe_kb.mode == "local"
+
+
+def test_user_data_legacy_recipe_corpus_migrates_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_root_selection(monkeypatch)
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    source = tmp_path / "kb"
+    legacy_dir = _legacy_recipe(source)
+
+    kb = cli_kb._build_recipe_kb_dispatcher(_args())
+
+    destination = tmp_path / "knowledge"
+    migrated = destination / legacy_dir.relative_to(source)
+    assert kb.local.root == destination
+    assert (migrated / "recipe.json").is_file()
+    assert (migrated / "history" / "v1.json").is_file()
+    assert (migrated / "attempts.ndjson").is_file()
+    assert (migrated / "metadata.json").is_file()
+    assert not (migrated / ".lock").exists()
+    assert not (migrated / ".recipe.json.partial.tmp").exists()
+    assert (destination / cli_kb._RECIPE_MIGRATION_MARKER).is_file()
+
+    shutil.rmtree(migrated)
+    _legacy_recipe(source, model="second")
+    assert (
+        cli_kb._migrate_legacy_recipe_kb_once(
+            destination=destination,
+            source=source,
+        )
+        is False
+    )
+    assert not list(destination.rglob("recipe.json"))
+
+
+def test_workspace_legacy_source_is_injectable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_root_selection(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    source = tmp_path / "workspace-kb"
+    _legacy_recipe(source)
+    monkeypatch.setattr(cli_kb, "_LEGACY_WORKSPACE_KB_ROOT", source)
+
+    kb = cli_kb._build_recipe_kb_dispatcher(_args())
+
+    assert kb.local.root == (
+        tmp_path / "home" / ".cache" / "hyperloom" / "knowledge"
+    )
+    assert len(list(kb.local.root.rglob("recipe.json"))) == 1
+
+
+def test_existing_destination_recipe_skips_legacy_migration(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "knowledge"
+    source = tmp_path / "kb"
+    existing = _legacy_recipe(destination, model="existing")
+    _legacy_recipe(source, model="legacy")
+
+    assert (
+        cli_kb._migrate_legacy_recipe_kb_once(
+            destination=destination,
+            source=source,
+        )
+        is False
+    )
+    assert existing.joinpath("recipe.json").is_file()
+    assert not (destination / cli_kb._RECIPE_MIGRATION_MARKER).exists()
+    assert len(list(destination.rglob("recipe.json"))) == 1
+
+
+def test_absent_legacy_source_does_not_create_destination(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "knowledge"
+    assert (
+        cli_kb._migrate_legacy_recipe_kb_once(
+            destination=destination,
+            source=tmp_path / "missing-kb",
+        )
+        is False
+    )
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("selection", ["flag", "compat-env", "knowledge-env"])
+def test_explicit_local_root_skips_migration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    selection: str,
+) -> None:
+    _clear_root_selection(monkeypatch)
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    _legacy_recipe(tmp_path / "kb")
+    args = _args()
+    selected = tmp_path / "selected"
+    if selection == "flag":
+        args.local_kb_root = str(selected)
+    elif selection == "compat-env":
+        monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(selected))
+    else:
+        monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(selected))
+    monkeypatch.setattr(
+        cli_kb,
+        "_migrate_legacy_recipe_kb_once",
+        lambda **_kwargs: pytest.fail("explicit root must not migrate"),
+    )
+
+    kb = cli_kb._build_recipe_kb_dispatcher(args)
+
+    assert kb.local.root == selected
+
+
+def test_legacy_migration_failure_aborts_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "kb"
+    destination = tmp_path / "knowledge"
+    _legacy_recipe(source)
+    monkeypatch.setattr(
+        cli_kb,
+        "_copy_recipe_corpus",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("injected copy failure")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="migration.*failed.*copy failure"):
+        cli_kb._migrate_legacy_recipe_kb_once(
+            destination=destination,
+            source=source,
+        )
+    assert not (destination / cli_kb._RECIPE_MIGRATION_MARKER).exists()
+
+
+def test_legacy_migration_marker_failure_rolls_back_corpus(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "kb"
+    destination = tmp_path / "knowledge"
+    _legacy_recipe(source)
+    monkeypatch.setattr(
+        cli_kb,
+        "atomic_write_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("marker fsync failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="marker fsync failed"):
+        cli_kb._migrate_legacy_recipe_kb_once(
+            destination=destination,
+            source=source,
+        )
+    assert not list(destination.rglob("recipe.json"))
+    assert not (destination / cli_kb._RECIPE_MIGRATION_MARKER).exists()
+
+
+def test_legacy_migration_interrupt_rolls_back_partial_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "kb"
+    destination = tmp_path / "knowledge"
+    _legacy_recipe(source)
+    monkeypatch.setattr(
+        cli_kb.shutil,
+        "copyfileobj",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        cli_kb._migrate_legacy_recipe_kb_once(
+            destination=destination,
+            source=source,
+        )
+    assert not list(destination.rglob("recipe.json"))
+    assert not list(destination.rglob("attempts.ndjson"))
+    assert not (destination / cli_kb._RECIPE_MIGRATION_MARKER).exists()
 
 
 def test_remote_dispatcher_is_none_without_creating_local_root(

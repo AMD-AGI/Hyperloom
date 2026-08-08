@@ -12,8 +12,10 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.knowledge.remote_recipe import (
+    HyperloomRemoteKB,
     KBStoreError,
     RemoteRecipeClient,
+    RemoteRecipeConfigurationError,
     build_remote_knowledge,
     convert_v1_recipe_to_knowledge,
     envelope_to_v1_recipe,
@@ -23,6 +25,11 @@ from hyperloom.orchestrator.knowledge.remote_recipe import (
     write_final_remote_recipe,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor import kb_store_client
+from hyperloom.orchestrator.knowledge.remote_recipe.client import (
+    _champion,
+    _validate_download_listing,
+    _verify_downloaded_files,
+)
 from hyperloom.orchestrator.knowledge.remote_recipe.models import (
     MAX_FILE_BYTES,
     MAX_PATH_BYTES,
@@ -326,6 +333,58 @@ def test_bundle_rejects_path_mismatch_and_prefix(tmp_path: Path) -> None:
         bad.validate(["files/explore/a"])
 
 
+def test_remote_client_internal_validation_error_paths(tmp_path: Path) -> None:
+    assert _champion(None) == ("", 0.0, {})
+    assert _champion({"champion": {"value": "not-a-number"}})[1] == 0.0
+    assert _champion({"champion": {"optimized_throughput": 12.0}})[1] == 12.0
+    with pytest.raises(RemoteRecipeValidationError, match="finite"):
+        _champion({"champion": {"value": float("inf")}})
+
+    with pytest.raises(RemoteRecipeValidationError, match="listing must be"):
+        _validate_download_listing([])
+    with pytest.raises(RemoteRecipeValidationError, match="files must be"):
+        _validate_download_listing({"files": {"bad": 1}})
+    with pytest.raises(RemoteRecipeValidationError, match="entry 0"):
+        _validate_download_listing({"files": ["not-an-object"]})
+
+    digest = hashlib.sha256(b"x").hexdigest()
+    duplicate = {"path": "artifact", "size": 1, "sha256": digest}
+    with pytest.raises(RemoteRecipeValidationError, match="duplicate"):
+        _validate_download_listing({"files": [duplicate, duplicate]})
+
+    not_a_directory = tmp_path / "not-a-directory"
+    not_a_directory.write_text("x", encoding="utf-8")
+    with pytest.raises(RemoteRecipeValidationError, match="not a directory"):
+        _verify_downloaded_files(not_a_directory, {})
+
+    target = tmp_path / "target"
+    target.mkdir()
+    symlink = tmp_path / "files-link"
+    symlink.symlink_to(target, target_is_directory=True)
+    with pytest.raises(RemoteRecipeValidationError, match="symlink"):
+        _verify_downloaded_files(symlink, {})
+
+    class _ReadStore:
+        def __init__(self, rollup, envelope=None) -> None:
+            self.rollup = rollup
+            self.envelope = envelope
+
+        def get_rollup(self, _canonical_id):
+            return self.rollup
+
+        def get_session(self, _canonical_id, _session_id):
+            return self.envelope
+
+    identity = "inference:m:h:f:mt:a:v:p"
+    assert RemoteRecipeClient(_ReadStore({})).read(identity, tmp_path / "miss") is None  # type: ignore[arg-type]
+    assert (
+        RemoteRecipeClient(
+            _ReadStore({"champion": {"session_id": "missing", "value": 1.0}})
+        ).read(identity, tmp_path / "missing-session")  # type: ignore[arg-type]
+        is None
+    )
+
+
 def test_artifact_rejects_symlink_and_oversized_file(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.write_text("x", encoding="utf-8")
@@ -361,11 +420,100 @@ def test_warm_replay_and_non_keep_actions_do_not_enable_write(tmp_path: Path) ->
     assert has_new_keep(state) is False
 
 
-def test_partial_remote_configuration_fails_fast(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("url", "token", "match"),
+    [
+        ("", "", "KB_STORE_URL and KB_STORE_TOKEN"),
+        ("https://kb.example", "", "KB_STORE_TOKEN"),
+        ("", "token", "KB_STORE_URL"),
+    ],
+)
+def test_facade_from_env_requires_complete_configuration(
+    monkeypatch,
+    url: str,
+    token: str,
+    match: str,
+) -> None:
+    monkeypatch.setenv("KB_STORE_URL", url)
+    monkeypatch.setenv("KB_STORE_TOKEN", token)
+    with pytest.raises(RemoteRecipeConfigurationError, match=match):
+        HyperloomRemoteKB.from_env()
+
+
+def test_facade_from_env_returns_configured_facade(monkeypatch) -> None:
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
-    monkeypatch.delenv("KB_STORE_TOKEN", raising=False)
-    with pytest.raises(KBStoreError, match="KB_STORE_TOKEN"):
-        RemoteRecipeClient.from_env_optional()
+    monkeypatch.setenv("KB_STORE_TOKEN", "token")
+    remote = HyperloomRemoteKB.from_env()
+    assert isinstance(remote, HyperloomRemoteKB)
+    assert isinstance(remote._client, RemoteRecipeClient)
+
+
+@pytest.mark.parametrize(
+    ("recipe_session_id", "state_session_id", "expected"),
+    [
+        ("recipe-session", "state-session", "recipe-session"),
+        ("", "state-session", "state-session"),
+        ("  ", "state-session", "state-session"),
+    ],
+)
+def test_facade_delegates_read_and_write_with_session_fallback(
+    tmp_path: Path,
+    monkeypatch,
+    recipe_session_id: str,
+    state_session_id: str,
+    expected: str,
+) -> None:
+    from hyperloom.orchestrator.knowledge import remote_recipe
+
+    client = object()
+    facade = HyperloomRemoteKB(client)  # type: ignore[arg-type]
+    state = SimpleNamespace(
+        recipe_kb_session_id=recipe_session_id,
+        session_id=state_session_id,
+    )
+    read_result = {"canonical_id": "inference:m:h:f:mt:a:v:p"}
+    write_result = SimpleNamespace(status="written", session_id=expected)
+    calls: list[tuple] = []
+
+    def _read(identity, destination, *, client):
+        calls.append(("read", identity, destination, client))
+        return read_result
+
+    def _write(state_arg, identity, session_id, *, client):
+        calls.append(("write", state_arg, identity, session_id, client))
+        return write_result
+
+    monkeypatch.setattr(remote_recipe, "read_remote_recipe", _read)
+    monkeypatch.setattr(remote_recipe, "write_final_remote_recipe", _write)
+
+    identity = "inference:m:h:f:mt:a:v:p"
+    destination = tmp_path / "download"
+    assert facade.read(identity, destination) is read_result
+    assert facade.write(identity, state) is write_result
+    assert calls == [
+        ("read", identity, destination, client),
+        ("write", state, identity, expected, client),
+    ]
+
+
+def test_facade_write_explicit_session_overrides_state(monkeypatch) -> None:
+    from hyperloom.orchestrator.knowledge import remote_recipe
+
+    facade = HyperloomRemoteKB(object())  # type: ignore[arg-type]
+    state = SimpleNamespace(
+        recipe_kb_session_id="recipe-session",
+        session_id="state-session",
+    )
+    seen: list[str] = []
+    expected_result = SimpleNamespace(status="written")
+
+    def _write(_state, _identity, session_id, *, client):
+        seen.append(session_id)
+        return expected_result
+
+    monkeypatch.setattr(remote_recipe, "write_final_remote_recipe", _write)
+    assert facade.write("inference:m:h:f:mt:a:v:p", state, "explicit-session") is expected_result
+    assert seen == ["explicit-session"]
 
 
 def test_local_close_ignores_ambient_kb_store(
@@ -391,9 +539,13 @@ def test_local_close_ignores_ambient_kb_store(
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
     monkeypatch.setenv("KB_STORE_TOKEN", "ambient-token")
     monkeypatch.setattr(
-        remote_recipe,
-        "write_final_remote_recipe",
-        lambda *args, **kwargs: calls.append((args, kwargs)),
+        remote_recipe.HyperloomRemoteKB,
+        "from_env",
+        classmethod(
+            lambda cls: (_ for _ in ()).throw(
+                AssertionError("local CLOSE constructed HyperloomRemoteKB")
+            )
+        ),
     )
     WritebackCollaborator(coordinator).finalize_recipe_and_journal()
     assert calls == []
@@ -417,7 +569,6 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
     coordinator = SimpleNamespace(
         shared_state=SimpleNamespace(
             current_best={"tput": 10.0},
-            recipe_kb_session_id="session-1",
         ),
         session_dir=tmp_path,
         recipe_kb=_LegacyRecipe(),
@@ -432,13 +583,28 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
     monkeypatch.setenv("KB_STORE_TOKEN", "token")
 
-    def _write(*args, **kwargs):
-        calls.append((args, kwargs))
-        return SimpleNamespace(status="written", reason="")
+    class _Facade:
+        def write(self, identity, state, session_id=None):
+            calls.append((identity, state, session_id))
+            return SimpleNamespace(
+                status="written",
+                reason="",
+                session_id=session_id,
+            )
 
-    monkeypatch.setattr(remote_recipe, "write_final_remote_recipe", _write)
+    monkeypatch.setattr(
+        remote_recipe.HyperloomRemoteKB,
+        "from_env",
+        classmethod(lambda cls: _Facade()),
+    )
     WritebackCollaborator(coordinator).finalize_recipe_and_journal()
-    assert len(calls) == 1
+    assert calls == [
+        (
+            "inference:m:h:f:mt:a:v:p",
+            coordinator.shared_state,
+            tmp_path.name,
+        )
+    ]
 
 
 def test_remote_close_transport_failure_is_nonfatal(
@@ -463,10 +629,12 @@ def test_remote_close_transport_failure_is_nonfatal(
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
     monkeypatch.setenv("KB_STORE_TOKEN", "token")
     monkeypatch.setattr(
-        remote_recipe,
-        "write_final_remote_recipe",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            OSError("transport down")
+        remote_recipe.HyperloomRemoteKB,
+        "from_env",
+        classmethod(
+            lambda cls: (_ for _ in ()).throw(
+                OSError("transport down")
+            )
         ),
     )
     WritebackCollaborator(coordinator).finalize_recipe_and_journal()
@@ -1007,7 +1175,8 @@ def test_read_is_not_wired_into_t0_and_close_write_remains() -> None:
     close_source = inspect.getsource(WritebackCollaborator.finalize_recipe_and_journal)
     assert "read_remote" not in t0_source
     assert "remote_recipe" not in t0_source
-    assert "write_final_remote_recipe" in close_source
+    assert "HyperloomRemoteKB.from_env().write" in close_source
+    assert "write_final_remote_recipe" not in close_source
 
 
 def test_vendored_sdk_matches_upstream_git_blob() -> None:

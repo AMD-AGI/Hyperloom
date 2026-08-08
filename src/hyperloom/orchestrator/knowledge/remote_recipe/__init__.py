@@ -20,7 +20,7 @@ from .client import (
     RemoteRecipeClient,
     RemoteRecipeConfigurationError,
 )
-from .models import RemoteWriteResult
+from .models import RemoteRecipeValidationError, RemoteWriteResult
 from .values import (
     build_remote_knowledge,
     convert_v1_recipe_to_knowledge,
@@ -85,7 +85,58 @@ def write_final_remote_recipe(
         )
 
 
+class HyperloomRemoteKB:
+    """Public facade for Hyperloom's remote inference knowledge."""
+
+    def __init__(self, client: RemoteRecipeClient) -> None:
+        self._client = client
+
+    @classmethod
+    def from_env(cls) -> "HyperloomRemoteKB":
+        """Build a configured facade, requiring both KB Store variables."""
+        client = RemoteRecipeClient.from_env_optional()
+        if client is None:
+            raise RemoteRecipeConfigurationError(
+                "KB_STORE_URL and KB_STORE_TOKEN are required for HyperloomRemoteKB"
+            )
+        return cls(client)
+
+    def read(
+        self,
+        identity: str,
+        destination: str | Path,
+    ) -> dict[str, Any] | None:
+        """Download the champion for a Hyperloom inference canonical id."""
+        return read_remote_recipe(identity, destination, client=self._client)
+
+    def write(
+        self,
+        identity: str,
+        state: Any,
+        session_id: str | None = None,
+    ) -> RemoteWriteResult:
+        """Write final E2E knowledge, resolving the session id from state."""
+        resolved_session_id = session_id
+        if resolved_session_id is None:
+            resolved_session_id = (
+                str(getattr(state, "recipe_kb_session_id", "") or "").strip()
+                or str(getattr(state, "session_id", "") or "").strip()
+            )
+        resolved_session_id = str(resolved_session_id or "").strip()
+        if not resolved_session_id:
+            raise RemoteRecipeValidationError(
+                "session_id is required; set state.recipe_kb_session_id or state.session_id"
+            )
+        return write_final_remote_recipe(
+            state,
+            identity,
+            resolved_session_id,
+            client=self._client,
+        )
+
+
 __all__ = [
+    "HyperloomRemoteKB",
     "KBStoreClient",
     "KBStoreError",
     "RemoteRecipeClient",
