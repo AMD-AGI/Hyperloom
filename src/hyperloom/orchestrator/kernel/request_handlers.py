@@ -3927,6 +3927,34 @@ def _build_trace_analyze_cmd(
     if analysis_mode:
         cmd += ["--analysis-mode", str(analysis_mode)]
 
+    # Model identity informs source resolution for every framework, not only the
+    # diffusion roofline. Keep the standard payload > state > environment
+    # precedence so ordinary sglang/vLLM production requests carry config.json
+    # selectors into the bounded model context.
+    model_path = str(
+        payload.get("model_path")
+        or getattr(state, "model_path", "")
+        or os.environ.get("MODEL_PATH")
+        or ""
+    ).strip()
+    if model_path:
+        cmd += ["--model-path", model_path]
+    precision = str(
+        payload.get("precision")
+        or getattr(state, "precision", "")
+        or workload.get("precision")
+        or ""
+    ).strip()
+    if precision:
+        cmd += ["--precision", precision]
+    runtime_config = str(
+        payload.get("runtime_config")
+        or getattr(state, "baseline_config_path", "")
+        or ""
+    ).strip()
+    if runtime_config and not is_bypass:
+        cmd += ["--runtime-config", runtime_config]
+
     if scriptable:
         # --skip-split is TraceLens-only; the bypass backend has its own windowing.
         if not is_bypass:
@@ -3940,14 +3968,6 @@ def _build_trace_analyze_cmd(
                     cmd += ["--num-denoise-steps", str(int(num_denoise))]
             except (TypeError, ValueError):
                 pass
-        # Forward model dir + precision so the diffusion roofline sidecar can emit
-        # an analytic compute ceiling (roofline_ideal_ms).
-        model_path = (payload.get("model_path") or state.model_path or "").strip()
-        if model_path:
-            cmd += ["--model-path", str(model_path)]
-        precision = (payload.get("precision") or workload.get("precision") or "").strip()
-        if precision:
-            cmd += ["--precision", str(precision)]
     else:
         # Splitter workload hints. Priority: payload override > baseline metadata
         # > drop the flag.
