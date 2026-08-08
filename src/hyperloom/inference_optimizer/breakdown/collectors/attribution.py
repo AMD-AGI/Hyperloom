@@ -49,7 +49,10 @@ def _normalize_specialist_key(provenance: str) -> str:
 # order is load-bearing (e.g. the ``kernel_opt`` prefix must precede the exact
 # ``==`` checks below it). Falls through to ``"other"`` when nothing matches.
 _ACTION_FAMILY_TABLE: tuple[tuple[Callable[[str], bool], str], ...] = (
-    (lambda s: s.startswith("kernel_opt") or s == "integrate", "kernel_agent"),
+    (
+        lambda s: s.startswith("kernel_opt") or s in {"integrate", "fusion"},
+        "kernel_agent",
+    ),
     # Legacy stack-entry action labels from archived sessions.
     (lambda s: s == "backends", "backends"),
     (lambda s: s == "params", "params"),
