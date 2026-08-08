@@ -13,6 +13,17 @@ but that class cannot be reused: its workspace guard requires the session cwd
 to be a git worktree and enforces KernelForge's benchmark-file protection.
 Hyperloom's Codex sessions run against plain output directories, so only the
 patterns are shared.
+
+Sandboxing follows that backend too. Codex builds its ``read-only`` and
+``workspace-write`` presets on bubblewrap, which Hyperloom's runtime container
+does not ship: under either preset every shell command the agent issues dies
+with ``bwrap: Failed to make / slave: Permission denied`` before its body runs,
+so the agent runtime is unusable. ``HYPERLOOM_CODEX_SANDBOX_MODE``
+(:data:`CODEX_SANDBOX_MODE_ENV`) therefore selects which preset family a
+session may use, and defaults to ``bypass``: a writing session gets
+``Sandbox.full_access`` and containment rests on the container Hyperloom
+already runs inside. Deployments whose host provides ``bwrap`` can set
+``workspace-write`` or ``read-only`` to hand containment back to Codex.
 """
 
 from __future__ import annotations
@@ -45,6 +56,14 @@ _API_KEY_ENV_FALLBACKS: tuple[str, ...] = ("OPENAI_API_KEY", "LLM_GATEWAY_KEY")
 # the Codex ``-c key=value`` override parser does not accept.
 _TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
+# Sandbox preset selector, mirroring KernelForge's ``agent_sandbox_mode``
+# (including its ``bypass`` default, which is what makes Codex usable in a
+# container without bubblewrap -- see the module docstring).
+CODEX_SANDBOX_MODE_ENV = "HYPERLOOM_CODEX_SANDBOX_MODE"
+DEFAULT_CODEX_SANDBOX_MODE = "bypass"
+# Ordered so the error raised for an unknown mode lists them predictably.
+CODEX_SANDBOX_MODES: tuple[str, ...] = ("bypass", "workspace-write", "read-only")
+
 # Grace period for tearing a timed-out turn down before giving up on it.
 _INTERRUPT_TIMEOUT_SEC = 5.0
 
@@ -54,7 +73,7 @@ class CodexSessionError(RuntimeError):
 
 
 class CodexSessionUnavailableError(CodexSessionError):
-    """Raised when the Codex SDK or its gateway configuration is missing."""
+    """Raised when the Codex SDK is missing or its configuration is unusable."""
 
 
 class CodexSessionTimeoutError(CodexSessionError):
@@ -199,7 +218,9 @@ def _writable_root_overrides(writable_roots: Sequence[Path]) -> tuple[str, ...]:
     """Widen the ``workspace_write`` sandbox to the given roots.
 
     The session cwd is already writable under that preset, so only the extra
-    roots are declared.
+    roots are declared. Codex reads the table only when that preset is active,
+    so the override is emitted for every sandbox mode and simply goes unread
+    under the others.
     """
     if not writable_roots:
         return ()
@@ -207,22 +228,65 @@ def _writable_root_overrides(writable_roots: Sequence[Path]) -> tuple[str, ...]:
     return (f"sandbox_workspace_write.writable_roots={json.dumps(roots)}",)
 
 
-def codex_sandbox(sdk: Any, *, writable_roots: Sequence[Path]) -> Any:
-    """Pick the tightest Codex sandbox preset for the requested write scope.
+def _validated_sandbox_mode(mode: str) -> str:
+    """Return ``mode`` when it names a known preset family, else fail loudly."""
+    if mode not in CODEX_SANDBOX_MODES:
+        raise CodexSessionUnavailableError(
+            f"unknown Codex sandbox mode {mode!r}; set {CODEX_SANDBOX_MODE_ENV} to one of "
+            f"{' / '.join(CODEX_SANDBOX_MODES)}"
+        )
+    return mode
 
-    ``Sandbox.full_access`` is deliberately unreachable: a Hyperloom Codex
-    session always states its write scope, so lifting filesystem restrictions
-    could only widen it beyond what the caller asked for.
+
+def resolve_codex_sandbox_mode(*, sandbox_mode: str = "", env: dict[str, str] | None = None) -> str:
+    """Resolve which Codex sandbox preset family a session may use.
+
+    Args:
+        sandbox_mode (str): Mode stated by the caller; outranks the
+            environment. Blank defers to :data:`CODEX_SANDBOX_MODE_ENV`.
+        env (dict[str, str] | None): Environment to read; ``os.environ`` when
+            ``None``.
+
+    Returns:
+        str: One of :data:`CODEX_SANDBOX_MODES`, defaulting to
+            :data:`DEFAULT_CODEX_SANDBOX_MODE`.
+
+    Raises:
+        CodexSessionUnavailableError: If the resolved value names no known mode.
+    """
+    stated = sandbox_mode.strip().lower()
+    if stated:
+        return _validated_sandbox_mode(stated)
+    source = env if env is not None else os.environ
+    configured = (source.get(CODEX_SANDBOX_MODE_ENV) or "").strip().lower()
+    return _validated_sandbox_mode(configured or DEFAULT_CODEX_SANDBOX_MODE)
+
+
+def codex_sandbox(sdk: Any, *, writable_roots: Sequence[Path], sandbox_mode: str) -> Any:
+    """Map a sandbox mode and the requested write scope onto a Codex preset.
+
+    The mode only decides how a *writing* session is contained: a session that
+    declares no writable root stays read-only under every mode. ``bypass``
+    gives a writing session ``Sandbox.full_access`` because Codex's other two
+    presets need a ``bwrap`` this deployment may not have; ``read-only`` is a
+    ceiling that a declared write scope cannot raise.
 
     Args:
         sdk (Any): The loaded ``openai_codex`` module.
         writable_roots (Sequence[Path]): Extra roots the session may write.
+        sandbox_mode (str): A mode already resolved by
+            :func:`resolve_codex_sandbox_mode`.
 
     Returns:
-        Any: ``Sandbox.workspace_write`` when any write is needed, else
-            ``Sandbox.read_only``.
+        Any: The ``Sandbox`` preset to run the session under.
+
+    Raises:
+        CodexSessionUnavailableError: If ``sandbox_mode`` names no known mode.
     """
-    return sdk.Sandbox.workspace_write if writable_roots else sdk.Sandbox.read_only
+    mode = _validated_sandbox_mode(sandbox_mode)
+    if not writable_roots or mode == "read-only":
+        return sdk.Sandbox.read_only
+    return sdk.Sandbox.full_access if mode == "bypass" else sdk.Sandbox.workspace_write
 
 
 def _item_dict(item: Any) -> dict[str, Any]:
@@ -370,6 +434,7 @@ async def run_codex_turn(
     model: str,
     timeout_sec: float,
     writable_roots: Sequence[Path] = (),
+    sandbox_mode: str = "",
     api_key_env: str = "OPENAI_API_KEY",
     base_url_env: str = "OPENAI_BASE_URL",
     codex_bin: str = "",
@@ -378,20 +443,24 @@ async def run_codex_turn(
     """Run one non-interactive Codex turn and normalize its typed result.
 
     The turn runs with ``ApprovalMode.deny_all`` (no approval prompt can block
-    an unattended run) inside the tightest sandbox that covers
-    ``writable_roots``. ``CODEX_HOME`` is redirected to a per-run temp dir so
-    concurrent sessions and the operator's own Codex state stay independent.
+    an unattended run). Thread and turn share one sandbox preset, chosen from
+    the resolved sandbox mode and ``writable_roots``. ``CODEX_HOME`` is
+    redirected to a per-run temp dir so concurrent sessions and the operator's
+    own Codex state stay independent.
 
     Args:
         prompt (str): The user prompt for the turn.
         developer_instructions (str): System-level instructions for the thread.
         cwd (Path): Working directory for the thread; writable under the
-            ``workspace_write`` sandbox.
+            ``workspace_write`` and ``full_access`` sandboxes.
         model (str): The Codex model id.
         timeout_sec (float): Wall-clock budget for the turn. On expiry the turn
             is interrupted and :class:`CodexSessionTimeoutError` is raised.
         writable_roots (Sequence[Path]): Extra roots the session may write.
-            Empty selects a read-only sandbox.
+            Empty keeps the session read-only under every sandbox mode.
+        sandbox_mode (str): One of :data:`CODEX_SANDBOX_MODES`. Blank defers to
+            :data:`CODEX_SANDBOX_MODE_ENV`, then to
+            :data:`DEFAULT_CODEX_SANDBOX_MODE`.
         api_key_env (str): Preferred API-key env var name.
         base_url_env (str): Preferred base-URL env var name.
         codex_bin (str): Optional Codex runtime path; the SDK resolves its own
@@ -403,18 +472,22 @@ async def run_codex_turn(
         CodexSessionResult: The normalized turn outcome.
 
     Raises:
-        CodexSessionUnavailableError: If the SDK or its gateway config is
-            missing.
+        CodexSessionUnavailableError: If the SDK is missing, or its gateway
+            config or sandbox mode is unusable.
         CodexSessionTimeoutError: If the turn outlived ``timeout_sec``.
         CodexSessionError: If the SDK failed for any other reason.
     """
     sdk = load_codex_sdk()
+    sandbox = codex_sandbox(
+        sdk,
+        writable_roots=writable_roots,
+        sandbox_mode=resolve_codex_sandbox_mode(sandbox_mode=sandbox_mode, env=env),
+    )
     config_overrides = (
         "features.memories=false",
         *codex_provider_overrides(api_key_env=api_key_env, base_url_env=base_url_env, env=env),
         *_writable_root_overrides(writable_roots),
     )
-    sandbox = codex_sandbox(sdk, writable_roots=writable_roots)
     thread_id = ""
     turn_task: asyncio.Task[Any] | None = None
 
@@ -475,10 +548,13 @@ async def run_codex_turn(
 
 __all__ = [
     "CODEX_PROVIDER_NAME",
+    "CODEX_SANDBOX_MODES",
+    "CODEX_SANDBOX_MODE_ENV",
     "CodexSessionError",
     "CodexSessionResult",
     "CodexSessionTimeoutError",
     "CodexSessionUnavailableError",
+    "DEFAULT_CODEX_SANDBOX_MODE",
     "api_key_env_name",
     "codex_file_changes",
     "codex_item_type",
@@ -489,5 +565,6 @@ __all__ = [
     "normalize_codex_items",
     "normalize_codex_result",
     "normalize_codex_usage",
+    "resolve_codex_sandbox_mode",
     "run_codex_turn",
 ]

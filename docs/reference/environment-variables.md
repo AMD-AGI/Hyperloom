@@ -335,6 +335,24 @@ endpoint is OpenAI-compatible and supports the Responses API `web_search` tool.
 
 ---
 
+## Codex (OpenAI) agent sandbox
+
+Selects how a Codex agent session (TraceLens analysis and every future
+Codex-based agent) is contained. Codex implements its `read-only` and
+`workspace-write` presets with bubblewrap; a host without `bwrap` fails every
+shell command the agent issues with `bwrap: Failed to make / slave: Permission
+denied`, so the default is `bypass` and containment rests on the container
+Hyperloom already runs inside. Hosts that provide `bwrap` can hand containment
+back to Codex. A session that declares no writable output directory is
+read-only under every mode, and an unrecognized value fails the session
+immediately rather than picking a preset for you.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYPERLOOM_`<br>`CODEX_SANDBOX_MODE` | `bypass` | `bypass` runs a writing session with Codex's filesystem restrictions lifted (required where `bwrap` is unavailable); `workspace-write` restricts writes to the session directory plus its declared output roots; `read-only` forbids writes entirely. |
+
+---
+
 ## Single-node Ray GPU scheduling
 
 These variables tune the single-node Ray execution path (active when
