@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import pytest
 
@@ -137,18 +138,44 @@ def test_bootstrap_recipe_kb_t0_failure_continues(tmp_path, monkeypatch) -> None
     assert args.kb_degraded_reason == "t0_runtime_fail"
 
 
-def test_bootstrap_recipe_kb_remote_skips_t0(
+def test_bootstrap_recipe_kb_remote_replays_explore_config(
     tmp_path,
     monkeypatch,
     capsys,
 ) -> None:
+    from hyperloom.orchestrator.knowledge import remote_recipe
+
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KB_STORE_URL", "https://kb.test")
     monkeypatch.setenv("KB_STORE_TOKEN", "token")
+    reads: list[tuple[str, Path]] = []
+
+    class _Remote:
+        def read(self, identity: str, destination: Path):
+            reads.append((identity, destination))
+            return {
+                "schema_version": 2,
+                "knowledge_schema_version": 2,
+                "canonical_id": identity,
+                "session_id": "champion-session",
+                "optimized_throughput": 120.0,
+                "validated_e2e_gain": 20.0,
+                "value": {
+                    "explore": {
+                        "extra_server_args": "--page-size 32",
+                        "extra_envs": {"EXPLORE": "1"},
+                    },
+                    "framework": {
+                        "extra_server_args": "--framework-ignored",
+                        "extra_envs": {"FRAMEWORK": "1"},
+                    },
+                },
+            }
+
     monkeypatch.setattr(
-        cli_kb,
-        "run_t0_anchor",
-        lambda *_args, **_kwargs: pytest.fail("remote mode ran T0"),
+        remote_recipe.HyperloomRemoteKB,
+        "from_env",
+        classmethod(lambda cls: _Remote()),
     )
     assert (
         cli_kb._bootstrap_recipe_kb(
@@ -168,7 +195,14 @@ def test_bootstrap_recipe_kb_remote_skips_t0(
     persisted = SharedState.load_or_init(tmp_path)
     assert persisted.stack_fingerprint_meta["rocm"] == "6.2"
     assert persisted.stack_fingerprint_meta["image_digest"] == "img@sha"
-    assert "T0 warm replay skipped" in capsys.readouterr().out
+    replay = persisted.warm_start_context["recommended_replay"]
+    assert replay["extra_server_args"] == "--page-size 32"
+    assert replay["extra_envs"] == {"EXPLORE": "1"}
+    assert replay.get("patches") in (None, [])
+    assert persisted.warm_start_context["match"]["source"] == "kb-store"
+    assert len(reads) == 1
+    assert reads[0][1] == tmp_path / "runtime" / "remote_recipe"
+    assert "Explore config warm replay" in capsys.readouterr().out
 
 
 def test_bootstrap_knowledge_plane_validates_remote_without_recipe_dispatcher(

@@ -77,17 +77,17 @@ def _build_warm_prefer(shared_state: Any, framework_version: str) -> dict[str, A
 
 
 def _warm_recipe_source(row: Mapping[str, Any] | None, kb: Any) -> str:
-    """Return the source tag for a local Recipe warm-start row.
+    """Return the source tag for a Recipe warm-start row.
 
     Args:
         row: Unused; retained for call-site compatibility.
-        kb: Unused; retained for call-site compatibility.
+        kb: Recipe backend or read-only compatibility adapter.
 
     Returns:
-        The local Recipe source tag.
+        A stable backend source tag.
     """
-    del row, kb
-    return "recipe-kb"
+    del row
+    return str(getattr(kb, "backend_name", "") or "recipe-kb")
 
 
 def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:

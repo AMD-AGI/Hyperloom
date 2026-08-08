@@ -612,6 +612,7 @@ def build_remote_knowledge(state: Any, files_dir: str | Path) -> KnowledgeBundle
     gains = list(getattr(state, "gain_per_stack_entry", []) or [])
     worked = _experience(state, "what_worked") or _worked_from_stack(stack, gains)
     knowledge = {
+        "knowledge_schema_version": 2,
         "optimized_throughput": optimized_throughput,
         "validated_e2e_gain": validated_gain,
         "value": {
@@ -646,31 +647,27 @@ def build_remote_knowledge(state: Any, files_dir: str | Path) -> KnowledgeBundle
 
 
 def convert_v1_recipe_to_knowledge(recipe: Mapping[str, Any]) -> dict[str, Any]:
-    """Convert a legacy RecipeKB row to the V2 opaque knowledge shape."""
-    best_config = _mapping(recipe.get("best_config"))
+    """Wrap one legacy RecipeKB row for lossless storage in KB Store."""
+    legacy = dict(recipe)
+    best_config = _mapping(legacy.get("best_config"))
+    if best_config:
+        legacy["best_config"] = {
+            "extra_server_args": str(
+                best_config.get("extra_server_args")
+                or best_config.get("args")
+                or ""
+            ),
+            "extra_envs": _mapping(
+                best_config.get("extra_envs") or best_config.get("envs")
+            ),
+        }
     return {
+        "knowledge_schema_version": 1,
         "optimized_throughput": _number(recipe.get("best_throughput")),
         "validated_e2e_gain": _number(recipe.get("validated_gain_pct") or recipe.get("gain_pct")),
         "value": {
-            "explore": {
-                "extra_server_args": str(best_config.get("extra_server_args") or best_config.get("args") or ""),
-                "extra_envs": _mapping(best_config.get("extra_envs") or best_config.get("envs")),
-                "patches": [],
-                "artifacts": [],
-            },
-            "framework": {"extra_server_args": "", "extra_envs": {}, "patches": [], "artifacts": []},
-            "kernel": {
-                "geak": {"items": []},
-                "gemm": {"optimizations": []},
-                "fusion": {"items": []},
-                "rewrite": {"items": list(recipe.get("kernel_optimizations") or [])},
-            },
+            "legacy_recipe": legacy,
         },
-        "what_worked": list(recipe.get("what_worked") or []),
-        "what_failed": list(recipe.get("what_failed") or []),
-        "remaining_gaps": list(recipe.get("remaining_gaps") or []),
-        "lessons": list(recipe.get("lessons") or []),
-        "pitfalls": list(recipe.get("pitfalls") or []),
         "provenance": {
             "producer": "hyperloom-v1-converter",
             "source_schema": 1,
@@ -679,50 +676,64 @@ def convert_v1_recipe_to_knowledge(recipe: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def envelope_to_v1_recipe(envelope: Mapping[str, Any]) -> dict[str, Any]:
-    """Project a V2 envelope into the stable RecipeKB reader shape."""
+    """Project remote knowledge into the stable config-only warm Recipe shape."""
     knowledge = _mapping(envelope.get("knowledge")) or dict(envelope)
     value = _mapping(knowledge.get("value"))
+    raw_version = knowledge.get("knowledge_schema_version")
+    if raw_version is None:
+        raw_version = 1 if "best_config" in knowledge or "legacy_recipe" in value else 2
+    try:
+        knowledge_version = int(raw_version)
+    except (TypeError, ValueError):
+        knowledge_version = 0
+    if knowledge_version == 1:
+        legacy = _mapping(value.get("legacy_recipe")) or knowledge
+        row = dict(legacy)
+        row["canonical_id"] = str(
+            envelope.get("canonical_id") or row.get("canonical_id") or ""
+        )
+        row.setdefault("prs_tested", [])
+        row["remote_session_id"] = str(envelope.get("session_id") or "")
+        row["remote_schema_version"] = int(envelope.get("schema_version") or 2)
+        row["knowledge_schema_version"] = 1
+        return row
+    if knowledge_version != 2:
+        raise RemoteRecipeValidationError(
+            f"unsupported knowledge_schema_version: {raw_version!r}"
+        )
     explore = _mapping(value.get("explore"))
-    framework = _mapping(value.get("framework"))
     explore_args = str(explore.get("extra_server_args") or "").strip()
-    framework_args = str(framework.get("extra_server_args") or "").strip()
-    if explore_args and framework_args:
-        if framework_args.startswith(explore_args):
-            merged_args = framework_args
-        elif explore_args.startswith(framework_args):
-            merged_args = explore_args
-        else:
-            # Preserve ordering so a framework override remains the final value
-            # seen by argparse while retaining independent explore flags.
-            merged_args = f"{explore_args} {framework_args}"
-    else:
-        merged_args = framework_args or explore_args
-    merged_envs = {
+    explore_envs = {
         str(key): str(value)
         for key, value in _mapping(explore.get("extra_envs")).items()
     }
-    merged_envs.update(
-        {
-            str(key): str(value)
-            for key, value in _mapping(framework.get("extra_envs")).items()
-        }
-    )
+    session_id = str(envelope.get("session_id") or "")
+    validated_gain = _number(knowledge.get("validated_e2e_gain"))
     return {
         "canonical_id": str(envelope.get("canonical_id") or ""),
         "best_config": {
-            "extra_server_args": merged_args,
-            "extra_envs": merged_envs,
+            "extra_server_args": explore_args,
+            "extra_envs": explore_envs,
         },
         "best_throughput": _number(knowledge.get("optimized_throughput")),
-        "validated_gain_pct": _number(knowledge.get("validated_e2e_gain")),
+        "validated_gain_pct": validated_gain,
         "what_worked": list(knowledge.get("what_worked") or []),
         "what_failed": list(knowledge.get("what_failed") or []),
         "remaining_gaps": list(knowledge.get("remaining_gaps") or []),
         "lessons": list(knowledge.get("lessons") or []),
         "pitfalls": list(knowledge.get("pitfalls") or []),
+        # Phase 1 intentionally replays config/env only. Omitting historical PR
+        # payloads keeps the unchanged replay executor out of its patch path.
+        "prs_tested": [],
+        "sessions": (
+            [{"session_id": session_id, "gain_pct": validated_gain}]
+            if session_id
+            else []
+        ),
         "provenance": _mapping(knowledge.get("provenance")),
-        "remote_session_id": str(envelope.get("session_id") or ""),
+        "remote_session_id": session_id,
         "remote_schema_version": int(envelope.get("schema_version") or 2),
+        "knowledge_schema_version": 2,
     }
 
 

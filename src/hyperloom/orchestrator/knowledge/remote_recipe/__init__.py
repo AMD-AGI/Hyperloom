@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Optional Remote Recipe KB V2 integration.
-
-The module is inert unless both ``KB_STORE_URL`` and ``KB_STORE_TOKEN`` are
-configured, so the existing RecipeKB local/remote dispatcher remains unchanged.
-"""
+"""KB Store Recipe read/write plus a config-only legacy warm-replay adapter."""
 
 from __future__ import annotations
 
@@ -42,7 +38,7 @@ def read_remote_recipe(
     return resolved.read(canonical_id, destination)
 
 
-# Kept as a standalone API compatibility alias; it is not wired into T0/replay.
+# Kept as a standalone API compatibility alias.
 read_remote_champion = read_remote_recipe
 
 
@@ -135,12 +131,70 @@ class HyperloomRemoteKB:
         )
 
 
+class RemoteWarmRecipeAdapter:
+    """Read-only RecipeKB-shaped adapter for the unchanged T0 replay pipeline."""
+
+    enabled = True
+    mode = "remote"
+    backend_name = "kb-store"
+
+    def __init__(
+        self,
+        remote_kb: HyperloomRemoteKB,
+        destination: str | Path,
+    ) -> None:
+        self._remote_kb = remote_kb
+        self._destination = Path(destination)
+        self._cache: dict[str, dict[str, Any] | None] = {}
+
+    def _read(self, canonical_id: str) -> dict[str, Any] | None:
+        if canonical_id not in self._cache:
+            document = self._remote_kb.read(canonical_id, self._destination)
+            self._cache[canonical_id] = (
+                envelope_to_v1_recipe(document) if document is not None else None
+            )
+        return self._cache[canonical_id]
+
+    def get_authoritative_recipe(
+        self,
+        *,
+        canonical_id: str,
+        version: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the exact champion projected into the legacy Recipe shape."""
+        del version
+        return self._read(canonical_id)
+
+    def get_recipe(
+        self,
+        *,
+        canonical_id: str,
+        version: int | None = None,
+        prefer: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the cached exact champion; relative-tier search is deferred."""
+        del version, prefer
+        return self._read(canonical_id)
+
+    def search(self, **_kwargs: Any) -> list[dict[str, Any]]:
+        """Return no cross-identity donors in the config-only migration phase."""
+        return []
+
+    def put_recipe(self, **kwargs: Any) -> dict[str, Any]:
+        """No-op the legacy T0 anchor write; CLOSE owns remote publication."""
+        return dict(kwargs)
+
+    def close(self) -> None:
+        """The wrapped blocking client has no explicit lifecycle."""
+
+
 __all__ = [
     "HyperloomRemoteKB",
     "KBStoreClient",
     "KBStoreError",
     "RemoteRecipeClient",
     "RemoteRecipeConfigurationError",
+    "RemoteWarmRecipeAdapter",
     "build_remote_knowledge",
     "convert_v1_recipe_to_knowledge",
     "envelope_to_v1_recipe",

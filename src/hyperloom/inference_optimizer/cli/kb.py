@@ -352,11 +352,6 @@ def _bootstrap_recipe_kb(
             merged_meta["image_digest"] = image_digest
         if merged_meta:
             state.stack_fingerprint_meta = merged_meta
-    if kb is None:
-        state.save(session_dir)
-        print("Recipe KB       : REMOTE (KB Store CLOSE write; T0 warm replay skipped)")
-        return None
-    _attach_recipe_audit_hook(kb, session_dir)
     extra_attrs = {
         "framework_name": state.framework or manifest.get("framework", ""),
         "model_class": state.model_class or "",
@@ -364,9 +359,22 @@ def _bootstrap_recipe_kb(
         "claw_session_id": manifest.get("claw_session_id") or "",
         "sandbox_user_id": manifest.get("sandbox_user_id") or "",
     }
+    if kb is None:
+        from hyperloom.orchestrator.knowledge.remote_recipe import (
+            HyperloomRemoteKB,
+            RemoteWarmRecipeAdapter,
+        )
+
+        t0_kb = RemoteWarmRecipeAdapter(
+            HyperloomRemoteKB.from_env(),
+            session_dir / "runtime" / "remote_recipe",
+        )
+    else:
+        _attach_recipe_audit_hook(kb, session_dir)
+        t0_kb = kb
     try:
         run_t0_anchor(
-            kb,
+            t0_kb,
             state,
             workload=workload,
             hw=hw,
@@ -378,11 +386,12 @@ def _bootstrap_recipe_kb(
             session_dir=session_dir,
             save_state=True,
         )
+        if kb is None:
+            print("Recipe KB       : REMOTE (KB Store Explore config warm replay)")
     except Exception as exc:  # noqa: BLE001 — defensive
         print(
             f"WARNING: T0 recipe-snapshot anchor failed mid-flight: {exc}\n"
-            f"Continuing without warm-start (recipes for this 5-tuple "
-            f"will be created on first KEEP/REVERT).",
+            "Continuing without warm-start.",
             file=sys.stderr,
         )
         args.kb_degraded_reason = getattr(args, "kb_degraded_reason", None) or "t0_runtime_fail"

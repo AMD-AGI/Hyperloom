@@ -16,6 +16,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe import (
     KBStoreError,
     RemoteRecipeClient,
     RemoteRecipeConfigurationError,
+    RemoteWarmRecipeAdapter,
     build_remote_knowledge,
     convert_v1_recipe_to_knowledge,
     envelope_to_v1_recipe,
@@ -37,7 +38,6 @@ from hyperloom.orchestrator.knowledge.remote_recipe.models import (
     KnowledgeBundle,
     RemoteRecipeValidationError,
 )
-from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 
 _DOWNLOAD_BYTES = b"verified artifact"
@@ -145,6 +145,7 @@ def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> 
     bundle = build_remote_knowledge(_state(tmp_path), tmp_path / "files")
 
     assert bundle.knowledge["optimized_throughput"] == 130.0
+    assert bundle.knowledge["knowledge_schema_version"] == 2
     assert bundle.knowledge["validated_e2e_gain"] == 30.0
     value = bundle.knowledge["value"]
     assert value["explore"]["extra_envs"] == {"EXPLORE": "1"}
@@ -1169,6 +1170,10 @@ def test_v1_conversion_helpers_round_trip_reader_fields() -> None:
             "lessons": [{"statement": "keep foo"}],
         }
     )
+    assert knowledge["knowledge_schema_version"] == 1
+    assert knowledge["value"]["legacy_recipe"]["lessons"] == [
+        {"statement": "keep foo"}
+    ]
     row = envelope_to_v1_recipe(
         {
             "schema_version": 2,
@@ -1205,10 +1210,11 @@ def test_v1_projection_accepts_flat_recipe_document() -> None:
     assert row["best_config"]["extra_envs"] == {"A": "1"}
 
 
-def test_v1_projection_merges_explore_and_framework_config() -> None:
+def test_v2_warm_projection_replays_only_explore_config() -> None:
     row = envelope_to_v1_recipe(
         {
             "schema_version": 2,
+            "knowledge_schema_version": 2,
             "canonical_id": "inference:m:h:f:mt:a:v:p",
             "session_id": "s",
             "optimized_throughput": 10.0,
@@ -1225,19 +1231,68 @@ def test_v1_projection_merges_explore_and_framework_config() -> None:
         }
     )
     config = row["best_config"]
-    assert config["extra_server_args"] == "--page-size 32 --enable-foo"
+    assert config["extra_server_args"] == "--page-size 32"
     assert config["extra_envs"] == {
         "EXPLORE": "1",
-        "FRAMEWORK": "1",
-        "SHARED": "framework",
+        "SHARED": "explore",
     }
+    assert row["prs_tested"] == []
 
 
-def test_read_is_not_wired_into_t0_and_close_write_remains() -> None:
-    t0_source = inspect.getsource(run_t0_anchor)
+def test_remote_warm_adapter_projects_and_caches_explore_config(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, Path]] = []
+
+    class _Remote:
+        def read(self, identity: str, destination: Path):
+            calls.append((identity, destination))
+            return {
+                "schema_version": 2,
+                "knowledge_schema_version": 2,
+                "canonical_id": identity,
+                "session_id": "champion",
+                "optimized_throughput": 10.0,
+                "validated_e2e_gain": 2.0,
+                "value": {
+                    "explore": {
+                        "extra_server_args": "--page-size 32",
+                        "extra_envs": {"A": "1"},
+                        "patches": ["ignored.patch"],
+                    },
+                    "framework": {
+                        "extra_server_args": "--framework-flag",
+                        "extra_envs": {"FRAMEWORK": "1"},
+                    },
+                },
+            }
+
+    identity = "inference:m:h:f:mt:a:v:p"
+    destination = tmp_path / "remote-recipe"
+    adapter = RemoteWarmRecipeAdapter(_Remote(), destination)  # type: ignore[arg-type]
+
+    first = adapter.get_authoritative_recipe(canonical_id=identity)
+    second = adapter.get_recipe(canonical_id=identity)
+
+    assert first == second
+    assert first["best_config"] == {
+        "extra_server_args": "--page-size 32",
+        "extra_envs": {"A": "1"},
+    }
+    assert first["prs_tested"] == []
+    assert calls == [(identity, destination)]
+    assert adapter.search(label_match={}, limit=5) == []
+
+
+def test_remote_read_is_wired_into_cli_t0_and_close_write_remains() -> None:
+    bootstrap_source = inspect.getsource(
+        __import__(
+            "hyperloom.inference_optimizer.cli.kb",
+            fromlist=["_bootstrap_recipe_kb"],
+        )._bootstrap_recipe_kb
+    )
     close_source = inspect.getsource(WritebackCollaborator.finalize_recipe_and_journal)
-    assert "read_remote" not in t0_source
-    assert "remote_recipe" not in t0_source
+    assert "RemoteWarmRecipeAdapter" in bootstrap_source
     assert "HyperloomRemoteKB.from_env().write" in close_source
     assert "write_final_remote_recipe" not in close_source
 
