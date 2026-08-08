@@ -338,6 +338,62 @@ def test_row_to_gpu_sample_empty_when_no_numeric():
     assert br._row_to_gpu_sample(["timestamp", "note"], ["1000", "n/a"]) == {}
 
 
+# Verbatim ``rocm-smi --showclocks --csv`` layout from an MI355X node: every
+# clock arrives as a "(1412Mhz)" speed cell paired with a small-integer DPM
+# level cell.
+_MI355X_CLOCK_HEADER = [
+    "ts",
+    "device",
+    "Temperature (Sensor junction) (C)",
+    "Temperature (Sensor memory) (C)",
+    "fclk clock speed:",
+    "fclk clock level:",
+    "mclk clock speed:",
+    "mclk clock level:",
+    "sclk clock speed:",
+    "sclk clock level:",
+    "socclk clock speed:",
+    "socclk clock level:",
+    "Current Socket Graphics Package Power (W)",
+    "GPU use (%)",
+    "GPU Memory Allocated (VRAM%)",
+]
+_MI355X_CLOCK_ROW = [
+    "1700000000",
+    "card0",
+    "42.0",
+    "25.0",
+    "(1250Mhz)",
+    "0",
+    "(2000Mhz)",
+    "0",
+    "(1412Mhz)",
+    "1",
+    "(38Mhz)",
+    "S",
+    "254.0",
+    "0",
+    "92",
+]
+
+
+def test_row_to_gpu_sample_reads_showclocks_speeds_not_dpm_levels():
+    s = br._row_to_gpu_sample(_MI355X_CLOCK_HEADER, _MI355X_CLOCK_ROW)
+    # The neighbouring "level" cell is a small integer that would otherwise be
+    # recorded as a frequency and silently derate the roofline to nothing.
+    assert s["clock_mhz"] == 1412
+    assert s["mclk_mhz"] == 2000
+    assert s["temperature_c"] == 42.0
+    assert s["power_w"] == 254.0
+
+
+def test_row_to_gpu_sample_omits_mclk_when_not_sampled():
+    header = ["timestamp", "Average Socket Power (W)", "sclk clock (MHz)"]
+    s = br._row_to_gpu_sample(header, ["1000", "310.5", "1400"])
+    assert s["clock_mhz"] == 1400
+    assert "mclk_mhz" not in s
+
+
 # ---- _aggregate_gpu_samples_by_role ---------------------------------------
 def test_aggregate_gpu_samples_by_role():
     samples = [

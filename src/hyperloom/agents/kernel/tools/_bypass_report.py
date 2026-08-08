@@ -564,11 +564,23 @@ def build_candidates(
         # it is not silently presented as ready to optimize.
         if kc.reusable and source_file and not cand["shape_dispatchable"]:
             cand["skip_reason"] = f"shape not dispatchable (provenance={shape_provenance}); need operand dims"
-        # Optimization ROI = GPU-time share x headroom (1 - efficiency); with no
-        # analytical efficiency, headroom=1 so it degrades to gpu_pct.
-        eff = cand.get("efficiency_percent")
-        eff = float(eff) if isinstance(eff, (int, float)) else 0.0
-        headroom = 1.0 - min(max(eff, 0.0), 100.0) / 100.0
+        # Optimization ROI = GPU-time share x headroom (1 - roofline attainment).
+        # Headroom must come from the BINDING side: ``efficiency_percent`` is
+        # compute-side and reads ~0 for a memory-bound kernel, so using it would
+        # award full headroom to a kernel already pinned at its bandwidth roof --
+        # exactly the kernel with nothing to recover. ``roofline_attainment_pct``
+        # already selects compute-vs-bandwidth util by ``bound_type``. With no
+        # analytical roofline, headroom=1 so this degrades to gpu_pct.
+        # A capped estimate is a modelling failure, not a saturated kernel: the
+        # FLOP/byte closed form overshot the roof and was clamped to 100%.
+        # Scoring it would read "no headroom" off a number that only means the
+        # formula does not fit this kernel -- e.g. a MoE grouped GEMM charged
+        # for all experts by the dense/elementwise form when topk of them run.
+        # Fall back to the raw share so the kernel keeps competing.
+        attainment = cand.get("roofline_attainment_pct")
+        if cand.get("roofline_estimate_capped") or not isinstance(attainment, (int, float)) or isinstance(attainment, bool):
+            attainment = 0.0
+        headroom = 1.0 - min(max(float(attainment), 0.0), 100.0) / 100.0
         cand["optimization_priority"] = round(float(cand.get("gpu_pct") or 0.0) * headroom, 4)
         # Deterministic per-kernel hint for the specialist prompt's action slot.
         suggestion = _build_suggestion(kc.category, str(cand.get("bound_type") or ""))

@@ -233,6 +233,17 @@ def _aggregate_gpu_monitor(
         vals = [v for v in vals if v is not None]
         return round(max(vals), 2) if vals else 0.0
 
+    def _count(key: str) -> int:
+        """Number of samples carrying a numeric value for *key*.
+
+        Args:
+            key (str): Sample field name.
+
+        Returns:
+            int: The count of present values.
+        """
+        return sum(1 for s in samples if _to_float(s.get(key)) is not None)
+
     return {
         "samples": len(samples),
         "avg_power_w": _avg("power_w") or _avg("power"),
@@ -240,6 +251,12 @@ def _aggregate_gpu_monitor(
         "avg_temp_c": _avg("temperature_c") or _avg("temperature"),
         "max_temp_c": _max("temperature_c") or _max("temperature"),
         "avg_clock_mhz": _avg("clock_mhz") or _avg("sclk_mhz"),
+        "max_clock_mhz": _max("clock_mhz") or _max("sclk_mhz"),
+        "avg_mclk_mhz": _avg("mclk_mhz"),
+        # Distinct from ``samples``: only a subset of samples may carry clocks
+        # (older samplers omitted ``--showclocks``), and the effective-frequency
+        # roofline derate keys off this count.
+        "clock_samples": _count("clock_mhz") or _count("sclk_mhz"),
     }
 
 

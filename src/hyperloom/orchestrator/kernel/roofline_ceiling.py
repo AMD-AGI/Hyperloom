@@ -31,6 +31,14 @@ from typing import Any
 
 from hyperloom.inference_optimizer.model_config_utils import _merge_config_scopes
 
+from .hw_probe import probe_compute_peak_tflops
+from .roofline_effective import (
+    EffectiveClocks,
+    effective_hbm_bw_gbps,
+    resolve_effective_clocks_from_state,
+    sclk_derate_factor,
+)
+
 
 #: GPU per-chip peak specs (keys match ``SharedState.gpu_type``, lowercase).
 #: ``hbm_bw_gbps`` is vendor peak; ``peak_tflops`` is DENSE peak (missing key
@@ -627,6 +635,74 @@ def _resolve_peak_tflops(gpu_type: str | None, precision_tag: str | None) -> flo
     return _resolve_tflops(HW_SPECS, gpu_type, precision_tag)
 
 
+def resolve_effective_compute_tflops(
+    gpu_type: str | None,
+    precision_tag: str | None,
+    clocks: "EffectiveClocks | None" = None,
+) -> tuple[float, str]:
+    """Compute roof in TFLOPS, preferring measurement over tables.
+
+    Precedence, each layer falling through to the next when it has nothing:
+
+    1. An on-node probe of the matrix-core issue rate, evaluated at the clock
+       the workload actually sustained. This is a hardware limit rather than a
+       library result, so it is a genuine upper bound.
+    2. The max-achievable table, derated by the sustained/reference clock ratio.
+    3. The vendor dense peak, derated the same way.
+
+    The probe result is *already* clock-scaled, so it must not be passed through
+    the derate again -- the two mechanisms express the same correction and
+    applying both would square it.
+
+    Args:
+        gpu_type: GPU type key for the table lookups.
+        precision_tag: Precision key.
+        clocks: Measured effective clocks; ``None`` leaves table peaks unscaled.
+
+    Returns:
+        ``(tflops, source)`` where source is one of ``"probe"``,
+        ``"achievable_table"``, ``"vendor_table"`` or ``"unresolved"``; the
+        TFLOPS is ``0.0`` when nothing resolved.
+    """
+    sustained = clocks.sclk_mhz if (clocks is not None and clocks.measured) else 0.0
+    probed = probe_compute_peak_tflops(
+        precision_tag, gpu_type=gpu_type, sustained_sclk_mhz=sustained
+    )
+    if probed is not None and probed > 0:
+        return probed, "probe"
+
+    achievable = _resolve_achievable_tflops(gpu_type, precision_tag)
+    if achievable > 0:
+        peak, convention, source = achievable, "achievable", "achievable_table"
+    else:
+        peak, convention, source = (
+            _resolve_peak_tflops(gpu_type, precision_tag),
+            "vendor",
+            "vendor_table",
+        )
+    if peak <= 0:
+        return 0.0, "unresolved"
+    return peak * sclk_derate_factor(gpu_type, clocks, convention=convention), source
+
+
+def _resolve_effective_compute_tflops(
+    gpu_type: str | None,
+    precision_tag: str | None,
+    clocks: "EffectiveClocks | None" = None,
+) -> float:
+    """Compute roof in TFLOPS, discarding the provenance.
+
+    Args:
+        gpu_type: GPU type key for the table lookups.
+        precision_tag: Precision key.
+        clocks: Measured effective clocks.
+
+    Returns:
+        The effective compute peak in TFLOPS, or ``0.0`` on a lookup miss.
+    """
+    return resolve_effective_compute_tflops(gpu_type, precision_tag, clocks)[0]
+
+
 @dataclass(frozen=True)
 class ModelMeta:
     """HF subset needed for the decode roofline ceiling.
@@ -952,7 +1028,8 @@ def compute_theoretical_peak_output_tok_per_sec(
     spec = HW_SPECS.get((gpu_type or "").strip().lower())
     if spec is None:
         return 0.0
-    bw_total_bytes_per_sec = spec["hbm_bw_gbps"] * 1e9 * max(num_gpus, 1)
+    per_gpu_gbps, _ = effective_hbm_bw_gbps(gpu_type, spec["hbm_bw_gbps"], active_gpus=num_gpus)
+    bw_total_bytes_per_sec = per_gpu_gbps * 1e9 * max(num_gpus, 1)
     batch = max(concurrency, 1)
     kv_bytes = compute_kv_bytes_per_token(
         num_layers=num_layers,
@@ -986,6 +1063,7 @@ def compute_compute_bound_ceiling_tok_per_sec(
     active_weight_bytes: int,
     weight_bytes: int,
     weight_dtype_bytes: float,
+    clocks: "EffectiveClocks | None" = None,
 ) -> float:
     """Decode-only compute-bound ceiling for ``output_throughput``.
 
@@ -1004,12 +1082,13 @@ def compute_compute_bound_ceiling_tok_per_sec(
         active_weight_bytes: Per-token active weight bytes at B=1.
         weight_bytes: Total weight bytes (fallback when active is missing).
         weight_dtype_bytes: Weight bytes-per-element.
+        clocks: Measured effective clocks; ``None`` leaves the peak unscaled.
 
     Returns:
         The compute-bound decode throughput ceiling, or ``0.0`` on missing
         input.
     """
-    peak_tflops = _resolve_achievable_tflops(gpu_type, precision_tag) or _resolve_peak_tflops(gpu_type, precision_tag)
+    peak_tflops = _resolve_effective_compute_tflops(gpu_type, precision_tag, clocks)
     if peak_tflops <= 0 or weight_dtype_bytes <= 0:
         return 0.0
     # B=1 per-token figure; fall back to dense weight_bytes when active is missing.
@@ -1195,7 +1274,8 @@ def compute_diffusion_mem_img_per_sec(*, gpu_type: str, num_gpus: int, weight_by
     spec = HW_SPECS.get((gpu_type or "").strip().lower())
     if spec is None:
         return 0.0
-    bw = spec["hbm_bw_gbps"] * 1e9 * max(num_gpus, 1)
+    per_gpu_gbps, _ = effective_hbm_bw_gbps(gpu_type, spec["hbm_bw_gbps"], active_gpus=num_gpus)
+    bw = per_gpu_gbps * 1e9 * max(num_gpus, 1)
     if weight_bytes <= 0 or num_steps <= 0 or bw <= 0:
         return 0.0
     per_step_s = weight_bytes / bw
@@ -1310,6 +1390,7 @@ def compute_diffusion_compute_img_per_sec(
     num_layers: int,
     hidden_size: int,
     num_steps: int,
+    clocks: "EffectiveClocks | None" = None,
 ) -> float:
     """Compute-roofline ceiling for diffusion image throughput (images/sec).
 
@@ -1330,11 +1411,12 @@ def compute_diffusion_compute_img_per_sec(
         num_layers: DiT transformer layers (for the attention-score term).
         hidden_size: DiT model dim (for the attention-score term).
         num_steps: Denoising steps per image.
+        clocks: Measured effective clocks; ``None`` leaves the peak unscaled.
 
     Returns:
         The compute-bound images/sec ceiling, or ``0.0`` on degenerate input.
     """
-    peak_tflops = _resolve_achievable_tflops(gpu_type, precision_tag) or _resolve_peak_tflops(gpu_type, precision_tag)
+    peak_tflops = _resolve_effective_compute_tflops(gpu_type, precision_tag, clocks)
     if peak_tflops <= 0 or dit_params <= 0 or latent_tokens <= 0 or num_steps <= 0:
         return 0.0
     linear = 2.0 * dit_params * latent_tokens
@@ -1346,7 +1428,12 @@ def compute_diffusion_compute_img_per_sec(
     return peak_flops / flops_per_image
 
 
-def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload) -> RooflineBreakdown:
+def _compute_diffusion_breakdown_from_state(
+    state: Any,
+    runtime: RuntimeWorkload,
+    *,
+    clocks: "EffectiveClocks | None" = None,
+) -> RooflineBreakdown:
     """Diffusion (xDiT) roofline breakdown in images/sec.
 
     Ceiling = ``min(memory, compute)`` (the binding side), like the LLM path.
@@ -1360,6 +1447,7 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
     Args:
         state: Shared run state (for the denoising step count).
         runtime: Resolved runtime workload (model_path / gpu_type / tp).
+        clocks: Measured effective clocks; ``None`` leaves the peak unscaled.
 
     Returns:
         The diffusion ``RooflineBreakdown``, or ``_EMPTY_BREAKDOWN`` when the
@@ -1407,6 +1495,7 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
             num_layers=num_layers,
             hidden_size=hidden,
             num_steps=num_steps,
+            clocks=clocks,
         )
     mem_img_s = compute_diffusion_mem_img_per_sec(
         gpu_type=runtime.gpu_type,
@@ -1424,6 +1513,7 @@ def compute_roofline_breakdown_from_state(
     state: Any,
     *,
     arm: str | None = None,
+    clocks: "EffectiveClocks | None" = None,
 ) -> RooflineBreakdown:
     """Primary decode ceiling + T_mem/T_cmp side projections.
 
@@ -1435,15 +1525,19 @@ def compute_roofline_breakdown_from_state(
     Args:
         state: Shared run state to resolve the workload and dtype from.
         arm: Pins precision to a specific arm; ``None`` infers it.
+        clocks: Measured effective clocks for the run being modelled; ``None``
+            keeps the boost-anchored ceiling.
 
     Returns:
         The decode ``RooflineBreakdown`` (``_EMPTY_BREAKDOWN`` on missing
         fields).
     """
     runtime = resolve_runtime_workload(state, arm=arm)
+    if clocks is None:
+        clocks = resolve_effective_clocks_from_state(state, arm=arm)
     # Diffusion (xDiT) uses a distinct images/sec ceiling.
     if (runtime.framework or "").strip().lower() == "xdit":
-        return _compute_diffusion_breakdown_from_state(state, runtime)
+        return _compute_diffusion_breakdown_from_state(state, runtime, clocks=clocks)
     meta = load_model_meta(
         runtime.model_path,
         precision_hint=runtime.precision,
@@ -1480,6 +1574,7 @@ def compute_roofline_breakdown_from_state(
         active_weight_bytes=meta.active_weight_bytes,
         weight_bytes=meta.weight_bytes,
         weight_dtype_bytes=meta.weight_dtype_bytes,
+        clocks=clocks,
     )
     if mem <= 0 and cmp <= 0:
         return _EMPTY_BREAKDOWN
@@ -1496,6 +1591,7 @@ def compute_roofline_breakdown_from_state(
             osl=runtime.osl,
             num_gpus=num_gpus,
             precision_tag=precision_tag,
+            clocks=clocks,
         )
         if pm_bd is not None and pm_bd.decode_tok_per_s > 0:
             return RooflineBreakdown(
@@ -1510,17 +1606,23 @@ def compute_roofline_breakdown_from_state(
     return legacy
 
 
-def compute_peak_from_state(state: Any, *, arm: str | None = None) -> float:
+def compute_peak_from_state(
+    state: Any,
+    *,
+    arm: str | None = None,
+    clocks: "EffectiveClocks | None" = None,
+) -> float:
     """Convenience scalar wrapper for ``T_peak`` only (kept for backward compat; prefer ``compute_roofline_breakdown_from_state``). ``arm`` pins precision to a specific arm.
 
     Args:
         state: Shared run state to compute the ceiling from.
         arm: Pins precision to a specific arm; ``None`` infers it.
+        clocks: Measured effective clocks; ``None`` leaves the peak unscaled.
 
     Returns:
         The peak decode throughput (``peak_tok_per_sec``).
     """
-    return compute_roofline_breakdown_from_state(state, arm=arm).peak_tok_per_sec
+    return compute_roofline_breakdown_from_state(state, arm=arm, clocks=clocks).peak_tok_per_sec
 
 
 def read_baseline_server_args(state: Any) -> str:
@@ -1605,20 +1707,39 @@ def _resolve_achievable_tflops(gpu_type: str | None, precision_tag: str | None) 
     return _resolve_tflops(HW_SPECS_ACHIEVABLE, gpu_type, precision_tag)
 
 
-def resolve_compute_peak_provenance(gpu_type: str | None, precision_tag: str | None) -> dict[str, Any]:
+def resolve_compute_peak_provenance(
+    gpu_type: str | None,
+    precision_tag: str | None,
+    clocks: "EffectiveClocks | None" = None,
+) -> dict[str, Any]:
     """Provenance for the compute-peak TFLOPS used by every compute ceiling.
 
-    The unified convention is max-achievable (sustained) TFLOPS; the vendor
-    dense peak is only a coverage-gap fallback. Surfacing convention + value +
-    source keeps within%/gap interpretable.
+    Preferred convention is an on-node probe of the matrix-core issue rate,
+    which is a hardware limit rather than a library result. Failing that, the
+    max-achievable table; failing that, the vendor dense peak. Surfacing which
+    layer answered, alongside the value, keeps ``within%`` interpretable --
+    a probe-derived roof and a table-derived one are not the same quantity, and
+    only the former is guaranteed unbeatable by a tuned kernel.
 
     Args:
         gpu_type: GPU type key for the peak lookup.
         precision_tag: Precision key for the peak lookup.
+        clocks: Measured effective clocks, so a probe-derived peak is reported
+            at the clock the workload actually sustained.
 
     Returns:
         ``{compute_peak_convention, compute_peak_tflops, compute_peak_source}``.
     """
+    sustained = clocks.sclk_mhz if (clocks is not None and clocks.measured) else 0.0
+    probed = probe_compute_peak_tflops(
+        precision_tag, gpu_type=gpu_type, sustained_sclk_mhz=sustained
+    )
+    if probed is not None and probed > 0:
+        return {
+            "compute_peak_convention": "probe",
+            "compute_peak_tflops": probed,
+            "compute_peak_source": "on-node MFMA issue-rate probe (hardware roof)",
+        }
     ach = _resolve_achievable_tflops(gpu_type, precision_tag)
     if ach > 0:
         return {
@@ -1874,6 +1995,7 @@ def compute_roofline_from_perfmodel(
     osl: int,
     num_gpus: int = 1,
     precision_tag: str = "bf16",
+    clocks: "EffectiveClocks | None" = None,
 ) -> "PerfModelBreakdown | None":
     """Bottom-up decode + prefill roofline using inlined GEMM/SDPA formulas.
 
@@ -1893,6 +2015,7 @@ def compute_roofline_from_perfmodel(
         osl: Output sequence length.
         num_gpus: Number of GPUs (tensor-parallel degree).
         precision_tag: Precision key for the achievable TFLOPS lookup.
+        clocks: Measured effective clocks; ``None`` leaves the peak unscaled.
 
     Returns:
         The per-op ``PerfModelBreakdown``, or ``None`` when model metadata is
@@ -1906,10 +2029,17 @@ def compute_roofline_from_perfmodel(
     if spec is None:
         return None
 
-    bw_gbps = spec["hbm_bw_gbps"] * max(num_gpus, 1)
+    per_gpu_gbps, _ = effective_hbm_bw_gbps(gpu_type, spec["hbm_bw_gbps"], active_gpus=num_gpus)
+    bw_gbps = per_gpu_gbps * max(num_gpus, 1)
     bw_bps = bw_gbps * 1e9
     tag = (precision_tag or "bf16").strip().lower()
-    f_peak_tflops = _resolve_achievable_tflops(gpu_type, tag) * max(num_gpus, 1)
+    # Keep the achievable-table-only lookup (a miss must still degrade to the
+    # legacy path), but scale it to the clock the workload actually sustained.
+    f_peak_tflops = (
+        _resolve_achievable_tflops(gpu_type, tag)
+        * max(num_gpus, 1)
+        * sclk_derate_factor(gpu_type, clocks, convention="achievable")
+    )
     if f_peak_tflops <= 0:
         return None
     f_peak = f_peak_tflops * 1e12
