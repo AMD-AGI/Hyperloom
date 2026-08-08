@@ -10,18 +10,24 @@
 * :class:`AnthropicRcaEngine` — :class:`LlmRcaEngine` subclass speaking the
   Anthropic Messages API; the factory selects it when the discovered provider
   is ``anthropic``.
+
+Both LLM engines reach their provider through ``hyperloom.common.llm_config``,
+which owns client construction (credentials, base URL, gateway custom headers,
+the single ``anthropic-version`` default) and the request/response shape. This
+module therefore holds only the prompt, the throttle, and the usage ledger.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 
-import httpx
+from hyperloom.common import llm_config
 
 from ..signals import Symptom, SymptomSeverity
 
@@ -195,14 +201,30 @@ def load_rca_system_prompt() -> str:
     return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 
 
+def _client_timeout(timeout_s: float) -> Any:
+    """Build the uniform per-request timeout both engines run with."""
+    return llm_config.build_http_timeout(connect=timeout_s, read=timeout_s, write=timeout_s, pool=timeout_s)
+
+
+def _provider_env(*, api_key_env: str, api_key: str, base_url_env: str, base_url: str) -> dict[str, str]:
+    """Overlay the discovered RCA credentials onto the process env.
+
+    ``Config.discover`` may have resolved them from provider-specific variables
+    (eg. ``DEEPSEEK_*``), so the client factory cannot re-derive them from the
+    canonical names. Everything else the factory needs — gateway custom headers
+    above all — still comes from the process env.
+    """
+    return {**os.environ, api_key_env: api_key, base_url_env: base_url}
+
+
 @dataclass
 class LlmRcaEngine:
     """Async OpenAI-compatible RCA engine (chat-server proxy).
 
-    The HTTP layer goes directly through ``httpx.AsyncClient`` rather
-    than the ``openai`` SDK to keep error handling explicit and
-    mocking trivial. ``base_url`` should already include any version
-    prefix (eg. ``/v1``).
+    ``hyperloom.common.llm_config`` owns the transport: it builds the provider
+    client and issues the chat completion, so this class carries only the
+    prompt, the throttle, and the token-usage ledger. ``base_url`` should
+    already include any version prefix (eg. ``/v1``).
     """
 
     base_url: str
@@ -211,7 +233,8 @@ class LlmRcaEngine:
     timeout_s: float = 8.0
     max_chars: int = 1500
     throttle: RcaThrottle | None = None
-    client: httpx.AsyncClient | None = None
+    # Provider client; built on first use unless a caller injects one.
+    client: Any = None
     _owns_client: bool = field(default=False, init=False, repr=False)
     _config_warned: bool = field(default=False, init=False, repr=False)
     _current_tick_id: int = field(default=-1, init=False, repr=False)
@@ -223,31 +246,43 @@ class LlmRcaEngine:
     _usage_latency_ms: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Validate config and lazily build the HTTP client and throttle."""
+        """Warn about missing credentials and install the default throttle."""
         if not self.base_url or not self.api_key:
-            log.warning("LlmRcaEngine constructed without base_url/api_key; calls will be skipped")
-        if self.client is None:
-            self.client = httpx.AsyncClient(
-                base_url=self.base_url.rstrip("/"),
-                timeout=httpx.Timeout(self.timeout_s),
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-            self._owns_client = True
-        else:
-            if "Authorization" not in self.client.headers:
-                self.client.headers["Authorization"] = f"Bearer {self.api_key}"
-            if "Content-Type" not in self.client.headers:
-                self.client.headers["Content-Type"] = "application/json"
+            log.warning("%s constructed without base_url/api_key; calls will be skipped", type(self).__name__)
         if self.throttle is None:
             self.throttle = RcaThrottle()
 
+    def _new_client(self) -> Any:
+        """Build the OpenAI-compatible client this engine calls through."""
+        return llm_config.get_async_openai_client(
+            env=_provider_env(
+                api_key_env="OPENAI_API_KEY",
+                api_key=self.api_key,
+                base_url_env="OPENAI_BASE_URL",
+                base_url=self.base_url,
+            ),
+            timeout=_client_timeout(self.timeout_s),
+        )
+
+    def _ensure_client(self) -> Any:
+        """Return the provider client, building it on first use.
+
+        Deferred so the connection pool binds to the event loop that issues the
+        request rather than whichever loop happened to construct the engine.
+        """
+        if self.client is None:
+            self.client = self._new_client()
+            self._owns_client = True
+        return self.client
+
+    async def _aclose_client(self) -> None:
+        """Close the OpenAI SDK client."""
+        await self.client.close()
+
     async def aclose(self) -> None:
-        """Close the underlying HTTP client if this engine created it."""
+        """Close the provider client if this engine created it."""
         if self._owns_client and self.client is not None:
-            await self.client.aclose()
+            await self._aclose_client()
 
     def drain_usage(self) -> dict[str, Any] | None:
         """Return + reset the token usage accumulated since the last drain.
@@ -299,7 +334,7 @@ class LlmRcaEngine:
         return _truncate(text, self.max_chars)
 
     def _accumulate_usage(self, usage: Any, *, latency_ms: int) -> None:
-        """Fold one chat response's ``usage`` block into the accumulator.
+        """Fold one chat response's ``usage`` object into the accumulator.
 
         Counts the call (and its latency) even when the provider omitted a
         ``usage`` block, so the trace still reflects that an RCA call happened.
@@ -308,14 +343,14 @@ class LlmRcaEngine:
         """
         self._usage_calls += 1
         self._usage_latency_ms += max(0, int(latency_ms))
-        if not isinstance(usage, Mapping):
+        if usage is None:
             return
         try:
-            self._usage_in += int(usage.get("prompt_tokens", 0) or 0)
+            self._usage_in += int(getattr(usage, "prompt_tokens", 0) or 0)
         except (TypeError, ValueError):
             pass
         try:
-            self._usage_out += int(usage.get("completion_tokens", 0) or 0)
+            self._usage_out += int(getattr(usage, "completion_tokens", 0) or 0)
         except (TypeError, ValueError):
             pass
 
@@ -333,8 +368,9 @@ class LlmRcaEngine:
     async def _call(self, symptom: Symptom) -> str:
         """Issue the chat-completion request and extract the reply text.
 
-        Network, HTTP-status, and decoding failures are logged and degraded to
-        an empty string rather than raised.
+        Every provider-side failure (transport, HTTP status, decoding) is
+        logged and degraded to an empty string: RCA text is advisory, so a
+        provider outage must not abort the reactor tick that asked for it.
 
         Args:
             symptom (Symptom): The symptom whose evidence is sent to the LLM.
@@ -342,141 +378,79 @@ class LlmRcaEngine:
         Returns:
             str: The model's reply content, or an empty string on any failure.
         """
-        prompt = _build_user_prompt(symptom)
-        payload = {
+        params: dict[str, Any] = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": load_rca_system_prompt()},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": _build_user_prompt(symptom)},
             ],
         }
         if _uses_max_completion_tokens(self.model):
-            payload["max_completion_tokens"] = 600
+            params["max_completion_tokens"] = 600
         else:
-            payload["max_tokens"] = 600
-            payload["temperature"] = 0.2
+            params["max_tokens"] = 600
+            params["temperature"] = 0.2
         _t0 = time.perf_counter()
         try:
-            assert self.client is not None
-            resp = await self.client.post("/chat/completions", json=payload)
-        except httpx.TimeoutException:
-            log.warning("LlmRcaEngine: chat-server call timed out")
+            result = await llm_config.achat_completion(self._ensure_client(), **params)
+        except Exception as exc:  # noqa: BLE001 - degrade-to-empty is this engine's contract
+            log.warning("LlmRcaEngine: chat completion failed: %r", exc)
             return ""
-        except httpx.RequestError as exc:
-            log.warning("LlmRcaEngine: chat-server request failed: %s", exc)
-            return ""
-        latency_ms = int((time.perf_counter() - _t0) * 1000)
-        if resp.status_code >= 400:
-            log.warning(
-                "LlmRcaEngine: chat-server status=%d body=%s",
-                resp.status_code,
-                resp.text[:200],
-            )
-            return ""
-        try:
-            body = resp.json()
-        except ValueError:
-            log.warning("LlmRcaEngine: chat-server returned non-json body")
-            return ""
-        self._accumulate_usage(
-            body.get("usage") if isinstance(body, dict) else None,
-            latency_ms=latency_ms,
-        )
-        choices = body.get("choices") if isinstance(body, dict) else None
-        if not choices:
-            return ""
-        message = choices[0].get("message") if isinstance(choices[0], dict) else None
-        if not isinstance(message, dict):
-            return ""
-        content = message.get("content")
-        if isinstance(content, list):
-            # Some providers return a list of content parts.
-            content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-        return str(content or "").strip()
+        self._accumulate_usage(result.usage, latency_ms=int((time.perf_counter() - _t0) * 1000))
+        return str(result.text or "").strip()
 
 
 @dataclass
 class AnthropicRcaEngine(LlmRcaEngine):
-    """Anthropic Messages-compatible RCA engine."""
+    """Anthropic Messages-compatible RCA engine.
 
-    def __post_init__(self) -> None:
-        """Validate config and lazily build the Anthropic HTTP client."""
-        if not self.base_url or not self.api_key:
-            log.warning("AnthropicRcaEngine constructed without base_url/api_key; calls will be skipped")
-        if self.client is None:
-            self.client = httpx.AsyncClient(
-                base_url=self.base_url.rstrip("/"),
-                timeout=httpx.Timeout(self.timeout_s),
-                headers={
-                    "x-api-key": self.api_key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-            )
-            self._owns_client = True
-        else:
-            if "x-api-key" not in self.client.headers:
-                self.client.headers["x-api-key"] = self.api_key
-            if "anthropic-version" not in self.client.headers:
-                self.client.headers["anthropic-version"] = "2023-06-01"
-            if "Content-Type" not in self.client.headers:
-                self.client.headers["Content-Type"] = "application/json"
-        if self.throttle is None:
-            self.throttle = RcaThrottle()
+    Only the transport differs from :class:`LlmRcaEngine`; the throttle, the
+    usage ledger, and the prompt are inherited unchanged.
+    """
+
+    def _new_client(self) -> Any:
+        """Build the Anthropic client this engine calls through."""
+        return llm_config.get_async_anthropic_client(
+            env=_provider_env(
+                api_key_env="ANTHROPIC_API_KEY",
+                api_key=self.api_key,
+                base_url_env="ANTHROPIC_BASE_URL",
+                base_url=self.base_url,
+            ),
+            timeout=_client_timeout(self.timeout_s),
+        )
+
+    async def _aclose_client(self) -> None:
+        """Close the Anthropic client (an ``httpx.AsyncClient``)."""
+        await self.client.aclose()
 
     async def _call(self, symptom: Symptom) -> str:
-        """Issue an Anthropic Messages request and extract text content."""
-        prompt = _build_user_prompt(symptom)
-        payload = {
-            "model": self.model,
-            "system": load_rca_system_prompt(),
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 600,
-            "temperature": 0.2,
-        }
+        """Issue an Anthropic Messages request and extract text content.
+
+        Degrades to an empty string on failure for the same reason as
+        :meth:`LlmRcaEngine._call`.
+
+        Args:
+            symptom (Symptom): The symptom whose evidence is sent to the LLM.
+
+        Returns:
+            str: The model's reply content, or an empty string on any failure.
+        """
         _t0 = time.perf_counter()
         try:
-            assert self.client is not None
-            resp = await self.client.post(
-                "/v1/messages",
-                json=payload,
-                headers={
-                    "x-api-key": self.api_key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
+            result = await llm_config.aanthropic_messages(
+                self._ensure_client(),
+                model=self.model,
+                system=load_rca_system_prompt(),
+                messages=[{"role": "user", "content": _build_user_prompt(symptom)}],
+                max_tokens=600,
+                temperature=0.2,
             )
-        except httpx.TimeoutException:
-            log.warning("AnthropicRcaEngine: messages call timed out")
+        except Exception as exc:  # noqa: BLE001 - degrade-to-empty is this engine's contract
+            log.warning("AnthropicRcaEngine: messages call failed: %r", exc)
             return ""
-        except httpx.RequestError as exc:
-            log.warning("AnthropicRcaEngine: messages request failed: %s", exc)
-            return ""
-        latency_ms = int((time.perf_counter() - _t0) * 1000)
-        if resp.status_code >= 400:
-            log.warning(
-                "AnthropicRcaEngine: messages status=%d body=%s",
-                resp.status_code,
-                resp.text[:200],
-            )
-            return ""
-        try:
-            body = resp.json()
-        except ValueError:
-            log.warning("AnthropicRcaEngine: messages returned non-json body")
-            return ""
-        self._accumulate_anthropic_usage(
-            body.get("usage") if isinstance(body, dict) else None,
-            latency_ms=latency_ms,
-        )
-        content = body.get("content") if isinstance(body, dict) else None
-        if not isinstance(content, list):
-            return ""
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
-                parts.append(item["text"])
-        return "\n".join(parts).strip()
+        self._accumulate_anthropic_usage(result.usage, latency_ms=int((time.perf_counter() - _t0) * 1000))
+        return str(result.text or "").strip()
 
     def _accumulate_anthropic_usage(self, usage: Any, *, latency_ms: int) -> None:
         """Fold Anthropic ``usage`` fields into the shared accumulator."""
@@ -627,6 +601,7 @@ def _decode_throttle_keys(payload: Any) -> dict[tuple[str, ...], float]:
 
 
 __all__ = [
+    "AnthropicRcaEngine",
     "LlmRcaEngine",
     "NoopRcaEngine",
     "RcaEngine",
