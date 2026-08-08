@@ -1127,9 +1127,8 @@ class TestDedupVllmServerArgs:
         # STRIPPED the inner double quotes of a compact --compilation-config
         # JSON value (``{"cudagraph_mode":"PIECEWISE"}`` -> ``{cudagraph_mode:
         # PIECEWISE}``) and crashed every explore/kernel/integrate variant
-        # server with ``Invalid JSON``. Listing --compilation-config (and the
-        # other JSON-object flags) in _SPACE_VALUE_FLAGS makes dedup leave the
-        # whole string untouched so the JSON round-trips.
+        # server with ``Invalid JSON``. JSON-aware tokenization must preserve
+        # that value while still collapsing unrelated duplicate flags.
         raw = (
             '--compilation-config {"cudagraph_mode":"PIECEWISE"} '
             "--block-size 128 --block-size 128 --gpu-memory-utilization 0.95"
@@ -1137,11 +1136,13 @@ class TestDedupVllmServerArgs:
         out = _grid_runner.dedup_vllm_server_args(raw, "vllm")
         assert '{"cudagraph_mode":"PIECEWISE"}' in out
         assert "{cudagraph_mode:PIECEWISE}" not in out
+        assert out.count("--block-size") == 1
 
     def test_speculative_config_quotes_survive_dedup(self):
         raw = '--speculative-config {"method":"eagle"} --max-num-seqs 256 --max-num-seqs 256'
         out = _grid_runner.dedup_vllm_server_args(raw, "vllm")
         assert '{"method":"eagle"}' in out
+        assert out.count("--max-num-seqs") == 1
 
     def test_equals_form_is_deduped(self):
         out = _grid_runner.dedup_vllm_server_args(
@@ -1202,10 +1203,13 @@ class TestDedupVllmServerArgs:
         )
         assert out == "--attention-backend C"
 
-    def test_json_space_value_flag_left_untouched(self):
-        # A flag carrying a JSON/space value must not be tokenized and re-joined;
-        # leave the whole string verbatim even with a duplicate flag present.
+    def test_json_flag_does_not_disable_other_flag_dedup(self):
         raw = "--attention-backend A --attention-backend B --override-generation-config '{\"temperature\": 0.7}'"
+        out = _grid_runner.dedup_vllm_server_args(raw, "vllm")
+        assert out == '--attention-backend B --override-generation-config {"temperature":0.7}'
+
+    def test_json_string_with_internal_space_fails_closed(self):
+        raw = '--attention-backend A --attention-backend B --speculative-config \'{"model":"draft model"}\''
         assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
 
     def test_multi_value_flag_left_untouched(self):
@@ -1401,9 +1405,17 @@ class TestCompactJsonServerArgs:
         out = _grid_runner.compact_json_server_args('--kv-cache-dtype fp8 --compilation-config {"level": 3}', "vllm")
         assert out == '--kv-cache-dtype fp8 --compilation-config {"level":3}'
 
-    def test_sglang_is_noop(self):
+    def test_sglang_json_is_normalized_for_unquoted_transport(self):
         raw = '--speculative-config {"method": "eagle"}'
-        assert _grid_runner.compact_json_server_args(raw, "sglang") == raw
+        assert _grid_runner.compact_json_server_args(raw, "sglang") == (
+            '--speculative-config {"method":"eagle"}'
+        )
+
+    def test_sglang_and_missing_framework_remove_legacy_shell_wrappers(self):
+        raw = """--json-model-override-args '{"rope_scaling":null}'"""
+        expected = '--json-model-override-args {"rope_scaling":null}'
+        assert _grid_runner.compact_json_server_args(raw, "sglang") == expected
+        assert _grid_runner.compact_json_server_args(raw, None) == expected
 
     def test_no_json_is_noop(self):
         raw = "--block-size 128 --no-enable-prefix-caching"
@@ -1411,6 +1423,10 @@ class TestCompactJsonServerArgs:
 
     def test_malformed_json_left_verbatim(self):
         raw = "--compilation-config {not json}"
+        assert _grid_runner.compact_json_server_args(raw, "vllm") == raw
+
+    def test_malformed_wrapped_json_keeps_both_shell_wrappers(self):
+        raw = "--compilation-config '{not json}'"
         assert _grid_runner.compact_json_server_args(raw, "vllm") == raw
 
     def test_empty_is_noop(self):

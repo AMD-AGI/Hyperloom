@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 import yaml
 
 from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_ingest as gi
@@ -138,3 +139,19 @@ def test_sanitize_server_args_preserves_json_without_shell_wrappers() -> None:
     json.loads(tokens[3])
     assert "'{" not in sanitized
     assert "}'" not in sanitized
+
+
+def test_sanitize_server_args_rejects_whitespace_bearing_token() -> None:
+    with pytest.raises(ValueError, match="whitespace-bearing"):
+        gi._sanitize_server_args(
+            '--tool-call-parser "my parser"',
+            drop_paths=False,
+        )
+
+
+def test_sanitize_server_args_rejects_unbalanced_shell_input() -> None:
+    with pytest.raises(ValueError, match="not shell-tokenizable"):
+        gi._sanitize_server_args(
+            "--speculative-config 'unterminated",
+            drop_paths=False,
+        )
