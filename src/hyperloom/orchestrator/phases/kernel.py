@@ -27,6 +27,7 @@ from ..state.task_registry import TERMINAL_STATES
 from ..bus.message_bus import Message
 from ..loop.coordinator_helpers import (
     _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
+    _MAX_ROOFLINE_FAILURE_RETRIES,
     _resolve_roofline_watermark_ratio,
     _resolve_serving_fidelity,
     _split_env_and_flags,
@@ -41,6 +42,12 @@ log = _logging.getLogger(__name__)
 # non-existent path and exercise the "no complete aiter config anywhere" branch
 # on a developer box that happens to have the real checkout mounted.
 _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
+
+# Idempotency key of the same-harness GEAK rebench enqueued by
+# ``_enqueue_internal_stack_rebench``. Doubles as the placeholder that reserves
+# ``geak_pending`` before the task row exists, so the phase guard already sees a
+# pending revalidation while the enqueue is in flight.
+_GEAK_REVALIDATE_IDEMPOTENCY_KEY = "geak-revalidate"
 
 
 class KernelPhase(PhaseHandler):
@@ -745,6 +752,20 @@ class KernelPhase(PhaseHandler):
 
         async def _enqueue_geak_revalidation(*, reason: str) -> bool:
             """Enqueue and persist the rebench that keeps a GEAK win pending."""
+            # Reserve the pending slot BEFORE the task exists. The rebench runs
+            # as an ``explore`` task, a kind no later phase allows, so the phase
+            # boundary cancels it on sight; ``kernel_work_pending`` is what holds
+            # KERNEL open until the rebench lands. Publishing the reservation
+            # after enqueue left a window where the guard saw no revalidation id,
+            # let KERNEL exit, and the cancel swept the freshly queued task —
+            # stranding a validated win as audit-only.
+            reserved = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
+            reserved["status"] = "awaiting_rebench"
+            reserved.setdefault("revalidation_task_id", _GEAK_REVALIDATE_IDEMPOTENCY_KEY)
+            reserved.pop("revalidation_error", None)
+            state.geak_pending = reserved
+            state.save(self.session_dir)
+
             try:
                 summary = await self._enqueue_internal_stack_rebench(reason=reason)
             except Exception as exc:  # noqa: BLE001 - defensive
@@ -762,6 +783,9 @@ class KernelPhase(PhaseHandler):
                 return True
 
             pending["status"] = "rebench_unavailable"
+            # Drop the reservation placeholder so no stale id outlives the slot.
+            if pending.get("revalidation_task_id") == _GEAK_REVALIDATE_IDEMPOTENCY_KEY:
+                pending.pop("revalidation_task_id", None)
             pending["revalidation_error"] = str(
                 (summary or {}).get("reason") or f"task settled before dispatch ({task_state or 'unknown'})"
             )[:500]
@@ -2694,7 +2718,8 @@ class KernelPhase(PhaseHandler):
         Returns:
             ``True`` when a fresh roofline is warranted because projected tput
             crossed the watermark ratio; ``False`` otherwise (including the
-            bootstrap and in-flight re-arm guards).
+            bootstrap and in-flight re-arm guards, and once the failure streak
+            has exhausted ``_MAX_ROOFLINE_FAILURE_RETRIES``).
         """
         state = self.shared_state
         try:
@@ -2710,6 +2735,8 @@ class KernelPhase(PhaseHandler):
                 failure_streak = 0
             if failure_streak <= 0:
                 return False
+            if failure_streak > _MAX_ROOFLINE_FAILURE_RETRIES:
+                return False
             try:
                 last_rl = float(state.baseline_tput or 0.0)
             except (TypeError, ValueError):
@@ -2720,6 +2747,31 @@ class KernelPhase(PhaseHandler):
         if cur <= 0:
             return False
         return cur / last_rl >= _resolve_roofline_watermark_ratio()
+
+    async def _release_finished_roofline_gate(self) -> None:
+        """Drop an in-flight marker that names a roofline which already finished.
+
+        ``auto_roofline_pending_task_id`` gates the watermark so two rooflines
+        never run at once, and it is cleared when the task reports back. A task
+        that was deduplicated into an already-finished attempt reports nothing,
+        so the marker it left behind gated the watermark permanently — and it
+        survives into the next process, because the marker is persisted state.
+        Whoever resumed the session inherited a gate that nothing could open.
+        """
+        pending = (self.shared_state.auto_roofline_pending_task_id or "").strip()
+        if not pending:
+            return
+        try:
+            task = await self.tasks.get(pending)
+        except Exception:  # noqa: BLE001 — a missing row is itself finished
+            task = None
+        if task is not None and str(getattr(task, "state", "")) not in TERMINAL_STATES:
+            return
+        self.shared_state.auto_roofline_pending_task_id = ""
+        log.info(
+            "watermark-roofline: released in-flight gate held by finished task=%s",
+            pending,
+        )
 
     async def _maybe_enqueue_watermark_roofline(
         self,
@@ -2734,6 +2786,7 @@ class KernelPhase(PhaseHandler):
         Returns:
             ``True`` if a roofline task was enqueued, else ``False``.
         """
+        await self._release_finished_roofline_gate()
         if not self._needs_roofline_for_watermark():
             return False
         try:

@@ -30,8 +30,14 @@ side_effects:
 preferred_backend: claude
 preferred_model: claude-opus-5
 max_turns: 4
-lease_ttl_sec: 3600
-description: "FRAMEWORK_AGENT-phase per-candidate executor: applies an upstream framework to framework_source_roots, runs throughput + accuracy gate, KEEPs or REVERTs. Coordinator-internal."
+# Must stay >= DEFAULT_VARIANT_TIMEOUT_SEC (7800), the hard cap the executor
+# already allows one bench to reach; the remainder covers the clone, the source
+# rebuild and the accuracy eval that bracket it. The watchdog measures from the
+# task entering `running` and nothing refreshes it, so this is a total wall-clock
+# budget, not an idle timeout. `test_action_registry_lease_covers_bench_timeout`
+# fails if the two numbers drift apart again.
+lease_ttl_sec: 10800
+description: "FRAMEWORK_AGENT-phase per-candidate executor: applies an upstream PR diff to framework_source_roots, runs throughput + accuracy gate, KEEPs or REVERTs. Coordinator-internal."
 pipeline_phase: explore
 typical_runtime_min: 12.0
 applicable_when:
@@ -49,7 +55,7 @@ params_schema:
     type: string
     description: |
       Optional. ``"sglang"`` / ``"vllm"``. Falls back to
-      ``candidate["framework"]`` then ``$INFERENCE_OPTIMIZER_FRAMEWORK``.
+      ``candidate["framework"]`` then ``$FRAMEWORK``.
   batch_id:
     type: string
     description: |

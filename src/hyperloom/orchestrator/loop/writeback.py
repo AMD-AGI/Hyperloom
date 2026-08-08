@@ -69,6 +69,12 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
+# FRAMEWORK_AGENT KEEPs are stacked under the ``framework`` attribution family
+# label rather than under their task kind, because that label is what
+# ``phase_breakdown`` and the action-family table publish. Anything that
+# reconciles a ``framework_agent`` task against the stack has to translate.
+_FRAMEWORK_STACK_ACTION = "framework"
+
 
 @dataclass
 class _PromoteOutcome:
@@ -2735,6 +2741,17 @@ class WritebackCollaborator:
             changed = True
             audit_extras["trace_path"] = str(trace_path)
             audit_extras["profile_args"] = profile_args
+        # Host-side rewrite evidence is independent of the trace: it answers
+        # "which host-side work is redundant", which no kernel timeline can, and
+        # a run whose trace was unusable can still have produced good evidence.
+        # So promote it on its own, outside the trace_path branch.
+        from ..actions.executors._framework_rewrite_evidence import promote_evidence_path
+
+        evidence_path = promote_evidence_path(self.shared_state, result)
+        if evidence_path:
+            audit_extras["framework_rewrite_evidence"] = evidence_path
+            audit_extras["framework_rewrite_candidate_count"] = result.get("framework_rewrite_candidate_count")
+            changed = True
         # profile result may include a tput; promote into current_best on the +1% rule.
         tput = result.get("output_throughput")
         cb = self.shared_state.current_best or {}
@@ -2822,10 +2839,25 @@ class WritebackCollaborator:
             # Reset the roofline failure streak on a successful snapshot.
             if hasattr(self.shared_state, "roofline_failure_streak"):
                 self.shared_state.roofline_failure_streak = 0
-            # Re-anchor the 10% watermark step on the projected current tput.
-            anchor_tput = self._current_tput_from_validated_gain()
-            if anchor_tput > 0:
-                self.shared_state.last_roofline_tput = float(anchor_tput)
+            # Re-anchor the 10% watermark step on the projected current tput --
+            # but only for a roofline that actually produced an analysis. The
+            # anchor is what stops the watermark firing again until throughput
+            # climbs another 10%, so anchoring on an empty one buys a whole
+            # cycle of silence for a snapshot that says nothing: the specialist
+            # keeps reading "(none)" while the anchor insists a roofline was
+            # taken here. Leaving the anchor alone lets the watermark re-arm and
+            # take a real one.
+            if str((self.shared_state.last_trace_analyze or {}).get("analysis_md_text") or ""):
+                anchor_tput = self._current_tput_from_validated_gain()
+                if anchor_tput > 0:
+                    self.shared_state.last_roofline_tput = float(anchor_tput)
+            else:
+                log.warning(
+                    "roofline %s produced no analysis; leaving the watermark "
+                    "anchor at %.4f so a real one can still be taken",
+                    task.task_id if task else "?",
+                    float(self.shared_state.last_roofline_tput or 0.0),
+                )
             changed = True
         else:
             audit_decision = "discarded"
@@ -2887,6 +2919,19 @@ class WritebackCollaborator:
             if err:
                 self.shared_state.discovered_flags_error = str(err)
             changed = True
+        # Per-lever attribution from this round. Recorded regardless of whether
+        # the lever variant won: a rewrite measured at +0.1% is as useful to know
+        # as one measured at +8%, and without the number the lever would be
+        # re-benched every round.
+        for attribution in result.get("framework_lever_attributions") or []:
+            if not isinstance(attribution, dict):
+                continue
+            if self.shared_state.record_framework_lever_attribution(
+                str(attribution.get("switch") or ""),
+                gain_pct=attribution.get("gain_pct"),
+                source=str(attribution.get("source") or ""),
+            ):
+                changed = True
         # 3. Per-winner record_explore_accepted (Coordinator is sole writer).
         winners = result.get("winners") or []
         round_id = str(result.get("round_id") or "")
@@ -3227,6 +3272,24 @@ class WritebackCollaborator:
         status = str(result.get("status") or "")
         new_tput = result.get("output_throughput")
         kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
+        # Register framework-rewrite switches as search levers. Done for both KEEP
+        # verdicts: a bundle that cleared the gate is on and gets leave-one-out
+        # attribution, while an inert KEEP is dormant and gets additive
+        # attribution. ``kept_inert`` deliberately does not lift current_best —
+        # the code is applied but every switch is off, so the running
+        # configuration is unchanged.
+        levers = result.get("framework_levers")
+        if isinstance(levers, list) and levers:
+            lever_outcome = str(result.get("framework_lever_outcome") or "")
+            if self.shared_state.record_authored_framework_levers(
+                levers,
+                default_on=(lever_outcome == "default_on"),
+                specialist_task_id=str(result.get("specialist_task_id") or ""),
+                stack_delta_pct=result.get("delta_pct"),
+            ):
+                changed = True
+            audit_extras["framework_levers"] = [str(row.get("switch") or "") for row in levers]
+            audit_extras["framework_lever_outcome"] = lever_outcome
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         prebaseline_enablement = bool(
             kept_flag
@@ -3349,9 +3412,14 @@ class WritebackCollaborator:
             audit_decision = "promoted"
         elif kept_flag:
             audit_decision = "no_promote"
+        elif status == "kept_inert":
+            # Applied but every switch off: nothing was promoted, yet the patch
+            # stays on disk as registered levers, so it is not a discard either.
+            audit_decision = "kept_inert"
         else:
             audit_decision = "discarded"
         audit_extras = {
+            **audit_extras,
             "status": status,
             "specialist_task_id": result.get("specialist_task_id"),
             "output_throughput": new_tput,
@@ -3447,9 +3515,24 @@ class WritebackCollaborator:
         changed = True
         lifted = False
         if kept_flag and isinstance(new_tput, (int, float)) and new_tput > 0:
+            if not cand_id:
+                # The name used to be prefixed, which made an empty key look
+                # non-empty to the stack's guard and stacked a nameless entry.
+                # The bare key is falsy, so the append is skipped — current_best
+                # and cumulative_gain are set regardless, further down. The win
+                # therefore counts without leaving a step anything can reconcile,
+                # dedupe or replay, which is worth saying out loud.
+                log.warning(
+                    "FRAMEWORK: KEEP carries no candidate key (candidate_id / pr_url / ref all "
+                    "empty, and task params had none either). current_best still advances, but "
+                    "no optimization_stack entry records how. task=%s",
+                    getattr(task, "task_id", "") if task is not None else "",
+                )
             lift = {
-                "name": f"framework:{cand_id}",
-                "variant_name": cand_id,
+                # The canonical candidate key, unadorned: it becomes the stack
+                # entry's variant_name, which resume reconciliation matches
+                # against the KEEP recorded on the event log.
+                "name": cand_id,
                 "task_id": getattr(task, "task_id", "") if task is not None else "",
                 "candidate_extra_server_args": "",
                 "extra_envs": {},
@@ -3459,7 +3542,7 @@ class WritebackCollaborator:
                 "source_phase": "FRAMEWORK_AGENT",
                 "provenance": "framework_agent",
             }
-            lifted = self._lift_to_current_best("framework", float(new_tput), lift)
+            lifted = self._lift_to_current_best(_FRAMEWORK_STACK_ACTION, float(new_tput), lift)
             if lifted and self.shared_state.baseline_tput > 0:
                 self._update_cumulative_gain_validated(new_tput)
                 await self._maybe_enqueue_watermark_roofline(
@@ -4184,21 +4267,21 @@ class WritebackCollaborator:
                 res = payload.get("result") or {}
                 if not isinstance(res, dict) or str(res.get("status") or "").lower() != "kept":
                     continue
+                stack_action = kind
                 if kind == "integrate_patch":
                     variant = str(res.get("specialist_task_id") or "")
                 elif kind == "framework_agent":
-                    cand = res.get("candidate") or {}
-                    variant = str(
-                        (cand.get("candidate_id") if isinstance(cand, dict) else "")
-                        or (cand.get("pr_url") if isinstance(cand, dict) else "")
-                        or ""
-                    )
+                    # This kind stacks under the framework family label, keyed
+                    # by the canonical candidate key, so reconcile on both.
+                    stack_action = _FRAMEWORK_STACK_ACTION
+                    cand = res.get("candidate")
+                    variant = self._framework_candidate_key(cand if isinstance(cand, dict) else None)
                 elif kind == "explore":
                     bv = res.get("best_variant") or {}
                     variant = str((bv.get("name") if isinstance(bv, dict) else "") or "")
                 else:
                     continue
-                key = (kind, variant)
+                key = (stack_action, variant)
                 if not variant or key in stack_keys or key in seen:
                     continue
                 seen.add(key)

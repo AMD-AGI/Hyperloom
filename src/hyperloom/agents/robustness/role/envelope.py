@@ -138,6 +138,12 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "phase_history",
         "phase_budget_pct",
         "explore_elapsed_accum_s",
+        "phase_elapsed_totals",
+        # KERNEL idle-streak bookkeeping; measured by the Coordinator from
+        # observed facts, never proposable.
+        "kernel_idle_ticks",
+        "kernel_progress_fingerprint",
+        "kernel_idle_since_unix",
         # Cyclic phase-machine state; locked so an LLM update_state cannot forge
         # macro-cycle / convergence / per-cycle budget state.
         "macro_cycle",
@@ -174,8 +180,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "orchestration_memory",
         # Bounded rollback ring of prior good orchestration_memory records.
         "orchestration_memory_history",
-        # FRAMEWORK per-repo discovery budget.
-        "framework_max_candidates",
         # Advisory model-architecture profile.
         "model_arch",
         # Architecture-identity tags from config.json.

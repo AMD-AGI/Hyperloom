@@ -23,7 +23,6 @@ class _StateStub:
     def __init__(self) -> None:
         self.framework_agent_phase_progress: list[dict[str, Any]] = []
         self.framework_agent_batches: list[dict[str, Any]] = []
-        self.framework_agent_critic_decisions: list[dict[str, Any]] = []
         self.research_scout_seen_pr_ids: list[str] = []
         # Workload context read by the ranker prompt.
         self.model = "test-model"
@@ -73,11 +72,6 @@ def test_build_working_memory_aggregates_tried_excluded_learnings():
             ],
         },
     ]
-    st.framework_agent_critic_decisions = [
-        {"candidate_id": "PR:1015", "verdict": "reject", "rationale": "does not address mem-bw bottleneck"},
-        {"candidate_id": "PR:5", "verdict": "approve", "rationale": "looks good"},
-    ]
-
     mem = coord._build_framework_working_memory()
 
     refs = {t["ref"] for t in mem["tried_and_why"]}
@@ -88,7 +82,8 @@ def test_build_working_memory_aggregates_tried_excluded_learnings():
     assert "baseline" in revert["why"]
     # excluded_refs = known ids ∪ processed keys.
     assert {"PR:723", "PR:1015", "PR:900", "PR:2000"} <= set(mem["excluded_refs"])
-    # learnings only from denied critic decisions.
+    # Learnings come from the denial rows in the progress ledger, which is the
+    # only place a Critic rejection is recorded.
     assert mem["learnings"] == ["does not address mem-bw bottleneck"]
     # pending = unprocessed candidate in the latest batch.
     assert mem["pending"] == ["PR:2000"]

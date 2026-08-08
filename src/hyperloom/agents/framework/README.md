@@ -54,9 +54,9 @@ the always-allowed `aiter`).
 ## Quick start
 
 ```bash
-# Install from the repo root (idempotent)
+# Install from the repo root; the fa CLI ships with the distribution.
 cd Hyperloom
-bash src/hyperloom/agents/framework/scripts/install.sh        # or: pip install -e '.[test]'
+pip install -e '.[test]'
 
 # Live IO discovery path
 fa phase-discover --request /path/to/request.json --out -
