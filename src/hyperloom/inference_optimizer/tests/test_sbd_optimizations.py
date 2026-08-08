@@ -78,6 +78,57 @@ def test_collect_optimizations_unifies_warm_framework_and_explore():
     assert source_breakdown["unattributed_pct_of_total"] == 0.0
 
 
+def test_fusion_after_warm_replay_is_attributed_to_kernel_agent():
+    state = {
+        "session_id": "warm-then-fusion",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 80.0,
+        "cumulative_gain_validated_stack_len": 2,
+        "optimization_stack": [
+            {
+                "action": "replay_warm_recipe",
+                "source_phase": "PRELUDE",
+                "variant_name": "warm",
+                "tput": 120.0,
+                "gain_pct": 20.0,
+                "ts": "1970-01-01T00:00:10+00:00",
+            },
+            {
+                "action": "fusion",
+                "source_phase": "KERNEL_AGENT",
+                "variant_name": "forge_fusion",
+                "backend": "forge",
+                "tput": 180.0,
+                # The stack entry retains integrate's increment relative to
+                # warm=120; the authoritative ledger remains baseline-relative.
+                "gain_pct": 50.0,
+                "ts": "1970-01-01T00:00:20+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [20.0, 80.0],
+        "phase_history": [
+            {"to_phase": "PRELUDE", "ts_unix": 0.0},
+            {"to_phase": "KERNEL_AGENT", "ts_unix": 15.0},
+        ],
+    }
+    warnings: list[str] = []
+
+    attribution = collect_attribution(state, [], [], warnings)
+    result = collect_optimizations(state, attribution, [], [], warnings)
+
+    source_breakdown = attribution["source_breakdown"]
+    assert source_breakdown["replay_warm_recipe_pct_of_total"] == 20.0
+    assert source_breakdown["kernel_unattributed_pct_of_total"] == 60.0
+    assert source_breakdown["unattributed_pct_of_total"] == 0.0
+    assert attribution["phase_breakdown"]["kernel_agent"]["total_gain_pct"] == 60.0
+    assert not any("actions: fusion" in warning for warning in warnings)
+    assert [entry["source"] for entry in result["entries"]] == [
+        "warm_replay",
+        "kernel_agent",
+    ]
+    assert result["entries"][1]["optimization_kind"] == "kernel_fusion"
+
+
 def test_prebaseline_enablement_is_not_framework_gain_before_warm_replay():
     """A runnable-baseline patch is config provenance, not a Framework gain."""
     state = {
