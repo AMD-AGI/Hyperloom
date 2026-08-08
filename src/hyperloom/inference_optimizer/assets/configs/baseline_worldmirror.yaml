@@ -1,0 +1,88 @@
+# Magpie baseline benchmark config for WorldMirror (HunyuanWorld-Mirror).
+# Resolved by default_baseline_config() / _default_profile_config() when
+# $FRAMEWORK=worldmirror.
+#
+# WorldMirror is a SCRIPTABLE (server-less) framework, like xDiT: there is no
+# OpenAI server, no benchmark_serving.py client, and no server_lifecycle reuse.
+# It is a ~1.2B feed-forward 3D reconstruction model (ViT backbone + DPT/GS
+# heads) run as a single forward pass per scene. The wrapper
+# worldmirror_{runner_type}.sh runs the benchmark once per variant, parses e2e
+# latency, runs the quality gate (per-head relative-L1 on depth/pts3d/normals vs
+# a fixed BF16 reference), and writes benchmark_report.json directly. Throughput
+# is recon/s.
+#
+# Two fields are FALLBACK ONLY and overridden at run time by the executor:
+#   - `benchmark.model`       <- --model / $MODEL_PATH (the HY-World checkout)
+#   - `benchmark.runner_type` <- --gpu-type / $GPU_TYPE / rocm-smi probe
+# At materialize time Hyperloom pins benchmark_script to
+# worldmirror_{runner_type}.sh, so it is intentionally NOT set here.
+#
+# The quality-gate reference paths (XDIT_QUALITY_REF for compare /
+# XDIT_QUALITY_REF_WRITE for the baseline that establishes the reference) are
+# injected by the shared scriptable choke point in _workload_envs (keyed on
+# is_scriptable), so the XDIT_ prefix is reused here to match what Hyperloom
+# injects. The pass/fail tolerance (WM_QUALITY_REL_MAX) and WorldMirror
+# generation knobs use the WM_ prefix.
+
+benchmark:
+  framework: worldmirror
+  workload_kind: scriptable        # drives server-less branching in the loop
+  # benchmark_script: worldmirror_mi355x.sh  # uncomment to force a script
+  model: /path/to/HY-World-2.0     # OVERRIDDEN at runtime; see header.
+  precision: bf16                  # LOCKED for a worldmirror session
+  run_mode: local
+
+  envs:
+    # Single-GPU forward pass by default. SP (sequence-parallel) + FSDP layouts
+    # for multi-GPU are A/B'd as discoverable optimizations, not the baseline.
+    TP: 1
+    WM_TARGET_SIZE: 518            # input image resize (model default)
+    WM_NUM_ITERATIONS: 5           # timed iterations per scene (steady-state)
+    WM_WARMUP_CALLS: 3
+    WM_SCENES: ""                  # empty = sweep all bundled examples/ scenes
+    WM_COND_FLAGS: "0 0 0"         # [depth, rays, camera] conditioning
+    # torch.compile knob (explorable). 0=eager (baseline). The optimizer can A/B
+    # WM_USE_TORCH_COMPILE=1 with WM_TORCH_COMPILE_MODE in
+    # {default, reduce-overhead, max-autotune} to attack small-GEMM/conv launch
+    # overhead via inductor fusion + CUDA graphs. reduce-overhead uses CUDA
+    # graphs (best for the ~34% host-sync/launch idle seen in roofline).
+    WM_USE_TORCH_COMPILE: 0
+    WM_TORCH_COMPILE_MODE: default
+    # torch.compile dynamic-shape knob (explorable). {0=off/per-shape static
+    # (default, WORKS), auto, 1=on}. NOTE: on this model dynamic=auto/1 currently
+    # hits a TorchInductor/Triton codegen bug ("KeyError: (float32, float64)") on
+    # the second shape, so per-shape static (0) is the working path. With the
+    # rope.py fix, static compile gives ~-25 to -38% per scene (mode=default).
+    # Each of the ~10-15 distinct scene shapes compiles once (warmup-absorbed).
+    WM_TORCH_COMPILE_DYNAMIC: 0
+    # aiter flash-attention knob (explorable). 0=native torch SDPA (baseline).
+    # WM_USE_AITER_ATTN=1 routes attention through AMD aiter's tuned MI355X
+    # (gfx950) flash-attention kernels; the model backbone attention is
+    # head_dim=64, non-causal, no mask -> aiter-friendly. Attacks the SDPA slice
+    # (~6.7% of compute). Falls back to native SDPA on any unsupported case.
+    WM_USE_AITER_ATTN: 0
+    # Geometry-quality gate. The wrapper writes quality_gate.{passed,lpips,ssim,mse};
+    # _accuracy_gate maps passed->1.0. Gate keys on per-head relative-L1 (scale-
+    # invariant across depth/pts3d/normals); MSE is reported as a diagnostic only.
+    XDIT_QUALITY_REF: ""           # reference output dir; empty = gate skipped
+    WM_QUALITY_REL_MAX: 0.2       # max relative-L1 per head (2%); all heads must pass
+    # Optional per-head overrides, e.g. WM_QUALITY_REL_MAX_NORMALS: 0.01
+    # /opt/rocm/bin is REQUIRED so AITER's runtime JIT can find `hipcc`.
+    PATH: "/venv/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    # ROCR_VISIBLE_DEVICES is injected at runtime by the executor as 0..TP-1.
+
+  gpu_selection:
+    auto: false                    # executor pins via ROCR_VISIBLE_DEVICES
+
+  server_lifecycle:
+    enabled: false                 # server-less: no reuse
+
+  timeout_seconds: 7200            # 120 min hard cap (load + warmup + iters)
+
+  profiler:
+    torch_profiler:
+      enabled: false               # baseline needs throughput + quality only
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false
