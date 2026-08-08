@@ -333,9 +333,6 @@ exclude_dirs = ["*/tests/*", "*/test/*", "build", ".venv"]
 # Pylint: minimal defaults for local runs; CI passes ``--errors-only``.
 [tool.pylint.main]
 jobs = 1
-# flydsl re-exports its IR types with ``import *`` from a compiled extension,
-# so static analysis cannot see the members that exist at runtime.
-ignored-modules = ["flydsl"]
 
 [tool.ruff]
 target-version = "py310"

@@ -42,6 +42,8 @@ _GIT_TIMEOUT_SEC = 30
 # ``HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS`` (csv) or, for exact pins,
 # ``HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS`` (csv, wins over minors).
 _SGLANG_DEFAULT_ALLOWED_MINORS: tuple[str, ...] = ("0.5",)
+_SGLANG_EXACT_VERSIONS_ENV = "HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS"
+_SGLANG_ALLOWED_MINORS_ENV = "HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS"
 
 # Vendor-shipped manifest filename(s). When present, the manifest is the
 # source of truth for supported versions (operator env pins still win). Format:
@@ -50,46 +52,6 @@ _SUPPORTED_VERSIONS_MANIFEST_NAMES: tuple[str, ...] = (
     "SUPPORTED_VERSIONS.txt",
     "SUPPORTED_VERSIONS",
 )
-
-
-@dataclass(frozen=True)
-class _VersionGate:
-    """Per-framework policy for :func:`_version_accepted`.
-
-    Each framework owns its env-var names, so an operator pin for one engine
-    can never silently reject the other, and its built-in fallback, so a tree
-    that ships no manifest gets the right default.
-    """
-
-    exact_env: str
-    minors_env: str
-    default_minors: tuple[str, ...]
-
-
-_SGLANG_VERSION_GATE = _VersionGate(
-    exact_env="HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS",
-    minors_env="HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS",
-    default_minors=_SGLANG_DEFAULT_ALLOWED_MINORS,
-)
-
-# vLLM cuts minors too often for a built-in allowlist to stay honest, so an
-# empty default fails closed: a vLLM patch tree must ship a SUPPORTED_VERSIONS
-# manifest (or the operator must pin) before anything is applied.
-_VLLM_VERSION_GATE = _VersionGate(
-    exact_env="HYPERLOOM_VLLM_SERVING_PATCH_EXACT_VERSIONS",
-    minors_env="HYPERLOOM_VLLM_SERVING_PATCH_ALLOWED_MINORS",
-    default_minors=(),
-)
-
-_VERSION_GATES: dict[str, _VersionGate] = {
-    "sglang": _SGLANG_VERSION_GATE,
-    "vllm": _VLLM_VERSION_GATE,
-}
-
-
-def _version_gate_for(framework: str) -> _VersionGate:
-    """The version-gate policy a framework's patch trees are held to."""
-    return _VERSION_GATES.get((framework or "").lower(), _SGLANG_VERSION_GATE)
 
 
 def _load_supported_versions_from_manifest(
@@ -138,20 +100,17 @@ def _version_accepted(
     version: str,
     *,
     patches_dir: Path | None = None,
-    gate: _VersionGate = _SGLANG_VERSION_GATE,
 ) -> bool:
-    """Return True iff ``version`` is in the allowlist ``gate`` resolves to.
+    """Return True iff an SGLang ``version`` is in the resolved allowlist.
 
-    Precedence: the gate's exact-pin env > the gate's allowed-minors env (minor
-    prefixes, ``0.5`` matches ``0.5.9`` not ``0.50.0``) > the vendor
-    ``SUPPORTED_VERSIONS`` manifest in ``patches_dir`` > the gate's built-in
-    minors.
+    Precedence: the exact-pin env > the allowed-minors env (minor prefixes,
+    ``0.5`` matches ``0.5.9`` not ``0.50.0``) > the vendor ``SUPPORTED_VERSIONS``
+    manifest in ``patches_dir`` > the built-in minors.
 
     Args:
-        version: The framework version string to test.
+        version: The SGLang version string to test.
         patches_dir: Optional patches directory consulted for the vendor
             ``SUPPORTED_VERSIONS`` manifest.
-        gate: Per-framework policy; defaults to SGLang.
 
     Returns:
         True iff ``version`` is accepted by the resolved allowlist.
@@ -159,11 +118,11 @@ def _version_accepted(
     text = (version or "").strip()
     if not text:
         return False
-    exact = os.environ.get(gate.exact_env, "").strip()
+    exact = os.environ.get(_SGLANG_EXACT_VERSIONS_ENV, "").strip()
     if exact:
         allowed_exact = {v.strip() for v in exact.split(",") if v.strip()}
         return text in allowed_exact
-    minors_env = os.environ.get(gate.minors_env, "").strip()
+    minors_env = os.environ.get(_SGLANG_ALLOWED_MINORS_ENV, "").strip()
     if minors_env:
         minors = tuple(v.strip() for v in minors_env.split(",") if v.strip())
         return any(text == minor or text.startswith(f"{minor}.") for minor in minors)
@@ -172,21 +131,27 @@ def _version_accepted(
         manifest_versions = _load_supported_versions_from_manifest(patches_dir)
         if manifest_versions is not None:
             return text in manifest_versions
-    return any(text == minor or text.startswith(f"{minor}.") for minor in gate.default_minors)
+    return any(
+        text == minor or text.startswith(f"{minor}.")
+        for minor in _SGLANG_DEFAULT_ALLOWED_MINORS
+    )
 
 
 # Path within the TraceLens checkout that hosts the patch sets.
 _PATCH_TREE_REL = ("examples", "custom_workflows", "inference_analysis")
 
+# Both patch trees this module applies are SGLang's, and each ships its subdirs
+# under this prefix.
+_PATCH_SUBDIR_PREFIX = "sglang"
 
-def _versioned_patches_subdir_name(version: str, *, prefix: str = "sglang") -> str | None:
-    """Map a framework version to the per-version patch subdir name (e.g.
+
+def _versioned_patches_subdir_name(version: str) -> str | None:
+    """Map an SGLang version to the per-version patch subdir name (e.g.
     ``0.5.11`` -> ``sglang_0_5_11``). Returns ``None`` when ``version`` has no
     dotted numeric head.
 
     Args:
-        version: The framework ``__version__`` string to map.
-        prefix: Framework name the subdir is prefixed with.
+        version: The SGLang ``__version__`` string to map.
 
     Returns:
         The per-version patch subdir name, or ``None`` when ``version`` has no
@@ -207,15 +172,15 @@ def _versioned_patches_subdir_name(version: str, *, prefix: str = "sglang") -> s
             break
     if len(numeric) < 2:
         return None
-    return f"{prefix}_" + "_".join(numeric)
+    return f"{_PATCH_SUBDIR_PREFIX}_" + "_".join(numeric)
 
 
-def _subdir_version_tuple(name: str, *, prefix: str = "sglang") -> tuple[int, ...] | None:
+def _subdir_version_tuple(name: str) -> tuple[int, ...] | None:
     """Parse a ``sglang_0_5_11`` patch subdir name back into ``(0, 5, 11)``.
 
-    Returns ``None`` when the name is not a versioned subdir for ``prefix``.
+    Returns ``None`` when the name is not a versioned SGLang patch subdir.
     """
-    head = f"{prefix}_"
+    head = f"{_PATCH_SUBDIR_PREFIX}_"
     if not name.startswith(head):
         return None
     numeric: list[int] = []
@@ -230,39 +195,27 @@ def _subdir_version_tuple(name: str, *, prefix: str = "sglang") -> tuple[int, ..
 def _resolve_versioned_patches_dir(
     patches_root: Path,
     version: str,
-    *,
-    prefix: str = "sglang",
-    required_patch: str | None = None,
 ) -> Path | None:
-    """Locate the per-version patches dir for a running framework version.
+    """Locate the per-version patches dir for the running SGLang version.
 
-    Order: exact ``<prefix>_X_Y_Z`` subdir > highest same-minor subdir whose
+    Order: exact ``sglang_X_Y_Z`` subdir > highest same-minor subdir whose
     version is <= running > nearest subdir whose version is <= running (never a
-    newer one). Only subdirs holding a matching patch qualify;
-    ``_apply_atomic``'s ``git apply --check`` still guards a genuinely
-    incompatible pick. Returns ``None`` when nothing qualifies (caller
-    fail-softs).
+    newer one). Only subdirs holding a ``*.patch`` qualify; ``_apply_atomic``'s
+    ``git apply --check`` still guards a genuinely incompatible pick. Returns
+    ``None`` when nothing qualifies (caller fail-softs).
 
     Args:
         patches_root: Root directory holding the per-version patch subdirs.
-        version: The running framework version string.
-        prefix: Framework name the subdirs are prefixed with.
-        required_patch: Filename that must exist in a subdir for it to qualify.
-            Defaults to any ``*.patch``, which is what a whole-directory
-            consumer wants; a consumer after one named patch must pass it, or
-            the fallback can return a dir that has other patches but not
-            the wanted one.
+        version: The running SGLang version string.
 
     Returns:
         The resolved patches subdir, or ``None`` when none qualifies.
     """
 
     def _qualifies(d: Path) -> bool:
-        if required_patch is not None:
-            return (d / required_patch).is_file()
         return any(d.glob("*.patch"))
 
-    subdir_name = _versioned_patches_subdir_name(version, prefix=prefix)
+    subdir_name = _versioned_patches_subdir_name(version)
     if subdir_name is not None:
         candidate = patches_root / subdir_name
         if candidate.is_dir() and _qualifies(candidate):
@@ -278,7 +231,7 @@ def _resolve_versioned_patches_dir(
     for d in patches_root.iterdir():
         if not d.is_dir() or not _qualifies(d):
             continue
-        vt = _subdir_version_tuple(d.name, prefix=prefix)
+        vt = _subdir_version_tuple(d.name)
         if vt:
             available[vt] = d
     if not available:

@@ -3535,6 +3535,7 @@ def _run_rewrite_via_cli(
     driver: str,
     logical_op_name: str,
     source_entry: str,
+    source_language: str,
     workspace: str,
     experiments_dir: Path,
     result_json: Path,
@@ -3639,6 +3640,8 @@ def _run_rewrite_via_cli(
     ]
     if source_entry:
         cmd += ["--source-entry", source_entry]
+    if source_language:
+        cmd += ["--source-language", source_language]
     if target_functions:
         cmd += ["--target-functions", ",".join(target_functions)]
     if framework:
@@ -3799,6 +3802,7 @@ def _run_rewrite_attempt(
         driver=spec.driver,
         logical_op_name=spec.logical_operator,
         source_entry=spec.source_entry,
+        source_language=spec.source_language,
         workspace=workspace,
         experiments_dir=experiments_dir,
         result_json=output_dir / "forge_rewrite_result.json",

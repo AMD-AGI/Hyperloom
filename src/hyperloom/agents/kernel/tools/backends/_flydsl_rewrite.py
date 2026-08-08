@@ -24,7 +24,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Container, Mapping, Sequence
 
 _TOOLS_DIR = str(Path(__file__).resolve().parent.parent)
 _TOOLS_DIR_INSERTED = _TOOLS_DIR not in sys.path
@@ -48,7 +48,8 @@ PROTOCOL_VERSION = 2
 ARTIFACT_SCHEMA_VERSION = 2
 RESULT_SENTINEL = "__FORGE_RESULT__"
 
-SUPPORTED_SOURCE_TYPES = frozenset({"triton"})
+# Which source languages can be rewritten is the producer's to declare, so it
+# arrives through the capability handshake rather than living here.
 SUPPORTED_FRAMEWORKS = frozenset({"aiter", "vllm", "sglang"})
 
 # Mirrors kernel_agents.cli MIN_MAX_HOURS (1.0h): the producer rejects a shorter
@@ -75,6 +76,11 @@ class RewriteCapabilities:
     reason: str
     detail: str = ""
     frameworks: tuple[str, ...] = ()
+    # What the producer can port from. Two vocabularies because a candidate
+    # carries both: the language of the file on disk and the curated kind a
+    # profiler assigned it, and for a traced Triton kernel those disagree.
+    source_languages: tuple[str, ...] = ()
+    source_kinds: tuple[str, ...] = ()
     # Optional and additive: a producer predating driver preparation simply
     # omits it, which keeps the route on its own synthesized driver.
     driver_preparation: bool = False
@@ -85,8 +91,30 @@ class RewriteCapabilities:
             "reason": self.reason,
             "detail": self.detail,
             "frameworks": list(self.frameworks),
+            "source_languages": list(self.source_languages),
+            "source_kinds": list(self.source_kinds),
             "driver_preparation": self.driver_preparation,
         }
+
+    def accepted_sources(self) -> frozenset[str]:
+        """Every source name the producer said it can port from.
+
+        The two lists are checked as one set because the vocabularies overlap:
+        ``triton`` is both a language and a curated kind, while ``hip_cpp`` is
+        only ever a kind. Keeping them apart in the payload lets the producer say
+        which is which; a consumer only needs to know whether the name its
+        candidate carries is one the producer will accept.
+        """
+        return frozenset(self.source_kinds) | frozenset(self.source_languages)
+
+    def resolved_source(self, *, language: str, kind: str) -> str:
+        """The source identity this candidate resolves to, kind before language."""
+        return _rewritable_source(language, kind, self.accepted_sources())
+
+    def accepts_source(self, *, language: str, kind: str) -> bool:
+        """Whether the producer can port a candidate with this language/kind."""
+        accepted = self.accepted_sources()
+        return _rewritable_source(language, kind, accepted) in accepted
 
 
 @dataclass(frozen=True)
@@ -103,6 +131,10 @@ class RewriteCandidateSpec:
     driver: str
     branch: str
     attempt_id: str
+    # Stated rather than left for the producer to infer: this consumer resolved it
+    # from a profile of the kernel actually running, which beats reading the file
+    # -- a traced Triton kernel lives in a ``.py`` that names no language.
+    source_language: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -116,6 +148,7 @@ class RewriteCandidateSpec:
             "driver": self.driver,
             "branch": self.branch,
             "attempt_id": self.attempt_id,
+            "source_language": self.source_language,
         }
 
 
@@ -209,16 +242,16 @@ def _int_versions(payload: Mapping[str, Any], key: str) -> tuple[int, ...]:
     return tuple(versions)
 
 
-def _capability_frameworks(payload: Mapping[str, Any]) -> tuple[str, ...]:
-    """Read the apply-back frameworks the producer advertises."""
-    raw = payload.get("frameworks")
+def _capability_names(payload: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    """Read one advertised name list, normalized and de-duplicated."""
+    raw = payload.get(key)
     values = raw if isinstance(raw, (list, tuple)) else []
-    frameworks: list[str] = []
+    names: list[str] = []
     for value in values:
-        name = str(value or "").strip().lower()
-        if name and name not in frameworks:
-            frameworks.append(name)
-    return tuple(frameworks)
+        name = str(value or "").strip().lower().replace("-", "_")
+        if name and name not in names:
+            names.append(name)
+    return tuple(names)
 
 
 def _validated_capabilities(payload: dict[str, Any] | None) -> RewriteCapabilities:
@@ -246,18 +279,28 @@ def _validated_capabilities(payload: dict[str, Any] | None) -> RewriteCapabiliti
             "capability_sentinel_mismatch",
             f"producer result sentinel {sentinel!r} is not {RESULT_SENTINEL!r}",
         )
-    frameworks = _capability_frameworks(payload)
+    frameworks = _capability_names(payload, "frameworks")
     if not frameworks:
         return RewriteCapabilities(
             False,
             "capability_frameworks_missing",
             "producer advertises no apply-back frameworks",
         )
+    source_languages = _capability_names(payload, "source_languages")
+    source_kinds = _capability_names(payload, "source_kinds")
+    if not source_languages and not source_kinds:
+        return RewriteCapabilities(
+            False,
+            "capability_source_languages_missing",
+            "producer advertises no source languages or kinds it can port from",
+        )
     return RewriteCapabilities(
         True,
         "capability_ok",
         "",
         frameworks,
+        source_languages=source_languages,
+        source_kinds=source_kinds,
         driver_preparation=payload.get("driver_preparation") is True,
     )
 
@@ -376,7 +419,7 @@ def _source_entry_hint(candidate: Mapping[str, Any] | None) -> str:
     return str(symbol).strip() if isinstance(symbol, str) else ""
 
 
-def _rewritable_source(language: str, kind: str) -> str:
+def _rewritable_source(language: str, kind: str, accepted: "Container[str]") -> str:
     """Resolve which rewrite source a candidate is, kind first then language.
 
     A traced Triton kernel reports its *language* as ``python`` and records that
@@ -388,13 +431,14 @@ def _rewritable_source(language: str, kind: str) -> str:
 
     Args:
         language: Normalized ``source_type`` (the file's language).
-        kernel_kind: Normalized curated kernel kind.
+        kind: Normalized curated kernel kind.
+        accepted: The names a source may resolve to, which the producer
+            advertises rather than this consumer fixing them.
 
     Returns:
-        str: The resolved source identity to check against
-            :data:`SUPPORTED_SOURCE_TYPES`.
+        str: The resolved source identity to check against ``accepted``.
     """
-    return kind if kind in SUPPORTED_SOURCE_TYPES else language
+    return kind if kind in accepted else language
 
 
 def _is_multi_node() -> bool:
@@ -502,14 +546,11 @@ def evaluate_rewrite_route(
     language = str(source_type or "").strip().lower()
     if "flydsl" in kind or language == "flydsl":
         return RewriteDecision(False, "already_flydsl_source", "candidate is already a FlyDSL kernel")
+    # Refused here rather than left to the handshake. There is nothing to port
+    # without readable source, so no producer capability can make this eligible
+    # and widening the advertised languages must never reach it.
     if "asm" in kind or "prebuilt" in kind:
         return RewriteDecision(False, "prebuilt_binary_unsupported", f"kernel_kind={kernel_kind}")
-    if _rewritable_source(language, kind) not in SUPPORTED_SOURCE_TYPES:
-        return RewriteDecision(
-            False,
-            "source_type_unsupported",
-            f"source_type={source_type} kernel_kind={kernel_kind}",
-        )
 
     candidate = candidate or {}
     if bool(candidate.get("is_multigpu")) or kernel_name_implies_multigpu(
@@ -556,6 +597,18 @@ def evaluate_rewrite_route(
             f"producer frameworks {list(capabilities.frameworks)} exclude {canonical_framework}",
             capabilities=capabilities,
         )
+    # Which languages can be ported is the producer's to state, not this
+    # consumer's to hardcode: it owns the port prompt, the anti-cheat gate and the
+    # entry resolution that have to understand the source.
+    if not capabilities.accepts_source(language=language, kind=kind):
+        return RewriteDecision(
+            False,
+            "source_type_unsupported",
+            f"source_type={source_type} kernel_kind={kernel_kind} is outside the "
+            f"producer's languages {list(capabilities.source_languages)} / kinds "
+            f"{list(capabilities.source_kinds)}",
+            capabilities=capabilities,
+        )
     # An operator's real invocation cannot be rebuilt from traced shapes alone --
     # quantized and routed operands carry scale and index meanings the trace does
     # not describe -- so the producer authors the driver from the invocation spec.
@@ -591,27 +644,20 @@ def evaluate_rewrite_route(
         driver="",
         branch=branch,
         attempt_id=attempt_id,
+        source_language=capabilities.resolved_source(language=language, kind=kind),
     )
     return RewriteDecision(True, "eligible", "", spec=spec, capabilities=capabilities)
 
 
+# What ``forge_submit`` -- the only consumer outside this module -- depends on.
+# Everything else here is an internal the tests reach into directly and is
+# deliberately absent, so a name entering this list is a decision to support it.
 __all__ = [
     "APPLYBACK_RESERVE_SEC",
-    "ARTIFACT_SCHEMA_VERSION",
-    "MIN_BUDGET_SEC",
-    "PROTOCOL_VERSION",
+    "PRODUCER_MIN_BUDGET_SEC",
     "RESULT_SENTINEL",
     "REWRITE_COMMAND",
-    "REWRITE_DRIVER_SEED_TEMPLATE",
-    "REWRITE_ENV",
-    "SUPPORTED_FRAMEWORKS",
-    "SUPPORTED_SOURCE_TYPES",
-    "RewriteCandidateSpec",
-    "RewriteCapabilities",
     "RewriteDecision",
     "build_rewrite_driver_seed",
     "evaluate_rewrite_route",
-    "probe_capabilities",
-    "reset_capability_cache",
-    "rewrite_enabled",
 ]

@@ -720,6 +720,7 @@ def materialize_config_with_envs(
     out_name: str = "baseline_config.with_envs.yaml",
     establish_quality_ref: bool = False,
     drop_moe_runner_backend: bool = False,
+    flydsl_source_dirs: bool = False,
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
 
@@ -761,6 +762,11 @@ def materialize_config_with_envs(
             ``--moe-runner-backend`` injection and strip the flag from the
             merged args whatever source it came from (the one-shot fallback
             after a launch failure blamed on that backend).
+        flydsl_source_dirs: When True, name the FlyDSL source roots in
+            ``$FLYDSL_EXTRA_SOURCE_DIRS`` so a patched helper in a sibling
+            directory invalidates the JIT cache key instead of being served from
+            a stale binary. Only the run that just applied such a patch is
+            exposed to that, so it is off by default.
 
     Returns:
         The materialized YAML path (stable file name across calls).
@@ -1474,9 +1480,13 @@ def materialize_config_with_envs(
     # patched helper one directory over is silently served from a stale binary.
     # Naming the kernel roots here folds every .py under them into the key, which
     # re-compiles exactly the kernels that changed instead of dropping the cache.
-    _flydsl_dirs = flydsl_extra_source_dirs()
-    if _flydsl_dirs:
-        envs[ENV_FLYDSL_EXTRA_SOURCE_DIRS] = _flydsl_dirs
+    # Only the run that just applied such a patch has that hazard, so it is asked
+    # for rather than applied to every benchmark; and setdefault, so an
+    # operator-set value (YAML / extra_envs) always wins.
+    if flydsl_source_dirs:
+        _flydsl_dirs = flydsl_extra_source_dirs()
+        if _flydsl_dirs:
+            envs.setdefault(ENV_FLYDSL_EXTRA_SOURCE_DIRS, _flydsl_dirs)
 
     # sglang FP8 per-channel/per-token CK fast path: a dense FP8 checkpoint
     # with per-channel weight + per-token (dynamic) activation falls into the

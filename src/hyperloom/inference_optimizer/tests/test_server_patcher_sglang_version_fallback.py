@@ -10,7 +10,6 @@ from pathlib import Path
 from hyperloom.orchestrator.actions.executors._server_patcher import (
     _resolve_versioned_patches_dir,
     _version_accepted,
-    _version_gate_for,
     _versioned_patches_subdir_name,
 )
 
@@ -56,43 +55,30 @@ def test_cross_minor_fallback_when_no_same_minor(tmp_path: Path):
     assert _resolve_versioned_patches_dir(root, "0.5.14") == older
 
 
-def test_prefix_selects_the_framework_tree(tmp_path: Path):
-    root = tmp_path / "vllm"
-    exact = _mk(root, "vllm_0_25_0", "moe.patch")
-    _mk(root, "sglang_0_5_14")
-    assert _resolve_versioned_patches_dir(root, "0.25.0", prefix="vllm") == exact
-    assert _versioned_patches_subdir_name("0.25.0", prefix="vllm") == "vllm_0_25_0"
+def test_subdir_name_maps_a_dotted_version(tmp_path: Path):
+    assert _versioned_patches_subdir_name("0.5.14") == "sglang_0_5_14"
+    # A dev/local suffix still resolves to its numeric head.
+    assert _versioned_patches_subdir_name("0.5.10.dev4") == "sglang_0_5_10"
+    assert _versioned_patches_subdir_name("main") is None
 
 
-def test_required_patch_skips_a_dir_holding_other_patches(tmp_path: Path):
-    root = tmp_path / "vllm"
-    _mk(root, "vllm_0_25_1", "other.patch")
-    wanted = _mk(root, "vllm_0_25_0", "moe.patch")
-    # 0.25.1 is the nearest not-newer dir, but it has no moe.patch, so the
-    # resolver must keep falling back rather than hand back a dir without it.
-    assert _resolve_versioned_patches_dir(root, "0.25.1", prefix="vllm", required_patch="moe.patch") == wanted
-
-
-def test_vllm_gate_fails_closed_without_a_manifest(tmp_path: Path, monkeypatch):
+def test_a_vendor_manifest_replaces_the_builtin_minors(tmp_path: Path, monkeypatch):
     for var in (
-        "HYPERLOOM_VLLM_SERVING_PATCH_EXACT_VERSIONS",
-        "HYPERLOOM_VLLM_SERVING_PATCH_ALLOWED_MINORS",
         "HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS",
         "HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS",
     ):
         monkeypatch.delenv(var, raising=False)
-    gate = _version_gate_for("vllm")
 
-    assert _version_accepted("0.25.0", patches_dir=tmp_path, gate=gate) is False
-    (tmp_path / "SUPPORTED_VERSIONS.txt").write_text("# c\n0.25.0\n", encoding="utf-8")
-    assert _version_accepted("0.25.0", patches_dir=tmp_path, gate=gate) is True
+    # 0.6 is outside the built-in 0.5 allowlist, so only a manifest admits it.
+    assert _version_accepted("0.6.0", patches_dir=tmp_path) is False
+    (tmp_path / "SUPPORTED_VERSIONS.txt").write_text("# c\n0.6.0\n", encoding="utf-8")
+    assert _version_accepted("0.6.0", patches_dir=tmp_path) is True
 
 
-def test_sglang_env_pin_does_not_leak_onto_vllm(tmp_path: Path, monkeypatch):
+def test_an_operator_pin_wins_over_the_manifest(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
     monkeypatch.setenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", "0.5")
-    monkeypatch.delenv("HYPERLOOM_VLLM_SERVING_PATCH_EXACT_VERSIONS", raising=False)
-    monkeypatch.delenv("HYPERLOOM_VLLM_SERVING_PATCH_ALLOWED_MINORS", raising=False)
-    (tmp_path / "SUPPORTED_VERSIONS.txt").write_text("0.25.0\n", encoding="utf-8")
+    (tmp_path / "SUPPORTED_VERSIONS.txt").write_text("0.6.0\n", encoding="utf-8")
 
-    assert _version_accepted("0.25.0", patches_dir=tmp_path, gate=_version_gate_for("vllm")) is True
-    assert _version_accepted("0.25.0", patches_dir=tmp_path, gate=_version_gate_for("sglang")) is False
+    assert _version_accepted("0.5.14", patches_dir=tmp_path) is True
+    assert _version_accepted("0.6.0", patches_dir=tmp_path) is False

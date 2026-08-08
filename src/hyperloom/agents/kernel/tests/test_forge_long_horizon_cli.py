@@ -2164,6 +2164,8 @@ def _capabilities_payload(**overrides) -> dict:
         "artifact_schema_versions": [2],
         "driver_contract_versions": [1],
         "frameworks": ["aiter", "vllm", "sglang"],
+        "source_languages": ["triton", "hip", "cuda", "cpp"],
+        "source_kinds": ["triton", "hip_cpp"],
         "result_sentinel": "__FORGE_RESULT__",
         "driver_preparation": True,
     }
@@ -2201,6 +2203,8 @@ _SUPPORTED_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
     "capability_ok",
     "",
     ("aiter", "sglang", "vllm"),
+    source_languages=("triton", "hip", "cuda", "cpp"),
+    source_kinds=("triton", "hip_cpp"),
     driver_preparation=True,
 )
 
@@ -2211,6 +2215,20 @@ _NO_PREPARATION_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
     "capability_ok",
     "",
     ("aiter", "sglang", "vllm"),
+    source_languages=("triton", "hip", "cuda", "cpp"),
+    source_kinds=("triton", "hip_cpp"),
+)
+
+# A producer that ports Triton only, as the route assumed before the source
+# language became part of the handshake.
+_TRITON_ONLY_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
+    True,
+    "capability_ok",
+    "",
+    ("aiter", "sglang", "vllm"),
+    source_languages=("triton",),
+    source_kinds=("triton",),
+    driver_preparation=True,
 )
 
 
@@ -2379,6 +2397,11 @@ def test_capability_payload_matches_the_installed_producer():
     assert capabilities.supported is True, f"{capabilities.reason}: {capabilities.detail}"
     assert capabilities.reason == "capability_ok"
     assert set(capabilities.frameworks) >= {"aiter", "sglang", "vllm"}
+    # The route now asks the producer which sources it can port, so a producer
+    # that stopped naming them would silently decline every candidate.
+    assert "triton" in capabilities.accepted_sources()
+    # And a source-less kind must not appear on either advertised list.
+    assert not capabilities.accepted_sources() & {"aiter_asm", "prebuilt", "asm"}
 
     # Ordering is not contractual, but the key set and value shapes are: a
     # fixture that no longer mirrors them stops protecting the other tests.
@@ -2514,9 +2537,6 @@ def test_the_route_declines_without_the_invocation_evidence(
 @pytest.mark.parametrize(
     ("overrides", "reason"),
     [
-        ({"source_type": "hip_cpp", "kernel_kind": ""}, "source_type_unsupported"),
-        # A .py file is not on its own evidence of a rewritable kernel.
-        ({"source_type": "python", "kernel_kind": ""}, "source_type_unsupported"),
         ({"kernel_kind": "flydsl"}, "already_flydsl_source"),
         ({"kernel_kind": "aiter_asm"}, "prebuilt_binary_unsupported"),
         ({"logical_operator": "vllm::all_reduce"}, "collective_unsupported"),
@@ -2544,6 +2564,87 @@ def test_rewrite_route_rejects_candidates_before_probing_the_producer(
     assert decision.reason == reason
     # An ineligible candidate must not spend a probe subprocess or any budget.
     assert probe.calls == 0
+
+
+def test_a_source_without_readable_code_is_refused_whatever_the_producer_advertises(
+    tmp_path,
+    monkeypatch,
+):
+    """A prebuilt binary or hand-written ASM has nothing to port.
+
+    Negotiation decides which *languages* are portable, and widening that list
+    must not reach a candidate that ships no source at all -- so this refusal
+    stays local and ahead of the handshake.
+    """
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    generous = _flydsl_rewrite.RewriteCapabilities(
+        True,
+        "capability_ok",
+        "",
+        ("aiter", "sglang", "vllm"),
+        source_languages=("triton", "hip", "cuda", "cpp", "asm"),
+        source_kinds=("triton", "hip_cpp", "aiter_asm", "prebuilt"),
+        driver_preparation=True,
+    )
+    probe = _RecordingProbe(generous)
+
+    for kind in ("aiter_asm", "prebuilt"):
+        decision = _flydsl_rewrite.evaluate_rewrite_route(
+            capability_probe=probe,
+            **_rewrite_route_kwargs(tmp_path, source_type="asm", kernel_kind=kind),
+        )
+        assert decision.eligible is False
+        assert decision.reason == "prebuilt_binary_unsupported"
+    assert probe.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "capabilities", "expected"),
+    [
+        # A HIP/C++ candidate is portable once the producer says it can read it,
+        # and refused by the same producer that only ever handled Triton.
+        ({"source_type": "hip_cpp", "kernel_kind": "hip_cpp"}, _SUPPORTED_CAPABILITIES, True),
+        ({"source_type": "hip_cpp", "kernel_kind": "hip_cpp"}, _TRITON_ONLY_CAPABILITIES, False),
+        ({"source_type": "hip", "kernel_kind": ""}, _SUPPORTED_CAPABILITIES, True),
+        # A .py file is not on its own evidence of a rewritable kernel.
+        ({"source_type": "python", "kernel_kind": ""}, _SUPPORTED_CAPABILITIES, False),
+        # ...but the curated kind still overrides the file's language.
+        ({"source_type": "python", "kernel_kind": "triton"}, _TRITON_ONLY_CAPABILITIES, True),
+    ],
+)
+def test_the_producer_decides_which_source_languages_are_portable(
+    tmp_path,
+    monkeypatch,
+    overrides,
+    capabilities,
+    expected,
+):
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=_RecordingProbe(capabilities),
+        **_rewrite_route_kwargs(tmp_path, **overrides),
+    )
+
+    assert decision.eligible is expected, decision.detail
+    if not expected:
+        assert decision.reason == "source_type_unsupported"
+        # The reason names both advertised lists, so an operator can tell a
+        # producer limit from a candidate this consumer refused on its own.
+        assert str(list(capabilities.source_languages)) in decision.detail
+
+
+def test_a_producer_that_names_no_source_language_is_refused(tmp_path, monkeypatch):
+    """Silence is not permission: an unreadable contract admits nothing."""
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    payload = _capabilities_payload()
+    payload.pop("source_languages")
+    payload.pop("source_kinds")
+
+    capabilities = _flydsl_rewrite._validated_capabilities(payload)
+
+    assert capabilities.supported is False
+    assert capabilities.reason == "capability_source_languages_missing"
 
 
 def test_rewrite_route_rejects_a_source_outside_the_prepared_workspace(tmp_path, monkeypatch):
@@ -2629,6 +2730,9 @@ def test_eligible_rewrite_route_carries_the_producer_candidate_fields(tmp_path, 
         "shape_cases": [{"M": 8, "N": 16}],
         "framework": "vllm",
         "gpu_target": "gfx942",
+            # The producer needs this stated: the candidate's file is a .py that
+            # names no language, and only the trace knew it was Triton.
+            "source_language": "triton",
             # The driver is generated only after the route is granted.
             "driver": "",
             "branch": "forge/session/fused-gemm-abc123def456",
@@ -3049,6 +3153,7 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         driver=str(driver),
         logical_op_name="vllm::fused_gemm",
         source_entry="matmul",
+        source_language="triton",
         workspace=str(workspace),
         experiments_dir=experiments,
         result_json=result_json,
@@ -3160,6 +3265,7 @@ def test_rewrite_cli_hard_kills_the_producer_at_the_deadline(tmp_path, monkeypat
         driver=str(workspace / "driver.py"),
         logical_op_name="vllm::op",
         source_entry="",
+        source_language="triton",
         workspace=str(workspace),
         experiments_dir=experiments,
         result_json=result_json,
@@ -3212,6 +3318,7 @@ def test_rewrite_cli_prefers_the_caller_named_result_file(tmp_path, monkeypatch)
         driver=str(workspace / "driver.py"),
         logical_op_name="vllm::op",
         source_entry="",
+        source_language="triton",
         workspace=str(workspace),
         experiments_dir=experiments,
         result_json=result_json,
