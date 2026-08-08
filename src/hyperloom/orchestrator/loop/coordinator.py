@@ -247,29 +247,38 @@ def _framework_config_levers_from_done(
             if parsed_args is None:
                 log.warning(
                     "FRAMEWORK config lever %r has server args unsupported by "
-                    "Magpie's unquoted argv transport; skipping the lever",
+                    "Magpie's unquoted argv transport; dropping the args%s",
                     entry.get("name"),
+                    " while preserving its environment overrides" if extra_envs else "",
                 )
-                continue
-            extra_server_args = parsed_args[0]
+                if not extra_envs:
+                    continue
+            else:
+                extra_server_args = parsed_args[0]
         elif isinstance(args, (list, tuple)):
             arg_tokens = [str(a) for a in args if str(a).strip()]
             if any(any(ch.isspace() for ch in token) for token in arg_tokens):
                 log.warning(
                     "FRAMEWORK config lever %r has a whitespace-bearing argv "
-                    "token; skipping the lever",
+                    "token; dropping the args%s",
                     entry.get("name"),
+                    " while preserving its environment overrides" if extra_envs else "",
                 )
-                continue
-            parsed_args = tokenize_server_args_preserving_json(" ".join(arg_tokens))
-            if parsed_args is None:
-                log.warning(
-                    "FRAMEWORK config lever %r has unparseable server args; "
-                    "skipping the lever",
-                    entry.get("name"),
-                )
-                continue
-            extra_server_args = parsed_args[0]
+                if not extra_envs:
+                    continue
+            else:
+                parsed_args = tokenize_server_args_preserving_json(" ".join(arg_tokens))
+                if parsed_args is None:
+                    log.warning(
+                        "FRAMEWORK config lever %r has unparseable server args; "
+                        "dropping the args%s",
+                        entry.get("name"),
+                        " while preserving its environment overrides" if extra_envs else "",
+                    )
+                    if not extra_envs:
+                        continue
+                else:
+                    extra_server_args = parsed_args[0]
         if extra_server_args or extra_envs:
             return {
                 "extra_server_args": extra_server_args,

@@ -1212,6 +1212,10 @@ class TestDedupVllmServerArgs:
         raw = '--attention-backend A --attention-backend B --speculative-config \'{"model":"draft model"}\''
         assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
 
+    def test_quoted_non_json_operand_fragments_fail_closed(self):
+        raw = '--tool-call-parser "my parser" --max-num-seqs 512 --max-num-seqs 1024'
+        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+
     def test_multi_value_flag_left_untouched(self):
         # cuda-graph-bs takes a list; never collapse a string that carries one.
         raw = "--attention-backend A --cuda-graph-bs 1 2 4 8 --attention-backend B"
