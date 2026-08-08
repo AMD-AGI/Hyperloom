@@ -1598,6 +1598,12 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("optimization_journal.finalize failed")
 
+        if bool(
+            getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)
+        ):
+            log.info("Recipe KB finalize skipped (--degraded-kb)")
+            return
+
         from ..knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 
         config = (

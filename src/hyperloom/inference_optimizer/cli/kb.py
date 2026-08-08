@@ -463,10 +463,22 @@ def _bootstrap_knowledge_plane(
 
     from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
 
-    config = getattr(recipe_kb_client, "knowledge_config", None) or KnowledgeConfig.from_env()
+    kb_disabled = bool(getattr(args, "degraded_kb", False))
+    if kb_disabled:
+        # A complete KB opt-out must not validate or activate an ambient remote
+        # configuration. Keep a local-shaped config only for status plumbing.
+        degraded_env = dict(os.environ)
+        degraded_env["KNOWLEDGE_STORE_MODE"] = "local"
+        config = KnowledgeConfig.from_env(degraded_env)
+    else:
+        config = (
+            getattr(recipe_kb_client, "knowledge_config", None)
+            or KnowledgeConfig.from_env()
+        )
     return KnowledgePlane.from_clients(
         pr_monitor=pr_client,
         pr_monitor_mcp_url=pr_mcp_url,
         recipe_kb=recipe_kb_client,
         config=config,
+        kb_disabled=kb_disabled,
     )

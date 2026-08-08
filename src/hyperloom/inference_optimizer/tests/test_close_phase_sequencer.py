@@ -642,3 +642,12 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb_sid(tmp_path: Pat
     await coord._recipe_kb_t4_hook()
 
     assert finalize_calls == []
+
+
+@pytest.mark.asyncio
+async def test_recipe_kb_t4_hook_degraded_is_complete_noop() -> None:
+    coordinator = SimpleNamespace(
+        knowledge_plane=SimpleNamespace(kb_disabled=True),
+    )
+
+    await Coordinator._recipe_kb_t4_hook(coordinator)

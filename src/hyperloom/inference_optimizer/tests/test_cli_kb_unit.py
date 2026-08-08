@@ -186,6 +186,26 @@ def test_bootstrap_knowledge_plane_validates_remote_without_recipe_dispatcher(
         )
 
 
+def test_bootstrap_knowledge_plane_degraded_bypasses_remote_validation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    monkeypatch.delenv("KB_STORE_URL", raising=False)
+    monkeypatch.delenv("KB_STORE_TOKEN", raising=False)
+
+    plane = cli_kb._bootstrap_knowledge_plane(
+        _args(degraded_kb=True, pr_monitor_enabled=False),
+        recipe_kb_client=None,
+        session_dir=tmp_path,
+    )
+
+    assert plane.kb_disabled is True
+    assert plane.recipe_kb is None
+    assert plane.status["recipe"]["enabled"] is False
+    assert plane.status["recipe"]["disabled_reason"] == "degraded_kb"
+
+
 def test_bootstrap_knowledge_plane_enabled(tmp_path) -> None:
     plane = cli_kb._bootstrap_knowledge_plane(
         _args(pr_monitor_enabled=True),
