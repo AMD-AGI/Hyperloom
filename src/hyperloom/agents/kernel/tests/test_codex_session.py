@@ -12,7 +12,9 @@ them. The SDK is mocked throughout: no test may reach the network.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -266,6 +268,38 @@ def _install_fake_sdk(
     if hasattr(cs, "_probe_codex_sandbox_capability"):
         monkeypatch.setattr(cs, "_probe_codex_sandbox_capability", lambda **_kwargs: True)
     return record
+
+
+def _install_transient_codex_home_cleanup_race(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    busy_failures: int,
+    late_recreations: int = 0,
+) -> dict[str, Any]:
+    """Make cleanup encounter busy writes and post-delete recreation."""
+    original_cleanup = cs.tempfile.TemporaryDirectory.cleanup
+    state: dict[str, Any] = {"calls": 0, "home": None}
+
+    def _racing_cleanup(temporary: Any) -> None:
+        state["calls"] += 1
+        home = Path(temporary.name)
+        state["home"] = home
+        pack = home / "pack"
+        if state["calls"] <= busy_failures:
+            if state["calls"] == 1:
+                temporary._finalizer.detach()
+            pack.mkdir(parents=True, exist_ok=True)
+            (pack / f"late-{state['calls']}").write_text("late", encoding="utf-8")
+            raise OSError(errno.ENOTEMPTY, "Directory not empty", str(pack))
+
+        original_cleanup(temporary)
+        recreation_index = state["calls"] - busy_failures
+        if recreation_index <= late_recreations:
+            pack.mkdir(parents=True)
+            (pack / f"recreated-{recreation_index}").write_text("late", encoding="utf-8")
+
+    monkeypatch.setattr(cs.tempfile.TemporaryDirectory, "cleanup", _racing_cleanup)
+    return state
 
 
 # --------------------------------------------------------------------------- #
@@ -857,6 +891,83 @@ def test_run_codex_turn_isolates_codex_home_under_the_runtime_dir(tmp_path, monk
     assert not Path(homes[1]).exists()
 
 
+def test_run_codex_turn_retries_busy_cleanup_and_repeated_late_writes(tmp_path, monkeypatch):
+    """Transient ENOTEMPTY and post-delete recreation cannot mask success."""
+    runtime_dir = tmp_path / "runtime"
+    race = _install_transient_codex_home_cleanup_race(
+        monkeypatch,
+        busy_failures=2,
+        late_recreations=2,
+    )
+    record = _install_fake_sdk(monkeypatch)
+
+    session = asyncio.run(
+        cs.run_codex_turn(
+            prompt="p",
+            developer_instructions="i",
+            cwd=tmp_path,
+            model="m",
+            timeout_sec=5.0,
+            env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(runtime_dir)),
+        )
+    )
+
+    assert session.text == "done"
+    assert record["closed"] is True
+    assert race["calls"] == 5
+    assert race["home"] == Path(record["codex_home_at_enter"])
+    assert not race["home"].exists()
+
+
+def test_run_codex_turn_reports_persistent_busy_cleanup_without_leaking_details(tmp_path, monkeypatch):
+    """A bounded cleanup failure is explicit, redacted, and retains the turn."""
+    monkeypatch.setattr(cs, "_CODEX_HOME_CLEANUP_TIMEOUT_SEC", 0.02)
+    monkeypatch.setattr(cs, "_CODEX_HOME_CLEANUP_GRACE_SEC", 0.0)
+    monkeypatch.setattr(cs, "_CODEX_HOME_CLEANUP_INITIAL_BACKOFF_SEC", 0.001)
+    monkeypatch.setattr(cs, "_CODEX_HOME_CLEANUP_MAX_BACKOFF_SEC", 0.005)
+    attempts = 0
+    home: Path | None = None
+
+    def _always_busy(temporary: Any) -> None:
+        nonlocal attempts, home
+        attempts += 1
+        home = Path(temporary.name)
+        if attempts == 1:
+            temporary._finalizer.detach()
+        pack = home / "pack"
+        pack.mkdir(parents=True, exist_ok=True)
+        raise OSError(errno.EBUSY, "Device or resource busy", str(pack / "secret-fragment"))
+
+    monkeypatch.setattr(cs.tempfile.TemporaryDirectory, "cleanup", _always_busy)
+    record = _install_fake_sdk(monkeypatch)
+
+    try:
+        with pytest.raises(cs.CodexHomeCleanupError) as excinfo:
+            asyncio.run(
+                cs.run_codex_turn(
+                    prompt="p",
+                    developer_instructions="i",
+                    cwd=tmp_path,
+                    model="m",
+                    timeout_sec=5.0,
+                    env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime")),
+                )
+            )
+
+        assert attempts >= 2
+        assert home == Path(record["codex_home_at_enter"])
+        assert excinfo.value.completed_result is not None
+        assert excinfo.value.completed_result.text == "done"
+        assert str(home) in str(excinfo.value)
+        assert "resource-busy" in str(excinfo.value)
+        assert "pack" not in str(excinfo.value)
+        assert "secret-fragment" not in str(excinfo.value)
+        assert home.is_dir()
+    finally:
+        if home is not None and home.exists():
+            shutil.rmtree(home)
+
+
 def test_run_codex_turn_places_codex_home_under_the_first_writable_root(tmp_path, monkeypatch):
     """An output root is preferred when no runtime directory is configured."""
     output = tmp_path / "out"
@@ -991,6 +1102,7 @@ def test_run_codex_turn_interrupts_a_turn_that_outlives_its_timeout(tmp_path, mo
 
     assert record["interrupt_calls"] == 1
     assert record["closed"] is True
+    assert not Path(record["codex_home_at_enter"]).exists()
 
 
 def test_run_codex_turn_cancels_a_turn_that_ignores_the_interrupt(tmp_path, monkeypatch):
@@ -1015,11 +1127,42 @@ def test_run_codex_turn_cancels_a_turn_that_ignores_the_interrupt(tmp_path, monk
         )
 
     assert record["interrupt_calls"] == 1
+    assert not Path(record["codex_home_at_enter"]).exists()
+
+
+def test_run_codex_turn_preserves_cancellation_across_a_transient_cleanup_race(tmp_path, monkeypatch):
+    """Caller cancellation still waits for secure CODEX_HOME removal."""
+    race = _install_transient_codex_home_cleanup_race(monkeypatch, busy_failures=1)
+    record = _install_fake_sdk(monkeypatch, hang=True, honor_interrupt=False)
+
+    async def _cancel_running_turn() -> None:
+        task = asyncio.create_task(
+            cs.run_codex_turn(
+                prompt="p",
+                developer_instructions="i",
+                cwd=tmp_path,
+                model="m",
+                timeout_sec=5.0,
+                env=_gateway_env(),
+            )
+        )
+        while "codex_home_at_enter" not in record:
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_cancel_running_turn())
+
+    assert race["calls"] == 2
+    assert record["closed"] is True
+    assert not Path(record["codex_home_at_enter"]).exists()
 
 
 def test_run_codex_turn_wraps_sdk_failures_with_context(tmp_path, monkeypatch):
     """An SDK failure surfaces as a Codex session error naming the cause."""
-    _install_fake_sdk(monkeypatch, thread_start_error=RuntimeError("app-server refused the handshake"))
+    race = _install_transient_codex_home_cleanup_race(monkeypatch, busy_failures=1)
+    record = _install_fake_sdk(monkeypatch, thread_start_error=RuntimeError("app-server refused the handshake"))
 
     with pytest.raises(cs.CodexSessionError, match="app-server refused the handshake"):
         asyncio.run(
@@ -1032,6 +1175,10 @@ def test_run_codex_turn_wraps_sdk_failures_with_context(tmp_path, monkeypatch):
                 env=_gateway_env(),
             )
         )
+
+    assert race["calls"] == 2
+    assert record["closed"] is True
+    assert not Path(record["codex_home_at_enter"]).exists()
 
 
 def test_run_codex_turn_fails_before_starting_when_the_gateway_is_unconfigured(tmp_path, monkeypatch):
