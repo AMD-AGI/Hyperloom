@@ -3,9 +3,9 @@
 
 """Unit tests for the report-narrative LLM client adapters.
 
-The adapters call through ``hyperloom.common.llm_config``. Those entry points
-are patched with ``raising=False`` so this suite is independent of whether the
-provider contract has landed in the module yet.
+The adapters call through ``hyperloom.common.llm_config``, so these tests patch
+its entry points by their real names: a rename on the contract side has to fail
+here rather than silently install an unused stub.
 """
 
 from __future__ import annotations
@@ -39,6 +39,13 @@ class _MessageReply:
     text: str
 
 
+@dataclass
+class _CompletionReply:
+    """Stand-in for ``llm_config.ChatCompletionResult``."""
+
+    text: str
+
+
 @pytest.fixture(autouse=True)
 def _clean_report_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep an operator's own report-backend settings out of these tests."""
@@ -67,9 +74,9 @@ def _install_factories(
             raise anthropic_error
         return "anthropic-client"
 
-    monkeypatch.setattr(f"{_LLM_CONFIG}.get_openai_client", _openai, raising=False)
-    monkeypatch.setattr(f"{_LLM_CONFIG}.get_anthropic_client", _anthropic, raising=False)
-    monkeypatch.setattr(f"{_LLM_CONFIG}.build_http_timeout", lambda **kwargs: kwargs, raising=False)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.get_openai_client", _openai)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.get_anthropic_client", _anthropic)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.build_http_timeout", lambda **kwargs: kwargs)
     return built
 
 
@@ -80,11 +87,11 @@ def test_null_client_disables_the_narrative_pass() -> None:
 def test_openai_client_delegates_to_the_shared_chat_helper(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
 
-    def _fake(client: Any, **params: Any) -> tuple[str, object | None]:
+    def _fake(client: Any, **params: Any) -> _CompletionReply:
         calls.append({"client": client, **params})
-        return "narrative", None
+        return _CompletionReply("narrative")
 
-    monkeypatch.setattr(f"{_LLM_CONFIG}.stream_chat_completion_text", _fake, raising=False)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.chat_completion", _fake)
 
     client = OpenAIHttpClient(client="openai-client", model="m", max_output_tokens=32)
     assert client.complete(system="sys", user="user") == "narrative"
@@ -105,7 +112,7 @@ def test_anthropic_client_delegates_to_the_shared_messages_helper(monkeypatch: p
         calls.append({"client": client, **params})
         return _MessageReply("narrative")
 
-    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_messages", _fake, raising=False)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_messages", _fake)
 
     client = AnthropicHttpClient(client="anthropic-client", model="m", max_output_tokens=8)
     assert client.complete(system="sys", user="user") == "narrative"
@@ -117,10 +124,10 @@ def test_anthropic_client_delegates_to_the_shared_messages_helper(monkeypatch: p
 
 
 def test_provider_transport_errors_propagate_to_the_caller(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _boom(client: Any, **params: Any) -> tuple[str, object | None]:
+    def _boom(client: Any, **params: Any) -> _CompletionReply:
         raise RuntimeError("gateway 502")
 
-    monkeypatch.setattr(f"{_LLM_CONFIG}.stream_chat_completion_text", _boom, raising=False)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.chat_completion", _boom)
 
     with pytest.raises(RuntimeError, match="gateway 502"):
         OpenAIHttpClient(client="openai-client").complete(system="s", user="u")

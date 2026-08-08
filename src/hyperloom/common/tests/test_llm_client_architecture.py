@@ -370,9 +370,9 @@ def test_pinned_violations_are_scannable_paths() -> None:
         assert code in _RULES, f"_KNOWN_VIOLATIONS pins unknown rule {code!r} for {path}"
         relative = Path(path)
         assert (_REPO_ROOT / relative).is_file(), f"_KNOWN_VIOLATIONS pins a missing file: {path}"
-        assert any(
-            path.startswith(f"{root}/") for root in _SCAN_ROOTS
-        ), f"_KNOWN_VIOLATIONS pins {path}, which is outside _SCAN_ROOTS"
+        assert any(path.startswith(f"{root}/") for root in _SCAN_ROOTS), (
+            f"_KNOWN_VIOLATIONS pins {path}, which is outside _SCAN_ROOTS"
+        )
         assert not _is_test_file(relative), f"_KNOWN_VIOLATIONS pins a test file: {path}"
         assert path not in _ALLOWLISTED_OWNERS, f"_KNOWN_VIOLATIONS pins an allowlisted owner: {path}"
 
