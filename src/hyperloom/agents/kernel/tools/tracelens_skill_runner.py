@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run TraceLens analysis-orchestrator skill through Claude SDK.
+"""Run the TraceLens analysis-orchestrator skill through an agent runtime.
 
 The LLM-backed path, kept outside ``tracelens_analysis.py`` so the
-deterministic CLI/csv fallback stays isolated.
+deterministic CLI/csv fallback stays isolated. The skill itself is plain text
+and provider-neutral; only the runtime that executes it differs. Two are
+supported: the Claude Agent SDK, and an OpenAI tool-calling loop for
+deployments configured with the OpenAI side alone.
 """
 
 from __future__ import annotations
@@ -152,6 +155,10 @@ class TraceLensSkillRunResult:
 
     output_dir: Path
     report_path: Path
+    # Which runner produced these artifacts, so callers report the provider that
+    # actually ran rather than assuming one. Required: a new runner that forgets
+    # to declare itself fails at construction instead of mislabelling its output.
+    runner: str
     artifact_paths: dict[str, str] = field(default_factory=dict)
     raw_text: str = ""
 
@@ -265,7 +272,10 @@ def build_orchestrator_prompt(
     analysis_mode: str,
     capture_folder: Path | None,
 ) -> str:
-    """Prompt a Claude SDK agent to execute the TraceLens standalone skill.
+    """Prompt an agent to execute the TraceLens standalone skill.
+
+    Provider-neutral: the same prompt drives the Claude SDK runner and the
+    OpenAI tool-calling runner.
 
     Assembles the full natural-language instruction that pins every required
     input (paths, platform, framework, analysis/execution mode, capture folder)
@@ -676,6 +686,7 @@ async def _run_tracelens_skill_openai(
     return TraceLensSkillRunResult(
         output_dir=output_dir,
         report_path=report_path,
+        runner="codex",
         raw_text="\n".join(chunks),
         artifact_paths=artifact_paths,
     )
@@ -848,12 +859,13 @@ async def run_tracelens_skill(
     openai_client_factory: Callable[[], Any] | None = None,
     log: Callable[[str], None] | None = None,
 ) -> TraceLensSkillRunResult:
-    """Execute the standalone TraceLens skill with Claude SDK.
+    """Execute the standalone TraceLens skill on the configured agent runtime.
 
-    Prepares the command-prefix cache and orchestrator prompt, drives the SDK
-    query loop, and treats the presence of ``analysis.md`` as the source of
-    truth: an SDK error after the report was written is recorded as metadata
-    rather than raised.
+    Prepares the command-prefix cache and orchestrator prompt, then dispatches
+    to the OpenAI tool-calling runner when the deployment has only the OpenAI
+    side configured, and to the Claude Agent SDK otherwise. Either way the
+    presence of ``analysis.md`` is the source of truth: a runtime error after
+    the report was written is recorded as metadata rather than raised.
 
     Args:
         skill_path (Path): Path to the TraceLens skill file to follow.
@@ -1050,6 +1062,7 @@ async def run_tracelens_skill(
     return TraceLensSkillRunResult(
         output_dir=output_dir,
         report_path=report_path,
+        runner="claude_agent_sdk",
         raw_text="\n".join(chunks),
         artifact_paths=artifact_paths,
     )
