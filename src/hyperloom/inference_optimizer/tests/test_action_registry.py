@@ -119,26 +119,56 @@ def test_registry_get_unknown_returns_none(registry):
     assert registry.get("does_not_exist") is None
 
 
-@pytest.mark.parametrize("action_name", ["framework_agent", "integrate_patch"])
-def test_action_registry_lease_covers_bench_timeout(registry, action_name):
+def _fixed_bench_cap_actions() -> dict[str, int]:
+    """Actions whose per-variant bench cap is a fixed constant, with that cap.
+
+    Read out of each executor's own signature rather than restated here, so the
+    assertion tracks the executor if its default moves. Only fixed caps qualify:
+    an executor that derives its timeout at runtime has no single number a
+    static lease can be compared against.
+    """
+    import inspect
+
+    from hyperloom.orchestrator.actions.executors.framework_agent import FrameworkAgentExecutor
+    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
+
+    caps: dict[str, int] = {}
+    for action_name, executor in (
+        ("framework_agent", FrameworkAgentExecutor),
+        ("integrate_patch", IntegratePatchExecutor),
+    ):
+        default = inspect.signature(executor.__init__).parameters["variant_timeout_sec"].default
+        assert isinstance(default, int), f"{action_name} no longer declares a fixed bench cap"
+        caps[action_name] = default
+    return caps
+
+
+@pytest.mark.parametrize("action_name,bench_cap_sec", sorted(_fixed_bench_cap_actions().items()))
+def test_action_registry_lease_covers_bench_timeout(registry, action_name, bench_cap_sec):
     """The lease must outlast the bench timeout the executor already grants itself.
 
     ``reclaim_expired_running`` measures ``now - updated_at``, and ``updated_at``
     only advances on a state transition — nothing refreshes it while the task
     runs. The lease is therefore a total wall-clock budget, so a lease shorter
-    than ``DEFAULT_VARIANT_TIMEOUT_SEC`` marks a healthy task ``failed`` and
-    releases its lanes while its benchmark is still on the GPU, letting the next
-    task restart the server underneath it.
+    than the bench cap marks a healthy task ``failed`` and releases its lanes
+    while its benchmark is still on the GPU, letting the next task restart the
+    server underneath it.
 
-    The margin on top covers the clone, the source rebuild and the accuracy eval
-    that bracket the bench; those are not separately bounded, so this asserts
-    only the part that is a hard contradiction between two declarations.
+    Scope: the actions whose cap is a fixed constant. ``explore`` derives its
+    per-variant cap from the measured baseline
+    (``_compute_explore_variant_timeout``, ceiling 14400s against a 7200s lease),
+    so the same contradiction is reachable there, but the number to assert
+    against only exists at runtime. That is a known gap, not a claim that the
+    invariant stops here.
+
+    The margin above the cap covers the clone, the source rebuild and the
+    accuracy eval that bracket the bench; those are not separately bounded, so
+    this asserts only the part that is a contradiction between two static
+    declarations.
     """
-    from hyperloom.orchestrator.actions.executors.integrate_patch import DEFAULT_VARIANT_TIMEOUT_SEC
-
     meta = registry.get(action_name)
     assert meta is not None
-    assert meta.lease_ttl_sec >= DEFAULT_VARIANT_TIMEOUT_SEC
+    assert meta.lease_ttl_sec >= bench_cap_sec
 
 
 def test_registry_load_missing_dir_raises(tmp_path):
