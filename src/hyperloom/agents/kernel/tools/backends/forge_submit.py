@@ -2052,38 +2052,63 @@ def _ensure_flydsl_aiter_compat(protocol_path: str = "") -> bool:
         return False
 
 
+def _openai_only_provider() -> bool:
+    """Return true when the OpenAI side is the only configured provider.
+
+    Mirrors ``tracelens_skill_runner._should_use_openai_tool_runner``. The forge
+    fellow reaches an OpenAI-protocol gateway only through KernelForge's codex
+    provider, so this predicate is what selects it over the claude provider that
+    ``Config.agent_backend='auto'`` would otherwise resolve to.
+    """
+    has_openai = bool(
+        (os.environ.get("OPENAI_API_KEY") or "").strip()
+        or (os.environ.get("OPENAI_BASE_URL") or "").strip()
+    )
+    has_anthropic = bool(
+        (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        or (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+    )
+    return has_openai and not has_anthropic
+
+
 def _apply_fellow_env(env: dict) -> None:
-    """Apply fellow (claude CLI / claude-agent-sdk) stability defaults to ``env``.
+    """Apply fellow (claude CLI / codex SDK) stability defaults to ``env``.
 
     Mutates the given child-process env dict ONLY -- never the parent
     ``os.environ`` -- so the rewrite (notably the ANTHROPIC_BASE_URL streaming
     proxy) cannot leak outside this forge attempt. The forge-loop subprocess
-    inherits this env; inside it the fellow drives the claude CLI streaming
-    transport. ``setdefault`` keeps operator overrides authoritative.
+    inherits this env; inside it the fellow drives either the claude CLI
+    streaming transport or the codex SDK, per the configured provider side.
+    ``setdefault`` keeps operator overrides authoritative.
     """
+    claude_fellow = not _openai_only_provider()
     # bypassPermissions refuses to start under root unless IS_SANDBOX=1.
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         env.setdefault("IS_SANDBOX", "1")
-    # claude CLI discovery: the child may inherit a stripped PATH, so resolve
-    # claude's absolute path here, export FORGE_CLAUDE_BIN, and prepend its dir
-    # to the child PATH.
-    claude_bin = env.get("FORGE_CLAUDE_BIN", "").strip() or shutil.which("claude")
-    if not claude_bin:
-        for cand in ("/usr/local/bin/claude", "/usr/bin/claude", str(Path.home() / ".local/bin/claude")):
-            if os.path.isfile(cand) and os.access(cand, os.X_OK):
-                claude_bin = cand
-                break
-    if claude_bin and os.path.isfile(claude_bin):
-        env.setdefault("FORGE_CLAUDE_BIN", claude_bin)
-        bindir = os.path.dirname(claude_bin)
-        cur_path = env.get("PATH", "")
-        if bindir and bindir not in cur_path.split(os.pathsep):
-            env["PATH"] = bindir + os.pathsep + cur_path if cur_path else bindir
-    # Public defaults keep TLS verification enabled. Internal deployments with
-    # self-signed proxies can opt out by exporting their own TLS override envs.
-    base_url = str(env.get("ANTHROPIC_BASE_URL") or "").strip()
-    if base_url.endswith("/llm-gateway"):
-        env["ANTHROPIC_BASE_URL"] = base_url[: -len("/llm-gateway")] + "/api/v1/llm-proxy"
+    if claude_fellow:
+        # claude CLI discovery: the child may inherit a stripped PATH, so resolve
+        # claude's absolute path here, export FORGE_CLAUDE_BIN, and prepend its dir
+        # to the child PATH.
+        claude_bin = env.get("FORGE_CLAUDE_BIN", "").strip() or shutil.which("claude")
+        if not claude_bin:
+            for cand in ("/usr/local/bin/claude", "/usr/bin/claude", str(Path.home() / ".local/bin/claude")):
+                if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                    claude_bin = cand
+                    break
+        if claude_bin and os.path.isfile(claude_bin):
+            env.setdefault("FORGE_CLAUDE_BIN", claude_bin)
+            bindir = os.path.dirname(claude_bin)
+            cur_path = env.get("PATH", "")
+            if bindir and bindir not in cur_path.split(os.pathsep):
+                env["PATH"] = bindir + os.pathsep + cur_path if cur_path else bindir
+        # Public defaults keep TLS verification enabled. Internal deployments with
+        # self-signed proxies can opt out by exporting their own TLS override envs.
+        base_url = str(env.get("ANTHROPIC_BASE_URL") or "").strip()
+        if base_url.endswith("/llm-gateway"):
+            env["ANTHROPIC_BASE_URL"] = base_url[: -len("/llm-gateway")] + "/api/v1/llm-proxy"
     # Fellow-hung mitigation: bound the claude CLI's own request timeout and cut
     # non-essential traffic / autoupdate that can block in headless containers.
     from _llm_stability_env import apply_llm_stability_env
@@ -2100,8 +2125,10 @@ def _apply_fellow_env(env: dict) -> None:
     KernelExperienceBridge(_knowledge_config_for_forge()).configure_child_env(env)
 
     # Auth fallback: seed ANTHROPIC_API_KEY from the claude CLI's config.json
-    # primaryApiKey when it is not already exported.
-    if not env.get("ANTHROPIC_API_KEY", "").strip():
+    # primaryApiKey when it is not already exported. Skipped on the OpenAI-only
+    # side, where the codex provider authenticates from OPENAI_API_KEY and an
+    # Anthropic key would only re-enable the claude fellow it cannot drive.
+    if claude_fellow and not env.get("ANTHROPIC_API_KEY", "").strip():
         try:
             import json as _json
 
@@ -2925,6 +2952,17 @@ def _run_loop_via_cli(
         "--result-json",
         str(result_json),
     ]
+    # Provider selection. KernelForge defaults agent_backend to "auto", which
+    # resolves to its claude provider; an OpenAI-only deployment has no Anthropic
+    # credential and no Claude CLI login, so every attempt would REVERT on "Not
+    # logged in". Pin codex instead, and disable the provider fallback (it
+    # defaults to claude) so a missing Codex SDK fails loudly here rather than
+    # degrading into an unauthenticated claude run.
+    if _openai_only_provider():
+        cmd += ["--agent-backend", "codex", "--agent-fallback-provider", "none"]
+        codex_model = (os.environ.get("CODEX_MODEL") or "").strip()
+        if codex_model:
+            cmd += ["--model", codex_model]
     if program_md_file and Path(program_md_file).exists():
         cmd += ["--program-md-file", str(program_md_file)]
     if invocation_spec_file and Path(invocation_spec_file).is_file():

@@ -6526,7 +6526,7 @@ def main() -> int:
                     )
                     artifacts.update(skill_result.artifact_paths)
                     agent_report_path = skill_result.report_path
-                    orchestrator_mode = "claude_agent_sdk"
+                    orchestrator_mode = skill_result.runner
 
                     raw_agent_candidates = []
                     report_source = ""

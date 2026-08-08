@@ -1374,6 +1374,7 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert "analysis-orchestrator" in captured["prompt"] or "skill.md" in captured["prompt"]
     assert "Bash" in captured["options"]["allowed_tools"]
     assert "Task" in captured["options"]["allowed_tools"]
+    assert res.runner == "claude_agent_sdk"
 
 
 def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
@@ -1511,6 +1512,9 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
 
     assert res.report_path == output_dir / "analysis.md"
     assert res.report_path.read_text(encoding="utf-8") == "# Codex TraceLens report\n"
+    # The result carries the runner that actually ran, so the caller reports the
+    # real provider instead of hardcoding one.
+    assert res.runner == "codex"
     assert calls
     assert calls[0]["model"] == "gpt-5.5"
     assert calls[0]["tools"]
