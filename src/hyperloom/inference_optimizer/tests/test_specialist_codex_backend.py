@@ -28,16 +28,18 @@ from typing import Any
 
 import pytest
 
+import hyperloom.orchestrator.roles.codex_agent as codex_agent
+import hyperloom.orchestrator.specialists.subprocess_ as sp
 from hyperloom.orchestrator.trace import parse_usage as pu
-from hyperloom.orchestrator.specialists.subprocess_ import (
-    AGENT_BACKEND_CLAUDE,
-    AGENT_BACKEND_CODEX,
-    SpecialistSubprocessConfig,
-    SpecialistSubprocessDispatcher,
-    _build_specialist_env,
-    resolve_codex_executable,
-    resolve_specialist_agent_backend,
-)
+
+AGENT_BACKEND_CLAUDE = sp.AGENT_BACKEND_CLAUDE
+AGENT_BACKEND_CODEX = sp.AGENT_BACKEND_CODEX
+SpecialistAgentUnavailableError = sp.SpecialistAgentUnavailableError
+SpecialistSubprocessConfig = sp.SpecialistSubprocessConfig
+SpecialistSubprocessDispatcher = sp.SpecialistSubprocessDispatcher
+_build_specialist_env = sp._build_specialist_env
+resolve_codex_executable = sp.resolve_codex_executable
+resolve_specialist_agent_backend = sp.resolve_specialist_agent_backend
 
 # Every provider-shape signal ``llm_config`` consults, so a test can pin an
 # exact deployment shape instead of inheriting the developer's own gateway.
@@ -382,8 +384,6 @@ def test_codex_argv_bypass_requires_both_operator_opt_ins(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Full access is available only under the canonical double opt-in."""
-    from hyperloom.orchestrator.specialists.subprocess_ import SpecialistAgentUnavailableError
-
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
     monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
     with pytest.raises(SpecialistAgentUnavailableError, match="EXTERNAL_SANDBOX"):
@@ -400,8 +400,6 @@ def test_codex_specialist_rejects_read_only_sandbox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A specialist cannot satisfy its result contract in read-only mode."""
-    from hyperloom.orchestrator.specialists.subprocess_ import SpecialistAgentUnavailableError
-
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
     monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "read-only")
     with pytest.raises(SpecialistAgentUnavailableError, match="read-only"):
@@ -478,8 +476,6 @@ def test_unknown_configured_backend_fails_loudly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A typo'd backend is a configuration error, not a silent Claude fallback."""
-    from hyperloom.orchestrator.specialists.subprocess_ import SpecialistAgentUnavailableError
-
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
     with pytest.raises(SpecialistAgentUnavailableError, match="agent_backend"):
         _build_cmd(tmp_path, agent_backend="gemini")
@@ -533,7 +529,6 @@ async def test_missing_codex_runtime_fails_the_task_instead_of_spawning_claude(
         "hyperloom.orchestrator.specialists.subprocess_.resolve_codex_executable",
         lambda explicit="": "",
     )
-    import hyperloom.orchestrator.specialists.subprocess_ as sp
 
     monkeypatch.setattr(
         sp.subprocess,
@@ -848,7 +843,6 @@ async def test_codex_secret_opt_out_masks_parent_provider_secrets_before_resolut
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Resolver fallback cannot reintroduce parent secrets after explicit opt-out."""
-    import hyperloom.orchestrator.specialists.subprocess_ as sp
 
     gateway_secret = "parent-gateway-secret"
     header_secret = "parent-literal-header-secret"
@@ -922,7 +916,6 @@ async def test_codex_child_receives_provider_env_without_secrets_or_prompt_in_ar
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Provider additions and gateway credentials belong in env, never argv."""
-    import hyperloom.orchestrator.specialists.subprocess_ as sp
 
     secret = "gateway-secret-value"
     header_value = "private-gateway-user"
@@ -987,7 +980,6 @@ async def test_workspace_write_fails_closed_when_bwrap_probe_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A failed containment probe must prevent the specialist from spawning."""
-    import hyperloom.orchestrator.specialists.subprocess_ as sp
 
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
     fake_codex = _successful_codex_script(tmp_path / "bin" / "codex")
@@ -1100,7 +1092,6 @@ async def test_codex_mcp_config_is_translated_without_credentials_in_config_or_a
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """HTTP and stdio MCP definitions retain transport/env through private env refs."""
-    import hyperloom.orchestrator.specialists.subprocess_ as sp
 
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
     _enable_codex_bypass(monkeypatch)
@@ -1193,7 +1184,6 @@ async def test_codex_mcp_env_rejects_control_and_provider_collisions_before_laun
     collision_key: str,
 ) -> None:
     """MCP stdio env cannot overwrite child control or provider variables."""
-    import hyperloom.orchestrator.specialists.subprocess_ as sp
 
     _pin_provider_env(
         monkeypatch,
@@ -1264,7 +1254,6 @@ def test_codex_mcp_env_accepts_identical_benign_existing_value(
     tmp_path: Path,
 ) -> None:
     """An identical non-reserved child value is safe to forward by name."""
-    import hyperloom.orchestrator.specialists.subprocess_ as sp
 
     mcp_path = tmp_path / "mcp-benign.json"
     mcp_path.write_text(
@@ -1298,8 +1287,6 @@ def test_untranslatable_codex_mcp_server_fails_loudly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unknown MCP transports cannot silently disappear from a Codex specialist."""
-    from hyperloom.orchestrator.specialists.subprocess_ import SpecialistAgentUnavailableError
-
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
     mcp_path = tmp_path / "mcp.json"
     mcp_path.write_text(
@@ -1404,7 +1391,6 @@ def test_selected_backend_uses_its_own_model_without_specialist_override(
     import shutil
 
     from hyperloom.inference_optimizer.cli import executors
-    import hyperloom.orchestrator.specialists.subprocess_ as sp
 
     _pin_provider_env(monkeypatch, shape)
     monkeypatch.setattr(sp, "resolve_codex_executable", lambda explicit="": "/usr/bin/codex")
@@ -1431,7 +1417,6 @@ def test_explicit_specialist_model_overrides_the_selected_backend_model(
     import shutil
 
     from hyperloom.inference_optimizer.cli import executors
-    import hyperloom.orchestrator.specialists.subprocess_ as sp
 
     _pin_provider_env(monkeypatch, shape)
     monkeypatch.setattr(sp, "resolve_codex_executable", lambda explicit="": "/usr/bin/codex")
@@ -1452,7 +1437,6 @@ def test_openai_only_inprocess_uses_codex_agent_sdk_not_claude(
 ) -> None:
     """OpenAI-only in-process dispatch must stay agentic without Claude fallback."""
     from hyperloom.inference_optimizer.cli import executors
-    from hyperloom.orchestrator.roles.codex_agent import CodexAgentBackend
 
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
     monkeypatch.setattr(
@@ -1469,7 +1453,7 @@ def test_openai_only_inprocess_uses_codex_agent_sdk_not_claude(
     )
     backend = runner.backend_factory(SimpleNamespace())
 
-    assert isinstance(backend, CodexAgentBackend)
+    assert isinstance(backend, codex_agent.CodexAgentBackend)
     assert backend.model == "gpt-selected-model"
     assert Path(backend.cwd).is_relative_to(tmp_path)
     assert Path(backend.cwd) in tuple(Path(root) for root in backend.writable_roots)
@@ -1504,7 +1488,6 @@ async def test_codex_agent_backend_preserves_roles_and_returns_validated_usage(
     """The Agent SDK receives developer/user roles separately and returns intents."""
     from hyperloom.common.codex_session import CodexSessionResult
     from hyperloom.inference_optimizer.protocol.intent import IntentType
-    import hyperloom.orchestrator.roles.codex_agent as codex_agent
 
     payload = {
         "gap_canonical_id": "gap.sdk",

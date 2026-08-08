@@ -700,7 +700,7 @@ def test_gpu_specialist_lease_lifecycle(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "ray", fake)
     actor = _FakeGpuActor()
     monkeypatch.setattr(rs, "make_gpu_specialist_actor", lambda n, *, serving_slot=False: actor)
-    monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
+    monkeypatch.setattr(rb, "get_ray_backend", _StubBackendP2)
 
     lease = rs.GpuSpecialistLease(num_gpus=2)
     lease.start_async(["claude"], env={"A": "1"}, cwd="/tmp", log_path="/tmp/p.log")

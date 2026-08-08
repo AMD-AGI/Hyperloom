@@ -418,6 +418,7 @@ def _write_private_codex_config(
         try:
             os.close(fd)
         except OSError:
+            # fdopen owns and may already have closed the descriptor.
             pass
         raise
     os.replace(temporary, config_path)
