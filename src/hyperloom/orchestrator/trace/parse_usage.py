@@ -15,6 +15,8 @@ Two agent CLIs are parsed, one per credential shape: the Claude CLI's
 ``--output-format stream-json`` and the Codex CLI's ``codex exec --json``. Each
 has the same four recovery jobs (session usage, reply text, per-turn usage, tool
 calls), so the parsers come in twins named after the log format they read.
+Codex also emits structured failure events; :func:`parse_codex_jsonl_error`
+recovers their actionable message without serializing request/config payloads.
 
 Output shape: the token parsers (:func:`normalize_usage`,
 :func:`parse_claude_stream_json_usage`, :func:`parse_codex_jsonl_usage`,
@@ -38,6 +40,8 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.env_safety import redact_secret_values
 
 from ._row_utils import coerce_optional_int
 
@@ -345,6 +349,32 @@ _CODEX_TOOL_NAMES: dict[str, str] = {
 # de-duplicates the pair.
 _CODEX_ITEM_EVENTS: frozenset[str] = frozenset({"item.started", "item.completed"})
 
+# Error items are non-fatal warnings in the Codex schema, top-level ``error``
+# events are fatal stream errors, and ``turn.failed`` is the terminal outcome.
+# A later event replaces an earlier event only at the same or higher authority.
+_CODEX_ERROR_AUTHORITY: dict[str, int] = {
+    "item_error": 1,
+    "error": 2,
+    "turn.failed": 3,
+}
+
+# Adapters around the canonical exec schema sometimes preserve the app-server
+# wrapper (``error.message``) or its additional-details spelling. Restrict
+# traversal to message-bearing keys: request/config mappings must never be
+# stringified into a specialist result.
+_CODEX_ERROR_MESSAGE_KEYS: tuple[str, ...] = (
+    "message",
+    "error",
+    "reason",
+    "detail",
+    "details",
+    "additional_details",
+    "additionalDetails",
+    "description",
+    "text",
+)
+_CODEX_ERROR_MESSAGE_LIMIT = 2000
+
 
 def _iter_codex_events(log_path: str | Path) -> "Any":
     """Yield each JSON object of a ``codex exec --json`` log, in stream order.
@@ -376,6 +406,85 @@ def _iter_codex_events(log_path: str | Path) -> "Any":
         return
     except OSError as exc:
         log.warning("parse_usage: failed reading codex jsonl log %s: %r", path, exc)
+
+
+def _codex_error_message(value: Any, *, depth: int = 0) -> str | None:
+    """Extract and sanitize a scalar message from a known error payload.
+
+    Mappings are traversed only through explicit message-bearing keys. In
+    particular, this helper never falls back to ``str``/``json.dumps`` for an
+    arbitrary error object, because those objects can also carry full provider
+    requests, headers, and configuration.
+    """
+    if isinstance(value, str):
+        message = value.strip()
+        if not message:
+            return None
+        redacted = redact_secret_values(message)
+        if len(redacted) > _CODEX_ERROR_MESSAGE_LIMIT:
+            return redacted[: _CODEX_ERROR_MESSAGE_LIMIT - 1] + "…"
+        return redacted
+    if not isinstance(value, dict) or depth >= 6:
+        return None
+    for key in _CODEX_ERROR_MESSAGE_KEYS:
+        if key not in value:
+            continue
+        message = _codex_error_message(value[key], depth=depth + 1)
+        if message is not None:
+            return message
+    return None
+
+
+def parse_codex_jsonl_error(log_path: str | Path) -> str | None:
+    """Recover the most authoritative actionable Codex failure message.
+
+    Reads the three structured error shapes emitted by ``codex exec --json``:
+
+    * terminal ``turn.failed.error.message``;
+    * fatal top-level ``error.message``;
+    * non-fatal ``item.*.item`` payloads whose item ``type`` is ``error``.
+
+    Authority is terminal turn failure, then top-level stream error, then error
+    item. The last message at the highest authority wins, which preserves the
+    final reason across retries without allowing a later warning to replace a
+    terminal model/auth/gateway failure.
+
+    Only scalar message fields are returned. Recognizable credentials are
+    redacted with :func:`hyperloom.common.env_safety.redact_secret_values`;
+    sibling request/config/header payloads are never serialized. Missing files,
+    malformed/truncated lines, and logs without a structured error return
+    ``None``.
+
+    Args:
+        log_path: Path to the Codex CLI JSONL log.
+
+    Returns:
+        The redacted actionable error message, or ``None`` when none was found.
+    """
+    best_authority = 0
+    best_message: str | None = None
+    for event in _iter_codex_events(log_path):
+        event_type = event.get("type")
+        authority = 0
+        payload: Any = None
+        if event_type == "turn.failed":
+            authority = _CODEX_ERROR_AUTHORITY["turn.failed"]
+            payload = event.get("error")
+        elif event_type == "error":
+            authority = _CODEX_ERROR_AUTHORITY["error"]
+            payload = event
+        elif event_type in {"item.started", "item.updated", "item.completed"}:
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "error":
+                authority = _CODEX_ERROR_AUTHORITY["item_error"]
+                payload = item
+        if authority < best_authority:
+            continue
+        message = _codex_error_message(payload)
+        if message is not None:
+            best_authority = authority
+            best_message = message
+    return best_message
 
 
 def _codex_usage_to_canonical(usage: Any) -> dict[str, int | None] | None:
@@ -641,6 +750,7 @@ __all__ = [
     "parse_claude_stream_json_tool_calls",
     "parse_claude_stream_json_turn_usages",
     "parse_claude_stream_json_usage",
+    "parse_codex_jsonl_error",
     "parse_codex_jsonl_response",
     "parse_codex_jsonl_tool_calls",
     "parse_codex_jsonl_turn_usages",
