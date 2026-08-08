@@ -2367,6 +2367,39 @@ def test_rewrite_route_needs_the_explicit_switch(tmp_path, monkeypatch):
     assert probe.calls == 0
 
 
+def test_a_traced_triton_kernel_is_rewritable_despite_its_python_language(tmp_path, monkeypatch):
+    """The curated kind decides, not the file's language.
+
+    The tracer reports a Triton kernel's ``source_type`` as ``python`` and
+    records that it is Triton in ``kernel_kind``. Reading the language alone
+    declined every Triton kernel the tracer resolved, which is all of them.
+    """
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    probe = _RecordingProbe(_SUPPORTED_CAPABILITIES)
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=probe,
+        **_rewrite_route_kwargs(tmp_path, source_type="python", kernel_kind="triton"),
+    )
+
+    assert decision.eligible is True
+    assert decision.reason == "eligible"
+
+
+def test_a_flydsl_kernel_is_declined_whatever_its_language_says(tmp_path, monkeypatch):
+    """Resolving the kind must not let an already-FlyDSL kernel through."""
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    probe = _RecordingProbe(_SUPPORTED_CAPABILITIES)
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=probe,
+        **_rewrite_route_kwargs(tmp_path, source_type="flydsl", kernel_kind=""),
+    )
+
+    assert decision.eligible is False
+    assert decision.reason == "already_flydsl_source"
+
+
 def test_an_unsynthesizable_operator_is_handed_to_the_producer(tmp_path, monkeypatch):
     """No driver contract is a hand-over, not a decline, when the producer can author one.
 
@@ -2427,6 +2460,8 @@ def test_a_synthesizable_operator_keeps_its_own_driver(tmp_path, monkeypatch):
     ("overrides", "reason"),
     [
         ({"source_type": "hip_cpp", "kernel_kind": ""}, "source_type_unsupported"),
+        # A .py file is not on its own evidence of a rewritable kernel.
+        ({"source_type": "python", "kernel_kind": ""}, "source_type_unsupported"),
         ({"kernel_kind": "flydsl"}, "already_flydsl_source"),
         ({"kernel_kind": "aiter_asm"}, "prebuilt_binary_unsupported"),
         ({"logical_operator": "vllm::all_reduce"}, "collective_unsupported"),

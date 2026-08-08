@@ -704,6 +704,27 @@ def _source_entry_hint(candidate: Mapping[str, Any] | None) -> str:
     return str(symbol).strip() if isinstance(symbol, str) else ""
 
 
+def _rewritable_source(language: str, kind: str) -> str:
+    """Resolve which rewrite source a candidate is, kind first then language.
+
+    A traced Triton kernel reports its *language* as ``python`` and records that
+    it is Triton in ``kernel_kind``, so the curated kind is the authoritative
+    signal -- the precedence ``_invocation_spec._effective_kernel_kind`` already
+    applies, and the one ``_SOURCE_TYPE_TO_FELLOW`` follows when it routes
+    ``python`` to the Triton fellow. Reading the language alone declined every
+    Triton kernel the tracer resolved.
+
+    Args:
+        language: Normalized ``source_type`` (the file's language).
+        kernel_kind: Normalized curated kernel kind.
+
+    Returns:
+        str: The resolved source identity to check against
+            :data:`SUPPORTED_SOURCE_TYPES`.
+    """
+    return kind if kind in SUPPORTED_SOURCE_TYPES else language
+
+
 def _is_multi_node() -> bool:
     """Report multi-node fan-out through the apply-side authority.
 
@@ -800,8 +821,12 @@ def evaluate_rewrite_route(
         return RewriteDecision(False, "already_flydsl_source", "candidate is already a FlyDSL kernel")
     if "asm" in kind or "prebuilt" in kind:
         return RewriteDecision(False, "prebuilt_binary_unsupported", f"kernel_kind={kernel_kind}")
-    if language not in SUPPORTED_SOURCE_TYPES:
-        return RewriteDecision(False, "source_type_unsupported", f"source_type={source_type}")
+    if _rewritable_source(language, kind) not in SUPPORTED_SOURCE_TYPES:
+        return RewriteDecision(
+            False,
+            "source_type_unsupported",
+            f"source_type={source_type} kernel_kind={kernel_kind}",
+        )
 
     candidate = candidate or {}
     if bool(candidate.get("is_multigpu")) or kernel_name_implies_multigpu(
