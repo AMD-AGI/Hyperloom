@@ -6,8 +6,8 @@
 Per-task git worktree under ``runs/specialist/<task_id>/worktree/``, an agent
 CLI subprocess scoped via ``--add-dir``, and a ``specialist_done.json``
 (+ ``worktree/patches/``) exit signal harvested into the final
-:class:`SpecialistRunResult`. Production uses the subprocess path; the
-in-process Backend path stays for unit tests.
+:class:`SpecialistRunResult`. The explicit in-process dispatch mode is wired
+separately by the CLI to the matching provider's Agent SDK backend.
 
 Two agent CLIs can drive that contract, and the deployment's credential shape
 picks one (:func:`resolve_specialist_agent_backend`): ``claude --print
@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -34,9 +35,20 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
+from hyperloom.common.codex_session import (
+    CodexSessionError,
+    probe_codex_sandbox_capability,
+    resolve_codex_provider_config,
+    resolve_codex_sandbox_mode,
+)
 from hyperloom.common.env import is_truthy
-from hyperloom.common.env_safety import scrub_child_process_env
+from hyperloom.common.env_safety import (
+    BLOCKED_CHILD_ENV_NAMES,
+    scrub_child_process_env,
+    valid_env_key,
+)
 
 from ..trace.parse_usage import (
     parse_claude_stream_json_response,
@@ -44,6 +56,7 @@ from ..trace.parse_usage import (
     parse_claude_stream_json_turn_usages,
     parse_claude_stream_json_usage,
     parse_codex_jsonl_response,
+    parse_codex_jsonl_error,
     parse_codex_jsonl_tool_calls,
     parse_codex_jsonl_turn_usages,
     parse_codex_jsonl_usage,
@@ -161,9 +174,255 @@ _SPECIALIST_SECRET_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
         "AWS_SHARED_CREDENTIALS_FILE",
+        "LLM_GATEWAY_KEY",
         "OPENAI_API_KEY",
+        "OPENAI_CUSTOM_HEADERS",
     }
 )
+
+_CODEX_MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+_ENV_REFERENCE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_CODEX_MCP_ENV_PREFIX = "HYPERLOOM_CODEX_MCP_ENV_"
+_CODEX_PROVIDER_ENV_PREFIX = "HYPERLOOM_CODEX_HTTP_HEADER_"
+_CODEX_MCP_RESERVED_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        *_SPECIALIST_ENV_ALLOWLIST,
+        *_SPECIALIST_SECRET_ENV_ALLOWLIST,
+        "API_TIMEOUT_MS",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        "CODEX_HOME",
+        "CUDA_VISIBLE_DEVICES",
+        "DISABLE_AUTOUPDATER",
+        "HIP_VISIBLE_DEVICES",
+        "INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS",
+        "IS_SANDBOX",
+        "ROCR_VISIBLE_DEVICES",
+    }
+)
+
+
+def _toml_string(value: str) -> str:
+    """Encode a string for the JSON-compatible subset of TOML."""
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _resolve_env_references(value: str, *, source: Mapping[str, str], context: str) -> str:
+    """Expand ``${NAME}`` references without reading them into generated config."""
+
+    def _replacement(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name not in source:
+            raise SpecialistAgentUnavailableError(f"{context} references unset environment variable {name!r}")
+        return source[name]
+
+    return _ENV_REFERENCE_RE.sub(_replacement, value)
+
+
+def _private_mcp_env_name(
+    index: int,
+    *,
+    source: Mapping[str, str],
+    additions: Mapping[str, str],
+    protected_env_names: frozenset[str],
+) -> str:
+    """Return a collision-free child-only variable name for one MCP header."""
+    base = f"{_CODEX_MCP_ENV_PREFIX}{index}"
+    candidate = base
+    suffix = 1
+    while candidate in source or candidate in additions or candidate in protected_env_names:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _codex_provider_resolver_overlay(base_env: Mapping[str, str]) -> dict[str, str]:
+    """Mask every omitted specialist secret before resolver environment overlay.
+
+    The canonical provider resolver intentionally overlays its input on
+    ``os.environ``. Empty sentinels preserve that contract while preventing an
+    omitted child secret from falling back to the parent process.
+    """
+    overlay = dict(base_env)
+    for name in _SPECIALIST_SECRET_ENV_ALLOWLIST:
+        overlay.setdefault(name, "")
+    return overlay
+
+
+def _codex_mcp_config(
+    config_path: str | None,
+    *,
+    source: Mapping[str, str],
+    child_env: Mapping[str, str],
+    protected_env_names: frozenset[str],
+) -> tuple[list[str], dict[str, str]]:
+    """Translate Claude-style MCP JSON into secret-free Codex TOML lines.
+
+    Stdio environment values and HTTP header values are copied into the child
+    environment. The generated TOML contains only their variable names through
+    Codex's verified ``env_vars`` and ``env_http_headers`` fields.
+    """
+    if not config_path:
+        return [], {}
+    path = Path(config_path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SpecialistAgentUnavailableError(f"cannot read specialist MCP config {path}: {exc}") from exc
+    servers = payload.get("mcpServers") if isinstance(payload, dict) else None
+    if not isinstance(servers, dict):
+        raise SpecialistAgentUnavailableError(f"specialist MCP config {path} must contain an object at 'mcpServers'")
+
+    lines: list[str] = []
+    env_additions: dict[str, str] = {}
+    header_index = 0
+    for raw_name, raw_server in servers.items():
+        name = str(raw_name or "")
+        if not _CODEX_MCP_SERVER_NAME_RE.fullmatch(name):
+            raise SpecialistAgentUnavailableError(
+                f"Codex MCP server name {name!r} is not translatable; "
+                "use a letter followed by letters, digits, '_' or '-'"
+            )
+        if not isinstance(raw_server, dict):
+            raise SpecialistAgentUnavailableError(f"Codex MCP server {name!r} must be an object")
+        server = dict(raw_server)
+        declared_type = str(server.get("type") or "").strip().lower()
+        if not declared_type:
+            declared_type = "http" if server.get("url") else "stdio" if server.get("command") else ""
+        if declared_type not in {"http", "stdio"}:
+            raise SpecialistAgentUnavailableError(
+                f"Codex MCP server {name!r} uses unsupported transport "
+                f"{declared_type or '<missing>'!r}; expected 'http' or 'stdio'"
+            )
+
+        lines.extend([f"[mcp_servers.{name}]"])
+        if declared_type == "http":
+            unsupported = set(server) - {"type", "url", "headers"}
+            if unsupported:
+                raise SpecialistAgentUnavailableError(
+                    f"Codex MCP server {name!r} has unsupported HTTP fields: {sorted(unsupported)!r}"
+                )
+            url = server.get("url")
+            if not isinstance(url, str) or not url.strip():
+                raise SpecialistAgentUnavailableError(f"Codex MCP server {name!r} requires a non-empty URL")
+            parsed_url = urlsplit(url.strip())
+            if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+                raise SpecialistAgentUnavailableError(f"Codex MCP server {name!r} has invalid HTTP URL")
+            if parsed_url.username is not None or parsed_url.password is not None:
+                raise SpecialistAgentUnavailableError(
+                    f"Codex MCP server {name!r} URL embeds credentials; use environment-backed headers instead"
+                )
+            lines.append(f"url = {_toml_string(url.strip())}")
+            headers = server.get("headers") or {}
+            if not isinstance(headers, dict):
+                raise SpecialistAgentUnavailableError(f"Codex MCP server {name!r} headers must be an object")
+            header_rows: list[tuple[str, str]] = []
+            for raw_header, raw_value in headers.items():
+                header = str(raw_header or "").strip()
+                if not header or not isinstance(raw_value, str):
+                    raise SpecialistAgentUnavailableError(f"Codex MCP server {name!r} has an invalid HTTP header")
+                value = _resolve_env_references(
+                    raw_value,
+                    source=source,
+                    context=f"Codex MCP server {name!r} header {header!r}",
+                )
+                env_name = _private_mcp_env_name(
+                    header_index,
+                    source=source,
+                    additions=env_additions,
+                    protected_env_names=protected_env_names,
+                )
+                header_index += 1
+                env_additions[env_name] = value
+                header_rows.append((header, env_name))
+            if header_rows:
+                lines.extend(["", f"[mcp_servers.{name}.env_http_headers]"])
+                lines.extend(f"{_toml_string(header)} = {_toml_string(env_name)}" for header, env_name in header_rows)
+        else:
+            unsupported = set(server) - {"type", "command", "args", "env"}
+            if unsupported:
+                raise SpecialistAgentUnavailableError(
+                    f"Codex MCP server {name!r} has unsupported stdio fields: {sorted(unsupported)!r}"
+                )
+            command = server.get("command")
+            if not isinstance(command, str) or not command.strip():
+                raise SpecialistAgentUnavailableError(f"Codex MCP server {name!r} requires a non-empty command")
+            args = server.get("args") or []
+            if not isinstance(args, list) or not all(isinstance(value, str) for value in args):
+                raise SpecialistAgentUnavailableError(f"Codex MCP server {name!r} args must be a list of strings")
+            raw_env = server.get("env") or {}
+            if not isinstance(raw_env, dict):
+                raise SpecialistAgentUnavailableError(f"Codex MCP server {name!r} env must be an object")
+            env_names: list[str] = []
+            for raw_key, raw_value in raw_env.items():
+                key = str(raw_key or "").strip()
+                if not valid_env_key(key) or key in BLOCKED_CHILD_ENV_NAMES or not isinstance(raw_value, str):
+                    raise SpecialistAgentUnavailableError(
+                        f"Codex MCP server {name!r} has an unsafe or invalid env entry {key!r}"
+                    )
+                if (
+                    key in _CODEX_MCP_RESERVED_ENV_NAMES
+                    or key in protected_env_names
+                    or key.startswith(_CODEX_PROVIDER_ENV_PREFIX)
+                    or key.startswith(_CODEX_MCP_ENV_PREFIX)
+                ):
+                    raise SpecialistAgentUnavailableError(
+                        f"Codex MCP server {name!r} env key {key!r} is reserved "
+                        "for specialist control or provider configuration"
+                    )
+                resolved_value = _resolve_env_references(
+                    raw_value,
+                    source=source,
+                    context=f"Codex MCP server {name!r} env {key!r}",
+                )
+                existing_value = env_additions.get(key, child_env.get(key))
+                if existing_value is not None and existing_value != resolved_value:
+                    raise SpecialistAgentUnavailableError(
+                        f"Codex MCP server {name!r} env key {key!r} collides with an existing child environment value"
+                    )
+                if existing_value is None:
+                    env_additions[key] = resolved_value
+                env_names.append(key)
+            lines.append(f"command = {_toml_string(command.strip())}")
+            lines.append(f"args = {json.dumps(args, ensure_ascii=False)}")
+            if env_names:
+                lines.append(f"env_vars = {json.dumps(env_names)}")
+        lines.append("")
+    return lines, env_additions
+
+
+def _write_private_codex_config(
+    *,
+    codex_home: Path,
+    developer_instructions: str,
+    mcp_lines: list[str],
+) -> Path:
+    """Write task-local Codex configuration with private filesystem modes."""
+    codex_home.mkdir(parents=True, mode=0o700, exist_ok=True)
+    codex_home.chmod(0o700)
+    config_path = codex_home / "config.toml"
+    lines: list[str] = []
+    if developer_instructions:
+        lines.extend(
+            [
+                f"developer_instructions = {_toml_string(developer_instructions)}",
+                "",
+            ]
+        )
+    lines.extend(mcp_lines)
+    temporary = config_path.with_suffix(".toml.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines).rstrip() + "\n")
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    os.replace(temporary, config_path)
+    config_path.chmod(0o600)
+    return config_path
 
 
 def _build_specialist_env() -> dict[str, str]:
@@ -262,25 +521,14 @@ class SpecialistSubprocessConfig:
     :func:`resolve_codex_executable`."""
 
     model: str = ""
-    """Model id for the selected agent CLI. Empty = that CLI's own default.
-
-    One field covers both backends because the CLI already resolves a single
-    orchestration model per credential shape (an OpenAI-only run rewrites
-    ``--claude-model`` to ``--codex-model`` in preflight), so there is never a
-    second model to choose from here."""
+    """Model id for the selected agent CLI. Empty = that CLI's own default."""
 
     permission_mode: str = "bypassPermissions"
-    """claude-cli ``--permission-mode``. Default ``bypassPermissions``: specialist
-    subprocesses are autonomous and already sandboxed by three independent gates —
-    an isolated git worktree, a curated ``--allowedTools`` allowlist, and
-    Critic + PolicyGate review of everything they emit — so the claude-cli safety
-    classifier adds no real safety, only a hard dependency on a separate
-    ``claude-sonnet-5`` gateway call. When that classifier is degraded, ``auto``
-    made specialists stall on retries and burn their whole budget without running
-    a single Bash command (observed 96 classifier-unavailable errors vs 6 runs in
-    one enablement task). Operators can override per pod via
-    ``HYPERLOOM_SPECIALIST_PERMISSION_MODE`` (e.g. ``auto`` to restore the
-    classifier path); see ``cli/executors.py``."""
+    """claude-cli ``--permission-mode``.
+
+    This is a Claude runtime policy only. Worktrees and tool allowlists scope
+    task behavior but are not filesystem containment.
+    """
 
     framework_source_roots: tuple[str, ...] = ()
     """Roots used to seed ``git worktree add`` and as ``--add-dir`` parents.
@@ -300,19 +548,6 @@ class SpecialistSubprocessConfig:
 
     extra_claude_args: tuple[str, ...] = ()
     """Operator escape hatch — appended verbatim to the claude command."""
-
-    codex_bypass_sandbox: bool = True
-    """Pass ``--dangerously-bypass-approvals-and-sandbox`` to ``codex exec``.
-
-    On by default because Hyperloom's own runtime container ships no ``bwrap``,
-    so every Codex sandbox preset fails to start there and no specialist could
-    run at all. The flag is documented for "environments that are externally
-    sandboxed", which is what a specialist already is: it runs in an isolated
-    git worktree, under a curated tool allowlist, with Critic + PolicyGate
-    review of everything it emits — the same reasoning that puts the claude
-    backend on ``bypassPermissions`` (see :attr:`permission_mode`). Set ``False``
-    on a host that does have a working sandbox to restore Codex's own
-    ``workspace-write`` confinement."""
 
     extra_codex_args: tuple[str, ...] = ()
     """Operator escape hatch — appended verbatim to the codex command."""
@@ -655,20 +890,44 @@ class SpecialistSubprocessDispatcher:
         partial_candidates.append(workspace / "specialist_done.partial.json")
         heartbeat_file = workspace / "heartbeat.json"
 
-        # Write the prompt file (system + user collapsed into one --system-prompt-file).
-        combined = "<!-- system_prompt -->\n" + system_prompt + "\n<!-- user_prompt -->\n" + user_prompt
-        prompt_file.write_text(combined, encoding="utf-8")
+        # Compose a minimal env. Provider credentials are inherited by default
+        # for compatibility with deployments that authenticate the agent CLI
+        # via env; set HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0 to disable.
+        env = _build_specialist_env()
+        # Bound the spawned CLI's request transport so a stalled gateway stream
+        # raises client-side instead of hanging forever.
+        from ..roles._llm_stability_env import apply_llm_stability_env
+
+        apply_llm_stability_env(env)
 
         backend = ""
         try:
             backend = self._agent_backend()
-            cmd = self._build_agent_cmd(
-                prompt_file=prompt_file,
-                workspace=workspace,
-                worktree=worktree,
-                allowed_tools=allowed_tools,
-                backend=backend,
-            )
+            if backend == AGENT_BACKEND_CODEX:
+                # Codex reads the user turn from stdin. Its higher-priority
+                # developer instructions live in private task-local config.
+                prompt_file.write_text(user_prompt, encoding="utf-8")
+                prompt_file.chmod(0o600)
+                cmd, launch_env_additions = self._build_codex_launch(
+                    prompt_file=prompt_file,
+                    workspace=workspace,
+                    worktree=worktree,
+                    system_prompt=system_prompt,
+                    base_env=env,
+                    probe_sandbox=True,
+                )
+                env.update(launch_env_additions)
+            else:
+                # Preserve the established Claude transport unchanged.
+                combined = "<!-- system_prompt -->\n" + system_prompt + "\n<!-- user_prompt -->\n" + user_prompt
+                prompt_file.write_text(combined, encoding="utf-8")
+                prompt_file.chmod(0o600)
+                cmd = self._build_claude_cmd(
+                    prompt_file=prompt_file,
+                    workspace=workspace,
+                    worktree=worktree,
+                    allowed_tools=allowed_tools,
+                )
         except SpecialistAgentUnavailableError as exc:
             # No runtime for this deployment's credential shape. Report it as the
             # task's failure rather than degrading to a CLI that cannot auth.
@@ -680,22 +939,12 @@ class SpecialistSubprocessDispatcher:
                 error=f"specialist agent runtime unavailable (backend={backend or 'unresolved'}): {exc}",
             )
 
-        # Compose a minimal env. Provider credentials are inherited by default
-        # for compatibility with deployments that authenticate the agent CLI
-        # via env; set HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0 to disable.
-        env = _build_specialist_env()
-        # Bound the spawned CLI's request transport so a stalled gateway stream
-        # raises client-side instead of hanging forever.
-        from ..roles._llm_stability_env import apply_llm_stability_env
-
-        apply_llm_stability_env(env)
         if backend == AGENT_BACKEND_CODEX:
             # Per-task CODEX_HOME so concurrent specialists and the operator's
             # own Codex state stay independent. It lives in the task workspace
             # rather than a temp dir because Codex refuses to create its helper
             # binaries under /tmp and would run without its PATH aliases.
             codex_home = workspace / ".codex"
-            codex_home.mkdir(parents=True, exist_ok=True)
             env["CODEX_HOME"] = str(codex_home)
         if gpu_lease is not None:
             # Ray-managed GPU execution (§12 T4): Ray sets *_VISIBLE_DEVICES in
@@ -736,6 +985,8 @@ class SpecialistSubprocessDispatcher:
                     env=env,
                     cwd=str(worktree or workspace),
                     log_path=str(process_log),
+                    env_mode="replace",
+                    stdin_path=(str(prompt_file) if backend == AGENT_BACKEND_CODEX else None),
                 )
             except Exception as exc:  # noqa: BLE001 — surface a submit failure as a result
                 return SpecialistSubprocessResult(
@@ -785,12 +1036,13 @@ class SpecialistSubprocessDispatcher:
         else:
             proc_started = time.monotonic()
             log_fh = process_log.open("w", encoding="utf-8")
+            stdin_fh: Any = None
             try:
+                if backend == AGENT_BACKEND_CODEX:
+                    stdin_fh = prompt_file.open("rb")
                 proc = subprocess.Popen(
                     cmd,
-                    # Both CLIs treat an open stdin as extra prompt input and
-                    # block until it closes; the prompt is already in argv.
-                    stdin=subprocess.DEVNULL,
+                    stdin=stdin_fh if stdin_fh is not None else subprocess.DEVNULL,
                     stdout=log_fh,
                     stderr=subprocess.STDOUT,
                     env=env,
@@ -806,6 +1058,14 @@ class SpecialistSubprocessDispatcher:
                     process_log_path=str(process_log),
                     error=f"failed to spawn {backend} subprocess: {exc!r}",
                 )
+            finally:
+                # Popen duplicates the descriptor before returning. Close the
+                # parent's copy on success and every spawn failure.
+                if stdin_fh is not None:
+                    try:
+                        stdin_fh.close()
+                    except OSError:
+                        log.warning("failed to close specialist prompt stdin", exc_info=True)
 
         # Reap loop — poll done-file / exit / heartbeat staleness / timeout.
         # Prefer the explicit wall budget; fall back to ``max_turns × per_turn``.
@@ -863,6 +1123,12 @@ class SpecialistSubprocessDispatcher:
             response = parse_codex_jsonl_response(process_log)
             tool_calls = parse_codex_jsonl_tool_calls(process_log)
             turn_usages = parse_codex_jsonl_turn_usages(process_log)
+            structured_error = parse_codex_jsonl_error(process_log)
+            if structured_error and (outcome["exit_code"] not in (None, 0) or done_payload is None):
+                prior_error = str(outcome.get("error") or "").strip()
+                outcome["error"] = (
+                    f"{prior_error}; codex: {structured_error}" if prior_error else f"codex: {structured_error}"
+                )
         else:
             usage = parse_claude_stream_json_usage(process_log)
             response = parse_claude_stream_json_response(process_log)
@@ -916,16 +1182,19 @@ class SpecialistSubprocessDispatcher:
         worktree: Path | None,
         allowed_tools: tuple[str, ...],
         backend: str = "",
+        system_prompt: str = "",
     ) -> list[str]:
         """Assemble the argv for whichever agent CLI drives this specialist.
 
         Args:
-            prompt_file (Path): Combined system+user prompt file.
+            prompt_file (Path): User prompt for Codex; combined prompt for Claude.
             workspace (Path): Task workspace surfaced as a writable dir.
             worktree (Path | None): Write-isolated worktree, when present.
             allowed_tools (tuple[str, ...]): Per-task tool whitelist.
             backend (str): Backend to build for; resolved from the config /
                 credential shape when empty.
+            system_prompt (str): Higher-priority Codex developer instructions.
+                Claude already reads its combined prompt file.
 
         Returns:
             list[str]: The full command argv to spawn.
@@ -940,6 +1209,7 @@ class SpecialistSubprocessDispatcher:
                 prompt_file=prompt_file,
                 workspace=workspace,
                 worktree=worktree,
+                system_prompt=system_prompt,
             )
         return self._build_claude_cmd(
             prompt_file=prompt_file,
@@ -976,42 +1246,36 @@ class SpecialistSubprocessDispatcher:
         prompt_file: Path,
         workspace: Path,
         worktree: Path | None,
+        system_prompt: str = "",
     ) -> list[str]:
-        """Assemble the ``codex exec`` argv for a specialist subprocess.
+        """Assemble a test/introspection Codex argv without running the probe."""
+        cmd, _env_additions = self._build_codex_launch(
+            prompt_file=prompt_file,
+            workspace=workspace,
+            worktree=worktree,
+            system_prompt=system_prompt,
+            base_env=_build_specialist_env(),
+            probe_sandbox=False,
+        )
+        return cmd
 
-        ``--json`` is the Codex counterpart of the claude backend's
-        ``--print --output-format stream-json``: one event per line on stdout,
-        which lands in ``process.log`` and is what the codex parsers read.
+    def _build_codex_launch(
+        self,
+        *,
+        prompt_file: Path,
+        workspace: Path,
+        worktree: Path | None,
+        system_prompt: str,
+        base_env: Mapping[str, str],
+        probe_sandbox: bool,
+    ) -> tuple[list[str], dict[str, str]]:
+        """Build secure Codex argv, private config, and child-only env values.
 
-        The gateway is wired with the same ``-c`` provider overrides the Codex
-        SDK session builds, so the CLI and SDK runtimes cannot drift apart or
-        disagree about which credential to use. The API key crosses as an env-var
-        NAME only, never a value, so it stays out of argv.
-
-        The prompt travels in argv rather than on stdin because the Ray
-        GPU-specialist actor launches this argv remotely and cannot pipe a
-        stdin; ``--skip-git-repo-check`` is needed because a readonly specialist
-        runs straight in its workspace, which is not a checkout.
-
-        Codex has no ``--allowedTools`` counterpart — its tool set is fixed — so
-        the per-task whitelist reaches the specialist only as the prompt
-        contract, and the write scope is enforced by the sandbox dirs instead.
-        It likewise has no ``--mcp-config`` counterpart (MCP servers are declared
-        in its own config file), so :attr:`SpecialistSubprocessConfig.mcp_config_path`
-        does not apply and a codex specialist has no PR-monitor MCP tools.
-
-        Args:
-            prompt_file (Path): Combined system+user prompt file; its text is
-                passed as the turn's prompt.
-            workspace (Path): Task workspace, exposed as a writable dir.
-            worktree (Path | None): Write-isolated worktree, when present.
-
-        Returns:
-            list[str]: The full command argv to spawn.
-
-        Raises:
-            SpecialistAgentUnavailableError: If no Codex runtime resolves, or the
-                OpenAI-side gateway config is incomplete.
+        Codex 0.144.4 accepts ``developer_instructions`` in ``config.toml`` as a
+        real developer-role message. The same schema declares MCP servers under
+        ``mcp_servers``. The user prompt is represented only by the positional
+        ``-`` marker and is supplied through file-backed stdin by both local and
+        Ray launchers.
         """
         cfg = self.config
         executable = resolve_codex_executable(cfg.codex_executable)
@@ -1021,32 +1285,78 @@ class SpecialistSubprocessDispatcher:
                 "install `codex` on $PATH, or install the Codex SDK runtime "
                 "(pip install 'hyperloom-inference_optimizer[llm]')"
             )
-        # Reuse the SDK session's gateway wiring verbatim (see above).
-        from hyperloom.common.codex_session import CodexSessionError, codex_provider_overrides
-
+        resolver_env = _codex_provider_resolver_overlay(base_env)
         try:
-            provider_overrides = codex_provider_overrides()
+            provider_config = resolve_codex_provider_config(env=resolver_env)
         except CodexSessionError as exc:
             raise SpecialistAgentUnavailableError(f"codex gateway is not configured: {exc}") from exc
+        try:
+            sandbox_mode = resolve_codex_sandbox_mode(env=dict(base_env))
+        except CodexSessionError as exc:
+            raise SpecialistAgentUnavailableError(f"codex sandbox policy is not usable: {exc}") from exc
+        if sandbox_mode == "read-only":
+            raise SpecialistAgentUnavailableError(
+                "Codex sandbox mode 'read-only' cannot run a specialist: "
+                "the specialist must write its result and may need to author patches"
+            )
+        if probe_sandbox and sandbox_mode != "bypass" and not probe_codex_sandbox_capability(env=dict(base_env)):
+            raise SpecialistAgentUnavailableError(
+                f"Codex sandbox mode {sandbox_mode!r} requires a working bubblewrap "
+                "sandbox, but the capability probe failed; refusing to fall back to bypass"
+            )
+
+        provider_env_additions = dict(provider_config.env_additions)
+        child_env_before_mcp = dict(base_env)
+        child_env_before_mcp.update(provider_env_additions)
+        effective_source = os.environ.copy()
+        effective_source.update(resolver_env)
+        effective_source.update(provider_env_additions)
+        mcp_lines, mcp_env_additions = _codex_mcp_config(
+            cfg.mcp_config_path,
+            source=effective_source,
+            child_env=child_env_before_mcp,
+            protected_env_names=frozenset(provider_env_additions),
+        )
+        env_additions = dict(provider_env_additions)
+        env_additions.update(mcp_env_additions)
+        codex_home = workspace / ".codex"
+        try:
+            _write_private_codex_config(
+                codex_home=codex_home,
+                developer_instructions=system_prompt,
+                mcp_lines=mcp_lines,
+            )
+        except OSError as exc:
+            raise SpecialistAgentUnavailableError(
+                f"cannot prepare private Codex config under {codex_home}: {exc}"
+            ) from exc
 
         writable_dirs = self._writable_dirs(workspace, worktree)
-        cmd: list[str] = [executable, "exec", "--json", "--skip-git-repo-check"]
-        if cfg.codex_bypass_sandbox:
+        cmd: list[str] = [
+            executable,
+            "exec",
+            "--json",
+            "--strict-config",
+            "--skip-git-repo-check",
+        ]
+        if sandbox_mode == "bypass":
             cmd.append("--dangerously-bypass-approvals-and-sandbox")
+        else:
+            cmd.extend(["--sandbox", sandbox_mode])
         # Primary working root; the reap loop spawns with the same cwd.
         cmd.extend(["-C", str(worktree or workspace)])
         for extra_dir in writable_dirs[1:]:
             cmd.extend(["--add-dir", extra_dir])
         # ``features.memories=false`` matches the SDK session: a specialist must
         # not carry state between tasks.
-        for override in ("features.memories=false", *provider_overrides):
+        for override in ("features.memories=false", *provider_config.overrides):
             cmd.extend(["-c", override])
         if cfg.model:
             cmd.extend(["-m", cfg.model])
         if cfg.extra_codex_args:
             cmd.extend(list(cfg.extra_codex_args))
-        cmd.append(prompt_file.read_text(encoding="utf-8"))
-        return cmd
+        cmd.append("-")
+        return cmd, env_additions
 
     def _build_claude_cmd(
         self,
