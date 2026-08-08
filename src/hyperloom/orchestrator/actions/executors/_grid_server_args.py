@@ -473,11 +473,10 @@ def tokenize_server_args_preserving_json(
             return None
         if any(ch.isspace() for ch in token):
             return None
-        if (
-            len(token) >= 2
-            and token[0] == token[-1]
-            and token[0] in {"'", '"'}
-        ):
+        # ``shlex.split(..., posix=False)`` can fracture a quoted operand with
+        # whitespace into edge-quoted pieces (``"my`` / ``parser"``). Reject
+        # any such edge, not only a token carrying both wrappers.
+        if token.startswith(("'", '"')) or token.endswith(("'", '"')):
             return None
     return normalized, tokens
 
