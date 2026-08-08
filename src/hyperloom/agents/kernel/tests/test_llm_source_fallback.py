@@ -5,12 +5,13 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""The LLM tier of source resolution: selection only, and off by default.
+"""The LLM tier of source resolution: selection only, with canonical routing.
 
 This pipeline was broken by an LLM writing a placeholder into a field that was
 consumed as a path, so the tier that reintroduces an LLM has to be provably
 unable to repeat that: it may only echo back one of the paths it was given, the
-answer is checked against the filesystem, and it stays off unless enabled.
+answer is checked against the filesystem, and a provider must be selected by
+the role override or the canonical credential shape.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import _llm_source_fallback as lsf  # noqa: E402
+from hyperloom.common import llm_config  # noqa: E402
 
 
 @pytest.fixture()
@@ -241,6 +243,7 @@ def test_parse_answer_rejects_invalid_payload_shapes(reply, expected_reason):
 
 def test_parse_answer_rejects_non_object_json(monkeypatch):
     """The defensive parser guard must reject a decoded non-object payload."""
+
     class Match:
         """Return a fixed JSON array from the regex match surface."""
 
@@ -283,16 +286,14 @@ def test_model_error_is_swallowed(enabled, files):
 
 def test_model_error_is_redacted_from_reason_errors_and_log(files):
     """Transport diagnostics retain only a stable type and status code."""
+
     class TransportError(RuntimeError):
         """Represent a provider failure carrying sensitive response details."""
 
         status_code = 401
 
     def _raise(*_args):
-        raise TransportError(
-            "https://gateway.example/v1?token=query-secret "
-            "Authorization: Bearer header-secret"
-        )
+        raise TransportError("https://gateway.example/v1?token=query-secret Authorization: Bearer header-secret")
 
     errors: list[str] = []
     logs: list[str] = []
@@ -315,6 +316,7 @@ def test_model_error_is_redacted_from_reason_errors_and_log(files):
 
 def test_exception_label_skips_hostile_and_boolean_codes():
     """Exception metadata inspection must ignore unsafe or ambiguous values."""
+
     class HostileMetadataError(RuntimeError):
         """Expose unusable metadata before one safe code."""
 
@@ -326,17 +328,123 @@ def test_exception_label_skips_hostile_and_boolean_codes():
         code = True
         errno = "E_GATEWAY"
 
-    assert lsf._safe_exception_label(HostileMetadataError()) == (
-        "HostileMetadataError (errno=E_GATEWAY)"
-    )
+    assert lsf._safe_exception_label(HostileMetadataError()) == ("HostileMetadataError (errno=E_GATEWAY)")
 
 
 # --- Provider routing and audit -----------------------------------------------
 
 
-def test_network_calls_require_an_explicit_provider(monkeypatch):
+def _stub_credential_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    anthropic: bool,
+    openai: bool,
+) -> None:
+    """Make the canonical llm_config predicates report one credential shape."""
+    monkeypatch.setattr(llm_config, "is_anthropic_only", lambda: anthropic and not openai)
+    monkeypatch.setattr(llm_config, "is_openai_only", lambda: openai and not anthropic)
+    monkeypatch.setattr(llm_config, "has_anthropic_side", lambda: anthropic)
+    monkeypatch.setattr(llm_config, "has_openai_side", lambda: openai)
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("anthropic", lsf._PROVIDER_CLAUDE),
+        ("openai", lsf._PROVIDER_OPENAI),
+    ],
+)
+def test_explicit_provider_override_wins_credential_shape(monkeypatch, configured, expected):
+    """The role-specific provider knob wins without consulting credential shape."""
+    monkeypatch.setenv(lsf._PROVIDER_ENV, configured)
+
+    def _unexpected_shape_probe():
+        raise AssertionError("explicit provider must short-circuit credential inference")
+
+    for predicate in (
+        "is_anthropic_only",
+        "is_openai_only",
+        "has_anthropic_side",
+        "has_openai_side",
+    ):
+        monkeypatch.setattr(llm_config, predicate, _unexpected_shape_probe)
+
+    assert lsf._resolve_provider() == expected
+
+
+@pytest.mark.parametrize(
+    ("anthropic", "openai", "expected"),
+    [
+        pytest.param(False, False, None, id="neither"),
+        pytest.param(False, True, lsf._PROVIDER_OPENAI, id="openai-only"),
+        pytest.param(True, False, lsf._PROVIDER_CLAUDE, id="anthropic-only"),
+        pytest.param(True, True, lsf._PROVIDER_OPENAI, id="both"),
+    ],
+)
+def test_provider_is_inferred_from_canonical_credential_shape(
+    monkeypatch,
+    anthropic,
+    openai,
+    expected,
+):
+    """All four shapes route canonically; dual-configured single shots use OpenAI."""
+    monkeypatch.delenv(lsf._PROVIDER_ENV, raising=False)
+    _stub_credential_shape(monkeypatch, anthropic=anthropic, openai=openai)
+
+    if expected is None:
+        with pytest.raises(RuntimeError, match=lsf._PROVIDER_ENV):
+            lsf._resolve_provider()
+    else:
+        assert lsf._resolve_provider() == expected
+
+
+@pytest.mark.parametrize(
+    ("anthropic", "openai", "expected_provider"),
+    [
+        pytest.param(False, True, lsf._PROVIDER_OPENAI, id="openai-only"),
+        pytest.param(True, False, lsf._PROVIDER_CLAUDE, id="anthropic-only"),
+        pytest.param(True, True, lsf._PROVIDER_OPENAI, id="both"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("preview_value", "expected_preview"),
+    [
+        pytest.param("", False, id="preview-unset"),
+        pytest.param("1", True, id="preview-opted-in"),
+    ],
+)
+def test_provider_inference_does_not_authorize_source_preview(
+    monkeypatch,
+    files,
+    anthropic,
+    openai,
+    expected_provider,
+    preview_value,
+    expected_preview,
+):
+    """Credential inference changes routing only; source-content egress stays opt-in."""
+    monkeypatch.delenv(lsf._PROVIDER_ENV, raising=False)
+    monkeypatch.delenv(lsf._PREVIEW_ENV, raising=False)
+    if preview_value:
+        monkeypatch.setenv(lsf._PREVIEW_ENV, preview_value)
+    _stub_credential_shape(monkeypatch, anthropic=anthropic, openai=openai)
+
+    audit = lsf.llm_source_audit()
+    prompt = lsf._build_prompt(
+        "my_kernel",
+        [files[0]],
+        framework_roots=(str(Path(files[0]).parent),),
+    )
+
+    assert audit["provider"] == expected_provider
+    assert audit["source_preview_authorised"] is expected_preview
+    assert ("@triton.jit" in prompt) is expected_preview
+
+
+def test_network_calls_fail_closed_without_override_or_credentials(monkeypatch):
     """A model name alone must never imply a provider or endpoint."""
     monkeypatch.delenv(lsf._PROVIDER_ENV, raising=False)
+    _stub_credential_shape(monkeypatch, anthropic=False, openai=False)
     with pytest.raises(RuntimeError, match=lsf._PROVIDER_ENV):
         lsf._resolve_provider()
 
@@ -383,8 +491,13 @@ def test_provider_aliases_route_to_native_backends(monkeypatch, configured, expe
     assert calls == [expected]
 
 
-def test_openai_provider_adapter_uses_sanitized_client_configuration(monkeypatch):
-    """The OpenAI adapter must forward only validated client configuration."""
+def test_openai_provider_adapter_uses_the_sanctioned_client_contract(monkeypatch):
+    """The OpenAI adapter must get its client from ``llm_config``, not build one.
+
+    Credential resolution is asserted by ``llm_config``'s own tests; what matters
+    here is that the adapter goes through the contract and sends the request the
+    fallback expects.
+    """
     captured = {}
 
     def _create(**kwargs):
@@ -396,24 +509,21 @@ def test_openai_provider_adapter_uses_sanitized_client_configuration(monkeypatch
     class Client:
         """Minimal OpenAI client surface used by the adapter."""
 
-        def __init__(self, **kwargs):
-            """Capture constructor options and expose chat completions."""
-            captured["client"] = kwargs
+        def __init__(self):
+            """Expose the chat-completions surface the contract calls."""
             completions = types.SimpleNamespace(create=_create)
             self.chat = types.SimpleNamespace(completions=completions)
 
-    fake_openai = types.ModuleType("openai")
-    fake_openai.OpenAI = Client
-    monkeypatch.setitem(sys.modules, "openai", fake_openai)
-    monkeypatch.setattr(
-        "hyperloom.common.llm_config.openai_client_kwargs",
-        lambda: {"api_key": "configured-key", "base_url": "https://gateway.example/v1"},
-    )
+    def _get_client(**kwargs):
+        captured["client_kwargs"] = kwargs
+        return Client()
+
+    monkeypatch.setattr("hyperloom.common.llm_config.get_openai_client", _get_client)
 
     reply = lsf._complete_openai("prompt", "source-model", 7.5)
 
     assert reply == "provider reply"
-    assert captured["client"]["base_url"] == "https://gateway.example/v1"
+    assert captured["client_kwargs"] == {}
     assert captured["request"] == {
         "model": "source-model",
         "messages": [
@@ -539,8 +649,9 @@ def test_prompt_context_and_unreadable_preview_are_explicit(files, tmp_path):
 
 
 def test_selection_reports_unconfigured_provider(monkeypatch, files):
-    """A missing provider must be reported without invoking a transport."""
+    """Missing override and credentials must be reported without a transport."""
     monkeypatch.delenv(lsf._PROVIDER_ENV, raising=False)
+    _stub_credential_shape(monkeypatch, anthropic=False, openai=False)
     errors = []
     logs = []
 
@@ -556,7 +667,7 @@ def test_selection_reports_unconfigured_provider(monkeypatch, files):
     assert confidence == 0.0
     assert reason.startswith("llm configuration failed: RuntimeError")
     assert errors == [reason]
-    assert logs == [f"llm_source_fallback: configuration failed: RuntimeError"]
+    assert logs == ["llm_source_fallback: configuration failed: RuntimeError"]
 
 
 def test_selection_reports_missing_provider_model(monkeypatch, files):
@@ -578,9 +689,7 @@ def test_selection_reports_missing_provider_model(monkeypatch, files):
     assert confidence == 0.0
     assert reason == "no model configured"
     assert errors == [reason]
-    assert logs == [
-        f"llm_source_fallback: no model configured; set ${lsf._MODEL_ENV}"
-    ]
+    assert logs == [f"llm_source_fallback: no model configured; set ${lsf._MODEL_ENV}"]
 
 
 # --- Wiring into finalization --------------------------------------------------
@@ -601,12 +710,13 @@ def test_finalizer_settles_the_provider_before_paying_for_the_shortlist(monkeypa
     """An unconfigured tier must not run the grep it would only decline to use.
 
     The shortlist walks every framework root once per keyword, so doing it
-    first would charge that to every hot kernel on a deployment that never
-    selected a provider.
+    first would charge that to every hot kernel on a deployment with neither a
+    role override nor canonical provider credentials.
     """
     import tracelens_analysis as tl
 
     monkeypatch.delenv("HYPERLOOM_LLM_SOURCE_PROVIDER", raising=False)
+    _stub_credential_shape(monkeypatch, anthropic=False, openai=False)
     grepped: list[str] = []
     monkeypatch.setattr(
         tl,
@@ -703,16 +813,18 @@ def test_fallback_provider_audit_is_projected_into_the_artifact():
         "source_preview_authorised": False,
         "outcome": "accepted",
     }
-    entry = tl.build_source_resolution_entries([
-        {
-            "kernel_id": "k1",
-            "name": "kernel",
-            "gpu_pct": 10.0,
-            "source_file": "/repo/kernel.py",
-            "source_resolution_method": "llm_fallback",
-            "source_resolution_llm_audit": audit,
-        }
-    ])[0]
+    entry = tl.build_source_resolution_entries(
+        [
+            {
+                "kernel_id": "k1",
+                "name": "kernel",
+                "gpu_pct": 10.0,
+                "source_file": "/repo/kernel.py",
+                "source_resolution_method": "llm_fallback",
+                "source_resolution_llm_audit": audit,
+            }
+        ]
+    )[0]
     assert entry["llm_audit"] == audit
     assert entry["method"] == "llm_fallback"
 

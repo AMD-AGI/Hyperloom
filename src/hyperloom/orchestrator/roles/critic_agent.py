@@ -26,9 +26,12 @@ from typing import Any, Callable, Literal
 
 from hyperloom.common.llm_config import (
     LLMConfigError,
+    aanthropic_messages,
+    achat_completion,
     apply_reasoning_effort,
-    openai_client_kwargs,
-    parse_custom_headers,
+    build_http_timeout,
+    get_async_anthropic_client,
+    get_async_openai_client,
 )
 from hyperloom.common.jsonio import extract_first_json_with_key
 from hyperloom.inference_optimizer.protocol.intent import (
@@ -119,23 +122,6 @@ def _extract_review_json(text: str) -> dict[str, Any] | None:
     can only appear before it.
     """
     return extract_first_json_with_key(text, "review_verdicts", _BARE_JSON_RE, last=True)
-
-
-def _anthropic_text_from_content(content: Any) -> str:
-    """Concatenate the text blocks of an Anthropic Messages ``content`` array.
-
-    Args:
-        content: The ``content`` field of an Anthropic Messages response (a
-            list of ``{"type": ..., "text": ...}`` blocks), or anything else.
-
-    Returns:
-        The joined text of every ``type == "text"`` block, stripped; empty when
-        ``content`` is not a list or has no text blocks.
-    """
-    if not isinstance(content, list):
-        return ""
-    parts = [block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"]
-    return "".join(parts).strip()
 
 
 def _default_runtime_caller(call: RuntimeCall) -> None:
@@ -441,12 +427,11 @@ class CriticAgentBackend:
         elif self.codex_client_factory is not None:
             self._client = self.codex_client_factory()
         else:
+            connect_timeout_s, rw_timeout_s = self._resolve_llm_timeouts()
             try:
-                from openai import AsyncOpenAI  # type: ignore[import-not-found]
-            except ImportError as exc:  # pragma: no cover
-                raise BackendError("openai SDK not installed; run `pip install openai>=1.50`") from exc
-            try:
-                kwargs = openai_client_kwargs()
+                self._client = get_async_openai_client(
+                    timeout=build_http_timeout(connect=connect_timeout_s, read=rw_timeout_s),
+                )
             except LLMConfigError as exc:
                 raise BackendError(
                     str(exc).replace(
@@ -454,38 +439,6 @@ class CriticAgentBackend:
                         "CriticAgentBackend cannot reach Codex for review reasoning",
                     )
                 ) from exc
-            try:
-                import httpx
-            except ImportError:
-                # Best-effort fallback to SDK default timeouts.
-                log.warning("critic_agent_backend: httpx unavailable; falling back to AsyncOpenAI default timeouts")
-            else:
-                connect_timeout_s = parse_call_timeout_env(
-                    "CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S",
-                    default=CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
-                )
-                rw_timeout_s = parse_call_timeout_env(
-                    "CRITIC_AGENT_LLM_RW_TIMEOUT_S",
-                    default=CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
-                )
-                try:
-                    kwargs["timeout"] = httpx.Timeout(
-                        connect=connect_timeout_s,
-                        read=rw_timeout_s,
-                        write=rw_timeout_s,
-                        pool=rw_timeout_s,
-                    )
-                except (TypeError, ValueError) as exc:
-                    # Best-effort fallback to SDK defaults on rejected timeouts.
-                    log.warning(
-                        "critic_agent_backend: failed to build httpx.Timeout "
-                        "(connect=%s rw=%s): %r; falling back to AsyncOpenAI "
-                        "default timeouts",
-                        connect_timeout_s,
-                        rw_timeout_s,
-                        exc,
-                    )
-            self._client = AsyncOpenAI(**kwargs)
 
         # Resolve static per-session context once.
         if self.static_context is not None:
@@ -498,12 +451,32 @@ class CriticAgentBackend:
             sorted(self._static_context.keys()),
         )
 
+    @staticmethod
+    def _resolve_llm_timeouts() -> tuple[float, float]:
+        """Return the ``(connect, read/write/pool)`` review-call timeouts in seconds.
+
+        Both transports (OpenAI-compatible and native Anthropic) honour the same
+        ``CRITIC_AGENT_LLM_*_TIMEOUT_S`` knobs, so the pair is resolved once.
+        """
+        return (
+            parse_call_timeout_env(
+                "CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S",
+                default=CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
+            ),
+            parse_call_timeout_env(
+                "CRITIC_AGENT_LLM_RW_TIMEOUT_S",
+                default=CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
+            ),
+        )
+
     def _init_anthropic_client(self) -> None:
         """Build the native Anthropic Messages client (protocol='anthropic').
 
-        An httpx client with ``x-api-key`` + ``anthropic-version`` headers,
-        resolving base URL / key from the fields or the ``ANTHROPIC_*`` env.
-        Optional ``ANTHROPIC_CUSTOM_HEADERS`` are merged in.
+        Delegates the transport to the shared LLM gateway, which owns the base
+        URL, ``x-api-key``, ``anthropic-version`` and ``ANTHROPIC_CUSTOM_HEADERS``.
+        The explicit :attr:`anthropic_base_url` / :attr:`anthropic_api_key`
+        fields are overlaid on the environment so they keep precedence over
+        ambient ``ANTHROPIC_*`` values.
 
         Raises:
             BackendError: If httpx is unavailable or no Anthropic API key can
@@ -512,49 +485,24 @@ class CriticAgentBackend:
         if self.anthropic_client_factory is not None:
             self._client = self.anthropic_client_factory()
             return
+        env = dict(os.environ)
+        if self.anthropic_base_url.strip():
+            env["ANTHROPIC_BASE_URL"] = self.anthropic_base_url.strip()
+        if self.anthropic_api_key.strip():
+            env["ANTHROPIC_API_KEY"] = self.anthropic_api_key.strip()
+        connect_timeout_s, rw_timeout_s = self._resolve_llm_timeouts()
         try:
-            import httpx
-        except ImportError as exc:  # pragma: no cover
-            raise BackendError("httpx not installed; required for the Anthropic critic-agent review path") from exc
-        base_url = (
-            (self.anthropic_base_url or os.environ.get("ANTHROPIC_BASE_URL", "") or "https://api.anthropic.com")
-            .strip()
-            .rstrip("/")
-        )
-        api_key = (
-            self.anthropic_api_key
-            or os.environ.get("ANTHROPIC_API_KEY", "")
-            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-        ).strip()
-        if not api_key:
-            raise BackendError(
-                "CriticAgentBackend(protocol=anthropic) requires ANTHROPIC_API_KEY "
-                "or ANTHROPIC_AUTH_TOKEN for review reasoning"
+            self._client = get_async_anthropic_client(
+                env=env,
+                timeout=build_http_timeout(connect=connect_timeout_s, read=rw_timeout_s),
             )
-        connect_timeout_s = parse_call_timeout_env(
-            "CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S",
-            default=CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
-        )
-        rw_timeout_s = parse_call_timeout_env(
-            "CRITIC_AGENT_LLM_RW_TIMEOUT_S",
-            default=CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
-        )
-        headers = {
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        }
-        headers.update(parse_custom_headers(os.environ.get("ANTHROPIC_CUSTOM_HEADERS")))
-        self._client = httpx.AsyncClient(
-            base_url=base_url,
-            timeout=httpx.Timeout(
-                connect=connect_timeout_s,
-                read=rw_timeout_s,
-                write=rw_timeout_s,
-                pool=rw_timeout_s,
-            ),
-            headers=headers,
-        )
+        except LLMConfigError as exc:
+            raise BackendError(
+                str(exc).replace(
+                    "Anthropic client",
+                    "CriticAgentBackend(protocol=anthropic) review reasoning",
+                )
+            ) from exc
 
     # Public API — Backend.run
     async def run(
@@ -1054,29 +1002,27 @@ class CriticAgentBackend:
         usage_acc = {"input_tokens": 0, "output_tokens": 0}
         _t0 = time.perf_counter()
         try:
-            resp = await self._client.chat.completions.create(**kwargs)
+            result = await achat_completion(self._client, **kwargs)
         except Exception as exc:  # noqa: BLE001
             raise self._llm_call_failed(
                 f"Codex API call failed (critic-agent reasoning): {exc!r}",
                 latency_ms=int((time.perf_counter() - _t0) * 1000),
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
-        self._accumulate_usage(usage_acc, getattr(resp, "usage", None))
+        self._accumulate_usage(usage_acc, result.usage)
         self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms)
-        choice = resp.choices[0]
-        return choice.message.content or "", getattr(choice, "finish_reason", None)
+        return result.text, result.finish_reason
 
     async def _run_anthropic_reasoning(
         self,
         messages: list[dict[str, Any]],
     ) -> tuple[str, str | None]:
-        """Issue one native Anthropic ``/v1/messages`` call.
+        """Issue one native Anthropic Messages call through the shared gateway.
 
         Splits the OpenAI-style ``messages`` into a top-level ``system`` string
-        and the user/assistant turns Anthropic expects, POSTs a single request,
-        and extracts the concatenated text blocks. Token usage
-        (``input_tokens`` / ``output_tokens``) is folded into the same trace as
-        the OpenAI path.
+        and the user/assistant turns Anthropic expects, then hands the body to
+        :func:`aanthropic_messages`. Token usage (``input_tokens`` /
+        ``output_tokens``) is folded into the same trace as the OpenAI path.
 
         Args:
             messages: The chat-completions message list (system + user).
@@ -1085,8 +1031,8 @@ class CriticAgentBackend:
             A tuple of the reply text and the Anthropic ``stop_reason``.
 
         Raises:
-            BackendError: If the Anthropic Messages API call fails or returns a
-                non-2xx status.
+            LLMCallFailed: If the Anthropic Messages call fails, returns a
+                non-2xx status, or returns a body that is not JSON.
         """
         system_text = "\n\n".join(str(m.get("content") or "") for m in messages if m.get("role") == "system").strip()
         turns = [
@@ -1107,32 +1053,16 @@ class CriticAgentBackend:
         usage_acc = {"input_tokens": 0, "output_tokens": 0}
         _t0 = time.perf_counter()
         try:
-            resp = await self._client.post("/v1/messages", json=payload)
+            result = await aanthropic_messages(self._client, **payload)
         except Exception as exc:  # noqa: BLE001
             raise self._llm_call_failed(
                 f"Anthropic API call failed (critic-agent reasoning): {exc!r}",
                 latency_ms=int((time.perf_counter() - _t0) * 1000),
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
-        status = int(getattr(resp, "status_code", 200) or 200)
-        if status >= 400:
-            body_txt = str(getattr(resp, "text", ""))[:200]
-            raise self._llm_call_failed(
-                f"Anthropic API call failed (critic-agent reasoning): status={status} body={body_txt}",
-                latency_ms=latency_ms,
-            )
-        try:
-            body = resp.json()
-        except ValueError as exc:
-            raise self._llm_call_failed(
-                f"Anthropic API returned non-JSON body (critic-agent reasoning): {exc!r}",
-                latency_ms=latency_ms,
-            ) from exc
-        self._accumulate_anthropic_usage(usage_acc, body.get("usage") if isinstance(body, dict) else None)
+        self._accumulate_anthropic_usage(usage_acc, result.usage)
         self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms)
-        text = _anthropic_text_from_content(body.get("content") if isinstance(body, dict) else None)
-        stop_reason = body.get("stop_reason") if isinstance(body, dict) else None
-        return text, stop_reason
+        return result.text, result.stop_reason
 
     @staticmethod
     def _accumulate_anthropic_usage(

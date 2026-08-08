@@ -26,7 +26,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from hyperloom.common.llm_config import LLMConfigError, apply_reasoning_effort, openai_client_kwargs
+from hyperloom.common.llm_config import (
+    LLMConfigError,
+    apply_reasoning_effort,
+    astream_chat_completion_text,
+    get_async_openai_client,
+)
 from hyperloom.common.jsonio import extract_first_json_with_key
 from ..roles.base import parse_call_timeout_env
 from ..loop.coordinator_helpers import format_exc_brief
@@ -198,14 +203,12 @@ class ProposalScorer:
         if self._client is not None:
             return self._client
         try:
-            from openai import AsyncOpenAI  # type: ignore[import-not-found]
-        except ImportError as exc:  # pragma: no cover
-            raise RuntimeError("openai SDK not installed; run `pip install openai>=1.50`") from exc
-        try:
-            kwargs = openai_client_kwargs(api_key_env=self.api_key_env, base_url_env=self.base_url_env)
+            self._client = get_async_openai_client(
+                api_key_env=self.api_key_env,
+                base_url_env=self.base_url_env,
+            )
         except LLMConfigError as exc:
             raise RuntimeError(str(exc).replace("OpenAI-compatible client", "ProposalScorer")) from exc
-        self._client = AsyncOpenAI(**kwargs)
         return self._client
 
     def _build_prompt(
@@ -277,35 +280,22 @@ class ProposalScorer:
         messages = [{"role": "user", "content": full_prompt}]
         _t0 = time.perf_counter()
 
-        # The proxy only accepts streamed requests; accumulate the deltas and
-        # pull usage from the final chunk. The deadline wraps both stream
-        # creation and the chunk-consumption loop (a proxy can stall mid-body),
-        # via a single ``asyncio.wait_for`` (``asyncio.timeout`` is 3.11+).
-        async def _read_stream() -> tuple[list[str], Any]:
-            parts: list[str] = []
-            usage_obj = None
-            stream = await client.chat.completions.create(
-                **apply_reasoning_effort(
-                    {
-                        "model": model,
-                        "messages": messages,
-                        "max_completion_tokens": self.max_completion_tokens,
-                        "stream": True,
-                        "stream_options": {"include_usage": True},
-                    }
-                )
-            )
-            async for chunk in stream:
-                if getattr(chunk, "usage", None) is not None:
-                    usage_obj = chunk.usage
-                if chunk.choices:
-                    delta = chunk.choices[0].delta
-                    if delta is not None and delta.content:
-                        parts.append(delta.content)
-            return parts, usage_obj
-
+        # The proxy only accepts streamed requests; the shared helper accumulates
+        # the deltas and pulls usage from the final chunk. The deadline wraps both
+        # stream creation and the chunk-consumption loop (a proxy can stall
+        # mid-body), via a single ``asyncio.wait_for`` (``asyncio.timeout`` is 3.11+).
+        create_params = apply_reasoning_effort(
+            {
+                "model": model,
+                "messages": messages,
+                "max_completion_tokens": self.max_completion_tokens,
+            }
+        )
         try:
-            text_parts, usage = await asyncio.wait_for(_read_stream(), timeout=self.call_timeout_s)
+            text, usage = await asyncio.wait_for(
+                astream_chat_completion_text(client, **create_params),
+                timeout=self.call_timeout_s,
+            )
         except asyncio.TimeoutError as exc:
             error = RuntimeError(f"timed out after {self.call_timeout_s:.0f}s")
             self._trace_scorer_llm_failure(
@@ -340,7 +330,6 @@ class ProposalScorer:
             tick=tick,
             phase=phase,
         )
-        text = "".join(text_parts)
         # Persist the full (redacted) prompt + reply alongside the token row.
         self._record_scorer_conversation(
             model,
