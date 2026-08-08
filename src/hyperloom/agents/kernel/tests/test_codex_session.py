@@ -12,6 +12,7 @@ them. The SDK is mocked throughout: no test may reach the network.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -24,9 +25,15 @@ _CODEX_ENV = (
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_CUSTOM_HEADERS",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
     "LLM_GATEWAY_KEY",
     "CODEX_HOME",
     "HYPERLOOM_CODEX_SANDBOX_MODE",
+    "HYPERLOOM_CODEX_EXTERNAL_SANDBOX",
+    "HYPERLOOM_RUNTIME_DIR",
 )
 
 _SECRET = "sk-do-not-leak-this-value"
@@ -35,6 +42,7 @@ _SECRET = "sk-do-not-leak-this-value"
 # rename of the variable or of an accepted value is a breaking change for every
 # deployment that set it, so it has to fail here.
 _SANDBOX_MODE_ENV = "HYPERLOOM_CODEX_SANDBOX_MODE"
+_EXTERNAL_SANDBOX_ENV = "HYPERLOOM_CODEX_EXTERNAL_SANDBOX"
 _WRITABLE_ROOTS = (Path("/tmp/out"),)
 
 
@@ -194,9 +202,15 @@ class _FakeAsyncCodex:
         self._thread_start_error = thread_start_error
 
     async def __aenter__(self) -> "_FakeAsyncCodex":
+        codex_home = Path(self._record["config"].kwargs["env"]["CODEX_HOME"])
+        self._record["codex_home_at_enter"] = str(codex_home)
+        self._record["codex_home_exists_at_enter"] = codex_home.is_dir()
+        self._record["codex_home_mode_at_enter"] = codex_home.stat().st_mode & 0o777
         return self
 
     async def __aexit__(self, *_exc: Any) -> bool:
+        codex_home = Path(self._record["config"].kwargs["env"]["CODEX_HOME"])
+        self._record["codex_home_exists_when_closed"] = codex_home.is_dir()
         self._record["closed"] = True
         return False
 
@@ -249,6 +263,8 @@ def _install_fake_sdk(
         },
     )
     monkeypatch.setattr(cs, "load_codex_sdk", lambda: fake_sdk)
+    if hasattr(cs, "_probe_codex_sandbox_capability"):
+        monkeypatch.setattr(cs, "_probe_codex_sandbox_capability", lambda **_kwargs: True)
     return record
 
 
@@ -295,11 +311,57 @@ def test_provider_overrides_name_the_gateway_key_variable_that_is_set():
     assert not any(_SECRET in override for override in overrides)
 
 
-def test_provider_overrides_carry_operator_gateway_headers():
-    """Gateway routing headers are operator-supplied and must be forwarded."""
-    overrides = cs.codex_provider_overrides(env=_gateway_env(OPENAI_CUSTOM_HEADERS="user: ntid42"))
+def test_resolved_provider_config_keeps_literal_header_values_out_of_overrides():
+    """Literal gateway headers travel through private child env variables."""
+    env = _gateway_env(OPENAI_CUSTOM_HEADERS="user: ntid42")
+    original = dict(env)
 
-    assert _override_value(overrides, "model_providers.hyperloom.http_headers.user") == '"ntid42"'
+    resolved = cs.resolve_codex_provider_config(env=env)
+
+    header_env_name = json.loads(_override_value(resolved.overrides, "model_providers.hyperloom.env_http_headers.user"))
+    assert header_env_name.startswith("HYPERLOOM_CODEX_HTTP_HEADER_")
+    assert dict(resolved.env_additions) == {header_env_name: "ntid42"}
+    assert not any("ntid42" in override for override in resolved.overrides)
+    assert env == original
+
+
+def test_resolved_provider_config_references_existing_env_for_derived_header_secret():
+    """An exact ``${VAR}`` header reference stays name-based end to end."""
+    env = _gateway_env(
+        OPENAI_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: ${OPENAI_API_KEY}",
+    )
+
+    resolved = cs.resolve_codex_provider_config(env=env)
+
+    assert (
+        _override_value(
+            resolved.overrides,
+            "model_providers.hyperloom.env_http_headers.Ocp-Apim-Subscription-Key",
+        )
+        == '"OPENAI_API_KEY"'
+    )
+    assert resolved.env_additions == ()
+    assert not any(_SECRET in override for override in resolved.overrides)
+
+
+def test_resolved_provider_config_uses_derived_anthropic_headers_without_exposing_values():
+    """An Anthropic-derived endpoint retains its env-backed gateway header."""
+    env = {
+        "OPENAI_API_KEY": _SECRET,
+        "ANTHROPIC_BASE_URL": "https://gateway.example/api/v1/llm-proxy/Anthropic",
+        "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: ${OPENAI_API_KEY}",
+    }
+
+    resolved = cs.resolve_codex_provider_config(env=env)
+
+    assert (
+        _override_value(
+            resolved.overrides,
+            "model_providers.hyperloom.env_http_headers.Ocp-Apim-Subscription-Key",
+        )
+        == '"OPENAI_API_KEY"'
+    )
+    assert not any(_SECRET in override for override in resolved.overrides)
 
 
 def test_provider_overrides_reject_a_header_codex_cannot_express():
@@ -309,7 +371,7 @@ def test_provider_overrides_reject_a_header_codex_cannot_express():
     emitting a dotted header name would corrupt the whole provider table.
     """
     with pytest.raises(cs.CodexSessionUnavailableError, match="not a valid Codex config key"):
-        cs.codex_provider_overrides(env=_gateway_env(OPENAI_CUSTOM_HEADERS="x.api.key: value"))
+        cs.resolve_codex_provider_config(env=_gateway_env(OPENAI_CUSTOM_HEADERS="x.api.key: value"))
 
 
 def test_provider_overrides_require_an_explicit_base_url():
@@ -348,10 +410,15 @@ def test_api_key_env_name_lists_every_candidate_when_none_is_set():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("mode", ["bypass", "workspace-write", "read-only"])
+@pytest.mark.parametrize("mode", ["workspace-write", "read-only"])
 def test_codex_sandbox_is_read_only_without_writable_roots(mode):
-    """A session that declares no write scope must not get one, whatever the mode."""
+    """Contained modes preserve read-only semantics without a write scope."""
     assert cs.codex_sandbox(_FakeSDKModule, writable_roots=(), sandbox_mode=mode) == _FakeSandbox.read_only
+
+
+def test_codex_sandbox_bypass_is_full_access_without_writable_roots():
+    """External isolation, not declared roots, is authoritative in bypass mode."""
+    assert cs.codex_sandbox(_FakeSDKModule, writable_roots=(), sandbox_mode="bypass") == _FakeSandbox.full_access
 
 
 def test_codex_sandbox_bypass_mode_lifts_the_preset_sandbox_for_a_write_scope():
@@ -388,14 +455,42 @@ def test_codex_sandbox_rejects_an_unresolved_mode():
         cs.codex_sandbox(_FakeSDKModule, writable_roots=_WRITABLE_ROOTS, sandbox_mode="Bypass")
 
 
-def test_resolve_codex_sandbox_mode_defaults_to_bypass():
-    """The default has to work in Hyperloom's own container, which has no bwrap."""
-    assert cs.resolve_codex_sandbox_mode(env={}) == "bypass"
+def test_resolve_codex_sandbox_mode_defaults_to_workspace_write():
+    """An omitted setting must never silently grant full filesystem access."""
+    assert cs.resolve_codex_sandbox_mode(env={}) == "workspace-write"
 
 
 def test_resolve_codex_sandbox_mode_reads_the_operator_variable():
-    """A bwrap-capable deployment tightens the sandbox without a code change."""
-    assert cs.resolve_codex_sandbox_mode(env={_SANDBOX_MODE_ENV: " Workspace-Write "}) == "workspace-write"
+    """A deployment may explicitly select a contained preset."""
+    assert cs.resolve_codex_sandbox_mode(env={_SANDBOX_MODE_ENV: " Read-Only "}) == "read-only"
+
+
+def test_resolve_codex_sandbox_mode_requires_external_isolation_for_bypass():
+    """The mode opt-in alone cannot disable Codex's filesystem containment."""
+    with pytest.raises(cs.CodexSessionUnavailableError, match=_EXTERNAL_SANDBOX_ENV):
+        cs.resolve_codex_sandbox_mode(env={_SANDBOX_MODE_ENV: "bypass"})
+
+
+def test_resolve_codex_sandbox_mode_requires_the_environment_mode_opt_in_for_bypass():
+    """A caller argument cannot replace the operator-owned mode opt-in."""
+    with pytest.raises(cs.CodexSessionUnavailableError, match=_SANDBOX_MODE_ENV):
+        cs.resolve_codex_sandbox_mode(
+            sandbox_mode="bypass",
+            env={_EXTERNAL_SANDBOX_ENV: "1"},
+        )
+
+
+def test_resolve_codex_sandbox_mode_allows_bypass_with_both_opt_ins():
+    """Explicit mode plus confirmed external isolation permits full access."""
+    assert (
+        cs.resolve_codex_sandbox_mode(
+            env={
+                _SANDBOX_MODE_ENV: "bypass",
+                _EXTERNAL_SANDBOX_ENV: "1",
+            }
+        )
+        == "bypass"
+    )
 
 
 def test_resolve_codex_sandbox_mode_reads_the_process_environment(monkeypatch):
@@ -427,12 +522,40 @@ def test_resolve_codex_sandbox_mode_rejects_an_unknown_value():
         assert mode in message
 
 
-def test_run_codex_turn_defaults_to_a_bypassed_sandbox_for_a_write_scope(tmp_path, monkeypatch):
-    """The shape TraceLens runs must not land on a bwrap-backed preset.
+@pytest.mark.parametrize(("returncode", "expected"), [(0, True), (1, False)])
+def test_probe_codex_sandbox_executes_a_real_bwrap_sandbox(returncode, expected):
+    """The capability check executes mount isolation instead of only finding bwrap."""
+    calls: list[tuple[list[str], dict[str, Any]]] = []
 
-    This is the live openai-only failure: the writing turn was given
-    ``workspace_write``, so every shell command the Codex agent issued died in
-    bwrap and no ``analysis.md`` was ever written.
+    def _runner(argv: list[str], **kwargs: Any) -> Any:
+        calls.append((argv, kwargs))
+        return type("_Completed", (), {"returncode": returncode})()
+
+    available = cs.probe_codex_sandbox_capability(
+        env={"PATH": "/probe/bin"},
+        bwrap_resolver=lambda _name, *, path: "/probe/bin/bwrap",
+        runner=_runner,
+        use_cache=False,
+    )
+
+    assert available is expected
+    assert calls[0][0] == [
+        "/probe/bin/bwrap",
+        "--unshare-user",
+        "--unshare-net",
+        "--ro-bind",
+        "/",
+        "/",
+        "/bin/true",
+    ]
+    assert calls[0][1]["timeout"] > 0
+
+
+def test_run_codex_turn_defaults_to_workspace_write_for_a_write_scope(tmp_path, monkeypatch):
+    """A writing turn uses the least-privilege usable preset by default.
+
+    Hosts without a functional bubblewrap sandbox fail the separate capability
+    probe; they do not silently receive full access.
     """
     output = tmp_path / "out"
     output.mkdir()
@@ -450,8 +573,8 @@ def test_run_codex_turn_defaults_to_a_bypassed_sandbox_for_a_write_scope(tmp_pat
         )
     )
 
-    assert record["thread_options"]["sandbox"] == _FakeSandbox.full_access
-    assert record["turn_options"]["sandbox"] == _FakeSandbox.full_access
+    assert record["thread_options"]["sandbox"] == _FakeSandbox.workspace_write
+    assert record["turn_options"]["sandbox"] == _FakeSandbox.workspace_write
 
 
 def test_run_codex_turn_honors_the_sandbox_mode_variable(tmp_path, monkeypatch):
@@ -468,12 +591,41 @@ def test_run_codex_turn_honors_the_sandbox_mode_variable(tmp_path, monkeypatch):
             model="m",
             timeout_sec=5.0,
             writable_roots=(output,),
-            env=_gateway_env(**{_SANDBOX_MODE_ENV: "workspace-write"}),
+            env=_gateway_env(**{_SANDBOX_MODE_ENV: "read-only"}),
         )
     )
 
-    assert record["thread_options"]["sandbox"] == _FakeSandbox.workspace_write
-    assert record["turn_options"]["sandbox"] == _FakeSandbox.workspace_write
+    assert record["thread_options"]["sandbox"] == _FakeSandbox.read_only
+    assert record["turn_options"]["sandbox"] == _FakeSandbox.read_only
+
+
+def test_run_codex_turn_overlays_partial_env_on_the_process_environment(tmp_path, monkeypatch):
+    """Policy, credentials, config and child launch share one overlaid mapping."""
+    monkeypatch.setenv(_SANDBOX_MODE_ENV, "read-only")
+    monkeypatch.setenv("OPENAI_API_KEY", _SECRET)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/Unified/v1")
+    output = tmp_path / "out"
+    output.mkdir()
+    record = _install_fake_sdk(monkeypatch)
+
+    asyncio.run(
+        cs.run_codex_turn(
+            prompt="analyze",
+            developer_instructions="i",
+            cwd=tmp_path,
+            model="m",
+            timeout_sec=5.0,
+            writable_roots=(output,),
+            env={"CALLER_ONLY": "present"},
+        )
+    )
+
+    assert record["thread_options"]["sandbox"] == _FakeSandbox.read_only
+    assert record["turn_options"]["sandbox"] == _FakeSandbox.read_only
+    child_env = record["config"].kwargs["env"]
+    assert child_env["CALLER_ONLY"] == "present"
+    assert child_env[_SANDBOX_MODE_ENV] == "read-only"
+    assert child_env["OPENAI_API_KEY"] == _SECRET
 
 
 def test_run_codex_turn_honors_an_explicit_sandbox_mode(tmp_path, monkeypatch):
@@ -496,6 +648,70 @@ def test_run_codex_turn_honors_an_explicit_sandbox_mode(tmp_path, monkeypatch):
     )
 
     assert record["thread_options"]["sandbox"] == _FakeSandbox.read_only
+    assert record["turn_options"]["sandbox"] == _FakeSandbox.read_only
+
+
+def test_run_codex_turn_uses_full_access_for_confirmed_bypass_without_write_roots(tmp_path, monkeypatch):
+    """External isolation remains authoritative when no roots are declared."""
+    record = _install_fake_sdk(monkeypatch)
+
+    asyncio.run(
+        cs.run_codex_turn(
+            prompt="inspect",
+            developer_instructions="i",
+            cwd=tmp_path,
+            model="m",
+            timeout_sec=5.0,
+            env=_gateway_env(
+                **{
+                    _SANDBOX_MODE_ENV: "bypass",
+                    _EXTERNAL_SANDBOX_ENV: "1",
+                }
+            ),
+        )
+    )
+
+    assert record["thread_options"]["sandbox"] == _FakeSandbox.full_access
+    assert record["turn_options"]["sandbox"] == _FakeSandbox.full_access
+
+
+def test_run_codex_turn_rejects_unconfirmed_bypass_before_starting(tmp_path, monkeypatch):
+    """An unsafe bypass setting fails before the app-server is constructed."""
+    record = _install_fake_sdk(monkeypatch)
+
+    with pytest.raises(cs.CodexSessionUnavailableError, match=_EXTERNAL_SANDBOX_ENV):
+        asyncio.run(
+            cs.run_codex_turn(
+                prompt="inspect",
+                developer_instructions="i",
+                cwd=tmp_path,
+                model="m",
+                timeout_sec=5.0,
+                env=_gateway_env(**{_SANDBOX_MODE_ENV: "bypass"}),
+            )
+        )
+
+    assert "config" not in record
+
+
+def test_run_codex_turn_does_not_fallback_when_the_bwrap_probe_fails(tmp_path, monkeypatch):
+    """A contained mode with unusable bwrap fails closed before app-server work."""
+    record = _install_fake_sdk(monkeypatch)
+    monkeypatch.setattr(cs, "_probe_codex_sandbox_capability", lambda **_kwargs: False)
+
+    with pytest.raises(cs.CodexSessionUnavailableError, match="bubblewrap"):
+        asyncio.run(
+            cs.run_codex_turn(
+                prompt="inspect",
+                developer_instructions="i",
+                cwd=tmp_path,
+                model="m",
+                timeout_sec=5.0,
+                env=_gateway_env(),
+            )
+        )
+
+    assert "config" not in record
 
 
 def test_run_codex_turn_rejects_an_unknown_sandbox_mode_before_starting(tmp_path, monkeypatch):
@@ -558,6 +774,36 @@ def test_run_codex_turn_denies_approvals_and_scopes_writes(tmp_path, monkeypatch
     assert _override_value(overrides, "sandbox_workspace_write.writable_roots") == f'["{output.resolve()}"]'
 
 
+def test_run_codex_turn_keeps_literal_headers_only_in_the_child_environment(tmp_path, monkeypatch):
+    """Resolved header values must never enter app-server launch arguments."""
+    record = _install_fake_sdk(monkeypatch)
+    header_secret = "subscription-secret-value"
+
+    asyncio.run(
+        cs.run_codex_turn(
+            prompt="inspect",
+            developer_instructions="instructions",
+            cwd=tmp_path,
+            model="gpt-5.6-sol",
+            timeout_sec=30.0,
+            env=_gateway_env(
+                OPENAI_CUSTOM_HEADERS=f"Ocp-Apim-Subscription-Key: {header_secret}",
+            ),
+        )
+    )
+
+    config_kwargs = record["config"].kwargs
+    overrides = config_kwargs["config_overrides"]
+    header_env_name = json.loads(
+        _override_value(
+            overrides,
+            "model_providers.hyperloom.env_http_headers.Ocp-Apim-Subscription-Key",
+        )
+    )
+    assert config_kwargs["env"][header_env_name] == header_secret
+    assert not any(header_secret in override for override in overrides)
+
+
 def test_run_codex_turn_uses_a_read_only_sandbox_with_no_write_scope(tmp_path, monkeypatch):
     """No writable roots means no writable-roots override and a read-only sandbox."""
     record = _install_fake_sdk(monkeypatch)
@@ -578,12 +824,15 @@ def test_run_codex_turn_uses_a_read_only_sandbox_with_no_write_scope(tmp_path, m
     assert not any(override.startswith("sandbox_workspace_write.writable_roots") for override in overrides)
 
 
-def test_run_codex_turn_isolates_codex_home_per_run(tmp_path, monkeypatch):
-    """Each run gets a private CODEX_HOME that does not survive it."""
+def test_run_codex_turn_isolates_codex_home_under_the_runtime_dir(tmp_path, monkeypatch):
+    """Each run gets a mode-0700 runtime home removed after the client closes."""
+    runtime_dir = tmp_path / "runtime"
     homes: list[str] = []
+    records: list[dict[str, Any]] = []
 
     def _capture(record: dict[str, Any]) -> None:
         homes.append(record["config"].kwargs["env"]["CODEX_HOME"])
+        records.append(record)
 
     for _ in range(2):
         record = _install_fake_sdk(monkeypatch)
@@ -594,14 +843,88 @@ def test_run_codex_turn_isolates_codex_home_per_run(tmp_path, monkeypatch):
                 cwd=tmp_path,
                 model="m",
                 timeout_sec=5.0,
-                env=_gateway_env(),
+                env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(runtime_dir)),
             )
         )
         _capture(record)
 
     assert homes[0] != homes[1]
+    assert all(Path(home).parent == runtime_dir for home in homes)
+    assert all(record["codex_home_exists_at_enter"] for record in records)
+    assert all(record["codex_home_mode_at_enter"] == 0o700 for record in records)
+    assert all(record["codex_home_exists_when_closed"] for record in records)
     assert not Path(homes[0]).exists()
     assert not Path(homes[1]).exists()
+
+
+def test_run_codex_turn_places_codex_home_under_the_first_writable_root(tmp_path, monkeypatch):
+    """An output root is preferred when no runtime directory is configured."""
+    output = tmp_path / "out"
+    output.mkdir()
+    record = _install_fake_sdk(monkeypatch)
+
+    asyncio.run(
+        cs.run_codex_turn(
+            prompt="p",
+            developer_instructions="i",
+            cwd=tmp_path,
+            model="m",
+            timeout_sec=5.0,
+            writable_roots=(output,),
+            env=_gateway_env(),
+        )
+    )
+
+    codex_home = Path(record["codex_home_at_enter"])
+    assert codex_home.parent == output
+    assert record["codex_home_mode_at_enter"] == 0o700
+    assert not codex_home.exists()
+
+
+def test_run_codex_turn_uses_cwd_as_the_run_local_codex_home_fallback(tmp_path, monkeypatch):
+    """Read-only sessions avoid both operator home and system temp storage."""
+    run_dir = tmp_path / "run-output"
+    run_dir.mkdir()
+    record = _install_fake_sdk(monkeypatch)
+
+    asyncio.run(
+        cs.run_codex_turn(
+            prompt="p",
+            developer_instructions="i",
+            cwd=run_dir,
+            model="m",
+            timeout_sec=5.0,
+            env=_gateway_env(),
+        )
+    )
+
+    codex_home = Path(record["codex_home_at_enter"])
+    assert codex_home.parent == run_dir
+    assert record["codex_home_exists_when_closed"] is True
+    assert not codex_home.exists()
+
+
+def test_run_codex_turn_rejects_a_codex_home_inside_a_source_checkout(tmp_path, monkeypatch):
+    """Neither the configured runtime path nor fallback may pollute source."""
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / ".git").mkdir()
+    record = _install_fake_sdk(monkeypatch)
+
+    with pytest.raises(cs.CodexSessionUnavailableError, match="source checkout"):
+        asyncio.run(
+            cs.run_codex_turn(
+                prompt="p",
+                developer_instructions="i",
+                cwd=source_root,
+                model="m",
+                timeout_sec=5.0,
+                env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(source_root / "runtime")),
+            )
+        )
+
+    assert "config" not in record
+    assert not (source_root / "runtime").exists()
 
 
 def test_run_codex_turn_identifies_hyperloom_to_the_app_server(tmp_path, monkeypatch):
