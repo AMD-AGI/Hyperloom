@@ -105,9 +105,11 @@ def _build_specialist_executor(
     knowledge_plane: Any,
 ) -> "Callable[[Any], Awaitable[dict]]":
     """Build the specialist executor adapter (async fn(ctx) -> dict wrapping a
-    SpecialistRunner). Production uses the subprocess dispatcher (claude in a
-    per-task worktree); --specialist-dispatch-mode / missing claude falls back
-    to the in-process ClaudeBackend.
+    SpecialistRunner). Production uses the subprocess dispatcher, spawning the
+    agent CLI the deployment's credentials can drive (``claude`` on the Anthropic
+    side, ``codex`` on the OpenAI side) in a per-task worktree.
+    ``--specialist-dispatch-mode`` / a missing ``claude`` falls back to the
+    in-process ClaudeBackend.
 
     Args:
         args: Parsed CLI arguments (specialist model, turns, dispatch mode).
@@ -117,6 +119,12 @@ def _build_specialist_executor(
     Returns:
         Callable[[Any], Awaitable[dict]]: An async executor that runs a
         specialist and returns a result envelope dict.
+
+    Raises:
+        RuntimeError: If the deployment can only authenticate the Codex CLI and
+            no Codex runtime is installed. There is no usable fallback in that
+            shape — the in-process backend is Claude too — so the run must fail
+            here rather than lose every specialist to an auth error per task.
     """
     import shutil
 
@@ -126,7 +134,12 @@ def _build_specialist_executor(
         SpecialistRunner,
     )
     from hyperloom.orchestrator.specialists.domains import DEFAULT_SPECIALIST_MAX_TURNS
-    from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSubprocessConfig
+    from hyperloom.orchestrator.specialists.subprocess_ import (
+        AGENT_BACKEND_CODEX,
+        SpecialistSubprocessConfig,
+        resolve_codex_executable,
+        resolve_specialist_agent_backend,
+    )
 
     claude_model = (getattr(args, "specialist_model", None) or args.claude_model).strip()
     max_turns = int(getattr(args, "specialist_max_turns", DEFAULT_SPECIALIST_MAX_TURNS) or DEFAULT_SPECIALIST_MAX_TURNS)
@@ -135,12 +148,31 @@ def _build_specialist_executor(
 
     # Root the specialist worktree at the set the prompt + PolicyGate trust.
     framework_source_roots = tuple(resolve_source_file_allowlist())
-    claude_bin = shutil.which("claude") or ""
-    use_subprocess = dispatch_mode != "inprocess" and bool(claude_bin)
-    if dispatch_mode == "subprocess" and not claude_bin:
+    # Resolve the agent CLI once here so the backend, its executable and its
+    # model are chosen together and a later dispatch cannot disagree with them.
+    agent_backend = resolve_specialist_agent_backend()
+    codex_bin = ""
+    claude_bin = ""
+    if agent_backend == AGENT_BACKEND_CODEX:
+        codex_bin = resolve_codex_executable()
+        if dispatch_mode != "inprocess" and not codex_bin:
+            raise RuntimeError(
+                "this deployment configures only the OpenAI side, so specialists must run on "
+                "the codex CLI, but no codex runtime was found. Install `codex` on PATH or "
+                "install the Codex SDK runtime (pip install 'hyperloom-inference_optimizer[llm]'). "
+                "Falling back to the claude CLI here would fail to authenticate on every "
+                "specialist task."
+            )
+        agent_bin = codex_bin
+    else:
+        claude_bin = shutil.which("claude") or ""
+        agent_bin = claude_bin
+    use_subprocess = dispatch_mode != "inprocess" and bool(agent_bin)
+    if dispatch_mode == "subprocess" and not agent_bin:
         log.warning(
-            "specialist_dispatch_mode=subprocess requested but `claude` "
+            "specialist_dispatch_mode=subprocess requested but `%s` "
             "binary not found on PATH; falling back to in-process backend",
+            agent_backend,
         )
 
     if use_subprocess:
@@ -171,7 +203,12 @@ def _build_specialist_executor(
         # classifier path); an empty/unset value keeps the config default.
         specialist_permission_mode = os.environ.get("HYPERLOOM_SPECIALIST_PERMISSION_MODE", "").strip()
         sub_config_kwargs: dict[str, Any] = {
+            "agent_backend": agent_backend,
             "claude_executable": claude_bin or "claude",
+            "codex_executable": codex_bin,
+            # Preflight already collapses the run onto one model per credential
+            # shape (an OpenAI-only run rewrites --claude-model to --codex-model),
+            # so this carries whichever id the selected CLI needs.
             "model": claude_model,
             "framework_source_roots": framework_source_roots,
             "mcp_config_path": mcp_config_path,

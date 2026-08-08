@@ -3,11 +3,22 @@
 
 """Subprocess-based specialist dispatcher.
 
-Per-task git worktree under ``runs/specialist/<task_id>/worktree/``, a
-``claude --print --output-format stream-json`` subprocess scoped via
-``--add-dir``, and a ``specialist_done.json`` (+ ``worktree/patches/``) exit
-signal harvested into the final :class:`SpecialistRunResult`. Production uses
-the subprocess path; the in-process Backend path stays for unit tests.
+Per-task git worktree under ``runs/specialist/<task_id>/worktree/``, an agent
+CLI subprocess scoped via ``--add-dir``, and a ``specialist_done.json``
+(+ ``worktree/patches/``) exit signal harvested into the final
+:class:`SpecialistRunResult`. Production uses the subprocess path; the
+in-process Backend path stays for unit tests.
+
+Two agent CLIs can drive that contract, and the deployment's credential shape
+picks one (:func:`resolve_specialist_agent_backend`): ``claude --print
+--output-format stream-json`` authenticates against the Anthropic side, and
+``codex exec --json`` against the OpenAI side. An OpenAI-only deployment has no
+Anthropic credential at all, so spawning the Claude CLI there produced a
+``Not logged in`` exit on every specialist task and silently cost the session
+those domains. Everything around the spawn — worktree setup, the reap loop,
+heartbeat/staleness, patch discovery, done-file harvesting and the Ray
+GPU-specialist actor path — is backend-agnostic and shared; only the argv and
+the ``process.log`` parsers differ.
 """
 
 from __future__ import annotations
@@ -16,12 +27,13 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import scrub_child_process_env
@@ -31,10 +43,86 @@ from ..trace.parse_usage import (
     parse_claude_stream_json_tool_calls,
     parse_claude_stream_json_turn_usages,
     parse_claude_stream_json_usage,
+    parse_codex_jsonl_response,
+    parse_codex_jsonl_tool_calls,
+    parse_codex_jsonl_turn_usages,
+    parse_codex_jsonl_usage,
 )
 
 
 log = logging.getLogger(__name__)
+
+
+class SpecialistAgentUnavailableError(RuntimeError):
+    """Raised when the agent CLI the deployment needs cannot be assembled.
+
+    A missing runtime or an unconfigurable gateway means this deployment cannot
+    run specialists at all. It surfaces as the task's failure rather than being
+    absorbed into a fallback CLI that would fail to authenticate.
+    """
+
+
+# The two agent CLIs that can drive the specialist contract (module docstring).
+AGENT_BACKEND_CLAUDE = "claude"
+AGENT_BACKEND_CODEX = "codex"
+
+
+def resolve_specialist_agent_backend(env: Mapping[str, str] | None = None) -> str:
+    """Return the agent CLI the deployment's credentials can actually drive.
+
+    An OpenAI-only deployment holds no Anthropic credential, so the Claude CLI
+    starts and immediately fails with ``Not logged in``; the Codex CLI is the
+    only runtime that can authenticate there. Every other shape — Anthropic-only,
+    both configured, or nothing configured (a CLI logged in by other means, or
+    Bedrock) — keeps the Claude CLI, so this only ever redirects the shape that
+    could not work at all.
+
+    The shape test itself belongs to :mod:`hyperloom.common.llm_config`, so this
+    cannot disagree with backend selection, the TraceLens runner or the forge
+    fellow.
+
+    Args:
+        env: Environment mapping to read; defaults to ``os.environ``.
+
+    Returns:
+        :data:`AGENT_BACKEND_CODEX` for an OpenAI-only deployment, else
+        :data:`AGENT_BACKEND_CLAUDE`.
+    """
+    from hyperloom.common import llm_config  # local import: keep module import-light
+
+    return AGENT_BACKEND_CODEX if llm_config.is_openai_only(env) else AGENT_BACKEND_CLAUDE
+
+
+def resolve_codex_executable(explicit: str = "") -> str:
+    """Resolve the Codex CLI a specialist subprocess should spawn.
+
+    Order: an explicit path, then ``codex`` on ``$PATH`` (what the runtime
+    container installs), then the version-pinned runtime shipped with the Codex
+    SDK. The SDK runtime is last so an operator's own installation still wins,
+    but present at all so a pod that never ran the npm install can still start a
+    specialist.
+
+    Args:
+        explicit: Operator-configured path; returned as-is when non-empty.
+
+    Returns:
+        The resolved executable path, or ``""`` when no Codex runtime exists —
+        the caller reports that instead of spawning a name that cannot run.
+    """
+    pinned = (explicit or "").strip()
+    if pinned:
+        return pinned
+    on_path = shutil.which(AGENT_BACKEND_CODEX)
+    if on_path:
+        return on_path
+    try:
+        # Installed as the ``openai-codex`` SDK's own runtime dependency.
+        from codex_cli_bin import bundled_codex_path  # type: ignore[import-not-found]
+
+        bundled = Path(bundled_codex_path())
+    except ImportError:
+        return ""
+    return str(bundled) if bundled.exists() else ""
 
 
 _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
@@ -151,17 +239,35 @@ def clear_wall_budget_extension(task_id: str) -> None:
 # Configuration
 @dataclass(frozen=True)
 class SpecialistSubprocessConfig:
-    """Static config for spawning claude subprocesses per specialist.
+    """Static config for spawning agent-CLI subprocesses per specialist.
 
     Captured once at CLI boot and reused for every dispatch; per-task state is
     passed at run time via :meth:`SpecialistSubprocessDispatcher.run`.
     """
 
+    agent_backend: str = ""
+    """Which agent CLI to spawn: ``"claude"``, ``"codex"``, or ``""``.
+
+    Empty resolves the deployment's credential shape per dispatch via
+    :func:`resolve_specialist_agent_backend`. The CLI pins it explicitly at boot
+    so the backend cannot disagree with the executable and model chosen next to
+    it; leaving it empty is for callers that construct a config directly.
+    """
+
     claude_executable: str = "claude"
     """Path / name of the claude CLI binary. Default looks it up on $PATH."""
 
+    codex_executable: str = ""
+    """Path / name of the codex CLI binary. Empty resolves it per
+    :func:`resolve_codex_executable`."""
+
     model: str = ""
-    """Claude model id (e.g. ``claude-opus-5``). Empty = SDK default."""
+    """Model id for the selected agent CLI. Empty = that CLI's own default.
+
+    One field covers both backends because the CLI already resolves a single
+    orchestration model per credential shape (an OpenAI-only run rewrites
+    ``--claude-model`` to ``--codex-model`` in preflight), so there is never a
+    second model to choose from here."""
 
     permission_mode: str = "bypassPermissions"
     """claude-cli ``--permission-mode``. Default ``bypassPermissions``: specialist
@@ -187,10 +293,29 @@ class SpecialistSubprocessConfig:
     """Optional path to a JSON file holding ``{"mcpServers": {...}}``."""
 
     output_format: str = "stream-json"
-    """``--output-format`` flag; ``stream-json`` matches Arbor."""
+    """claude-cli ``--output-format`` flag; ``stream-json`` matches Arbor.
+
+    Codex has no equivalent knob — ``codex exec --json`` is its only streaming
+    event format — so this applies to the claude backend only."""
 
     extra_claude_args: tuple[str, ...] = ()
     """Operator escape hatch — appended verbatim to the claude command."""
+
+    codex_bypass_sandbox: bool = True
+    """Pass ``--dangerously-bypass-approvals-and-sandbox`` to ``codex exec``.
+
+    On by default because Hyperloom's own runtime container ships no ``bwrap``,
+    so every Codex sandbox preset fails to start there and no specialist could
+    run at all. The flag is documented for "environments that are externally
+    sandboxed", which is what a specialist already is: it runs in an isolated
+    git worktree, under a curated tool allowlist, with Critic + PolicyGate
+    review of everything it emits — the same reasoning that puts the claude
+    backend on ``bypassPermissions`` (see :attr:`permission_mode`). Set ``False``
+    on a host that does have a working sandbox to restore Codex's own
+    ``workspace-write`` confinement."""
+
+    extra_codex_args: tuple[str, ...] = ()
+    """Operator escape hatch — appended verbatim to the codex command."""
 
     leaf_agents_json: str | None = None
     """``--agents`` JSON declaring leaf sub-agent types. None = built-in leaf."""
@@ -252,27 +377,28 @@ class SpecialistSubprocessResult:
     directly — do not join them onto a base."""
 
     usage: dict[str, Any] | None = None
-    """Token usage recovered from the Claude CLI ``stream-json`` log. Carries
-    the four canonical counters (``input_tokens`` / ``output_tokens`` /
+    """Token usage recovered from the agent CLI's ``process.log``. Carries the
+    four canonical counters (``input_tokens`` / ``output_tokens`` /
     ``cache_creation_input_tokens`` / ``cache_read_input_tokens``); the two
-    ``cache_*`` may be ``None``. ``None`` when no result row carried a ``usage``
-    block. Re-enters the unified ledger the production specialist's token spend."""
+    ``cache_*`` may be ``None``, and the codex backend adds
+    ``reasoning_output_tokens``. ``None`` when no row carried a ``usage`` block.
+    Re-enters the unified ledger the production specialist's token spend."""
 
     response: str | None = None
-    """Assistant reply text recovered from the same ``stream-json`` log. The
-    prompt is held by the parent; pairing it with this response lands the
-    production specialist turn in ``conversations.jsonl``. ``None`` when no
-    response text could be recovered."""
+    """Assistant reply text recovered from the same log. The prompt is held by
+    the parent; pairing it with this response lands the production specialist
+    turn in ``conversations.jsonl``. ``None`` when no response text could be
+    recovered."""
 
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    """Intel/tool calls (``{"tool", "query"}``) recovered from the same
-    stream-json log (WebSearch / WebFetch / pr_monitor / ...).
-    Empty when none were made or the log was missing/truncated."""
+    """Intel/tool calls (``{"tool", "query"}``) recovered from the same log
+    (WebSearch / WebFetch / pr_monitor / Bash / ...). Empty when none were made
+    or the log was missing/truncated."""
 
     turn_usages: list[dict[str, int | None]] = field(default_factory=list)
-    """Per-assistant-turn token usage recovered from the stream-json log so the
-    parent can trace the multi-turn subprocess as one ledger row per model turn.
-    Empty when no per-message usage was present (parent falls back to ``usage``)."""
+    """Per-turn token usage recovered from the same log so the parent can trace
+    the multi-turn subprocess as one ledger row per model turn. Empty when no
+    per-turn usage was present (parent falls back to ``usage``)."""
 
     error: str = ""
 
@@ -431,7 +557,7 @@ class _RayLeaseProcess:
 
 # Dispatcher
 class SpecialistSubprocessDispatcher:
-    """Spawn + reap one claude subprocess for a specialist task.
+    """Spawn + reap one agent-CLI subprocess for a specialist task.
 
     Reusable across many specialist tasks; owns no per-task state.
     """
@@ -462,7 +588,10 @@ class SpecialistSubprocessDispatcher:
         gpu_lease: Any = None,
         progress_cb: Any = None,
     ) -> SpecialistSubprocessResult:
-        """Spawn a claude subprocess, reap it, return the parsed result.
+        """Spawn an agent-CLI subprocess, reap it, return the parsed result.
+
+        The CLI is the one the deployment's credentials can drive (module
+        docstring); the spawn, reap and harvest contract is identical either way.
 
         Args:
             task_id (str): Task identifier used for logging / workspace
@@ -471,8 +600,8 @@ class SpecialistSubprocessDispatcher:
                 prompt.md, process.log, heartbeat.json, and
                 specialist_done.json live.
             worktree (Path | None): Per-task git worktree (None when
-                worktree setup failed; the dispatcher still spawns claude
-                but the agent has no write-isolated tree, only
+                worktree setup failed; the dispatcher still spawns the agent
+                but it has no write-isolated tree, only
                 ``--add-dir <workspace>``).
             worktree_base (Path | None): Base checkout the worktree was
                 branched off. Unused here; the runner uses it as the clean
@@ -483,9 +612,9 @@ class SpecialistSubprocessDispatcher:
             allowed_tools (tuple[str, ...]): Per-task tool whitelist
                 (post-:meth:`SpecialistRunner._resolve_tools`).
             max_turns (int): Turn budget. This dispatcher never enforces it
-                mechanically — no ``--max-turns`` flag is passed to the claude
-                CLI (the cap reaches the specialist only as advisory prompt
-                text baked into ``system_prompt``). Its sole effect here is the
+                mechanically — neither agent CLI is passed a turn-cap flag (the
+                cap reaches the specialist only as advisory prompt text baked
+                into ``system_prompt``). Its sole effect here is the
                 ``max_turns × per_turn_max_seconds`` fallback wall-clock
                 ceiling, used when ``wall_budget_sec`` is not supplied.
             gpu_ids (tuple[int, ...]): GPU ids to expose to the subprocess.
@@ -530,22 +659,44 @@ class SpecialistSubprocessDispatcher:
         combined = "<!-- system_prompt -->\n" + system_prompt + "\n<!-- user_prompt -->\n" + user_prompt
         prompt_file.write_text(combined, encoding="utf-8")
 
-        cmd = self._build_claude_cmd(
-            prompt_file=prompt_file,
-            workspace=workspace,
-            worktree=worktree,
-            allowed_tools=allowed_tools,
-        )
+        backend = ""
+        try:
+            backend = self._agent_backend()
+            cmd = self._build_agent_cmd(
+                prompt_file=prompt_file,
+                workspace=workspace,
+                worktree=worktree,
+                allowed_tools=allowed_tools,
+                backend=backend,
+            )
+        except SpecialistAgentUnavailableError as exc:
+            # No runtime for this deployment's credential shape. Report it as the
+            # task's failure rather than degrading to a CLI that cannot auth.
+            return SpecialistSubprocessResult(
+                done_payload=None,
+                exit_code=None,
+                elapsed_seconds=0.0,
+                process_log_path=str(process_log),
+                error=f"specialist agent runtime unavailable (backend={backend or 'unresolved'}): {exc}",
+            )
 
         # Compose a minimal env. Provider credentials are inherited by default
-        # for compatibility with deployments that authenticate the claude CLI
+        # for compatibility with deployments that authenticate the agent CLI
         # via env; set HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0 to disable.
         env = _build_specialist_env()
-        # Bound the spawned claude CLI's request transport so a stalled gateway
-        # stream raises client-side instead of hanging forever.
+        # Bound the spawned CLI's request transport so a stalled gateway stream
+        # raises client-side instead of hanging forever.
         from ..roles._llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
+        if backend == AGENT_BACKEND_CODEX:
+            # Per-task CODEX_HOME so concurrent specialists and the operator's
+            # own Codex state stay independent. It lives in the task workspace
+            # rather than a temp dir because Codex refuses to create its helper
+            # binaries under /tmp and would run without its PATH aliases.
+            codex_home = workspace / ".codex"
+            codex_home.mkdir(parents=True, exist_ok=True)
+            env["CODEX_HOME"] = str(codex_home)
         if gpu_lease is not None:
             # Ray-managed GPU execution (§12 T4): Ray sets *_VISIBLE_DEVICES in
             # the actor's worker; never let the caller env pin them (that would
@@ -637,6 +788,9 @@ class SpecialistSubprocessDispatcher:
             try:
                 proc = subprocess.Popen(
                     cmd,
+                    # Both CLIs treat an open stdin as extra prompt input and
+                    # block until it closes; the prompt is already in argv.
+                    stdin=subprocess.DEVNULL,
                     stdout=log_fh,
                     stderr=subprocess.STDOUT,
                     env=env,
@@ -650,7 +804,7 @@ class SpecialistSubprocessDispatcher:
                     exit_code=None,
                     elapsed_seconds=0.0,
                     process_log_path=str(process_log),
-                    error=f"failed to spawn claude subprocess: {exc!r}",
+                    error=f"failed to spawn {backend} subprocess: {exc!r}",
                 )
 
         # Reap loop — poll done-file / exit / heartbeat staleness / timeout.
@@ -700,14 +854,20 @@ class SpecialistSubprocessDispatcher:
                             outcome["error"] = "recovered_from_partial"
                         break
 
-        # Recover cumulative session token usage from process.log.
-        usage = parse_claude_stream_json_usage(process_log)
-        # Recover the assistant's reply so the production turn lands in conversations.jsonl.
-        response = parse_claude_stream_json_response(process_log)
-        # Intel/tool calls the specialist made, recovered from the same log.
-        tool_calls = parse_claude_stream_json_tool_calls(process_log)
-        # Per-turn usage for fine-grained tracing; falls back to ``usage`` when absent.
-        turn_usages = parse_claude_stream_json_turn_usages(process_log)
+        # Harvest the trace from process.log with the parsers for the CLI that
+        # wrote it: cumulative session token usage, the reply text that lands in
+        # conversations.jsonl, the intel/tool calls, and per-turn usage for
+        # fine-grained tracing (which falls back to ``usage`` when absent).
+        if backend == AGENT_BACKEND_CODEX:
+            usage: dict[str, Any] | None = parse_codex_jsonl_usage(process_log)
+            response = parse_codex_jsonl_response(process_log)
+            tool_calls = parse_codex_jsonl_tool_calls(process_log)
+            turn_usages = parse_codex_jsonl_turn_usages(process_log)
+        else:
+            usage = parse_claude_stream_json_usage(process_log)
+            response = parse_claude_stream_json_response(process_log)
+            tool_calls = parse_claude_stream_json_tool_calls(process_log)
+            turn_usages = parse_claude_stream_json_turn_usages(process_log)
 
         return SpecialistSubprocessResult(
             done_payload=done_payload,
@@ -725,6 +885,169 @@ class SpecialistSubprocessDispatcher:
         )
 
     # Internals
+    def _agent_backend(self) -> str:
+        """Return the agent CLI this dispatch should spawn.
+
+        An explicitly configured backend wins; otherwise the deployment's
+        credential shape decides (:func:`resolve_specialist_agent_backend`).
+
+        Returns:
+            str: :data:`AGENT_BACKEND_CLAUDE` or :data:`AGENT_BACKEND_CODEX`.
+
+        Raises:
+            SpecialistAgentUnavailableError: If the configured backend is not
+                one this dispatcher can spawn.
+        """
+        pinned = (self.config.agent_backend or "").strip().lower()
+        if not pinned:
+            return resolve_specialist_agent_backend()
+        if pinned not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
+            raise SpecialistAgentUnavailableError(
+                f"agent_backend={self.config.agent_backend!r} is not one of "
+                f"{AGENT_BACKEND_CLAUDE!r} / {AGENT_BACKEND_CODEX!r}"
+            )
+        return pinned
+
+    def _build_agent_cmd(
+        self,
+        *,
+        prompt_file: Path,
+        workspace: Path,
+        worktree: Path | None,
+        allowed_tools: tuple[str, ...],
+        backend: str = "",
+    ) -> list[str]:
+        """Assemble the argv for whichever agent CLI drives this specialist.
+
+        Args:
+            prompt_file (Path): Combined system+user prompt file.
+            workspace (Path): Task workspace surfaced as a writable dir.
+            worktree (Path | None): Write-isolated worktree, when present.
+            allowed_tools (tuple[str, ...]): Per-task tool whitelist.
+            backend (str): Backend to build for; resolved from the config /
+                credential shape when empty.
+
+        Returns:
+            list[str]: The full command argv to spawn.
+
+        Raises:
+            SpecialistAgentUnavailableError: If the selected CLI has no runtime
+                or cannot be pointed at the deployment's gateway.
+        """
+        selected = backend or self._agent_backend()
+        if selected == AGENT_BACKEND_CODEX:
+            return self._build_codex_cmd(
+                prompt_file=prompt_file,
+                workspace=workspace,
+                worktree=worktree,
+            )
+        return self._build_claude_cmd(
+            prompt_file=prompt_file,
+            workspace=workspace,
+            worktree=worktree,
+            allowed_tools=allowed_tools,
+        )
+
+    def _writable_dirs(self, workspace: Path, worktree: Path | None) -> list[str]:
+        """Return the dirs an agent CLI may write, in precedence order.
+
+        Worktree first (where patches are authored), then the workspace (where
+        ``specialist_done.json`` lands), then each distinct framework source root.
+
+        Args:
+            workspace (Path): Task workspace.
+            worktree (Path | None): Per-task worktree, when present.
+
+        Returns:
+            list[str]: Directory paths, de-duplicated, in order.
+        """
+        dirs: list[str] = []
+        if worktree is not None:
+            dirs.append(str(worktree))
+        dirs.append(str(workspace))
+        for root in self.config.framework_source_roots:
+            if root and Path(root).is_dir() and root not in dirs:
+                dirs.append(root)
+        return dirs
+
+    def _build_codex_cmd(
+        self,
+        *,
+        prompt_file: Path,
+        workspace: Path,
+        worktree: Path | None,
+    ) -> list[str]:
+        """Assemble the ``codex exec`` argv for a specialist subprocess.
+
+        ``--json`` is the Codex counterpart of the claude backend's
+        ``--print --output-format stream-json``: one event per line on stdout,
+        which lands in ``process.log`` and is what the codex parsers read.
+
+        The gateway is wired with the same ``-c`` provider overrides the Codex
+        SDK session builds, so the CLI and SDK runtimes cannot drift apart or
+        disagree about which credential to use. The API key crosses as an env-var
+        NAME only, never a value, so it stays out of argv.
+
+        The prompt travels in argv rather than on stdin because the Ray
+        GPU-specialist actor launches this argv remotely and cannot pipe a
+        stdin; ``--skip-git-repo-check`` is needed because a readonly specialist
+        runs straight in its workspace, which is not a checkout.
+
+        Codex has no ``--allowedTools`` counterpart — its tool set is fixed — so
+        the per-task whitelist reaches the specialist only as the prompt
+        contract, and the write scope is enforced by the sandbox dirs instead.
+        It likewise has no ``--mcp-config`` counterpart (MCP servers are declared
+        in its own config file), so :attr:`SpecialistSubprocessConfig.mcp_config_path`
+        does not apply and a codex specialist has no PR-monitor MCP tools.
+
+        Args:
+            prompt_file (Path): Combined system+user prompt file; its text is
+                passed as the turn's prompt.
+            workspace (Path): Task workspace, exposed as a writable dir.
+            worktree (Path | None): Write-isolated worktree, when present.
+
+        Returns:
+            list[str]: The full command argv to spawn.
+
+        Raises:
+            SpecialistAgentUnavailableError: If no Codex runtime resolves, or the
+                OpenAI-side gateway config is incomplete.
+        """
+        cfg = self.config
+        executable = resolve_codex_executable(cfg.codex_executable)
+        if not executable:
+            raise SpecialistAgentUnavailableError(
+                "no codex CLI found: set SpecialistSubprocessConfig.codex_executable, "
+                "install `codex` on $PATH, or install the Codex SDK runtime "
+                "(pip install 'hyperloom-inference_optimizer[llm]')"
+            )
+        # Reuse the SDK session's gateway wiring verbatim (see above).
+        from hyperloom.common.codex_session import CodexSessionError, codex_provider_overrides
+
+        try:
+            provider_overrides = codex_provider_overrides()
+        except CodexSessionError as exc:
+            raise SpecialistAgentUnavailableError(f"codex gateway is not configured: {exc}") from exc
+
+        writable_dirs = self._writable_dirs(workspace, worktree)
+        cmd: list[str] = [executable, "exec", "--json", "--skip-git-repo-check"]
+        if cfg.codex_bypass_sandbox:
+            cmd.append("--dangerously-bypass-approvals-and-sandbox")
+        # Primary working root; the reap loop spawns with the same cwd.
+        cmd.extend(["-C", str(worktree or workspace)])
+        for extra_dir in writable_dirs[1:]:
+            cmd.extend(["--add-dir", extra_dir])
+        # ``features.memories=false`` matches the SDK session: a specialist must
+        # not carry state between tasks.
+        for override in ("features.memories=false", *provider_overrides):
+            cmd.extend(["-c", override])
+        if cfg.model:
+            cmd.extend(["-m", cfg.model])
+        if cfg.extra_codex_args:
+            cmd.extend(list(cfg.extra_codex_args))
+        cmd.append(prompt_file.read_text(encoding="utf-8"))
+        return cmd
+
     def _build_claude_cmd(
         self,
         *,
@@ -735,10 +1058,11 @@ class SpecialistSubprocessDispatcher:
     ) -> list[str]:
         """Assemble the ``claude`` CLI argv for a specialist subprocess.
 
-        Builds the flag list (output format, permission mode, system
-        prompt file, tool whitelist, mcp config, ``--add-dir`` entries,
-        operator escape-hatch args). ``emit_intent`` is dropped from the
-        tool whitelist since the subprocess has no in-process MCP server.
+        The Anthropic-side half of :meth:`_build_agent_cmd`. Builds the flag list
+        (output format, permission mode, system prompt file, tool whitelist, mcp
+        config, ``--add-dir`` entries, operator escape-hatch args).
+        ``emit_intent`` is dropped from the tool whitelist since the subprocess
+        has no in-process MCP server.
 
         Args:
             prompt_file (Path): Combined system+user prompt file passed via
@@ -779,15 +1103,7 @@ class SpecialistSubprocessDispatcher:
             cmd.extend(["--agents", cfg.leaf_agents_json or build_leaf_agents_json()])
         if cfg.mcp_config_path:
             cmd.extend(["--mcp-config", cfg.mcp_config_path])
-        # --add-dir order: worktree (writes), workspace (done.json), framework roots.
-        add_dirs: list[str] = []
-        if worktree is not None:
-            add_dirs.append(str(worktree))
-        add_dirs.append(str(workspace))
-        for r in cfg.framework_source_roots:
-            if r and Path(r).is_dir() and r not in add_dirs:
-                add_dirs.append(r)
-        for d in add_dirs:
+        for d in self._writable_dirs(workspace, worktree):
             cmd.extend(["--add-dir", d])
         if cfg.extra_claude_args:
             cmd.extend(list(cfg.extra_claude_args))
@@ -856,7 +1172,7 @@ class SpecialistSubprocessDispatcher:
         the way are forwarded to ``progress_cb`` as they change.
 
         Args:
-            proc (Any): The running claude subprocess — a ``subprocess.Popen``
+            proc (Any): The running agent subprocess — a ``subprocess.Popen``
                 (local) or a :class:`_RayLeaseProcess` (Ray GPU-specialist
                 actor). Only ``poll`` / ``returncode`` / ``pid`` are used.
             workspace (Path): Task workspace; supplies the ``process.log``
@@ -963,7 +1279,7 @@ class SpecialistSubprocessDispatcher:
 
     @staticmethod
     def _kill(proc: Any) -> None:
-        """Tear down a claude subprocess.
+        """Tear down an agent subprocess.
 
         Kills the whole process group (SIGTERM, then SIGKILL after a 5s
         grace) so child SDK / curl invocations die with it. No-op if the
@@ -1086,9 +1402,14 @@ class SpecialistSubprocessDispatcher:
 
 
 __all__ = [
+    "AGENT_BACKEND_CLAUDE",
+    "AGENT_BACKEND_CODEX",
+    "SpecialistAgentUnavailableError",
     "SpecialistSubprocessConfig",
     "SpecialistSubprocessDispatcher",
     "SpecialistSubprocessResult",
     "_pick_worktree_base",
     "_setup_worktree",
+    "resolve_codex_executable",
+    "resolve_specialist_agent_backend",
 ]
