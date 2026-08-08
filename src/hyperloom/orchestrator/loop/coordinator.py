@@ -1398,7 +1398,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
     # Max tried-candidate rows fed into the ranker/discovery working memory.
     _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
 
-    _CRITIC_PRIORS_DECISION_TAIL: int = 5
     _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
 
     # Auto-roofline — PRELUDE bootstrap + 10% watermark refresh.

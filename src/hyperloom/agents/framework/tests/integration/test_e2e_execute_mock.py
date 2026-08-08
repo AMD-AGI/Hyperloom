@@ -64,8 +64,8 @@ def test_explore_execute_mock_winner_and_kb_append(tmp_path: Path, fake_primus: 
     summary_path = tmp_path / "summary.json"
 
     env = dict(os.environ)
-    env["FRAMEWORK_AGENT_KB_DIR"] = str(kb_root)
-    env.pop("FRAMEWORK_AGENT_ROOT", None)
+    env["INFERENCE_OPTIMIZER_FA_KB_PATH"] = str(kb_root)
+    env.pop("FRAMEWORK_AGENT_KB_DIR", None)
 
     proc = subprocess.run(
         [

@@ -398,10 +398,8 @@ async def test_executor_reverts_when_live_anchor_exceeds_queued_baseline(tmp_pat
 @pytest.mark.asyncio
 async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
     """A KEEP appends an 'integrated' record to lessons.jsonl for dedup."""
-    import hyperloom.orchestrator.knowledge.kb_writeback as kb_writeback
-
     kb_root = tmp_path / "kb" / "framework_optimization"
-    monkeypatch.setattr(kb_writeback, "KB_ROOT", kb_root)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "kb"))
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -446,10 +444,8 @@ async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
 @pytest.mark.asyncio
 async def test_executor_revert_writes_kb_lessons(tmp_path: Path, monkeypatch):
     """A REVERT appends a 'reverted_smoke_fail' record for dedup."""
-    import hyperloom.orchestrator.knowledge.kb_writeback as kb_writeback
-
     kb_root = tmp_path / "kb" / "framework_optimization"
-    monkeypatch.setattr(kb_writeback, "KB_ROOT", kb_root)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "kb"))
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -796,9 +792,7 @@ def test_materialize_pr_diff_empty_when_no_ref(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_executor_checkout_head_mode_applies_and_keeps(tmp_path: Path, monkeypatch):
     """apply_mode=checkout_head extracts the PR's net diff, applies, benches (+10%), KEEPs."""
-    import hyperloom.orchestrator.knowledge.kb_writeback as kb_writeback
-
-    monkeypatch.setattr(kb_writeback, "KB_ROOT", tmp_path / "kb" / "framework_optimization")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "kb"))
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()

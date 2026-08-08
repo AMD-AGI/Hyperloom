@@ -615,8 +615,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # Bounded rollback ring of prior good orchestration_memory records;
         # Coordinator-only writer, locked in lock-step with its parent.
         "orchestration_memory_history",
-        # FRAMEWORK per-repo discovery budget; set once, locked.
-        "framework_max_candidates",
         # Advisory model-architecture profile from the SKILL launcher; locked.
         "model_arch",
         # Architecture-identity tags from config.json; locked against pollution.
@@ -1279,7 +1277,7 @@ class PolicyGate:
                 f"action {action_name!r} is Coordinator-managed and not LLM-proposable ({intent_kind})",
                 rule="phase_incompatible",
                 hint=(
-                    "roofline / profile / replay_warm_recipe / framework / "
+                    "roofline / profile / replay_warm_recipe / framework_agent / "
                     "conc_sweep are driven by the Coordinator (PRELUDE "
                     "bootstrap, +10% watermark refresh, warm-recipe replay, "
                     "FRAMEWORK pump, SWEEP-entry CONC ladder) and never appear "

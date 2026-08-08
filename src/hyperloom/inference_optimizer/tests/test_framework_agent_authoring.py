@@ -9,12 +9,16 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.actions.registry import ActionRegistry
 from hyperloom.orchestrator.framework import client as _fa_client
 from hyperloom.orchestrator.framework import paths as _framework_paths
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 from hyperloom.orchestrator.phases.framework import FrameworkPhase
+
+
+_ACTION_REGISTRY = ActionRegistry().load()
 
 
 class _StateStub:
@@ -24,7 +28,6 @@ class _StateStub:
         self.framework_agent_discover_failures = 0
         self.framework_agent_batches: list[dict[str, Any]] = []
         self.framework_agent_phase_progress: list[dict[str, Any]] = []
-        self.framework_agent_critic_decisions: list[dict[str, Any]] = []
         self.framework_agent_authoring_enabled = authoring
         # Local-exploration arm off in this suite: these tests exercise the
         # PR-authoring track; the arm has dedicated coverage elsewhere.
@@ -111,7 +114,6 @@ class _BusStub:
 class _Stub:
     """Binds the Coordinator methods the pump + helpers touch."""
 
-    _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
     _MAX_REPEATED_REVIEW_SUBMISSIONS = Coordinator._MAX_REPEATED_REVIEW_SUBMISSIONS
     _collect_framework_agent_candidate_priors = Coordinator._collect_framework_agent_candidate_priors
@@ -153,6 +155,8 @@ class _Stub:
     # Stub has no GPU pool, so ``_framework_gpu_params`` degrades to ``{}``.
     _coerce_needs_gpu = staticmethod(Coordinator._coerce_needs_gpu)
     _framework_authoring_lanes_ttl = Coordinator._framework_authoring_lanes_ttl
+    # The raw-diff track resolves its lanes and lease TTL from the registry.
+    _registry_lanes_ttl = DispatcherCollaborator._registry_lanes_ttl
 
     def _framework_gpu_params(self) -> dict[str, Any]:
         return {}
@@ -160,6 +164,7 @@ class _Stub:
     def __init__(self, tmp_path: Path, *, authoring: bool = True) -> None:
         self.session_dir = tmp_path
         self.shared_state = _StateStub(authoring=authoring)
+        self.action_registry = _ACTION_REGISTRY
         self.tasks = _TasksStub()
         self.framework_agent_discover_timeout_sec = 0.0
         self.backends: dict[str, Any] = {"critic": _ApproveCritic()}
@@ -862,9 +867,7 @@ def test_pump_audit_skip_records_terminal_row_no_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """already_equivalent audit -> skip: no Critic, no tasks, terminal row + KB."""
-    import hyperloom.orchestrator.knowledge.kb_writeback as kb_writeback
-
-    monkeypatch.setattr(kb_writeback, "KB_ROOT", tmp_path / "kb" / "framework_optimization")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "kb"))
 
     async def _discover(**_: Any) -> dict[str, Any]:
         return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
