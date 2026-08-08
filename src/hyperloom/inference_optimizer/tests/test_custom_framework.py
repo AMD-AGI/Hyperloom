@@ -318,6 +318,12 @@ class TestLaunchValidation:
 
         return Namespace(framework_path=None, benchmark_scripts_dir=None, **kw)
 
+    @pytest.fixture(autouse=True)
+    def _bypass_backend(self, monkeypatch):
+        # custom refuses to launch on any other backend; the path assertions in
+        # this class are about the paths, so give them the one that is valid.
+        monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
+
     def test_custom_without_its_paths_exits_instead_of_running(self, monkeypatch):
         """Failing here beats failing at the first benchmark, half an hour in."""
         from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
@@ -354,6 +360,57 @@ class TestLaunchValidation:
         _apply_operator_supplied_paths(args, "custom")
         assert os.environ["FRAMEWORK_REPO_PATH"] == str(repo.resolve())
         assert os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == str(scripts.resolve())
+
+    @pytest.mark.parametrize("backend", ["", "magpie", "MAGPIE", "  ", "bypasss", "none"])
+    def test_custom_refuses_a_backend_that_cannot_run_the_script(
+        self, monkeypatch, tmp_path, backend
+    ):
+        """The default backend is Magpie, which cannot run an operator's script.
+
+        Nothing downstream rejects the pairing, so an unset or wrong value used
+        to be accepted and the run simply took the wrong executor.
+        """
+        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+
+        repo, scripts = tmp_path / "fw", tmp_path / "sc"
+        repo.mkdir()
+        scripts.mkdir()
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
+        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
+        monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", backend)
+        args = self._args()
+        args.framework_path = str(repo)
+        args.benchmark_scripts_dir = str(scripts)
+
+        with pytest.raises(SystemExit) as exc:
+            _apply_operator_supplied_paths(args, "custom")
+        assert exc.value.code == 2
+
+    @pytest.mark.parametrize("backend", ["bypass", "  Bypass  ", "BYPASS"])
+    def test_custom_accepts_bypass_however_it_is_spelled(self, monkeypatch, tmp_path, backend):
+        """Normalisation matches install.sh's, so the two gates cannot disagree."""
+        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+
+        repo, scripts = tmp_path / "fw", tmp_path / "sc"
+        repo.mkdir()
+        scripts.mkdir()
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
+        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
+        monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", backend)
+        args = self._args()
+        args.framework_path = str(repo)
+        args.benchmark_scripts_dir = str(scripts)
+
+        _apply_operator_supplied_paths(args, "custom")
+        assert os.environ["FRAMEWORK_REPO_PATH"] == str(repo.resolve())
+
+    def test_a_shipped_framework_keeps_its_backend_freedom(self, monkeypatch):
+        """The gate is scoped to custom; xdit/sglang launches are untouched."""
+        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+
+        monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
+        for framework in ("sglang", "vllm", "xdit", "hunyuan_image3"):
+            _apply_operator_supplied_paths(self._args(), framework)
 
     def test_a_shipped_framework_needs_neither_flag(self, monkeypatch):
         from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths

@@ -140,9 +140,27 @@ def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
 
     ``custom`` has no shipped checkout or entrypoint to fall back on, so a
     missing or non-existent directory is fatal here rather than at the first
-    benchmark, half an hour in.
+    benchmark, half an hour in. The benchmark backend is checked for the same
+    reason: it defaults to Magpie, which cannot run an operator's script at all,
+    and nothing downstream rejects the combination — the run would simply take
+    the wrong executor and fail somewhere less obvious.
     """
     fatal: list[str] = []
+    if framework == "custom":
+        from hyperloom.orchestrator.actions.executors.benchmark_backend import (
+            BENCHMARK_BACKEND_ENV,
+            DEFAULT_BENCHMARK_BACKEND,
+        )
+
+        # Matches install.sh's normalisation so the two gates agree on a value
+        # like " Bypass "; anything else, including unset, is refused.
+        backend = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip().lower()
+        if backend != "bypass":
+            shown = f"{backend!r}" if backend else f"unset (defaults to {DEFAULT_BENCHMARK_BACKEND!r})"
+            fatal.append(
+                f"--framework custom requires {BENCHMARK_BACKEND_ENV}=bypass; it is {shown}. "
+                "The default backend cannot run an operator-supplied script."
+            )
     for flag, value, env_name in (
         ("--framework-path", getattr(args, "framework_path", None), "FRAMEWORK_REPO_PATH"),
         (
