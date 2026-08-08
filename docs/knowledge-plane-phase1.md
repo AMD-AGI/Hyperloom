@@ -21,8 +21,7 @@ does not select local mode.
 
 This is a breaking mode cutover. Recipe remote mode now requires `KB_STORE_URL`
 and `KB_STORE_TOKEN`. GBrain credentials do not satisfy or select Recipe remote
-mode. `RECIPE_KB_MIRROR_MODE` is obsolete; remove it from launchers, ConfigMaps,
-and secrets rather than using it to select behavior.
+mode.
 
 Local mode is local-only. Remote mode writes one final Recipe session to KB
 Store at CLOSE; neither mode performs an inline mirror or dual write.
@@ -103,7 +102,8 @@ Hyperloom's `KernelExperienceBridge` only:
 1. validates and forwards the shared mode/root;
 2. forwards validated KB Store credentials in Recipe remote mode and strips
    them in local mode;
-3. keeps optional GBrain credentials available for non-Recipe capabilities;
+3. keeps optional GBrain credentials in the Hyperloom parent for KG/Framework
+   PR clients, but never forwards them to KernelForge children;
 4. forces the legacy `KERNELFORGE_GBRAIN_ENABLED` Recipe-derived flag off; and
 5. collects bounded capability/result provenance returned by KernelForge.
 

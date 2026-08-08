@@ -480,7 +480,7 @@ async def test_recipe_kb_t4_hook_short_circuits_when_sequencer_done(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Path):
-    """Crash / Ctrl-C path: sequencer didn't run, so ``_recipe_kb_t4_hook`` MUST call recipe-finalize."""
+    """Graceful teardown/Ctrl-C fallback calls finalize when CLOSE did not."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -499,14 +499,14 @@ async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Pa
     coord.shared_state.recipe_kb_session_id = "sid-fallback"
     coord.shared_state.close_sequence_done = False
 
-    finalize_calls: list[int] = []
+    finalize_calls: list[str] = []
 
-    def _spy() -> None:
-        finalize_calls.append(1)
+    def _spy(*, source: str) -> None:
+        finalize_calls.append(source)
 
     coord.finalize_recipe_and_journal = _spy  # type: ignore[method-assign]
     await coord._recipe_kb_t4_hook()
-    assert finalize_calls == [1]
+    assert finalize_calls == ["t4_fallback"]
 
 
 @pytest.mark.asyncio
@@ -535,14 +535,16 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
     coord.shared_state.recipe_kb_session_id = ""
     coord.shared_state.close_sequence_done = False
 
-    finalize_calls: list[int] = []
+    finalize_calls: list[str] = []
     save_calls: list[Path] = []
-    coord.finalize_recipe_and_journal = lambda: finalize_calls.append(1)  # type: ignore[method-assign]
+    coord.finalize_recipe_and_journal = (  # type: ignore[method-assign]
+        lambda *, source: finalize_calls.append(source)
+    )
     coord.shared_state.save = lambda path: save_calls.append(path)  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
 
-    assert finalize_calls == [1]
+    assert finalize_calls == ["t4_fallback"]
     assert save_calls == [session_dir]
 
 

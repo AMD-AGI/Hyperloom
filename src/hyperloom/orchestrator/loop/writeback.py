@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from hyperloom.common.coerce import to_float, to_str_list
+from hyperloom.common.io import append_jsonl
 from ..state.optimization_journal import (
     Journal,
     JournalEntry,
@@ -1581,7 +1582,63 @@ class WritebackCollaborator:
             ],
         }
 
-    def finalize_recipe_and_journal(self) -> None:
+    def _record_remote_recipe_audit(
+        self,
+        *,
+        source: str,
+        status: str,
+        canonical_id: str,
+        session_id: str,
+        optimized_throughput: float = 0.0,
+        reason: str = "",
+        error_type: str = "",
+    ) -> None:
+        """Append one best-effort, secret-free KB Store publish audit row."""
+        try:
+            from hyperloom.inference_optimizer.session.session_paths import (
+                recipe_snapshot_audit_jsonl,
+            )
+
+            row: dict[str, Any] = {
+                "ts": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+                "op": "write",
+                "method": "write",
+                "mode": "remote",
+                "backend": "kb-store",
+                "remote": "kb-store",
+                "resolution": status,
+                "success": status in {"written", "skipped"},
+                "generator": source,
+                "phase": "CLOSE",
+                "status": status,
+                "reason": reason,
+                "request": {
+                    "canonical_id": canonical_id or None,
+                    "session_id": session_id or None,
+                },
+                "result": {
+                    "canonical_id": canonical_id,
+                    "session_id": session_id,
+                    "created": status == "written",
+                    "best_throughput": optimized_throughput,
+                },
+                "provenance": {
+                    "component": "remote_recipe",
+                    "source": source,
+                },
+            }
+            if error_type:
+                row["error"] = {"type": error_type}
+            append_jsonl(
+                recipe_snapshot_audit_jsonl(self.session_dir),
+                row,
+                make_parents=True,
+                sort_keys=True,
+            )
+        except Exception:  # noqa: BLE001 - audit cannot break finalization
+            log.debug("Remote Recipe KB audit append failed", exc_info=True)
+
+    def finalize_recipe_and_journal(self, *, source: str = "close") -> None:
         """Finalize the journal and exactly one mode-selected Recipe backend."""
         try:
             journal = self._ensure_journal()
@@ -1613,15 +1670,16 @@ class WritebackCollaborator:
         if config.mode is KnowledgeStoreMode.REMOTE:
             # Remote mode has one Recipe sink: the KB Store final session
             # writer. T0 and runtime amendment are intentionally absent.
+            remote_cid = ""
+            remote_sid = str(
+                getattr(self.shared_state, "recipe_kb_session_id", "")
+                or getattr(self.shared_state, "session_id", "")
+                or self.session_dir.name
+            )
             try:
                 from ..knowledge.remote_recipe import HyperloomRemoteKB
 
                 remote_cid = self._workload_canonical_id()
-                remote_sid = str(
-                    getattr(self.shared_state, "recipe_kb_session_id", "")
-                    or getattr(self.shared_state, "session_id", "")
-                    or self.session_dir.name
-                )
                 remote_result = HyperloomRemoteKB.from_env().write(
                     remote_cid,
                     self.shared_state,
@@ -1634,7 +1692,22 @@ class WritebackCollaborator:
                     remote_cid,
                     remote_result.session_id,
                 )
-            except Exception:  # noqa: BLE001 - remote transport is best-effort
+                self._record_remote_recipe_audit(
+                    source=source,
+                    status=remote_result.status,
+                    canonical_id=remote_cid,
+                    session_id=remote_result.session_id,
+                    optimized_throughput=remote_result.optimized_throughput,
+                    reason=remote_result.reason,
+                )
+            except Exception as exc:  # noqa: BLE001 - remote transport is best-effort
+                self._record_remote_recipe_audit(
+                    source=source,
+                    status="error",
+                    canonical_id=remote_cid,
+                    session_id=remote_sid,
+                    error_type=type(exc).__name__,
+                )
                 log.exception("Remote Recipe KB finalize failed (non-fatal)")
             return
 

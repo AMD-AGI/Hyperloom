@@ -36,7 +36,6 @@ def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
         "GBRAIN_TOKEN",
         "KB_STORE_URL",
         "KB_STORE_TOKEN",
-        "RECIPE_KB_MIRROR_MODE",
     ):
         monkeypatch.delenv(key, raising=False)
 
