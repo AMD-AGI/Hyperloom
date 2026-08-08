@@ -132,15 +132,30 @@ def _default_claude_model() -> str:
 
 
 def _resolve_provider(provider: str = "") -> str:
-    """Resolve the explicitly configured source-resolution provider."""
+    """Resolve the explicit provider or infer it from canonical credential shape.
+
+    The role-specific override wins. Otherwise Anthropic-only deployments use
+    the native Claude path, while any configured OpenAI side uses the OpenAI
+    path. The latter preserves the project's OpenAI default for dual-configured
+    single-shot roles.
+    """
     raw = str(provider or os.environ.get(_PROVIDER_ENV) or "").strip().lower()
-    resolved = _PROVIDER_ALIASES.get(raw)
-    if resolved:
-        return resolved
     supported = "claude_agent_sdk, openai_compatible"
-    if not raw:
-        raise RuntimeError(f"{_PROVIDER_ENV} is not set; choose one of: {supported}")
-    raise RuntimeError(f"unsupported {_PROVIDER_ENV}={raw!r}; choose one of: {supported}")
+    if raw:
+        resolved = _PROVIDER_ALIASES.get(raw)
+        if resolved:
+            return resolved
+        raise RuntimeError(f"unsupported {_PROVIDER_ENV}={raw!r}; choose one of: {supported}")
+
+    from hyperloom.common import llm_config  # noqa: PLC0415 - keep standalone import-light
+
+    if llm_config.is_anthropic_only():
+        return _PROVIDER_CLAUDE
+    if llm_config.has_openai_side():
+        return _PROVIDER_OPENAI
+    raise RuntimeError(
+        f"{_PROVIDER_ENV} is not set and no provider credentials are configured; choose one of: {supported}"
+    )
 
 
 def _resolve_model(model: str = "", provider: str = "") -> str:
@@ -159,9 +174,7 @@ def _endpoint_host(provider: str) -> str:
         raw = str(os.environ.get("OPENAI_BASE_URL") or "").strip()
         default = "api.openai.com"
     else:
-        raw = str(
-            os.environ.get("ANTHROPIC_BASE_URL") or os.environ.get("DEEPSEEK_BASE_URL") or ""
-        ).strip()
+        raw = str(os.environ.get("ANTHROPIC_BASE_URL") or os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
         default = "provider-default"
     if not raw:
         return default
@@ -169,11 +182,11 @@ def _endpoint_host(provider: str) -> str:
 
 
 def llm_source_provider_configured() -> bool:
-    """Whether an explicit source-resolution provider is selected.
+    """Whether source resolution has an explicit or inferred provider.
 
     Lets a caller skip the work it would only do in order to build a request --
-    the shortlist grep walks every framework root -- when no provider is
-    configured and the call would be declined anyway.
+    the shortlist grep walks every framework root -- when neither the role
+    override nor a canonical credential side can select a provider.
     """
     try:
         _resolve_provider()
@@ -435,7 +448,7 @@ def _complete_claude_sdk(prompt: str, model: str, timeout_sec: float) -> str:
 
 
 def _complete(prompt: str, model: str, timeout_sec: float) -> str:
-    """Route one completion through the explicitly selected native provider."""
+    """Route one completion through the selected native provider."""
     provider = _resolve_provider()
     if provider == _PROVIDER_CLAUDE:
         return _complete_claude_sdk(prompt, model, timeout_sec)
@@ -475,6 +488,7 @@ def select_source_via_llm(
         ``(source_file, confidence, reason)``; ``source_file`` is ``""`` on any
         failure, including a low-confidence answer.
     """
+
     def _say(message: str) -> None:
         if callable(log):
             log(f"llm_source_fallback: {message}")
