@@ -335,104 +335,6 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
     return {"items": [record]}
 
 
-def build_kernel_geak_value(state: Any, files: _Files) -> dict[str, Any]:
-    """Build only same-harness E2E-validated GEAK winners and their artifacts."""
-    stack_rows = [
-        dict(item)
-        for item in (getattr(state, "optimization_stack", []) or [])
-        if isinstance(item, Mapping) and str(item.get("action") or "").lower() == "geak_e2e"
-    ]
-    if not stack_rows:
-        return {"items": []}
-    result = _mapping(getattr(state, "geak_result", {}))
-    if str(result.get("status") or "").lower() != "ok":
-        result = {}
-    current_best = _mapping(getattr(state, "current_best", {}))
-    baseline = _number(getattr(state, "baseline_tput", 0.0))
-    rows: list[dict[str, Any]] = []
-    for entry in stack_rows:
-        optimized_throughput = _number(entry.get("tput"))
-        gain = (
-            (optimized_throughput - baseline) / baseline * 100.0
-            if baseline > 0 and optimized_throughput > 0
-            else 0.0
-        )
-
-        def add_required_file(source: Any, *, kind: str) -> str:
-            if not str(source or "").strip():
-                return ""
-            ref = files.add(source, category="kernel/geak", kind=kind)
-            if not ref:
-                raise RemoteRecipeValidationError(
-                    f"accepted kernel/geak {kind} cannot be materialized: {source!r}"
-                )
-            return ref
-
-        report = add_required_file(
-            entry.get("report_path") or result.get("report_path"),
-            kind="reports",
-        )
-        launch_script = add_required_file(
-            current_best.get("geak_launch_script") or result.get("final_launch_script"),
-            kind="launch",
-        )
-        bench_script = add_required_file(
-            current_best.get("geak_bench_script") or result.get("bench_script"),
-            kind="launch",
-        )
-        overlay_source = (
-            entry.get("final_overlay")
-            or current_best.get("final_overlay")
-            or result.get("final_overlay")
-        )
-        overlay_files: list[str] = []
-        if str(overlay_source or "").strip():
-            overlay_root = Path(str(overlay_source))
-            nested_overlay = overlay_root / "overlay"
-            if overlay_root.is_dir() and nested_overlay.is_dir():
-                overlay_root = nested_overlay
-            overlay_files = files.add_tree(
-                overlay_root,
-                category="kernel/geak",
-                kind="overlay",
-            )
-            if not overlay_files:
-                raise RemoteRecipeValidationError(
-                    f"accepted kernel/geak overlay is empty: {overlay_root}"
-                )
-        row_id = hashlib.sha256(
-            (
-                f"{entry.get('ts')}|{entry.get('variant_name')}|"
-                f"{optimized_throughput}|{overlay_source}"
-            ).encode()
-        ).hexdigest()[:16]
-        rows.append(
-            {
-                "id": f"geak-{row_id}",
-                "optimized_throughput": optimized_throughput,
-                "e2e_gain_pct": gain,
-                "extra_server_args": str(
-                    entry.get("candidate_extra_server_args")
-                    or entry.get("extra_server_args")
-                    or ""
-                ),
-                "extra_envs": {
-                    str(key): str(value)
-                    for key, value in _mapping(entry.get("extra_envs")).items()
-                },
-                "accepted_kernels": list(entry.get("accepted_kernels") or []),
-                "accepted_heads": list(entry.get("accepted_heads") or []),
-                "self_reported_speedup": _number(result.get("throughput_speedup")),
-                "alignment": _mapping(current_best.get("geak_alignment")),
-                "report": report,
-                "launch_script": launch_script,
-                "bench_script": bench_script,
-                "overlay_files": overlay_files,
-            }
-        )
-    return {"items": rows}
-
-
 def _match_rewrite_attempt(
     integrate: Mapping[str, Any],
     attempts: Mapping[str, Any],
@@ -619,7 +521,6 @@ def build_remote_knowledge(state: Any, files_dir: str | Path) -> KnowledgeBundle
             "explore": build_explore_value(state, explore_entries, files),
             "framework": build_framework_value(state, framework_entries, files),
             "kernel": {
-                "geak": build_kernel_geak_value(state, files),
                 "gemm": build_kernel_gemm_value(state, files),
                 "fusion": build_kernel_fusion_value(state, files),
                 "rewrite": build_kernel_rewrite_value(state, files),
@@ -689,10 +590,22 @@ def envelope_to_v1_recipe(envelope: Mapping[str, Any]) -> dict[str, Any]:
     if knowledge_version == 1:
         legacy = _mapping(value.get("legacy_recipe")) or knowledge
         row = dict(legacy)
+        best_config = _mapping(row.get("best_config"))
+        row["best_config"] = {
+            "extra_server_args": str(
+                best_config.get("extra_server_args")
+                or best_config.get("args")
+                or ""
+            ),
+            "extra_envs": _mapping(
+                best_config.get("extra_envs") or best_config.get("envs")
+            ),
+        }
         row["canonical_id"] = str(
             envelope.get("canonical_id") or row.get("canonical_id") or ""
         )
-        row.setdefault("prs_tested", [])
+        # Remote warm replay is intentionally config/env-only in phase 1.
+        row["prs_tested"] = []
         row["remote_session_id"] = str(envelope.get("session_id") or "")
         row["remote_schema_version"] = int(envelope.get("schema_version") or 2)
         row["knowledge_schema_version"] = 1
@@ -741,7 +654,6 @@ __all__ = [
     "build_explore_value",
     "build_framework_value",
     "build_kernel_fusion_value",
-    "build_kernel_geak_value",
     "build_kernel_gemm_value",
     "build_kernel_rewrite_value",
     "build_remote_knowledge",
