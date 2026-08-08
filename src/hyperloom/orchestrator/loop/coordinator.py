@@ -1409,7 +1409,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self.db.close()
 
     async def _recipe_kb_t4_hook(self) -> None:
-        """T4 — finalize recipe at session end. Safety net for crash/Ctrl-C where CLOSE sequencer didn't run; no-op when close_sequence_done."""
+        """Finalize on graceful teardown/Ctrl-C when CLOSE did not finish.
+
+        This in-process hook cannot run after SIGKILL, container force-delete,
+        host loss, or interpreter failure.
+        """
         if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
             return
         if getattr(self.shared_state, "close_sequence_done", False):
@@ -1422,7 +1426,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 sid = (self.shared_state.recipe_kb_session_id or "").strip()
                 if not sid:
                     return
-            self.finalize_recipe_and_journal()
+            self.finalize_recipe_and_journal(source="t4_fallback")
         except Exception:  # noqa: BLE001 — defensive
             log.exception("recipe KB T4 fact_finalize fallback failed")
         try:

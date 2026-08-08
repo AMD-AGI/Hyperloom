@@ -621,6 +621,7 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
                 status="written",
                 reason="",
                 session_id=session_id,
+                optimized_throughput=10.0,
             )
 
     monkeypatch.setattr(
@@ -636,6 +637,21 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
             tmp_path.name,
         )
     ]
+    from hyperloom.inference_optimizer.session.session_paths import (
+        recipe_snapshot_audit_jsonl,
+    )
+
+    audit_rows = [
+        json.loads(line)
+        for line in recipe_snapshot_audit_jsonl(tmp_path)
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert audit_rows[-1]["status"] == "written"
+    assert audit_rows[-1]["generator"] == "close"
+    assert audit_rows[-1]["result"]["canonical_id"] == (
+        "inference:m:h:f:mt:a:v:p"
+    )
 
 
 def test_remote_close_transport_failure_is_nonfatal(
@@ -669,6 +685,15 @@ def test_remote_close_transport_failure_is_nonfatal(
         ),
     )
     WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    from hyperloom.inference_optimizer.session.session_paths import (
+        recipe_snapshot_audit_jsonl,
+    )
+
+    row = json.loads(
+        recipe_snapshot_audit_jsonl(tmp_path).read_text(encoding="utf-8")
+    )
+    assert row["status"] == "error"
+    assert row["error"]["type"] == "OSError"
 
 
 class _FakeStore:

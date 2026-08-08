@@ -18,7 +18,6 @@ Hyperloom uses a recipe-snapshot KB and selects exactly one store:
 | Remote Recipe KB | KB Store | Selected only by `KNOWLEDGE_STORE_MODE=remote`; writes one final session at CLOSE. |
 
 Ambient KB Store or GBrain credentials do not select remote mode.
-`RECIPE_KB_MIRROR_MODE` is obsolete and ignored.
 
 ---
 
@@ -94,6 +93,11 @@ does not construct the legacy Recipe dispatcher, does not fall back to local
 Recipe data, and currently skips T0 warm replay and runtime amendments. CLOSE
 performs one best-effort final write. Optional `GBRAIN_*` credentials remain
 available only to non-Recipe KG and Framework PR capabilities.
+
+Graceful teardown and Ctrl-C retry an unfinished CLOSE write through the T4
+fallback. No in-process hook can run after SIGKILL, container force-deletion,
+host loss, or interpreter failure; preserving CLOSE-only knowledge across those
+failures requires the platform to resume the durable session and finalize it.
 
 ---
 

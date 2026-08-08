@@ -32,7 +32,6 @@ def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
         "KB_STORE_TOKEN",
         "KNOWLEDGE_LOCAL_ROOT",
         "KNOWLEDGE_STORE_MODE",
-        "RECIPE_KB_MIRROR_MODE",
     ):
         monkeypatch.delenv(key, raising=False)
 
