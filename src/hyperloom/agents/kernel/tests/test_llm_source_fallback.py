@@ -383,8 +383,13 @@ def test_provider_aliases_route_to_native_backends(monkeypatch, configured, expe
     assert calls == [expected]
 
 
-def test_openai_provider_adapter_uses_sanitized_client_configuration(monkeypatch):
-    """The OpenAI adapter must forward only validated client configuration."""
+def test_openai_provider_adapter_uses_the_sanctioned_client_contract(monkeypatch):
+    """The OpenAI adapter must get its client from ``llm_config``, not build one.
+
+    Credential resolution is asserted by ``llm_config``'s own tests; what matters
+    here is that the adapter goes through the contract and sends the request the
+    fallback expects.
+    """
     captured = {}
 
     def _create(**kwargs):
@@ -396,24 +401,21 @@ def test_openai_provider_adapter_uses_sanitized_client_configuration(monkeypatch
     class Client:
         """Minimal OpenAI client surface used by the adapter."""
 
-        def __init__(self, **kwargs):
-            """Capture constructor options and expose chat completions."""
-            captured["client"] = kwargs
+        def __init__(self):
+            """Expose the chat-completions surface the contract calls."""
             completions = types.SimpleNamespace(create=_create)
             self.chat = types.SimpleNamespace(completions=completions)
 
-    fake_openai = types.ModuleType("openai")
-    fake_openai.OpenAI = Client
-    monkeypatch.setitem(sys.modules, "openai", fake_openai)
-    monkeypatch.setattr(
-        "hyperloom.common.llm_config.openai_client_kwargs",
-        lambda: {"api_key": "configured-key", "base_url": "https://gateway.example/v1"},
-    )
+    def _get_client(**kwargs):
+        captured["client_kwargs"] = kwargs
+        return Client()
+
+    monkeypatch.setattr("hyperloom.common.llm_config.get_openai_client", _get_client)
 
     reply = lsf._complete_openai("prompt", "source-model", 7.5)
 
     assert reply == "provider reply"
-    assert captured["client"]["base_url"] == "https://gateway.example/v1"
+    assert captured["client_kwargs"] == {}
     assert captured["request"] == {
         "model": "source-model",
         "messages": [
