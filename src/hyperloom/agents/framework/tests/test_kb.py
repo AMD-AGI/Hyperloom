@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -168,6 +169,99 @@ class TestMigrateLegacyPartition:
 
     def test_no_legacy_data_is_not_an_error(self, tmp_path: Path) -> None:
         assert kb.migrate_legacy_partition_once() is None
+
+
+class TestMigrationCannotStopTheRun:
+    """A convenience copy must never be able to take a session down with it.
+
+    A missing ledger is a cold start, which the FRAMEWORK phase handles, so the
+    worst outcome of a failed migration is re-proposing a PR. A session that
+    disabled the phase entirely never reads this KB at all. Neither justifies
+    refusing to start, which is what a full disk or one unreadable file would
+    otherwise have caused.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _legacy_data(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
+        legacy = tmp_path / "workspace" / "kb" / "framework_optimization"
+        legacy.mkdir(parents=True)
+        (legacy / "lessons.jsonl").write_text('{"pr_url": "PR-1"}', encoding="utf-8")
+
+    @staticmethod
+    def _break_copy(monkeypatch: pytest.MonkeyPatch, exc: BaseException) -> None:
+        def _raise(*_a: object, **_k: object) -> None:
+            raise exc
+
+        monkeypatch.setattr(kb.shutil, "copytree", _raise)
+
+    def test_io_failure_warns_and_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._break_copy(monkeypatch, OSError(28, "No space left on device"))
+
+        with caplog.at_level("WARNING"):
+            assert kb.migrate_legacy_partition_once() is None
+
+        assert "could not carry the legacy partition over" in caplog.text
+
+    def test_permission_failure_warns_and_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._break_copy(monkeypatch, PermissionError(13, "Permission denied"))
+
+        assert kb.migrate_legacy_partition_once() is None
+
+    def test_unexpected_failure_still_does_not_escape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Not just OSError: nothing this helper can hit is worth the session."""
+        self._break_copy(monkeypatch, ValueError("something nobody predicted"))
+
+        assert kb.migrate_legacy_partition_once() is None
+
+    def test_start_up_still_completes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The whole start-up sequence, not just the helper, survives it."""
+        self._break_copy(monkeypatch, OSError(28, "No space left on device"))
+
+        kb.prepare_kb_environment()
+
+    def test_a_failed_copy_leaves_nothing_behind(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No staging dir survives; ``list_domains`` would report it as a domain."""
+        self._break_copy(monkeypatch, OSError(28, "No space left on device"))
+
+        kb.migrate_legacy_partition_once()
+
+        workspace = tmp_path / "workspace"
+        assert not [p for p in workspace.glob("*.migrating*")]
+        assert kb.list_domains() == []
+
+    def test_staging_is_unique_and_outside_the_kb_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Concurrent start-ups must not stage onto one another's directory.
+
+        A fixed staging name let one process's cleanup delete the copy another
+        was still writing, turning two healthy start-ups into a failed one.
+        """
+        seen: list[Path] = []
+        real_copytree = kb.shutil.copytree
+
+        def _record(src: object, dst: object, *a: object, **k: object) -> object:
+            seen.append(Path(str(dst)))
+            return real_copytree(src, dst, *a, **k)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(kb.shutil, "copytree", _record)
+
+        kb.migrate_legacy_partition_once()
+
+        assert len(seen) == 1
+        staging = seen[0]
+        assert str(os.getpid()) in staging.name
+        assert kb.mutable_kb_root() not in staging.parents
+        assert staging.parent == tmp_path / "workspace"
+
+    def test_the_loser_of_a_race_gives_up_quietly(self, tmp_path: Path) -> None:
+        """Second writer finds the destination populated and stands down."""
+        assert kb.migrate_legacy_partition_once() is not None
+        assert kb.migrate_legacy_partition_once() is None
+        assert kb.read_pr_ledger() == [{"pr_url": "PR-1"}]
 
 
 class TestListAndMatch:
