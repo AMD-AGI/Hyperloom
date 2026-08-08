@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from .. import framework_registry
-from hyperloom.common.llm_config import DEFAULT_DEEPSEEK_MODEL
+from hyperloom.common.llm_config import provider_model_defaults
 from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
@@ -151,14 +151,20 @@ def _positive_int_arg(value: str) -> int:
 
 
 def _default_claude_model_env() -> str:
-    """Resolve the default Claude model from env."""
+    """Resolve the default Claude model from env.
+
+    Runs before ``_preflight`` normalizes the environment, so it consults
+    :func:`provider_model_defaults` itself: a gateway that only serves its own
+    models must not be handed the AMD Claude default.
+    """
     explicit = (os.environ.get("CLAUDE_MODEL") or "").strip()
     if explicit:
         return explicit
-    if (os.environ.get("DEEPSEEK_API_KEY") or "").strip() or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip():
-        return (os.environ.get("DEEPSEEK_MODEL") or "").strip() or DEFAULT_DEEPSEEK_MODEL
     if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
         return (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
+    gateway_model = provider_model_defaults().get("CLAUDE_MODEL", "")
+    if gateway_model:
+        return gateway_model
     openai_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
     anthropic_url = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
     if openai_url and not anthropic_url:
@@ -177,19 +183,14 @@ def _default_codex_model_env() -> str:
     """
     anthropic_url = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
     openai_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
-    if (
-        (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
-        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
-        or anthropic_url == "https://api.deepseek.com/anthropic"
-    ) and not openai_url:
-        return (
-            os.environ.get("CLAUDE_MODEL") or os.environ.get("DEEPSEEK_MODEL") or ""
-        ).strip() or DEFAULT_DEEPSEEK_MODEL
     if anthropic_url and not openai_url:
         return (os.environ.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
     explicit = (os.environ.get("CODEX_MODEL") or "").strip()
     if explicit:
         return explicit
+    gateway_model = provider_model_defaults().get("CODEX_MODEL", "")
+    if gateway_model:
+        return gateway_model
     return DEFAULT_CODEX_MODEL
 
 
@@ -295,7 +296,30 @@ def _build_parser() -> argparse.ArgumentParser:
         "The auto-tighten guard only enforces ``--nodes 1``. "
         "--framework xdit is a server-less (scriptable) diffusion "
         "workload (xDiT): no serving server, throughput is img/s, and "
-        "the accuracy gate is an image-quality gate (LPIPS/SSIM/MSE).",
+        "the accuracy gate is an image-quality gate (LPIPS/SSIM/MSE). "
+        "--framework custom is your own workload: pass --framework-path and "
+        "--benchmark-scripts-dir instead of shipping a framework definition.",
+    )
+    opt.add_argument(
+        "--framework-path",
+        default=None,
+        metavar="DIR",
+        help="Checkout of the framework to optimize. Sets FRAMEWORK_REPO_PATH, "
+        "which is what puts the tree on PolicyGate's patch allowlist, so a "
+        "specialist may only edit source you pointed at. Required for "
+        "--framework custom; for the built-in frameworks it overrides the "
+        "checkout they would otherwise clone.",
+    )
+    opt.add_argument(
+        "--benchmark-scripts-dir",
+        default=None,
+        metavar="DIR",
+        help="Directory holding your benchmark entrypoint. Sets "
+        "HYPERLOOM_BYPASS_SCRIPTS_DIR. The entrypoint is taken as "
+        "custom_<gpu-type>.sh, or the single .sh in the directory. It must "
+        "emit a quality_gate block in its report: for a server-less workload "
+        "that gate is the only correctness signal, and a missing one scores "
+        "zero, so every candidate is rejected.",
     )
     opt.add_argument(
         "--nodes",
@@ -1414,7 +1438,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.28.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.35.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",
@@ -1422,7 +1446,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_sweep_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for SWEEP. Default: 0.12.",
+        help="Wall-clock budget cap for SWEEP. Default: 0.05.",
     )
     opt.add_argument(
         "--max-minutes-close-pct",

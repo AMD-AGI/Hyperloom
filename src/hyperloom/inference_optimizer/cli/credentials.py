@@ -21,7 +21,6 @@ log = logging.getLogger(__name__)
 
 _OFFICIAL_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _OFFICIAL_OPENAI_BASE_URL = "https://api.openai.com/v1"
-_DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
 
 # AMD Claude allowlist, ordered best-first: on a catalog miss preflight walks
 # this tuple and takes the first id the gateway actually serves, so the order
@@ -188,21 +187,8 @@ def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
     return True
 
 
-def _is_deepseek_anthropic_url(value: str | None) -> bool:
-    if not value:
-        return False
-    from urllib.parse import urlparse
-
-    parts = urlparse(str(value).strip())
-    return parts.hostname == "api.deepseek.com" and parts.path.rstrip("/") == "/anthropic"
-
-
 def _has_explicit_anthropic_key() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
-
-
-def _has_explicit_deepseek_key() -> bool:
-    return bool(os.environ.get("DEEPSEEK_API_KEY"))
 
 
 def _has_explicit_openai_key() -> bool:
@@ -239,12 +225,9 @@ def _resolve_llm_endpoints() -> tuple[str, str]:
     """
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
-    deepseek_url = os.environ.get("DEEPSEEK_BASE_URL", "").strip()
 
     if not anthropic_url and _has_explicit_anthropic_key():
         anthropic_url = _OFFICIAL_ANTHROPIC_BASE_URL
-    if not anthropic_url and _has_explicit_deepseek_key():
-        anthropic_url = deepseek_url or _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL
     if not openai_url and _has_explicit_openai_key():
         openai_url = _OFFICIAL_OPENAI_BASE_URL
     return anthropic_url, openai_url
@@ -308,18 +291,8 @@ def _reject_cross_provider_pairing() -> None:
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
     openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     anthropic_key = (
-        os.environ.get("ANTHROPIC_API_KEY", "").strip()
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
-        or deepseek_key
-    )
-    # DeepSeek serves its own Anthropic-compatible endpoint, so its key carries an
-    # implied base URL.
-    anthropic_endpoint = anthropic_url or (
-        (os.environ.get("DEEPSEEK_BASE_URL", "").strip() or _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL)
-        if deepseek_key
-        else ""
+        os.environ.get("ANTHROPIC_API_KEY", "").strip() or os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
     )
     offender = ""
     if openai_url and not openai_key and anthropic_key:
@@ -332,12 +305,12 @@ def _reject_cross_provider_pairing() -> None:
             "ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an "
             "OPENAI_API_KEY is configured"
         )
-    elif openai_url and anthropic_key and not anthropic_endpoint:
+    elif openai_url and anthropic_key and not anthropic_url:
         offender = (
             "an Anthropic-side key is configured without ANTHROPIC_BASE_URL, "
             "while the OpenAI side points at OPENAI_BASE_URL"
         )
-    elif anthropic_endpoint and openai_key and not openai_url:
+    elif anthropic_url and openai_key and not openai_url:
         offender = (
             "OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the "
             "Anthropic side points at ANTHROPIC_BASE_URL"
@@ -368,9 +341,9 @@ def _validate_credentials() -> None:
 
     Requires a base URL (``OPENAI_BASE_URL`` / ``ANTHROPIC_BASE_URL``, or an
     official provider key that implies its default endpoint) plus at least one
-    key (``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` /
-    ``DEEPSEEK_API_KEY``). Split Anthropic/OpenAI entrypoints and single
-    gateways (same key under both provider env names) are both accepted.
+    key (``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN``).
+    Split Anthropic/OpenAI entrypoints and single gateways (same key under both
+    provider env names) are both accepted.
     """
     _reject_cross_provider_pairing()
     anthropic_url, openai_url = _resolve_llm_endpoints()
@@ -378,17 +351,9 @@ def _validate_credentials() -> None:
         os.environ.get("OPENAI_API_KEY")
         or os.environ.get("ANTHROPIC_API_KEY")
         or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-        or os.environ.get("DEEPSEEK_API_KEY")
     )
     has_usable_endpoint = bool(
-        (
-            anthropic_url
-            and (
-                os.environ.get("ANTHROPIC_API_KEY")
-                or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-                or os.environ.get("DEEPSEEK_API_KEY")
-            )
-        )
+        (anthropic_url and (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")))
         or (openai_url and os.environ.get("OPENAI_API_KEY"))
     )
     if has_usable_endpoint and has_key:
@@ -398,9 +363,7 @@ def _validate_credentials() -> None:
     if not has_usable_endpoint:
         missing.append("a usable endpoint/key pair")
     if not has_key:
-        missing.append(
-            "an API key (OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / DEEPSEEK_API_KEY)"
-        )
+        missing.append("an API key (OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN)")
     repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
     env_file = Path(repo_root) / ".env"
     env_status = "present" if env_file.exists() else "not found"
@@ -421,9 +384,12 @@ def _validate_credentials() -> None:
         "     both providers is this shape: point both URLs at it and set both\n"
         "     keys, even when the key value is the same.\n"
         "     Official provider keys may omit the matching *_BASE_URL.\n"
-        "  4. DeepSeek Anthropic-compatible endpoint:\n"
-        "       export DEEPSEEK_API_KEY=sk-xxx\n"
-        "       # optional: export DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic",
+        "     A dual-protocol gateway such as DeepSeek is exactly this shape:\n"
+        "       export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic  ANTHROPIC_API_KEY=sk-xxx\n"
+        "       export OPENAI_BASE_URL=https://api.deepseek.com/v1            OPENAI_API_KEY=sk-xxx\n"
+        "     A gateway serving only its own models also needs the model ids;\n"
+        "     known hosts default themselves, otherwise set CLAUDE_MODEL (the\n"
+        "     Anthropic side) and CODEX_MODEL (the OpenAI side) yourself.",
         file=sys.stderr,
     )
     sys.exit(2)

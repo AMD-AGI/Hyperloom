@@ -67,6 +67,13 @@ class _OpenAIToolScope:
 # we bound the wait for each next SDK message (inactivity, not total). Env-overridable.
 _DEFAULT_STREAM_IDLE_TIMEOUT_SEC = 300.0
 
+# While a tool call is in flight the SDK is silent by design, so the bound above
+# would kill a working run. Session 20260803T091144Z lost its roofline exactly
+# that way: the agent launched TraceLens_generate_perf_report_pytorch over a
+# 896 MB trace and was killed at 300s, while the same command run by hand was
+# still making progress 25 minutes in.
+_DEFAULT_TOOL_IDLE_TIMEOUT_SEC = 3600.0
+
 
 def _resolve_stream_idle_timeout_sec() -> float:
     """Resolve the per-message SDK stream-idle timeout in seconds.
@@ -88,6 +95,59 @@ def _resolve_stream_idle_timeout_sec() -> float:
     if value <= 0:
         return 0.0
     return max(30.0, value)
+
+
+def _resolve_tool_idle_timeout_sec(idle_timeout: float) -> float:
+    """Resolve the idle bound that applies while an agent tool call is running.
+
+    The SDK emits nothing between the ``ToolUseBlock`` that launches a tool and
+    the result that ends it, so the plain idle timeout cannot tell a dead
+    gateway from a working tool. Reads
+    ``HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC``; floored at 30s, and a value
+    <= 0 removes the bound while a tool is in flight.
+
+    Args:
+        idle_timeout: The between-messages idle timeout, used as a floor so the
+            tool bound is never the tighter of the two.
+
+    Returns:
+        float: The in-flight idle timeout in seconds (0 disables it).
+    """
+    raw = os.environ.get("HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC", "").strip()
+    if not raw:
+        return max(_DEFAULT_TOOL_IDLE_TIMEOUT_SEC, idle_timeout)
+    try:
+        value = float(raw)
+    except ValueError:
+        return max(_DEFAULT_TOOL_IDLE_TIMEOUT_SEC, idle_timeout)
+    if value <= 0:
+        return 0.0
+    return max(30.0, value)
+
+
+def _tool_call_transition(message: Any) -> str | None:
+    """Return ``"start"`` / ``"end"`` when a message brackets a tool call.
+
+    Args:
+        message: An SDK stream message.
+
+    Returns:
+        str | None: ``"start"`` when the message launches a tool, ``"end"`` when
+            it delivers a tool result or terminates the run, else ``None``.
+    """
+    name = type(message).__name__
+    if name == "TaskStartedMessage":
+        return "start"
+    if name == "ResultMessage":
+        return "end"
+    transition: str | None = None
+    for block in list(getattr(message, "content", None) or []):
+        block_name = type(block).__name__
+        if "ToolUse" in block_name:
+            transition = "start"
+        elif "ToolResult" in block_name:
+            transition = "end"
+    return transition
 
 
 # Strips a ``Kernel N:`` label prefix from a kernel-name cell piece.
@@ -367,8 +427,6 @@ def _should_use_openai_tool_runner() -> bool:
         (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
         or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
         or (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
-        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
     )
     return has_openai and not has_anthropic
 
@@ -969,21 +1027,27 @@ async def run_tracelens_skill(
     # per-message idle timeout (inactivity, not a total budget); the in-process
     # SDK has no client-side read timeout and would otherwise block on a stall.
     idle_timeout = _resolve_stream_idle_timeout_sec()
+    tool_idle_timeout = _resolve_tool_idle_timeout_sec(idle_timeout)
+    tool_in_flight = False
     stream = sdk_query_factory(prompt=prompt, options=options)
     stream_iter = stream.__aiter__() if hasattr(stream, "__aiter__") else stream
     try:
         while True:
+            wait_for = tool_idle_timeout if tool_in_flight else idle_timeout
             try:
-                if idle_timeout > 0:
-                    message = await asyncio.wait_for(stream_iter.__anext__(), timeout=idle_timeout)
+                if wait_for > 0:
+                    message = await asyncio.wait_for(stream_iter.__anext__(), timeout=wait_for)
                 else:
                     message = await stream_iter.__anext__()
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
-                # Gateway stream stalled mid-response: abort and tear the
-                # generator down so its transport/subprocess does not leak.
-                sdk_error = f"stream idle timeout: no SDK message for {idle_timeout:.0f}s (gateway stall)"
+                # Stream went quiet past its bound: abort and tear the generator
+                # down so its transport/subprocess does not leak. Name the phase —
+                # silence during a tool call means the tool overran its bound, not
+                # that the gateway died.
+                phase = "while a tool call was in flight" if tool_in_flight else "with no tool call in flight"
+                sdk_error = f"stream idle timeout: no SDK message for {wait_for:.0f}s {phase}"
                 if log:
                     log(f"[claude-sdk] WARNING: {sdk_error}")
                 aclose = getattr(stream_iter, "aclose", None)
@@ -993,6 +1057,11 @@ async def run_tracelens_skill(
                     except (asyncio.TimeoutError, Exception):  # noqa: BLE001
                         pass
                 break
+            transition = _tool_call_transition(message)
+            if transition == "start":
+                tool_in_flight = True
+            elif transition == "end":
+                tool_in_flight = False
             if transcript_fh is not None:
                 try:
                     record = _serialize_sdk_message(message, seq=transcript_seq)
@@ -1334,18 +1403,23 @@ def _row_to_candidate(
     args = record.get("args", "").replace("<br>", "\n").strip()
     shapes = [s.strip() for s in args.split("\n") if s.strip() and s.strip() not in {"-", "—"}]
     kernel_path = record.get("kernel path", "").strip()
-    if kernel_path in {"-", "—"}:
+    # Share the launcher placeholder vocabulary so a sentinel such as TraceLens'
+    # "Not found" cannot survive as a fake source_file (see the constant).
+    if kernel_path.lower() in _LAUNCHER_PATH_PLACEHOLDERS:
         kernel_path = ""
     # Device kernel symbol(s) used to disambiguate dispatch ops; keep the full
     # list and use the first for matching. Placeholders normalize to "".
     device_kernel_names = _parse_kernel_name_cell(record.get("kernel name", ""))
     device_kernel_name = device_kernel_names[0] if device_kernel_names else ""
-    # Promote a framework-relative launcher path to its absolute on-disk source.
-    resolved_source_file = kernel_path
+    # Store only the path in source_file; line/function annotations have their
+    # own fields and otherwise make extension-based routing see an unknown file.
+    resolved_source_file, resolved_line, resolved_func = _parse_launcher_path(
+        kernel_path
+    )
     if kernel_path:
         resolved = _resolve_launcher_to_abs_source(kernel_path)
         if resolved is not None:
-            resolved_source_file, _resolved_line, _resolved_func = resolved
+            resolved_source_file, resolved_line, resolved_func = resolved
     time_ms = _safe_float(record.get("time (ms)"))
     percent_e2e = _safe_float(record.get("%e2e"))
     count_val = _safe_float(record.get("count"), 1.0)
@@ -1367,6 +1441,8 @@ def _row_to_candidate(
         "duration_us": time_ms * 1000.0,
         "call_count": int(count_val) if count_val else 0,
         "source_file": resolved_source_file,
+        "source_line": resolved_line,
+        "source_function": resolved_func or "",
         # Raw Kernel Path kept so aggregation's AST resolution survives the source_file overwrite.
         "tracelens_launcher_path": kernel_path,
         # Device kernel symbol for dispatch resolution; "" when absent.
@@ -1559,6 +1635,11 @@ _LAUNCHER_PATH_RE = re.compile(
     r"(?P<path>.+?)\((?P<line>\d+)\)\s*:\s*(?P<func>[A-Za-z_][A-Za-z0-9_]*)\s*$",
 )
 # Placeholders for unresolved Kernel Paths; must not survive parsing.
+# ``not found`` is TraceLens' own sentinel for an unresolved launcher: it lands
+# in ``other_metrics.json`` whenever ``_find_entry_point`` cannot locate the op
+# in the call stack (every Synthetic Op), and the report agent copies it
+# verbatim into the Kernel Path cell. Letting it through makes it a truthy
+# ``source_file`` that silently skips the grep fallback downstream.
 _LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset(
     {
         "",
@@ -1567,6 +1648,9 @@ _LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset(
         "–",
         "n/a",
         "none",
+        "not found",
+        "not_found",
+        "notfound",
         "null",
         "tbd",
         "unknown",
@@ -1730,16 +1814,16 @@ def _resolve_launcher_to_abs_source(
         kernel_path: The TraceLens launcher-path to resolve.
 
     Returns:
-        An ``(abs_file, line, function_name)`` tuple only when the file
-        exists, else ``None`` (a conservative miss defers to the caller's grep
-        locator).
+        An ``(abs_file, line, function_name)`` tuple for an absolute path or a
+        resolvable framework-relative file, else ``None``.
     """
     raw_path, line, func = _parse_launcher_path(kernel_path)
     if not raw_path:
         return None
     if os.path.isabs(raw_path):
-        # Already absolute — None signals "no rewrite needed".
-        return None
+        # Keep container-resident paths even when this analysis host cannot stat
+        # them; the caller still needs the annotation split into separate fields.
+        return raw_path, line, func
     head = raw_path.split("/", 1)[0]
     if not head or head.startswith("."):
         return None

@@ -40,7 +40,6 @@ INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
         "roofline",
         "profile",
         "replay_warm_recipe",
-        "conc_sweep",
     }
 )
 

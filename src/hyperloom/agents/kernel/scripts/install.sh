@@ -237,14 +237,11 @@ MAGPIE_PATH INFERENCEX_PATH TRACELENS_ROOT TRACELENS_INTERNAL_ROOT
 GEAK_ROOT GEAK_E2E_RUNNER PYTHONPATH'
 
 if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
-   || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -z "${DEEPSEEK_API_KEY:-}" ] \
-   || [ -z "${DEEPSEEK_BASE_URL:-}" ]; then
+   || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
   if [ -f "$REPO_ROOT/.env" ]; then
     _snap_anthropic_url="${ANTHROPIC_BASE_URL-}"
     _snap_anthropic_key="${ANTHROPIC_API_KEY-}"
     _snap_anthropic_token="${ANTHROPIC_AUTH_TOKEN-}"
-    _snap_deepseek_key="${DEEPSEEK_API_KEY-}"
-    _snap_deepseek_url="${DEEPSEEK_BASE_URL-}"
     for _v in $_DOTENV_PROTECTED_VARS; do
       eval "_snap_prot_${_v}=\"\${${_v}-}\""
     done
@@ -255,8 +252,6 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     [ -n "$_snap_anthropic_url" ] && export ANTHROPIC_BASE_URL="$_snap_anthropic_url"
     [ -n "$_snap_anthropic_key" ] && export ANTHROPIC_API_KEY="$_snap_anthropic_key"
     [ -n "$_snap_anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$_snap_anthropic_token"
-    [ -n "$_snap_deepseek_key" ] && export DEEPSEEK_API_KEY="$_snap_deepseek_key"
-    [ -n "$_snap_deepseek_url" ] && export DEEPSEEK_BASE_URL="$_snap_deepseek_url"
     for _v in $_DOTENV_PROTECTED_VARS; do
       eval "_snap_val=\"\${_snap_prot_${_v}-}\""
       if [ -n "${_snap_val}" ]; then
@@ -270,10 +265,19 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     done
     unset _v _snap_val _cur_val
     unset _snap_anthropic_url _snap_anthropic_key _snap_anthropic_token
-    unset _snap_deepseek_key _snap_deepseek_url
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
+# kernel-agent consumes ANTHROPIC_* and nothing else. Translating a retired
+# DEEPSEEK_* config into the standard variables belongs to whoever owns the
+# entrypoint -- assets/install.sh for a chained install, llm_config for the
+# Python side -- and both do it before this script is reached. Repeating it
+# here bought nothing: the chained caller unsets the retired keys and exports
+# the Anthropic side first, so a second translation could never fire. It only
+# added a copy of the endpoint derivation that no test covered and that would
+# drift out of step with deepseek_compat_env. A retired variable reaching this
+# far is a stale leftover; the .env writer below purges it rather than acting
+# on it.
 # e2e whole-pipeline optimizer — Hyperloom calls it simply "geak" (formerly the
 # standalone PerfSkills repo / GEAK_v4). Its code lives IN GEAK (interface/run_e2e.py
 # + e2e_workflow/), tracked on the ``main`` branch. Hyperloom calls
@@ -292,9 +296,6 @@ if [ -z "${GEAK_ROOT:-}" ]; then
 fi
 GEAK_E2E_RUNNER="${GEAK_E2E_RUNNER:-${GEAK_ROOT}/interface/run_e2e.py}"
 GEAK_CLAUDE_MODEL_VAL="${GEAK_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-opus-5}}"
-if [ -z "${GEAK_CLAUDE_MODEL:-}" ] && [ -z "${CLAUDE_MODEL:-}" ] && [ -n "${DEEPSEEK_API_KEY:-${DEEPSEEK_BASE_URL:-}}" ]; then
-  GEAK_CLAUDE_MODEL_VAL="${DEEPSEEK_MODEL:-deepseek-v4-pro}"
-fi
 # Run mode for the GEAKv4 Claude Code workflow. ``full`` (default) selects the
 # 2 h / 5-round preset; ``quick`` selects the 1 h / 2-round smoke-test preset.
 # GEAK still honours later CLI ``--mode`` or LLM-parsed task-hint overrides.
@@ -308,14 +309,10 @@ case "$GEAK_RUN_MODE_VAL" in
     exit 1
     ;;
 esac
-# Split-provider aware per-side credentials. Anthropic side keeps its own
-# base URL/key. DeepSeek uses the Anthropic-compatible endpoint and may omit
-# DEEPSEEK_BASE_URL because the runtime has a provider default.
+# Split-provider aware per-side credentials: each protocol side keeps its own
+# base URL/key. A dual-protocol gateway simply has both pointed at one host.
 _ANTHROPIC_BASE_URL_VAL="${ANTHROPIC_BASE_URL:-}"
 _ANTHROPIC_KEY_VAL="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
-_DEEPSEEK_BASE_URL_VAL="${DEEPSEEK_BASE_URL:-}"
-_DEEPSEEK_KEY_VAL="${DEEPSEEK_API_KEY:-}"
-_DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic"
 # GEAK_BASE_URL / GEAK_API_KEY are neither derived nor written here: GEAKv4 runs
 # on the Anthropic side via GEAK_CLAUDE_MODEL + Claude Code auth, and an operator
 # value reaches it from the environment. write_env_file removes both from the
@@ -422,11 +419,8 @@ verify_die() {
 # DeepSeek serves its own Anthropic-compatible endpoint, so its key counts as one.
 preflight_reject_cross_provider() {
   local a_key a_endpoint conflict=""
-  a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${DEEPSEEK_API_KEY:-}}}"
+  a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
   a_endpoint="${ANTHROPIC_BASE_URL:-}"
-  if [ -z "$a_endpoint" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; then
-    a_endpoint="${DEEPSEEK_BASE_URL:-https://api.deepseek.com/anthropic}"
-  fi
   if [ -n "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -n "$a_key" ]; then
     conflict="OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an Anthropic-side key is configured"
   elif [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ -z "$a_key" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
@@ -454,8 +448,8 @@ preflight_validate_credentials() {
   local missing=()
   local has_anthropic=0 has_openai=0
   # Each side needs its own base URL and key; an unset side is fine.
-  { { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } &&
-    { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; }; } &&
+  { [ -n "${ANTHROPIC_BASE_URL:-}" ] &&
+    { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; }; } &&
     has_anthropic=1
   { [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; } && has_openai=1
   preflight_reject_cross_provider || return 1
@@ -489,8 +483,12 @@ Fix one of:
        export ANTHROPIC_BASE_URL=https://api.anthropic.com
        export ANTHROPIC_API_KEY=sk-ant-...
   2. DeepSeek:
-       export DEEPSEEK_API_KEY=sk-...
-       # optional: export DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic
+       export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+       export OPENAI_BASE_URL=https://api.deepseek.com/v1
+       export ANTHROPIC_API_KEY=sk-...  OPENAI_API_KEY=sk-...
+     A gateway serving only its own models also needs the model ids. Known
+     hosts default themselves; otherwise set CLAUDE_MODEL (Anthropic side)
+     and CODEX_MODEL (OpenAI side).
   3. Copy .env from a working worktree into this one:
        cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
 EOF
@@ -1058,17 +1056,15 @@ write_env_file() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
   fi
-  # Strict provider separation: Anthropic and DeepSeek keep their own canonical
-  # values; GEAK aliases are never written back to provider slots.
+  # Strict protocol-side separation: each side keeps its own canonical values;
+  # GEAK aliases are never written back to provider slots.
   local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-}"
-  local _deepseek_url="${_DEEPSEEK_BASE_URL_VAL:-}"
   local _anthropic_key="${_ANTHROPIC_KEY_VAL:-}"
-  local _deepseek_key="${_DEEPSEEK_KEY_VAL:-}"
-  # Warn loudly if neither provider URL is resolved — kernel-agent env would
-  # silently lack provider base URLs and CLIs would resort to
-  # whatever was in the operator's shell rc, defeating the point of this file.
-  if [ -z "${_anthropic_url:-}" ] && [ -z "${_deepseek_url:-}" ] && [ -z "${_deepseek_key:-}" ]; then
-    warn "LLM gateway URL empty; kernel-agent env will lack ANTHROPIC_BASE_URL/DEEPSEEK_BASE_URL"
+  # Warn loudly if the Anthropic endpoint is unresolved — kernel-agent env would
+  # silently lack a base URL and CLIs would resort to whatever was in the
+  # operator's shell rc, defeating the point of this file.
+  if [ -z "${_anthropic_url:-}" ]; then
+    warn "LLM gateway URL empty; kernel-agent env will lack ANTHROPIC_BASE_URL"
   fi
   # Recompute PYTHONPATH just before persisting it. Sourcing an existing
   # $REPO_ROOT/.env (credentials fallback above) can re-import a stale
@@ -1093,12 +1089,10 @@ write_env_file() {
     [ -n "${MAGPIE_PYTHON:-}" ] && echo "export MAGPIE_PYTHON='${MAGPIE_PYTHON}'"
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
-    # Strict per-provider separation: write only each provider's own canonical
-    # base URL + API key.
+    # The kernel-agent drives Claude Code, so only the Anthropic side is
+    # exported here; gateway/OpenAI credentials are never persisted.
     [ -n "${_anthropic_url}" ] && echo "export ANTHROPIC_BASE_URL='${_anthropic_url}'"
-    [ -n "${_deepseek_url:-}" ] && echo "export DEEPSEEK_BASE_URL='${_deepseek_url}'"
     [ -n "${_anthropic_key}" ] && echo "export ANTHROPIC_API_KEY='${_anthropic_key}'"
-    [ -n "${_deepseek_key}" ] && echo "export DEEPSEEK_API_KEY='${_deepseek_key}'"
     # Pin TRACELENS_ROOT and TRACELENS_INTERNAL_ROOT to the (possibly
     # mirrored) values resolved by ensure_tracelens(). This is what lets
     # setsid nohup python -m hyperloom.inference_optimizer.cli optimize →
@@ -1165,18 +1159,13 @@ write_env_file() {
   else
     remove_dotenv_var ANTHROPIC_API_KEY
   fi
-  # Only the Anthropic / DeepSeek side is persisted here. The OpenAI-side entries
-  # in the shared .env are owned elsewhere and left untouched.
-  if [ -n "${_deepseek_url}" ]; then
-    upsert_dotenv_var DEEPSEEK_BASE_URL "$_deepseek_url"
-  else
-    remove_dotenv_var DEEPSEEK_BASE_URL
-  fi
-  if [ -n "${_deepseek_key}" ]; then
-    upsert_dotenv_var DEEPSEEK_API_KEY "$_deepseek_key"
-  else
-    remove_dotenv_var DEEPSEEK_API_KEY
-  fi
+  # Only the Anthropic side is persisted here. The OpenAI-side entries in the
+  # shared .env are owned elsewhere and left untouched -- which is also what
+  # keeps the OpenAI half of a dual-protocol gateway alive across a re-install.
+  # Retired provider vars never survive one.
+  remove_dotenv_var DEEPSEEK_BASE_URL
+  remove_dotenv_var DEEPSEEK_API_KEY
+  remove_dotenv_var DEEPSEEK_MODEL
   remove_dotenv_var ANTHROPIC_AUTH_TOKEN
   # Legacy gateway key: not read, purged if present.
   remove_dotenv_var SAFE_API_KEY
@@ -1296,10 +1285,10 @@ ensure_forge_claude_cli() {
     fi
   fi
   # ~/.claude authenticates the Claude Code CLI for Anthropic-compatible flows.
-  local _claude_key="${_ANTHROPIC_KEY_VAL:-${_DEEPSEEK_KEY_VAL:-}}"
+  local _claude_key="${_ANTHROPIC_KEY_VAL:-}"
   if [ -n "$_claude_key" ]; then
     mkdir -p /root/.claude
-    local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-${_DEEPSEEK_BASE_URL_VAL:-${_DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL:-}}}"
+    local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-}"
     _anthropic_url="${_anthropic_url%/}"
     _anthropic_url="${_anthropic_url%/v1}"
     cat > /root/.claude/config.json <<EOF

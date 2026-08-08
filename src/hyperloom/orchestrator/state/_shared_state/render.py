@@ -162,12 +162,17 @@ class _RenderMixin:
             llm_proposable_actions_for,
             normalize_budget_pct,
             phase_budget_remaining_seconds,
+            phase_cumulative_seconds,
             phase_elapsed_seconds,
             session_remaining_seconds,
         )
 
         phase = (self.phase or "").strip().upper() or "UNSET"
         elapsed = int(phase_elapsed_seconds(self, now_unix=now_unix))
+        # ``remaining`` is charged against every entry of this phase, so showing
+        # only the current entry's elapsed time next to it reads as a
+        # contradiction on a re-entered phase: "elapsed_sec=0 remaining_sec=0".
+        cumulative = int(phase_cumulative_seconds(self, now_unix=now_unix))
         budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
         budget_pct_for_phase = budget.get(phase, 0.0)
         remaining = phase_budget_remaining_seconds(
@@ -180,7 +185,8 @@ class _RenderMixin:
             budget_line = f"budget    : pct={budget_pct_for_phase:.2f} (unlimited run; no per-phase cap)"
         else:
             budget_line = (
-                f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} remaining_sec={int(remaining)}"
+                f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} "
+                f"cumulative_sec={cumulative} remaining_sec={int(remaining)}"
             )
         proposable = llm_proposable_actions_for(phase)
         allowed_line = f"allowed   : {', '.join(proposable) if proposable else '(none)'}"

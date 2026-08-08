@@ -3978,6 +3978,34 @@ def _build_trace_analyze_cmd(
     if analysis_mode:
         cmd += ["--analysis-mode", str(analysis_mode)]
 
+    # Model identity informs source resolution for every framework, not only the
+    # diffusion roofline. Keep the standard payload > state > environment
+    # precedence so ordinary sglang/vLLM production requests carry config.json
+    # selectors into the bounded model context.
+    model_path = str(
+        payload.get("model_path")
+        or getattr(state, "model_path", "")
+        or os.environ.get("MODEL_PATH")
+        or ""
+    ).strip()
+    if model_path:
+        cmd += ["--model-path", model_path]
+    precision = str(
+        payload.get("precision")
+        or getattr(state, "precision", "")
+        or workload.get("precision")
+        or ""
+    ).strip()
+    if precision:
+        cmd += ["--precision", precision]
+    runtime_config = str(
+        payload.get("runtime_config")
+        or getattr(state, "baseline_config_path", "")
+        or ""
+    ).strip()
+    if runtime_config and not is_bypass:
+        cmd += ["--runtime-config", runtime_config]
+
     if scriptable:
         # --skip-split is TraceLens-only; the bypass backend has its own windowing.
         if not is_bypass:
@@ -3991,14 +4019,6 @@ def _build_trace_analyze_cmd(
                     cmd += ["--num-denoise-steps", str(int(num_denoise))]
             except (TypeError, ValueError):
                 pass
-        # Forward model dir + precision so the diffusion roofline sidecar can emit
-        # an analytic compute ceiling (roofline_ideal_ms).
-        model_path = (payload.get("model_path") or state.model_path or "").strip()
-        if model_path:
-            cmd += ["--model-path", str(model_path)]
-        precision = (payload.get("precision") or workload.get("precision") or "").strip()
-        if precision:
-            cmd += ["--precision", str(precision)]
     else:
         # Splitter workload hints. Priority: payload override > baseline metadata
         # > drop the flag.
@@ -5874,6 +5894,20 @@ def _shape_tool_result(rc: int, stdout: str, stderr: str) -> HandlerResult:
         synthesized failure result when stdout has no parseable JSON.
     """
     parsed = _parse_tool_stdout(stdout)
+    if parsed and set(parsed) == {"raw_stdout_tail"}:
+        # Unparseable output is not a result. Inferring ``ok`` from rc==0 here
+        # made a tool whose output we could not read indistinguishable from one
+        # that succeeded: the roofline executor read status=ok, recorded an
+        # empty analysis over the real one, and the leg reported success while
+        # twenty minutes of GPU evidence went in the bin.
+        return {
+            "status": "failed",
+            "error_class": "tool_output_unparseable",
+            "error": ("tool exited rc=%d but its stdout held no JSON object" % rc),
+            "returncode": rc,
+            "raw_stdout_tail": parsed["raw_stdout_tail"],
+            "stderr_tail": stderr[-2000:] if stderr.strip() else "",
+        }
     if parsed:
         # Trust the tool's own status; else infer from rc.
         if "status" not in parsed:
@@ -5923,6 +5957,22 @@ def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
                     return obj
             except json.JSONDecodeError:
                 continue
+    # Last: a pretty-printed object opening at the start of a line. A tool that
+    # indents its result spans many lines, so neither whole-text nor per-line
+    # parsing sees it, and it is exactly the tools with a lot to say that
+    # indent. tracelens_analysis returned a megabyte of hot-kernel analysis this
+    # way, interleaved with progress chatter and followed by an import banner;
+    # every field of it was dropped and the run still reported ``ok``.
+    # ``raw_decode`` stops at the end of the object, so trailing noise is fine.
+    decoder = json.JSONDecoder()
+    starts = [m.start() for m in re.finditer(r"^\{", text, re.MULTILINE)]
+    for start in reversed(starts):
+        try:
+            obj, _end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
     return {"raw_stdout_tail": text[-2000:]}
 
 

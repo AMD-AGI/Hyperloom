@@ -1856,6 +1856,20 @@ def test_grid_variants_from_payload_carries_removal_controls():
     assert variant.extra_server_args == "--max-num-seqs 256"
 
 
+def test_on_disk_stderr_tail_reads_benchmark_stderr_log(tmp_path):
+    from hyperloom.orchestrator.actions.executors._grid_runner import (
+        _on_disk_stderr_tail,
+    )
+
+    (tmp_path / "benchmark_stderr.log").write_text(
+        "bench_fps.py: error: unrecognized arguments: --use_cache teacache"
+    )
+    tail = _on_disk_stderr_tail(tmp_path)
+    assert "unrecognized arguments" in tail
+    # Empty dir → empty string (caller keeps its original blank error).
+    assert _on_disk_stderr_tail(tmp_path / "nope") == ""
+
+
 @pytest.mark.asyncio
 async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_runner, tmp_path, monkeypatch):
     """FAILED and accepted historical fingerprints may rerun; rejected contains latest attempt."""

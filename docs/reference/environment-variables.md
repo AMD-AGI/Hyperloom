@@ -115,7 +115,8 @@ that degraded path.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RUN_EVAL` | `true` | Whether a serving benchmark runs the GSM8K eval. Turning it off removes the per-candidate accuracy signal entirely — accuracy regressions stop being caught. Ignored by scriptable (xDiT) workloads, whose correctness signal is the image `quality_gate` in `benchmark_report.json`. |
+| `RUN_EVAL` | `true` | Whether a serving benchmark runs the GSM8K eval. Turning it off removes the per-candidate accuracy signal entirely — accuracy regressions stop being caught. Ignored by scriptable workloads, whose correctness signal is the `quality_gate` in `benchmark_report.json`. |
+| `HYPERLOOM_QUALITY_REF`<br>`HYPERLOOM_QUALITY_REF_WRITE` | Derived under the session dir | The scriptable quality gate's reference artifact: `_WRITE` establishes it on the baseline, the other compares against it on every later candidate. What the artifact holds is the workload's own business — xDiT stores an image, an operator-supplied `custom` workload stores whatever its script compares. Also emitted as `XDIT_QUALITY_REF` / `XDIT_QUALITY_REF_WRITE` for bench scripts written before the rename; either name is read, both are written. |
 | `INFERENCE_OPTIMIZER`<br>`_REQUIRE_KERNEL`<br>`_ACCURACY` | On | Gates the `KEEP` for a kernel patch integrated by the kernel lane. Set to `0` / `false` / `no` / `off` to fall back to a throughput-only `KEEP`. Disable only when the eval lane is known-broken: this gate is what stops a faster-but-wrong kernel from being kept. |
 | `INFERENCE_OPTIMIZER`<br>`_REQUIRE_FRAMEWORK`<br>`_ACCURACY` | On | Same gate for a framework source patch authored by a specialist. Same disable spellings. |
 | `MAGPIE_EVAL_LIMIT` | Unset (full task set) | Caps the number of eval problems (`lm_eval --limit`). Useful for smoke runs; see the noise caveat below before using it on a run whose `KEEP` decisions matter. |
@@ -145,6 +146,168 @@ The following variables control the kernel optimization backend ladder.
 | `HYPERLOOM_GEMM_SHAPE_CAPTURE` | `1`                           | Enables automatic runtime GEMM-shape capture for eligible single-node dense vLLM Forge tuning when no explicit shape input is available. Block-FP8 first reuses shapes from the TraceLens-selected steady-state trace of a successful Roofline with exactly matching model, workload, server arguments, environment, and backend controls. Missing or stale evidence triggers the same standard Roofline/ProfileExecutor/TraceLens steady-state pipeline as a fallback. Set to `0` to preserve the no-capture path. |
 | `HYPERLOOM_GEMM_SHAPE_CAPTURE_TIMEOUT_SEC` | `1800`          | Timeout in seconds for the dense vLLM TunableOp recording benchmark. Block-FP8 fallback uses the standard Roofline/ProfileExecutor timeout. Values below `60` are clamped to `60`. |
 | `INFERENCE_OPTIMIZER`<br>`_KERNEL_OPT_MAX_PARTIAL` | Unset           | Cap on how many `PARTIAL` kernel-opt verdicts an action can yield before it short-circuits to `NEEDS_REVIEW`. Useful for keeping budget contained when GEAK is consistently timing out.            |
+
+---
+
+## Kernel source resolution
+
+A kernel candidate must resolve to a real source file before any backend can
+rewrite it. Resolution runs as a ladder: curated dictionary, then the
+trace-derived launcher frame, then a name grep. All three are deterministic and
+require no configuration. Agent analysis may add the model-backed tiers below.
+
+Every run writes `kernel_source_resolution.json` next to the candidate report.
+It answers one question per hot kernel — which file defines it, and which tier
+decided that — in a versioned schema (`schema_version`, currently `1.0.0`), so
+consumers and triage read a contract rather than candidate internals.
+
+Two model-backed tiers may sit on top of the deterministic ladder when
+`--analysis-route agent` is used. The `deterministic` route never invokes either
+tier. Agent-route network calls require an explicit
+`HYPERLOOM_LLM_SOURCE_PROVIDER`; a model name alone never implies a provider or
+endpoint. The tiers differ in scope, authority and data exposure; the
+constraints of one do not apply to the other.
+
+Neither can fail a run: no model configured, a gateway error, a timeout or an
+unparseable reply all leave the deterministic result standing.
+
+### Fallback tier
+
+**When it runs.** Only for a candidate whose `source_file` is still empty after
+all three deterministic tiers, and whose GPU share is at least 5%.
+
+**What it sends.** One chat completion per such candidate, containing the kernel
+symbol and every shortlisted path. The shortlist comes from a relaxed grep over
+the known framework roots. **File contents are not sent unless
+`HYPERLOOM_LLM_SOURCE_PREVIEW` authorises it** (see [Source egress](#source-egress));
+with it, each path is accompanied by its first 40 lines, capped at 2000
+characters.
+
+**What it costs.** One call per qualifying candidate, 60-second ceiling, no
+retry. `HYPERLOOM_LLM_SOURCE_MODEL` overrides the selected provider's model
+setting. Claude uses `CLAUDE_MODEL`, then the project-wide
+`DEFAULT_CLAUDE_MODEL`; OpenAI-compatible routing uses `OPENAI_MODEL`, then
+`CODEX_MODEL`. Model settings are never borrowed across providers.
+
+**Authority: selection only.** The model may return one of the exact shortlist
+strings and nothing else. An invented path is rejected, as is any answer below
+0.7 confidence. This is deliberate — an LLM-produced sentinel written into
+`source_file` is what broke this pipeline originally.
+
+### Review tier
+
+The fallback only fires on an empty `source_file`, so it cannot catch the
+deterministic tiers' actual failure mode: not coming up empty, but coming up
+*confidently wrong*. Measured across historical sessions, only 59% of
+verifiable resolutions mention the kernel they claim to define, and
+`aten::fill_` alone has been resolved to four unrelated business files — each a
+real, existing, root-resident source file passing every mechanical check.
+
+**When it runs.** On the whole resolution table, including entries already
+filled in by the deterministic tiers. Entries below 1% GPU share are skipped.
+
+**What it sends.** A single chat completion carrying up to 40 entries at once.
+For each entry it includes the kernel symbol, GPU share, current path and
+deciding tier. File contents follow the same rule as the fallback tier: nothing
+is sent unless `HYPERLOOM_LLM_SOURCE_PREVIEW` authorises it. When it does, one
+call can ship up to 40 file heads, considerably more than the fallback tier
+sends per call — which is why the switch is global rather than per-tier.
+
+**What it costs.** One call per run (not per candidate), 180-second ceiling, no
+retry. Same provider and model resolution as the fallback tier. The response
+must include every sent `kernel_id` exactly once. A missing, duplicate or extra
+ID rejects the whole batch so a truncated response cannot masquerade as a
+complete review.
+
+<div class="callout warn">
+
+**Authority: it may rewrite, and it has no confidence threshold.** Unlike the
+fallback tier, this one is not restricted to a shortlist — it can replace any
+entry's path with any path, or drop a resolved entry back to unresolved. There
+is no 0.7 confidence gate. The mechanical limit is that a rewritten path must
+exist on disk **and** its resolved target must sit under a known framework root.
+Symlinks cannot escape that boundary. TraceLens-style
+`path.py(247): function` answers are split into a bare, openable path plus line
+and function metadata. An unverifiable path is rejected and the original
+stands. Curated `op_to_source` verdicts — including `non_rewritable` and
+`no_kernel` — are authoritative and cannot be replaced by model review.
+
+</div>
+
+Every revision records `previous_source_file` and `previous_method`, so a bad
+review is auditable and reversible, and `review_notes` lists every applied and
+rejected change. The batch is staged before it is committed, so an exception
+while validating one revision leaves every entry untouched. Failures — no model
+configured, gateway error, timeout, unparseable reply — leave the deterministic
+table untouched and are recorded in `review_notes`.
+
+Accepted revisions are folded back into `hot_kernels`, all metadata derived from
+the old path is cleared, and patchability is recomputed. The resolution JSON is
+the audit view of the same effective candidate state, not a detached suggestion.
+
+### Source egress
+
+Both tiers call an external model provider, so what leaves the host is a
+deliberate boundary rather than a side effect of building a useful prompt.
+
+**Provider routing is explicit.** Set `HYPERLOOM_LLM_SOURCE_PROVIDER` to
+`claude_agent_sdk` or `openai_compatible`. Claude requests use the native Claude
+Agent SDK with all repository, shell and web tools denied; OpenAI-compatible
+requests use chat completions. `kernel_source_resolution.json` records the
+provider, model, source-preview decision, outcome and endpoint hostname. It
+never records keys, custom headers, URL userinfo, query parameters or the full
+prompt.
+
+**Repository source is not sent by default.** The file heads described above are
+withheld unless `HYPERLOOM_LLM_SOURCE_PREVIEW` is set to `1`/`true`/`yes`/`on`.
+Without it both tiers still see candidate paths, which carry most of the
+selection signal; with it, a review call can ship up to 40 file heads.
+
+**The serving command line is never forwarded verbatim.** The tiers need backend
+flags — the same MoE operator dispatches differently under
+`--moe-runner-backend triton` and `aiter` — but `EXTRA_*_ARGS` also carries
+credentials, model paths and user data. It is therefore tokenised, and only
+flags on an explicit allowlist of backend selectors survive. A denied flag
+consumes its value too, so the value cannot reappear as a stray token. Every
+surviving value is dropped unless it is a short selector token. URL userinfo or
+queries, authorization headers, JWTs, control characters, non-finite numbers,
+vendor prefixes such as `sk-`, and long opaque strings are rejected. An
+unbalanced quote discards the whole line rather than risking a partial parse.
+
+**Environment variables** follow the same discipline: an explicit allowlist of
+path-selecting names, with the secret-name pattern applied on top.
+
+**Model config is allowlisted too.** Only fields that select architecture,
+expert layout or kernel format are included. Inside `quantization_config`, only
+explicit quantization selectors survive; arbitrary vendor fields, nested
+metadata and credential-shaped values are dropped.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_PROVIDER` | Unset (no network call) | Required provider for source fallback/review: `claude_agent_sdk` (native Claude SDK, tools denied) or `openai_compatible` (chat completions). Common provider aliases are normalized to the canonical audit value. |
+| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_MODEL` | Unset | Optional source-resolution model override. Otherwise resolves only from the selected provider's own model variables; no cross-provider fallback. |
+| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_PREVIEW` | Unset (off) | Authorise sending the first 40 lines of candidate source files to the model provider. Applies to both the fallback and review tiers. Leave unset unless the provider is an approved destination for repository content. |
+
+### How fallback failures surface
+
+The fallback tier is advisory and never fails a run. Every
+outcome is recorded on the candidate as `source_resolution_reason`, so a skip
+can be told apart from a genuine failure:
+
+| `source_resolution_reason` | Meaning |
+|----------------------------|---------|
+| *(absent)* | Resolved before fallback, so the tier was not reached |
+| `llm_fallback_skipped: deterministic route` | Deterministic analysis explicitly prohibited model tiers |
+| `llm_fallback_skipped: gpu_pct ...` | Candidate below the 5% GPU-share floor; no call made |
+| `llm_fallback_skipped: no provider configured` | No `HYPERLOOM_LLM_SOURCE_PROVIDER`; settled before the shortlist grep, so an unconfigured tier costs nothing |
+| `llm_fallback_no_shortlist` | Grep found nothing to choose from; no call made |
+| `llm_fallback_declined: ...` | Model answered but the pick was rejected (invented path, low confidence, or refusal) |
+| `llm_fallback_error: ...` | Call failed — import error, gateway rejection, or timeout |
+
+Accepted answers are stamped `source_resolution_method="llm_fallback"` alongside
+a `source_resolution_confidence`, so they can be audited separately from
+deterministic resolutions. Failures in the trace-launcher tier are recorded the
+same way under `trace_resolver_error: ...`, and both are logged at `WARNING`.
 
 ---
 
@@ -320,6 +483,7 @@ The following variables configure the Critic, Robustness, and knowledge base com
 | `KNOWLEDGE_STORE_MODE`                | `local`                | Exclusive Recipe/KG backend: `local` or `remote`. Ambient GBrain credentials do not select remote mode. |
 | `KNOWLEDGE_LOCAL_ROOT`                | `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` | Shared knowledge root. Remote mode uses only `.remote-locks/recipes` beneath it. |
 | `HYPERLOOM_`<br>`LOCAL_KB_ROOT`       | Unset                  | Deprecated explicit local Recipe root compatibility input, overridden by `--local-kb-root`; explicit use skips automatic legacy migration. |
+| `INFERENCE_OPTIMIZER_`<br>`FA_KB_PATH` | `$USER_DATA_PATH/framework-kb`, otherwise `/workspace/hyperloom/framework-kb` | Framework-agent KB root, holding the lessons ledger the FRAMEWORK phase reads and writes. The only supported override: the `fa` reader and the orchestrator's writeback both resolve through it, so it moves both halves at once. The withdrawn `FRAMEWORK_AGENT_KB_DIR` is ignored with a warning naming the resolved root. On first start-up an existing partition under the legacy `$USER_DATA_PATH/kb` is copied across once; a copy that fails warns and leaves the phase to cold-start. |
 | `GBRAIN_BASE_URL`                     | Unset                  | GBrain endpoint; required with `KNOWLEDGE_STORE_MODE=remote` and ignored in local mode. |
 | `GBRAIN_TOKEN`                        | Unset                  | GBrain bearer token; required with `KNOWLEDGE_STORE_MODE=remote` and ignored in local mode. |
 | `RECIPE_KB_MIRROR_MODE`               | Obsolete               | Ignored. Remove it and select `KNOWLEDGE_STORE_MODE=local` or `remote`. |

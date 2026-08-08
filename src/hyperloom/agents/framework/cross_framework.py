@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ._audit_common import _obtain_patch_text, _resolve_local_file, _symbols, _verdict, parse_unified_diff
-from .kb import path_for_framework
+from .kb import packaged_kb_root
 
 
 log = logging.getLogger(__name__)
@@ -26,8 +26,14 @@ _MAP_FILE = "cross_framework_map.jsonl"
 
 
 def cross_framework_map_path() -> Path:
-    """Return the active cross-framework module-map JSONL path."""
-    return path_for_framework("") / _MAP_FILE
+    """Return the cross-framework module-map JSONL path.
+
+    The map is seed data shipped in the wheel, not something a session
+    accumulates, so it comes from the packaged tree rather than the writable
+    KB partition. Resolving it through the writable root is what made it
+    unreadable once that root moved to the operator workspace.
+    """
+    return packaged_kb_root() / "framework_optimization" / _MAP_FILE
 
 
 def load_cross_framework_map(src_framework: str, dst_framework: str) -> list[dict[str, Any]]:

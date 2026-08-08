@@ -494,7 +494,7 @@ class FrameworkAgentExecutor:
                 ),
             }
 
-        # Per-task workspace under runs/framework/<task_id>/.
+        # Per-task workspace under runs/framework_agent/<task_id>/.
         output_root = Path(
             params.get("output_dir")
             or extra.get("workspace")

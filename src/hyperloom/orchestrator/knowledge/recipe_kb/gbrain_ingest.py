@@ -137,12 +137,20 @@ def _is_absolute_path_text(value: str) -> bool:
 
 
 def _sanitize_server_args(value: str, *, drop_paths: bool) -> str:
-    """Remove secret options and, for non-replay metadata, local paths."""
+    """Remove secrets/paths and emit Magpie-safe, whitespace-free argv text.
+
+    Credential-bearing options are always removed; absolute path operands are
+    also removed when ``drop_paths`` is true. GBrain stores launch args as one
+    string that Magpie later expands without shell ``eval``, so a single argv
+    token containing whitespace cannot be represented safely and is rejected
+    rather than silently split. Valid JSON blobs are compacted and legacy shell
+    quote wrappers are removed.
+    """
 
     try:
         tokens = shlex.split(value)
-    except ValueError:
-        tokens = value.split()
+    except ValueError as exc:
+        raise ValueError(f"extra_server_args is not shell-tokenizable: {exc}") from exc
     safe: list[str] = []
     skip_value = False
     for token in tokens:
@@ -161,7 +169,21 @@ def _sanitize_server_args(value: str, *, drop_paths: bool) -> str:
         if drop_paths and separator and _is_absolute_path_text(operand):
             continue
         safe.append(token)
-    return shlex.join(safe)
+    # These args are later expanded from ``$EXTRA_*_ARGS`` without ``eval``.
+    # There is no safe string encoding for a whitespace-bearing argv token
+    # under that contract; fail the recipe write instead of persisting a partial
+    # or differently-tokenized champion config.
+    whitespace_tokens = [token for token in safe if any(ch.isspace() for ch in token)]
+    if whitespace_tokens:
+        raise ValueError(
+            "extra_server_args contains a whitespace-bearing value unsupported "
+            "by Magpie's unquoted environment expansion"
+        )
+    # Store plain argv text and repair JSON quotes stripped by the token walk.
+    # Import locally to keep the recipe codec lightweight at module load.
+    from ...actions.executors._grid_server_args import _reserialize_json_blobs
+
+    return _reserialize_json_blobs(" ".join(safe))
 
 
 def _sanitize_gbrain_value(

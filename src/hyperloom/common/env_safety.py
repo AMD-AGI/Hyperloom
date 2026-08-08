@@ -95,8 +95,11 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "ANTHROPIC_BASE_URL",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
+        # Retired provider variables, still readable so a pre-migration .env can
+        # be normalized by hyperloom.common.llm_config.deepseek_compat_env.
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_MODEL",
         "FORGE_PATH",
         "FRAMEWORK",
         "GEAK_CLAUDE_MODEL",

@@ -17,9 +17,14 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.actions.registry import ActionRegistry
 from hyperloom.orchestrator.framework import client as _fa_client
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.phases.framework import FrameworkPhase
+
+
+_ACTION_REGISTRY = ActionRegistry().load()
 
 
 # Cross-cutting framework parametrisation; add new frameworks here.
@@ -65,7 +70,6 @@ class _StateStub:
         self.framework_agent_empty_discoveries = 0
         self.framework_agent_batches: list[dict[str, Any]] = []
         self.framework_agent_phase_progress: list[dict[str, Any]] = []
-        self.framework_agent_critic_decisions: list[dict[str, Any]] = []
         self.phase_history: list[dict[str, Any]] = []
         self.gaps: list[dict[str, Any]] = []
         self.model = "test-model"
@@ -115,7 +119,6 @@ class _BusStub:
 class _CoordinatorStub:
     """Glue stub carrying the attribute/method surface the pump touches."""
 
-    _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
     _MAX_REPEATED_REVIEW_SUBMISSIONS = Coordinator._MAX_REPEATED_REVIEW_SUBMISSIONS
     _collect_framework_agent_candidate_priors = Coordinator._collect_framework_agent_candidate_priors
@@ -138,10 +141,13 @@ class _CoordinatorStub:
     _maybe_dispatch_local_explore = FrameworkPhase._maybe_dispatch_local_explore
     # The discovery merge calls this reverse-lookup on every repo.
     _framework_agent_repo_url_origin_framework = staticmethod(Coordinator._framework_agent_repo_url_origin_framework)
+    # The enqueue path resolves its lanes and lease TTL from the registry.
+    _registry_lanes_ttl = DispatcherCollaborator._registry_lanes_ttl
 
     def __init__(self, tmp_path: Path, *, framework: str = "sglang") -> None:
         self.session_dir = tmp_path
         self.shared_state = _StateStub(framework=framework)
+        self.action_registry = _ACTION_REGISTRY
         self.tasks = _TasksStub()
         self.bus = _BusStub()
         self.state = SimpleNamespace(pending_proposals={})

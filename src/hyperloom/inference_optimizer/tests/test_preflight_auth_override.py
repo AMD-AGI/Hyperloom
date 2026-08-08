@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.llm_config import deepseek_compat_env
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
@@ -59,6 +60,27 @@ def stub_install_steps(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli_preflight.subprocess, "run", _fake_run)
     return None
+
+
+@pytest.fixture(autouse=True)
+def _restore_environ():
+    """Roll back direct ``os.environ`` writes after every test in this module.
+
+    Several tests here exercise the real `_load_dotenv_fallback`, which writes
+    straight into ``os.environ`` — monkeypatch cannot undo that. One of them clears
+    ``REPO_ROOT`` on purpose, and the fallback then walks up to the repository root
+    and finds the `.env` that `install.sh` generates there. On a machine where the
+    installer has run, that leaked `ANTHROPIC_BASE_URL` into the environment and
+    four later auth tests in this file failed — a real defect in the suite's
+    hermeticity that only appears after a real deployment step, which is the worst
+    time to be chasing a phantom failure.
+    """
+    snapshot = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(snapshot)
 
 
 @pytest.fixture
@@ -496,6 +518,44 @@ def test_preflight_rewrites_stale_proxy_even_when_operator_set(
     assert "127.0.0.1:4002" not in cli.os.environ["LLM_API_BASE"]
 
 
+def test_preflight_keeps_official_anthropic_endpoint_despite_leftover_deepseek_key(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """Regression: a forgotten DEEPSEEK_API_KEY must not hijack a real Anthropic key.
+
+    Half-adopting the retired gateway would resolve ANTHROPIC_BASE_URL to
+    DeepSeek's host while the operator's own Anthropic key is what gets sent
+    there, and would add an OpenAI side they never configured.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "sk-real-anthropic")
+    monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "sk-legacy-deepseek")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
+
+    cli_preflight._preflight()
+
+    assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
+    assert cli.os.environ.get("OPENAI_BASE_URL", "") == ""
+    assert cli.os.environ.get("_".join(("OPENAI", "API", "KEY")), "") == ""
+
+
+def test_provider_fallback_keys_strip_retired_deepseek_vars_in_either_mode():
+    """A stale .env must not hand a single-provider run the other side.
+
+    The retired variables normalize to BOTH protocol sides, so an Anthropic-only
+    shell has to drop them just like an OpenAI-only one does.
+    """
+    for key in ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL"):
+        assert key in cli_preflight._PROVIDER_FALLBACK_KEYS, key
+        assert key in cli_preflight._ANTHROPIC_FALLBACK_KEYS, key
+
+
 def test_is_stale_proxy_url_matches_legacy_only():
     assert cli_credentials._is_stale_proxy_url("http://127.0.0.1:4002/api/v1/llm-proxy/v1")
     assert not cli_credentials._is_stale_proxy_url("https://127.0.0.1:18444/api/v1/llm-proxy/v1")
@@ -578,13 +638,13 @@ def test_preflight_anthropic_only_sets_geak_v4_claude_model(
     assert cli.os.environ["GEAK_CLAUDE_MODEL"] == "claude-opus-4-6"
 
 
-def test_preflight_deepseek_only_sets_geak_v4_claude_model(
+def test_preflight_migrates_retired_deepseek_env_to_both_sides(
     monkeypatch,
     tmp_path,
     clean_url_env,
     stub_install_steps,
 ):
-    """GEAKv4 can use DeepSeek through the Anthropic-compatible Claude workflow."""
+    """A retired DEEPSEEK_* config resolves to both protocol sides plus its model."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
     monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
@@ -599,10 +659,11 @@ def test_preflight_deepseek_only_sets_geak_v4_claude_model(
     cli._preflight()
 
     assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    assert cli.os.environ["OPENAI_BASE_URL"] == "https://api.deepseek.com/v1"
     assert cli.os.environ["GEAK_CLAUDE_MODEL"] == "deepseek-v4-pro"
 
 
-def test_preflight_deepseek_only_exports_claude_cli_auth_aliases(
+def test_preflight_retired_deepseek_env_exports_claude_cli_auth_aliases(
     monkeypatch,
     tmp_path,
     clean_url_env,
@@ -1134,6 +1195,81 @@ def test_validate_claude_model_split_entry_auth_error_refuses(monkeypatch):
     assert exc.value.code == 2
 
 
+def test_catalog_probe_retries_the_other_side_only_when_a_route_is_missing(monkeypatch, capsys):
+    """A dual-protocol gateway lists its models on the OpenAI side only.
+
+    The Anthropic side answers 404 for /models, which is the sentinel rather
+    than None -- so the candidate loop has to keep going on the sentinel, or the
+    catalog is never read and every model stays unverified until the first call.
+
+    Both halves of the stub mirror what api.deepseek.com actually answers:
+    /anthropic/models is a 404 and /v1/models lists exactly deepseek-v4-pro and
+    deepseek-v4-flash. That correspondence is what makes reading the catalog an
+    improvement rather than a regression -- the default model has to be in the
+    ids the gateway really serves, or resolution below exits 2 on the miss
+    instead of proceeding on the old "no /models route" warning.
+    """
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "sk-ds")
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "sk-ds")
+
+    probed: list[str] = []
+
+    def _probe(*, base_url, api_key):
+        probed.append(base_url)
+        if base_url.endswith("/anthropic"):
+            return cli._CATALOG_NO_MODELS_ENDPOINT
+        return {"deepseek-v4-pro", "deepseek-v4-flash"}
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _probe)
+    args = _make_args(claude_model="deepseek-v4-pro")
+
+    catalog = cli._validate_and_resolve_claude_model(args, None)
+
+    assert probed == ["https://api.deepseek.com/anthropic", "https://api.deepseek.com/v1"]
+    assert catalog == {"deepseek-v4-pro", "deepseek-v4-flash"}
+    assert args.claude_model == "deepseek-v4-pro"
+    # Confirmed against a real catalog rather than waved through with a warning.
+    out = capsys.readouterr().out.lower()
+    assert "confirmed in gateway catalog" in out
+    assert "cannot verify" not in out
+
+
+def test_catalog_probe_does_not_retry_the_other_side_when_a_gateway_is_flaky(monkeypatch, capsys):
+    """An unreachable Anthropic side must degrade, not get answered by OpenAI.
+
+    A 5xx / auth / timeout returns None, not the missing-route sentinel. Probing
+    the OpenAI side then answers a Claude question with an OpenAI catalog, and
+    every allowlisted Claude id would fail against it -- turning a transient
+    gateway blip into a hard exit.
+    """
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.amd.example/Anthropic")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.amd.example/Unified/v1")
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "ak-x")
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "ak-x")
+
+    probed: list[str] = []
+
+    def _probe(*, base_url, api_key):
+        probed.append(base_url)
+        if base_url.endswith("/Anthropic"):
+            return None
+        return {"gpt-5.6-sol"}
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _probe)
+    args = _make_args(claude_model="claude-opus-5")
+
+    assert cli._validate_and_resolve_claude_model(args, None) is None
+    assert probed == ["https://llm.amd.example/Anthropic"]
+    assert args.claude_model == "claude-opus-5"
+    assert "cannot verify" in capsys.readouterr().out.lower()
+
+
 def test_validate_claude_model_custom_model_warns_when_catalog_unreachable(monkeypatch, capsys):
     """ALLOW_CUSTOM=1 + catalog unreachable → WARN and proceed (no sys.exit)."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
@@ -1558,47 +1694,81 @@ def test_parser_anthropic_only_empty_codex_model_uses_claude_model(monkeypatch):
     assert cli._codex_model_should_follow_claude() is True
 
 
-def test_parser_deepseek_only_empty_codex_model_uses_claude_model(monkeypatch):
-    """DeepSeek's Anthropic-compatible endpoint follows the Claude-side model."""
+def test_parser_dual_protocol_gateway_empty_codex_model_uses_gateway_model(monkeypatch):
+    """An empty CODEX_MODEL is filled by the shim, not left to the GPT default."""
     monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
+    monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
+    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("CODEX_MODEL", "")
 
-    resolved = cli_credentials._resolve_llm_endpoints()
-    for key, value in (("ANTHROPIC_BASE_URL", resolved[0]), ("OPENAI_BASE_URL", resolved[1])):
-        if value:
-            monkeypatch.setenv(key, value)
-        else:
-            monkeypatch.delenv(key, raising=False)
+    for key, value in deepseek_compat_env().items():
+        monkeypatch.setenv(key, value)
     args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
 
-    assert resolved == ("https://api.deepseek.com/anthropic", "")
     assert args.claude_model == "deepseek-v4-pro"
     assert args.codex_model == "deepseek-v4-pro"
-    assert cli._codex_model_should_follow_claude() is True
+    # Both protocol sides now resolve, so Codex no longer has to follow Claude.
+    assert cli._codex_model_should_follow_claude() is False
 
 
-def test_parser_deepseek_key_only_defaults_to_deepseek_chat(monkeypatch):
-    """A key-only DeepSeek config must not inherit the Claude Opus default."""
+def test_parser_retired_deepseek_key_only_defaults_to_gateway_model(monkeypatch):
+    """A key-only legacy config must not inherit the Claude Opus / GPT defaults.
+
+    The parser runs BEFORE ``_preflight`` normalizes the environment, so it has
+    to resolve this on its own -- relying on preflight to export CLAUDE_MODEL
+    would leave ``args.claude_model`` on the AMD default.
+    """
     monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
-    monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("CLAUDE_MODEL", raising=False)
-    monkeypatch.delenv("CODEX_MODEL", raising=False)
+    for name in ("DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL",
+                 "CLAUDE_MODEL", "CODEX_MODEL", "INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX"):
+        monkeypatch.delenv(name, raising=False)
 
-    resolved = cli_credentials._resolve_llm_endpoints()
-    for key, value in (("ANTHROPIC_BASE_URL", resolved[0]), ("OPENAI_BASE_URL", resolved[1])):
-        if value:
-            monkeypatch.setenv(key, value)
-        else:
-            monkeypatch.delenv(key, raising=False)
     args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
 
     assert args.claude_model == "deepseek-v4-pro"
     assert args.codex_model == "deepseek-v4-pro"
+
+
+def test_parser_standard_dual_protocol_config_defaults_to_gateway_model(monkeypatch):
+    """The configuration the docs recommend resolves its own models.
+
+    Without this both sides would be handed ``claude-opus-5`` / ``gpt-5.6-sol``
+    and fail on the first call, since DeepSeek serves neither.
+    """
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "sk-deepseek")
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "sk-deepseek")
+    for name in ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "CLAUDE_MODEL", "CODEX_MODEL",
+                 "INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX"):
+        monkeypatch.delenv(name, raising=False)
+
+    args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
+
+    assert args.claude_model == "deepseek-v4-pro"
+    assert args.codex_model == "deepseek-v4-pro"
+
+
+@pytest.mark.parametrize(
+    ("anthropic_url", "openai_url", "expected"),
+    [
+        ("https://api.deepseek.com/anthropic", "https://api.deepseek.com/v1", True),
+        ("https://gw.example/x", "https://gw.example/x", True),
+        ("https://llm.amd.example/Anthropic", "https://llm.amd.example/Unified/v1", True),
+        ("https://api.anthropic.com", "https://api.openai.com/v1", False),
+        ("", "https://api.openai.com/v1", False),
+    ],
+)
+def test_same_gateway_recognizes_one_host_serving_both_protocols(anthropic_url, openai_url, expected):
+    """The catalog probe may retry the OpenAI side only within one gateway.
+
+    A dual-protocol gateway lists its models on the OpenAI side only, so a
+    string-equality check would leave its catalog permanently unreadable.
+    """
+    assert cli._same_gateway(anthropic_url, openai_url) is expected
 
 
 def test_parser_anthropic_only_generated_codex_default_uses_claude_model(monkeypatch):
