@@ -39,9 +39,10 @@ python3 -m hyperloom.inference_optimizer.cli -v optimize \
 
 ```{important}
 `HYPERLOOM_BENCHMARK_BACKEND=bypass` is required. The backend defaults to
-Magpie, which cannot run a scriptable framework, so omitting it fails at launch
-with `Unsupported framework`. This is easy to lose when you move to a fresh
-shell, and it is the most common launch failure on this path.
+Magpie, which cannot run an operator-supplied script, so launch refuses any
+other value with `--framework custom requires HYPERLOOM_BENCHMARK_BACKEND=bypass`.
+This is easy to lose when you move to a fresh shell, and it is the most common
+launch failure on this path.
 ```
 
 Neither `--framework-path` nor `--benchmark-scripts-dir` is optional here. With
@@ -246,7 +247,7 @@ denominator. For the full artifact schema, see
 
 | Symptom | Cause |
 |---------|-------|
-| `Unsupported framework` at launch | `HYPERLOOM_BENCHMARK_BACKEND=bypass` not set |
+| `requires HYPERLOOM_BENCHMARK_BACKEND=bypass` at launch | The backend is unset or set to something else |
 | Missing-path error at launch | `--framework-path` or `--benchmark-scripts-dir` not given; `custom` has no shipped entrypoint to fall back on |
 | Entrypoint not resolved | The directory has no `custom_<runner_type>.sh` and does not contain exactly one `.sh` |
 | Run completes but keeps no optimization | The report carries no `quality_gate`, so accuracy scores 0.0 and every candidate is rejected |
