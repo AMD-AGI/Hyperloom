@@ -807,11 +807,26 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     rejected_kernel_patches: list[dict[str, Any]] = field(default_factory=list)
     # Kernel ids with no remaining automated path (from REVERTs + exhausted integrate attempts).
     rejected_kernel_ids: list[str] = field(default_factory=list)
-    # Consecutive KERNEL_AGENT ticks with no actionable work pending. Lets the
-    # phase machine wind down to SWEEP instead of spinning on hallucinated
-    # kernel-id requests / no-intent turns until the wall-clock cap. Reset to 0
-    # whenever kernel work is pending or the phase is not KERNEL_AGENT.
+    # Consecutive KERNEL_AGENT ticks that observed no forward motion AND no
+    # kernel-lane task in flight. Lets the phase machine wind down to SWEEP
+    # instead of spinning on hallucinated kernel-id requests / no-intent turns
+    # until the wall-clock cap. Reset to 0 outside KERNEL_AGENT and whenever
+    # ``kernel_progress_fingerprint`` changes.
     kernel_idle_ticks: int = 0
+    # Digest of the KERNEL progress signals (attempt ledger, rejected ids, last
+    # kernel_opt, stack depth, in-flight kernel task ids) seen on the tick that
+    # opened the current idle streak. The streak used to be driven by
+    # ``kernel_work_pending``, which reports whether the ledger still holds
+    # anything unresolved — attempts that can never be advanced answer "yes"
+    # forever, so the counter was pinned at 0 through 1130 idle ticks. A digest
+    # answers the question that actually matters: did anything change?
+    kernel_progress_fingerprint: str = ""
+    # Unix time the current idle streak opened. Ticks alone are a poor stall
+    # measure (a few seconds each, and the phase machine advances more than once
+    # per coordinator tick), so the wind-down also requires the streak to have
+    # lasted ``KERNEL_IDLE_MIN_SECONDS``. Rebased to now while a kernel-lane task
+    # is in flight so a 30-minute build never accrues idle time.
+    kernel_idle_since_unix: float = 0.0
 
     # Search-space expansion ledger surfaced in the Orchestration prompt.
     discovered_flags: dict[str, Any] = field(default_factory=dict)
@@ -835,6 +850,17 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # segment is added at status-render time; accumulating completed segments
     # avoids undercounting long macro-cycle runs after phase_history is capped.
     explore_elapsed_accum_s: float | None = 0.0
+    # Durable per-phase sum of COMPLETED segments, keyed by phase name.
+    # ``phase_started_unix`` is reset on EVERY phase entry, so a budget guard
+    # reading it alone measures the CURRENT entry only — and each phase is
+    # re-entered once per macro-cycle. That turned "KERNEL gets 15% of the run"
+    # into "KERNEL gets 15% of the run every time it is entered": three entries
+    # burned 288% of the cap while the other phases starved. The guards read
+    # this total plus the live segment instead. ``record_phase_transition`` is
+    # the only writer; unlike ``explore_elapsed_accum_s`` there is no "unknown"
+    # sentinel, because a budget guard must never read "unknown" as "no cap"
+    # (see ``from_raw`` for how a pre-upgrade state is reconstructed).
+    phase_elapsed_totals: dict[str, float] = field(default_factory=dict)
     # Append-only operator-facing lifecycle log. Each row (built by
     # :func:`machine_state.make_lifecycle_event`) records a phase/step boundary
     # plus artifact paths. Coordinator-only writer; capped at ``_LIFECYCLE_CAP``.
@@ -1222,6 +1248,18 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         # partial zero after resume. Fresh states still start from 0.0.
         if "explore_elapsed_accum_s" not in raw:
             filtered["explore_elapsed_accum_s"] = None
+        # A state written before per-phase totals existed still records every
+        # transition in phase_history, so the completed segments are
+        # reconstructible. Rebuilding beats defaulting to an empty dict: an empty
+        # dict silently re-arms the per-entry bug for the rest of a resumed run.
+        # phase_history is capped, so the rebuild is a LOWER bound — the safe
+        # direction, since it can only under-charge a phase, never invent time.
+        if not isinstance(filtered.get("phase_elapsed_totals"), dict):
+            from ..phases.machine_state import phase_elapsed_totals_from_history
+
+            filtered["phase_elapsed_totals"] = phase_elapsed_totals_from_history(
+                filtered.get("phase_history"),
+            )
         if not isinstance(filtered.get("specialist_patch_verdicts"), dict):
             filtered["specialist_patch_verdicts"] = {}
         if not isinstance(filtered.get("kernel_opt_attempts"), dict):
