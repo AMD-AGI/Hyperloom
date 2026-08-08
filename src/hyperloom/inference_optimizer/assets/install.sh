@@ -377,8 +377,8 @@ acquire_install_lock() {
 }
 
 # Preflight credential validation. Mirrors src/hyperloom/agents/kernel/scripts/install.sh:
-# a usable setup needs Anthropic or DeepSeek credentials. The installer gate
-# intentionally does not default or require OpenAI.
+# a usable setup needs at least one self-consistent provider side. A
+# dual-protocol gateway such as DeepSeek configures both sides on one host.
 #
 # Loader (env wins; never overwrites a key that is already set):
 #   env > $REPO_ROOT/.env
@@ -392,15 +392,56 @@ preflight_load_dotenv() {
   fi
 }
 
+# Translate a retired DEEPSEEK_* configuration into the standard variables.
+# DeepSeek is a dual-protocol gateway, not a third provider: /anthropic speaks
+# the Anthropic API and /v1 speaks OpenAI chat-completions, both with the same
+# key. Endpoint and model derivation matches
+# hyperloom.common.llm_config.deepseek_compat_env.
+normalize_legacy_deepseek_env() {
+  [ -n "${DEEPSEEK_API_KEY:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || return 0
+  # Adopt the gateway whole or not at all. Anything already on the Anthropic
+  # side means the retired variables are stale leftovers: half-adopting them
+  # would send an explicit Anthropic credential to DeepSeek's host.
+  if [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+    warn "DEEPSEEK_* is retired and ignored here: the Anthropic side is already configured"
+    return 0
+  fi
+  local base lowered anthropic_url openai_url model
+  base="${DEEPSEEK_BASE_URL:-}"
+  base="${base%/}"
+  # Case-insensitive match (AMD spells it /Anthropic); ${base%/*} drops the
+  # final segment whatever its casing.
+  lowered="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')"
+  case "$lowered" in
+    "")           anthropic_url="https://api.deepseek.com/anthropic"; openai_url="https://api.deepseek.com/v1" ;;
+    */anthropic)  anthropic_url="$base"; openai_url="${base%/*}/v1" ;;
+    */v1)         anthropic_url="${base%/*}/anthropic"; openai_url="$base" ;;
+    https://api.deepseek.com|http://api.deepseek.com)
+                  anthropic_url="${base}/anthropic"; openai_url="${base}/v1" ;;
+    *)            anthropic_url="$base"; openai_url="${base}/v1" ;;
+  esac
+  model="${DEEPSEEK_MODEL:-deepseek-v4-pro}"
+  export ANTHROPIC_BASE_URL="$anthropic_url"
+  [ -n "${DEEPSEEK_API_KEY:-}" ] && export ANTHROPIC_API_KEY="$DEEPSEEK_API_KEY"
+  [ -n "${CLAUDE_MODEL:-}" ] || export CLAUDE_MODEL="$model"
+  # GEAKv4 follows whichever Claude model is actually in effect.
+  [ -n "${GEAK_CLAUDE_MODEL:-}" ] || export GEAK_CLAUDE_MODEL="${CLAUDE_MODEL:-$model}"
+  # The OpenAI side is adopted only when it is entirely free; otherwise some
+  # other gateway already runs there and keeps its own key and model.
+  if [ -z "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+    export OPENAI_BASE_URL="$openai_url"
+    [ -n "${DEEPSEEK_API_KEY:-}" ] && export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
+    [ -n "${CODEX_MODEL:-}" ] || export CODEX_MODEL="$model"
+  fi
+  unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL
+  warn "DEEPSEEK_* is retired; normalized to ANTHROPIC_*/OPENAI_*"
+}
+
 # Reject one provider's base URL paired with only the other provider's key.
-# DeepSeek serves its own Anthropic-compatible endpoint, so its key counts as one.
 preflight_reject_cross_provider() {
   local a_key a_endpoint conflict=""
-  a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${DEEPSEEK_API_KEY:-}}}"
+  a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
   a_endpoint="${ANTHROPIC_BASE_URL:-}"
-  if [ -z "$a_endpoint" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; then
-    a_endpoint="${DEEPSEEK_BASE_URL:-https://api.deepseek.com/anthropic}"
-  fi
   if [ -n "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -n "$a_key" ]; then
     conflict="OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an Anthropic-side key is configured"
   elif [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ -z "$a_key" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
@@ -426,11 +467,12 @@ EOF
 
 preflight_validate_credentials() {
   preflight_load_dotenv
+  normalize_legacy_deepseek_env
   local missing=()
   local has_anthropic=0 has_openai=0
   # Each side needs its own base URL and key; an unset side is fine.
-  { { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } &&
-    { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; }; } &&
+  { [ -n "${ANTHROPIC_BASE_URL:-}" ] &&
+    { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; }; } &&
     has_anthropic=1
   { [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; } && has_openai=1
   preflight_reject_cross_provider || return 1
@@ -438,7 +480,7 @@ preflight_validate_credentials() {
     log "credentials preflight: at least one self-consistent provider side present"
     return 0
   fi
-  missing+=("a self-consistent provider side: ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY (DeepSeek may omit the URL), or OPENAI_BASE_URL + OPENAI_API_KEY")
+  missing+=("a self-consistent provider side: ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY, or OPENAI_BASE_URL + OPENAI_API_KEY")
   local env_file_status
   if [ -f "$REPO_ROOT/.env" ]; then
     env_file_status="present"
@@ -463,9 +505,13 @@ Fix one of:
   1. Anthropic:
        export ANTHROPIC_BASE_URL=https://api.anthropic.com
        export ANTHROPIC_API_KEY=sk-ant-...
-  2. DeepSeek:
-       export DEEPSEEK_API_KEY=sk-...
-       # optional: export DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic
+  2. A dual-protocol gateway such as DeepSeek (same key, both sides):
+       export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+       export OPENAI_BASE_URL=https://api.deepseek.com/v1
+       export ANTHROPIC_API_KEY=sk-...  OPENAI_API_KEY=sk-...
+     A gateway serving only its own models also needs the model ids. Known
+     hosts default themselves; otherwise set CLAUDE_MODEL (Anthropic side)
+     and CODEX_MODEL (OpenAI side).
   3. Copy .env from a working worktree into this one:
        cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
 EOF

@@ -24,7 +24,7 @@ from typing import Optional
 import httpx
 
 from hyperloom.common.env import env_bool, env_int
-from hyperloom.common.llm_config import DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL, DEFAULT_DEEPSEEK_MODEL
+from hyperloom.common.llm_config import deepseek_compat_env
 
 log = logging.getLogger(__name__)
 
@@ -410,6 +410,18 @@ async def _probe_robustness_server() -> str:
     return ""
 
 
+def _provider_env() -> dict[str, str]:
+    """Return the process environment with retired provider variables normalized.
+
+    The robustness agent also runs standalone, outside the CLI preflight that
+    normally performs this rewrite, so a sandbox still carrying ``DEEPSEEK_*``
+    would otherwise resolve no credentials and silently degrade RCA to a no-op.
+    """
+    env = dict(os.environ)
+    env.update(deepseek_compat_env(env))
+    return env
+
+
 def _discover_llm_credentials() -> tuple[str, str, str]:
     """Pick up LLM credentials already in the Claw sandbox environment.
 
@@ -417,32 +429,20 @@ def _discover_llm_credentials() -> tuple[str, str, str]:
         tuple[str, str, str]: A ``(base_url, api_key, provider)`` tuple read
         from sandbox environment variables; URL/key may be empty if unset.
     """
-    openai_base = os.environ.get("OPENAI_BASE_URL", "").strip()
-    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    env = _provider_env()
+    openai_base = env.get("OPENAI_BASE_URL", "").strip()
+    openai_key = env.get("OPENAI_API_KEY", "").strip()
     if openai_key:
         return openai_base or "https://api.openai.com/v1", openai_key, "openai"
-    gateway_key = (
-        os.environ.get("LLM_API_KEY", "").strip()
-        or os.environ.get("LLM_GATEWAY_KEY", "").strip()
-    )
+    gateway_key = env.get("LLM_API_KEY", "").strip() or env.get("LLM_GATEWAY_KEY", "").strip()
     if gateway_key and openai_base:
         return openai_base, gateway_key, "openai"
 
-    anthropic_key = (
-        os.environ.get("ANTHROPIC_API_KEY", "").strip() or os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
-    )
+    anthropic_key = env.get("ANTHROPIC_API_KEY", "").strip() or env.get("ANTHROPIC_AUTH_TOKEN", "").strip()
     if anthropic_key:
         return (
-            os.environ.get("ANTHROPIC_BASE_URL", "").strip() or "https://api.anthropic.com",
+            env.get("ANTHROPIC_BASE_URL", "").strip() or "https://api.anthropic.com",
             anthropic_key,
-            "anthropic",
-        )
-
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    if deepseek_key:
-        return (
-            os.environ.get("DEEPSEEK_BASE_URL", "").strip() or DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL,
-            deepseek_key,
             "anthropic",
         )
 
@@ -451,18 +451,13 @@ def _discover_llm_credentials() -> tuple[str, str, str]:
 
 def _discover_llm_model(provider: str) -> str:
     """Resolve the RCA model for the discovered provider."""
-    explicit = os.environ.get("ROBUSTNESS_LLM_MODEL", "").strip() or os.environ.get("LLM_MODEL", "").strip()
+    env = _provider_env()
+    explicit = env.get("ROBUSTNESS_LLM_MODEL", "").strip() or env.get("LLM_MODEL", "").strip()
     if explicit:
         return explicit
-    if os.environ.get("DEEPSEEK_API_KEY", "").strip() or os.environ.get("DEEPSEEK_BASE_URL", "").strip():
-        return os.environ.get("DEEPSEEK_MODEL", "").strip() or DEFAULT_DEEPSEEK_MODEL
     if provider == "openai":
-        return os.environ.get("OPENAI_MODEL", "").strip() or os.environ.get("CODEX_MODEL", "").strip() or "gpt-5.6-sol"
-    return (
-        os.environ.get("ANTHROPIC_MODEL", "").strip()
-        or os.environ.get("CLAUDE_MODEL", "").strip()
-        or "claude-opus-5"
-    )
+        return env.get("OPENAI_MODEL", "").strip() or env.get("CODEX_MODEL", "").strip() or "gpt-5.6-sol"
+    return env.get("ANTHROPIC_MODEL", "").strip() or env.get("CLAUDE_MODEL", "").strip() or "claude-opus-5"
 
 
 _WORKLOAD_UID_ENV_KEYS: tuple[str, ...] = (

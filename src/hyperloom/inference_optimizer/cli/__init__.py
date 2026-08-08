@@ -590,14 +590,28 @@ def _catalog_compare_model_id(model_id: str) -> str:
     return lowered
 
 
+def _same_gateway(anthropic_url: str, openai_url: str) -> bool:
+    """True when both protocol sides are served by one gateway.
+
+    Either the same URL, or the same host with a different path per protocol
+    (``/anthropic`` vs ``/v1``) — the shape the installers call a dual-protocol
+    gateway.
+    """
+    if not anthropic_url or not openai_url:
+        return False
+    if anthropic_url == openai_url:
+        return True
+    from urllib.parse import urlsplit
+
+    return urlsplit(anthropic_url).netloc == urlsplit(openai_url).netloc
+
+
 def _codex_model_should_follow_claude() -> bool:
     """True when the operator supplied only Anthropic config."""
     has_anthropic = bool(
         (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
         or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
         or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
-        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
     )
     has_openai = bool(
         (os.environ.get("OPENAI_BASE_URL") or "").strip() or (os.environ.get("OPENAI_API_KEY") or "").strip()
@@ -616,8 +630,6 @@ def _claude_model_should_follow_codex() -> bool:
         (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
         or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
         or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
-        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
     )
     return has_openai and not has_anthropic
 
@@ -725,7 +737,6 @@ def _validate_and_resolve_claude_model(
         api_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-            or os.environ.get("DEEPSEEK_API_KEY", "")
             or os.environ.get("OPENAI_API_KEY", "")
         )
         catalog_ids = _probe_llm_catalog(base_url=override_url, api_key=api_key)
@@ -736,16 +747,14 @@ def _validate_and_resolve_claude_model(
             anthropic_url = resolved_urls[0]
         if not openai_url and resolved_urls is not None:
             openai_url = resolved_urls[1]
-        anthropic_key = (
-            os.environ.get("ANTHROPIC_API_KEY", "")
-            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-            or os.environ.get("DEEPSEEK_API_KEY", "")
-        )
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
         # OpenAI-side key only.
         openai_key = os.environ.get("OPENAI_API_KEY", "")
-        # The Claude catalog must come from the Anthropic side. Fall back to the
-        # OpenAI side only for a single-gateway deploy where both sides resolve
-        # to the same endpoint.
+        # The Claude catalog must come from the Anthropic side. The OpenAI side
+        # is offered as a second candidate only when both sides are the same
+        # gateway -- identical URLs, or one host serving each protocol on its
+        # own path -- and the loop below only reaches it when the first side
+        # turns out to have no /models route at all.
         candidates: list[tuple[str, str]] = []
         if _claude_model_should_follow_codex():
             if openai_url:
@@ -755,8 +764,7 @@ def _validate_and_resolve_claude_model(
         else:
             if anthropic_url:
                 candidates.append((anthropic_url, anthropic_key))
-            if openai_url and openai_url == anthropic_url:
-                # single gateway: same URL serves both; OpenAI key is a valid retry
+            if openai_url and anthropic_url and _same_gateway(anthropic_url, openai_url):
                 candidates.append((openai_url, openai_key))
             elif openai_url and not anthropic_url:
                 # pure single-gateway with only OPENAI_BASE_URL configured
@@ -767,7 +775,13 @@ def _validate_and_resolve_claude_model(
                 continue
             seen_urls.add(cand_url)
             catalog_ids = _probe_llm_catalog(base_url=cand_url, api_key=cand_key)
-            if catalog_ids is not None:
+            # A missing /models route is the only answer worth re-asking on the
+            # other side, and only because a dual-protocol gateway lists its
+            # models there. An unreachable side (None) means the gateway is
+            # flaky rather than route-less: probing the OpenAI side would then
+            # answer a Claude question with an OpenAI catalog and fail every
+            # allowlisted id, so stop and let the caller degrade to its WARN.
+            if catalog_ids is not _CATALOG_NO_MODELS_ENDPOINT:
                 break
 
     if catalog_ids is _CATALOG_NO_MODELS_ENDPOINT:

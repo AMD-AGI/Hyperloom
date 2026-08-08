@@ -367,8 +367,6 @@ def _should_use_openai_tool_runner() -> bool:
         (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
         or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
         or (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
-        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
     )
     return has_openai and not has_anthropic
 
