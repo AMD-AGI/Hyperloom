@@ -56,15 +56,11 @@ class KnowledgeConfig:
         try:
             mode = KnowledgeStoreMode(raw_mode)
         except ValueError as exc:
-            raise ValueError(
-                f"invalid KNOWLEDGE_STORE_MODE={raw_mode!r}; expected 'local' or 'remote'"
-            ) from exc
+            raise ValueError(f"invalid KNOWLEDGE_STORE_MODE={raw_mode!r}; expected 'local' or 'remote'") from exc
 
         explicit_root = source.get("KNOWLEDGE_LOCAL_ROOT")
         local_root = (
-            _expanded(str(explicit_root).strip())
-            if explicit_root not in (None, "")
-            else _default_local_root(source)
+            _expanded(str(explicit_root).strip()) if explicit_root not in (None, "") else _default_local_root(source)
         )
         kb_store_url = str(source.get("KB_STORE_URL") or "").strip()
         kb_store_token = str(source.get("KB_STORE_TOKEN") or "").strip()
@@ -80,9 +76,7 @@ class KnowledgeConfig:
                 if not value
             ]
             if missing:
-                raise ValueError(
-                    "KNOWLEDGE_STORE_MODE=remote requires " + " and ".join(missing)
-                )
+                raise ValueError("KNOWLEDGE_STORE_MODE=remote requires " + " and ".join(missing))
         return cls(
             mode=mode,
             local_root=local_root,
@@ -105,19 +99,26 @@ class KnowledgeConfig:
 
         env["KNOWLEDGE_STORE_MODE"] = self.mode.value
         env["KNOWLEDGE_LOCAL_ROOT"] = self.local_root
-        # Recipe remote mode is backed by KB Store, not GBrain. Never turn on
-        # KernelForge's legacy GBrain switch as a side effect of Recipe mode.
-        env["KERNELFORGE_GBRAIN_ENABLED"] = "false"
         if self.mode is KnowledgeStoreMode.REMOTE:
             env["KB_STORE_URL"] = self.kb_store_url
             env["KB_STORE_TOKEN"] = self.kb_store_token
         else:
             env.pop("KB_STORE_URL", None)
             env.pop("KB_STORE_TOKEN", None)
-        # GBrain credentials belong to parent-process KG/Framework PR clients;
-        # never leak them into a KernelForge child.
-        env.pop("GBRAIN_BASE_URL", None)
-        env.pop("GBRAIN_TOKEN", None)
+        # KernelForge is mid-migration: only its FlyDSL rewrite path reads KB
+        # Store, while forge-loop, gemm tuning and fusion still speak GBrain and
+        # refuse to start without credentials. Both sets travel until those
+        # three move, because withholding one silently costs the child a
+        # knowledge base it is still expected to use.
+        forwards_gbrain = self.mode is KnowledgeStoreMode.REMOTE and bool(self.gbrain_base_url and self.gbrain_token)
+        if forwards_gbrain:
+            env["GBRAIN_BASE_URL"] = self.gbrain_base_url
+            env["GBRAIN_TOKEN"] = self.gbrain_token
+        else:
+            env.pop("GBRAIN_BASE_URL", None)
+            env.pop("GBRAIN_TOKEN", None)
+        # Derived state, never an operator-provided value.
+        env["KERNELFORGE_GBRAIN_ENABLED"] = "true" if forwards_gbrain else "false"
         # The section draft belongs to this run's inference document. A
         # KernelForge child publishes its own ``kernel:`` record, so letting it
         # inherit these would stage its sections into the wrong document.
