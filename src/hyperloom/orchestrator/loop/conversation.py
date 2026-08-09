@@ -52,7 +52,7 @@ class ConversationCollaborator:
         """
         return bool(getattr(self.backends.get("orchestration"), "context_tools_mounted", False))
 
-    def _orchestration_needs_seed(self) -> bool:
+    def _orchestration_needs_seed(self, system_prompt: str | None = None) -> bool:
         """True when the orchestration backend lost the history a delta assumes.
 
         Only the backend knows when the conversation underneath it was
@@ -60,10 +60,23 @@ class ConversationCollaborator:
         system prompt or after a turn that never landed. Backends that keep no
         conversation report nothing and the seeded flag alone decides.
 
+        The answer has to describe the turn that is *about* to run: a re-scoped
+        system prompt replaces the thread inside the turn, so a backend asked
+        only about the thread as it stands would report history that this turn is
+        going to discard. ``needs_seed_for`` answers for the pending prompt;
+        ``needs_seed`` is the fallback for backends that cannot.
+
+        Args:
+            system_prompt: The system prompt this turn will carry, when known.
+
         Returns:
             ``True`` when the backend reports a conversation with no history.
         """
-        return bool(getattr(self.backends.get("orchestration"), "needs_seed", False))
+        backend = self.backends.get("orchestration")
+        ask = getattr(backend, "needs_seed_for", None)
+        if callable(ask):
+            return bool(ask(system_prompt))
+        return bool(getattr(backend, "needs_seed", False))
 
     def _reset_orchestration_conversation(self) -> None:
         """Force the next orchestration turn to re-seed a fresh conversation."""
@@ -405,12 +418,15 @@ class ConversationCollaborator:
                 exc_info=True,
             )
 
-    async def _compose_prompt(self, agent_name: str) -> str:
+    async def _compose_prompt(self, agent_name: str, *, system_prompt: str | None = None) -> str:
         """Compose the orchestration prompt: SharedState summary + inbox tail (with canonical msg_id per inbox row).
 
         Args:
             agent_name: The agent role to compose the per-tick prompt for;
                 selects which advisory/telemetry sections are included.
+            system_prompt: The system prompt the turn will carry. The SEED/DELTA
+                gate needs it because a re-scoped prompt empties the backend's
+                conversation inside the turn this prompt is being built for.
 
         Returns:
             The assembled prompt string for this agent's reactor turn.
@@ -438,7 +454,7 @@ class ConversationCollaborator:
             push_full = (
                 not self._orchestration_conversational()
                 or not self._orchestration_seeded
-                or self._orchestration_needs_seed()
+                or self._orchestration_needs_seed(system_prompt)
             )
             if self._orchestration_conversational():
                 log.info(

@@ -56,6 +56,14 @@ from .base import (
 )
 from .mcp_emit_intent import build_intent_envelope_schema, payload_contract
 
+# Prepended to a turn that runs without the enforced schema. Thread developer
+# instructions are fixed at thread_start, so the standing OUTPUT FORMAT block
+# cannot be scoped out for one turn and has to be overridden in the user turn.
+_PER_TURN_SCHEMA_OVERRIDE = (
+    "THIS TURN ONLY: ignore the OUTPUT FORMAT block in your instructions. "
+    "Do not emit an intent envelope. Reply exactly as the message below asks."
+)
+
 
 def build_output_instructions(allowed_intents: Iterable[IntentType]) -> str:
     """Render the transport contract for one role's intent set.
@@ -120,6 +128,12 @@ def decode_intent_envelope(text: str) -> dict[str, Any]:
         ) from exc
     if not isinstance(envelope, dict) or not isinstance(envelope.get("intents"), list):
         raise NoIntentEmitted("codex reply is valid JSON but carries no 'intents' list")
+    # An empty list satisfies validate_envelope, so without this the tick is
+    # recorded as a success that did nothing and the backend's error streak is
+    # reset. The schema's ``minItems`` is the provider-side belt; this is the
+    # braces, because a gateway that drops the keyword must not go unnoticed.
+    if not envelope["intents"]:
+        raise NoIntentEmitted("codex reply carried an empty 'intents' list")
     decoded: list[Any] = []
     for index, item in enumerate(envelope["intents"]):
         if not isinstance(item, dict):
@@ -263,12 +277,22 @@ class CodexBackend:
                 failed intent validation.
         """
         output_schema = None if allow_no_intent else build_intent_envelope_schema(self.allowed_intents)
+        # Dropping the schema is not enough on its own: the thread's developer
+        # instructions carry the OUTPUT FORMAT block for the life of the thread
+        # and cannot be scoped out for one turn, so a checkpoint turn asking for
+        # a different JSON shape would be answered with an intent envelope. The
+        # compaction parser reads that as degenerate, skips the compaction, and
+        # leaves the conversation growing -- the failure this backend exists to
+        # end. An explicit per-turn override is the only channel available.
+        turn_prompt = (
+            f"{_PER_TURN_SCHEMA_OVERRIDE}\n\n{prompt}" if allow_no_intent else prompt
+        )
 
         async def _one_attempt() -> Any:
             """Acquire the session and run one turn under the retry policy."""
             session = await self._session_for(system_prompt)
             return await session.turn(
-                prompt,
+                turn_prompt,
                 timeout_sec=self.call_timeout_s,
                 output_schema=output_schema,
             )
@@ -347,6 +371,27 @@ class CodexBackend:
         """
         return not self._thread_seeded
 
+    def needs_seed_for(self, system_prompt: str | None) -> bool:
+        """True when the turn about to run will start on an empty thread.
+
+        :attr:`needs_seed` can only describe the thread as it stands, but the
+        caller has to choose SEED or DELTA *before* the turn, and a re-scoped
+        system prompt replaces the thread inside the turn itself. Answering for
+        the prompt that is about to be sent is what keeps a thin delta out of a
+        thread that holds none of the state the delta omits.
+        """
+        if not self._thread_seeded:
+            return True
+        return self._instructions_for(system_prompt) != self._thread_instructions
+
+    def _instructions_for(self, system_prompt: str | None) -> str:
+        """Thread-level instructions implied by one system prompt."""
+        return "\n\n".join(
+            part
+            for part in ((system_prompt or "").strip(), build_output_instructions(self.allowed_intents))
+            if part
+        )
+
     def reset_conversation(self) -> None:
         """Start the next turn on a fresh conversation.
 
@@ -371,9 +416,7 @@ class CodexBackend:
             BackendError: If the session's config or sandbox policy is unusable.
             LLMCallFailed: If the SDK client could not be opened.
         """
-        instructions = "\n\n".join(
-            part for part in ((system_prompt or "").strip(), build_output_instructions(self.allowed_intents)) if part
-        )
+        instructions = self._instructions_for(system_prompt)
         if self._session is None:
             self._session = CodexSession(
                 cwd=self.cwd,

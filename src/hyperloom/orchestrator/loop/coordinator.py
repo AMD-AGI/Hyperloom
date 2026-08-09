@@ -1780,10 +1780,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
             agent_name (str): The agent role to run this pass for.
         """
         backend = self.backends[agent_name]
-        prompt = await self._compose_prompt(agent_name)
-        # Conversation-growth accounting happens after the turn returns, from the
-        # backend's reported token usage.
+        # The system prompt is loaded first because the SEED/DELTA gate inside
+        # _compose_prompt has to know whether THIS prompt replaces the backend's
+        # conversation. A re-scoped prompt opens a new thread inside the turn, so
+        # a gate that only sees the thread as it stands would compose a delta for
+        # a conversation that is about to be emptied.
         sys_prompt = await self._load_system_prompt(agent_name)
+        prompt = await self._compose_prompt(agent_name, system_prompt=sys_prompt)
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
         # No-op for backends without the hook. Presence of the hook is also what
