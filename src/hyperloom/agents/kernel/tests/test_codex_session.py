@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import inspect
 import json
 import shutil
 import sys
@@ -175,6 +176,8 @@ class _FakeThread:
     async def turn(self, prompt: str, **options: Any) -> _FakeTurnHandle:
         self._record["prompt"] = prompt
         self._record["turn_options"] = options
+        self._record.setdefault("turn_prompts", []).append(prompt)
+        self._record.setdefault("turn_threads", []).append(id(self))
         return _FakeTurnHandle(
             self._record,
             result=self._result,
@@ -218,6 +221,7 @@ class _FakeAsyncCodex:
 
     async def thread_start(self, **options: Any) -> _FakeThread:
         self._record["thread_options"] = options
+        self._record["thread_start_calls"] = self._record.get("thread_start_calls", 0) + 1
         if self._thread_start_error is not None:
             raise self._thread_start_error
         return _FakeThread(
@@ -1364,6 +1368,127 @@ def test_codex_file_changes_keeps_only_real_paths():
 
 
 # --------------------------------------------------------------------------- #
+# Long-lived sessions
+# --------------------------------------------------------------------------- #
+
+
+async def _drain(session: cs.CodexSession, prompts: tuple[str, ...]) -> None:
+    """Run each prompt as one turn on an already-started session."""
+    for prompt in prompts:
+        await session.turn(prompt, timeout_sec=5.0)
+
+
+def test_codex_session_reuses_one_thread_across_turns(tmp_path, monkeypatch):
+    """Continuity is the point: a second turn must not re-seed a new thread."""
+    record = _install_fake_sdk(monkeypatch)
+
+    async def _run() -> None:
+        async with cs.CodexSession(
+            cwd=tmp_path,
+            model="m",
+            developer_instructions="i",
+            env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime")),
+        ) as session:
+            await _drain(session, ("tick 1", "tick 2", "tick 3"))
+
+    asyncio.run(_run())
+
+    assert record["thread_start_calls"] == 1
+    assert record["turn_prompts"] == ["tick 1", "tick 2", "tick 3"]
+    assert len(set(record["turn_threads"])) == 1
+
+
+def test_codex_session_starts_a_new_thread_after_a_reset(tmp_path, monkeypatch):
+    """Compaction drops the conversation; the next turn opens a fresh thread."""
+    record = _install_fake_sdk(monkeypatch)
+
+    async def _run() -> None:
+        async with cs.CodexSession(
+            cwd=tmp_path,
+            model="m",
+            developer_instructions="i",
+            env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime")),
+        ) as session:
+            await _drain(session, ("before",))
+            session.reset_thread()
+            await _drain(session, ("after",))
+
+    asyncio.run(_run())
+
+    assert record["thread_start_calls"] == 2
+    assert len(set(record["turn_threads"])) == 2
+
+
+def test_codex_session_keeps_codex_home_alive_until_close(tmp_path, monkeypatch):
+    """The private state directory is session-scoped, not per turn."""
+    record = _install_fake_sdk(monkeypatch)
+    seen: list[bool] = []
+
+    async def _run() -> None:
+        session = cs.CodexSession(
+            cwd=tmp_path,
+            model="m",
+            developer_instructions="i",
+            env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime")),
+        )
+        await session.start()
+        try:
+            for prompt in ("first", "second"):
+                await session.turn(prompt, timeout_sec=5.0)
+                seen.append(Path(record["codex_home_at_enter"]).is_dir())
+        finally:
+            await session.aclose()
+
+    asyncio.run(_run())
+
+    assert seen == [True, True]
+    assert not Path(record["codex_home_at_enter"]).exists()
+
+
+def test_codex_session_close_is_idempotent(tmp_path, monkeypatch):
+    """The Coordinator closes backends in a ``finally``; a double close is normal."""
+    _install_fake_sdk(monkeypatch)
+
+    async def _run() -> None:
+        session = cs.CodexSession(
+            cwd=tmp_path,
+            model="m",
+            env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime")),
+        )
+        await session.start()
+        await session.aclose()
+        await session.aclose()
+
+    asyncio.run(_run())
+
+
+def test_codex_session_turn_forwards_the_output_schema(tmp_path, monkeypatch):
+    """Each turn carries its own structured-output constraint."""
+    record = _install_fake_sdk(monkeypatch)
+    schema = {"type": "object", "additionalProperties": False, "properties": {}, "required": []}
+
+    async def _run() -> None:
+        async with cs.CodexSession(
+            cwd=tmp_path,
+            model="m",
+            env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime")),
+        ) as session:
+            await session.turn("p", timeout_sec=5.0, output_schema=schema)
+
+    asyncio.run(_run())
+
+    assert record["turn_options"]["output_schema"] == schema
+
+
+def test_codex_session_turn_before_start_is_rejected(tmp_path):
+    """A turn on an unstarted session is a caller bug, not a provider failure."""
+    session = cs.CodexSession(cwd=tmp_path, model="m", env=_gateway_env())
+
+    with pytest.raises(cs.CodexSessionError, match="not started"):
+        asyncio.run(session.turn("p", timeout_sec=5.0))
+
+
+# --------------------------------------------------------------------------- #
 # Installed-SDK contract
 # --------------------------------------------------------------------------- #
 
@@ -1380,6 +1505,7 @@ def test_installed_codex_sdk_exposes_the_api_this_module_drives():
     for method in ("thread_start", "close"):
         assert hasattr(sdk.AsyncCodex, method), method
     assert hasattr(sdk.AsyncThread, "turn")
+    assert "output_schema" in inspect.signature(sdk.AsyncThread.turn).parameters
     for method in ("run", "interrupt"):
         assert hasattr(sdk.AsyncTurnHandle, method), method
     for attr in ("final_response", "items", "usage", "error"):

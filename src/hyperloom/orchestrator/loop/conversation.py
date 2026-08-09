@@ -43,6 +43,19 @@ class ConversationCollaborator:
         backend = self.backends.get("orchestration")
         return bool(getattr(backend, "conversational", False))
 
+    def _orchestration_needs_seed(self) -> bool:
+        """True when the orchestration backend lost the history a delta assumes.
+
+        Only the backend knows when the conversation underneath it was
+        replaced — a session-scoped provider re-opens its thread on a re-scoped
+        system prompt or after a turn that never landed. Backends that keep no
+        conversation report nothing and the seeded flag alone decides.
+
+        Returns:
+            ``True`` when the backend reports a conversation with no history.
+        """
+        return bool(getattr(self.backends.get("orchestration"), "needs_seed", False))
+
     def _reset_orchestration_conversation(self) -> None:
         """Force the next orchestration turn to re-seed a fresh conversation."""
         backend = self.backends.get("orchestration")
@@ -413,7 +426,11 @@ class ConversationCollaborator:
         # Conversational delta gating: first turn gets full SEED, later turns thin DELTA.
         push_full = True
         if agent_name == "orchestration":
-            push_full = not self._orchestration_conversational() or not self._orchestration_seeded
+            push_full = (
+                not self._orchestration_conversational()
+                or not self._orchestration_seeded
+                or self._orchestration_needs_seed()
+            )
             if self._orchestration_conversational():
                 log.info(
                     "orchestration prompt mode=%s seeded=%s tick=%s",

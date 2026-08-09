@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 
 from hyperloom.common import codex_session
-from hyperloom.common.codex_session import CodexSessionError, CodexSessionResult
+from hyperloom.common.codex_session import CodexSession, CodexSessionError, CodexSessionResult
 from hyperloom.inference_optimizer.protocol.intent import IntentType, NoIntentEmitted
 from hyperloom.orchestrator.roles import codex as codex_module
 from hyperloom.orchestrator.roles.agent_role import (
@@ -186,16 +186,37 @@ def _backend(tmp_path: Path) -> CodexBackend:
 
 
 def _stub_turn(monkeypatch: pytest.MonkeyPatch, result: CodexSessionResult | BaseException) -> dict[str, Any]:
-    """Replace the SDK turn with a recorder returning ``result``."""
+    """Replace the SDK session with a recorder returning ``result``.
+
+    Patches the real :class:`CodexSession` methods rather than substituting a
+    fake class, so the recorded developer instructions and schema are the ones
+    the backend actually configured.
+    """
     captured: dict[str, Any] = {}
 
-    async def _fake_run_codex_turn(**kwargs: Any) -> CodexSessionResult:
-        captured.update(kwargs)
+    async def _start(session: CodexSession) -> None:
+        captured["developer_instructions"] = session.developer_instructions
+
+    async def _turn(
+        session: CodexSession,
+        prompt: str,
+        *,
+        timeout_sec: float,
+        output_schema: dict[str, Any] | None = None,
+    ) -> CodexSessionResult:
+        captured["prompt"] = prompt
+        captured["timeout_sec"] = timeout_sec
+        captured["output_schema"] = output_schema
         if isinstance(result, BaseException):
             raise result
         return result
 
-    monkeypatch.setattr(codex_module, "run_codex_turn", _fake_run_codex_turn)
+    async def _aclose(session: CodexSession) -> None:
+        captured["closed"] = True
+
+    monkeypatch.setattr(CodexSession, "start", _start)
+    monkeypatch.setattr(CodexSession, "turn", _turn)
+    monkeypatch.setattr(CodexSession, "aclose", _aclose)
     return captured
 
 

@@ -1099,6 +1099,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_hold_for_framework_config_lane": "phase_framework",
         "_record_framework_config_exploration_result": "phase_framework",
         "_orchestration_conversational": "conversation",
+        "_orchestration_needs_seed": "conversation",
         "_reset_orchestration_conversation": "conversation",
         "_conversation_progress_signal": "conversation",
         "_attach_orchestration_context_tools": "conversation",
@@ -1744,7 +1745,25 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 except (NotImplementedError, RuntimeError):
                     # Teardown is best-effort; signal handlers may be unsupported.
                     pass
+            await self._close_backends()
         return self.shared_state.stop_reason
+
+    async def _close_backends(self) -> None:
+        """Release every backend holding a live agent session.
+
+        A session-scoped backend (Codex) keeps a child process and a private
+        state directory open for the whole run, and the loop is the only place
+        that knows the run is over. Failing to close one must not change the
+        stop reason, so each failure is logged and the rest still close.
+        """
+        for name, backend in list(self.backends.items()):
+            closer = getattr(backend, "aclose", None)
+            if not callable(closer):
+                continue
+            try:
+                await closer()
+            except Exception:  # noqa: BLE001 — teardown must not mask the stop reason
+                log.exception("Coordinator: closing the %s backend failed", name)
 
     # Reactor
     async def _reactor_pass(self, agent_name: str) -> None:

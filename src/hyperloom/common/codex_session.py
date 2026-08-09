@@ -1,12 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""One-shot Codex Agent SDK turns for Hyperloom's OpenAI-side runners.
+"""Codex Agent SDK sessions for Hyperloom's OpenAI-side runners.
 
 Hyperloom never issues bare LLM API calls: every interaction runs inside an
 agent runtime. This module is the Codex half of that contract. It wraps
 ``openai_codex`` so callers inherit the SDK's shell/file tools, sandbox, turn
 management and usage accounting instead of hand-rolling a tool-calling loop.
+:class:`CodexSession` holds one runtime open across many turns for a
+persistent role; :func:`run_codex_turn` is the one-shot form for a caller
+whose work is a single turn.
 
 The SDK plumbing follows ``kernel_agents.agent_backends.codex.CodexBackend``,
 but that class cannot be reused: its workspace guard requires the session cwd
@@ -762,20 +765,10 @@ def _private_codex_home(
     except OSError as exc:
         temporary.cleanup()
         raise CodexSessionUnavailableError(f"cannot secure private CODEX_HOME {codex_home}: {exc}") from exc
-    operation_error: BaseException | None = None
     try:
         yield codex_home
-    except BaseException as exc:
-        operation_error = exc
-        raise
     finally:
-        try:
-            _cleanup_codex_home(temporary)
-        except CodexHomeCleanupError as cleanup_error:
-            cleanup_error.operation_error = operation_error
-            if operation_error is not None:
-                raise cleanup_error from operation_error
-            raise
+        _cleanup_codex_home(temporary)
 
 
 def _item_dict(item: Any) -> dict[str, Any]:
@@ -915,6 +908,273 @@ def normalize_codex_result(result: Any, thread_id: str) -> CodexSessionResult:
     )
 
 
+class CodexSession:
+    """One Codex Agent SDK runtime held open across many turns.
+
+    The SDK client, its child app-server process and the private
+    ``CODEX_HOME`` live for the whole session; the *thread* is the
+    conversation. :meth:`turn` opens the thread on first use and keeps it, so
+    a reactor role can carry one conversation across ticks instead of paying a
+    cold start (and a full context re-push) every time.
+    :meth:`reset_thread` drops only the conversation, which is what a
+    compaction needs — restarting the runtime would leak a child process.
+
+    Turns run with ``ApprovalMode.deny_all`` (no approval prompt can block an
+    unattended run). Thread and turn receive the same resolved sandbox preset.
+    Contained presets first pass a real bubblewrap capability probe; failure
+    never falls back to ``full_access``. ``CODEX_HOME`` is a private mode-0700
+    directory below ``HYPERLOOM_RUNTIME_DIR``, the first safe writable root, or
+    a run-local ``cwd`` fallback, and is removed by :meth:`aclose` after the
+    SDK client closes.
+
+    Args:
+        cwd (Path): Working directory for the thread; writable under the
+            ``workspace_write`` and ``full_access`` sandboxes.
+        model (str): The Codex model id.
+        developer_instructions (str): System-level instructions for the
+            thread. Read when a thread is opened, so changing it and calling
+            :meth:`reset_thread` re-scopes the next conversation.
+        writable_roots (Sequence[Path]): Extra roots the session may write.
+            Empty keeps contained sessions read-only; confirmed ``bypass``
+            remains full access because external isolation is authoritative.
+        sandbox_mode (str): One of :data:`CODEX_SANDBOX_MODES`. Blank defers to
+            :data:`CODEX_SANDBOX_MODE_ENV`, then to
+            :data:`DEFAULT_CODEX_SANDBOX_MODE`.
+        api_key_env (str): Preferred API-key env var name.
+        base_url_env (str): Preferred base-URL env var name.
+        codex_bin (str): Optional Codex runtime path; the SDK resolves its own
+            when empty.
+        env (dict[str, str] | None): Values overlaid on ``os.environ``. The
+            resulting mapping drives policy, credentials, config and child
+            process launch.
+    """
+
+    def __init__(
+        self,
+        *,
+        cwd: Path,
+        model: str,
+        developer_instructions: str = "",
+        writable_roots: Sequence[Path] = (),
+        sandbox_mode: str = "",
+        api_key_env: str = "OPENAI_API_KEY",
+        base_url_env: str = "OPENAI_BASE_URL",
+        codex_bin: str = "",
+        env: dict[str, str] | None = None,
+    ) -> None:
+        self.cwd = Path(cwd)
+        self.model = model
+        self.developer_instructions = developer_instructions
+        self.writable_roots = tuple(writable_roots)
+        self.sandbox_mode = sandbox_mode
+        self.api_key_env = api_key_env
+        self.base_url_env = base_url_env
+        self.codex_bin = codex_bin
+        self.env = env
+        self._stack: contextlib.AsyncExitStack | None = None
+        self._sdk: Any | None = None
+        self._sandbox: Any = None
+        self._client: Any = None
+        self._thread: Any = None
+        self._thread_id: str = ""
+
+    @property
+    def thread_id(self) -> str:
+        """The SDK handle of the open conversation, or ``""`` before one opens."""
+        return self._thread_id
+
+    async def __aenter__(self) -> "CodexSession":
+        """Start the session and return it."""
+        await self.start()
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        """Close the session."""
+        await self.aclose()
+
+    async def start(self) -> None:
+        """Resolve policy and credentials, then open the SDK client.
+
+        Idempotent: starting an already-started session is a no-op.
+
+        Raises:
+            CodexSessionUnavailableError: If the SDK is missing, or its gateway
+                config or sandbox mode is unusable.
+            CodexSessionError: If the SDK client could not be opened.
+        """
+        if self._stack is not None:
+            return
+        effective_env = _effective_env(self.env)
+        resolved_sandbox_mode = _resolve_codex_sandbox_mode(
+            sandbox_mode=self.sandbox_mode,
+            source=effective_env,
+        )
+        if resolved_sandbox_mode != "bypass" and not _probe_codex_sandbox_capability(
+            source=effective_env,
+            bwrap_resolver=shutil.which,
+            runner=subprocess.run,
+            use_cache=True,
+        ):
+            raise CodexSessionUnavailableError(
+                f"Codex sandbox mode {resolved_sandbox_mode!r} requires a working bubblewrap sandbox, "
+                "but the capability probe failed; refusing to fall back to bypass"
+            )
+
+        provider_config = _resolve_codex_provider_config(
+            api_key_env=self.api_key_env,
+            base_url_env=self.base_url_env,
+            source=effective_env,
+        )
+        sdk = load_codex_sdk()
+        sandbox = codex_sandbox(
+            sdk,
+            writable_roots=self.writable_roots,
+            sandbox_mode=resolved_sandbox_mode,
+        )
+        config_overrides = (
+            "features.memories=false",
+            *provider_config.overrides,
+            *_writable_root_overrides(self.writable_roots),
+        )
+        # The client is entered inside the CODEX_HOME context so unwinding
+        # closes the client first and only then removes the state it writes.
+        stack = contextlib.AsyncExitStack()
+        try:
+            codex_home = stack.enter_context(
+                _private_codex_home(
+                    cwd=self.cwd,
+                    writable_roots=self.writable_roots,
+                    source=effective_env,
+                )
+            )
+            child_env = effective_env.copy()
+            child_env.update(provider_config.env_additions)
+            child_env["CODEX_HOME"] = str(codex_home)
+            config = sdk.CodexConfig(
+                codex_bin=self.codex_bin or None,
+                config_overrides=config_overrides,
+                cwd=str(self.cwd),
+                env=child_env,
+                client_name=_CLIENT_NAME,
+                client_title=_CLIENT_TITLE,
+            )
+            client = await stack.enter_async_context(sdk.AsyncCodex(config))
+        except CodexSessionError:
+            await stack.aclose()
+            raise
+        except Exception as exc:
+            await stack.aclose()
+            raise CodexSessionError(f"Codex SDK session failed to start: {exc}") from exc
+        self._stack = stack
+        self._sdk = sdk
+        self._sandbox = sandbox
+        self._client = client
+
+    def reset_thread(self) -> None:
+        """Drop the open conversation; the next turn opens a fresh thread."""
+        self._thread = None
+        self._thread_id = ""
+
+    async def aclose(self) -> None:
+        """Close the SDK client and remove the private state directory.
+
+        Idempotent, so a caller may close in a ``finally`` without tracking
+        whether the session ever started.
+
+        Raises:
+            CodexHomeCleanupError: If the private state directory remains busy
+                after bounded retries.
+        """
+        stack, self._stack = self._stack, None
+        self._sdk = None
+        self._sandbox = None
+        self._client = None
+        self.reset_thread()
+        if stack is not None:
+            await stack.aclose()
+
+    async def _open_thread(self) -> Any:
+        """Return the open conversation, opening one on first use."""
+        if self._thread is None:
+            self._thread = await self._client.thread_start(
+                approval_mode=self._sdk.ApprovalMode.deny_all,
+                cwd=str(self.cwd),
+                developer_instructions=self.developer_instructions,
+                model=self.model,
+                model_provider=CODEX_PROVIDER_NAME,
+                sandbox=self._sandbox,
+            )
+            self._thread_id = str(getattr(self._thread, "id", "") or "")
+        return self._thread
+
+    async def turn(
+        self,
+        prompt: str,
+        *,
+        timeout_sec: float,
+        output_schema: dict[str, Any] | None = None,
+    ) -> CodexSessionResult:
+        """Run one turn on this session's conversation.
+
+        Args:
+            prompt (str): The user prompt for the turn.
+            timeout_sec (float): Wall-clock budget for the turn. On expiry the
+                turn is interrupted and :class:`CodexSessionTimeoutError` is
+                raised.
+            output_schema (dict[str, Any] | None): JSON schema the final
+                response must match, forwarded to the provider as a
+                structured-output constraint. ``None`` leaves the reply
+                free-form. Providers that enforce OpenAI *strict* structured
+                outputs reject any object that omits
+                ``additionalProperties: false`` or a ``required`` entry, and
+                reject free-form objects outright.
+
+        Returns:
+            CodexSessionResult: The normalized turn outcome.
+
+        Raises:
+            CodexSessionTimeoutError: If the turn outlived ``timeout_sec``.
+            CodexSessionError: If the session is not started, or the SDK failed
+                for any other reason.
+        """
+        if self._client is None:
+            raise CodexSessionError("Codex session is not started; call start() before turn()")
+        turn_task: asyncio.Task[Any] | None = None
+        try:
+            thread = await self._open_thread()
+            turn_handle = await thread.turn(
+                prompt,
+                approval_mode=self._sdk.ApprovalMode.deny_all,
+                cwd=str(self.cwd),
+                model=self.model,
+                output_schema=output_schema,
+                sandbox=self._sandbox,
+            )
+            turn_task = asyncio.create_task(turn_handle.run())
+            completed, _pending = await asyncio.wait({turn_task}, timeout=timeout_sec)
+            if not completed:
+                # Teardown of an already-failed turn: the timeout below is
+                # the reported failure, so interrupt errors add no signal.
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(turn_handle.interrupt(), timeout=_INTERRUPT_TIMEOUT_SEC)
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(asyncio.shield(turn_task), timeout=_INTERRUPT_TIMEOUT_SEC)
+                raise CodexSessionTimeoutError(f"Codex turn timed out after {timeout_sec:g}s")
+            sdk_result = turn_task.result()
+        except CodexSessionError:
+            raise
+        except Exception as exc:
+            raise CodexSessionError(f"Codex SDK turn failed: {exc}") from exc
+        finally:
+            if turn_task is not None and not turn_task.done():
+                turn_task.cancel()
+                # Let the cancellation settle. The turn's own outcome is already
+                # decided, so the task's result is discarded rather than raised;
+                # a cancellation of *this* task still propagates.
+                await asyncio.gather(turn_task, return_exceptions=True)
+        return normalize_codex_result(sdk_result, self._thread_id)
+
+
 async def run_codex_turn(
     *,
     prompt: str,
@@ -930,42 +1190,27 @@ async def run_codex_turn(
     output_schema: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
 ) -> CodexSessionResult:
-    """Run one non-interactive Codex turn and normalize its typed result.
+    """Run one non-interactive Codex turn in a session of its own.
 
-    The turn runs with ``ApprovalMode.deny_all`` (no approval prompt can block
-    an unattended run). Thread and turn receive the exact same resolved sandbox
-    preset. Contained presets first pass a real bubblewrap capability probe;
-    failure never falls back to ``full_access``. ``CODEX_HOME`` is a private
-    mode-0700 directory below ``HYPERLOOM_RUNTIME_DIR``, the first safe writable
-    root, or a run-local ``cwd`` fallback, and is removed after the SDK closes.
+    The one-shot form of :class:`CodexSession`, for callers whose work is a
+    single turn (a specialist dispatch, a one-off review). See that class for
+    the sandbox, approval and ``CODEX_HOME`` contract; the session is started
+    and closed around this turn alone.
 
     Args:
         prompt (str): The user prompt for the turn.
         developer_instructions (str): System-level instructions for the thread.
-        cwd (Path): Working directory for the thread; writable under the
-            ``workspace_write`` and ``full_access`` sandboxes.
+        cwd (Path): Working directory for the thread.
         model (str): The Codex model id.
-        timeout_sec (float): Wall-clock budget for the turn. On expiry the turn
-            is interrupted and :class:`CodexSessionTimeoutError` is raised.
+        timeout_sec (float): Wall-clock budget for the turn.
         writable_roots (Sequence[Path]): Extra roots the session may write.
-            Empty keeps contained sessions read-only; confirmed ``bypass``
-            remains full access because external isolation is authoritative.
-        sandbox_mode (str): One of :data:`CODEX_SANDBOX_MODES`. Blank defers to
-            :data:`CODEX_SANDBOX_MODE_ENV`, then to
-            :data:`DEFAULT_CODEX_SANDBOX_MODE`.
+        sandbox_mode (str): One of :data:`CODEX_SANDBOX_MODES`.
         api_key_env (str): Preferred API-key env var name.
         base_url_env (str): Preferred base-URL env var name.
-        codex_bin (str): Optional Codex runtime path; the SDK resolves its own
-            when empty.
+        codex_bin (str): Optional Codex runtime path.
         output_schema (dict[str, Any] | None): JSON schema the final response
-            must match, forwarded to the provider as a structured-output
-            constraint. ``None`` leaves the reply free-form. Providers that
-            enforce OpenAI *strict* structured outputs reject any object that
-            omits ``additionalProperties: false`` or a ``required`` entry, and
-            reject free-form objects outright.
-        env (dict[str, str] | None): Values overlaid on ``os.environ``. The
-            resulting mapping drives policy, credentials, config and child
-            process launch.
+            must match.
+        env (dict[str, str] | None): Values overlaid on ``os.environ``.
 
     Returns:
         CodexSessionResult: The normalized turn outcome.
@@ -974,112 +1219,41 @@ async def run_codex_turn(
         CodexSessionUnavailableError: If the SDK is missing, or its gateway
             config or sandbox mode is unusable.
         CodexHomeCleanupError: If the private state directory remains busy
-            after bounded retries.
+            after bounded retries. ``completed_result`` carries a turn that
+            succeeded before cleanup failed, ``operation_error`` the failure
+            that ended the turn.
         CodexSessionTimeoutError: If the turn outlived ``timeout_sec``.
         CodexSessionError: If the SDK failed for any other reason.
     """
-    effective_env = _effective_env(env)
-    resolved_sandbox_mode = _resolve_codex_sandbox_mode(
+    session = CodexSession(
+        cwd=cwd,
+        model=model,
+        developer_instructions=developer_instructions,
+        writable_roots=writable_roots,
         sandbox_mode=sandbox_mode,
-        source=effective_env,
-    )
-    if resolved_sandbox_mode != "bypass" and not _probe_codex_sandbox_capability(
-        source=effective_env,
-        bwrap_resolver=shutil.which,
-        runner=subprocess.run,
-        use_cache=True,
-    ):
-        raise CodexSessionUnavailableError(
-            f"Codex sandbox mode {resolved_sandbox_mode!r} requires a working bubblewrap sandbox, "
-            "but the capability probe failed; refusing to fall back to bypass"
-        )
-
-    provider_config = _resolve_codex_provider_config(
         api_key_env=api_key_env,
         base_url_env=base_url_env,
-        source=effective_env,
+        codex_bin=codex_bin,
+        env=env,
     )
-    sdk = load_codex_sdk()
-    sandbox = codex_sandbox(
-        sdk,
-        writable_roots=writable_roots,
-        sandbox_mode=resolved_sandbox_mode,
-    )
-    config_overrides = (
-        "features.memories=false",
-        *provider_config.overrides,
-        *_writable_root_overrides(writable_roots),
-    )
-    thread_id = ""
-    turn_task: asyncio.Task[Any] | None = None
-    sdk_result: Any | None = None
-
+    await session.start()
+    result: CodexSessionResult | None = None
+    operation_error: BaseException | None = None
     try:
-        with _private_codex_home(
-            cwd=cwd,
-            writable_roots=writable_roots,
-            source=effective_env,
-        ) as codex_home:
-            child_env = effective_env.copy()
-            child_env.update(provider_config.env_additions)
-            child_env["CODEX_HOME"] = str(codex_home)
-            config = sdk.CodexConfig(
-                codex_bin=codex_bin or None,
-                config_overrides=config_overrides,
-                cwd=str(cwd),
-                env=child_env,
-                client_name=_CLIENT_NAME,
-                client_title=_CLIENT_TITLE,
-            )
-            try:
-                async with sdk.AsyncCodex(config) as client:
-                    thread = await client.thread_start(
-                        approval_mode=sdk.ApprovalMode.deny_all,
-                        cwd=str(cwd),
-                        developer_instructions=developer_instructions,
-                        model=model,
-                        model_provider=CODEX_PROVIDER_NAME,
-                        sandbox=sandbox,
-                    )
-                    thread_id = str(getattr(thread, "id", "") or "")
-                    turn_handle = await thread.turn(
-                        prompt,
-                        approval_mode=sdk.ApprovalMode.deny_all,
-                        cwd=str(cwd),
-                        model=model,
-                        output_schema=output_schema,
-                        sandbox=sandbox,
-                    )
-                    turn_task = asyncio.create_task(turn_handle.run())
-                    completed, _pending = await asyncio.wait({turn_task}, timeout=timeout_sec)
-                    if not completed:
-                        # Teardown of an already-failed turn: the timeout below is
-                        # the reported failure, so interrupt errors add no signal.
-                        with contextlib.suppress(Exception):
-                            await asyncio.wait_for(turn_handle.interrupt(), timeout=_INTERRUPT_TIMEOUT_SEC)
-                        with contextlib.suppress(Exception):
-                            await asyncio.wait_for(asyncio.shield(turn_task), timeout=_INTERRUPT_TIMEOUT_SEC)
-                        raise CodexSessionTimeoutError(f"Codex turn timed out after {timeout_sec:g}s")
-                    sdk_result = turn_task.result()
-            except CodexSessionError:
-                raise
-            except Exception as exc:
-                raise CodexSessionError(f"Codex SDK turn failed: {exc}") from exc
-            finally:
-                if turn_task is not None and not turn_task.done():
-                    turn_task.cancel()
-                    # Let the cancellation settle. The turn's own outcome is already
-                    # decided, so the task's result is discarded rather than raised;
-                    # a cancellation of *this* task still propagates.
-                    await asyncio.gather(turn_task, return_exceptions=True)
-    except CodexHomeCleanupError as cleanup_error:
-        if sdk_result is not None:
-            with contextlib.suppress(Exception):
-                cleanup_error.completed_result = normalize_codex_result(sdk_result, thread_id)
+        result = await session.turn(prompt, timeout_sec=timeout_sec, output_schema=output_schema)
+    except BaseException as exc:
+        operation_error = exc
         raise
-
-    assert sdk_result is not None
-    return normalize_codex_result(sdk_result, thread_id)
+    finally:
+        try:
+            await session.aclose()
+        except CodexHomeCleanupError as cleanup_error:
+            cleanup_error.completed_result = result
+            cleanup_error.operation_error = operation_error
+            if operation_error is not None:
+                raise cleanup_error from operation_error
+            raise
+    return result
 
 
 __all__ = [
@@ -1089,6 +1263,7 @@ __all__ = [
     "CODEX_SANDBOX_MODE_ENV",
     "CodexHomeCleanupError",
     "CodexProviderConfig",
+    "CodexSession",
     "CodexSessionError",
     "CodexSessionResult",
     "CodexSessionTimeoutError",
