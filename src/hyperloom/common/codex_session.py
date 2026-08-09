@@ -927,6 +927,7 @@ async def run_codex_turn(
     api_key_env: str = "OPENAI_API_KEY",
     base_url_env: str = "OPENAI_BASE_URL",
     codex_bin: str = "",
+    output_schema: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
 ) -> CodexSessionResult:
     """Run one non-interactive Codex turn and normalize its typed result.
@@ -956,6 +957,12 @@ async def run_codex_turn(
         base_url_env (str): Preferred base-URL env var name.
         codex_bin (str): Optional Codex runtime path; the SDK resolves its own
             when empty.
+        output_schema (dict[str, Any] | None): JSON schema the final response
+            must match, forwarded to the provider as a structured-output
+            constraint. ``None`` leaves the reply free-form. Providers that
+            enforce OpenAI *strict* structured outputs reject any object that
+            omits ``additionalProperties: false`` or a ``required`` entry, and
+            reject free-form objects outright.
         env (dict[str, str] | None): Values overlaid on ``os.environ``. The
             resulting mapping drives policy, credentials, config and child
             process launch.
@@ -1040,6 +1047,7 @@ async def run_codex_turn(
                         approval_mode=sdk.ApprovalMode.deny_all,
                         cwd=str(cwd),
                         model=model,
+                        output_schema=output_schema,
                         sandbox=sandbox,
                     )
                     turn_task = asyncio.create_task(turn_handle.run())
