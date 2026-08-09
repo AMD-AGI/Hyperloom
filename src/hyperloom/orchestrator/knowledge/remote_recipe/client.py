@@ -440,7 +440,9 @@ class RemoteRecipeClient:
                     f"missing={sorted(missing)!r} blank={sorted(blank)!r} "
                     f"unexpected={sorted(unexpected)!r}"
                 )
-        self.store.put_knowledge(canonical_id, session_id, bundle.knowledge, mode="replace")
+        self.store.put_knowledge(
+            canonical_id, bundle.knowledge, session_id=session_id, mode="replace"
+        )
         try:
             self.store.set_champion(
                 canonical_id,

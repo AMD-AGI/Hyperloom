@@ -8,7 +8,7 @@ over presigned URLs; only small JSON control messages touch the service.
 Typical producer flow::
 
     store = KBStoreClient.from_env()
-    store.put_knowledge(cid, session_id, {"prs_tested": [...]})
+    store.put_knowledge(cid, {"prs_tested": [...]})
     ref = store.put_file(cid, session_id, "patches/pr-123.patch",
                          local_path, kind="patch",
                          meta={"pr_url": url, "outcome": "integrated"})
@@ -59,11 +59,18 @@ def record_id(canonical_id: str, session_id: str) -> str:
     The id is derived from the identity rather than allocated, so a
     producer can record it (in a session breakdown, a DB row, a log line)
     before the record exists and know the value will match.
+
+    The whole identity is hashed, scheme segment included, which is what
+    keeps an ``inference:`` id from colliding with a ``kernel:`` one.
     """
-    _, _, dims = (canonical_id or "").partition(":")
-    if not dims:
+    cid = (canonical_id or "").strip()
+    scheme, _, dims = cid.partition(":")
+    if not scheme or not dims:
         raise KBStoreError(f"canonical_id {canonical_id!r} is malformed")
-    return str(uuid.uuid5(RECORD_NAMESPACE, f"{dims}|{session_id}"))
+    sid = (session_id or "").strip()
+    if not sid:
+        raise KBStoreError(f"session_id {session_id!r} is malformed")
+    return str(uuid.uuid5(RECORD_NAMESPACE, f"{cid}|{sid}"))
 
 
 def sha256_of(path: str | Path) -> tuple[str, int]:
@@ -165,17 +172,22 @@ class KBStoreClient:
     def put_knowledge(
         self,
         canonical_id: str,
-        session_id: str,
         knowledge: dict[str, Any],
         *,
+        session_id: str = "",
         mode: str = "merge",
     ) -> dict[str, Any]:
-        """Upsert the knowledge payload of a session."""
-        return self._request(
-            "POST",
-            self._session_base(canonical_id, session_id),
-            {"knowledge": knowledge, "mode": mode},
-        )
+        """Record what this producer knows about an identity.
+
+        ``session_id`` names a candidate under the identity and is optional;
+        omitting it writes to a slot of this producer's own. Pass it to keep
+        separate runs comparable — the champion is picked from candidates.
+        The resolved id comes back as ``session_id`` in the response.
+        """
+        payload: dict[str, Any] = {"knowledge": knowledge, "mode": mode}
+        if session_id:
+            payload["session_id"] = session_id
+        return self._request("POST", f"/v1/kb/{self._quote(canonical_id)}", payload)
 
     def get_session(self, canonical_id: str, session_id: str) -> dict[str, Any] | None:
         """Read a session document, or ``None`` when it does not exist."""
@@ -195,10 +207,23 @@ class KBStoreClient:
                 return None
             raise
 
-    def get_rollup(self, canonical_id: str) -> dict[str, Any] | None:
-        """Read the identity rollup, or ``None`` when nothing is recorded."""
+    def get_best_record(self, canonical_id: str) -> dict[str, Any] | None:
+        """The record to act on for an identity, or ``None`` if there is none.
+
+        Answers from the v1 recipe page when an identity predates this store,
+        so a caller does not have to know which plane its data lives in.
+        """
         try:
             return self._request("GET", f"/v1/kb/{self._quote(canonical_id)}")
+        except KBStoreError as exc:
+            if "HTTP 404" in str(exc):
+                return None
+            raise
+
+    def get_rollup(self, canonical_id: str) -> dict[str, Any] | None:
+        """Read the candidate index, or ``None`` when nothing is recorded."""
+        try:
+            return self._request("GET", f"/v1/kb/{self._quote(canonical_id)}/sessions")
         except KBStoreError as exc:
             if "HTTP 404" in str(exc):
                 return None
