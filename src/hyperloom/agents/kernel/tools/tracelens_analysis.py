@@ -37,6 +37,13 @@ except ImportError:
     _resolve_patch_target_roots = None
 
 try:
+    from hyperloom.orchestrator.framework.paths import (
+        resolve_flydsl_source_roots as _resolve_flydsl_source_roots,
+    )
+except ImportError:
+    _resolve_flydsl_source_roots = None
+
+try:
     from apply_kernel_patch import known_target_roots as _known_target_roots
 except ImportError:
     _known_target_roots = None
@@ -1601,10 +1608,13 @@ def _flydsl_reusable_roots() -> tuple[str, ...]:
     """Resolve FlyDSL checkout root(s) for moe_flydsl pseudo-ops.
 
     ``$DSL2_ROOT`` / ``$FLYDSL_ROOT`` take precedence over the WekaFS default.
+    Uncached, so an env override applies without a process restart.
 
     Returns:
         The lower-cased FlyDSL checkout roots.
     """
+    if _resolve_flydsl_source_roots is not None:
+        return tuple(dict.fromkeys(r.lower() for r in _resolve_flydsl_source_roots()))
     out: list[str] = []
     for env_key in ("DSL2_ROOT", "FLYDSL_ROOT"):
         val = (os.environ.get(env_key, "") or "").strip()

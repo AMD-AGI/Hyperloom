@@ -51,6 +51,8 @@ _FALLBACK_KNOWN_TARGET_ROOTS: tuple[str, ...] = (
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
 )
+_FALLBACK_FLYDSL_ROOT_ENV_KEYS: tuple[str, ...] = ("DSL2_ROOT", "FLYDSL_ROOT")
+_FALLBACK_FLYDSL_ROOTS: tuple[str, ...] = ("/opt/flydsl/", "/sgl-workspace/flydsl/")
 
 _CACHED_KNOWN_TARGET_ROOTS: tuple[str, ...] | None = None
 
@@ -105,12 +107,12 @@ def known_target_roots() -> tuple[str, ...]:
     """Resolved framework roots (importlib/glob when orchestrator is importable).
 
     Resolves once and caches the result. Falls back to
-    :data:`_FALLBACK_KNOWN_TARGET_ROOTS` when the orchestrator package is
-    not importable (standalone CLI use).
+    :data:`_FALLBACK_KNOWN_TARGET_ROOTS` plus the FlyDSL roots when the
+    orchestrator package is not importable (standalone CLI use).
 
     Returns:
         tuple[str, ...]: Absolute path-prefix strings for the recognised
-            reusable framework source roots (aiter / sglang / vllm).
+            reusable framework source roots (aiter / sglang / vllm / flydsl).
     """
     global _CACHED_KNOWN_TARGET_ROOTS
     if _CACHED_KNOWN_TARGET_ROOTS is not None:
@@ -122,8 +124,20 @@ def known_target_roots() -> tuple[str, ...]:
 
         _CACHED_KNOWN_TARGET_ROOTS = resolve_patch_target_roots()
     except ImportError:
-        _CACHED_KNOWN_TARGET_ROOTS = _FALLBACK_KNOWN_TARGET_ROOTS
+        _CACHED_KNOWN_TARGET_ROOTS = _FALLBACK_KNOWN_TARGET_ROOTS + _fallback_flydsl_roots()
     return _CACHED_KNOWN_TARGET_ROOTS
+
+
+def _fallback_flydsl_roots() -> tuple[str, ...]:
+    """FlyDSL roots for the standalone CLI, mirroring the orchestrator's."""
+    out: list[str] = []
+    for key in _FALLBACK_FLYDSL_ROOT_ENV_KEYS:
+        raw = (os.environ.get(key, "") or "").strip()
+        if raw:
+            root = raw.rstrip("/") + "/"
+            out.extend((root, root.lower()))
+    out.extend(_FALLBACK_FLYDSL_ROOTS)
+    return tuple(dict.fromkeys(r for r in out if r))
 
 
 # Pod-local multi-node backup dir; overridable via $HYPERLOOM_MN_KERNEL_BACKUP_DIR.
@@ -892,6 +906,24 @@ def _isolated_aiter_pkg_root() -> Path | None:
     return None
 
 
+def _flydsl_root_for(target_file: Path) -> Path | None:
+    """The FlyDSL checkout root containing ``target_file``, else ``None``.
+
+    Matches case-insensitively, as the surrounding patchability and apply
+    gates do, but returns the matching prefix of ``target_file`` rather than
+    the matched root: the root list carries a lower-cased variant of every env
+    root, and handing back a spelling that does not exist on disk would send
+    snapshot mode into a fabricated tree.
+    """
+    raw = str(target_file).replace(os.sep, "/")
+    norm = raw.lower()
+    for root in _fallback_flydsl_roots():
+        lowered = root.lower()
+        if norm.startswith(lowered):
+            return Path(raw[: len(lowered)].rstrip("/"))
+    return None
+
+
 def _installed_kernel_package(
     target_file: Path,
 ) -> tuple[Path, str] | None:
@@ -1514,6 +1546,10 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
         rebuild_mode = _REBUILD_MODE_COMMAND
         rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "."]
         artifact_roots = [root]
+    elif flydsl_root := _flydsl_root_for(target_file):
+        # FlyDSL compiles at import time, so there is nothing to rebuild; the
+        # root only has to be right for cache invalidation and rebuild cwd.
+        root = flydsl_root
     elif installed_aiter_root:
         root = installed_aiter_root
         deploy_roots = _installed_kernel_deploy_roots(installed_aiter_root)
