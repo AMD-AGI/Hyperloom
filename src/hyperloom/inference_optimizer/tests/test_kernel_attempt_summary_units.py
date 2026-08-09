@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 from hyperloom.orchestrator.kernel import attempt_summary as kas
+from hyperloom.orchestrator.state import kernel_decision_settings as kds
 
 
 def test_is_real_artifact_path_variants():
@@ -168,30 +169,68 @@ def test_classify_attempted():
     )
 
 
+def _eligible(gpu_pct: float) -> dict:
+    """A top-list entry that clears every gate except the GPU-share threshold."""
+    return {
+        "source_file": "f.py",
+        "reusable_native_kernel": True,
+        "recommended_backends": ["forge"],
+        "gpu_pct": gpu_pct,
+    }
+
+
 def test_unattempted_reason_order():
-    assert kas._unattempted_reason({})[0] == kas.UNATTEMPTED_NO_SOURCE
+    assert kas._unattempted_reason({}, min_gpu_pct=10.0)[0] == kas.UNATTEMPTED_NO_SOURCE
     assert (
         kas._unattempted_reason(
             {"source_file": "f.py", "reusable_native_kernel": False},
+            min_gpu_pct=10.0,
         )[0]
         == kas.UNATTEMPTED_NOT_REUSABLE
     )
     assert (
         kas._unattempted_reason(
             {"source_file": "f.py", "reusable_native_kernel": True, "recommended_backends": []},
+            min_gpu_pct=10.0,
         )[0]
         == kas.UNATTEMPTED_NO_BACKEND
     )
+
+
+def test_unattempted_below_threshold_names_the_gate_that_fired():
+    code, detail = kas._unattempted_reason(_eligible(6.57), min_gpu_pct=10.0)
+    assert code == kas.UNATTEMPTED_BELOW_MIN_GPU_PCT
+    assert "6.57" in detail and "10" in detail
+    assert "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT" in detail
+
+
+def test_unattempted_above_threshold_reports_a_missing_dispatch():
+    """A kernel that cleared every gate must not be blamed on a cutoff.
+
+    An 8h run reported five of these as ``below_priority_cutoff`` while the real
+    cause was a Coordinator that could not emit the kernel REQUEST at all.
+    """
+    code, detail = kas._unattempted_reason(_eligible(37.2), min_gpu_pct=10.0)
+    assert code == kas.UNATTEMPTED_NEVER_DISPATCHED
+    assert "REQUEST" in detail
+
+
+def test_unattempted_threshold_is_the_dispatcher_s_own(monkeypatch):
+    """The report must read the same env var the batch filter reads."""
+    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "5.0")
+    assert kds.resolve_hot_kernel_min_gpu_pct() == 5.0
     assert (
         kas._unattempted_reason(
-            {
-                "source_file": "f.py",
-                "reusable_native_kernel": True,
-                "recommended_backends": ["forge"],
-            },
+            _eligible(6.57),
+            min_gpu_pct=kds.resolve_hot_kernel_min_gpu_pct(),
         )[0]
-        == kas.UNATTEMPTED_BELOW_CUTOFF
+        == kas.UNATTEMPTED_NEVER_DISPATCHED
     )
+
+
+def test_unattempted_threshold_falls_back_on_an_unparseable_override(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "not-a-number")
+    assert kds.resolve_hot_kernel_min_gpu_pct() == kds._DEFAULT_HOT_KERNEL_MIN_GPU_PCT
 
 
 def test_load_backend_ladder_skipped_flag(tmp_path: Path):
