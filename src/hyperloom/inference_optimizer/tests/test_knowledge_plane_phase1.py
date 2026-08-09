@@ -28,16 +28,7 @@ def _args(**kwargs) -> argparse.Namespace:
 
 
 def _legacy_recipe(root: Path, *, model: str = "model") -> Path:
-    recipe_dir = (
-        root
-        / model
-        / "mi300x"
-        / "sglang"
-        / "qwen3"
-        / "qwen3"
-        / "1.0"
-        / "fp8"
-    )
+    recipe_dir = root / model / "mi300x" / "sglang" / "qwen3" / "qwen3" / "1.0" / "fp8"
     recipe_dir.mkdir(parents=True)
     (recipe_dir / "recipe.json").write_text(
         '{"canonical_id":"legacy"}',
@@ -132,7 +123,7 @@ def test_remote_config_uses_kb_store_backend_and_keeps_optional_gbrain() -> None
     assert config.gbrain_base_url == "https://gbrain.test"
 
 
-def test_apply_child_env_routes_recipe_credentials_by_mode() -> None:
+def test_a_remote_child_gets_both_knowledge_bases_it_still_uses() -> None:
     remote = KnowledgeConfig.from_env(
         {
             "KNOWLEDGE_STORE_MODE": "remote",
@@ -142,14 +133,36 @@ def test_apply_child_env_routes_recipe_credentials_by_mode() -> None:
             "GBRAIN_TOKEN": "gbrain-token",
         }
     )
-    child: dict[str, str] = {"KERNELFORGE_GBRAIN_ENABLED": "true"}
+    child: dict[str, str] = {}
     remote.apply_to_child_env(child)
     assert child["KB_STORE_URL"] == "https://kb.test"
     assert child["KB_STORE_TOKEN"] == "kb-token"
+    assert child["GBRAIN_BASE_URL"] == "https://gbrain.test"
+    assert child["GBRAIN_TOKEN"] == "gbrain-token"
+    assert child["KERNELFORGE_GBRAIN_ENABLED"] == "true"
+
+
+def test_a_remote_child_without_gbrain_is_told_so_rather_than_left_guessing() -> None:
+    remote = KnowledgeConfig.from_env(
+        {
+            "KNOWLEDGE_STORE_MODE": "remote",
+            "KB_STORE_URL": "https://kb.test",
+            "KB_STORE_TOKEN": "kb-token",
+        }
+    )
+    child: dict[str, str] = {
+        "KERNELFORGE_GBRAIN_ENABLED": "true",
+        "GBRAIN_BASE_URL": "https://ambient.invalid",
+        "GBRAIN_TOKEN": "ambient-secret",
+    }
+    remote.apply_to_child_env(child)
+    assert child["KB_STORE_URL"] == "https://kb.test"
     assert child["KERNELFORGE_GBRAIN_ENABLED"] == "false"
     assert "GBRAIN_BASE_URL" not in child
     assert "GBRAIN_TOKEN" not in child
 
+
+def test_a_local_child_reaches_for_neither_backend() -> None:
     local = KnowledgeConfig.from_env(
         {
             "KNOWLEDGE_STORE_MODE": "local",
@@ -157,9 +170,18 @@ def test_apply_child_env_routes_recipe_credentials_by_mode() -> None:
             "GBRAIN_TOKEN": "gbrain-token",
         }
     )
+    child: dict[str, str] = {
+        "KERNELFORGE_GBRAIN_ENABLED": "true",
+        "KB_STORE_URL": "https://kb.test",
+        "KB_STORE_TOKEN": "kb-token",
+        "GBRAIN_BASE_URL": "https://gbrain.test",
+        "GBRAIN_TOKEN": "gbrain-token",
+    }
     local.apply_to_child_env(child)
     assert "KB_STORE_URL" not in child
     assert "KB_STORE_TOKEN" not in child
+    assert "GBRAIN_BASE_URL" not in child
+    assert "GBRAIN_TOKEN" not in child
     assert child["KERNELFORGE_GBRAIN_ENABLED"] == "false"
 
 
@@ -239,9 +261,7 @@ def test_workspace_legacy_source_is_injectable(
 
     kb = cli_kb._build_recipe_kb_dispatcher(_args())
 
-    assert kb.local.root == (
-        tmp_path / "home" / ".cache" / "hyperloom" / "knowledge"
-    )
+    assert kb.local.root == (tmp_path / "home" / ".cache" / "hyperloom" / "knowledge")
     assert len(list(kb.local.root.rglob("recipe.json"))) == 1
 
 
@@ -317,9 +337,7 @@ def test_legacy_migration_failure_aborts_startup(
     monkeypatch.setattr(
         cli_kb,
         "_copy_recipe_corpus",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            OSError("injected copy failure")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected copy failure")),
     )
 
     with pytest.raises(RuntimeError, match="migration.*failed.*copy failure"):
@@ -340,9 +358,7 @@ def test_legacy_migration_marker_failure_rolls_back_corpus(
     monkeypatch.setattr(
         cli_kb,
         "atomic_write_json",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            OSError("marker fsync failed")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("marker fsync failed")),
     )
 
     with pytest.raises(RuntimeError, match="marker fsync failed"):

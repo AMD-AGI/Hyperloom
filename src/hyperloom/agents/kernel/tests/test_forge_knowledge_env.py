@@ -55,7 +55,7 @@ def test_local_child_env_strips_remote_credentials(
     assert "KB_STORE_TOKEN" not in env
 
 
-def test_remote_child_env_forwards_kb_store_without_enabling_gbrain(
+def test_remote_child_env_forwards_kb_store_alone_when_gbrain_is_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _avoid_unrelated_fellow_setup(monkeypatch)
@@ -63,6 +63,8 @@ def test_remote_child_env_forwards_kb_store_without_enabling_gbrain(
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", "unchanged/root")
     monkeypatch.setenv("KB_STORE_URL", "https://kb.test")
     monkeypatch.setenv("KB_STORE_TOKEN", "token")
+    monkeypatch.delenv("GBRAIN_BASE_URL", raising=False)
+    monkeypatch.delenv("GBRAIN_TOKEN", raising=False)
     env = {
         "KNOWLEDGE_STORE_MODE": "remote",
         "KNOWLEDGE_LOCAL_ROOT": "unchanged/root",
@@ -76,6 +78,31 @@ def test_remote_child_env_forwards_kb_store_without_enabling_gbrain(
     assert env["KB_STORE_URL"] == "https://kb.test"
     assert env["KB_STORE_TOKEN"] == "token"
     assert env["KERNELFORGE_GBRAIN_ENABLED"] == "false"
+
+
+def test_remote_child_env_forwards_gbrain_for_the_paths_still_using_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _avoid_unrelated_fellow_setup(monkeypatch)
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", "unchanged/root")
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.test")
+    monkeypatch.setenv("KB_STORE_TOKEN", "token")
+    monkeypatch.setenv("GBRAIN_BASE_URL", "https://gbrain.test")
+    monkeypatch.setenv("GBRAIN_TOKEN", "gbrain-token")
+    env = {
+        "KNOWLEDGE_STORE_MODE": "remote",
+        "KNOWLEDGE_LOCAL_ROOT": "unchanged/root",
+        "KB_STORE_URL": "https://kb.test",
+        "KB_STORE_TOKEN": "token",
+        "GBRAIN_BASE_URL": "https://gbrain.test",
+        "GBRAIN_TOKEN": "gbrain-token",
+    }
+    forge_submit._apply_fellow_env(env)
+    assert env["KB_STORE_URL"] == "https://kb.test"
+    assert env["GBRAIN_BASE_URL"] == "https://gbrain.test"
+    assert env["GBRAIN_TOKEN"] == "gbrain-token"
+    assert env["KERNELFORGE_GBRAIN_ENABLED"] == "true"
 
 
 def test_remote_child_env_missing_kb_store_credentials_degrades_once(
