@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from ._vendor.kb_store_client import KnowledgeSections, SectionContent
 from .client import (
     KBStoreClient,
     KBStoreError,
@@ -71,7 +72,9 @@ def write_final_remote_recipe(
         return RemoteWriteResult("skipped", "missing_optimized_throughput", canonical_id, session_id)
     with tempfile.TemporaryDirectory(prefix="hyperloom-remote-recipe-") as temporary:
         files_dir = Path(temporary) / "files"
-        bundle = build_remote_knowledge(state, files_dir)
+        bundle = build_remote_knowledge(
+            state, files_dir, sections=KnowledgeSections.from_env()
+        )
         return resolved.write_if_better(
             canonical_id,
             session_id,
@@ -192,9 +195,11 @@ __all__ = [
     "HyperloomRemoteKB",
     "KBStoreClient",
     "KBStoreError",
+    "KnowledgeSections",
     "RemoteRecipeClient",
     "RemoteRecipeConfigurationError",
     "RemoteWarmRecipeAdapter",
+    "SectionContent",
     "build_remote_knowledge",
     "convert_v1_recipe_to_knowledge",
     "envelope_to_v1_recipe",

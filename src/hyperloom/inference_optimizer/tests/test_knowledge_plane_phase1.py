@@ -163,6 +163,23 @@ def test_apply_child_env_routes_recipe_credentials_by_mode() -> None:
     assert child["KERNELFORGE_GBRAIN_ENABLED"] == "false"
 
 
+def test_a_kernelforge_child_never_stages_into_the_inference_draft() -> None:
+    config = KnowledgeConfig.from_env(
+        {
+            "KNOWLEDGE_STORE_MODE": "remote",
+            "KB_STORE_URL": "https://kb.test",
+            "KB_STORE_TOKEN": "kb-token",
+        }
+    )
+    child = {
+        "KB_DRAFT_DIR": "/session/runtime/kb_draft",
+        "KB_WARM_START_DIR": "/session/runtime/remote_recipe",
+    }
+    config.apply_to_child_env(child)
+    assert "KB_DRAFT_DIR" not in child
+    assert "KB_WARM_START_DIR" not in child
+
+
 def test_local_dispatcher_ignores_ambient_remote_credentials(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -28,7 +28,6 @@ from hyperloom.orchestrator.knowledge.remote_recipe import (
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor import kb_store_client
 from hyperloom.orchestrator.knowledge.remote_recipe.client import (
     _champion,
-    _recommendation_metadata,
     _validate_download_listing,
     _validate_session_envelope,
     _verify_downloaded_files,
@@ -887,7 +886,7 @@ def test_read_sequence_writes_flat_recipe_and_files_only(tmp_path: Path) -> None
     assert saved["record_id"] == "record-1"
     assert saved["revision"] == 7
     assert saved["version"] == 7
-    assert saved["champion"]["session_id"] == "champion-session"
+    assert saved["session_id"] == "champion-session"
     assert saved["optimized_throughput"] == 125.0
     assert not (tmp_path / "bundle" / "values.json").exists()
     assert not (tmp_path / "bundle" / "manifest.json").exists()
@@ -1020,11 +1019,6 @@ def test_read_does_not_consult_rollup_champion_metric(tmp_path: Path) -> None:
         client=RemoteRecipeClient(store),  # type: ignore[arg-type]
     )
     assert row is not None
-    assert row["champion"] == {
-        "session_id": "champion-session",
-        "metric": "optimized_throughput",
-        "value": 125.0,
-    }
     assert [call[0] for call in store.calls] == [
         "get_best_record",
         "list_session_files",
@@ -1032,37 +1026,97 @@ def test_read_does_not_consult_rollup_champion_metric(tmp_path: Path) -> None:
     ]
 
 
-def test_recommendation_metadata_validates_or_normalizes_service_fields() -> None:
-    valid = {
-        "session_id": "best-session",
-        "champion": {
-            "session_id": "best-session",
-            "metric": "optimized_throughput",
-            "value": 125.0,
-            "promoted_at": "2026-08-08T00:00:00Z",
-        },
-        "knowledge": {"optimized_throughput": 124.0},
-    }
-    assert _recommendation_metadata(valid) == valid["champion"]
-
-    malformed = {
-        "session_id": "best-session",
-        "champion": {
-            "session_id": "other-session",
-            "metric": "latency",
-            "value": True,
-        },
-        "knowledge": {"optimized_throughput": "not-a-number"},
-    }
-    assert _recommendation_metadata(malformed) == {
-        "session_id": "best-session",
+def test_read_passes_through_the_services_selection_reason(tmp_path: Path) -> None:
+    store = _FakeStore()
+    store.envelope["selected_by"] = {
+        "reason": "champion",
         "metric": "optimized_throughput",
-        "value": 0.0,
+        "value": 125.0,
+        "promoted_at": "2026-08-08T00:00:00Z",
     }
+    row = read_remote_recipe(
+        "inference:m:h:f:mt:a:v:p",
+        tmp_path / "direct-best-record",
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+    assert row is not None
+    assert row["selected_by"] == store.envelope["selected_by"]
 
-    malformed["knowledge"]["optimized_throughput"] = float("nan")
-    with pytest.raises(RemoteRecipeValidationError, match="finite"):
-        _recommendation_metadata(malformed)
+
+def _sections(tmp_path: Path):
+    return kb_store_client.KnowledgeSections(tmp_path / "draft")
+
+
+def test_an_agent_staged_section_overrides_what_the_stack_scrape_guessed(
+    tmp_path: Path,
+) -> None:
+    sections = _sections(tmp_path)
+    sections.write("framework", {"extra_server_args": "--authored-by-the-agent"})
+    bundle = build_remote_knowledge(
+        _state(tmp_path), tmp_path / "files", sections=sections
+    )
+    framework = bundle.knowledge["value"]["framework"]
+    assert framework["extra_server_args"] == "--authored-by-the-agent"
+    # Keys the agent did not stage still come from the scrape.
+    assert framework["extra_envs"] == {"FRAMEWORK": "1"}
+    assert bundle.knowledge["provenance"]["staged_sections"] == ["framework"]
+
+
+def test_a_section_nobody_staged_is_left_to_the_stack_scrape(tmp_path: Path) -> None:
+    sections = _sections(tmp_path)
+    sections.write("framework", {"extra_server_args": "--authored"})
+    bundle = build_remote_knowledge(
+        _state(tmp_path), tmp_path / "files", sections=sections
+    )
+    explore = bundle.knowledge["value"]["explore"]
+    assert explore["extra_envs"] == {"EXPLORE": "1"}
+    assert bundle.knowledge["provenance"]["staged_sections"] == ["framework"]
+
+
+def test_a_staged_file_is_published_under_its_own_section(tmp_path: Path) -> None:
+    patch = tmp_path / "authored.patch"
+    patch.write_text("authored", encoding="utf-8")
+    sections = _sections(tmp_path)
+    sections.write("framework", {"note": "one"}, files=[patch], kind="patches")
+    bundle = build_remote_knowledge(
+        _state(tmp_path), tmp_path / "files", sections=sections
+    )
+    published = {artifact.path for artifact in bundle.artifacts}
+    assert "framework/patches/authored.patch" in published
+    assert (tmp_path / "files" / "framework" / "patches" / "authored.patch").is_file()
+
+
+def test_the_kernel_column_keeps_the_sub_columns_the_agent_left_alone(
+    tmp_path: Path,
+) -> None:
+    sections = _sections(tmp_path)
+    sections.write("kernel", {"gemm": {"authored": True}})
+    bundle = build_remote_knowledge(
+        _state(tmp_path), tmp_path / "files", sections=sections
+    )
+    kernel = bundle.knowledge["value"]["kernel"]
+    assert kernel["gemm"] == {"authored": True}
+    assert "rewrite" in kernel and "fusion" in kernel
+
+
+def test_no_draft_at_all_publishes_exactly_what_it_used_to(tmp_path: Path) -> None:
+    without = build_remote_knowledge(_state(tmp_path), tmp_path / "a")
+    with_empty = build_remote_knowledge(
+        _state(tmp_path), tmp_path / "b", sections=_sections(tmp_path)
+    )
+    assert without.knowledge["value"] == with_empty.knowledge["value"]
+    assert without.knowledge["provenance"]["staged_sections"] == []
+
+
+def test_a_record_without_a_selection_reason_still_reads(tmp_path: Path) -> None:
+    store = _FakeStore()
+    row = read_remote_recipe(
+        "inference:m:h:f:mt:a:v:p",
+        tmp_path / "direct-best-record",
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+    assert row is not None
+    assert row["selected_by"] == {}
 
 
 @pytest.mark.parametrize(
@@ -1437,7 +1491,7 @@ def test_vendored_sdk_matches_upstream_git_blob() -> None:
     path = Path(kb_store_client.__file__)
     content = path.read_bytes()
     digest = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
-    assert digest == "ed4fe92fda3bf8f335ba682e3191121f0dd2407e"
+    assert digest == "22d08109fe680cd15c4053ba0ccc5891222eb6cf"
 
 
 def test_read_alias_is_standalone_api() -> None:
