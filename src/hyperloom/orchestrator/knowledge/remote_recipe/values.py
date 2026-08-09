@@ -123,6 +123,27 @@ class _Files:
             refs.append(rel)
         return refs
 
+    def adopt(self, source: Path, rel: str) -> str:
+        """Take a file that already carries its final ``category/kind/name``."""
+        if source.is_symlink():
+            raise RemoteRecipeValidationError(f"artifact source must not be a symlink: {source}")
+        if source.stat().st_size > MAX_FILE_BYTES:
+            raise RemoteRecipeValidationError(
+                f"artifact {source} exceeds the {MAX_FILE_BYTES}-byte KB Store limit"
+            )
+        if rel in self.refs:
+            return rel
+        destination = self.root / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        category = rel.split("/", 1)[0]
+        kind = rel.split("/")[1] if rel.count("/") >= 2 else "artifacts"
+        self.artifacts.append(
+            Artifact(path=rel, source=destination, kind=kind, meta={"origin": category})
+        )
+        self.refs.add(rel)
+        return rel
+
     def write(self, text: str, *, rel: str, kind: str) -> str:
         destination = self.root / rel
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -497,7 +518,39 @@ def has_new_keep(state: Any) -> bool:
     return False
 
 
-def build_remote_knowledge(state: Any, files_dir: str | Path) -> KnowledgeBundle:
+def merge_staged_sections(
+    value: dict[str, Any],
+    sections: Any,
+    files: "_Files",
+) -> list[str]:
+    """Overlay agent-staged sections onto the values scraped from the stack.
+
+    An agent that stages a section owns the keys it wrote; keys it left alone
+    keep whatever the stack scrape produced. That is what lets a section-aware
+    agent and a not-yet-migrated one publish into the same document.
+    """
+    merged: list[str] = []
+    for name in sections.sections():
+        staged = sections.staged(name)
+        if staged is None or not staged.knowledge:
+            continue
+        current = value.get(name)
+        value[name] = {**(current if isinstance(current, Mapping) else {}), **staged.knowledge}
+        merged.append(name)
+    staged_root = Path(sections.files_dir)
+    if staged_root.is_dir():
+        for source in sorted(staged_root.rglob("*")):
+            if source.is_file():
+                files.adopt(source, source.relative_to(staged_root).as_posix())
+    return merged
+
+
+def build_remote_knowledge(
+    state: Any,
+    files_dir: str | Path,
+    *,
+    sections: Any = None,
+) -> KnowledgeBundle:
     """Construct the final opaque knowledge document and temporary files tree."""
     root = Path(files_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -513,19 +566,23 @@ def build_remote_knowledge(state: Any, files_dir: str | Path) -> KnowledgeBundle
     )
     gains = list(getattr(state, "gain_per_stack_entry", []) or [])
     worked = _experience(state, "what_worked") or _worked_from_stack(stack, gains)
+    value = {
+        "explore": build_explore_value(state, explore_entries, files),
+        "framework": build_framework_value(state, framework_entries, files),
+        "kernel": {
+            "gemm": build_kernel_gemm_value(state, files),
+            "fusion": build_kernel_fusion_value(state, files),
+            "rewrite": build_kernel_rewrite_value(state, files),
+        },
+    }
+    staged_sections = (
+        merge_staged_sections(value, sections, files) if sections is not None else []
+    )
     knowledge = {
         "knowledge_schema_version": 2,
         "optimized_throughput": optimized_throughput,
         "validated_e2e_gain": validated_gain,
-        "value": {
-            "explore": build_explore_value(state, explore_entries, files),
-            "framework": build_framework_value(state, framework_entries, files),
-            "kernel": {
-                "gemm": build_kernel_gemm_value(state, files),
-                "fusion": build_kernel_fusion_value(state, files),
-                "rewrite": build_kernel_rewrite_value(state, files),
-            },
-        },
+        "value": value,
         "what_worked": worked,
         "what_failed": _experience(state, "last_action_failures"),
         "remaining_gaps": _experience(state, "gaps"),
@@ -540,6 +597,7 @@ def build_remote_knowledge(state: Any, files_dir: str | Path) -> KnowledgeBundle
             ),
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "optimization_stack_length": len(stack),
+            "staged_sections": staged_sections,
         },
     }
     bundle = KnowledgeBundle(knowledge=knowledge, artifacts=files.artifacts)
@@ -660,4 +718,5 @@ __all__ = [
     "convert_v1_recipe_to_knowledge",
     "envelope_to_v1_recipe",
     "has_new_keep",
+    "merge_staged_sections",
 ]

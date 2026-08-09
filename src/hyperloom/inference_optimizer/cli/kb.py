@@ -214,6 +214,20 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
     return Path(KnowledgeConfig.from_env().local_root)
 
 
+def _publish_section_dirs(session_dir: Path, warm_start_dir: Path) -> None:
+    """Point this run's agents at the shared draft and warm-start directories.
+
+    Agents run out of process, so the handoff is two paths in the environment
+    rather than an object. Both are exported before T0 because a child may
+    start before the warm-start download lands; a reader treats a directory
+    that is not there yet as a cold start.
+    """
+    draft_dir = session_dir / "runtime" / "kb_draft"
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["KB_DRAFT_DIR"] = str(draft_dir)
+    os.environ["KB_WARM_START_DIR"] = str(warm_start_dir)
+
+
 def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
     """Wire ``RecipeKB.audit_hook`` to append local Recipe trace events.
 
@@ -365,10 +379,12 @@ def _bootstrap_recipe_kb(
             RemoteWarmRecipeAdapter,
         )
 
+        warm_start_dir = session_dir / "runtime" / "remote_recipe"
         t0_kb = RemoteWarmRecipeAdapter(
             HyperloomRemoteKB.from_env(),
-            session_dir / "runtime" / "remote_recipe",
+            warm_start_dir,
         )
+        _publish_section_dirs(session_dir, warm_start_dir)
     else:
         _attach_recipe_audit_hook(kb, session_dir)
         t0_kb = kb

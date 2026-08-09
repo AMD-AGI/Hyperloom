@@ -70,15 +70,12 @@ def _champion(
     return session_id, value, champion
 
 
-def flatten_recipe_document(
-    envelope: dict[str, Any],
-    *,
-    champion: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+def flatten_recipe_document(envelope: dict[str, Any]) -> dict[str, Any]:
     """Merge service-owned envelope fields and opaque knowledge into recipe.json."""
     knowledge = envelope.get("knowledge") or {}
     business = dict(knowledge) if isinstance(knowledge, dict) else {}
     revision = envelope.get("revision", envelope.get("version"))
+    raw_selection = envelope.get("selected_by")
     fixed = {
         "schema_version": envelope.get("schema_version"),
         "canonical_id": envelope.get("canonical_id"),
@@ -86,46 +83,9 @@ def flatten_recipe_document(
         "record_id": envelope.get("record_id"),
         "revision": revision,
         "version": envelope.get("version", revision),
-        "champion": dict(champion or {}),
+        "selected_by": dict(raw_selection) if isinstance(raw_selection, dict) else {},
     }
     return {**business, **fixed}
-
-
-def _recommendation_metadata(envelope: dict[str, Any]) -> dict[str, Any]:
-    """Keep valid service metadata or synthesize stable recommendation fields."""
-    session_id = str(envelope.get("session_id") or "").strip()
-    raw_champion = envelope.get("champion")
-    if isinstance(raw_champion, dict):
-        champion_session_id = str(raw_champion.get("session_id") or "").strip()
-        metric = str(raw_champion.get("metric") or "").strip()
-        raw_champion_value = raw_champion.get("value")
-        if (
-            champion_session_id == session_id
-            and metric == "optimized_throughput"
-            and not isinstance(raw_champion_value, bool)
-            and isinstance(raw_champion_value, (int, float))
-            and math.isfinite(float(raw_champion_value))
-        ):
-            return dict(raw_champion)
-    knowledge = envelope.get("knowledge") or {}
-    raw_value = (
-        knowledge.get("optimized_throughput", 0.0)
-        if isinstance(knowledge, dict)
-        else 0.0
-    )
-    try:
-        value = float(raw_value or 0.0)
-    except (TypeError, ValueError):
-        value = 0.0
-    if not math.isfinite(value):
-        raise RemoteRecipeValidationError(
-            f"recommendation value must be finite, got {raw_value!r}"
-        )
-    return {
-        "session_id": session_id,
-        "metric": "optimized_throughput",
-        "value": value,
-    }
 
 
 def _validate_session_envelope(
@@ -301,12 +261,11 @@ class RemoteRecipeClient:
             canonical_id=canonical_id,
             session_id=session_id,
         )
-        champion = _recommendation_metadata(envelope)
         root = Path(destination)
         if root.is_symlink():
             raise RemoteRecipeValidationError(f"refusing symlink destination: {root}")
         files_root = root / "files"
-        document = flatten_recipe_document(envelope, champion=champion)
+        document = flatten_recipe_document(envelope)
         try:
             recipe_json = json.dumps(
                 document,

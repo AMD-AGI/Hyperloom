@@ -118,6 +118,11 @@ class KnowledgeConfig:
         # never leak them into a KernelForge child.
         env.pop("GBRAIN_BASE_URL", None)
         env.pop("GBRAIN_TOKEN", None)
+        # The section draft belongs to this run's inference document. A
+        # KernelForge child publishes its own ``kernel:`` record, so letting it
+        # inherit these would stage its sections into the wrong document.
+        env.pop("KB_DRAFT_DIR", None)
+        env.pop("KB_WARM_START_DIR", None)
 
     def public_dict(self) -> dict[str, Any]:
         """Return secret-free configuration suitable for status/audit output."""
