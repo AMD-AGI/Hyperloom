@@ -325,3 +325,72 @@ class TestIntegrateHandlerHonoursStateDefault:
         assert captured["params"]["extra_envs"] == {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"}
         assert captured["params"]["defer_accuracy_until_after_measure"] is True
         assert captured["params"]["post_measure_accuracy_min_tput"] == pytest.approx(1010.0)
+
+
+class TestApplybackProvenanceSurvivesTheLedgerFallbacks:
+    """An apply-back must arm the strict accuracy gate however it was resolved.
+
+    Provenance used to reach the payload only through the pending record, so
+    every KEEP that fell back to a ledger -- which is what the ``source_file``
+    dedup forces for the second and later KEEPs against one file -- looked like
+    an ordinary kernel patch. That is the one artifact whose correctness was
+    proven against a standalone reference only, so it must never be gradeable on
+    throughput alone.
+    """
+
+    def _seed_attempt_ledger(self, session_dir: Path, *, kernel_id: str) -> None:
+        state = SharedState.load_or_init(session_dir)
+        state.kernel_opt_attempts = {
+            kernel_id: {
+                "last_artifact_path": "/tmp/deploy.patch",
+                "last_source_file": "/framework/vllm/attention.py",
+                "last_framework_applyback": {"artifact_kind": "framework_applyback"},
+                "last_integration_validation_status": "pending",
+            }
+        }
+        state.save(session_dir)
+
+    def test_the_attempt_ledger_fallback_carries_provenance(self, session_dir):
+        self._seed_attempt_ledger(session_dir, kernel_id="k_applyback")
+
+        out, missing = krh._resolve_integrate_payload(
+            {"kernel_id": "k_applyback"},
+            session_dir=session_dir,
+        )
+
+        assert missing is None, missing
+        assert out["artifact_kind"] == "framework_applyback"
+        assert out["integration_validation_status"] == "pending"
+
+    def test_the_last_kernel_opt_fallback_carries_provenance(self, session_dir):
+        state = SharedState.load_or_init(session_dir)
+        state.last_kernel_opt = {
+            "kernel_id": "k_applyback",
+            "best_artifact_path": "/tmp/deploy.patch",
+            "source_file": "/framework/vllm/attention.py",
+            "framework_applyback": {"artifact_kind": "framework_applyback"},
+            "integration_validation_status": "pending",
+        }
+        state.save(session_dir)
+
+        out, missing = krh._resolve_integrate_payload(
+            {"kernel_id": "k_applyback"},
+            session_dir=session_dir,
+        )
+
+        assert missing is None, missing
+        assert out["artifact_kind"] == "framework_applyback"
+        assert out["integration_validation_status"] == "pending"
+
+    def test_an_explicit_payload_value_still_wins(self, session_dir):
+        self._seed_attempt_ledger(session_dir, kernel_id="k_applyback")
+
+        out, _missing = krh._resolve_integrate_payload(
+            {
+                "kernel_id": "k_applyback",
+                "integration_validation_status": "passed",
+            },
+            session_dir=session_dir,
+        )
+
+        assert out["integration_validation_status"] == "passed"

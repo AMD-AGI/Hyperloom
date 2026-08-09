@@ -74,6 +74,10 @@ log = logging.getLogger(__name__)
 _VALID_ANALYSIS_ROUTES = frozenset({"bypass", "deterministic", "agent"})
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
+# A patch whose correctness was only established against a reference kernel;
+# serving accuracy is what settles it.
+_FRAMEWORK_APPLYBACK_ARTIFACT_KIND = "framework_applyback"
+_INTEGRATE_ACCURACY_VALIDATION_TIER = "integrate_e2e_accuracy"
 
 
 def _vram_guarded_server_args(extra_args: str) -> str:
@@ -154,6 +158,43 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
     return None
 
 
+def _confirm_sources_imported(
+    source_files: list[str],
+    workspace: str | Path | None,
+) -> tuple[bool | None, dict[str, bool | None]]:
+    """Confirm every file a patch wrote was exercised by the served process.
+
+    A patch can span several files -- a new module, the dispatcher that routes
+    to it, the original source it replaces -- so each is graded on its own with
+    :func:`_confirm_source_imported` and the verdicts are combined:
+
+    * ``True``  — every file shows import evidence.
+    * ``False`` — no file appears in the log at all, which is the unambiguous
+      "the served process never ran any of this" case.
+    * ``None``  — anything mixed. A module can be imported lazily or folded
+      into another, so partial evidence is recorded for audit rather than held
+      against the patch.
+
+    Args:
+        source_files: Paths the patch wrote; duplicates and blanks are ignored.
+        workspace: Re-baseline workspace dir (holds ``server.log``).
+
+    Returns:
+        tuple[bool | None, dict[str, bool | None]]: The aggregate tri-state and
+            the per-file verdicts kept for audit.
+    """
+    ordered = list(dict.fromkeys(path for path in source_files if str(path or "").strip()))
+    if not ordered:
+        return None, {}
+    per_file = {path: _confirm_source_imported(path, workspace) for path in ordered}
+    verdicts = list(per_file.values())
+    if all(verdict is True for verdict in verdicts):
+        return True, per_file
+    if all(verdict is False for verdict in verdicts):
+        return False, per_file
+    return None, per_file
+
+
 # Backends whose stdout log we mine for token usage.
 _TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"forge"})
 
@@ -216,18 +257,6 @@ def _reusable_source_roots() -> tuple[str, ...]:
             if variant and variant not in seen:
                 seen.add(variant)
                 out.append(variant)
-    # FlyDSL kernel checkout roots for moe_flydsl_* candidates.
-    for env_key in ("DSL2_ROOT", "FLYDSL_ROOT"):
-        val = (os.environ.get(env_key, "") or "").strip()
-        if val:
-            cand = (val.rstrip("/") + "/").lower()
-            if cand not in seen:
-                seen.add(cand)
-                out.append(cand)
-    for default in ("/opt/flydsl/", "/sgl-workspace/flydsl/"):
-        if default not in seen:
-            seen.add(default)
-            out.append(default)
     return tuple(out)
 
 
@@ -1262,6 +1291,14 @@ def _fill_integrate_defaults_from_state(
             "identity_route",
             str(pending_record.get("identity_route") or ""),
         )
+        resolved.setdefault(
+            "artifact_kind",
+            str(pending_record.get("artifact_kind") or ""),
+        )
+        resolved.setdefault(
+            "integration_validation_status",
+            str(pending_record.get("integration_validation_status") or ""),
+        )
 
     current_best = getattr(state, "current_best", None) or {}
 
@@ -1317,6 +1354,32 @@ def _fill_integrate_snapshot_from_bundle(resolved: dict, bundle: Any) -> None:
         resolved["kernel_repo"] = str(bundle["repo_root"])
     if not resolved.get("producer_manifest") and bundle.get("producer_manifest"):
         resolved["producer_manifest"] = str(bundle["producer_manifest"])
+    if not resolved.get("patch_write_paths"):
+        write_paths = [str(path) for path in (bundle.get("write_paths") or []) if str(path or "").strip()]
+        if write_paths:
+            resolved["patch_write_paths"] = write_paths
+
+
+def _fill_integrate_provenance(
+    resolved: dict,
+    *,
+    framework_applyback: Any,
+    integration_validation_status: Any,
+) -> None:
+    """Backfill artifact provenance for an integrate resolved from a ledger entry.
+
+    These two fields arm the strict accuracy gate. A KEEP the ``source_file`` dedup
+    drops from the pending queue resolves through a fallback instead, and without
+    them a reference-only apply-back reads as an ordinary kernel patch.
+    """
+    if not resolved.get("artifact_kind") and isinstance(framework_applyback, dict):
+        kind = str(framework_applyback.get("artifact_kind") or "")
+        if kind:
+            resolved["artifact_kind"] = kind
+    if not resolved.get("integration_validation_status"):
+        status = str(integration_validation_status or "")
+        if status:
+            resolved["integration_validation_status"] = status
 
 
 def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dict, HandlerResult | None]:
@@ -1358,6 +1421,16 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
             "identity_route",
             str(pending_record.get("identity_route") or ""),
         )
+        # Provenance travels with the artifact so the serving verdict can tell a
+        # reference-only apply-back from one already proven in place.
+        resolved.setdefault(
+            "artifact_kind",
+            str(pending_record.get("artifact_kind") or ""),
+        )
+        resolved.setdefault(
+            "integration_validation_status",
+            str(pending_record.get("integration_validation_status") or ""),
+        )
         _fill_integrate_snapshot_from_bundle(
             resolved,
             pending_record.get("artifact_bundle"),
@@ -1393,6 +1466,11 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
                 resolved["patch_path"] = str(artifact)
         if not resolved.get("source_file") and last_kernel.get("source_file"):
             resolved["source_file"] = str(last_kernel["source_file"])
+        _fill_integrate_provenance(
+            resolved,
+            framework_applyback=last_kernel.get("framework_applyback"),
+            integration_validation_status=last_kernel.get("integration_validation_status"),
+        )
 
     # Multi-KEEP queue fallback: pull patch_path/source_file from the per-kernel
     # ledger for KEEPs other than the strongest pending one.
@@ -1409,6 +1487,11 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
             resolved["patch_path"] = str(attempt["last_artifact_path"])
         if not resolved.get("source_file") and attempt.get("last_source_file"):
             resolved["source_file"] = str(attempt["last_source_file"])
+        _fill_integrate_provenance(
+            resolved,
+            framework_applyback=attempt.get("last_framework_applyback"),
+            integration_validation_status=attempt.get("last_integration_validation_status"),
+        )
 
     if kernel_id and not (resolved.get("target_file") or resolved.get("source_file")):
         source = _find_selected_kernel_source(state, kernel_id)
@@ -6071,6 +6154,7 @@ def _grade_integrate_accuracy(
     *,
     session_dir: Path,
     workspace: Path,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Grade a kernel re-baseline's accuracy against the session baseline.
 
@@ -6089,6 +6173,10 @@ def _grade_integrate_accuracy(
         bench_result: The re-baseline result dict from ``BaselineExecutor``.
         session_dir: Session directory used to resolve ``baseline_accuracy``.
         workspace: The integrate task workspace holding both round slots.
+        strict: Grade an artifact whose correctness has only ever been proven
+            against a reference. This serving run is its first and only
+            end-to-end evidence, so the operator opt-out does not apply and a
+            gate that produced no verdict blocks instead of degrading.
 
     Returns:
         ``{"blocked": bool, "accuracy_pass": bool | None, "reason": str,
@@ -6133,9 +6221,15 @@ def _grade_integrate_accuracy(
 
     blocked, reason, degraded = accuracy_keep_block(
         accuracy_pass,
-        required=require_kernel_accuracy_default(),
+        required=True if strict else require_kernel_accuracy_default(),
         baseline_accuracy=baseline_accuracy,
     )
+    if strict and degraded:
+        blocked = True
+        reason = (
+            "accuracy gate produced no eval result and this artifact has no "
+            "other end-to-end correctness evidence"
+        )
     log.info(
         "integrate_handler: accuracy gate pass=%s blocked=%s degraded=%s new=%s baseline=%.4f source=%s",
         accuracy_pass,
@@ -6332,6 +6426,12 @@ async def integrate_handler(
             "timeout_sec": rebaseline_timeout_sec,
             "extra_server_args": extra_args,
             "extra_envs": dict(payload.get("extra_envs") or {}),
+            # The only artifact that patches FlyDSL sources, so the only run that
+            # needs the JIT cache key widened.
+            "flydsl_source_dirs": (
+                str(payload.get("artifact_kind") or "")
+                == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
+            ),
             "defer_accuracy_until_after_measure": True,
             "post_measure_accuracy_min_tput": base_tput * (1.0 + keep_threshold_pct / 100.0),
             "accuracy_timeout_sec": rebaseline_timeout_sec,
@@ -6515,12 +6615,21 @@ async def integrate_handler(
     # re-baseline's own eval output, so the verdict costs no extra GPU time.
     # Placed ahead of the optional source-import / paired-A/B passes so a patch
     # that loses accuracy short-circuits before they run.
+    # An apply-back carries only reference correctness, so this run is the sole
+    # end-to-end evidence it will ever get.
+    # Anything other than a recorded pass still owes the verdict, so an absent or
+    # unrecognised status keeps the gate armed rather than disarming it.
+    applyback_pending = (
+        str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
+        and str(payload.get("integration_validation_status") or "") != "passed"
+    )
     accuracy_gate: dict[str, Any] | None = None
     if decision == "KEEP":
         accuracy_gate = _grade_integrate_accuracy(
             bench_result,
             session_dir=session_dir,
             workspace=workspace,
+            strict=applyback_pending,
         )
         if accuracy_gate["blocked"]:
             # A measured regression is hard negative evidence -> REVERT. A
@@ -6533,10 +6642,18 @@ async def integrate_handler(
     # Only the strict sub-flag enforces it, and only on positive non-import
     # evidence (confirmed is False); an "unknown" (None) never penalizes.
     source_import_confirmed: bool | None = None
+    source_import_evidence: dict[str, bool | None] = {}
     source_not_imported_downgrade = False
     if _honest_flag("HL_CONFIRM_SOURCE_IMPORTED"):
-        _src = str(payload.get("target_file") or payload.get("source_file") or "")
-        source_import_confirmed = _confirm_source_imported(_src, bench_result.get("workspace"))
+        # Grade the whole write set; the single target is the fallback for a
+        # patch whose bundle declared none.
+        _written = [str(path) for path in (payload.get("patch_write_paths") or []) if str(path or "").strip()]
+        if not _written:
+            _written = [str(payload.get("target_file") or payload.get("source_file") or "")]
+        source_import_confirmed, source_import_evidence = _confirm_sources_imported(
+            _written,
+            bench_result.get("workspace"),
+        )
         if (
             decision == "KEEP"
             and source_import_confirmed is False
@@ -6672,6 +6789,8 @@ async def integrate_handler(
         result["stack_incremental_keep_threshold_pct"] = STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
     if source_import_confirmed is not None:
         result["source_import_confirmed"] = source_import_confirmed
+    if len(source_import_evidence) > 1:
+        result["source_import_evidence"] = source_import_evidence
     if source_not_imported_downgrade:
         result["decision_reason"] = "source_not_confirmed_imported"
     if paired_ab is not None:
@@ -6690,6 +6809,14 @@ async def integrate_handler(
             result["decision_reason"] = (
                 "accuracy_regression" if accuracy_gate["accuracy_pass"] is False else "accuracy_evidence_missing"
             )
+    if applyback_pending:
+        result["artifact_kind"] = _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
+        # Only a KEEP settles the outstanding verdict. A non-KEEP is left
+        # unstamped: the attempt ledger already distinguishes a rejection from a
+        # retryable fault, and this field must not blur the two.
+        if decision == "KEEP":
+            result["integration_validation_status"] = "passed"
+            result["validation_tier"] = _INTEGRATE_ACCURACY_VALIDATION_TIER
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -6704,7 +6831,7 @@ async def integrate_handler(
             target_file=str(payload.get("target_file") or payload.get("source_file") or "") or None,
             extra_server_args=extra_args,
             result=result,
-            validation_tier="integrate_e2e",
+            validation_tier=str(result.get("validation_tier") or "integrate_e2e"),
         )
     except Exception:  # noqa: BLE001
         log.debug("kernel integrate v4 result recording failed", exc_info=True)
