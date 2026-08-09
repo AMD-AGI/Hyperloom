@@ -755,7 +755,7 @@ class _FakeStore:
             if path.is_file()
         }
 
-    def put_knowledge(self, canonical_id, session_id, knowledge, *, mode):
+    def put_knowledge(self, canonical_id, knowledge, *, session_id="", mode="merge"):
         self.calls.append(("put_knowledge", canonical_id, session_id, mode))
 
     def set_champion(self, canonical_id, session_id, *, metric, value):
@@ -1437,7 +1437,7 @@ def test_vendored_sdk_matches_upstream_git_blob() -> None:
     path = Path(kb_store_client.__file__)
     content = path.read_bytes()
     digest = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
-    assert digest == "cb7849422030798860ef5985cfc047392b60f061"
+    assert digest == "ed4fe92fda3bf8f335ba682e3191121f0dd2407e"
 
 
 def test_read_alias_is_standalone_api() -> None:
