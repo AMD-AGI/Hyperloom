@@ -43,6 +43,15 @@ class ConversationCollaborator:
         backend = self.backends.get("orchestration")
         return bool(getattr(backend, "conversational", False))
 
+    def _orchestration_context_tools_mounted(self) -> bool:
+        """True when the orchestration backend really exposes the pull tools.
+
+        Returns:
+            ``True`` when the backend reports the read-only context tools live;
+            backends without them (and a failed MCP build) report ``False``.
+        """
+        return bool(getattr(self.backends.get("orchestration"), "context_tools_mounted", False))
+
     def _orchestration_needs_seed(self) -> bool:
         """True when the orchestration backend lost the history a delta assumes.
 
@@ -620,19 +629,33 @@ class ConversationCollaborator:
                 sections.append("=== Acceptance threshold (advisory) ===")
                 sections.append(accept_block)
 
-        # Conversational DELTA turn: tell the agent verbose state was not re-pushed + how to pull it.
+        # Conversational DELTA turn: tell the agent verbose state was not
+        # re-pushed. Where to find it depends on what the backend mounted —
+        # pointing a tool-less session at the context tools is an instruction
+        # it cannot follow, and the state is still in its conversation anyway.
         if agent_name == "orchestration" and not push_full:
-            tool_list = ", ".join(_CONTEXT_TOOL_NAMES)
-            sections.append("=== Context (pull on demand) ===")
-            sections.append(
+            preamble = (
                 "This is a continuation of our ongoing conversation; the "
                 "full session state was NOT re-pasted. The Phase, Mission "
                 "progress, Time budget, and new inbox events above are the "
-                "delta since your last turn. Pull anything else you need "
-                f"with the read-only context tools: {tool_list} "
-                "(and `Read` for sandboxed files). Reason "
-                "from your own running plan; do not re-derive it from scratch."
+                "delta since your last turn. "
             )
+            if self._orchestration_context_tools_mounted():
+                tool_list = ", ".join(_CONTEXT_TOOL_NAMES)
+                sections.append("=== Context (pull on demand) ===")
+                sections.append(
+                    preamble + "Pull anything else you need "
+                    f"with the read-only context tools: {tool_list} "
+                    "(and `Read` for sandboxed files). Reason "
+                    "from your own running plan; do not re-derive it from scratch."
+                )
+            else:
+                sections.append("=== Context (delta turn) ===")
+                sections.append(
+                    preamble + "Everything omitted was pushed earlier in this "
+                    "same conversation; re-read it above. Reason from your own "
+                    "running plan; do not re-derive it from scratch."
+                )
 
         # NOTE: there is deliberately no "=== Specialist health ===" block.
         # This prompt renders only on an agent's own turn, and a turn only

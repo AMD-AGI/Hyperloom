@@ -1099,6 +1099,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_hold_for_framework_config_lane": "phase_framework",
         "_record_framework_config_exploration_result": "phase_framework",
         "_orchestration_conversational": "conversation",
+        "_orchestration_context_tools_mounted": "conversation",
         "_orchestration_needs_seed": "conversation",
         "_reset_orchestration_conversation": "conversation",
         "_conversation_progress_signal": "conversation",

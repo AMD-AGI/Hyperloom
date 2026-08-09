@@ -43,12 +43,15 @@ from hyperloom.inference_optimizer.protocol.intent import (
     NoIntentEmitted,
     validate_envelope,
 )
+from ..prompts.transport import TRANSPORT_STRUCTURED_OUTPUT
 from .agent_role import DEFAULT_CODEX_MODEL
 from .base import (
     BackendError,
     BackendTurnResult,
     LLMCallFailed,
+    RetryPolicy,
     parse_call_timeout_env,
+    retry_with_backoff,
     safe_int,
 )
 from .mcp_emit_intent import build_intent_envelope_schema, payload_contract
@@ -156,6 +159,9 @@ class CodexBackend:
         call_timeout_s: Wall-clock cap for one ``run()``. Env override:
             ``INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC``.
         env: Values overlaid on ``os.environ`` for the child process.
+        retry_policy: Bounded backoff for transient SDK/gateway failures; env
+            override via ``INFERENCE_OPTIMIZER_LLM_RETRY_*`` (ATTEMPTS=1
+            disables), shared with the Claude path.
     """
 
     allowed_intents: frozenset[IntentType]
@@ -173,6 +179,9 @@ class CodexBackend:
         )
     )
     env: dict[str, str] | None = None
+    # Bounded transient-failure retry/backoff, on the same
+    # INFERENCE_OPTIMIZER_LLM_RETRY_* knobs the Claude path reads.
+    retry_policy: RetryPolicy = field(default_factory=RetryPolicy.from_env)
 
     name: str = "codex"
     calls: list[dict[str, Any]] = field(default_factory=list)
@@ -181,6 +190,10 @@ class CodexBackend:
     # and checkpoint compaction both apply. Not a dataclass field: a
     # session-scoped backend has no stateless mode to fall back to.
     conversational = True
+    # Which prompt modules describe a surface this backend actually has. Read
+    # by the prompt builder, which cannot infer it from the role: the
+    # orchestration role is Claude on paper and Codex in an OpenAI-only run.
+    transport = TRANSPORT_STRUCTURED_OUTPUT
 
     _session: CodexSession | None = field(default=None, init=False, repr=False)
     # Developer instructions the open thread was started with. The orchestration
@@ -242,18 +255,36 @@ class CodexBackend:
 
         Raises:
             BackendError: If the session's config or sandbox policy is
-                unusable.
-            LLMCallFailed: If the SDK turn failed or reported an in-band error.
+                unusable. Not retried: a misconfigured deployment does not
+                become usable on the second attempt.
+            LLMCallFailed: If the SDK turn kept failing once the retry budget
+                was spent, or the turn reported an in-band error.
             NoIntentEmitted: If the reply did not honour the enforced schema or
                 failed intent validation.
         """
-        session = await self._session_for(system_prompt)
         output_schema = None if allow_no_intent else build_intent_envelope_schema(self.allowed_intents)
-        try:
-            sdk_result = await session.turn(
+
+        async def _one_attempt() -> Any:
+            """Acquire the session and run one turn under the retry policy."""
+            session = await self._session_for(system_prompt)
+            return await session.turn(
                 prompt,
                 timeout_sec=self.call_timeout_s,
                 output_schema=output_schema,
+            )
+
+        def _note_retry(attempt: int, exc: BaseException, delay: float) -> None:
+            """Record a transient-failure retry warning into the call log."""
+            self.calls.append(
+                {"warn": f"codex SDK transient failure (attempt {attempt}): {exc!r}; retrying in {delay:.2f}s"}
+            )
+
+        try:
+            sdk_result = await retry_with_backoff(
+                _one_attempt,
+                policy=self.retry_policy,
+                retry_on=(CodexSessionError,),
+                on_retry=_note_retry,
             )
         except CodexSessionError as exc:
             raise LLMCallFailed(f"Codex Agent SDK turn failed: {redact_secret_values(str(exc))}") from exc
