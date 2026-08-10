@@ -199,7 +199,6 @@ exporting GBrain credentials:
 
 Without the explicit mode, local/default ignores both credentials. Set
 `KNOWLEDGE_STORE_MODE=local` (or leave it unset) for local-only operation.
-`RECIPE_KB_MIRROR_MODE` is obsolete and ignored; remove it.
 
 The implicit local root changed from `$USER_DATA_PATH/kb` (or
 `/workspace/hyperloom/kb`) to `$USER_DATA_PATH/knowledge` (or

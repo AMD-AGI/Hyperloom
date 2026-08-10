@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from hyperloom.common.coerce import to_float, to_str_list
+from hyperloom.common.io import append_jsonl
 from ..state.optimization_journal import (
     Journal,
     JournalEntry,
@@ -1581,8 +1582,68 @@ class WritebackCollaborator:
             ],
         }
 
-    def finalize_recipe_and_journal(self) -> None:
-        """CLOSE-time fact finalize: final update_recipe + journal finalize (total_gain_pct + final_throughput); idempotent (CLOSE sequencer + _recipe_kb_t4_hook safety net)."""
+    def _record_remote_recipe_audit(
+        self,
+        *,
+        source: str,
+        status: str,
+        canonical_id: str,
+        session_id: str,
+        optimized_throughput: float = 0.0,
+        reason: str = "",
+        error_type: str = "",
+    ) -> None:
+        """Append one best-effort, secret-free KB Store publish audit row."""
+        try:
+            from hyperloom.inference_optimizer.session.session_paths import (
+                recipe_snapshot_audit_jsonl,
+            )
+
+            row: dict[str, Any] = {
+                "ts": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+                "op": "write",
+                "method": "write",
+                "mode": "remote",
+                "backend": "kb-store",
+                "remote": "kb-store",
+                "resolution": status,
+                "success": status in {"written", "skipped"},
+                "generator": source,
+                "phase": "CLOSE",
+                "status": status,
+                "reason": reason,
+                "request": {
+                    "canonical_id": canonical_id or None,
+                    "session_id": session_id or None,
+                },
+                "result": {
+                    "canonical_id": canonical_id,
+                    "session_id": session_id,
+                    "created": status == "written",
+                    "best_throughput": optimized_throughput,
+                },
+                "provenance": {
+                    "component": "remote_recipe",
+                    "source": source,
+                },
+            }
+            if error_type:
+                row["error"] = {"type": error_type}
+            append_jsonl(
+                recipe_snapshot_audit_jsonl(self.session_dir),
+                row,
+                make_parents=True,
+                sort_keys=True,
+            )
+        except Exception:  # noqa: BLE001 - audit cannot break finalization
+            log.debug("Remote Recipe KB audit append failed", exc_info=True)
+
+    def finalize_recipe_and_journal(
+        self,
+        *,
+        source: str = "close",
+    ) -> dict[str, Any]:
+        """Finalize Recipe state and return a secret-free observable outcome."""
         try:
             journal = self._ensure_journal()
             ss = self.shared_state
@@ -1598,8 +1659,98 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("optimization_journal.finalize failed")
 
+        if bool(
+            getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)
+        ):
+            log.info("Recipe KB finalize skipped (--degraded-kb)")
+            return {
+                "status": "skipped",
+                "reason": "degraded_kb",
+                "backend": "disabled",
+            }
+
+        from ..knowledge.config import KnowledgeConfig, KnowledgeStoreMode
+
+        try:
+            config = (
+                getattr(getattr(self, "knowledge_plane", None), "config", None)
+                or KnowledgeConfig.from_env()
+            )
+        except Exception as exc:  # noqa: BLE001 - KB remains best-effort
+            log.exception("Recipe KB finalize configuration failed (non-fatal)")
+            return {
+                "status": "error",
+                "reason": f"configuration:{type(exc).__name__}",
+                "backend": "unknown",
+            }
+        if config.mode is KnowledgeStoreMode.REMOTE:
+            # Remote mode has one Recipe sink: the KB Store final session
+            # writer. T0 and runtime amendment are intentionally absent.
+            remote_cid = ""
+            remote_sid = str(
+                getattr(self.shared_state, "recipe_kb_session_id", "")
+                or getattr(self.shared_state, "session_id", "")
+                or self.session_dir.name
+            )
+            try:
+                from ..knowledge.remote_recipe import HyperloomRemoteKB
+
+                remote_cid = self._workload_canonical_id()
+                remote_result = HyperloomRemoteKB.from_env().write(
+                    remote_cid,
+                    self.shared_state,
+                    session_id=remote_sid,
+                )
+                log.info(
+                    "Remote Recipe KB finalize: status=%s reason=%s cid=%s sid=%s",
+                    remote_result.status,
+                    remote_result.reason,
+                    remote_cid,
+                    remote_result.session_id,
+                )
+                self._record_remote_recipe_audit(
+                    source=source,
+                    status=remote_result.status,
+                    canonical_id=remote_cid,
+                    session_id=remote_result.session_id,
+                    optimized_throughput=remote_result.optimized_throughput,
+                    reason=remote_result.reason,
+                )
+                return {
+                    "status": remote_result.status,
+                    "reason": remote_result.reason,
+                    "backend": "kb-store",
+                    "canonical_id": str(
+                        getattr(remote_result, "canonical_id", "") or remote_cid
+                    ),
+                    "session_id": str(
+                        getattr(remote_result, "session_id", "") or remote_sid
+                    ),
+                }
+            except Exception as exc:  # noqa: BLE001 - remote transport is best-effort
+                self._record_remote_recipe_audit(
+                    source=source,
+                    status="error",
+                    canonical_id=remote_cid,
+                    session_id=remote_sid,
+                    error_type=type(exc).__name__,
+                )
+                log.exception("Remote Recipe KB finalize failed (non-fatal)")
+                return {
+                    "status": "error",
+                    "reason": type(exc).__name__,
+                    "backend": "kb-store",
+                    "canonical_id": remote_cid,
+                    "session_id": remote_sid,
+                }
+
+        # Local mode never consults ambient KB_STORE_* credentials.
         if self.recipe_kb is None:
-            return
+            return {
+                "status": "skipped",
+                "reason": "no_recipe_backend",
+                "backend": "local",
+            }
         ss = self.shared_state
         model_name = getattr(ss, "model_name", "") or ""
         gpu_type = getattr(ss, "gpu_type", "") or ""
@@ -1609,7 +1760,11 @@ class WritebackCollaborator:
                 model_name,
                 gpu_type,
             )
-            return
+            return {
+                "status": "skipped",
+                "reason": "missing_model_or_hardware",
+                "backend": "local",
+            }
         try:
             attrs = self._coord._build_recipe_attrs_from_state()
             # Hoist workload tags flat into top-level recipe attrs (shallow-merged) for warm-start filters.
@@ -1624,8 +1779,7 @@ class WritebackCollaborator:
             if self.recipe_kb is not None:
                 try:
                     cid = self._workload_canonical_id()
-                    # Read exactly the selected store's authority row. Remote
-                    # mode must not enter warm-start search/list pagination.
+                    # Read exactly the local store's authority row.
                     existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
                     existing_sessions: list[dict[str, Any]] = []
                     for row in existing_row.get("sessions") or []:
@@ -1698,9 +1852,19 @@ class WritebackCollaborator:
                     ],
                 },
             )
+            return {
+                "status": "written",
+                "reason": "",
+                "backend": "local",
+            }
         # Catch-all keeps CLOSE step 2.5 defensive against programmer bugs.
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception as exc:  # noqa: BLE001 — defensive
             log.exception("update_recipe raised unexpectedly")
+            return {
+                "status": "error",
+                "reason": type(exc).__name__,
+                "backend": "local",
+            }
 
     async def _record_specialist_result(
         self,
