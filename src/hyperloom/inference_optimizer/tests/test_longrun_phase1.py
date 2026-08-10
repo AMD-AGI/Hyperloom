@@ -429,18 +429,14 @@ def test_long_bounded_run_caps_at_absolute_floor():
     assert ev["min_remaining_sec_effective"] == pytest.approx(10800.0, abs=1.0)
 
 
-def test_env_override_changes_floor(monkeypatch):
+def test_env_override_changes_absolute_floor(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", "3600")
-    import importlib
+    assert ps._default_cycle_reloop_min_remaining_sec() == pytest.approx(3600.0)
 
-    import hyperloom.orchestrator.phases.machine_state as _ms
 
-    importlib.reload(_ms)
-    try:
-        assert _ms.DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC == pytest.approx(3600.0)
-    finally:
-        monkeypatch.delenv("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", raising=False)
-        importlib.reload(_ms)
+def test_malformed_env_override_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", "not-a-number")
+    assert ps._default_cycle_reloop_min_remaining_sec() == pytest.approx(10800.0)
 
 
 def test_evidence_keys_present():

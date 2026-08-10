@@ -16,17 +16,18 @@ from hyperloom.common.env_safety import redact_secret_values
 
 FAILURE_STAGE_WARMUP: str = "warmup"
 FAILURE_STAGE_DECISION: str = "decision"
-FAILURE_STAGES: frozenset[str] = frozenset({FAILURE_STAGE_WARMUP, FAILURE_STAGE_DECISION})
 
-# Characters kept when building a variant-name slug for the fallback id.
+# Variant outcomes that produced no usable measurement, so they need evidence.
+UNMEASURED_OUTCOMES: frozenset[str] = frozenset({"FAILED", "KILLED_OVERTIME"})
+
+# Matches every character replaced by ``_`` in a variant-name slug.
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]")
 
 
 def tail_excerpt(value: Any, *, limit: int = 1200) -> str | None:
     """Return the trailing ``limit`` characters of ``value`` after redaction.
 
-    Boot-time crashes put the assertion at the end of the log blob; taking the
-    tail retains the root cause where a head truncation would drop it.
+    Tail, not head: a boot crash puts its assertion at the end of the blob.
 
     Args:
         value: Raw text; falsy inputs return ``None``.
@@ -44,10 +45,7 @@ def tail_excerpt(value: Any, *, limit: int = 1200) -> str | None:
 
 
 def make_failure_id(*, task_id: str, fingerprint: str, variant_name: str = "") -> str:
-    """Compute a stable, recomputable failure id.
-
-    Both the executor and the Coordinator call this with the same arguments;
-    the result must be identical on both sides.
+    """Compute a failure id; must stay recomputable from the same inputs.
 
     Args:
         task_id: The owning task's id.
@@ -81,10 +79,9 @@ def failure_from_variant_outcome(
     """
     fp = str(vo.get("fingerprint") or "")
     variant_name = str(vo.get("variant_name") or "")
-    failure_id = make_failure_id(task_id=task_id, fingerprint=fp, variant_name=variant_name)
     variant = vo.get("variant") or {}
     return {
-        "failure_id": failure_id,
+        "failure_id": make_failure_id(task_id=task_id, fingerprint=fp, variant_name=variant_name),
         "task_id": task_id,
         "round_id": round_id,
         "variant_name": variant_name,
@@ -115,17 +112,15 @@ def render_failure_line(fe: dict[str, Any], *, excerpt_chars: int = 160) -> str:
     Returns:
         A single-line summary string.
     """
-    fid = str(fe.get("failure_id") or "")
-    variant = str(fe.get("variant_name") or "")
-    stage = str(fe.get("stage") or "")
-    ec = str(fe.get("error_class") or "")
-    # Prefer tail-truncated error body; fall back to the reason tag.
+    error_class = str(fe.get("error_class") or "")
     body = str(fe.get("error_excerpt") or fe.get("reason") or "")
-    if len(body) > excerpt_chars:
-        body = body[-excerpt_chars:]
-    parts = [f"fid={fid}", f"variant={variant!r}", f"stage={stage}"]
-    if ec:
-        parts.append(f"err={ec}")
+    parts = [
+        f"fid={fe.get('failure_id') or ''}",
+        f"variant={str(fe.get('variant_name') or '')!r}",
+        f"stage={fe.get('stage') or ''}",
+    ]
+    if error_class:
+        parts.append(f"err={error_class}")
     if body:
-        parts.append(f"msg={body!r}")
+        parts.append(f"msg={body[-excerpt_chars:]!r}")
     return " ".join(parts)

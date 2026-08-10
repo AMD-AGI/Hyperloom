@@ -5,12 +5,9 @@
 
 from __future__ import annotations
 
-import pytest
-
 from hyperloom.orchestrator.state.failure_evidence import (
     FAILURE_STAGE_DECISION,
     FAILURE_STAGE_WARMUP,
-    FAILURE_STAGES,
     failure_from_variant_outcome,
     make_failure_id,
     render_failure_line,
@@ -133,18 +130,12 @@ class TestRenderFailureLine:
         line = render_failure_line(fe)
         assert "warmup_failed" in line
 
-    def test_is_single_line(self):
+    def test_keeps_the_tail_of_a_long_body(self):
         fe = {
             "failure_id": "fail.t1.abc",
             "variant_name": "v",
             "stage": FAILURE_STAGE_WARMUP,
-            "error_class": "x",
-            "error_excerpt": "line1\nline2\nline3",
+            "error_excerpt": "banner " * 200 + "AssertionError: batch == 1",
         }
-        line = render_failure_line(fe)
-        # render_failure_line produces one line (excerpt is truncated/clipped outside)
-        assert isinstance(line, str)
-
-    def test_stages_constant_membership(self):
-        assert FAILURE_STAGE_WARMUP in FAILURE_STAGES
-        assert FAILURE_STAGE_DECISION in FAILURE_STAGES
+        line = render_failure_line(fe, excerpt_chars=40)
+        assert "AssertionError: batch == 1" in line
