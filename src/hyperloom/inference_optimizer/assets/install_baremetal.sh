@@ -43,13 +43,13 @@ INSTALL_FRAMEWORK="none"
 _FRAMEWORK_ENV_WAS_SET="${FRAMEWORK_ENV+x}"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
-# Framework versions track docs/compatibility.rst (SGLang v0.5.12, ROCm 7.2).
-# vLLM installs 0.21.0+rocm722 from the wheels.vllm.ai pip index, matching the
-# v0.21.0 Docker image version. The pip index only publishes the rocm722
-# variant (no rocm720 wheel exists there), so the ROCm layer is 7.2.2. AITER_REF
+# Framework versions track docs/compatibility.rst (SGLang v0.5.16, ROCm 7.2).
+# vLLM installs 0.24.0+rocm723 from the wheels.vllm.ai pip index, matching the
+# v0.24.0 Docker image version. The pip index publishes 0.24.0 only as the
+# rocm723 variant (ROCm 7.2.3), so the ROCm layer is 7.2.3. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
-SGLANG_REF="${SGLANG_REF:-v0.5.12}"
+SGLANG_REF="${SGLANG_REF:-v0.5.16}"
 _SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
 _AITER_REF_WAS_SET="${AITER_REF+x}"
 SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-rocm720}"
@@ -62,8 +62,8 @@ fi
 SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-7.2.0}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
-VLLM_VERSION="${VLLM_VERSION:-0.21.0}"
-VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm722}"
+VLLM_VERSION="${VLLM_VERSION:-0.24.0}"
+VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm723}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
 VLLM_VENV_ROOT="${VLLM_VENV_ROOT:-/opt/hyperloom/vllm-venv}"
 REQUIRE_FRAMEWORKS=0
@@ -158,7 +158,7 @@ warn() { echo "[install-baremetal WARN] $*" >&2; }
 die() { echo "[install-baremetal ERROR] $*" >&2; exit 1; }
 
 IMAGE_HINT="Provision the ROCm framework base first (run inside an AMD ROCm \
-SGLang/vLLM image such as primussafe/sglang:*-rocm*-mi30x|mi35x-profilerfix, or \
+SGLang/vLLM image such as rocm/hyperloom:sglang-*-rocm7.2.0-mi300x|mi350x, or \
 install an equivalent ROCm torch + framework stack), then re-run."
 
 is_interactive() { [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; }
@@ -774,16 +774,22 @@ PY
     # +git<sha>) that PyPI lacks, so an exact pin forces the ROCm build; vLLM then
     # reuses the already-satisfied torch.
     rocm_torch_ver="$("$py" - "$VLLM_ROCM_INDEX" <<'PY'
-import re, sys, urllib.request
+import re, sys, urllib.request, urllib.error
 
 base = sys.argv[1].rstrip("/") + "/torch/"
 try:
     html = urllib.request.urlopen(base, timeout=30).read().decode()
-except Exception:
+except urllib.error.HTTPError as e:
+    print("index unreachable: HTTP %s at %s" % (e.code, base), file=sys.stderr)
+    raise SystemExit(0)
+except Exception as e:
+    print("index unreachable: %s at %s" % (e, base), file=sys.stderr)
     raise SystemExit(0)
 # Match the plain "+local" form (e.g. 2.10.0+git8514f05); URL-encoded %2B
 # anchors are skipped so the pinned spec stays pip-usable.
 matches = re.findall(r"torch-([0-9][0-9A-Za-z.]*\+[0-9A-Za-z.]+)-cp", html)
+if not matches:
+    print("index reachable but no torch wheel matched at %s" % base, file=sys.stderr)
 print(matches[-1] if matches else "")
 PY
 )"
