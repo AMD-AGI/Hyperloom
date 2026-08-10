@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .models import MAX_FILE_BYTES, Artifact, KnowledgeBundle, RemoteRecipeValidationError
+from .sanitize import (
+    sanitize_publish_env_mapping,
+    sanitize_publish_server_args,
+    sanitize_shared_knowledge,
+)
 
 _PATH_KEYS = {
     "artifact_path",
@@ -188,7 +193,10 @@ def _config_from(entries: list[dict[str, Any]]) -> dict[str, Any]:
         envs.update(_mapping(entry.get("extra_envs")))
     if not envs:
         envs = _mapping(source.get("extra_envs"))
-    return {"extra_server_args": args, "extra_envs": {str(k): str(v) for k, v in envs.items()}}
+    return {
+        "extra_server_args": sanitize_publish_server_args(args),
+        "extra_envs": sanitize_publish_env_mapping(envs),
+    }
 
 
 def _entry_files(entries: list[dict[str, Any]], files: _Files, category: str) -> tuple[list[str], list[str]]:
@@ -578,28 +586,30 @@ def build_remote_knowledge(
     staged_sections = (
         merge_staged_sections(value, sections, files) if sections is not None else []
     )
-    knowledge = {
-        "knowledge_schema_version": 2,
-        "optimized_throughput": optimized_throughput,
-        "validated_e2e_gain": validated_gain,
-        "value": value,
-        "what_worked": worked,
-        "what_failed": _experience(state, "last_action_failures"),
-        "remaining_gaps": _experience(state, "gaps"),
-        "lessons": _experience(state, "warm_start_lessons"),
-        "pitfalls": _experience(state, "warm_start_pitfalls"),
-        "provenance": {
-            "producer": "hyperloom-inference-optimizer",
-            "phase": "CLOSE",
-            "session_id": str(
-                getattr(state, "recipe_kb_session_id", "")
-                or getattr(state, "session_id", "")
-            ),
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "optimization_stack_length": len(stack),
-            "staged_sections": staged_sections,
-        },
-    }
+    knowledge = sanitize_shared_knowledge(
+        {
+            "knowledge_schema_version": 2,
+            "optimized_throughput": optimized_throughput,
+            "validated_e2e_gain": validated_gain,
+            "value": value,
+            "what_worked": worked,
+            "what_failed": _experience(state, "last_action_failures"),
+            "remaining_gaps": _experience(state, "gaps"),
+            "lessons": _experience(state, "warm_start_lessons"),
+            "pitfalls": _experience(state, "warm_start_pitfalls"),
+            "provenance": {
+                "producer": "hyperloom-inference-optimizer",
+                "phase": "CLOSE",
+                "session_id": str(
+                    getattr(state, "recipe_kb_session_id", "")
+                    or getattr(state, "session_id", "")
+                ),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "optimization_stack_length": len(stack),
+                "staged_sections": staged_sections,
+            },
+        }
+    )
     bundle = KnowledgeBundle(knowledge=knowledge, artifacts=files.artifacts)
     bundle.validate(files.refs)
     return bundle
@@ -620,18 +630,22 @@ def convert_v1_recipe_to_knowledge(recipe: Mapping[str, Any]) -> dict[str, Any]:
                 best_config.get("extra_envs") or best_config.get("envs")
             ),
         }
-    return {
-        "knowledge_schema_version": 1,
-        "optimized_throughput": _number(recipe.get("best_throughput")),
-        "validated_e2e_gain": _number(recipe.get("validated_gain_pct") or recipe.get("gain_pct")),
-        "value": {
-            "legacy_recipe": legacy,
-        },
-        "provenance": {
-            "producer": "hyperloom-v1-converter",
-            "source_schema": 1,
-        },
-    }
+    return sanitize_shared_knowledge(
+        {
+            "knowledge_schema_version": 1,
+            "optimized_throughput": _number(recipe.get("best_throughput")),
+            "validated_e2e_gain": _number(
+                recipe.get("validated_gain_pct") or recipe.get("gain_pct")
+            ),
+            "value": {
+                "legacy_recipe": legacy,
+            },
+            "provenance": {
+                "producer": "hyperloom-v1-converter",
+                "source_schema": 1,
+            },
+        }
+    )
 
 
 def envelope_to_v1_recipe(envelope: Mapping[str, Any]) -> dict[str, Any]:

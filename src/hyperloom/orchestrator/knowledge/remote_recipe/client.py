@@ -24,6 +24,7 @@ from .models import (
     RemoteWriteResult,
     validate_relative_path,
 )
+from .sanitize import sanitize_shared_knowledge
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _READ_CHUNK = 1024 * 1024
@@ -370,6 +371,10 @@ class RemoteRecipeClient:
             raise RemoteRecipeValidationError(
                 f"optimized_throughput must be finite, got {optimized_throughput!r}"
             )
+        # Defense in depth at the final shared-store boundary. Builders sanitize
+        # earlier so their outputs are safe to inspect, but callers can also
+        # construct a KnowledgeBundle directly.
+        bundle.knowledge = sanitize_shared_knowledge(bundle.knowledge)
         try:
             json.dumps(bundle.knowledge, allow_nan=False)
         except (TypeError, ValueError) as exc:
