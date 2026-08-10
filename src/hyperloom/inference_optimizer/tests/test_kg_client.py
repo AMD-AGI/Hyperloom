@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import GbrainRemoteError
+from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_mcp import GbrainRemoteError
 from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import (
     Fact,
     KGClient,

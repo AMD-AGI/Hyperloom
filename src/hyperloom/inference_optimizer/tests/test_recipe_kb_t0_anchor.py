@@ -23,15 +23,8 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
 )
 
 
-class GbrainRemoteRecipeClient:  # name matches the real client for the type check
-    enabled = True
-
-
-def test_warm_recipe_source_falls_back_to_remote_type() -> None:
-    class _Kb:
-        remote = GbrainRemoteRecipeClient()
-
-    assert _warm_recipe_source({}, kb=_Kb()) == "gbrain"
+def test_warm_recipe_source_is_local_recipe_kb() -> None:
+    assert _warm_recipe_source({}, kb=object()) == "recipe-kb"
     assert _warm_recipe_source(None, kb=object()) == "recipe-kb"
 
 
@@ -72,7 +65,6 @@ def kb(tmp_path: Path) -> RecipeKB:
     """Local-only dispatcher (no remote)."""
     return RecipeKB(
         local=LocalRecipeStore(root=tmp_path / "kb"),
-        remote=None,
     )
 
 

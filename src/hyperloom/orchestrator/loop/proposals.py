@@ -183,7 +183,11 @@ class ProposalsCollaborator:
             provenance_details: Optional provenance metadata recorded with the
                 amendment.
         """
-        if self.recipe_kb is None:
+        config = getattr(getattr(self, "knowledge_plane", None), "config", None)
+        if (
+            getattr(getattr(config, "mode", None), "value", None) == "remote"
+            or self.recipe_kb is None
+        ):
             return
         try:
             cid = self._workload_canonical_id()
@@ -198,8 +202,7 @@ class ProposalsCollaborator:
             framework_version = detect_framework_version(framework)
         precision = str(getattr(ss, "precision", "") or "")
 
-        # Read the selected store's exact authority row. In remote mode this
-        # bypasses warm-start fallback/search and addresses one canonical slug.
+        # Local mode reads the exact authority row before amending it.
         try:
             live = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
         except Exception as exc:  # noqa: BLE001
