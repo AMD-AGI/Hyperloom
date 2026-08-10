@@ -40,30 +40,46 @@ def _champion(
     *,
     validate_metric: bool = False,
 ) -> tuple[str, float, dict[str, Any]]:
-    """Extract champion identity/value while retaining the rollup champion object."""
-    if not isinstance(rollup, dict):
+    """Extract one incumbent, failing closed on an unrecognized rollup."""
+    if rollup is None:
         return "", 0.0, {}
-    raw_champion = rollup.get("champion") or {}
-    champion = dict(raw_champion) if isinstance(raw_champion, dict) else {}
-    metric = str(champion.get("metric") or rollup.get("champion_metric") or "").strip()
-    if validate_metric and metric and metric != "optimized_throughput":
+    if not isinstance(rollup, dict):
+        raise RemoteRecipeValidationError("candidate rollup must be an object")
+    if "champion" not in rollup:
+        raise RemoteRecipeValidationError("candidate rollup is missing champion")
+    raw_champion = rollup.get("champion")
+    if raw_champion in (None, {}):
+        sessions = rollup.get("sessions")
+        if isinstance(sessions, list) and not sessions:
+            return "", 0.0, {}
+        raise RemoteRecipeValidationError(
+            "candidate rollup has sessions but no champion"
+        )
+    if not isinstance(raw_champion, dict):
+        raise RemoteRecipeValidationError("candidate rollup champion must be an object")
+    champion = dict(raw_champion)
+    metric = str(champion.get("metric") or "").strip()
+    if validate_metric and metric != "optimized_throughput":
         raise RemoteRecipeValidationError(
             "cannot compare or replace champion metric "
             f"{metric!r}; expected 'optimized_throughput'"
         )
-    session_id = str(
-        champion.get("session_id")
-        or rollup.get("champion_session_id")
-        or rollup.get("champion_session")
-        or ""
-    )
+    session_id = str(champion.get("session_id") or "").strip()
+    if not session_id:
+        raise RemoteRecipeValidationError("candidate rollup champion is missing session_id")
+    if "value" not in champion:
+        raise RemoteRecipeValidationError("candidate rollup champion is missing value")
     raw_value = champion.get("value")
-    if raw_value is None:
-        raw_value = champion.get("optimized_throughput", rollup.get("champion_value", 0.0))
+    if isinstance(raw_value, bool):
+        raise RemoteRecipeValidationError(
+            f"champion value must be numeric, got {raw_value!r}"
+        )
     try:
-        value = float(raw_value or 0.0)
+        value = float(raw_value)
     except (TypeError, ValueError):
-        value = 0.0
+        raise RemoteRecipeValidationError(
+            f"champion value must be numeric, got {raw_value!r}"
+        ) from None
     if not math.isfinite(value):
         raise RemoteRecipeValidationError(
             f"champion value must be finite, got {raw_value!r}"
@@ -244,12 +260,7 @@ class RemoteRecipeClient:
 
     def read(self, canonical_id: str, destination: str | Path) -> dict[str, Any] | None:
         """Download the direct best record and emit flattened recipe.json + files/."""
-        get_best_record = getattr(self.store, "get_best_record", None)
-        if get_best_record is None:
-            # Transitional compatibility only: the old vendored SDK calls the
-            # same direct /v1/kb/{canonical_id} request ``get_rollup``.
-            get_best_record = self.store.get_rollup
-        envelope = get_best_record(canonical_id)
+        envelope = self.store.get_best_record(canonical_id)
         if envelope is None:
             return None
         session_id = (
@@ -375,12 +386,7 @@ class RemoteRecipeClient:
         # earlier so their outputs are safe to inspect, but callers can also
         # construct a KnowledgeBundle directly.
         bundle.knowledge = sanitize_shared_knowledge(bundle.knowledge)
-        try:
-            json.dumps(bundle.knowledge, allow_nan=False)
-        except (TypeError, ValueError) as exc:
-            raise RemoteRecipeValidationError(
-                f"knowledge is not strict JSON: {exc}"
-            ) from exc
+        bundle.validate()
         rollup = self.store.get_rollup(canonical_id)
         _, prior, _ = _champion(rollup, validate_metric=True)
         if optimized_throughput <= prior:

@@ -263,6 +263,8 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     coord.shared_state.phase_history = [_close_phase_history_row()]
     coord.recipe_kb = _StubRecipeKB()
     coord.shared_state.recipe_kb_session_id = "sid-test"
+    coord.shared_state.model_name = "model"
+    coord.shared_state.gpu_type = "mi300x"
 
     await coord._on_enter_close(from_phase="SWEEP")
 
@@ -283,11 +285,39 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     # No curated artifacts in tmp_path, so packaging records "skipped".
     assert by_step["artifact_package"]["status"] == "skipped"
     assert by_step["fact_finalize"]["status"] == "done"
+    assert "status=written" in by_step["fact_finalize"]["detail"]
+    assert "backend=local" in by_step["fact_finalize"]["detail"]
     assert by_step["ndjson_drain"]["status"] == "skipped"
     assert by_step["done"]["status"] == "done"
     assert coord.shared_state.close_sequence_done is True
     # A normal SWEEP completion's sweep_done reason must be preserved.
     assert coord.shared_state.stop_reason == "sweep_done"
+
+
+@pytest.mark.asyncio
+async def test_close_sequencer_surfaces_remote_finalize_failure(
+    coord,
+    monkeypatch,
+):
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    monkeypatch.setattr(
+        coord,
+        "finalize_recipe_and_journal",
+        lambda: {
+            "status": "error",
+            "reason": "KBStoreError",
+            "backend": "kb-store",
+        },
+    )
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
+    fact = next(row for row in rows if row["step"] == "fact_finalize")
+    assert fact["status"] == "failed"
+    assert fact["detail"] == (
+        "status=error reason=KBStoreError backend=kb-store"
+    )
 
 
 @pytest.mark.asyncio

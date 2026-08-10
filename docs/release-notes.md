@@ -14,6 +14,13 @@ or view a detailed breakdown of all previous Hyperloom pre-release versions unde
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
 summarizes the headline capabilities.
 
+## Unreleased
+
+- **Remote Recipe KB Store cutover**: remote Recipe reads and CLOSE writes use
+  KB Store with legacy v1 read compatibility, direct best-record selection,
+  verified artifacts, and config/env-only T0 replay. Local Recipe storage and
+  non-Recipe GBrain consumers are unchanged.
+
 ## Hyperloom 1.0.0a3 release
 
 The [1.0.0a3 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a3)

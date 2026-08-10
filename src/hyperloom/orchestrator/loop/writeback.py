@@ -1638,8 +1638,12 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 - audit cannot break finalization
             log.debug("Remote Recipe KB audit append failed", exc_info=True)
 
-    def finalize_recipe_and_journal(self, *, source: str = "close") -> None:
-        """Finalize the journal and exactly one mode-selected Recipe backend."""
+    def finalize_recipe_and_journal(
+        self,
+        *,
+        source: str = "close",
+    ) -> dict[str, Any]:
+        """Finalize Recipe state and return a secret-free observable outcome."""
         try:
             journal = self._ensure_journal()
             ss = self.shared_state
@@ -1659,14 +1663,26 @@ class WritebackCollaborator:
             getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)
         ):
             log.info("Recipe KB finalize skipped (--degraded-kb)")
-            return
+            return {
+                "status": "skipped",
+                "reason": "degraded_kb",
+                "backend": "disabled",
+            }
 
         from ..knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 
-        config = (
-            getattr(getattr(self, "knowledge_plane", None), "config", None)
-            or KnowledgeConfig.from_env()
-        )
+        try:
+            config = (
+                getattr(getattr(self, "knowledge_plane", None), "config", None)
+                or KnowledgeConfig.from_env()
+            )
+        except Exception as exc:  # noqa: BLE001 - KB remains best-effort
+            log.exception("Recipe KB finalize configuration failed (non-fatal)")
+            return {
+                "status": "error",
+                "reason": f"configuration:{type(exc).__name__}",
+                "backend": "unknown",
+            }
         if config.mode is KnowledgeStoreMode.REMOTE:
             # Remote mode has one Recipe sink: the KB Store final session
             # writer. T0 and runtime amendment are intentionally absent.
@@ -1700,6 +1716,17 @@ class WritebackCollaborator:
                     optimized_throughput=remote_result.optimized_throughput,
                     reason=remote_result.reason,
                 )
+                return {
+                    "status": remote_result.status,
+                    "reason": remote_result.reason,
+                    "backend": "kb-store",
+                    "canonical_id": str(
+                        getattr(remote_result, "canonical_id", "") or remote_cid
+                    ),
+                    "session_id": str(
+                        getattr(remote_result, "session_id", "") or remote_sid
+                    ),
+                }
             except Exception as exc:  # noqa: BLE001 - remote transport is best-effort
                 self._record_remote_recipe_audit(
                     source=source,
@@ -1709,11 +1736,21 @@ class WritebackCollaborator:
                     error_type=type(exc).__name__,
                 )
                 log.exception("Remote Recipe KB finalize failed (non-fatal)")
-            return
+                return {
+                    "status": "error",
+                    "reason": type(exc).__name__,
+                    "backend": "kb-store",
+                    "canonical_id": remote_cid,
+                    "session_id": remote_sid,
+                }
 
         # Local mode never consults ambient KB_STORE_* credentials.
         if self.recipe_kb is None:
-            return
+            return {
+                "status": "skipped",
+                "reason": "no_recipe_backend",
+                "backend": "local",
+            }
         ss = self.shared_state
         model_name = getattr(ss, "model_name", "") or ""
         gpu_type = getattr(ss, "gpu_type", "") or ""
@@ -1723,7 +1760,11 @@ class WritebackCollaborator:
                 model_name,
                 gpu_type,
             )
-            return
+            return {
+                "status": "skipped",
+                "reason": "missing_model_or_hardware",
+                "backend": "local",
+            }
         try:
             attrs = self._coord._build_recipe_attrs_from_state()
             # Hoist workload tags flat into top-level recipe attrs (shallow-merged) for warm-start filters.
@@ -1811,9 +1852,19 @@ class WritebackCollaborator:
                     ],
                 },
             )
+            return {
+                "status": "written",
+                "reason": "",
+                "backend": "local",
+            }
         # Catch-all keeps CLOSE step 2.5 defensive against programmer bugs.
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception as exc:  # noqa: BLE001 — defensive
             log.exception("update_recipe raised unexpectedly")
+            return {
+                "status": "error",
+                "reason": type(exc).__name__,
+                "backend": "local",
+            }
 
     async def _record_specialist_result(
         self,
