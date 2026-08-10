@@ -495,7 +495,7 @@ def _is_scriptable_framework(framework: str | None) -> bool:
         from hyperloom.inference_optimizer.framework_registry import is_scriptable
 
         return is_scriptable(framework)
-    except Exception:  # noqa: BLE001 — standalone invocation without the package installed.
+    except ImportError:  # standalone invocation without the package installed.
         return str(framework or "").strip().lower() in _STANDALONE_SCRIPTABLE
 
 
@@ -518,7 +518,7 @@ def _throughput_unit(framework: str | None) -> str:
         from hyperloom.inference_optimizer.framework_registry import throughput_unit
 
         return throughput_unit(framework)
-    except Exception:  # noqa: BLE001 — standalone invocation without the package installed.
+    except ImportError:  # standalone invocation without the package installed.
         return _STANDALONE_UNITS.get(str(framework or "").strip().lower(), "tok/s")
 
 

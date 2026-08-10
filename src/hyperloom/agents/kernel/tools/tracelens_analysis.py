@@ -4955,10 +4955,11 @@ def _raise_on_failed_deterministic_pipeline(
     )
 
 
-#: Mirror of the registry's ``SCRIPTABLE`` names, used only when that package is
-#: not importable (standalone invocation). Kept identical to the bypass route's
-#: copy; a test asserts both against the registry.
+#: Mirrors of the registry, used only when that package is not importable
+#: (standalone invocation). Kept identical to the bypass route's copies; tests
+#: assert every one of them against the registry.
 _STANDALONE_SCRIPTABLE = frozenset({"xdit", "custom"})
+_STANDALONE_DENOISER_CONFIG = frozenset({"xdit"})
 
 
 def _is_scriptable_framework(framework: str | None) -> bool:
@@ -4980,28 +4981,32 @@ def _is_scriptable_framework(framework: str | None) -> bool:
         from hyperloom.inference_optimizer.framework_registry import is_scriptable
 
         return is_scriptable(framework)
-    except Exception:
+    except ImportError:  # standalone invocation without the package installed.
         return str(framework or "").strip().lower() in _STANDALONE_SCRIPTABLE
 
 
 def _has_diffusion_ceiling(framework: str | None) -> bool:
     """Return whether an analytic diffusion ceiling is meaningful for ``framework``.
 
-    Scriptable does not imply diffusion. ``custom`` runs an operator-supplied
+    Scriptable does not imply diffusion: ``custom`` runs an operator-supplied
     entrypoint whose model Hyperloom never inspects, so the config-derived
-    denoiser geometry the ceiling needs cannot be resolved; emitting a guessed
-    one is worse than emitting none. Hence the exclusion is by name, not by
-    registry kind.
+    geometry the ceiling needs cannot be resolved, and a guessed one is worse
+    than none. Read from the registry rather than matched against a name, so the
+    next framework is classified when it is added rather than when someone
+    remembers this call site.
 
     Args:
         framework: Framework name (matched case-insensitively).
 
     Returns:
-        bool: ``True`` for scriptable frameworks whose denoiser config is known.
+        bool: ``True`` for frameworks shipping a readable denoiser config.
     """
-    if str(framework or "").strip().lower() == "custom":
-        return False
-    return _is_scriptable_framework(framework)
+    try:
+        from hyperloom.inference_optimizer.framework_registry import has_denoiser_config
+
+        return has_denoiser_config(framework)
+    except ImportError:  # standalone invocation without the package installed.
+        return str(framework or "").strip().lower() in _STANDALONE_DENOISER_CONFIG
 
 
 def _run_deterministic_tracelens_steps(

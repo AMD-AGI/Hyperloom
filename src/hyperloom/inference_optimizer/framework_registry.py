@@ -40,6 +40,11 @@ class FrameworkSpec:
         supports_server_reuse: Whether the Magpie ``server_lifecycle`` reuse
             protocol applies (always ``False`` for ``scriptable``).
         throughput_unit: Human-readable throughput unit for reports.
+        has_denoiser_config: Whether a session's model directory carries a
+            diffusers denoiser config Hyperloom can read. This is what the
+            analytic diffusion ceiling needs, and it is not implied by ``kind``:
+            ``custom`` is scriptable but its model arrives from the operator, so
+            nothing about it can be read ahead of the run.
         magpie_script_fmt: Format string for the Magpie benchmark script name,
             resolved with ``framework`` and ``runner_type``.
     """
@@ -50,6 +55,7 @@ class FrameworkSpec:
     repo_url: str | None
     supports_server_reuse: bool
     throughput_unit: str
+    has_denoiser_config: bool = False
     magpie_script_fmt: str = "{framework}_{runner_type}.sh"
 
 
@@ -91,6 +97,8 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         repo_url="https://github.com/xdit-project/xDiT.git",
         supports_server_reuse=False,
         throughput_unit="img/s",
+        # A diffusers pipeline: transformer/ + vae/ configs are on disk.
+        has_denoiser_config=True,
     ),
     # An operator's own workload. Everything the entries above hardcode — the
     # checkout, the entrypoint, the knobs the script reads — arrives at launch
@@ -158,6 +166,23 @@ def is_scriptable(framework: str | None) -> bool:
     return _spec_or_default(framework).kind == SCRIPTABLE
 
 
+def has_denoiser_config(framework: str | None) -> bool:
+    """Return whether ``framework``'s model can be read as a diffusers denoiser.
+
+    The predicate the analytic diffusion ceiling needs. Deliberately separate
+    from :func:`is_scriptable`: ``custom`` is scriptable yet its model arrives
+    from the operator at launch, so no geometry can be resolved ahead of the run
+    and a guessed one would be worse than none.
+
+    Args:
+        framework (str | None): Framework name; matched case-insensitively.
+
+    Returns:
+        bool: ``True`` only for frameworks shipping a readable denoiser config.
+    """
+    return _spec_or_default(framework).has_denoiser_config
+
+
 def extra_args_env(framework: str | None) -> str:
     """Return the Magpie env var used to append backend args.
 
@@ -177,7 +202,8 @@ def throughput_unit(framework: str | None) -> str:
         framework (str | None): Framework name; matched case-insensitively.
 
     Returns:
-        str: ``"tok/s"`` or ``"img/s"``.
+        str: The unit the entry declares, e.g. ``"tok/s"`` (serving),
+        ``"img/s"`` (xDiT) or ``"unit/s"`` (``custom``, deliberately neutral).
     """
     return _spec_or_default(framework).throughput_unit
 

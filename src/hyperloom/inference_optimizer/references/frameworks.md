@@ -2,9 +2,8 @@
 
 ## Framework Selection
 
-A session is single-framework. Pick `sglang` (default), `vllm`, `atom`, `xdit`,
-or `custom` via `--framework` or
-`$FRAMEWORK`:
+A session is single-framework. Pick `sglang` (default), `vllm`, `atom`, `xdit`
+or `custom` via `--framework` or `$FRAMEWORK`:
 
 ```bash
 python3 -m hyperloom.inference_optimizer.cli optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
@@ -18,8 +17,8 @@ Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
 
 What this controls:
 - Which Magpie YAML the executors default to —
-  `baseline_{sglang,vllm,atom,xdit,custom}.yaml`
-  and `profile_{sglang,vllm,atom,xdit,custom}.yaml`. The per-framework resolver
+  `baseline_{sglang,vllm,atom,xdit,custom}.yaml` and
+  `profile_{sglang,vllm,atom,xdit,custom}.yaml`. The per-framework resolver
   `_default_profile_config()` in `src/hyperloom/orchestrator/actions/executors/profile.py` picks the right
   file from `$FRAMEWORK`.
 - Which framework-specific seed grid the `explore` action falls back to when no

@@ -1215,7 +1215,9 @@ def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0
     ``1x`` -- so ``params = 12 * H**2 * (2 * num_layers + num_single_layers)``.
 
     Latent token count (the DiT sequence length):
-      - ``sample_size`` present (Sana/PixArt/DiT): ``(sample_size / patch_size)**2``.
+      - ``sample_size`` present (Sana/PixArt/DiT):
+        ``(sample_size / patch_h) * (sample_size / patch_w)``, where a
+        2-element ``patch_size`` is ``(h, w)`` and need not be square.
       - else (FLUX/SD3): from the runtime resolution -- one token per
         ``vae_scale_factor * transformer_pack`` pixels a side, where the pack is
         inferred from ``in_channels / vae_latent_channels`` (FLUX folds a 2x2
@@ -1230,7 +1232,9 @@ def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0
         ``(dit_params, latent_tokens, num_layers, hidden_size)`` where
         ``num_layers`` is the TOTAL block count (dual + single stream, for the
         attention term), or ``None`` when the config is unreadable / missing
-        fields / no way to size the latent grid (caller degrades to memory-only).
+        fields / carries a non-numeric value / declares a 3-element (video)
+        ``patch_size`` this function has no frame axis for / offers no way to
+        size the latent grid (caller degrades to memory-only).
     """
     try:
         cfg = json.loads((Path(model_path) / "transformer" / "config.json").read_text(encoding="utf-8"))
@@ -1249,24 +1253,30 @@ def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0
             head_dim = int(cfg.get("attention_head_dim") or cfg.get("head_dim") or 0)
             hidden = heads * head_dim
         _ps = cfg.get("patch_size")
+        # A 3-element patch is (temporal, h, w): a video denoiser, whose token
+        # count needs the frame axis nothing in this module models.
+        video_patch = isinstance(_ps, (list, tuple)) and len(_ps) >= 3
         if isinstance(_ps, (list, tuple)):
-            # A 3-element patch is (temporal, h, w): a video denoiser, whose token
-            # count needs the frame axis nothing in this module models.
-            if len(_ps) >= 3:
-                return None
-            _ps = _ps[-1] if _ps else 1
-        patch = int(_ps or 1) or 1
+            # A 2-element patch is (h, w) and need not be square, so keep both.
+            patch_h = int((_ps[0] if _ps else 0) or 1) or 1
+            patch_w = int((_ps[-1] if _ps else 0) or 1) or 1
+        else:
+            patch_h = patch_w = int(_ps or 1) or 1
         sample = int(cfg.get("sample_size") or 0)
     except (TypeError, ValueError):
         return None
     if num_layers <= 0 or hidden <= 0:
         return None
 
-    if sample > 0:
-        latent_tokens = (sample // patch) ** 2
+    if video_patch:
+        # Only the compute side abstains. The weights are still resolvable, so the
+        # caller keeps a DiT-only memory bound instead of the whole checkpoint's.
+        latent_tokens = 0
+    elif sample > 0:
+        latent_tokens = (sample // patch_h) * (sample // patch_w)
     else:
         latent_tokens = _diffusion_latent_tokens_from_resolution(model_path, cfg, height, width)
-    if latent_tokens <= 0:
+    if latent_tokens <= 0 and not video_patch:
         return None
 
     total_layers = num_layers + num_single_layers
@@ -1410,16 +1420,19 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
         dit_weight_bytes = int(dit_params * _resolve_dtype_bytes(runtime.precision or "bf16"))
         if dit_weight_bytes > 0:
             mem_bytes = dit_weight_bytes
-        cmp_img_s = compute_diffusion_compute_img_per_sec(
-            gpu_type=runtime.gpu_type,
-            num_gpus=runtime.tp,
-            precision_tag=runtime.precision or "bf16",
-            dit_params=dit_params,
-            latent_tokens=latent_tokens,
-            num_layers=num_layers,
-            hidden_size=hidden,
-            num_steps=num_steps,
-        )
+        # ``latent_tokens == 0`` means the geometry read resolved the weights but
+        # not the sequence length, so the memory bound above still holds.
+        if latent_tokens > 0:
+            cmp_img_s = compute_diffusion_compute_img_per_sec(
+                gpu_type=runtime.gpu_type,
+                num_gpus=runtime.tp,
+                precision_tag=runtime.precision or "bf16",
+                dit_params=dit_params,
+                latent_tokens=latent_tokens,
+                num_layers=num_layers,
+                hidden_size=hidden,
+                num_steps=num_steps,
+            )
     mem_img_s = compute_diffusion_mem_img_per_sec(
         gpu_type=runtime.gpu_type,
         num_gpus=runtime.tp,
