@@ -19,19 +19,14 @@ _ARTIFACT_REF_KEYS: frozenset[str] = frozenset(
         "artifact_files",
         "artifact_path",
         "artifacts",
-        "bench_script",
         "changed_files",
-        "config_file",
         "experience_document",
         "files",
         "final_report_path",
-        "launch_script",
-        "overlay_files",
         "patch",
         "patch_path",
         "patches",
         "patches_applied",
-        "report",
         "report_path",
         "source_file",
         "source_files",
@@ -39,6 +34,11 @@ _ARTIFACT_REF_KEYS: frozenset[str] = frozenset(
         "target_files",
         "tuned_file",
     }
+)
+_BUILDER_REF_PREFIXES: tuple[str, ...] = (
+    "explore/",
+    "framework/",
+    "kernel/",
 )
 
 
@@ -76,6 +76,17 @@ def extract_knowledge_artifact_refs(
     }
     refs: set[str] = set()
 
+    def declared_ref(raw: str, key: str) -> str | None:
+        if key not in _ARTIFACT_REF_KEYS or "/" not in raw:
+            return None
+        try:
+            normalized = validate_relative_path(raw)
+        except RemoteRecipeValidationError:
+            raise
+        if key == "files" or normalized.startswith(_BUILDER_REF_PREFIXES):
+            return normalized
+        return None
+
     def visit(value: Any, *, key: str = "") -> None:
         if isinstance(value, dict):
             for nested_key, nested_value in value.items():
@@ -90,12 +101,12 @@ def extract_knowledge_artifact_refs(
         raw = value.strip()
         if not raw or "://" in raw:
             return
-        if raw in known_paths or key in _ARTIFACT_REF_KEYS:
-            try:
-                refs.add(validate_relative_path(raw))
-            except RemoteRecipeValidationError:
-                if key in _ARTIFACT_REF_KEYS:
-                    raise
+        if raw in known_paths:
+            refs.add(validate_relative_path(raw))
+            return
+        declared = declared_ref(raw, key)
+        if declared is not None:
+            refs.add(declared)
 
     visit(knowledge)
     return refs

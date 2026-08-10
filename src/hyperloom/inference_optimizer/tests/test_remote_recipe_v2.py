@@ -1321,24 +1321,53 @@ def test_a_staged_file_is_published_under_its_own_section(tmp_path: Path) -> Non
     assert (tmp_path / "files" / "framework" / "patches" / "authored.patch").is_file()
 
 
-def test_orphaned_staged_file_is_rejected(tmp_path: Path) -> None:
+def test_agent_column_free_text_is_not_treated_as_an_artifact_ref(
+    tmp_path: Path,
+) -> None:
+    sections = _sections(tmp_path)
+    sections.write(
+        "kernel",
+        {
+            "gemm": {
+                "optimizations": [{"id": "g1"}],
+                "report": "tuned 3 shapes, 1.4x on the hot GEMM",
+                "patch": "inlined the epilogue",
+            }
+        },
+    )
+
+    bundle = build_remote_knowledge(
+        _state(tmp_path),
+        tmp_path / "files-free-text",
+        sections=sections,
+    )
+
+    gemm = bundle.knowledge["value"]["kernel"]["gemm"]
+    assert gemm["report"] == "tuned 3 shapes, 1.4x on the hot GEMM"
+    assert gemm["patch"] == "inlined the epilogue"
+
+
+def test_orphaned_staged_file_falls_back_to_stack_scrape(tmp_path: Path) -> None:
     patch = tmp_path / "orphan.patch"
     patch.write_text("orphan", encoding="utf-8")
     sections = _sections(tmp_path)
     sections.write("framework", {"note": "no ref"}, files=[patch], kind="patches")
 
-    with pytest.raises(
-        RemoteRecipeValidationError,
-        match="absent from final knowledge",
-    ):
-        build_remote_knowledge(
-            _state(tmp_path),
-            tmp_path / "files-orphan",
-            sections=sections,
-        )
+    bundle = build_remote_knowledge(
+        _state(tmp_path),
+        tmp_path / "files-orphan",
+        sections=sections,
+    )
+
+    framework = bundle.knowledge["value"]["framework"]
+    assert framework["extra_server_args"] == "--page-size 32 --enable-foo"
+    assert "framework" not in bundle.knowledge["provenance"]["staged_sections"]
+    assert "framework/patches/orphan.patch" not in {
+        artifact.path for artifact in bundle.artifacts
+    }
 
 
-def test_conflicting_staged_artifact_bytes_are_rejected(tmp_path: Path) -> None:
+def test_conflicting_staged_artifact_falls_back_to_stack_scrape(tmp_path: Path) -> None:
     staged_patch = tmp_path / "staged" / "explore.patch"
     staged_patch.parent.mkdir()
     staged_patch.write_text("different", encoding="utf-8")
@@ -1350,12 +1379,16 @@ def test_conflicting_staged_artifact_bytes_are_rejected(tmp_path: Path) -> None:
         kind="patches",
     )
 
-    with pytest.raises(RemoteRecipeValidationError, match="conflicting artifact"):
-        build_remote_knowledge(
-            _state(tmp_path),
-            tmp_path / "files-conflict",
-            sections=sections,
-        )
+    bundle = build_remote_knowledge(
+        _state(tmp_path),
+        tmp_path / "files-conflict",
+        sections=sections,
+    )
+
+    assert "explore" not in bundle.knowledge["provenance"]["staged_sections"]
+    assert bundle.knowledge["value"]["explore"]["patches"] == [
+        "explore/patches/explore.patch"
+    ]
 
 
 def test_the_kernel_column_keeps_the_sub_columns_the_agent_left_alone(
