@@ -31,6 +31,7 @@ from ..loop.coordinator import (
     _framework_config_levers_from_done,
 )
 from .base import PhaseHandler
+from ..state.failure_evidence import failure_from_variant_outcome
 
 log = _logging.getLogger(__name__)
 
@@ -1367,17 +1368,25 @@ class ExplorePhase(PhaseHandler):
         for outcome in per_variant:
             if not isinstance(outcome, dict):
                 continue
-            state.append_gap_attempt(
-                canonical,
-                {
-                    "action": "explore",
-                    "variant_name": str(outcome.get("variant_name") or ""),
-                    "outcome": str(outcome.get("outcome") or "").upper(),
-                    "gain_pct": outcome.get("gain_pct"),
-                    "reason": str(outcome.get("reason") or ""),
-                    "error_class": str(outcome.get("error_class") or ""),
-                },
-            )
+            attempt: dict[str, Any] = {
+                "action": "explore",
+                "variant_name": str(outcome.get("variant_name") or ""),
+                "outcome": str(outcome.get("outcome") or "").upper(),
+                "gain_pct": outcome.get("gain_pct"),
+                "reason": str(outcome.get("reason") or ""),
+                "error_class": str(outcome.get("error_class") or ""),
+            }
+            if outcome.get("failure_id"):
+                attempt["failure_id"] = str(outcome["failure_id"])
+            if outcome.get("fingerprint"):
+                attempt["fingerprint"] = str(outcome["fingerprint"])
+            if outcome.get("stage"):
+                attempt["stage"] = str(outcome["stage"])
+            if outcome.get("workspace"):
+                attempt["workspace"] = str(outcome["workspace"])
+            if outcome.get("server_log_path"):
+                attempt["server_log_path"] = str(outcome["server_log_path"])
+            state.append_gap_attempt(canonical, attempt)
 
     def _record_explore_variant_failures(
         self,
@@ -1399,20 +1408,24 @@ class ExplorePhase(PhaseHandler):
         per_variant = result.get("per_variant_outcomes")
         if not isinstance(per_variant, list):
             return
+        task_id = str(task.task_id or "")
         for vo in per_variant:
             if not isinstance(vo, dict):
                 continue
-            if str(vo.get("outcome") or "").upper() != "FAILED":
+            if str(vo.get("outcome") or "").upper() not in {"FAILED", "KILLED_OVERTIME"}:
                 continue
+            fe = failure_from_variant_outcome(task_id=task_id, round_id="", vo=vo)
+            self.shared_state.record_failure_evidence(fe)
             self.shared_state.record_action_failure(
                 action="explore",
-                task_id=str(task.task_id or ""),
+                task_id=task_id,
                 result={
                     "variant_name": str(vo.get("variant_name") or ""),
                     "error_class": str(vo.get("error_class") or ""),
                     "error": str(vo.get("reason") or ""),
                     "workspace": vo.get("workspace"),
                     "stderr_log_path": vo.get("server_log_path"),
+                    "failure_id": fe.get("failure_id"),
                 },
             )
 

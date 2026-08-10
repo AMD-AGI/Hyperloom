@@ -1302,6 +1302,13 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
     te = out["explore_search_update"]["tested"][fp]
     assert te["outcome"] == "FAILED"
     assert te["reason"] == "warmup_failed"
+    assert te["stage"] == "warmup"
+    assert "workspace" in te
+    pvo = [v for v in out["per_variant_outcomes"] if v["outcome"] == "FAILED"]
+    assert pvo, "expected FAILED entry in per_variant_outcomes"
+    assert pvo[0]["stage"] == "warmup"
+    assert "failure_id" in pvo[0]
+    assert pvo[0]["failure_id"].startswith("fail.")
 
 
 @pytest.mark.asyncio
@@ -1478,6 +1485,14 @@ async def test_explore_executor_killed_overtime_no_tput_no_keep(
     outcomes = {row["variant_name"]: row["outcome"] for row in out["per_variant_outcomes"]}
     assert outcomes["slow_variant"] == "KILLED_OVERTIME"
     assert fp in out["explore_search_update"]["last_round"]["killed_overtime"]
+    # KILLED_OVERTIME rows must carry the decision stage and a distinct error_class.
+    killed_pvo = [v for v in out["per_variant_outcomes"] if v["outcome"] == "KILLED_OVERTIME"]
+    assert killed_pvo
+    assert killed_pvo[0]["stage"] == "decision"
+    assert "failure_id" in killed_pvo[0]
+    assert killed_pvo[0]["failure_id"].startswith("fail.")
+    assert te["stage"] == "decision"
+    assert te["error_class"] == "killed_overtime"
 
 
 @pytest.mark.asyncio
