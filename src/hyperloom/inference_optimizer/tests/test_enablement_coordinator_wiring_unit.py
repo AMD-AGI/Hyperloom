@@ -647,79 +647,34 @@ async def test_revalidation_skips_when_tracked_task_in_flight():
 
 
 @pytest.mark.asyncio
-async def test_revalidation_forwards_effective_envs():
-    """Revalidation params include extra_envs from the KEEP's accepted_config."""
-    fake = _enqueue_self(
-        enablement_validation_pending=True,
-        enablement_origin="eval",
-        enablement_probe_config_path="/runs/baseline/probe.yaml",
-        enablement_accepted_config_path="/runs/specialist/accepted.yaml",
-        enablement_accepted_config={
-            "extra_envs": {"VLLM_ROCM_USE_AITER_FP4BMM": "0", "VLLM_ROCM_USE_AITER_MOE": "0"},
-            "extra_server_args": "",
-            "remove_args": [],
-            "unset_envs": [],
-            "args_mode": "append",
-        },
-    )
-    await fake._maybe_enqueue_enablement_baseline_revalidation()
-    created = fake.tasks.created[-1]
-    assert created["params"]["extra_envs"] == {
-        "VLLM_ROCM_USE_AITER_FP4BMM": "0",
-        "VLLM_ROCM_USE_AITER_MOE": "0",
-    }
-    assert "extra_server_args" not in created["params"]
-
-
-@pytest.mark.asyncio
-async def test_revalidation_forwards_effective_args():
-    """Revalidation params include extra_server_args from the KEEP's accepted_config."""
+@pytest.mark.parametrize(
+    "accepted_config",
+    [
+        {"extra_envs": {"VLLM_ROCM_USE_AITER_MOE": "0"}},
+        {"extra_server_args": "--kv-cache-dtype fp8_e4m3"},
+        {"remove_args": ["--block-size"], "unset_envs": ["VLLM_X"], "args_mode": "replace"},
+        {},
+    ],
+)
+async def test_revalidation_forwards_accepted_config(accepted_config):
+    """The KEEP's env/arg layers reach the revalidation baseline, and nothing else does."""
     fake = _enqueue_self(
         enablement_validation_pending=True,
         enablement_origin="eval",
         enablement_accepted_config_path="/runs/specialist/accepted.yaml",
-        enablement_accepted_config={
-            "extra_envs": {},
-            "extra_server_args": "--kv-cache-dtype fp8_e4m3",
-            "remove_args": [],
-            "unset_envs": [],
-            "args_mode": "append",
-        },
+        enablement_accepted_config=accepted_config,
     )
     await fake._maybe_enqueue_enablement_baseline_revalidation()
-    created = fake.tasks.created[-1]
-    assert created["params"]["extra_server_args"] == "--kv-cache-dtype fp8_e4m3"
-    assert "extra_envs" not in created["params"]
-
-
-@pytest.mark.asyncio
-async def test_revalidation_no_extra_params_when_accepted_config_empty():
-    """Boot-origin or no-lever KEEP: empty accepted_config adds no baseline params."""
-    fake = _enqueue_self(
-        enablement_validation_pending=True,
-        enablement_origin="eval",
-        enablement_accepted_config_path="/runs/specialist/accepted.yaml",
-        enablement_accepted_config={},
-    )
-    await fake._maybe_enqueue_enablement_baseline_revalidation()
-    created = fake.tasks.created[-1]
-    assert "extra_envs" not in created["params"]
-    assert "extra_server_args" not in created["params"]
-    assert "remove_args" not in created["params"]
-    assert "unset_envs" not in created["params"]
+    params = fake.tasks.created[-1]["params"]
+    for key in ("extra_envs", "extra_server_args", "remove_args", "unset_envs", "args_mode"):
+        assert params.get(key) == accepted_config.get(key), key
 
 
 @pytest.mark.asyncio
 async def test_rearm_kept_stores_accepted_config():
-    """A KEEP result with enablement_effective_config is persisted on the round."""
+    """A KEEP's effective config is persisted on the round for the revalidation to replay."""
     fake = _enqueue_self(enablement_inflight_task_id="spec-1", enablement_origin="eval")
-    effective = {
-        "extra_envs": {"VLLM_ROCM_USE_AITER_FP4BMM": "0"},
-        "extra_server_args": "",
-        "remove_args": [],
-        "unset_envs": [],
-        "args_mode": "append",
-    }
+    effective = {"extra_envs": {"VLLM_ROCM_USE_AITER_FP4BMM": "0"}, "args_mode": "append"}
     fake._maybe_rearm_enablement(
         {
             "status": "kept",

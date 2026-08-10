@@ -57,7 +57,7 @@ from ._grid_runner import (
     sanitize_script_name,
 )
 from . import _framework_switch_manifest as _switch_manifest
-from ._grid_server_args import compose_server_args, merge_server_args, split_config_changes  # noqa: F401
+from ._grid_server_args import compose_server_args
 from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
 from ._workload_envs import (
     FrameworkScriptMismatchError,
@@ -2631,9 +2631,12 @@ class IntegratePatchExecutor:
           boot-origin stays ``None`` (KEEP but provisional) — it only ever
           claimed to make the model boot, and eval-less runs must not be blocked.
 
-        On KEEP, when an attempt runtime was provisioned, the stack action is
-        recorded in the result (``enablement_kept_stack_action``) so it survives
-        rearm. On REVERT / non-KEEP, the attempt runtime dir is GC'd.
+        On KEEP the benched env/arg layers are reported as
+        ``enablement_effective_config``: the materialized YAML holds only the base
+        layer, so the revalidation baseline needs them to re-run the graded config.
+        When an attempt runtime was provisioned, the stack action is recorded in
+        the result (``enablement_kept_stack_action``) so it survives rearm. On
+        REVERT / non-KEEP, the attempt runtime dir is GC'd.
         """
         stack_action = getattr(ctx, "_ip_stack_action", None) if ctx is not None else None
         provision_result = getattr(ctx, "_ip_provision_result", None) if ctx is not None else None
@@ -2812,11 +2815,9 @@ class IntegratePatchExecutor:
             "setup_commands_applied": list(setup_result.get("applied") or []),
             "bench_result": bench_result,
             "workspace": str(output_root),
-            # Base YAML from the KEEP'd bench (RUN_EVAL layer only; variant envs/args
-            # are recorded separately in enablement_effective_config).
+            # Base YAML only; the env/arg layers live in enablement_effective_config.
             "enablement_accepted_config_path": str(bench_result.get("materialized_config") or ""),
-            # Full effective launch config: base stack layer merged with the variant's
-            # own levers, mirroring what _bench_patch passed to GridVariant at run time.
+            # Base stack layer merged with the candidate's own levers, as benched.
             "enablement_effective_config": {
                 "extra_envs": {
                     **dict(params.get("base_extra_envs") or {}),
@@ -2829,8 +2830,8 @@ class IntegratePatchExecutor:
                     remove_args=params.get("base_remove_args"),
                     args_mode=str(params.get("base_args_mode") or "append"),
                 ),
-                "remove_args": list(params.get("base_remove_args") or []),
-                "unset_envs": list(params.get("base_unset_envs") or []),
+                "remove_args": to_str_list(params.get("base_remove_args")),
+                "unset_envs": to_str_list(params.get("base_unset_envs")),
                 "args_mode": str(params.get("base_args_mode") or "append"),
             },
             **eval_provenance,
