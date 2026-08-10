@@ -473,3 +473,44 @@ def test_format_variant_line_no_artifact_refs_when_absent():
     line = _RenderMixin._format_variant_line(entry)
     assert "fid=" not in line
     assert "ws=" not in line
+
+
+# read_artifact containment and non-text tests
+
+
+@pytest.mark.asyncio
+async def test_context_artifact_reader_rejects_path_escape(session_dir):
+    c = _silent_coordinator(session_dir)
+    try:
+        out = c._context_artifact_reader("/etc/passwd")
+        assert "not within session" in out
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_context_artifact_reader_returns_tail_window(session_dir):
+    c = _silent_coordinator(session_dir)
+    try:
+        log_file = session_dir / "reports" / "test.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_file.write_text("\n".join(f"line{i}" for i in range(20)))
+        out = c._context_artifact_reader(str(log_file), limit=5, mode="tail")
+        lines = out.splitlines()
+        assert len(lines) == 5
+        assert "line19" in out
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_context_artifact_reader_rejects_binary(session_dir):
+    c = _silent_coordinator(session_dir)
+    try:
+        bin_file = session_dir / "reports" / "test.bin"
+        bin_file.parent.mkdir(parents=True, exist_ok=True)
+        bin_file.write_bytes(b"\x00\x01\x02\xfe\xff")
+        out = c._context_artifact_reader(str(bin_file))
+        assert "binary" in out or "non-UTF-8" in out
+    finally:
+        await c.stop()

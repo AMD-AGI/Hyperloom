@@ -52,6 +52,8 @@ class ContextProvider:
     action_runner: Callable[[str, dict[str, Any]], str] | None = None
     # On-demand reference documents directory; ``None`` => unavailable.
     reference_reader: Callable[[str], str] | None = None
+    # Sandboxed log/artifact file reader; ``None`` => unavailable.
+    artifact_reader: Callable[[str, int, int, str], str] | None = None
 
     def _safe(self, fn: Callable[[], str], label: str) -> str:
         """Invoke a projection callable, never letting it crash the reactor.
@@ -212,6 +214,72 @@ class ContextProvider:
             return "(read_reference not wired)"
         return self._safe(lambda: self.reference_reader(name), "read_reference")
 
+    def get_failure(self, failure_id: str = "") -> str:
+        """Return the full failure evidence packet for a single failure_id.
+
+        Args:
+            failure_id: The stable failure id to look up.
+
+        Returns:
+            JSON-encoded failure packet, or a not-found message.
+        """
+        import json as _json
+
+        fid = str(failure_id or "").strip()
+        if not fid:
+            return "(get_failure: failure_id is required)"
+        try:
+            fe = self.shared_state.find_failure(fid)
+        except Exception as exc:  # noqa: BLE001
+            return f"(get_failure: error: {exc!r})"
+        if fe is None:
+            return f"(get_failure: no entry for {fid!r})"
+        return _json.dumps(fe, default=str, indent=2)
+
+    def get_variant_failures(self, task_id: str = "", top_k: int = 10) -> str:
+        """Return the most recent failure evidence entries, optionally filtered by task.
+
+        Args:
+            task_id: When non-empty, only entries for this task are returned.
+            top_k: Maximum number of entries to return.
+
+        Returns:
+            Newline-separated JSON objects, one per entry.
+        """
+        import json as _json
+
+        k = max(1, min(int(top_k or 10), 50))
+
+        def _read() -> str:
+            if task_id:
+                entries = self.shared_state.failures_for_task(task_id)
+            else:
+                entries = list(reversed(self.shared_state.failures or []))
+            shown = entries[:k]
+            if not shown:
+                return "(no failure entries)"
+            lines = [_json.dumps(e, default=str) for e in shown]
+            return "\n".join(lines)
+
+        return self._safe(_read, "get_variant_failures")
+
+    def read_artifact(self, path: str = "", offset: int = 0, limit: int = 200, mode: str = "tail") -> str:
+        """Return a windowed view of a log or artifact file within the session directory.
+
+        Args:
+            path: Absolute path to the file; must reside under session_dir.
+            offset: Line offset for ``head`` mode; ignored in ``tail`` mode.
+            limit: Maximum number of lines to return.
+            mode: ``tail`` (default) returns the last ``limit`` lines;
+                ``head`` returns ``limit`` lines starting at ``offset``.
+
+        Returns:
+            File content window, or an error string.
+        """
+        if self.artifact_reader is None:
+            return "(read_artifact not wired)"
+        return self._safe(lambda: self.artifact_reader(path, offset, limit, mode), "read_artifact")
+
 
 # Tool descriptors: (tool_name, description, input_schema, provider-method).
 _NO_ARGS_SCHEMA: dict[str, Any] = {
@@ -242,6 +310,31 @@ _REFERENCE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"name": {"type": "string"}},
     "required": ["name"],
+    "additionalProperties": False,
+}
+_FAILURE_ID_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"failure_id": {"type": "string"}},
+    "required": ["failure_id"],
+    "additionalProperties": False,
+}
+_VARIANT_FAILURES_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "task_id": {"type": "string"},
+        "top_k": {"type": "integer", "minimum": 1, "maximum": 50},
+    },
+    "additionalProperties": False,
+}
+_ARTIFACT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "path": {"type": "string"},
+        "offset": {"type": "integer", "minimum": 0},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 400},
+        "mode": {"type": "string", "enum": ["tail", "head"]},
+    },
+    "required": ["path"],
     "additionalProperties": False,
 }
 
@@ -359,6 +452,36 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         _REFERENCE_SCHEMA,
         "read_reference",
     ),
+    (
+        "get_failure",
+        "Return the full structured failure evidence packet for a single "
+        "failure_id (from a delegated_result failure line or gap attempt). "
+        "Carries variant args, stage, error_class, error_excerpt, "
+        "server_log_path, and workspace so you can then use read_artifact "
+        "to pull the actual log.",
+        _FAILURE_ID_SCHEMA,
+        "get_failure",
+    ),
+    (
+        "get_variant_failures",
+        "Return the most recent failure evidence entries across the session, "
+        "optionally filtered to a single task_id.  Each entry is a JSON "
+        "object with failure_id, variant_name, stage, error_class, "
+        "error_excerpt, server_log_path, and workspace.  Use this to find "
+        "failure_ids you can then inspect with get_failure or read_artifact.",
+        _VARIANT_FAILURES_SCHEMA,
+        "get_variant_failures",
+    ),
+    (
+        "read_artifact",
+        "Return a bounded window of a log or artifact file that lives under "
+        "the session directory.  path must be an absolute path obtained from "
+        "get_failure (server_log_path or workspace).  mode=tail (default) "
+        "returns the last limit lines; mode=head returns limit lines "
+        "starting at offset.  limit is capped at 400 lines.",
+        _ARTIFACT_SCHEMA,
+        "read_artifact",
+    ),
 )
 
 
@@ -414,15 +537,39 @@ def _make_handler(
         kwargs: dict[str, Any] = {}
         if isinstance(args, dict):
             if "top_k" in args:
-                kwargs["top_k"] = int(args["top_k"])
+                try:
+                    kwargs["top_k"] = int(args["top_k"])
+                except (TypeError, ValueError):
+                    pass
             if "since_seq" in args:
-                kwargs["since_seq"] = int(args["since_seq"])
+                try:
+                    kwargs["since_seq"] = int(args["since_seq"])
+                except (TypeError, ValueError):
+                    pass
             if "action_name" in args:
                 kwargs["action_name"] = str(args["action_name"])
             if "params" in args and isinstance(args["params"], dict):
                 kwargs["params"] = args["params"]
             if "name" in args:
                 kwargs["name"] = str(args["name"])
+            if "failure_id" in args:
+                kwargs["failure_id"] = str(args["failure_id"])
+            if "task_id" in args:
+                kwargs["task_id"] = str(args["task_id"])
+            if "path" in args:
+                kwargs["path"] = str(args["path"])
+            if "offset" in args:
+                try:
+                    kwargs["offset"] = int(args["offset"])
+                except (TypeError, ValueError):
+                    pass
+            if "limit" in args:
+                try:
+                    kwargs["limit"] = int(args["limit"])
+                except (TypeError, ValueError):
+                    pass
+            if "mode" in args:
+                kwargs["mode"] = str(args["mode"])
         try:
             text = method(**kwargs)
         except Exception as exc:  # noqa: BLE001 — never crash a pull

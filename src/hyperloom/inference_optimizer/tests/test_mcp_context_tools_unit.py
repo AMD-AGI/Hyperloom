@@ -17,11 +17,14 @@ def _shared_state():
     return SimpleNamespace(
         to_mission_summary=lambda: "mission",
         to_prompt_summary=lambda: "prompt",
-        to_gaps_summary=lambda: "gaps",
+        to_gaps_summary=lambda max_attempts=0: "gaps",
         to_warm_start_summary=lambda: "warm",
         to_proposal_scores_summary=lambda: "scores",
         to_intervention_mix_summary=lambda: "mix",
         to_policy_denial_summary=lambda top_k=6: f"denials({top_k})",
+        failures=[],
+        find_failure=lambda fid: None,
+        failures_for_task=lambda tid: [],
     )
 
 
@@ -208,3 +211,94 @@ def test_build_server_with_fake_factories():
     assert out == "SERVER"
     assert created["name"] == mct.MCP_SERVER_NAME
     assert len(created["tools"]) == len(mct.CONTEXT_TOOL_SPECS)
+
+
+# ---- new tools: get_failure / get_variant_failures / read_artifact ----
+
+
+def test_spec_methods_all_exist_on_provider():
+    """Every CONTEXT_TOOL_SPECS entry must name a real ContextProvider method."""
+    for _, _, _, method_name in mct.CONTEXT_TOOL_SPECS:
+        assert callable(getattr(mct.ContextProvider, method_name, None)), (
+            f"ContextProvider missing method {method_name!r}"
+        )
+
+
+def test_get_failure_not_found():
+    p = mct.ContextProvider(shared_state=_shared_state())
+    out = p.get_failure("fail.t1.abc")
+    assert "no entry" in out
+
+
+def test_get_failure_returns_json():
+    import json
+
+    fe = {"failure_id": "fail.t1.abc", "task_id": "t1", "error_class": "x"}
+    ss = _shared_state()
+    ss.find_failure = lambda fid: fe if fid == "fail.t1.abc" else None
+    p = mct.ContextProvider(shared_state=ss)
+    out = p.get_failure("fail.t1.abc")
+    data = json.loads(out)
+    assert data["failure_id"] == "fail.t1.abc"
+
+
+def test_get_failure_requires_failure_id():
+    p = mct.ContextProvider(shared_state=_shared_state())
+    out = p.get_failure("")
+    assert "required" in out
+
+
+def test_get_variant_failures_empty():
+    p = mct.ContextProvider(shared_state=_shared_state())
+    out = p.get_variant_failures()
+    assert "no failure" in out
+
+
+def test_get_variant_failures_returns_entries():
+    import json
+
+    fe1 = {"failure_id": "fail.t1.a", "task_id": "t1"}
+    fe2 = {"failure_id": "fail.t1.b", "task_id": "t1"}
+    ss = _shared_state()
+    ss.failures = [fe1, fe2]
+    ss.failures_for_task = lambda tid: [fe for fe in [fe1, fe2] if fe["task_id"] == tid]
+    p = mct.ContextProvider(shared_state=ss)
+    out = p.get_variant_failures(task_id="t1")
+    lines = [l for l in out.splitlines() if l.strip()]
+    assert len(lines) == 2
+    ids = {json.loads(l)["failure_id"] for l in lines}
+    assert ids == {"fail.t1.a", "fail.t1.b"}
+
+
+def test_read_artifact_not_wired():
+    p = mct.ContextProvider(shared_state=_shared_state())
+    assert "not wired" in p.read_artifact("/some/path")
+
+
+def test_read_artifact_wired():
+    p = mct.ContextProvider(
+        shared_state=_shared_state(),
+        artifact_reader=lambda path, offset, limit, mode: f"content:{path}:{mode}",
+    )
+    out = p.read_artifact("/some/path", limit=50, mode="head")
+    assert "/some/path" in out
+    assert "head" in out
+
+
+async def test_make_handler_forwards_failure_id():
+    p = mct.ContextProvider(shared_state=_shared_state())
+    handler = mct._make_handler(p, "get_failure")
+    out = await handler({"failure_id": "fail.t1.abc"})
+    assert "no entry" in out["content"][0]["text"]
+
+
+async def test_make_handler_forwards_artifact_kwargs():
+    p = mct.ContextProvider(
+        shared_state=_shared_state(),
+        artifact_reader=lambda path, offset, limit, mode: f"p={path} o={offset} l={limit} m={mode}",
+    )
+    handler = mct._make_handler(p, "read_artifact")
+    out = await handler({"path": "/a/b", "offset": 5, "limit": 10, "mode": "head"})
+    text = out["content"][0]["text"]
+    assert "/a/b" in text
+    assert "head" in text
