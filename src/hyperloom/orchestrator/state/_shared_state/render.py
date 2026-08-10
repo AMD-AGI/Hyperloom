@@ -144,7 +144,12 @@ class _RenderMixin:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-tick ``=== Phase ===`` block (≤6 lines). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate.
+        """Render the per-tick ``=== Phase ===`` block.
+
+        5 base lines + a ``force_exit`` line for EXPLORE + a ``reloop``
+        line for FRAMEWORK_AGENT / EXPLORE / KERNEL_AGENT / SWEEP showing
+        whether a new macro-cycle can still be opened.  Outside SWEEP the
+        value is a projection (remaining time will only decrease).
 
         Args:
             budget_pct (dict[str, float] | None): Per-phase budget fractions;
@@ -157,7 +162,9 @@ class _RenderMixin:
         from ...phases.machine_state import (
             DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
             DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
+            PHASE_CLOSE,
             PHASE_EXPLORE,
+            PHASE_PRELUDE,
             _phase_budget_total_seconds,
             llm_proposable_actions_for,
             normalize_budget_pct,
@@ -165,6 +172,7 @@ class _RenderMixin:
             phase_cumulative_seconds,
             phase_elapsed_seconds,
             session_remaining_seconds,
+            should_reloop_to_explore,
         )
 
         phase = (self.phase or "").strip().upper() or "UNSET"
@@ -231,6 +239,26 @@ class _RenderMixin:
             if phase_remaining_pct is not None:
                 force_line += f" phase_remaining_pct={phase_remaining_pct:.3f}"
             lines.append(force_line)
+        # Append a cycle_reloop line for all phases except CLOSE and PRELUDE.
+        # Enables model to know whether "advance out of this phase" is safe.
+        if phase not in (PHASE_CLOSE, PHASE_PRELUDE, "UNSET"):
+            try:
+                feasible, _ev = should_reloop_to_explore(self, now_unix=now_unix)
+                eff = _ev.get("min_remaining_sec_effective")
+                remaining_sec = _ev.get("session_remaining_seconds")
+                reloop_line = f"cycle_reloop: feasible={feasible}"
+                if eff is not None:
+                    reloop_line += f" threshold_sec={int(eff)}"
+                if remaining_sec is not None:
+                    reloop_line += f" session_remaining_sec={int(remaining_sec)}"
+                blocked = _ev.get("reloop_blocked")
+                if blocked:
+                    reloop_line += f" blocked={blocked}"
+                if phase != "SWEEP":
+                    reloop_line += " (projected)"
+                lines.append(reloop_line)
+            except Exception:  # noqa: BLE001 — rendering must never crash
+                pass
         return "\n".join(lines)
 
     def to_phase_budget_telemetry(

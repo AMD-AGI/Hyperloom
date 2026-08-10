@@ -610,6 +610,14 @@ To get the single "total tokens for this run" number, read
 
 ---
 
+## Phase tuning
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC` | Optional | `10800` | Absolute minimum remaining session seconds to justify opening a new macro-cycle. For bounded sessions the effective floor is `min(this, max_minutes * 60 * 0.15)` so shorter sessions are not unconditionally blocked. |
+
+---
+
 ## Variables intentionally not exposed
 
 These are read by `os.environ` somewhere in the codebase but are

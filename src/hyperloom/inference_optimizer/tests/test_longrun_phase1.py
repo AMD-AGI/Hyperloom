@@ -126,23 +126,29 @@ def test_short_bounded_run_closes_when_insufficient_remaining():
     assert evidence["reloop_blocked"] == "insufficient_remaining"
 
 
-def test_reloop_requires_at_least_three_hours_remaining():
+def test_reloop_blocked_when_insufficient_budget_remains():
+    # 12h session: effective floor = min(10800, 12*3600*0.15) = min(10800, 6480) = 6480s.
+    # Reloop is blocked when remaining < 6480s, i.e. elapsed > 12h - 1.8h = 10.2h.
     st = _sweep_state(max_minutes=12 * 60, started_hours_ago=0.0)
     start_unix = datetime.fromisoformat(st.start_ts).timestamp()
 
+    # Well inside budget (3h remaining for a 12h session).
     reloop, ev = ps.should_reloop_to_explore(
         st,
         now_unix=start_unix + 9 * 3600,
     )
     assert reloop is True
     assert ev["reloop"] is True
+    assert "min_remaining_sec_effective" in ev
 
+    # Just past the proportional floor (remaining drops below 6480s).
     reloop, ev = ps.should_reloop_to_explore(
         st,
-        now_unix=start_unix + 9 * 3600 + 1,
+        now_unix=start_unix + 12 * 3600 - 6479,
     )
     assert reloop is False
     assert ev["reloop_blocked"] == "insufficient_remaining"
+    assert ev["min_remaining_sec_effective"] == pytest.approx(6480.0, abs=1.0)
 
 
 def test_exactly_24h_is_long_run():
@@ -397,3 +403,49 @@ def test_regression_short_run_sweep_evidence_carries_loopback():
     assert (target, reason) == (ps.PHASE_EXPLORE, "cycle_reloop")
     assert evidence["loopback"] is True
     assert evidence["next_cycle"] == 1
+
+
+# Stage 5 additions — adaptive reloop floor
+
+
+def test_unbounded_run_uses_absolute_floor():
+    st = _sweep_state(max_minutes=0, started_hours_ago=0.0)
+    _, ev = ps.should_reloop_to_explore(st)
+    # Unbounded run (max_minutes=0): effective floor == absolute floor (10800).
+    assert ev["min_remaining_sec_effective"] == pytest.approx(10800.0, abs=1.0)
+
+
+def test_short_bounded_run_scales_floor():
+    # 2h session: effective = min(10800, 2*3600*0.15) = min(10800, 1080) = 1080s.
+    st = _sweep_state(max_minutes=2 * 60, started_hours_ago=0.0)
+    _, ev = ps.should_reloop_to_explore(st)
+    assert ev["min_remaining_sec_effective"] == pytest.approx(1080.0, abs=1.0)
+
+
+def test_long_bounded_run_caps_at_absolute_floor():
+    # 48h session: effective = min(10800, 48*3600*0.15) = min(10800, 25920) = 10800s.
+    st = _sweep_state(max_minutes=48 * 60, started_hours_ago=0.0)
+    _, ev = ps.should_reloop_to_explore(st)
+    assert ev["min_remaining_sec_effective"] == pytest.approx(10800.0, abs=1.0)
+
+
+def test_env_override_changes_floor(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", "3600")
+    import importlib
+
+    import hyperloom.orchestrator.phases.machine_state as _ms
+
+    importlib.reload(_ms)
+    try:
+        assert _ms.DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC == pytest.approx(3600.0)
+    finally:
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", raising=False)
+        importlib.reload(_ms)
+
+
+def test_evidence_keys_present():
+    st = _sweep_state(max_minutes=12 * 60, started_hours_ago=0.0)
+    _, ev = ps.should_reloop_to_explore(st)
+    for key in ("macro_cycle", "min_gain_pct", "cycle_gain_delta", "cycle_gained",
+                "no_gain_cycle_streak_effective", "min_remaining_sec_effective"):
+        assert key in ev, f"missing evidence key: {key}"

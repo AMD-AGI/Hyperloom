@@ -488,3 +488,45 @@ def test_inject_phase_constraints_is_a_noop_without_a_phase():
     _inject_phase_constraints(bundle, "")
     assert "phase" not in bundle
     assert "review_constraints" not in bundle
+
+
+# Stage 5 additions — cycle_reloop_feasible in to_phase_status_summary
+
+
+def _make_render_state(phase: str, max_minutes: float = 120.0):
+    """Build a minimal SharedState for render testing."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    s = SharedState()
+    s.phase = phase
+    s.max_minutes = max_minutes
+    s.start_ts = "2026-01-01T00:00:00+00:00"
+    return s
+
+
+def test_cycle_reloop_line_present_in_middle_phases():
+    for phase in (_ps.PHASE_FRAMEWORK_AGENT, _ps.PHASE_EXPLORE, _ps.PHASE_KERNEL_AGENT, _ps.PHASE_SWEEP):
+        s = _make_render_state(phase)
+        out = s.to_phase_status_summary()
+        assert "cycle_reloop:" in out, f"cycle_reloop line missing for {phase}"
+
+
+def test_cycle_reloop_line_absent_in_close_and_prelude():
+    for phase in (_ps.PHASE_CLOSE, _ps.PHASE_PRELUDE):
+        s = _make_render_state(phase)
+        out = s.to_phase_status_summary()
+        assert "cycle_reloop:" not in out, f"cycle_reloop line should not appear in {phase}"
+
+
+def test_cycle_reloop_projected_label_outside_sweep():
+    s = _make_render_state(_ps.PHASE_EXPLORE)
+    out = s.to_phase_status_summary()
+    assert "(projected)" in out
+
+
+def test_cycle_reloop_no_projected_label_in_sweep():
+    s = _make_render_state(_ps.PHASE_SWEEP)
+    out = s.to_phase_status_summary()
+    reloop_line = next((l for l in out.splitlines() if "cycle_reloop:" in l), None)
+    assert reloop_line is not None
+    assert "(projected)" not in reloop_line

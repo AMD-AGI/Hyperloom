@@ -98,9 +98,11 @@ The first public release of Hyperloom (1.0.0a1) combines features from the follo
 - **Unified macro-cycle orchestration and budget accounting**: Short and long
   sessions now share the same cyclic optimization model. Phase budgets use
   consistent charge-back accounting, short runs stop dispatching after their
-  phase budget is exhausted, and new macro-cycles only start when at least
-  three hours remain. This removes legacy cyclic-mode branches and makes phase
-  progression more predictable across bounded and long-horizon runs.
+  phase budget is exhausted, and new macro-cycles open when sufficient budget
+  remains (the effective floor scales with session length so short sessions are
+  not unconditionally blocked by the 3-hour absolute floor). This removes legacy
+  cyclic-mode branches and makes phase progression more predictable across
+  bounded and long-horizon runs.
 
 - **Ray-managed single-node serving and GPU execution**: The Ray path now places
   all serving and GPU-specialist operations under the whole-machine `serving_slot`

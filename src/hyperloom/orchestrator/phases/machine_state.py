@@ -415,10 +415,34 @@ DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 5
 # Safety ceiling on macro-cycles (defense against a pathological tight loop).
 DEFAULT_MAX_MACRO_CYCLES: int = 1000
 
+# For bounded sessions the effective reloop floor is reduced proportionally:
+# min(ABSOLUTE_FLOOR, max_minutes * 60 * RATIO).  This makes the 3-hour ceiling
+# only binding for sessions that are long enough to sustain another full cycle.
+_CYCLE_RELOOP_BUDGET_RATIO: float = 0.15
+
+
+def _default_cycle_reloop_min_remaining_sec() -> float:
+    """Minimum session seconds to justify opening a new macro-cycle.
+
+    Env-overridable via ``INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC``.
+    Default is 10800 (3 h); applies as an absolute floor for unbounded runs.
+    Bounded sessions use the smaller of this floor and the budget-ratio value.
+    """
+    raw = (_os_fw_ratio.environ.get("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", "") or "").strip()
+    if raw:
+        try:
+            v = float(raw)
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    return 10800.0
+
+
 # Minimum session wall-clock (seconds) that must remain to justify opening a new
 # macro-cycle; below this we wind down to CLOSE instead of starting a cycle we
 # cannot meaningfully use.
-DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = 10800.0  # 3 h
+DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = _default_cycle_reloop_min_remaining_sec()
 
 # R7 global convergence: number of consecutive no-gain macro-cycles after which
 # the run is considered converged (stop looping → CLOSE).
@@ -575,8 +599,18 @@ def should_reloop_to_explore(
         return False, evidence
 
     # Budget remaining must justify a fresh cycle.
+    # For bounded sessions the effective floor is the minimum of the absolute
+    # floor and a fraction of the total budget, so a 2-hour session is not
+    # unconditionally blocked by the 3-hour absolute floor.
+    mm = _max_minutes(state)
+    if mm > 0:
+        budget_floor = mm * 60.0 * _CYCLE_RELOOP_BUDGET_RATIO
+        effective_min_remaining = min(float(min_remaining_sec), budget_floor)
+    else:
+        effective_min_remaining = float(min_remaining_sec)
+    evidence["min_remaining_sec_effective"] = round(effective_min_remaining, 2)
     remaining = session_remaining_seconds(state, now_unix=now_unix)
-    if remaining is not None and remaining < float(min_remaining_sec):
+    if remaining is not None and remaining < effective_min_remaining:
         evidence["reloop_blocked"] = "insufficient_remaining"
         evidence["session_remaining_seconds"] = round(remaining, 2)
         return False, evidence
