@@ -129,9 +129,11 @@ for several cycles), saturates, or the deadline hits. Short bounded runs
 can reloop too; they keep charge-back phase budgeting while long /
 unbounded runs use the fixed per-cycle budget window.
 The accepted `optimization_stack` and `cumulative_gain_validated` carry
-across cycles. **Consequence:** advancing OUT of the current phase never
-"strands" an idea — a config/param lever you cannot pursue in this phase
-gets a fresh EXPLORE round next macro-cycle. So when the current phase's
+across cycles. **Consequence:** when `cycle_reloop_feasible=true` in the
+``=== Phase ===`` block, advancing OUT of the current phase does not
+"strand" an idea — a config/param lever you cannot pursue in this phase
+gets a fresh EXPLORE round next macro-cycle. When `cycle_reloop_feasible=false`
+the deferred work will not come back; plan accordingly. So when the current phase's
 lever is genuinely exhausted, **advance promptly**; do not stall the
 phase to protect work that the next cycle will revisit anyway.
 
