@@ -41,7 +41,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env_safety import valid_env_key
+from hyperloom.common.env_safety import BLOCKED_EXTERNAL_ENV_NAMES, valid_env_key
 
 
 log = logging.getLogger(__name__)
@@ -144,23 +144,7 @@ MAX_SWITCHES = 24
 
 # Env names a manifest may never claim: setting one of these from a "rewrite
 # switch" would silently retarget the benchmark rather than toggling a code path.
-FORBIDDEN_SWITCHES: frozenset[str] = frozenset(
-    {
-        "PATH",
-        "PYTHONPATH",
-        "LD_LIBRARY_PATH",
-        "LD_PRELOAD",
-        "HOME",
-        "TP",
-        "MODEL",
-        "MODEL_PATH",
-        "PRECISION",
-        "RUN_EVAL",
-        "PROFILE",
-        "RESULT_DIR",
-        "RESULT_FILENAME",
-    }
-)
+FORBIDDEN_SWITCHES: frozenset[str] = BLOCKED_EXTERNAL_ENV_NAMES
 
 
 class SwitchManifestError(ValueError):

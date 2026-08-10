@@ -182,6 +182,47 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     }
 )
 
+# Env names an untrusted external source (reference recipe, framework-switch
+# manifest) may never set: shell-unsafe vars plus the workload/benchmark keys the
+# optimizer's CLI flags own — setting one retargets the benchmark instead of
+# toggling a knob.
+BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = BLOCKED_UNTRUSTED_ENV_NAMES | BENCHMARK_SECRET_ENV_NAMES | frozenset(
+    {
+        "HOME",
+        "MODEL",
+        "MODEL_PATH",
+        "TP",
+        "EP",
+        "CONC",
+        "ISL",
+        "OSL",
+        "MAX_MODEL_LEN",
+        "PRECISION",
+        "PORT",
+        "ROCR_VISIBLE_DEVICES",
+        "HIP_VISIBLE_DEVICES",
+        "NUM_PROMPTS",
+        "NUM_WARMUPS",
+        "RANDOM_RANGE_RATIO",
+        "RUN_EVAL",
+        "PROFILE",
+        "RESULT_DIR",
+        "RESULT_FILENAME",
+    }
+)
+
+# Credential-shaped name fragments, so an unlisted secret cannot be persisted
+# into a session YAML by name alone.
+_SECRET_NAME_FRAGMENTS: tuple[str, ...] = ("APIKEY", "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
+
+
+def is_allowed_external_env_key(key: object) -> bool:
+    """True when an env export from an untrusted external source is safe to carry."""
+    upper = str(key or "").strip().upper()
+    if not valid_env_key(upper) or upper in BLOCKED_EXTERNAL_ENV_NAMES:
+        return False
+    return not any(fragment in upper for fragment in _SECRET_NAME_FRAGMENTS)
+
 
 def is_python_package_root(path: object) -> bool:
     """True when ``path`` is a ``site-packages``/``dist-packages`` dir.
@@ -277,10 +318,12 @@ def redact_secret_values(text: str) -> str:
 __all__ = [
     "BENCHMARK_SECRET_ENV_NAMES",
     "BLOCKED_CHILD_ENV_NAMES",
+    "BLOCKED_EXTERNAL_ENV_NAMES",
     "BLOCKED_UNTRUSTED_ENV_NAMES",
     "filter_benchmark_env_mapping",
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",
+    "is_allowed_external_env_key",
     "is_allowed_kernel_agent_env_key",
     "is_python_package_root",
     "redact_secret_values",

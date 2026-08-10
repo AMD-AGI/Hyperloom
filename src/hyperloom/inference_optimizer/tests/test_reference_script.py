@@ -1,18 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for reference-script parsing, rendering, and discovery."""
+"""Tests for reference-script parsing and rendering."""
 
 from __future__ import annotations
 
+import pytest
 from pathlib import Path
+from types import SimpleNamespace
 
 from hyperloom.inference_optimizer.reference_script import (
-    discover_reference_script,
-    models_compatible,
     parse_reference_script,
     render_reference_script,
 )
+from hyperloom.inference_optimizer.cli.bootstrap import _resolve_reference_recipe
 
 _M3_RECIPE = """#!/usr/bin/env bash
 source "$(dirname "$0")/../benchmark_lib.sh"
@@ -80,8 +81,8 @@ def test_parse_flag_equals_var_dropped_whole(tmp_path):
     assert "--block-size=32" in r.server_args
 
 
-def test_parse_env_whitelist(tmp_path):
-    """R6: only enumerated exports are carried; path-valued / secret vars are not."""
+def test_parse_env_denylist(tmp_path):
+    """R6: tuning envs are carried; credential-shaped names are not."""
     src = _write(tmp_path, _M3_RECIPE)
     r = parse_reference_script(src, framework="vllm")
     assert r.envs.get("VLLM_USE_BREAKABLE_CUDAGRAPH") == "0"
@@ -89,8 +90,43 @@ def test_parse_env_whitelist(tmp_path):
     assert r.envs.get("VLLM_ALLREDUCE_USE_FLASHINFER") == "1"
     assert r.envs.get("VLLM_USE_RUST_FRONTEND") == "1"
     assert r.envs.get("NCCL_DMABUF_ENABLE") == "0"
-    assert "VLLM_CACHE_ROOT" not in r.envs
+    # Path-typed vars pass: the denylist gates names, not value shapes.
+    assert r.envs.get("VLLM_CACHE_ROOT") == "/workspace/cache"
     assert "SOME_SECRET" not in r.envs
+
+
+def test_parse_env_workload_owned_blocked(tmp_path):
+    """Workload keys the optimizer owns must never come from a reference script."""
+    text = """\
+export TP=16
+export MODEL=/bad/path
+export CONC=128
+export RUN_EVAL=false
+export RESULT_DIR=/bad
+export VLLM_ROCM_USE_AITER=1
+vllm serve $MODEL --trust-remote-code
+"""
+    src = _write(tmp_path, text)
+    r = parse_reference_script(src, framework="vllm")
+    for blocked in ("TP", "MODEL", "CONC", "RUN_EVAL", "RESULT_DIR"):
+        assert blocked not in r.envs, f"{blocked} should be blocked"
+    assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
+
+
+def test_parse_env_shell_safety_blocked(tmp_path):
+    """Shell-unsafe vars (BLOCKED_UNTRUSTED_ENV_NAMES) must be denied."""
+    text = """\
+export LD_LIBRARY_PATH=/bad
+export PYTHONPATH=/bad
+export PATH=/bad/bin
+export VLLM_ROCM_USE_AITER=1
+vllm serve $MODEL
+"""
+    src = _write(tmp_path, text)
+    r = parse_reference_script(src, framework="vllm")
+    for blocked in ("LD_LIBRARY_PATH", "PYTHONPATH", "PATH"):
+        assert blocked not in r.envs, f"{blocked} should be blocked"
+    assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
 
 
 def test_parse_env_self_defaults(tmp_path):
@@ -121,17 +157,9 @@ def test_parse_continuation_parity(tmp_path):
     assert rm.server_args == rs.server_args
 
 
-def test_parse_missing_file_failsoft():
-    r = parse_reference_script("/nonexistent/recipe.sh", framework="vllm")
-    assert r.server_args == ""
-    assert r.envs == {}
-    assert r.model is None
-
-
-def test_parse_unreachable_url_failsoft():
-    r = parse_reference_script("https://127.0.0.1:1/none.sh", framework="vllm")
-    assert r.server_args == ""
-    assert r.envs == {}
+def test_parse_missing_file_raises():
+    with pytest.raises(OSError):
+        parse_reference_script("/nonexistent/recipe.sh", framework="vllm")
 
 
 def test_parse_sglang_entrypoint(tmp_path):
@@ -180,206 +208,38 @@ def test_render_carries_validated_rocm_envs():
     assert "export NCCL_MIN_NCHANNELS=112" in text
 
 
-def _mk_tree(tmp_path: Path, names: list[str]) -> Path:
-    d = tmp_path / "InferenceX" / "benchmarks" / "single_node"
-    d.mkdir(parents=True)
-    for n in names:
-        (d / n).write_text("vllm serve $MODEL\n", encoding="utf-8")
-    return tmp_path / "InferenceX"
+# --- bootstrap._resolve_reference_recipe tests ---
 
-
-def test_discovery_exact(tmp_path):
-    root = _mk_tree(
-        tmp_path,
-        [
-            "dsr1_fp8_mi300x.sh",
-            "gptoss_fp4_mi300x.sh",
-        ],
-    )
-    path, tier = discover_reference_script(
-        str(root),
-        model_path="dsr1",
-        precision="fp8",
-        gpu_type="mi300x",
-        framework="vllm",
-    )
-    assert tier == "exact"
-    assert path.endswith("dsr1_fp8_mi300x.sh")
-
-
-def test_discovery_exact_underscore_model(tmp_path):
-    """Model aliases containing ``_`` (qwen3_moe, qwen2_5_vl) must parse:
-    the precision/gpu fields sit to the right of the GPU anchor, so they are
-    not mistaken for the model's own underscore segments."""
-    root = _mk_tree(
-        tmp_path,
-        [
-            "qwen3_moe_bf16_mi300x.sh",
-            "qwen2_5_vl_fp8_mi300x.sh",
-        ],
-    )
-    path, tier = discover_reference_script(
-        str(root),
-        model_path="/path/models/qwen3_moe",
-        precision="bf16",
-        gpu_type="mi300x",
-        framework="vllm",
-    )
-    assert tier == "exact"
-    assert path.endswith("qwen3_moe_bf16_mi300x.sh")
-
-    path2, tier2 = discover_reference_script(
-        str(root),
-        model_path="qwen2_5_vl",
-        precision="fp8",
-        gpu_type="mi300x",
-        framework="vllm",
-    )
-    assert tier2 == "exact"
-    assert path2.endswith("qwen2_5_vl_fp8_mi300x.sh")
-
-
-def test_discovery_version_mismatch_is_none(tmp_path):
-    root = _mk_tree(tmp_path, ["minimaxm2.5_fp8_mi300x.sh"])
-    path, tier = discover_reference_script(
-        str(root),
-        model_path="minimaxm3",
-        precision="fp8",
-        gpu_type="mi300x",
-        framework="vllm",
-    )
-    assert tier == "none"
-    assert path is None
-
-
-def test_discovery_fuzzy(tmp_path):
-    root = _mk_tree(tmp_path, ["kimik2.5_int4_mi300x.sh"])
-    path, tier = discover_reference_script(
-        str(root),
-        model_path="/path/models/moonshotai-Kimi-K2.5-Instruct",
-        precision="int4",
-        gpu_type="mi300x",
-        framework="vllm",
-    )
-    assert tier == "fuzzy"
-    assert path.endswith("kimik2.5_int4_mi300x.sh")
-
-
-def test_discovery_framework_gate(tmp_path):
-    """An atom-tagged script must not match a vllm run."""
-    root = _mk_tree(tmp_path, ["dsr1_fp8_mi300x_atom.sh"])
-    _, tier = discover_reference_script(
-        str(root),
-        model_path="dsr1",
-        precision="fp8",
-        gpu_type="mi300x",
-        framework="vllm",
-    )
-    assert tier == "none"
-
-
-def test_discovery_precision_gpu_filter(tmp_path):
-    root = _mk_tree(tmp_path, ["dsr1_fp8_b200.sh", "dsr1_fp4_mi300x.sh"])
-    _, tier = discover_reference_script(
-        str(root),
-        model_path="dsr1",
-        precision="fp8",
-        gpu_type="mi300x",
-        framework="vllm",
-    )
-    assert tier == "none"
-
-
-def test_discovery_missing_path_failsoft():
-    path, tier = discover_reference_script(
-        "/nonexistent",
-        model_path="x",
-        precision="fp8",
-        gpu_type="mi300x",
-        framework="vllm",
-    )
-    assert path is None
-    assert tier == "none"
-
-
-def test_models_compatible_exact_and_fuzzy():
-    assert models_compatible("dsr1", "/path/models/dsr1") is True
-    assert (
-        models_compatible(
-            "minimaxm2.5",
-            "/path/models/MiniMaxAI-MiniMax-M2.5",
-        )
-        is True
-    )
-
-
-def test_models_compatible_version_mismatch_blocked():
-    """R2: a near-name version mismatch must NOT apply the recipe."""
-    assert models_compatible("minimaxm2.5", "/path/models/minimax-m3") is False
-    assert models_compatible("kimik2", "/path/models/kimi-k2.5") is False
-
-
-def test_models_compatible_empty_is_ungated():
-    assert models_compatible("", "/path/models/anything") is True
-
-
-from types import SimpleNamespace
-
-from hyperloom.inference_optimizer.cli.bootstrap import _resolve_reference_recipe
-
-
-def test_resolve_no_flag_does_not_discover(tmp_path, monkeypatch):
-    """No --reference-script → empty, and discovery never runs (0 degrade)."""
-    root = _mk_tree(tmp_path, ["dsr1_fp8_mi300x.sh"])
-    monkeypatch.setenv("INFERENCEX_PATH", str(root))
+def test_resolve_no_flag_returns_empty(monkeypatch):
+    """No --reference-script → empty tuple, nothing attempted."""
     monkeypatch.setenv("FRAMEWORK", "vllm")
-    args = SimpleNamespace(
-        reference_script=None,
-        model="/path/models/dsr1",
-        precision="fp8",
-        gpu_type="mi300x",
-    )
-    server_args, envs, model, source = _resolve_reference_recipe(args)
-    assert (server_args, envs, model, source) == ("", {}, "", "")
+    args = SimpleNamespace(reference_script=None)
+    assert _resolve_reference_recipe(args) == ("", {}, "", "")
 
 
 def test_resolve_valid_flag_is_used(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "vllm")
     src = _write(tmp_path, _M3_RECIPE, "explicit.sh")
-    args = SimpleNamespace(
-        reference_script=src,
-        model="/path/models/whatever",
-        precision="fp8",
-        gpu_type="mi300x",
-    )
+    args = SimpleNamespace(reference_script=src)
     server_args, envs, model, source = _resolve_reference_recipe(args)
     assert "--block-size 128" in server_args
     assert source == src
 
 
-def test_resolve_invalid_flag_falls_back_to_discovery(tmp_path, monkeypatch):
-    """Given but unreadable path → auto-discover an exact match instead."""
-    root = _mk_tree(tmp_path, ["dsr1_fp8_mi300x.sh"])
-    monkeypatch.setenv("INFERENCEX_PATH", str(root))
+def test_resolve_unreadable_flag_raises_system_exit(monkeypatch):
+    """Given but unreadable path → SystemExit(2)."""
     monkeypatch.setenv("FRAMEWORK", "vllm")
-    args = SimpleNamespace(
-        reference_script="/no/such/recipe.sh",
-        model="/path/models/dsr1",
-        precision="fp8",
-        gpu_type="mi300x",
-    )
-    server_args, envs, model, source = _resolve_reference_recipe(args)
-    assert source.endswith("dsr1_fp8_mi300x.sh")
+    args = SimpleNamespace(reference_script="/no/such/recipe.sh")
+    with pytest.raises(SystemExit) as exc_info:
+        _resolve_reference_recipe(args)
+    assert exc_info.value.code == 2
 
 
-def test_resolve_invalid_flag_no_inferencex_returns_empty(tmp_path, monkeypatch):
-    """Given but unreadable + no INFERENCEX_PATH → empty (still 0 degrade)."""
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+def test_resolve_script_with_no_flags_raises_system_exit(tmp_path, monkeypatch):
+    """A readable script that yields no server flags and no envs → SystemExit(2)."""
     monkeypatch.setenv("FRAMEWORK", "vllm")
-    args = SimpleNamespace(
-        reference_script="/no/such/recipe.sh",
-        model="/path/models/dsr1",
-        precision="fp8",
-        gpu_type="mi300x",
-    )
-    assert _resolve_reference_recipe(args) == ("", {}, "", "")
+    empty = _write(tmp_path, "#!/usr/bin/env bash\necho hello\n")
+    args = SimpleNamespace(reference_script=empty)
+    with pytest.raises(SystemExit) as exc_info:
+        _resolve_reference_recipe(args)
+    assert exc_info.value.code == 2
