@@ -135,7 +135,7 @@ Container images
 ----------------
 
 Pick the image that matches your environment. Public Docker Hub refs
-(``primussafe/sglang:<tag>``) are used on your own GPU machine. If your
+(``rocm/hyperloom:<tag>``) are used on your own GPU machine. If your
 deployment uses a private registry mirror, set the registry prefix
 accordingly.
 
@@ -145,15 +145,15 @@ accordingly.
 
    * - Image
      - GPU
-   * - ``primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix``
+   * - ``rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x``
      - MI300X / MI325X
-   * - ``primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix``
+   * - ``rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi350x``
      - MI355X
-   * - ``primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix``
+   * - ``rocm/hyperloom:vllm-v0.24.0-rocm7.2.0``
      - MI300X / MI325X / MI355X
 
-Browse all available SGLang tags at
-`hub.docker.com/r/primussafe/sglang/tags <https://hub.docker.com/r/primussafe/sglang/tags>`_.
+Browse all available tags at
+`hub.docker.com/r/rocm/hyperloom/tags <https://hub.docker.com/r/rocm/hyperloom/tags>`_.
 
 Bare-metal recommended environment
 -----------------------------------
@@ -178,20 +178,20 @@ Hyperloom does not install ROCm or torch itself.
      - ROCm build matching the host ROCm
      - Preinstalled by the operator; not managed by Hyperloom.
    * - SGLang
-     - v0.5.12 (rocm720)
+     - v0.5.16 (rocm720)
      - Installed in ``shared`` mode (reuses the host torch). Uses the ROCm 7.2.0 AMD wheel index (``SGLANG_ROCM_EXTRA=rocm720``), so the SGLang ROCm layer is 7.2.0.
    * - vLLM
-     - v0.21.0 (rocm722), isolated venv
-     - Installs ``vllm==0.21.0+rocm722`` from the wheels.vllm.ai pip index. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
+     - v0.24.0 (rocm722), isolated venv
+     - Installs ``vllm==0.24.0+rocm722`` from the wheels.vllm.ai pip index. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
 
 Bare-metal ROCm patch levels differ per framework. The vLLM version matches the
-``v0.21.0`` Docker image, but the pip index only publishes the ``rocm722``
+``v0.24.0`` Docker image, but the pip index only publishes the ``rocm722``
 variant (ROCm 7.2.2), so the bare-metal vLLM ROCm layer is 7.2.2 rather than the
 image's rocm720. The SGLang stack installs from the ROCm 7.2.0 AMD wheel index,
 so its ROCm layer is 7.2.0. In ``docker`` mode both frameworks use ROCm 7.2.0
 (the ``-rocm720-`` images). For a fully validated, pre-aligned vLLM stack with
 rocm720, prefer ``docker`` mode with
-``primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix``.
+``rocm/hyperloom:vllm-v0.24.0-rocm7.2.0``.
 
 These are recommended defaults, not hard pins. Framework and ROCm versions are
 overridable via env (``SGLANG_REF``, ``SGLANG_ROCM_EXTRA``, ``VLLM_VERSION``,

@@ -588,7 +588,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "pid": 12345,
     "session_dir": "/workspace/hyperloom/GLM-5-FP8/20260517T113000Z",
     "tick_count": 89,
-    "image": "lmsysorg/sglang:v0.5.11-rocm720-mi30x-profilerfix"
+    "image": "rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x"
   },
 
   "workload": {
