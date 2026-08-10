@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import shutil
 from datetime import datetime, timezone
@@ -24,6 +25,8 @@ from .sanitize import (
     sanitize_publish_server_args,
     sanitize_shared_knowledge,
 )
+
+log = logging.getLogger(__name__)
 
 _PATH_KEYS = {
     "artifact_path",
@@ -134,8 +137,8 @@ class _Files:
             refs.append(rel)
         return refs
 
-    def adopt(self, source: Path, rel: str) -> str:
-        """Take a file that already carries its final ``category/kind/name``."""
+    def validate_adoption(self, source: Path, rel: str) -> None:
+        """Fail before merge when a staged file cannot safely own ``rel``."""
         if source.is_symlink():
             raise RemoteRecipeValidationError(f"artifact source must not be a symlink: {source}")
         if source.stat().st_size > MAX_FILE_BYTES:
@@ -155,6 +158,11 @@ class _Files:
                 raise RemoteRecipeValidationError(
                     f"conflicting artifact content for shared ref: {rel}"
                 )
+
+    def adopt(self, source: Path, rel: str) -> str:
+        """Take a file that already carries its final ``category/kind/name``."""
+        self.validate_adoption(source, rel)
+        if rel in self.refs:
             return rel
         destination = self.root / rel
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -590,17 +598,47 @@ def merge_staged_sections(
     """
     merged: list[str] = []
     for name in sections.sections():
-        staged = sections.staged(name)
-        if staged is None or not staged.knowledge:
-            continue
-        current = value.get(name)
-        value[name] = {**(current if isinstance(current, Mapping) else {}), **staged.knowledge}
-        merged.append(name)
-    staged_root = Path(sections.files_dir)
-    if staged_root.is_dir():
-        for source in sorted(staged_root.rglob("*")):
-            if source.is_file():
-                files.adopt(source, source.relative_to(staged_root).as_posix())
+        try:
+            staged = sections.staged(name)
+            if staged is None or not staged.knowledge:
+                continue
+            staged_files = [
+                (
+                    source,
+                    source.relative_to(sections.files_dir).as_posix(),
+                )
+                for source in staged.files
+                if source.is_file()
+            ]
+            staged_paths = {rel for _, rel in staged_files}
+            staged_refs = extract_knowledge_artifact_refs(
+                staged.knowledge,
+                staged_paths,
+            )
+            missing = staged_refs - staged_paths
+            orphaned = staged_paths - staged_refs
+            if missing or orphaned:
+                raise RemoteRecipeValidationError(
+                    f"staged section {name!r} file mismatch: "
+                    f"missing={sorted(missing)!r} orphaned={sorted(orphaned)!r}"
+                )
+            for source, rel in staged_files:
+                files.validate_adoption(source, rel)
+            for source, rel in staged_files:
+                files.adopt(source, rel)
+            current = value.get(name)
+            value[name] = {
+                **(current if isinstance(current, Mapping) else {}),
+                **staged.knowledge,
+            }
+            merged.append(name)
+        except Exception as exc:  # noqa: BLE001 - one bad column falls back
+            log.warning(
+                "remote recipe: ignoring invalid staged section %s; "
+                "falling back to CLOSE scrape: %s",
+                name,
+                exc,
+            )
     return merged
 
 
