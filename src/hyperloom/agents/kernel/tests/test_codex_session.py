@@ -172,12 +172,17 @@ class _FakeThread:
         self._result = result
         self._hang = hang
         self._honor_interrupt = honor_interrupt
+        # A serial, not id(self): the tests below count distinct threads, and a
+        # reset frees the previous one, after which CPython hands the same heap
+        # address to its replacement often enough to fail the count in CI.
+        record["threads_made"] = record.get("threads_made", 0) + 1
+        self._serial = record["threads_made"]
 
     async def turn(self, prompt: str, **options: Any) -> _FakeTurnHandle:
         self._record["prompt"] = prompt
         self._record["turn_options"] = options
         self._record.setdefault("turn_prompts", []).append(prompt)
-        self._record.setdefault("turn_threads", []).append(id(self))
+        self._record.setdefault("turn_threads", []).append(self._serial)
         return _FakeTurnHandle(
             self._record,
             result=self._result,
