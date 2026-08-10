@@ -1166,6 +1166,43 @@ class TestDiffusionComputeCeiling:
     def test_read_dit_meta_none_when_missing(self, tmp_path):
         assert _read_diffusion_dit_meta(str(tmp_path)) is None
 
+    def _write_dit_config(self, tmp_path, patch_size):
+        import json as _json
+
+        td = tmp_path / "transformer"
+        td.mkdir()
+        (td / "config.json").write_text(
+            _json.dumps(
+                {
+                    "num_layers": 20,
+                    "num_attention_heads": 70,
+                    "attention_head_dim": 32,
+                    "patch_size": patch_size,
+                    "sample_size": 32,
+                }
+            )
+        )
+        return _read_diffusion_dit_meta(str(tmp_path))
+
+    def test_read_dit_meta_accepts_a_3d_patch_size(self, tmp_path):
+        """A (t, h, w) patch must not reach ``int()`` as a list. Wan ships
+        [1, 2, 2]; before this the whole call raised TypeError."""
+        dit = self._write_dit_config(tmp_path, [1, 2, 2])
+        assert dit is not None
+        _dit_params, latent_tokens, _num_layers, _hidden = dit
+        # Spatial patch is the trailing entry (2), not the temporal one (1).
+        assert latent_tokens == (32 // 2) ** 2
+
+    def test_read_dit_meta_reads_a_2d_patch_size_from_the_front(self, tmp_path):
+        dit = self._write_dit_config(tmp_path, [2, 2])
+        assert dit is not None
+        assert dit[1] == (32 // 2) ** 2
+
+    def test_read_dit_meta_survives_an_empty_patch_size(self, tmp_path):
+        dit = self._write_dit_config(tmp_path, [])
+        assert dit is not None
+        assert dit[1] == 32**2
+
     def _rt(self):
         return RuntimeWorkload(
             model_path="/x",
