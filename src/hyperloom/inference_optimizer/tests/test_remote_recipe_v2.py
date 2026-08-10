@@ -39,6 +39,11 @@ from hyperloom.orchestrator.knowledge.remote_recipe.models import (
     KnowledgeBundle,
     RemoteRecipeValidationError,
 )
+from hyperloom.orchestrator.knowledge.remote_recipe.sanitize import (
+    sanitize_publish_env_mapping,
+    sanitize_publish_server_args,
+    sanitize_shared_knowledge,
+)
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 
 _DOWNLOAD_BYTES = b"verified artifact"
@@ -74,7 +79,7 @@ def _state(tmp_path: Path) -> SimpleNamespace:
                 "action": "explore",
                 "source_phase": "EXPLORE",
                 "extra_server_args": "--page-size 32",
-                "extra_envs": {"EXPLORE": "1"},
+                "extra_envs": {"VLLM_EXPLORE_TEST": "1"},
                 "patch_path": str(explore_patch),
                 "tput": 110.0,
             },
@@ -82,7 +87,7 @@ def _state(tmp_path: Path) -> SimpleNamespace:
                 "action": "integrate_patch",
                 "source_phase": "FRAMEWORK_AGENT",
                 "extra_server_args": "--page-size 32 --enable-foo",
-                "extra_envs": {"FRAMEWORK": "1"},
+                "extra_envs": {"VLLM_FRAMEWORK_TEST": "1"},
                 "patch_path": str(framework_patch),
                 "tput": 120.0,
             },
@@ -149,8 +154,8 @@ def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> 
     assert bundle.knowledge["knowledge_schema_version"] == 2
     assert bundle.knowledge["validated_e2e_gain"] == 30.0
     value = bundle.knowledge["value"]
-    assert value["explore"]["extra_envs"] == {"EXPLORE": "1"}
-    assert value["framework"]["extra_envs"] == {"FRAMEWORK": "1"}
+    assert value["explore"]["extra_envs"] == {"VLLM_EXPLORE_TEST": "1"}
+    assert value["framework"]["extra_envs"] == {"VLLM_FRAMEWORK_TEST": "1"}
     assert "config" not in value["explore"]
     assert "phase" not in value["framework"]
     assert value["explore"]["patches"][0].startswith("explore/patches/")
@@ -177,6 +182,75 @@ def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> 
     assert "object_id" not in serialized
     assert "bucket" not in serialized
     assert '"files": [' not in serialized
+
+
+def test_publish_sanitizer_allows_only_safe_replay_envs_and_args() -> None:
+    envs = sanitize_publish_env_mapping(
+        {
+            "VLLM_ROCM_USE_AITER": "1",
+            "SGLANG_SAFE_TOGGLE": "true",
+            "OPENAI_API_KEY": "openai-secret",
+            "VLLM_API_TOKEN": "vllm-secret",
+            "UNKNOWN_TOGGLE": "1",
+            "HIP_VISIBLE_DEVICES": "0,1",
+            "VLLM_CONFIG_PATH": "/workspace/session/config.json",
+            "VLLM_HEADER": "Bearer secret-value",
+        }
+    )
+    assert envs == {
+        "VLLM_ROCM_USE_AITER": "1",
+        "SGLANG_SAFE_TOGGLE": "true",
+    }
+
+    assert (
+        sanitize_publish_server_args(
+            "--page-size 32 "
+            "--api-key secret "
+            "--download-dir /shared_nfs/private/cache "
+            "--auth-token=secret "
+            "--attention-backend ROCM_AITER"
+        )
+        == "--page-size 32 --attention-backend ROCM_AITER"
+    )
+
+
+def test_shared_knowledge_sanitizer_scrubs_nested_columns_and_paths() -> None:
+    sanitized = sanitize_shared_knowledge(
+        {
+            "value": {
+                "explore": {
+                    "extra_envs": {
+                        "VLLM_ROCM_USE_AITER": "1",
+                        "HF_TOKEN": "secret",
+                    },
+                    "extra_server_args": "--page-size 32 --password hidden",
+                },
+                "kernel": {
+                    "rewrite": {
+                        "workspace": "/workspace/hyperloom/session",
+                        "api_token": "secret",
+                        "source_file": "kernel/rewrite/source/kernel.py",
+                        "note": (
+                            "failed at /home/operator/session/log.txt "
+                            "with TOKEN=secret"
+                        ),
+                    }
+                },
+            }
+        }
+    )
+
+    explore = sanitized["value"]["explore"]
+    assert explore == {
+        "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+        "extra_server_args": "--page-size 32",
+    }
+    rewrite = sanitized["value"]["kernel"]["rewrite"]
+    assert "workspace" not in rewrite
+    assert "api_token" not in rewrite
+    assert rewrite["source_file"] == "kernel/rewrite/source/kernel.py"
+    assert "[LOCAL_PATH]" in rewrite["note"]
+    assert "secret" not in rewrite["note"]
 
 
 def test_empty_phase_sections_do_not_copy_cumulative_current_best(tmp_path: Path) -> None:
@@ -700,6 +774,7 @@ class _FakeStore:
         self.conflict = conflict
         self.metric = metric
         self.calls: list[tuple] = []
+        self.published_knowledge: dict | None = None
         self.files_listing: dict = {
             "files": [
                 {
@@ -756,6 +831,7 @@ class _FakeStore:
 
     def put_knowledge(self, canonical_id, knowledge, *, session_id="", mode="merge"):
         self.calls.append(("put_knowledge", canonical_id, session_id, mode))
+        self.published_knowledge = json.loads(json.dumps(knowledge))
 
     def set_champion(self, canonical_id, session_id, *, metric, value):
         self.calls.append(("set_champion", canonical_id, session_id, metric, value))
@@ -807,6 +883,41 @@ def test_write_order_replace_metric_and_409_retry(tmp_path: Path) -> None:
     assert store.calls[2][-1] == "replace"
     assert store.calls[3][-2:] == ("optimized_throughput", 130.0)
     assert result.status == "written"
+
+
+def test_write_boundary_sanitizes_directly_constructed_bundle(tmp_path: Path) -> None:
+    store = _FakeStore()
+    bundle = KnowledgeBundle(
+        {
+            "optimized_throughput": 130.0,
+            "value": {
+                "explore": {
+                    "extra_server_args": "--page-size 32 --api-key secret",
+                    "extra_envs": {
+                        "VLLM_ROCM_USE_AITER": "1",
+                        "OPENAI_API_KEY": "secret",
+                    },
+                    "workspace": "/workspace/private/session",
+                }
+            },
+        }
+    )
+
+    result = RemoteRecipeClient(store).write_if_better(  # type: ignore[arg-type]
+        "inference:m:h:f:mt:a:v:p",
+        "session-1",
+        bundle,
+        optimized_throughput=130.0,
+        files_dir=tmp_path,
+    )
+
+    assert result.status == "written"
+    assert store.published_knowledge is not None
+    explore = store.published_knowledge["value"]["explore"]
+    assert explore == {
+        "extra_server_args": "--page-size 32",
+        "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+    }
 
 
 def test_weaker_session_skips_before_upload(tmp_path: Path) -> None:
@@ -1058,8 +1169,40 @@ def test_an_agent_staged_section_overrides_what_the_stack_scrape_guessed(
     framework = bundle.knowledge["value"]["framework"]
     assert framework["extra_server_args"] == "--authored-by-the-agent"
     # Keys the agent did not stage still come from the scrape.
-    assert framework["extra_envs"] == {"FRAMEWORK": "1"}
+    assert framework["extra_envs"] == {"VLLM_FRAMEWORK_TEST": "1"}
     assert bundle.knowledge["provenance"]["staged_sections"] == ["framework"]
+
+
+def test_agent_staged_sections_are_sanitized_at_publish_boundary(
+    tmp_path: Path,
+) -> None:
+    sections = _sections(tmp_path)
+    sections.write(
+        "kernel",
+        {
+            "rewrite": {
+                "extra_envs": {
+                    "SGLANG_SAFE_TOGGLE": "1",
+                    "ANTHROPIC_API_KEY": "secret",
+                },
+                "workspace": "/home/operator/private/session",
+                "access_token": "secret",
+                "source_file": "kernel/rewrite/source/kernel.py",
+            }
+        },
+    )
+
+    bundle = build_remote_knowledge(
+        _state(tmp_path),
+        tmp_path / "files",
+        sections=sections,
+    )
+
+    rewrite = bundle.knowledge["value"]["kernel"]["rewrite"]
+    assert rewrite["extra_envs"] == {"SGLANG_SAFE_TOGGLE": "1"}
+    assert rewrite["source_file"] == "kernel/rewrite/source/kernel.py"
+    assert "workspace" not in rewrite
+    assert "access_token" not in rewrite
 
 
 def test_a_section_nobody_staged_is_left_to_the_stack_scrape(tmp_path: Path) -> None:
@@ -1069,7 +1212,7 @@ def test_a_section_nobody_staged_is_left_to_the_stack_scrape(tmp_path: Path) -> 
         _state(tmp_path), tmp_path / "files", sections=sections
     )
     explore = bundle.knowledge["value"]["explore"]
-    assert explore["extra_envs"] == {"EXPLORE": "1"}
+    assert explore["extra_envs"] == {"VLLM_EXPLORE_TEST": "1"}
     assert bundle.knowledge["provenance"]["staged_sections"] == ["framework"]
 
 
@@ -1318,7 +1461,7 @@ def test_nonfinite_built_metrics_are_normalized(tmp_path: Path) -> None:
 def test_v1_conversion_helpers_round_trip_reader_fields() -> None:
     knowledge = convert_v1_recipe_to_knowledge(
         {
-            "best_config": {"args": "--foo", "envs": {"A": "1"}},
+            "best_config": {"args": "--foo", "envs": {"VLLM_LEGACY_TEST": "1"}},
             "best_throughput": 10.0,
             "validated_gain_pct": 2.0,
             "lessons": [{"statement": "keep foo"}],
@@ -1336,7 +1479,10 @@ def test_v1_conversion_helpers_round_trip_reader_fields() -> None:
             "knowledge": knowledge,
         }
     )
-    assert row["best_config"] == {"extra_server_args": "--foo", "extra_envs": {"A": "1"}}
+    assert row["best_config"] == {
+        "extra_server_args": "--foo",
+        "extra_envs": {"VLLM_LEGACY_TEST": "1"},
+    }
     assert row["best_throughput"] == 10.0
     assert row["validated_gain_pct"] == 2.0
     assert row["lessons"] == [{"statement": "keep foo"}]
