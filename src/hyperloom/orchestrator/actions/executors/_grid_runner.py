@@ -47,8 +47,8 @@ from .benchmark_result import (
 )
 from .benchmark_backend import build_benchmark_command
 from ._inferencex_patcher import (
-    ensure_benchmark_lib_eval_probe_patched,
     ensure_benchmark_lib_eval_start_patched,
+    ensure_eval_probe_patched,
 )
 
 # Re-exported from sibling modules to keep the module namespace intact.
@@ -990,22 +990,8 @@ def _run_magpie(
         # through that hook: re-assert here so a resumed session or a re-cloned
         # checkout still emits the eval-start marker and installs the
         # generation-pathology probe. Both idempotent.
-        try:
-            ensure_benchmark_lib_eval_start_patched(Path(inferencex_path))
-        except Exception as exc:  # noqa: BLE001 — patch is best-effort
-            log.warning(
-                "_grid_runner: eval-start patch skipped for %s: %s",
-                inferencex_path,
-                exc,
-            )
-        try:
-            ensure_benchmark_lib_eval_probe_patched(Path(inferencex_path))
-        except Exception as exc:  # noqa: BLE001 — patch is best-effort
-            log.warning(
-                "_grid_runner: eval-probe patch skipped for %s: %s",
-                inferencex_path,
-                exc,
-            )
+        ensure_benchmark_lib_eval_start_patched(Path(inferencex_path))
+        ensure_eval_probe_patched(Path(inferencex_path))
     # AgentX: deploy the aiperf client into InferenceX ``benchmarks/`` + preflight
     # aiperf right before Magpie runs it, via the shared helper (also used by the
     # baseline/profile shell-out). No-op under pytest / when AgentX is off (the
@@ -1248,7 +1234,7 @@ async def run_grid(
         try:
             from .baseline import _resolve_reference_base
 
-            _, _mn_ref_envs = _resolve_reference_base(Path("."), model_path=str(model_path or ""))
+            _, _mn_ref_envs = _resolve_reference_base(Path("."))
         except Exception as exc:  # noqa: BLE001 - reference base is additive; never block the grid
             log.debug("grid_runner: reference env resolve swallowed: %r", exc)
 
