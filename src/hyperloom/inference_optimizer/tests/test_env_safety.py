@@ -75,6 +75,11 @@ def test_common_env_safety_filters_dotenv_and_kernel_agent_keys_only():
     assert not common_env_safety.is_allowed_dotenv_key("BAD-NAME")
 
     assert common_env_safety.is_allowed_kernel_agent_env_key("TRACELENS_ROOT")
+    # install.sh persists the Anthropic header into kernel-agent.env.sh, so the
+    # reader must accept it; the OpenAI one is read on the same terms as the
+    # OpenAI URL and key already are.
+    assert common_env_safety.is_allowed_kernel_agent_env_key("ANTHROPIC_CUSTOM_HEADERS")
+    assert common_env_safety.is_allowed_kernel_agent_env_key("OPENAI_CUSTOM_HEADERS")
     assert common_env_safety.is_allowed_kernel_agent_env_key("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV")
     assert common_env_safety.is_allowed_kernel_agent_env_key("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS")
     # Dropped keys never reach the kernel-agent child, so an opt-in route switch
