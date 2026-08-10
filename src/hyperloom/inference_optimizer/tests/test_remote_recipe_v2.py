@@ -371,18 +371,54 @@ def test_bundle_rejects_path_mismatch_and_prefix(tmp_path: Path) -> None:
     source.write_text("x", encoding="utf-8")
     bundle = KnowledgeBundle({"value": {}}, [Artifact("explore/a", source)])
     with pytest.raises(RemoteRecipeValidationError, match="absent from knowledge"):
-        bundle.validate([])
+        bundle.validate()
     bad = KnowledgeBundle({"value": {}}, [Artifact("files/explore/a", source)])
     with pytest.raises(RemoteRecipeValidationError, match="files/ prefix"):
-        bad.validate(["files/explore/a"])
+        bad.validate()
+    missing = KnowledgeBundle(
+        {"value": {"explore": {"patches": ["explore/missing.patch"]}}}
+    )
+    with pytest.raises(RemoteRecipeValidationError, match="missing artifacts"):
+        missing.validate()
 
 
 def test_remote_client_internal_validation_error_paths(tmp_path: Path) -> None:
     assert _champion(None) == ("", 0.0, {})
-    assert _champion({"champion": {"value": "not-a-number"}})[1] == 0.0
-    assert _champion({"champion": {"optimized_throughput": 12.0}})[1] == 12.0
+    assert _champion({"sessions": [], "champion": None}) == ("", 0.0, {})
+    valid = {
+        "champion": {
+            "session_id": "best",
+            "metric": "optimized_throughput",
+            "value": 12.0,
+        }
+    }
+    assert _champion(valid, validate_metric=True)[1] == 12.0
+    with pytest.raises(RemoteRecipeValidationError, match="missing champion"):
+        _champion({})
+    with pytest.raises(RemoteRecipeValidationError, match="sessions but no champion"):
+        _champion({"sessions": [{"session_id": "candidate"}], "champion": None})
+    with pytest.raises(RemoteRecipeValidationError, match="must be numeric"):
+        _champion(
+            {
+                "champion": {
+                    "session_id": "best",
+                    "metric": "optimized_throughput",
+                    "value": "not-a-number",
+                }
+            },
+            validate_metric=True,
+        )
     with pytest.raises(RemoteRecipeValidationError, match="finite"):
-        _champion({"champion": {"value": float("inf")}})
+        _champion(
+            {
+                "champion": {
+                    "session_id": "best",
+                    "metric": "optimized_throughput",
+                    "value": float("inf"),
+                }
+            },
+            validate_metric=True,
+        )
 
     with pytest.raises(RemoteRecipeValidationError, match="listing must be"):
         _validate_download_listing([])
@@ -429,19 +465,8 @@ def test_remote_client_internal_validation_error_paths(tmp_path: Path) -> None:
         def get_best_record(self, _canonical_id):
             return self.envelope
 
-    class _LegacyReadStore:
-        def get_rollup(self, _canonical_id):
-            return None
-
-        def get_session(self, *_args):
-            raise AssertionError("read must not fetch a separate session document")
-
     identity = "inference:m:h:f:mt:a:v:p"
     assert RemoteRecipeClient(_ReadStore()).read(identity, tmp_path / "miss") is None  # type: ignore[arg-type]
-    assert RemoteRecipeClient(_LegacyReadStore()).read(  # type: ignore[arg-type]
-        identity,
-        tmp_path / "legacy-method-name-miss",
-    ) is None
 
 
 def test_artifact_rejects_symlink_and_oversized_file(tmp_path: Path) -> None:
@@ -464,7 +489,7 @@ def test_path_limit_and_strict_json_validation(tmp_path: Path) -> None:
     with pytest.raises(RemoteRecipeValidationError, match="1024-byte"):
         Artifact("x" * (MAX_PATH_BYTES + 1), source).validate()
     with pytest.raises(RemoteRecipeValidationError, match="strict JSON"):
-        KnowledgeBundle({"bad": float("nan")}).validate([])
+        KnowledgeBundle({"bad": float("nan")}).validate()
 
 
 def test_warm_replay_and_non_keep_actions_do_not_enable_write(tmp_path: Path) -> None:
@@ -610,7 +635,12 @@ def test_degraded_kb_skips_remote_close_writer(
         ),
     )
 
-    WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    assert outcome == {
+        "status": "skipped",
+        "reason": "degraded_kb",
+        "backend": "disabled",
+    }
 
 
 def test_local_close_ignores_ambient_kb_store(
@@ -644,7 +674,12 @@ def test_local_close_ignores_ambient_kb_store(
             )
         ),
     )
-    WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    assert outcome == {
+        "status": "skipped",
+        "reason": "no_recipe_backend",
+        "backend": "local",
+    }
     assert calls == []
 
 
@@ -695,7 +730,14 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
         "from_env",
         classmethod(lambda cls: _Facade()),
     )
-    WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    assert outcome == {
+        "status": "written",
+        "reason": "",
+        "backend": "kb-store",
+        "canonical_id": "inference:m:h:f:mt:a:v:p",
+        "session_id": tmp_path.name,
+    }
     assert calls == [
         (
             "inference:m:h:f:mt:a:v:p",
@@ -750,7 +792,14 @@ def test_remote_close_transport_failure_is_nonfatal(
             )
         ),
     )
-    WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    assert outcome == {
+        "status": "error",
+        "reason": "OSError",
+        "backend": "kb-store",
+        "canonical_id": "inference:m:h:f:mt:a:v:p",
+        "session_id": tmp_path.name,
+    }
     from hyperloom.inference_optimizer.session.session_paths import (
         recipe_snapshot_audit_jsonl,
     )
@@ -768,7 +817,7 @@ class _FakeStore:
         *,
         champion: float = 0.0,
         conflict: bool = False,
-        metric: str | None = None,
+        metric: str | None = "optimized_throughput",
     ) -> None:
         self.champion = champion
         self.conflict = conflict
@@ -932,6 +981,60 @@ def test_weaker_session_skips_before_upload(tmp_path: Path) -> None:
     assert [call[0] for call in store.calls] == ["get_rollup"]
 
 
+@pytest.mark.parametrize(
+    "rollup,match",
+    [
+        ({}, "missing champion"),
+        (
+            {"sessions": [{"session_id": "candidate"}], "champion": None},
+            "sessions but no champion",
+        ),
+        ({"sessions": [], "champion": "bad"}, "must be an object"),
+    ],
+)
+def test_malformed_rollup_fails_closed_before_write(
+    tmp_path: Path,
+    rollup: dict,
+    match: str,
+) -> None:
+    class _MalformedRollupStore(_FakeStore):
+        def get_rollup(self, canonical_id):
+            self.calls.append(("get_rollup", canonical_id))
+            return rollup
+
+    store = _MalformedRollupStore()
+    with pytest.raises(RemoteRecipeValidationError, match=match):
+        write_final_remote_recipe(
+            _state(tmp_path),
+            "inference:m:h:f:mt:a:v:p",
+            "session-1",
+            client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+        )
+    assert [call[0] for call in store.calls] == ["get_rollup"]
+
+
+def test_absent_rollup_is_treated_as_first_write(tmp_path: Path) -> None:
+    class _FirstWriteStore(_FakeStore):
+        def get_rollup(self, canonical_id):
+            self.calls.append(("get_rollup", canonical_id))
+            return None
+
+    store = _FirstWriteStore()
+    result = write_final_remote_recipe(
+        _state(tmp_path),
+        "inference:m:h:f:mt:a:v:p",
+        "session-1",
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+    assert result.status == "written"
+    assert [call[0] for call in store.calls] == [
+        "get_rollup",
+        "put_dir",
+        "put_knowledge",
+        "set_champion",
+    ]
+
+
 def test_non_throughput_champion_metric_is_rejected(tmp_path: Path) -> None:
     store = _FakeStore(champion=1.0, metric="latency_ms")
     with pytest.raises(RemoteRecipeValidationError, match="latency_ms"):
@@ -1007,29 +1110,6 @@ def test_read_sequence_writes_flat_recipe_and_files_only(tmp_path: Path) -> None
         tmp_path / "bundle" / "files" / "kernel" / "rewrite" / "verified.bin"
     ).read_bytes() == _DOWNLOAD_BYTES
     assert {path.name for path in destination.iterdir()} == {"recipe.json", "files"}
-
-
-def test_read_supports_old_vendored_best_record_method_name(tmp_path: Path) -> None:
-    class _LegacyMethodStore(_FakeStore):
-        get_best_record = None
-
-        def get_rollup(self, canonical_id):
-            self.calls.append(("get_rollup", canonical_id))
-            return self.envelope
-
-    store = _LegacyMethodStore()
-    row = read_remote_recipe(
-        "inference:m:h:f:mt:a:v:p",
-        tmp_path / "legacy-method-name",
-        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
-    )
-
-    assert row is not None
-    assert [call[0] for call in store.calls] == [
-        "get_rollup",
-        "list_session_files",
-        "download_session",
-    ]
 
 
 def test_read_pins_manifest_against_download_relisting(tmp_path: Path) -> None:
@@ -1177,6 +1257,8 @@ def test_agent_staged_sections_are_sanitized_at_publish_boundary(
     tmp_path: Path,
 ) -> None:
     sections = _sections(tmp_path)
+    source = tmp_path / "kernel.py"
+    source.write_text("pass\n", encoding="utf-8")
     sections.write(
         "kernel",
         {
@@ -1187,9 +1269,11 @@ def test_agent_staged_sections_are_sanitized_at_publish_boundary(
                 },
                 "workspace": "/home/operator/private/session",
                 "access_token": "secret",
-                "source_file": "kernel/rewrite/source/kernel.py",
+                "source_file": "kernel/rewrite/kernel.py",
             }
         },
+        files=[source],
+        kind="rewrite",
     )
 
     bundle = build_remote_knowledge(
@@ -1200,7 +1284,7 @@ def test_agent_staged_sections_are_sanitized_at_publish_boundary(
 
     rewrite = bundle.knowledge["value"]["kernel"]["rewrite"]
     assert rewrite["extra_envs"] == {"SGLANG_SAFE_TOGGLE": "1"}
-    assert rewrite["source_file"] == "kernel/rewrite/source/kernel.py"
+    assert rewrite["source_file"] == "kernel/rewrite/kernel.py"
     assert "workspace" not in rewrite
     assert "access_token" not in rewrite
 
@@ -1220,13 +1304,58 @@ def test_a_staged_file_is_published_under_its_own_section(tmp_path: Path) -> Non
     patch = tmp_path / "authored.patch"
     patch.write_text("authored", encoding="utf-8")
     sections = _sections(tmp_path)
-    sections.write("framework", {"note": "one"}, files=[patch], kind="patches")
+    sections.write(
+        "framework",
+        {
+            "note": "one",
+            "patches": ["framework/patches/authored.patch"],
+        },
+        files=[patch],
+        kind="patches",
+    )
     bundle = build_remote_knowledge(
         _state(tmp_path), tmp_path / "files", sections=sections
     )
     published = {artifact.path for artifact in bundle.artifacts}
     assert "framework/patches/authored.patch" in published
     assert (tmp_path / "files" / "framework" / "patches" / "authored.patch").is_file()
+
+
+def test_orphaned_staged_file_is_rejected(tmp_path: Path) -> None:
+    patch = tmp_path / "orphan.patch"
+    patch.write_text("orphan", encoding="utf-8")
+    sections = _sections(tmp_path)
+    sections.write("framework", {"note": "no ref"}, files=[patch], kind="patches")
+
+    with pytest.raises(
+        RemoteRecipeValidationError,
+        match="absent from final knowledge",
+    ):
+        build_remote_knowledge(
+            _state(tmp_path),
+            tmp_path / "files-orphan",
+            sections=sections,
+        )
+
+
+def test_conflicting_staged_artifact_bytes_are_rejected(tmp_path: Path) -> None:
+    staged_patch = tmp_path / "staged" / "explore.patch"
+    staged_patch.parent.mkdir()
+    staged_patch.write_text("different", encoding="utf-8")
+    sections = _sections(tmp_path)
+    sections.write(
+        "explore",
+        {"patches": ["explore/patches/explore.patch"]},
+        files=[staged_patch],
+        kind="patches",
+    )
+
+    with pytest.raises(RemoteRecipeValidationError, match="conflicting artifact"):
+        build_remote_knowledge(
+            _state(tmp_path),
+            tmp_path / "files-conflict",
+            sections=sections,
+        )
 
 
 def test_the_kernel_column_keeps_the_sub_columns_the_agent_left_alone(

@@ -3,6 +3,10 @@
 
 """The kernel agent's own columns of this run's knowledge document.
 
+This module defines the handoff surface only. GEMM, fusion and rewrite
+production call sites are intentionally owned by their agent implementations
+and are not wired by the Remote Recipe migration itself.
+
 The document keeps one column per producer, and the kernel column keeps one
 sub-column per kernel backend::
 

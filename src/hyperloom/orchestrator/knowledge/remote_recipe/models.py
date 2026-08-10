@@ -14,6 +14,32 @@ MAX_KNOWLEDGE_BYTES = 5 * 1024 * 1024
 MAX_FILES = 512
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_PATH_BYTES = 1024
+_ARTIFACT_REF_KEYS: frozenset[str] = frozenset(
+    {
+        "artifact_files",
+        "artifact_path",
+        "artifacts",
+        "bench_script",
+        "changed_files",
+        "config_file",
+        "experience_document",
+        "files",
+        "final_report_path",
+        "launch_script",
+        "overlay_files",
+        "patch",
+        "patch_path",
+        "patches",
+        "patches_applied",
+        "report",
+        "report_path",
+        "source_file",
+        "source_files",
+        "target_file",
+        "target_files",
+        "tuned_file",
+    }
+)
 
 
 class RemoteRecipeValidationError(ValueError):
@@ -36,6 +62,43 @@ def validate_relative_path(value: str) -> str:
     if normalized == "files" or normalized.startswith("files/"):
         raise RemoteRecipeValidationError("knowledge paths must not include the bundle files/ prefix")
     return normalized
+
+
+def extract_knowledge_artifact_refs(
+    knowledge: Any,
+    artifact_paths: Iterable[str] = (),
+) -> set[str]:
+    """Collect artifact refs actually present in the final knowledge document."""
+    known_paths = {
+        validate_relative_path(path)
+        for path in artifact_paths
+        if str(path or "").strip()
+    }
+    refs: set[str] = set()
+
+    def visit(value: Any, *, key: str = "") -> None:
+        if isinstance(value, dict):
+            for nested_key, nested_value in value.items():
+                visit(nested_value, key=str(nested_key))
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                visit(item, key=key)
+            return
+        if not isinstance(value, str):
+            return
+        raw = value.strip()
+        if not raw or "://" in raw:
+            return
+        if raw in known_paths or key in _ARTIFACT_REF_KEYS:
+            try:
+                refs.add(validate_relative_path(raw))
+            except RemoteRecipeValidationError:
+                if key in _ARTIFACT_REF_KEYS:
+                    raise
+
+    visit(knowledge)
+    return refs
 
 
 @dataclass(frozen=True)
@@ -67,7 +130,7 @@ class KnowledgeBundle:
     knowledge: dict[str, Any]
     artifacts: list[Artifact] = field(default_factory=list)
 
-    def validate(self, referenced_paths: Iterable[str]) -> None:
+    def validate(self) -> None:
         try:
             encoded = json.dumps(
                 self.knowledge,
@@ -92,7 +155,7 @@ class KnowledgeBundle:
             if normalized in paths:
                 raise RemoteRecipeValidationError(f"duplicate artifact path: {normalized}")
             paths.add(normalized)
-        refs = {validate_relative_path(path) for path in referenced_paths if str(path or "").strip()}
+        refs = extract_knowledge_artifact_refs(self.knowledge, paths)
         missing = refs - paths
         unreferenced = paths - refs
         if missing:
@@ -121,5 +184,6 @@ __all__ = [
     "MAX_PATH_BYTES",
     "RemoteRecipeValidationError",
     "RemoteWriteResult",
+    "extract_knowledge_artifact_refs",
     "validate_relative_path",
 ]
