@@ -170,7 +170,7 @@ Hyperloom does not install ROCm or torch itself.
      - Notes
    * - ROCm
      - 7.2.x
-     - Bare-metal patch level differs per framework: the vLLM stack uses ROCm 7.2.2 and the SGLang stack uses ROCm 7.2.0 (see the note below). ``docker`` mode uses ROCm 7.2.0 for both frameworks (the ``-rocm720-`` images).
+     - Bare-metal patch level differs per framework: the vLLM stack uses ROCm 7.2.3 and the SGLang stack uses ROCm 7.2.0 (see the note below). ``docker`` mode uses the ``rocm/hyperloom`` images (ROCm 7.2.x) for both frameworks.
    * - Python
      - 3.12
      - Required by the vLLM ROCm wheel.
@@ -179,19 +179,18 @@ Hyperloom does not install ROCm or torch itself.
      - Preinstalled by the operator; not managed by Hyperloom.
    * - SGLang
      - v0.5.16 (rocm720)
-     - Installed in ``shared`` mode (reuses the host torch). Uses the ROCm 7.2.0 AMD wheel index (``SGLANG_ROCM_EXTRA=rocm720``), so the SGLang ROCm layer is 7.2.0.
+     - Installed in ``shared`` mode (reuses the host torch). Uses the ROCm 7.2.0 AMD wheel index (``SGLANG_ROCM_EXTRA=rocm720``), so the SGLang ROCm layer is 7.2.0. Note: ``SGLANG_REF`` (v0.5.16) only pins the version on the source-install branch (non-3.10 Python); on Python 3.10 the AMD wheel index installs ``amd-sglang`` unpinned, which may resolve to a different patch release.
    * - vLLM
-     - v0.24.0 (rocm722), isolated venv
-     - Installs ``vllm==0.24.0+rocm722`` from the wheels.vllm.ai pip index. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
+     - v0.24.0 (rocm723), isolated venv
+     - Installs ``vllm==0.24.0+rocm723`` from the wheels.vllm.ai pip index. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
 
 Bare-metal ROCm patch levels differ per framework. The vLLM version matches the
-``v0.24.0`` Docker image, but the pip index only publishes the ``rocm722``
-variant (ROCm 7.2.2), so the bare-metal vLLM ROCm layer is 7.2.2 rather than the
-image's rocm720. The SGLang stack installs from the ROCm 7.2.0 AMD wheel index,
-so its ROCm layer is 7.2.0. In ``docker`` mode both frameworks use ROCm 7.2.0
-(the ``-rocm720-`` images). For a fully validated, pre-aligned vLLM stack with
-rocm720, prefer ``docker`` mode with
-``rocm/hyperloom:vllm-v0.24.0-rocm7.2.0``.
+``v0.24.0`` Docker image; the pip index publishes 0.24.0 only as the ``rocm723``
+variant (ROCm 7.2.3), so the bare-metal vLLM ROCm layer is 7.2.3. The SGLang
+stack installs from the ROCm 7.2.0 AMD wheel index, so its ROCm layer is 7.2.0.
+In ``docker`` mode both frameworks use the ``rocm/hyperloom`` images (ROCm
+7.2.x). For a fully validated, pre-aligned vLLM stack, prefer ``docker`` mode
+with ``rocm/hyperloom:vllm-v0.24.0-rocm7.2.0``.
 
 These are recommended defaults, not hard pins. Framework and ROCm versions are
 overridable via env (``SGLANG_REF``, ``SGLANG_ROCM_EXTRA``, ``VLLM_VERSION``,
