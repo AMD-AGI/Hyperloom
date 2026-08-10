@@ -44,6 +44,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.sanitize import (
     sanitize_publish_server_args,
     sanitize_shared_knowledge,
 )
+from hyperloom.orchestrator.knowledge.remote_recipe.values import _Files
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 
 _DOWNLOAD_BYTES = b"verified artifact"
@@ -380,6 +381,27 @@ def test_bundle_rejects_path_mismatch_and_prefix(tmp_path: Path) -> None:
     )
     with pytest.raises(RemoteRecipeValidationError, match="missing artifacts"):
         missing.validate()
+
+
+def test_mixed_slash_free_text_is_not_treated_as_an_artifact_ref(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "accepted.patch"
+    source.write_text("diff", encoding="utf-8")
+    files = _Files(tmp_path / "bundle-files")
+    ref = files.add(source, category="explore", kind="patches")
+    knowledge = {
+        "value": {
+            "explore": {
+                "patches": [ref],
+                "patch": "see notes at a/b\\c",
+            }
+        }
+    }
+
+    files.prune_superseded(knowledge)
+    assert [artifact.path for artifact in files.artifacts] == [ref]
+    KnowledgeBundle(knowledge, files.artifacts).validate()
 
 
 def test_remote_client_internal_validation_error_paths(tmp_path: Path) -> None:
