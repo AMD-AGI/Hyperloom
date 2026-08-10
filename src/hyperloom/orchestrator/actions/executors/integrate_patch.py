@@ -57,7 +57,7 @@ from ._grid_runner import (
     sanitize_script_name,
 )
 from . import _framework_switch_manifest as _switch_manifest
-from ._grid_server_args import merge_server_args, split_config_changes
+from ._grid_server_args import compose_server_args, merge_server_args, split_config_changes  # noqa: F401
 from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
 from ._workload_envs import (
     FrameworkScriptMismatchError,
@@ -2812,9 +2812,27 @@ class IntegratePatchExecutor:
             "setup_commands_applied": list(setup_result.get("applied") or []),
             "bench_result": bench_result,
             "workspace": str(output_root),
-            # The actual materialized config from the KEEP'd bench, used for
-            # revalidation baseline so the same effective config is re-run.
+            # Base YAML from the KEEP'd bench (RUN_EVAL layer only; variant envs/args
+            # are recorded separately in enablement_effective_config).
             "enablement_accepted_config_path": str(bench_result.get("materialized_config") or ""),
+            # Full effective launch config: base stack layer merged with the variant's
+            # own levers, mirroring what _bench_patch passed to GridVariant at run time.
+            "enablement_effective_config": {
+                "extra_envs": {
+                    **dict(params.get("base_extra_envs") or {}),
+                    **extra_envs_applied,
+                },
+                "extra_server_args": compose_server_args(
+                    inherited_args="",
+                    base_extra_args=str(params.get("base_extra_args") or ""),
+                    variant_extra_args=extra_server_args_applied,
+                    remove_args=params.get("base_remove_args"),
+                    args_mode=str(params.get("base_args_mode") or "append"),
+                ),
+                "remove_args": list(params.get("base_remove_args") or []),
+                "unset_envs": list(params.get("base_unset_envs") or []),
+                "args_mode": str(params.get("base_args_mode") or "append"),
+            },
             **eval_provenance,
         }
         # Record the KEEP'd attempt runtime so it survives rearm and every later
