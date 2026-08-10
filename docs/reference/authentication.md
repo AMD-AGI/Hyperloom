@@ -199,10 +199,9 @@ Each side reads only its own variable: the Anthropic side never picks up
 `OPENAI_CUSTOM_HEADERS`, and the reverse. Headers are operator-supplied and are
 never synthesized from the configured keys.
 
-The two variables are not persisted symmetrically. `ANTHROPIC_CUSTOM_HEADERS`
-survives in `.env`, but bare-metal setup drops `OPENAI_CUSTOM_HEADERS` from `.env`
-whenever it writes resolved credentials. Export the OpenAI-side header in the
-shell, or re-add it after running setup.
+Both survive in `.env` across setup runs. An Anthropic-only deployment is the one
+exception: setup scrubs the whole OpenAI side there, header included, because that
+side is a second provider rather than part of the same gateway credential.
 
 ---
 

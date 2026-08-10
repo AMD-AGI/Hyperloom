@@ -1294,9 +1294,13 @@ resolve_credentials() {
       [ -n "${CLAUDE_MODEL:-}" ] && upsert_dotenv_var CLAUDE_MODEL "$CLAUDE_MODEL"
       [ -n "${CODEX_MODEL:-}" ] && upsert_dotenv_var CODEX_MODEL "$CODEX_MODEL"
     elif [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
-      # Anthropic-only deployment: scrub the other provider's entries.
+      # Anthropic-only deployment: scrub the other provider's entries. The
+      # custom header belongs to that side, so it leaves with its URL and key --
+      # a dual-protocol gateway takes the branch above and keeps all three,
+      # which is the only place a header-authenticated OpenAI route is stored.
       remove_dotenv_var OPENAI_API_KEY
       remove_dotenv_var OPENAI_BASE_URL
+      remove_dotenv_var OPENAI_CUSTOM_HEADERS
     fi
     # Drop the retired keys only now: dropping them inside the migration would
     # discard the operator's only copy if validation above had bailed out.
@@ -1307,7 +1311,6 @@ resolve_credentials() {
     fi
     remove_dotenv_var LLM_GATEWAY_KEY
     remove_dotenv_var ANTHROPIC_AUTH_TOKEN
-    remove_dotenv_var OPENAI_CUSTOM_HEADERS
     # Legacy gateway key: not read, purged if present.
     remove_dotenv_var SAFE_API_KEY
     log "credentials written to ${DOTENV}"
