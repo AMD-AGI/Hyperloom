@@ -44,6 +44,8 @@ subtrees:
   entries:
   - file: how-to/optimize.md
     title: Run a Hyperloom optimization
+  - file: how-to/optimize-custom-workload.md
+    title: Optimize your own workload
   - file: how-to/quantization-quark.md
     title: Quantization with AMD Quark
   - file: how-to/multi-node/hyperloom-remote-demo.md

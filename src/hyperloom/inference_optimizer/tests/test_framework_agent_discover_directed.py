@@ -33,7 +33,6 @@ class _StateStub:
         self.gpu_type = "MI300X"
         self.model_class = "dense"
         self.precision = "fp8"
-        self.framework_max_candidates = 0
         self.last_profile_kernel_breakdown = None
 
     def save(self, _session_dir: Path) -> None:
@@ -82,6 +81,14 @@ def test_repo_urls_cover_global_allowlist_with_framework_primary():
         expected = f"https://github.com/{repo}.git"
         assert expected in urls or repo in "".join(urls)
     assert len(urls) == len(set(urls))
+
+
+def test_scriptable_repo_urls_skip_serving_allowlist_when_primary_repo_exists():
+    """Scriptable model repos are not compatible with serving-framework PR diffs."""
+    stub = _CoordinatorStub(Path("/tmp"))
+    urls = stub._framework_agent_discover_repo_urls("xdit")
+
+    assert urls == ["https://github.com/xdit-project/xDiT.git"]
 
 
 def test_discover_merges_candidates_across_repos(
@@ -152,16 +159,21 @@ def test_discover_uses_max_candidates_override(
 
     monkeypatch.setattr(_fa_client, "phase_discover", _spy)
     stub = _CoordinatorStub(tmp_path)
-    stub.shared_state.framework_max_candidates = 13
 
     _call_discover(stub)
-    assert captured["max_candidates"] == 13
+    assert captured["max_candidates"] == DEFAULT_FRAMEWORK_MAX_CANDIDATES
 
 
-def test_discover_default_max_candidates_when_unset(
+def test_discover_cap_is_not_configurable_through_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """The per-repo cap is a constant, and no state field may appear to move it.
+
+    A SharedState field used to sit in front of this constant with no writer
+    and no CLI, so it read as a knob while always resolving to the default.
+    Setting a same-named attribute must not change what discovery asks for.
+    """
     captured: dict[str, Any] = {}
 
     async def _spy(**kwargs: Any) -> dict[str, Any]:
@@ -170,7 +182,7 @@ def test_discover_default_max_candidates_when_unset(
 
     monkeypatch.setattr(_fa_client, "phase_discover", _spy)
     stub = _CoordinatorStub(tmp_path)
-    stub.shared_state.framework_max_candidates = 0
+    stub.shared_state.framework_max_candidates = 13
 
     _call_discover(stub)
     assert captured["max_candidates"] == DEFAULT_FRAMEWORK_MAX_CANDIDATES

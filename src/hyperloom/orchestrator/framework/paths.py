@@ -19,6 +19,11 @@ import sys
 import sysconfig
 from pathlib import Path
 
+#: Framework-agnostic way to name the source tree a session may patch. Accepted in
+#: addition to ``<FRAMEWORK>_REPO_PATH`` / ``<FRAMEWORK>_DIR``, which keep
+#: precedence; see :func:`_discover_explicit_framework_root`.
+GENERIC_FRAMEWORK_ROOT_ENV: str = "FRAMEWORK_REPO_PATH"
+
 _DEFAULT_SOURCE_ROOTS: tuple[str, ...] = (
     "/sgl-workspace/aiter/",
     "/sgl-workspace/sglang/",
@@ -54,6 +59,62 @@ def resolve_rocm_hip_source_roots() -> tuple[str, ...]:
         tuple[str, ...]: :data:`_ROCM_HIP_SOURCE_ROOTS`.
     """
     return _ROCM_HIP_SOURCE_ROOTS
+
+
+# FlyDSL checkout roots. Env overrides come first, then the image defaults.
+_FLYDSL_ROOT_ENV_KEYS: tuple[str, ...] = ("DSL2_ROOT", "FLYDSL_ROOT")
+_FLYDSL_DEFAULT_ROOTS: tuple[str, ...] = ("/opt/flydsl/", "/sgl-workspace/flydsl/")
+
+
+def resolve_flydsl_source_roots() -> tuple[str, ...]:
+    """Return the FlyDSL checkout roots for patch-target matching.
+
+    Included in :func:`resolve_patch_target_roots` but deliberately not in
+    :func:`resolve_source_file_allowlist`: FlyDSL is a rewrite target for the
+    kernel agent, not a framework the specialist may edit.
+
+    An env-supplied root is emitted both case-preserved and lower-cased,
+    because the patchability and apply gates match a lower-cased path against
+    these roots verbatim while path-resolving consumers need the real case.
+
+    Returns:
+        tuple[str, ...]: The de-duplicated FlyDSL roots.
+    """
+    out: list[str] = []
+    for key in _FLYDSL_ROOT_ENV_KEYS:
+        root = _normalize_root(os.environ.get(key, ""))
+        if root:
+            out.extend((root, root.lower()))
+    out.extend(_FLYDSL_DEFAULT_ROOTS)
+    return _merge_roots(tuple(out))
+
+
+#: FlyDSL hashes every ``.py`` under these dirs into its JIT cache key.
+ENV_FLYDSL_EXTRA_SOURCE_DIRS = "FLYDSL_EXTRA_SOURCE_DIRS"
+
+
+def flydsl_extra_source_dirs() -> str:
+    """Value for ``$FLYDSL_EXTRA_SOURCE_DIRS``: the FlyDSL roots that exist.
+
+    FlyDSL's cache key covers the traced function and same-directory helpers
+    only, so an edited helper in a sibling directory does not invalidate it and
+    the stale binary is reused. Listing the roots here folds their sources into
+    the key, re-compiling only the kernels that actually changed.
+
+    Any operator-supplied value is preserved and comes first.
+
+    Returns:
+        str: Existing roots joined by ``:`` (empty when none exist).
+    """
+    found: list[str] = []
+    preset = os.environ.get(ENV_FLYDSL_EXTRA_SOURCE_DIRS, "").strip()
+    if preset:
+        found.extend(p for p in preset.split(":") if p.strip())
+    for root in resolve_flydsl_source_roots():
+        path = Path(root.rstrip("/"))
+        if path.is_dir() and str(path) not in found:
+            found.append(str(path))
+    return ":".join(found)
 
 
 # Minimal static fallbacks when importlib/glob find nothing (image defaults).
@@ -248,6 +309,101 @@ def _discover_installed_framework_roots() -> tuple[str, ...]:
     return tuple(found)
 
 
+def _scriptable_frameworks() -> tuple[str, ...]:
+    """Return the registered scriptable framework names (empty on import error).
+
+    Imported lazily: ``framework_registry`` lives in ``inference_optimizer`` and
+    importing it at module scope would close a cycle back through this package.
+
+    Returns:
+        tuple[str, ...]: Scriptable framework names, or ``()`` when the registry
+            cannot be imported.
+    """
+    try:
+        from hyperloom.inference_optimizer import framework_registry as _reg
+
+        return tuple(name for name in _reg.names() if _reg.is_scriptable(name))
+    except Exception:  # noqa: BLE001 - discovery must never break path resolution
+        return ()
+
+
+def _framework_repo_dirname(framework: str) -> str:
+    """Return the checkout directory name implied by a framework's repo URL.
+
+    ``my-framework.git`` -> ``my-framework``. Used so a checkout whose directory
+    name differs from the framework name still registers as discovered.
+
+    Args:
+        framework (str): Registered framework name.
+
+    Returns:
+        str: The bare repo directory name, or ``""`` when unknown.
+    """
+    try:
+        from hyperloom.inference_optimizer import framework_registry as _reg
+
+        spec = _reg.FRAMEWORKS.get(framework)
+        url = str(getattr(spec, "repo_url", "") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+    if not url:
+        return ""
+    name = url.rstrip("/").rsplit("/", 1)[-1]
+    return name[:-4] if name.endswith(".git") else name
+
+
+def _discover_scriptable_repo_roots() -> tuple[str, ...]:
+    """Discover git-checkout roots for scriptable frameworks.
+
+    A scriptable framework runs out of a repo checkout
+    instead of a pip-installed package, so importlib spec origins and the
+    site-packages globs never see them. Materialization exports the resolved
+    checkout as ``<FRAMEWORK>_REPO_PATH`` / ``<FRAMEWORK>_DIR``; without those
+    roots PolicyGate rejects every patch against the framework's own source and
+    framework-agent cannot touch the code it is meant to optimize.
+
+    Returns:
+        tuple[str, ...]: Normalised, de-duplicated checkout roots that exist.
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+    for framework in _scriptable_frameworks():
+        prefix = framework.upper()
+        for var in (f"{prefix}_REPO_PATH", f"{prefix}_DIR"):
+            candidate = os.environ.get(var, "").strip()
+            if not candidate or not Path(candidate).is_dir():
+                continue
+            root = _normalize_root(candidate)
+            if root and root not in seen:
+                seen.add(root)
+                found.append(root)
+    return tuple(found)
+
+
+def _discover_explicit_framework_root() -> tuple[str, ...]:
+    """Discover the framework checkout named by the framework-agnostic env var.
+
+    ``<FRAMEWORK>_REPO_PATH`` requires the operator to know the framework name
+    before the right variable can be set, and to change variable names when
+    switching frameworks — for a value that cannot collide, since a session is
+    single-framework by construction (the CLI locks ``$FRAMEWORK``). This accepts
+    the same thing without the prefix, and unlike the scriptable discovery it is
+    not restricted to registered scriptable frameworks: an editable checkout of a
+    normally pip-installed framework is invisible to both importlib and the
+    site-packages scan, and this is how it gets pointed at.
+
+    A prefixed value keeps precedence, because it is the more specific statement.
+
+    Returns:
+        tuple[str, ...]: The normalised checkout root, or empty when unset or absent.
+    """
+    candidate = os.environ.get(GENERIC_FRAMEWORK_ROOT_ENV, "").strip()
+    if not candidate or not Path(candidate).is_dir():
+        return ()
+    root = _normalize_root(candidate)
+    return (root,) if root else ()
+
+
 def _discover_installed_package_roots() -> tuple[str, ...]:
     """Return active site/dist-packages roots available to specialists."""
     candidates: list[Path] = []
@@ -305,24 +461,50 @@ def resolve_source_file_allowlist() -> tuple[str, ...]:
         _DEFAULT_SOURCE_ROOTS,
         _discover_installed_package_roots(),
         _discover_installed_framework_roots(),
+        _discover_scriptable_repo_roots(),
+        _discover_explicit_framework_root(),
         env_roots,
         resolve_rocm_hip_source_roots(),
     )
+
+
+def resolve_session_framework_root() -> str:
+    """The one source tree this session was explicitly pointed at, or ``""``.
+
+    :func:`resolve_source_file_allowlist` answers "may this be edited", and its
+    order is an artefact of how the roots were discovered — ``/sgl-workspace/aiter/``
+    heads the static defaults, so it comes first whatever the session is
+    optimising. Anything that needs to name *the* tree under optimisation must
+    ask for it, not read position 0 of a permission set: a session that picked
+    the head of the allowlist got an aiter checkout, and every patch naming a
+    file in the real tree failed to apply against it.
+
+    Only the explicitly-named checkout counts. Discovery by import or by
+    globbing site-packages finds whatever the image happens to ship, which is
+    the same guess with more steps.
+
+    Returns:
+        str: The normalised checkout root, or ``""`` when the session named none.
+    """
+    roots = _discover_scriptable_repo_roots() or _discover_explicit_framework_root()
+    return roots[0] if roots else ""
 
 
 def resolve_patch_target_roots() -> tuple[str, ...]:
     """Roots for substring matching in patch apply + kernel classifiers.
 
     Same as :func:`resolve_source_file_allowlist` plus static fallbacks for
-    layouts that are not importable until first use (e.g. ``aiter_meta/csrc``).
+    layouts that are not importable until first use (e.g. ``aiter_meta/csrc``)
+    and the FlyDSL checkout roots.
 
     Returns:
         tuple[str, ...]: The allowlist roots merged with the static patch
-            fallback roots.
+            fallback roots and the FlyDSL roots.
     """
     return _merge_roots(
         resolve_source_file_allowlist(),
         _STATIC_PATCH_FALLBACK_ROOTS,
+        resolve_flydsl_source_roots(),
     )
 
 
@@ -343,7 +525,7 @@ def probe_framework_source_roots_for_env() -> str:
 
 
 # Ordered for deterministic substring matching (atom before vllm/sglang).
-_FRAMEWORK_BUCKETS: tuple[str, ...] = ("atom", "vllm", "sglang", "aiter", "xdit")
+_FRAMEWORK_BUCKETS: tuple[str, ...] = ("atom", "vllm", "sglang", "aiter", "xdit", "custom")
 
 
 def summarise_framework_root_discovery(roots: str) -> str:
@@ -362,8 +544,13 @@ def summarise_framework_root_discovery(roots: str) -> str:
     parts: list[str] = []
     items = [p.strip().lower() for p in (roots or "").split(":") if p.strip()]
     for fw in _FRAMEWORK_BUCKETS:
-        token = f"/{fw}/"
-        status = "ok" if any(item.endswith(token) for item in items) else "missing"
+        # A checkout directory rarely matches the framework name, so accept the
+        # repo dirname the registry implies too.
+        tokens = [f"/{fw}/"]
+        dirname = _framework_repo_dirname(fw)
+        if dirname:
+            tokens.append(f"/{dirname.lower()}/")
+        status = "ok" if any(item.endswith(t) for item in items for t in tokens) else "missing"
         parts.append(f"{fw}={status}")
     return " ".join(parts)
 
@@ -372,6 +559,7 @@ __all__ = [
     "probe_framework_source_roots_for_env",
     "resolve_patch_target_roots",
     "resolve_rocm_hip_source_roots",
+    "resolve_session_framework_root",
     "resolve_source_file_allowlist",
     "summarise_framework_root_discovery",
 ]

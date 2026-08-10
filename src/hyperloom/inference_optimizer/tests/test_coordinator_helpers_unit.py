@@ -188,12 +188,29 @@ def test_dedupe_normalizes_equals_form():
     assert out == "--attention-backend ROCM_AITER_FA"
 
 
-def test_dedupe_leaves_json_arg_untouched():
+def test_dedupe_preserves_json_and_collapses_other_flags():
     args = (
         '--json-model-override-args {"rope_scaling":null} '
         "--attention-backend ROCM_ATTN --attention-backend ROCM_AITER_FA"
     )
-    assert ch._dedupe_extra_server_args(args) == args
+    assert ch._dedupe_extra_server_args(args) == (
+        '--json-model-override-args {"rope_scaling":null} '
+        "--attention-backend ROCM_AITER_FA"
+    )
+
+
+def test_dedupe_warm_replay_json_flags_without_skipping_other_dedup():
+    args = (
+        """--speculative-config '{"method":"ngram","num_speculative_tokens":7}' """
+        """--compilation-config '{"pass_config":{"enable_sp":true}}' """
+        "--max-num-seqs 512 --max-num-seqs 1024"
+    )
+    out = ch._dedupe_extra_server_args(args)
+    assert out == (
+        '--speculative-config {"method":"ngram","num_speculative_tokens":7} '
+        '--compilation-config {"pass_config":{"enable_sp":true}} '
+        "--max-num-seqs 1024"
+    )
 
 
 # ---- _merge_cumulative_extra_server_args ----
@@ -228,12 +245,15 @@ def test_merge_dedupes_attention_backend_equals_space_mix():
     assert out == "--attention-backend ROCM_AITER_FA"
 
 
-def test_merge_leaves_json_arg_untouched():
+def test_merge_preserves_json_while_deduping_other_flags():
     args = (
         '--json-model-override-args {"rope_scaling":null} '
         "--attention-backend ROCM_ATTN --attention-backend ROCM_AITER_FA"
     )
-    assert _merge("", args, "") == args
+    assert _merge("", args, "") == (
+        '--json-model-override-args {"rope_scaling":null} '
+        "--attention-backend ROCM_AITER_FA"
+    )
 
 
 # ---- serialize_verdict_advisory ----

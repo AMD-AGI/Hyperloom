@@ -1197,7 +1197,11 @@ def test_framework_audit_llm_refine_fallbacks(monkeypatch: pytest.MonkeyPatch) -
         def __init__(self, **_kwargs):
             self.chat = SimpleNamespace(completions=_Completions())
 
-    monkeypatch.setitem(__import__("sys").modules, "openai", SimpleNamespace(OpenAI=_OpenAI))
+    # ``raising=False``: get_openai_client is llm_config's client-construction
+    # contract, so stubbing it keeps this test off the real ``openai`` SDK.
+    from hyperloom.common import llm_config
+
+    monkeypatch.setattr(llm_config, "get_openai_client", lambda **_kw: _OpenAI(), raising=False)
     refined = audit._maybe_llm_refine(
         {"api_key": "sk", "openai_base_url": "https://llm.example/v1", "model": "m"},
         dict(static),
@@ -1353,7 +1357,7 @@ def test_kb_writeback_default_root_uses_user_data_path(monkeypatch: pytest.Monke
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
-    assert kb_writeback._default_kb_root() == tmp_path / "workspace" / "kb" / "framework_optimization"
+    assert kb_writeback._default_kb_root() == tmp_path / "workspace" / "framework-kb" / "framework_optimization"
 
 
 async def test_kb_writeback_rejects_unknown_outcome() -> None:

@@ -16,6 +16,26 @@ import yaml
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
 
+@pytest.fixture(autouse=True)
+def _restore_environ():
+    """Roll back direct ``os.environ`` writes between tests in this module.
+
+    Materialization deliberately publishes the resolved checkout into the
+    orchestrator's own environment (that is how PolicyGate sees a scriptable
+    framework's source root), and monkeypatch cannot undo a direct write. Without
+    this, one test's published ``MYFW_DIR`` satisfies the next test's
+    resolution and the repo-URL fallback silently never runs.
+    """
+    import os
+
+    snapshot = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(snapshot)
+
+
 def _clear_env(monkeypatch):
     for k in (
         "TP",
@@ -31,6 +51,17 @@ def _clear_env(monkeypatch):
         "PROFILE",
         "MODEL_PATH",
         "INFERENCEX_PATH",
+        "MYFW_REPO",
+        "MYFW_REPO_PATH",
+        "MYFW_DIR",
+        "MYFW_REPO_URL",
+        "FRAMEWORK_REPO_PATH",
+        "MYFW_BENCH",
+        "MYFW_ACTION_CKPT",
+        "MYFW_REPO_PATH",
+        "MYFW_REPO_URL",
+        "MYFW_DIR",
+        "MYFW_BENCH",
         "HYPERLOOM_PROFILE_MAX_ITERS",
         "HYPERLOOM_PROFILE_DELAY_ITERS",
         "HYPERLOOM_PROFILE_MAX_STEPS_CAP",
@@ -39,6 +70,11 @@ def _clear_env(monkeypatch):
         "INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP",
         "XDIT_QUALITY_REF",
         "XDIT_QUALITY_REF_WRITE",
+        "HYPERLOOM_QUALITY_REF",
+        "HYPERLOOM_QUALITY_REF_WRITE",
+        "XDIT_MODEL_ARG",
+        "XDIT_MODEL_ROOT",
+        "XDIT_ATTENTION_BACKEND",
     ):
         monkeypatch.delenv(k, raising=False)
 
@@ -151,6 +187,8 @@ def test_default_baseline_config(monkeypatch):
     assert we.default_baseline_config().name == "baseline_atom.yaml"
     monkeypatch.setenv("FRAMEWORK", "vllm")
     assert we.default_baseline_config().name == "baseline_vllm.yaml"
+    monkeypatch.setenv("FRAMEWORK", "custom")
+    assert we.default_baseline_config().name == "baseline_custom.yaml"
     monkeypatch.setenv("FRAMEWORK", "weird")
     assert we.default_baseline_config().name == "baseline_sglang.yaml"
 
@@ -167,6 +205,24 @@ def test_precision_and_gpu_type_no_framework_agent(monkeypatch, tmp_path):
     bench = _materialize(src, tmp_path / "out", gpu_type="mi300x")
     assert bench["precision"] == "fp8"
     assert "benchmark_script" not in bench
+
+
+
+
+def test_bypass_scriptable_prefers_absolute_benchmark_script(tmp_path):
+    from hyperloom.orchestrator.actions.executors import bypass_scriptable
+
+    script = tmp_path / "custom_mi355x.sh"
+    script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+    resolved = bypass_scriptable.resolve_scriptable_script(
+        "custom",
+        "mi355x",
+        "",
+        {"benchmark_script": str(script)},
+    )
+
+    assert resolved == script
 
 
 def test_rocr_derives_tp(monkeypatch, tmp_path):
@@ -488,6 +544,61 @@ def test_quality_ref_baseline_establishes(monkeypatch, tmp_path):
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == "/ref/q.png"
 
 
+_XDIT_ONLY_ENVS = ("XDIT_MODEL_ARG", "XDIT_MODEL_ROOT", "XDIT_ATTENTION_BACKEND")
+
+
+def test_custom_baseline_gets_no_xdit_only_envs(monkeypatch, tmp_path):
+    # An operator-supplied workload declares its own contract, so nothing that
+    # only the xDiT runner reads may reach it -- least of all an attention
+    # backend on the BASELINE, which would make the reference measurement
+    # something the operator never asked for.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("XDIT_MODEL_ROOT", "/models")
+    src = _write(tmp_path / "cfg.yaml", framework="custom", envs={})
+    bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
+    for key in _XDIT_ONLY_ENVS:
+        assert key not in bench["envs"], f"{key} leaked into a custom baseline"
+
+
+def test_xdit_baseline_still_gets_xdit_only_envs(monkeypatch, tmp_path):
+    # The counterpart: scoping those envs to xdit must not disarm xdit itself.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("XDIT_MODEL_ROOT", "/models")
+    src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={})
+    bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
+    assert bench["envs"]["XDIT_MODEL_ARG"] == "name"
+    assert bench["envs"]["XDIT_MODEL_ROOT"] == "/models"
+    assert bench["envs"]["XDIT_ATTENTION_BACKEND"] == "aiter"
+
+
+def test_quality_ref_emitted_under_both_names(monkeypatch, tmp_path):
+    # The gate itself IS generic, so a custom workload keeps it. Both names are
+    # written so operator bench scripts reading either one resolve the same file.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_QUALITY_REF", "/ref/q.png")
+    src = _write(tmp_path / "cfg.yaml", framework="custom", envs={})
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["HYPERLOOM_QUALITY_REF"] == "/ref/q.png"
+    assert bench["envs"]["XDIT_QUALITY_REF"] == "/ref/q.png"
+    assert bench["envs"]["HYPERLOOM_QUALITY_REF_WRITE"] == ""
+    assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == ""
+
+
+def test_quality_ref_legacy_name_still_resolves(monkeypatch, tmp_path):
+    # Operator scripts that predate the rename set only the XDIT_ name; it must
+    # still select the reference until they migrate.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/legacy.png")
+    src = _write(tmp_path / "cfg.yaml", framework="custom", envs={})
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["HYPERLOOM_QUALITY_REF"] == "/ref/legacy.png"
+    assert bench["envs"]["XDIT_QUALITY_REF"] == "/ref/legacy.png"
+
+
 def test_quality_ref_baseline_write_env_override(monkeypatch, tmp_path):
     # Explicit XDIT_QUALITY_REF_WRITE wins over the derived path on baseline.
     _clear_env(monkeypatch)
@@ -548,3 +659,10 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
     expected = str(sess / "storage" / "quality_ref" / "baseline.png")
     assert bench["envs"]["XDIT_QUALITY_REF"] == ""
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == expected
+
+
+# ---------------------------------------------------------------------------
+# Scriptable baseline sampling cost (measurement contract values)
+# ---------------------------------------------------------------------------
+
+

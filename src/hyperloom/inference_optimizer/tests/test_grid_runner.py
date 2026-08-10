@@ -1127,9 +1127,8 @@ class TestDedupVllmServerArgs:
         # STRIPPED the inner double quotes of a compact --compilation-config
         # JSON value (``{"cudagraph_mode":"PIECEWISE"}`` -> ``{cudagraph_mode:
         # PIECEWISE}``) and crashed every explore/kernel/integrate variant
-        # server with ``Invalid JSON``. Listing --compilation-config (and the
-        # other JSON-object flags) in _SPACE_VALUE_FLAGS makes dedup leave the
-        # whole string untouched so the JSON round-trips.
+        # server with ``Invalid JSON``. JSON-aware tokenization must preserve
+        # that value while still collapsing unrelated duplicate flags.
         raw = (
             '--compilation-config {"cudagraph_mode":"PIECEWISE"} '
             "--block-size 128 --block-size 128 --gpu-memory-utilization 0.95"
@@ -1137,11 +1136,13 @@ class TestDedupVllmServerArgs:
         out = _grid_runner.dedup_vllm_server_args(raw, "vllm")
         assert '{"cudagraph_mode":"PIECEWISE"}' in out
         assert "{cudagraph_mode:PIECEWISE}" not in out
+        assert out.count("--block-size") == 1
 
     def test_speculative_config_quotes_survive_dedup(self):
         raw = '--speculative-config {"method":"eagle"} --max-num-seqs 256 --max-num-seqs 256'
         out = _grid_runner.dedup_vllm_server_args(raw, "vllm")
         assert '{"method":"eagle"}' in out
+        assert out.count("--max-num-seqs") == 1
 
     def test_equals_form_is_deduped(self):
         out = _grid_runner.dedup_vllm_server_args(
@@ -1202,10 +1203,17 @@ class TestDedupVllmServerArgs:
         )
         assert out == "--attention-backend C"
 
-    def test_json_space_value_flag_left_untouched(self):
-        # A flag carrying a JSON/space value must not be tokenized and re-joined;
-        # leave the whole string verbatim even with a duplicate flag present.
+    def test_json_flag_does_not_disable_other_flag_dedup(self):
         raw = "--attention-backend A --attention-backend B --override-generation-config '{\"temperature\": 0.7}'"
+        out = _grid_runner.dedup_vllm_server_args(raw, "vllm")
+        assert out == '--attention-backend B --override-generation-config {"temperature":0.7}'
+
+    def test_json_string_with_internal_space_fails_closed(self):
+        raw = '--attention-backend A --attention-backend B --speculative-config \'{"model":"draft model"}\''
+        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+
+    def test_quoted_non_json_operand_fragments_fail_closed(self):
+        raw = '--tool-call-parser "my parser" --max-num-seqs 512 --max-num-seqs 1024'
         assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
 
     def test_multi_value_flag_left_untouched(self):
@@ -1379,6 +1387,17 @@ class TestCompactJsonServerArgs:
             "nested": {"a": 1},
         }
 
+    def test_shell_single_quote_wrappers_are_removed(self):
+        out = _grid_runner.compact_json_server_args(
+            """--speculative-config '{"method":"ngram","num_speculative_tokens":7}' """,
+            "vllm",
+        )
+        assert out.strip() == (
+            "--speculative-config "
+            '{"method":"ngram","num_speculative_tokens":7}'
+        )
+        json.loads(out.split(" ", 1)[1].strip())
+
     def test_unrepairable_json_left_verbatim(self):
         # Genuinely broken blobs that cannot be repaired to valid JSON are left
         # verbatim (no worse than before), never raising.
@@ -1390,9 +1409,17 @@ class TestCompactJsonServerArgs:
         out = _grid_runner.compact_json_server_args('--kv-cache-dtype fp8 --compilation-config {"level": 3}', "vllm")
         assert out == '--kv-cache-dtype fp8 --compilation-config {"level":3}'
 
-    def test_sglang_is_noop(self):
+    def test_sglang_json_is_normalized_for_unquoted_transport(self):
         raw = '--speculative-config {"method": "eagle"}'
-        assert _grid_runner.compact_json_server_args(raw, "sglang") == raw
+        assert _grid_runner.compact_json_server_args(raw, "sglang") == (
+            '--speculative-config {"method":"eagle"}'
+        )
+
+    def test_sglang_and_missing_framework_remove_legacy_shell_wrappers(self):
+        raw = """--json-model-override-args '{"rope_scaling":null}'"""
+        expected = '--json-model-override-args {"rope_scaling":null}'
+        assert _grid_runner.compact_json_server_args(raw, "sglang") == expected
+        assert _grid_runner.compact_json_server_args(raw, None) == expected
 
     def test_no_json_is_noop(self):
         raw = "--block-size 128 --no-enable-prefix-caching"
@@ -1400,6 +1427,10 @@ class TestCompactJsonServerArgs:
 
     def test_malformed_json_left_verbatim(self):
         raw = "--compilation-config {not json}"
+        assert _grid_runner.compact_json_server_args(raw, "vllm") == raw
+
+    def test_malformed_wrapped_json_keeps_both_shell_wrappers(self):
+        raw = "--compilation-config '{not json}'"
         assert _grid_runner.compact_json_server_args(raw, "vllm") == raw
 
     def test_empty_is_noop(self):
@@ -1437,3 +1468,95 @@ class TestRemoveServerArgsPreservesJson:
         assert json.loads(out.split("--compilation-config ", 1)[1].strip()) == {
             "cudagraph_mode": "FULL"
         }
+
+
+# ---------------------------------------------------------------------------
+# benchmark_report settling (real-run race)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_report_read_waits_for_a_report_still_being_written(tmp_path):
+    """A report that lands a moment after the process exits must not abort the variant.
+
+    Observed on a live 24-hour session: the reader ran in the same second the
+    benchmark finished, read a ``benchmark_report.json`` that was not fully on disk
+    yet, and aborted the variant as ``benchmark_report_invalid_metric``. Six of
+    thirteen variants died that way while their reports, read afterwards, all held
+    valid throughput — including two authored patches worth +4.4% and +4.7% whose
+    switch-off parity legs had passed. The measurement was fine; only the moment of
+    reading was wrong.
+    """
+    workspace = tmp_path / "benchmark_ws"
+    workspace.mkdir()
+    report_path = workspace / "benchmark_report.json"
+    # First read sees a truncated file, exactly as a partial flush leaves it.
+    report_path.write_text('{"throughput": {"output_th', encoding="utf-8")
+
+    reads = {"n": 0}
+    real_parse = _grid_runner._parse_report
+
+    def _parse_then_complete(ws):
+        reads["n"] += 1
+        result = real_parse(ws)
+        if reads["n"] == 1:
+            report_path.write_text(
+                json.dumps({"throughput": {"output_throughput": 0.351, "completed_requests": 3}}),
+                encoding="utf-8",
+            )
+        return result
+
+    with patch.object(_grid_runner, "_parse_report", _parse_then_complete):
+        report, measurement = await _grid_runner._settled_measurement(
+            workspace,
+            subprocess_started_unix=None,
+            settle_seconds=5.0,
+            poll_seconds=0.01,
+        )
+
+    assert reads["n"] >= 2, "a truncated report must be re-read, not accepted as final"
+    assert measurement.get("valid_measurement") is True
+    assert report is not None
+
+
+@pytest.mark.asyncio
+async def test_report_read_gives_up_on_a_genuinely_invalid_report(tmp_path):
+    """Settling must be bounded: a report that never becomes valid still aborts."""
+    workspace = tmp_path / "benchmark_ws"
+    workspace.mkdir()
+    (workspace / "benchmark_report.json").write_text(
+        json.dumps({"throughput": {"output_throughput": 0.0, "completed_requests": 0}}),
+        encoding="utf-8",
+    )
+    started = time.monotonic()
+    _report, measurement = await _grid_runner._settled_measurement(
+        workspace,
+        subprocess_started_unix=None,
+        settle_seconds=0.05,
+        poll_seconds=0.01,
+    )
+    assert not measurement.get("valid_measurement")
+    assert time.monotonic() - started < 3.0, "a dead report must not stall the grid"
+
+
+@pytest.mark.asyncio
+async def test_report_read_does_not_wait_when_the_process_already_failed(tmp_path):
+    """With settling disabled the reader takes one look, so a crashed run fails fast."""
+    workspace = tmp_path / "benchmark_ws"
+    workspace.mkdir()
+    reads = {"n": 0}
+    real_parse = _grid_runner._parse_report
+
+    def _counting_parse(ws):
+        reads["n"] += 1
+        return real_parse(ws)
+
+    with patch.object(_grid_runner, "_parse_report", _counting_parse):
+        _report, measurement = await _grid_runner._settled_measurement(
+            workspace,
+            subprocess_started_unix=None,
+            settle_seconds=0.0,
+            poll_seconds=0.01,
+        )
+    assert reads["n"] == 1
+    assert not measurement.get("valid_measurement")

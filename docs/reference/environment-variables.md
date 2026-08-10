@@ -52,6 +52,7 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `TRACELENS_ROOT`                          | No (installer auto-clones) | `${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}/Tr`<br>`aceLens@<resolved-sha>` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `src/hyperloom/agents/kernel/scripts/install.sh` clones the public repo into the repo-local cache root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
 | `GEAK_CLAUDE_BIN`                          | No (installer auto-resolves) | First of `$HOME/.local/bin/claude`, `/usr/local/bin/claude`, `$(command -v claude)`; written to `kernel-agent.env.sh` | Pins the Claude Code binary the GEAK SDK path uses, so `claude_agent_sdk` doesn't fall back to its older bundled CLI. Export to force a specific build. |
 | `USER_DATA_PATH`                          | No                   | `/workspace/hyperloom`                                             | Session directory root (logs, runs, mirrors, breakdown). Replaces the retired `INFERENCE_OPTIMIZER_SESSION_DIR` and `WORKSPACE_PATH`.                                                |
+| `HYPERLOOM_`<br>`RUNTIME_DIR`             | No                   | `$USER_DATA_PATH/runtime` (installer)                               | Private writable runtime state. Codex SDK turns create a unique mode-`0700` `CODEX_HOME` here and remove it after the SDK client closes. When unset, Codex uses the first safe declared output root, then a run-local working directory; it never falls back to `/tmp` or a source checkout. |
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_CU`<br>`RRENT_S`<br>`ESSION_DIR` | No (set by CLI) | Set at session boot | Absolute path to the active session directory. Written by the CLI when a session starts and inherited by every benchmark subprocess; session-path resolution prefers it over scanning `USER_DATA_PATH`. Do not set by hand. |
 | `HYPERLOOM_ROOT`                          | No                   | `$HYPER`<br>`LOOM_R`<br>`UNTIME_`<br>`DIR/sou`<br>`rce-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the repo-local cache root (`${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}`), not this path. |
 | `HYPERLOOM`<br>`_CACHE_`<br>`DIR`                          | No                   | `$REPO_ROOT`<br>`/.cache`                      | Writable, repo-local base for auto-cloned open-source deps (TraceLens, Magpie, etc.), cloned per revision as `<name>@<sha>`. Not under `$TMPDIR` so a reaper cannot wipe it mid-run. |
@@ -116,7 +117,8 @@ that degraded path.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RUN_EVAL` | `true` | Whether a serving benchmark runs the GSM8K eval. Turning it off removes the per-candidate accuracy signal entirely — accuracy regressions stop being caught. Ignored by scriptable (xDiT) workloads, whose correctness signal is the image `quality_gate` in `benchmark_report.json`. |
+| `RUN_EVAL` | `true` | Whether a serving benchmark runs the GSM8K eval. Turning it off removes the per-candidate accuracy signal entirely — accuracy regressions stop being caught. Ignored by scriptable workloads, whose correctness signal is the `quality_gate` in `benchmark_report.json`. |
+| `HYPERLOOM_QUALITY_REF`<br>`HYPERLOOM_QUALITY_REF_WRITE` | Derived under the session dir | The scriptable quality gate's reference artifact: `_WRITE` establishes it on the baseline, the other compares against it on every later candidate. What the artifact holds is the workload's own business — xDiT stores an image, an operator-supplied `custom` workload stores whatever its script compares. Also emitted as `XDIT_QUALITY_REF` / `XDIT_QUALITY_REF_WRITE` for bench scripts written before the rename; either name is read, both are written. |
 | `INFERENCE_OPTIMIZER`<br>`_REQUIRE_KERNEL`<br>`_ACCURACY` | On | Gates the `KEEP` for a kernel patch integrated by the kernel lane. Set to `0` / `false` / `no` / `off` to fall back to a throughput-only `KEEP`. Disable only when the eval lane is known-broken: this gate is what stops a faster-but-wrong kernel from being kept. |
 | `INFERENCE_OPTIMIZER`<br>`_REQUIRE_FRAMEWORK`<br>`_ACCURACY` | On | Same gate for a framework source patch authored by a specialist. Same disable spellings. |
 | `MAGPIE_EVAL_LIMIT` | Unset (full task set) | Caps the number of eval problems (`lm_eval --limit`). Useful for smoke runs; see the noise caveat below before using it on a run whose `KEEP` decisions matter. |
@@ -149,6 +151,168 @@ The following variables control the kernel optimization backend ladder.
 
 ---
 
+## Kernel source resolution
+
+A kernel candidate must resolve to a real source file before any backend can
+rewrite it. Resolution runs as a ladder: curated dictionary, then the
+trace-derived launcher frame, then a name grep. All three are deterministic and
+require no configuration. Agent analysis may add the model-backed tiers below.
+
+Every run writes `kernel_source_resolution.json` next to the candidate report.
+It answers one question per hot kernel — which file defines it, and which tier
+decided that — in a versioned schema (`schema_version`, currently `1.0.0`), so
+consumers and triage read a contract rather than candidate internals.
+
+Two model-backed tiers may sit on top of the deterministic ladder when
+`--analysis-route agent` is used. The `deterministic` route never invokes either
+tier. Agent-route network calls require an explicit
+`HYPERLOOM_LLM_SOURCE_PROVIDER`; a model name alone never implies a provider or
+endpoint. The tiers differ in scope, authority and data exposure; the
+constraints of one do not apply to the other.
+
+Neither can fail a run: no model configured, a gateway error, a timeout or an
+unparseable reply all leave the deterministic result standing.
+
+### Fallback tier
+
+**When it runs.** Only for a candidate whose `source_file` is still empty after
+all three deterministic tiers, and whose GPU share is at least 5%.
+
+**What it sends.** One chat completion per such candidate, containing the kernel
+symbol and every shortlisted path. The shortlist comes from a relaxed grep over
+the known framework roots. **File contents are not sent unless
+`HYPERLOOM_LLM_SOURCE_PREVIEW` authorises it** (see [Source egress](#source-egress));
+with it, each path is accompanied by its first 40 lines, capped at 2000
+characters.
+
+**What it costs.** One call per qualifying candidate, 60-second ceiling, no
+retry. `HYPERLOOM_LLM_SOURCE_MODEL` overrides the selected provider's model
+setting. Claude uses `CLAUDE_MODEL`, then the project-wide
+`DEFAULT_CLAUDE_MODEL`; OpenAI-compatible routing uses `OPENAI_MODEL`, then
+`CODEX_MODEL`. Model settings are never borrowed across providers.
+
+**Authority: selection only.** The model may return one of the exact shortlist
+strings and nothing else. An invented path is rejected, as is any answer below
+0.7 confidence. This is deliberate — an LLM-produced sentinel written into
+`source_file` is what broke this pipeline originally.
+
+### Review tier
+
+The fallback only fires on an empty `source_file`, so it cannot catch the
+deterministic tiers' actual failure mode: not coming up empty, but coming up
+*confidently wrong*. Measured across historical sessions, only 59% of
+verifiable resolutions mention the kernel they claim to define, and
+`aten::fill_` alone has been resolved to four unrelated business files — each a
+real, existing, root-resident source file passing every mechanical check.
+
+**When it runs.** On the whole resolution table, including entries already
+filled in by the deterministic tiers. Entries below 1% GPU share are skipped.
+
+**What it sends.** A single chat completion carrying up to 40 entries at once.
+For each entry it includes the kernel symbol, GPU share, current path and
+deciding tier. File contents follow the same rule as the fallback tier: nothing
+is sent unless `HYPERLOOM_LLM_SOURCE_PREVIEW` authorises it. When it does, one
+call can ship up to 40 file heads, considerably more than the fallback tier
+sends per call — which is why the switch is global rather than per-tier.
+
+**What it costs.** One call per run (not per candidate), 180-second ceiling, no
+retry. Same provider and model resolution as the fallback tier. The response
+must include every sent `kernel_id` exactly once. A missing, duplicate or extra
+ID rejects the whole batch so a truncated response cannot masquerade as a
+complete review.
+
+<div class="callout warn">
+
+**Authority: it may rewrite, and it has no confidence threshold.** Unlike the
+fallback tier, this one is not restricted to a shortlist — it can replace any
+entry's path with any path, or drop a resolved entry back to unresolved. There
+is no 0.7 confidence gate. The mechanical limit is that a rewritten path must
+exist on disk **and** its resolved target must sit under a known framework root.
+Symlinks cannot escape that boundary. TraceLens-style
+`path.py(247): function` answers are split into a bare, openable path plus line
+and function metadata. An unverifiable path is rejected and the original
+stands. Curated `op_to_source` verdicts — including `non_rewritable` and
+`no_kernel` — are authoritative and cannot be replaced by model review.
+
+</div>
+
+Every revision records `previous_source_file` and `previous_method`, so a bad
+review is auditable and reversible, and `review_notes` lists every applied and
+rejected change. The batch is staged before it is committed, so an exception
+while validating one revision leaves every entry untouched. Failures — no model
+configured, gateway error, timeout, unparseable reply — leave the deterministic
+table untouched and are recorded in `review_notes`.
+
+Accepted revisions are folded back into `hot_kernels`, all metadata derived from
+the old path is cleared, and patchability is recomputed. The resolution JSON is
+the audit view of the same effective candidate state, not a detached suggestion.
+
+### Source egress
+
+Both tiers call an external model provider, so what leaves the host is a
+deliberate boundary rather than a side effect of building a useful prompt.
+
+**Provider routing is explicit.** Set `HYPERLOOM_LLM_SOURCE_PROVIDER` to
+`claude_agent_sdk` or `openai_compatible`. Claude requests use the native Claude
+Agent SDK with all repository, shell and web tools denied; OpenAI-compatible
+requests use chat completions. `kernel_source_resolution.json` records the
+provider, model, source-preview decision, outcome and endpoint hostname. It
+never records keys, custom headers, URL userinfo, query parameters or the full
+prompt.
+
+**Repository source is not sent by default.** The file heads described above are
+withheld unless `HYPERLOOM_LLM_SOURCE_PREVIEW` is set to `1`/`true`/`yes`/`on`.
+Without it both tiers still see candidate paths, which carry most of the
+selection signal; with it, a review call can ship up to 40 file heads.
+
+**The serving command line is never forwarded verbatim.** The tiers need backend
+flags — the same MoE operator dispatches differently under
+`--moe-runner-backend triton` and `aiter` — but `EXTRA_*_ARGS` also carries
+credentials, model paths and user data. It is therefore tokenised, and only
+flags on an explicit allowlist of backend selectors survive. A denied flag
+consumes its value too, so the value cannot reappear as a stray token. Every
+surviving value is dropped unless it is a short selector token. URL userinfo or
+queries, authorization headers, JWTs, control characters, non-finite numbers,
+vendor prefixes such as `sk-`, and long opaque strings are rejected. An
+unbalanced quote discards the whole line rather than risking a partial parse.
+
+**Environment variables** follow the same discipline: an explicit allowlist of
+path-selecting names, with the secret-name pattern applied on top.
+
+**Model config is allowlisted too.** Only fields that select architecture,
+expert layout or kernel format are included. Inside `quantization_config`, only
+explicit quantization selectors survive; arbitrary vendor fields, nested
+metadata and credential-shaped values are dropped.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_PROVIDER` | Unset (no network call) | Required provider for source fallback/review: `claude_agent_sdk` (native Claude SDK, tools denied) or `openai_compatible` (chat completions). Common provider aliases are normalized to the canonical audit value. |
+| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_MODEL` | Unset | Optional source-resolution model override. Otherwise resolves only from the selected provider's own model variables; no cross-provider fallback. |
+| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_PREVIEW` | Unset (off) | Authorise sending the first 40 lines of candidate source files to the model provider. Applies to both the fallback and review tiers. Leave unset unless the provider is an approved destination for repository content. |
+
+### How fallback failures surface
+
+The fallback tier is advisory and never fails a run. Every
+outcome is recorded on the candidate as `source_resolution_reason`, so a skip
+can be told apart from a genuine failure:
+
+| `source_resolution_reason` | Meaning |
+|----------------------------|---------|
+| *(absent)* | Resolved before fallback, so the tier was not reached |
+| `llm_fallback_skipped: deterministic route` | Deterministic analysis explicitly prohibited model tiers |
+| `llm_fallback_skipped: gpu_pct ...` | Candidate below the 5% GPU-share floor; no call made |
+| `llm_fallback_skipped: no provider configured` | No `HYPERLOOM_LLM_SOURCE_PROVIDER`; settled before the shortlist grep, so an unconfigured tier costs nothing |
+| `llm_fallback_no_shortlist` | Grep found nothing to choose from; no call made |
+| `llm_fallback_declined: ...` | Model answered but the pick was rejected (invented path, low confidence, or refusal) |
+| `llm_fallback_error: ...` | Call failed — import error, gateway rejection, or timeout |
+
+Accepted answers are stamped `source_resolution_method="llm_fallback"` alongside
+a `source_resolution_confidence`, so they can be audited separately from
+deterministic resolutions. Failures in the trace-launcher tier are recorded the
+same way under `trace_resolver_error: ...`, and both are logged at `WARNING`.
+
+---
+
 ## Single-node Ray execution
 
 | Variable | Default | Description |
@@ -170,6 +334,34 @@ endpoint is OpenAI-compatible and supports the Responses API `web_search` tool.
 |----------|---------|-------------|
 | `HYPERLOOM_CODEX_WEB_SEARCH` | Unset (off) | Set to `1`/`true` to route every Codex turn through the OpenAI Responses API with the built-in `web_search` tool. Default keeps the existing `chat.completions` path unchanged. |
 | `HYPERLOOM_`<br>`CODEX_WEB_SEARCH`<br>`_CONTEXT_SIZE` | `medium` | Passed through as the `web_search` tool's `search_context_size` (`low` / `medium` / `high`). Ignored unless `HYPERLOOM_CODEX_WEB_SEARCH` is on. |
+
+---
+
+## Codex (OpenAI) agent sandbox
+
+Selects how a Codex agent session (TraceLens analysis and every future
+Codex-based agent) is contained. The secure default is `workspace-write`.
+Codex implements both contained presets with bubblewrap, so Hyperloom executes
+a real namespace-and-mount capability probe before starting the SDK. Merely
+finding a `bwrap` executable is insufficient: if the current kernel or
+container prevents it from establishing the sandbox, `workspace-write` and
+`read-only` fail closed before the app-server starts. There is no automatic
+fallback to `bypass`.
+
+`bypass` is a deliberate double opt-in. Set both
+`HYPERLOOM_CODEX_SANDBOX_MODE=bypass` and
+`HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1`; the second variable confirms that an
+external container or sandbox already enforces the required isolation. It does
+not create that boundary. A confirmed bypass maps to Codex full access even
+when no writable roots are declared, because the external sandbox is
+authoritative. Under the contained modes, no writable roots remains
+`read-only`. Unknown modes and incomplete bypass configuration fail
+immediately.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYPERLOOM_`<br>`CODEX_SANDBOX_MODE` | `workspace-write` | `workspace-write` restricts writes to the session directory plus declared output roots; `read-only` forbids writes; `bypass` selects Codex full access only when the external-sandbox confirmation below is also set. |
+| `HYPERLOOM_`<br>`CODEX_EXTERNAL_`<br>`SANDBOX` | Unset | Set exactly to `1` only when an external isolation boundary is already active and `HYPERLOOM_CODEX_SANDBOX_MODE=bypass`. Setting this alone has no effect and never weakens the default sandbox. |
 
 ---
 
@@ -321,6 +513,7 @@ The following variables configure the Critic, Robustness, and knowledge base com
 | `KNOWLEDGE_STORE_MODE`                | `local`                | Exclusive Recipe/KG backend: `local` or `remote`. Ambient GBrain credentials do not select remote mode. |
 | `KNOWLEDGE_LOCAL_ROOT`                | `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` | Shared knowledge root. Remote mode uses only `.remote-locks/recipes` beneath it. |
 | `HYPERLOOM_`<br>`LOCAL_KB_ROOT`       | Unset                  | Deprecated explicit local Recipe root compatibility input, overridden by `--local-kb-root`; explicit use skips automatic legacy migration. |
+| `INFERENCE_OPTIMIZER_`<br>`FA_KB_PATH` | `$USER_DATA_PATH/framework-kb`, otherwise `/workspace/hyperloom/framework-kb` | Framework-agent KB root, holding the lessons ledger the FRAMEWORK phase reads and writes. The only supported override: the `fa` reader and the orchestrator's writeback both resolve through it, so it moves both halves at once. The withdrawn `FRAMEWORK_AGENT_KB_DIR` is ignored with a warning naming the resolved root. On first start-up an existing partition under the legacy `$USER_DATA_PATH/kb` is copied across once; a copy that fails warns and leaves the phase to cold-start. |
 | `GBRAIN_BASE_URL`                     | Unset                  | GBrain endpoint; required with `KNOWLEDGE_STORE_MODE=remote` and ignored in local mode. |
 | `GBRAIN_TOKEN`                        | Unset                  | GBrain bearer token; required with `KNOWLEDGE_STORE_MODE=remote` and ignored in local mode. |
 | `RECIPE_KB_MIRROR_MODE`               | Obsolete               | Ignored. Remove it and select `KNOWLEDGE_STORE_MODE=local` or `remote`. |

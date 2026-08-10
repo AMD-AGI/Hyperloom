@@ -203,3 +203,57 @@ def test_unset_env_dropped_when_not_in_extra_envs(monkeypatch, tmp_path):
     )
     envs = yaml.safe_load(res.read_text())["benchmark"]["envs"]
     assert "KEEP" not in envs
+
+
+# ── FLYDSL_EXTRA_SOURCE_DIRS is asked for, and never clobbers a set value ────
+
+
+def _flydsl_env(monkeypatch, tmp_path, **kwargs):
+    """Materialize with a real FlyDSL root on disk; return the rendered envs."""
+    _isolate(monkeypatch)
+    root = tmp_path / "flydsl"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("FLYDSL_ROOT", str(root))
+    monkeypatch.delenv("FLYDSL_EXTRA_SOURCE_DIRS", raising=False)
+    src = _write(
+        tmp_path / "cfg.yaml",
+        {"framework": "vllm", "model": "/m", "envs": dict(kwargs.pop("yaml_envs", {}))},
+    )
+    res = we.materialize_config_with_envs(src, tmp_path / "out", **kwargs)
+    return yaml.safe_load(res.read_text())["benchmark"]["envs"], str(root)
+
+
+def test_an_ordinary_benchmark_is_not_given_the_flydsl_source_dirs(monkeypatch, tmp_path):
+    # Widening FlyDSL's JIT cache key recompiles kernels, so a baseline, explore
+    # or sweep run that patched nothing must not pay for it.
+    envs, _root = _flydsl_env(monkeypatch, tmp_path)
+
+    assert "FLYDSL_EXTRA_SOURCE_DIRS" not in envs
+
+
+def test_the_run_that_applied_a_flydsl_patch_asks_for_the_source_dirs(monkeypatch, tmp_path):
+    envs, root = _flydsl_env(monkeypatch, tmp_path, flydsl_source_dirs=True)
+
+    # A host with its own FlyDSL install contributes further roots, so the
+    # configured one being named is what matters, not the whole list.
+    assert root in envs["FLYDSL_EXTRA_SOURCE_DIRS"].split(":")
+
+
+def test_an_explicitly_configured_value_is_never_clobbered(monkeypatch, tmp_path):
+    # The injection used to be the last writer of all, so it overwrote both the
+    # YAML base and an extra_envs value the caller had threaded in on purpose.
+    from_yaml, _root = _flydsl_env(
+        monkeypatch,
+        tmp_path,
+        flydsl_source_dirs=True,
+        yaml_envs={"FLYDSL_EXTRA_SOURCE_DIRS": "/operator/yaml"},
+    )
+    assert from_yaml["FLYDSL_EXTRA_SOURCE_DIRS"] == "/operator/yaml"
+
+    from_extra, _root2 = _flydsl_env(
+        monkeypatch,
+        tmp_path / "second",
+        flydsl_source_dirs=True,
+        extra_envs={"FLYDSL_EXTRA_SOURCE_DIRS": "/operator/extra"},
+    )
+    assert from_extra["FLYDSL_EXTRA_SOURCE_DIRS"] == "/operator/extra"

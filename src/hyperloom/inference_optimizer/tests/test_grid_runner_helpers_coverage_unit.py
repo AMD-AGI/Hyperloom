@@ -364,13 +364,14 @@ def test_build_variant_yaml_drops_unsafe_overlay(tmp_path: Path) -> None:
         assert "PYTHONPATH" not in envs or bad not in envs.get("PYTHONPATH", ""), bad
 
 
-def test_shell_safe_dedupe_leaves_json_arg_untouched() -> None:
-    """When a space/JSON-valued flag is present, dedupe must leave the whole
-    string untouched (the unquoted $EXTRA_*_ARGS expansion downstream cannot
-    round-trip a quoted value anyway, so mangling it is worse than skipping)."""
+def test_shell_safe_dedupe_preserves_json_and_dedupes_other_flags() -> None:
+    """JSON stays an opaque argv token while unrelated flags dedupe last-wins."""
     args = '--json-model-override-args {"rope_scaling":null} --context-length 8192 --context-length 4096'
     out = gr._shell_safe_dedupe(args)
-    assert out == args, f"JSON-bearing string must be left as-is: {out}"
+    assert out == '--json-model-override-args {"rope_scaling":null} --context-length 4096'
+    assert json.loads(out.split("--json-model-override-args ", 1)[1].split(" ", 1)[0]) == {
+        "rope_scaling": None
+    }
 
 
 def test_shell_safe_dedupe_leaves_multi_value_arg_untouched() -> None:

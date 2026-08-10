@@ -49,6 +49,61 @@ _OP_TO_KEYWORD: tuple[tuple[str, str], ...] = (
 )
 
 
+# Rewrite-evidence category -> canonical gap keyword. These name *host-side*
+# bottlenecks, which the kernel-name vocabulary above cannot express: a
+# collective that round-trips through the host to agree on a shape, or a pure
+# function recomputed every step, costs real wall time without owning a kernel.
+_CATEGORY_TO_KEYWORD: tuple[tuple[str, str], ...] = (
+    ("eliminate_host_round_trip", "collective_rendezvous"),
+    ("eliminate_host_sync", "host_sync"),
+    ("fuse_collectives", "collective_fusion"),
+    ("keep_device_resident", "host_to_device"),
+    ("memoize_invariant", "recomputation"),
+    ("hoist_loop_invariant", "loop_invariant"),
+)
+
+
+def _extract_bottleneck_from_rewrite_evidence(evidence_path: str | Path | None) -> str:
+    """Read the host-side rewrite evidence and return its top bottleneck keyword.
+
+    ``evidence_path`` is ``SharedState.last_framework_rewrite_evidence``. The
+    document's candidates are already ranked by measured cost, so the first one
+    whose category maps to a keyword is the answer.
+
+    Args:
+        evidence_path: Path to the merged rewrite-evidence JSON, or None.
+
+    Returns:
+        One canonical keyword, or "" when the path is empty/unreadable or no
+        candidate maps to a known category.
+    """
+    if not evidence_path:
+        return ""
+    path = Path(str(evidence_path))
+    if not path.is_file():
+        return ""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning(
+            "_framework_gap_composer: could not read rewrite evidence %s: %s",
+            path,
+            exc,
+        )
+        return ""
+    candidates = raw.get("candidates") if isinstance(raw, dict) else None
+    if not isinstance(candidates, list):
+        return ""
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        category = str(item.get("category") or "").strip().lower()
+        for needle, keyword in _CATEGORY_TO_KEYWORD:
+            if category == needle:
+                return keyword
+    return ""
+
+
 def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str:
     """Read the kernel breakdown JSON and return one canonical bottleneck keyword.
 
@@ -149,12 +204,18 @@ def compose_gap(
     model_class: str = "",
     precision: str = "",
     profile_kernel_breakdown_path: str | Path | None = None,
+    rewrite_evidence_path: str | Path | None = None,
 ) -> tuple[str, list[str]]:
     """Build ``(gap_description, keywords)`` for the framework arm.
 
     All workload fields are optional; missing pieces drop from the gap.
     ``precision`` comes from ``manifest.json``'s ``workload.precision``.
-    ``profile_kernel_breakdown_path`` (when present) adds a bottleneck keyword.
+
+    Two independent bottleneck sources contribute a keyword each, because they
+    see different things: the kernel breakdown names the hottest *device*
+    operation, while the host-side rewrite evidence names the costliest
+    *redundant host* work. A framework-level source rewrite usually attacks the
+    latter, which no kernel timeline can surface, so both are carried.
 
     Args:
         framework: Inference framework name.
@@ -162,7 +223,9 @@ def compose_gap(
         model_class: Model-class label (canonicalised to a search token).
         precision: Workload precision.
         profile_kernel_breakdown_path: Optional path to the kernel breakdown
-            JSON used to derive a bottleneck keyword.
+            JSON used to derive a device-side bottleneck keyword.
+        rewrite_evidence_path: Optional path to the merged host-side rewrite
+            evidence JSON used to derive a host-side bottleneck keyword.
 
     Returns:
         A ``(gap_description, keywords)`` tuple: a free-text gap phrase for
@@ -175,6 +238,7 @@ def compose_gap(
     arch = _model_class_to_search_token(model_class)
     prec = (precision or "").strip().lower()
     bottleneck = _extract_bottleneck_from_breakdown(profile_kernel_breakdown_path)
+    host_bottleneck = _extract_bottleneck_from_rewrite_evidence(rewrite_evidence_path)
 
     # Gap text mirrors the SKILL.md template.
     parts: list[str] = ["improve"]
@@ -184,8 +248,9 @@ def compose_gap(
         parts.append(prec)
     if arch:
         parts.append(arch)
-    if bottleneck and bottleneck not in {fw, prec, arch}:
-        parts.append(bottleneck)
+    for token in (bottleneck, host_bottleneck):
+        if token and token not in parts:
+            parts.append(token)
     parts.append("throughput")
     if gpu:
         parts.extend(["on", gpu])
@@ -193,7 +258,7 @@ def compose_gap(
 
     # Keywords: dedup + sort, lowercase; passed as the ``keywords`` override.
     kw_pool: list[str] = []
-    for tok in (fw, gpu, arch, prec, bottleneck):
+    for tok in (fw, gpu, arch, prec, bottleneck, host_bottleneck):
         if tok and tok not in kw_pool:
             kw_pool.append(tok)
     keywords = sorted(kw_pool)

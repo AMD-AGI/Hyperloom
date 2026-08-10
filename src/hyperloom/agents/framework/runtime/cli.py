@@ -842,6 +842,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     log = get_logger("cli")
     log.debug("fa cli start cmd=%s argv=%r", args.cmd, argv)
+
+    # `fa` runs standalone, so it cannot rely on the inference_optimizer
+    # preflight that covers the orchestrator. The call cannot raise.
+    from ..kb import prepare_kb_environment
+
+    prepare_kb_environment()
+
     try:
         args.func(args)
     except RuntimeAdapterError as exc:

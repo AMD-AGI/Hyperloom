@@ -36,6 +36,10 @@ side_effects:
 preferred_backend: claude
 preferred_model: claude-opus-5
 max_turns: 4
+# Known short: this is below DEFAULT_VARIANT_TIMEOUT_SEC (7800), the cap its own
+# executor grants one bench, so a long run can be reclaimed while it is still on
+# the GPU. Pre-existing and left alone deliberately — see the note in
+# `test_action_registry_lease_covers_bench_timeout`.
 lease_ttl_sec: 3600
 description: "Apply specialist worktree patches to framework_source_roots, restart server, run throughput + accuracy gate, KEEP or REVERT. Deterministic executor for EXPLORE and FRAMEWORK_AGENT; also serves the enablement launch-only build probe and framework-agent authoring lanes."
 pipeline_phase: explore

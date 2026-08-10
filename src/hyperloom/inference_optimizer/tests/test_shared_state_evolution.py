@@ -406,6 +406,115 @@ def test_v3_flat_enablement_fields_migrate_to_nested(tmp_path):
     assert loaded.enablement_mode == "launch"
 
 
+# 8. FRAMEWORK field rename v4→v5 migration
+def test_v4_legacy_framework_fields_migrate_to_current_names(tmp_path):
+    """A state written before the framework_agent rename keeps its progress.
+
+    Without the migration these keys are not dataclass fields, so the
+    unknown-key filter drops them and the phase restarts from scratch: already
+    benchmarked PRs are re-run and a persisted --no-framework-agent flips back
+    on. Nothing raises, which is why it went unnoticed.
+    """
+    sd = tmp_path / "session"
+    sd.mkdir()
+    legacy = {
+        "schema_version": 4,
+        "framework_phase_enabled": False,
+        "framework_pr_phase_progress": [{"candidate_id": "PR:1", "status": "kept"}],
+        "framework_pr_batches": [{"batch_id": "b1", "candidates": []}],
+        "framework_pr_phase_done": True,
+        "framework_pr_discover_failures": 2,
+        "framework_pr_consecutive_empty_discoveries": 3,
+        "framework_pr_authoring_enabled": False,
+        "framework_pr_specialist_candidate_map": {"spec-1": "PR:1"},
+    }
+    (sd / "state.json").write_text(json.dumps(legacy))
+
+    loaded = SharedState.load_or_init(sd)
+
+    assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
+    assert loaded.framework_agent_phase_enabled is False
+    assert loaded.framework_agent_phase_progress == [{"candidate_id": "PR:1", "status": "kept"}]
+    assert loaded.framework_agent_batches == [{"batch_id": "b1", "candidates": []}]
+    assert loaded.framework_agent_phase_done is True
+    assert loaded.framework_agent_discover_failures == 2
+    assert loaded.framework_consecutive_empty_discoveries == 3
+    assert loaded.framework_agent_authoring_enabled is False
+    assert loaded.framework_agent_specialist_candidate_map == {"spec-1": "PR:1"}
+
+
+def test_v5_migration_prefers_the_current_spelling(tmp_path):
+    """A half-migrated state carrying both spellings keeps the current one."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    (sd / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 4,
+                "framework_pr_discover_failures": 9,
+                "framework_agent_discover_failures": 1,
+            }
+        )
+    )
+
+    assert SharedState.load_or_init(sd).framework_agent_discover_failures == 1
+
+
+def test_v5_migration_strips_the_promote_prefix_from_stacked_framework_keeps(tmp_path):
+    """An in-flight session's already-stacked KEEPs must reconcile after the upgrade.
+
+    Renaming the fields alone leaves ``variant_name`` spelled the promote-side
+    way. Resume reconciliation keys on the bare candidate key, so those entries
+    keep reporting as orphaned KEEPs, and the ``(action, variant_name)`` dedup
+    that stops a second append for the same PR no longer matches either.
+    """
+    sd = tmp_path / "session"
+    sd.mkdir()
+    (sd / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 4,
+                "optimization_stack": [
+                    {"action": "framework", "variant_name": "framework:PR-1", "tput": 1.0},
+                    {"action": "framework", "variant_name": "PR-2", "tput": 2.0},
+                    {"action": "explore", "variant_name": "framework:not-mine", "tput": 3.0},
+                ],
+            }
+        )
+    )
+
+    stack = SharedState.load_or_init(sd).optimization_stack
+
+    assert stack[0]["variant_name"] == "PR-1"
+    assert stack[1]["variant_name"] == "PR-2"
+    # Only the framework family carried that prefix; explore names are its own.
+    assert stack[2]["variant_name"] == "framework:not-mine"
+
+
+def test_v5_stack_action_label_matches_the_writeback_constant():
+    """The migration hardcodes the stack label; writeback owns the real one."""
+    from hyperloom.orchestrator.loop.writeback import _FRAMEWORK_STACK_ACTION
+    from hyperloom.orchestrator.state.shared_state import _FRAMEWORK_STACK_ACTION_V5
+
+    assert _FRAMEWORK_STACK_ACTION_V5 == _FRAMEWORK_STACK_ACTION
+
+
+def test_v5_rename_table_targets_are_real_fields():
+    """Every rename target must still exist, or the migration drops the data.
+
+    The table is the only thing standing between an old state.json and the
+    unknown-key filter, and a target that no longer exists fails the same
+    silent way the missing migration did.
+    """
+    from hyperloom.orchestrator.state.shared_state import _FRAMEWORK_FIELD_RENAMES_V5
+
+    fields = set(SharedState.__dataclass_fields__)
+    missing = sorted(t for t in _FRAMEWORK_FIELD_RENAMES_V5.values() if t not in fields)
+    assert not missing, f"rename targets that are no longer fields: {missing}"
+    stale = sorted(legacy for legacy in _FRAMEWORK_FIELD_RENAMES_V5 if legacy in fields)
+    assert not stale, f"legacy names that are somehow still fields: {stale}"
+
+
 def test_v4_nested_enablement_roundtrips(tmp_path):
     """A v4 state.json with nested enablement dict survives save/load_or_init."""
     sd = tmp_path / "session"
@@ -458,3 +567,185 @@ def test_policy_blocks_llm_search_ledger_write(field_name):
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", intent)
     assert exc.value.rule == "state_field"
+
+
+def _applyback_evidence():
+    return {
+        "artifact_kind": "framework_applyback",
+        "artifact_schema_version": 2,
+        "validation_scope": "reference",
+        "reference_correctness_passed": True,
+        "reference_snr_db": 48.5,
+        "integration_validation_required": True,
+        "integration_validation_status": "pending",
+        "commit": "a" * 40,
+        "commit_ref": "refs/hyperloom/applyback/attempt-1",
+        "builder_symbol": "build_fused_gemm_module",
+        "changed_files": ["flydsl_kernel.py", "kernel.py"],
+    }
+
+
+def _record_applyback_keep(state, **verification_overrides):
+    verification = {
+        "micro_speedup": 1.6,
+        "compile_passed": True,
+        "correctness_passed": True,
+        "correctness_source": "forge_rewrite_reference",
+        "integration_validation_status": "pending",
+        "framework_applyback": _applyback_evidence(),
+        "best_backend": "forge",
+        "best_artifact_path": "/artifacts/flydsl_kernel.py",
+        "deploy_patch_path": "/artifacts/forge.patch",
+        "deploy_repo_root": "/repo",
+        "deploy_snapshot_dir": "/artifacts/snapshot",
+    }
+    verification.update(verification_overrides)
+    state.record_kernel_opt(
+        {
+            "status": "ok",
+            "kernel_id": "k007",
+            "source_file": "/repo/fused_gemm.py",
+            "task_group_id": "tg001",
+            "task_group_key": "tg-fused-gemm",
+            "proposal": {
+                "decision": "KEEP",
+                "reasons": [
+                    "framework apply-back reference-verified; framework "
+                    "E2E/accuracy deferred to integrate"
+                ],
+            },
+            "verification": verification,
+        }
+    )
+
+
+def test_reference_verified_applyback_queues_with_its_provenance():
+    state = SharedState()
+
+    _record_applyback_keep(state)
+
+    attempt = state.kernel_opt_attempts["k007"]
+    assert attempt["last_correctness_source"] == "forge_rewrite_reference"
+    assert attempt["last_integration_validation_status"] == "pending"
+    assert attempt["last_framework_applyback"] == _applyback_evidence()
+
+    assert state.last_kernel_opt["correctness_source"] == "forge_rewrite_reference"
+    assert state.last_kernel_opt["integration_validation_status"] == "pending"
+    assert state.last_kernel_opt["framework_applyback"]["commit_ref"] == (
+        "refs/hyperloom/applyback/attempt-1"
+    )
+
+    pending = state.pending_kernel_integration_records()
+    assert len(pending) == 1
+    record = pending[0]
+    assert record["status"] == "pending"
+    assert record["artifact_kind"] == "framework_applyback"
+    assert record["integration_validation_status"] == "pending"
+    assert record["correctness_source"] == "forge_rewrite_reference"
+    assert record["framework_applyback"]["changed_files"] == [
+        "flydsl_kernel.py",
+        "kernel.py",
+    ]
+
+
+def test_a_plain_keep_queues_without_applyback_provenance():
+    state = SharedState()
+
+    _record_applyback_keep(
+        state,
+        correctness_source="report_scan",
+        integration_validation_status="",
+        framework_applyback={},
+    )
+
+    record = state.pending_kernel_integration_records()[0]
+    assert record["artifact_kind"] == ""
+    assert record["integration_validation_status"] == ""
+    assert record["framework_applyback"] == {}
+
+
+def test_serving_accuracy_settles_the_pending_applyback_verdict():
+    state = SharedState()
+    _record_applyback_keep(state)
+    pending = state.pending_kernel_integration_records()[0]
+
+    state.record_kernel_integrate_result(
+        {
+            "status": "ok",
+            "decision": "KEEP",
+            "kernel_id": "k007",
+            "integration_id": pending["integration_id"],
+            "task_group_key": "tg-fused-gemm",
+            "patch_path": "/artifacts/forge.patch",
+            "target_file": "/repo/fused_gemm.py",
+            "gain_pct": 4.2,
+            "accuracy_pass": True,
+            "artifact_kind": "framework_applyback",
+            "integration_validation_status": "passed",
+            "validation_tier": "integrate_e2e_accuracy",
+        }
+    )
+
+    record = state.pending_kernel_integrations[pending["integration_id"]]
+    assert record["status"] == "integrated"
+    assert record["integration_validation_status"] == "passed"
+    assert record["validation_tier"] == "integrate_e2e_accuracy"
+
+    attempt = state.kernel_opt_attempts["k007"]
+    assert attempt["integration_status"] == "integrated"
+    assert attempt["last_integration_validation_status"] == "passed"
+    assert attempt["validation_tier"] == "integrate_e2e_accuracy"
+
+
+def test_a_plain_integrated_keep_records_no_applyback_verdict():
+    state = SharedState()
+    _record_applyback_keep(
+        state,
+        correctness_source="report_scan",
+        integration_validation_status="",
+        framework_applyback={},
+    )
+    pending = state.pending_kernel_integration_records()[0]
+
+    state.record_kernel_integrate_result(
+        {
+            "status": "ok",
+            "decision": "KEEP",
+            "kernel_id": "k007",
+            "integration_id": pending["integration_id"],
+            "task_group_key": "tg-fused-gemm",
+            "patch_path": "/artifacts/forge.patch",
+            "target_file": "/repo/fused_gemm.py",
+            "gain_pct": 4.2,
+            "accuracy_pass": True,
+        }
+    )
+
+    record = state.pending_kernel_integrations[pending["integration_id"]]
+    assert record["status"] == "integrated"
+    assert record["integration_validation_status"] == ""
+    assert "validation_tier" not in record
+
+
+def test_bare_kernel_id_integrate_resolves_the_pending_applyback(tmp_path):
+    """Orchestration may send only a kernel_id; the queue supplies the rest."""
+    from hyperloom.orchestrator.kernel.request_handlers import (
+        _fill_integrate_defaults_from_state,
+    )
+
+    sd = tmp_path / "session"
+    sd.mkdir()
+    state = SharedState()
+    state.baseline_tput = 100.0
+    state.baseline_config_path = "/configs/baseline.yaml"
+    _record_applyback_keep(state)
+    state.save(sd)
+
+    resolved = _fill_integrate_defaults_from_state({"kernel_id": "k007"}, session_dir=sd)
+
+    assert resolved["kernel_id"] == "k007"
+    assert resolved["task_group_key"] == "tg-fused-gemm"
+    assert resolved["artifact_kind"] == "framework_applyback"
+    assert resolved["integration_validation_status"] == "pending"
+    assert resolved["integration_id"]
+    assert resolved["config_path"] == "/configs/baseline.yaml"

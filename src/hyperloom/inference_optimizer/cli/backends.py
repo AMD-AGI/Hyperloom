@@ -31,48 +31,22 @@ from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 
 CRITIC_PROTOCOL_CHOICES: tuple[str, ...] = ("auto", "openai", "anthropic")
 
-# Anthropic-side env vars that, alone, make the Anthropic side usable.
-_ANTHROPIC_SIDE_ENV: tuple[str, ...] = (
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    CLAUDE_OAUTH_TOKEN_ENV,
-    "DEEPSEEK_BASE_URL",
-    "DEEPSEEK_API_KEY",
-)
-_OPENAI_SIDE_ENV: tuple[str, ...] = ("OPENAI_BASE_URL", "OPENAI_API_KEY")
-
-
 def _any_env_set(names: tuple[str, ...]) -> bool:
     return any((os.environ.get(name) or "").strip() for name in names)
 
 
 def _official_anthropic_only() -> bool:
     """True when only the Anthropic-side endpoint is available."""
-    return _any_env_set(_ANTHROPIC_SIDE_ENV) and not _any_env_set(_OPENAI_SIDE_ENV)
+    from hyperloom.common import llm_config  # local import: keep module import-light
+
+    return llm_config.is_anthropic_only()
 
 
 def _official_openai_only() -> bool:
     """True when only the OpenAI-side endpoint is available."""
-    return _any_env_set(_OPENAI_SIDE_ENV) and not _any_env_set(_ANTHROPIC_SIDE_ENV)
+    from hyperloom.common import llm_config  # local import: keep module import-light
 
-
-def _deepseek_only() -> bool:
-    """True for a DeepSeek-keyed provider-only config with no Anthropic key.
-
-    DeepSeek is natively OpenAI-compatible, so its critic review runs over the
-    DeepSeek OpenAI endpoint. An explicit Anthropic key takes precedence.
-    """
-    has_deepseek = bool(
-        (os.environ.get("DEEPSEEK_BASE_URL") or "").strip() or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
-    )
-    has_anthropic_key = bool(
-        (os.environ.get("ANTHROPIC_API_KEY") or "").strip() or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-    )
-    has_openai = bool(
-        (os.environ.get("OPENAI_BASE_URL") or "").strip() or (os.environ.get("OPENAI_API_KEY") or "").strip()
-    )
-    return has_deepseek and not has_anthropic_key and not has_openai
+    return llm_config.is_openai_only()
 
 
 def _resolve_critic_protocol(requested: str, *, provider_anthropic_only: bool) -> str:
@@ -97,32 +71,26 @@ def _resolve_critic_protocol(requested: str, *, provider_anthropic_only: bool) -
         raise ValueError(f"_build_backends: critic_protocol={requested!r} not in {set(CRITIC_PROTOCOL_CHOICES)}")
 
     if requested == "auto":
-        # DeepSeek serves an OpenAI-compatible endpoint, so it stays on the
-        # OpenAI transport even though it is an Anthropic-side credential.
-        return "anthropic" if provider_anthropic_only and not _deepseek_only() else "openai"
+        return "anthropic" if provider_anthropic_only else "openai"
 
     if requested == "anthropic":
-        # A DeepSeek key authenticates DeepSeek's Anthropic-compatible endpoint,
-        # so it is a usable credential for this transport too.
-        if not _any_env_set(
-            ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", CLAUDE_OAUTH_TOKEN_ENV, "DEEPSEEK_API_KEY")
-        ):
+        if not _any_env_set(("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", CLAUDE_OAUTH_TOKEN_ENV)):
             raise ValueError(
                 "--critic-protocol=anthropic requires one of ANTHROPIC_API_KEY, "
-                f"ANTHROPIC_AUTH_TOKEN, {CLAUDE_OAUTH_TOKEN_ENV} or DEEPSEEK_API_KEY"
+                f"ANTHROPIC_AUTH_TOKEN or {CLAUDE_OAUTH_TOKEN_ENV}"
             )
         return requested
 
     # Mirror resolve_openai_client_config's key chain, LLM_GATEWAY_KEY included:
     # rejecting a gateway-only host here would fail a config that does run.
     if requested == "openai":
-        if not _any_env_set(("OPENAI_API_KEY", "LLM_GATEWAY_KEY", "DEEPSEEK_API_KEY")):
-            raise ValueError("--critic-protocol=openai requires OPENAI_API_KEY, LLM_GATEWAY_KEY or DEEPSEEK_API_KEY")
+        if not _any_env_set(("OPENAI_API_KEY", "LLM_GATEWAY_KEY")):
+            raise ValueError("--critic-protocol=openai requires OPENAI_API_KEY or LLM_GATEWAY_KEY")
         # A gateway key is scoped to that gateway; without OPENAI_BASE_URL the
         # client would send it to the official OpenAI endpoint instead.
         gateway_only = (
             _any_env_set(("LLM_GATEWAY_KEY",))
-            and not _any_env_set(("OPENAI_API_KEY", "DEEPSEEK_API_KEY"))
+            and not _any_env_set(("OPENAI_API_KEY",))
             and not _any_env_set(("OPENAI_BASE_URL",))
         )
         if gateway_only:
@@ -131,26 +99,6 @@ def _resolve_critic_protocol(requested: str, *, provider_anthropic_only: bool) -
                 "otherwise the gateway key is sent to the official OpenAI endpoint"
             )
     return requested
-
-
-def _deepseek_openai_client_factory() -> Any:
-    """Build a factory that points the critic's OpenAI client at DeepSeek.
-
-    DeepSeek exposes an OpenAI-compatible ``/chat/completions`` API, so the
-    critic-agent's OpenAI review path works once the client base URL / key are
-    set to DeepSeek, without mutating the process env. The OpenAI SDK appends
-    the route to ``base_url`` verbatim, so the default carries the ``/v1``
-    suffix; an explicit ``DEEPSEEK_BASE_URL`` is respected as-is.
-    """
-    base_url = (os.environ.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com/v1").strip().rstrip("/")
-    api_key = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
-
-    def _factory() -> Any:
-        from openai import AsyncOpenAI  # local import: keep module import-light
-
-        return AsyncOpenAI(base_url=base_url, api_key=api_key)
-
-    return _factory
 
 
 def _load_action_verdict_policy() -> dict[str, str]:
@@ -245,18 +193,6 @@ def _build_backends(
                 protocol="anthropic",
                 claude_model=claude_model,
                 codex_model=codex_model,
-                kb_mode=critic_kb_mode,
-                action_verdict_policy=_policy,
-            )
-        elif provider_anthropic_only and _deepseek_only():
-            # DeepSeek's OpenAI-compatible endpoint serves the orchestration
-            # model id, so the review runs on claude_model over that transport.
-            critic_backend = CriticAgentBackend(
-                critic_agent_root=critic_agent_root,
-                session_dir=session_dir,
-                protocol="openai",
-                codex_model=claude_model,
-                codex_client_factory=_deepseek_openai_client_factory(),
                 kb_mode=critic_kb_mode,
                 action_verdict_policy=_policy,
             )

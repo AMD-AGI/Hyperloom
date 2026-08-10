@@ -34,7 +34,16 @@ import pytest
 
 _BACKENDS_DIR = Path(__file__).resolve().parent.parent / "tools" / "backends"
 sys.path.insert(0, str(_BACKENDS_DIR))
+import _flydsl_rewrite  # noqa: E402
 import forge_submit  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _forget_rewrite_capabilities():
+    """The capability answer is cached per process; never leak it across tests."""
+    _flydsl_rewrite.reset_capability_cache()
+    yield
+    _flydsl_rewrite.reset_capability_cache()
 
 
 def _git(repo: Path | str, *args: str) -> str:
@@ -454,6 +463,85 @@ def test_finalize_removes_staged_drivers_from_the_live_repo(tmp_path):
     assert not driver.exists()
     assert not stray.exists()
     assert tracked.read_text() == "TRACKED\n"
+
+
+def test_finalize_leaves_the_live_repo_exclude_file_as_it_found_it(tmp_path):
+    """Staging a driver edits the caller's repository, so cleanup undoes it.
+
+    ``--git-common-dir`` resolves to the live repository even from a worktree, so
+    the entry outlived the run and reached sessions that never enabled this
+    route. Pre-existing content has to survive the removal untouched.
+    """
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _git(workspace, "init", "-q")
+    exclude = workspace / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text("# user content\n*.log\n", encoding="utf-8")
+    output_dir = tmp_path / "attempt"
+    output_dir.mkdir()
+
+    driver = Path(forge_submit._write_generated_driver(workspace, "print('drive')\n"))
+    assert forge_submit._GENERATED_DRIVER_GLOB in exclude.read_text().split()
+
+    forge_submit._finalize_forge_workspace(
+        inplace=True,
+        restore_info=None,
+        driver=str(driver),
+        workspace=str(workspace),
+        output_dir=output_dir,
+        branch="forge/test",
+        nogit_scratch=False,
+    )
+
+    assert exclude.read_text() == "# user content\n*.log\n"
+
+
+def test_finalize_repoints_artifact_paths_at_the_relocated_campaign(tmp_path):
+    """Relocating the campaign moves the producer's bundle with it.
+
+    The producer publishes inside ``<workspace>/forge_experiments``, so the paths
+    a caller receives named a directory this cleanup had just emptied -- and the
+    consumer that builds the deploy snapshot afterwards silently found nothing.
+    """
+    workspace = tmp_path / "repo"
+    published = workspace / "forge_experiments" / "rewrite_applyback" / "best"
+    published.mkdir(parents=True)
+    (published / "forge.patch").write_text("PATCH\n")
+    output_dir = tmp_path / "attempt"
+    output_dir.mkdir()
+    result = {
+        "canonical_patch_path": str(published / "forge.patch"),
+        "canonical_files_root": str(published / "files"),
+        "artifacts": [str(published / "forge.patch")],
+        "flydsl_applyback": {
+            "canonical_manifest": str(published / "manifest.json"),
+        },
+        "output_dir": str(output_dir),
+    }
+
+    forge_submit._finalize_forge_workspace(
+        inplace=True,
+        restore_info=None,
+        driver="",
+        workspace=str(workspace),
+        output_dir=output_dir,
+        branch="forge/test",
+        nogit_scratch=False,
+        result=result,
+    )
+
+    relocated = output_dir / "forge_experiments" / "rewrite_applyback" / "best"
+    assert result["canonical_patch_path"] == str(relocated / "forge.patch")
+    assert result["canonical_files_root"] == str(relocated / "files")
+    assert result["artifacts"] == [str(relocated / "forge.patch")]
+    assert result["flydsl_applyback"]["canonical_manifest"] == str(
+        relocated / "manifest.json"
+    )
+    # The repointed path is the one that actually holds the artifact now.
+    assert Path(result["canonical_patch_path"]).read_text() == "PATCH\n"
+    # Paths outside the moved tree are left exactly as they were.
+    assert result["output_dir"] == str(output_dir)
 
 
 def test_finalize_keeps_both_campaigns_when_the_destination_is_populated(tmp_path):
@@ -2061,3 +2149,1281 @@ def test_nogit_scratch_uses_supplied_non_main_branch(tmp_path):
     assert prepared is not None
     workspace, _kernel, _base = prepared
     assert _git(workspace, "branch", "--show-current") == branch
+
+
+def _capabilities_payload(**overrides) -> dict:
+    """One capability payload, spelled exactly as the producer emits it.
+
+    Copied from ``kernel_agents.rewrite_by_flydsl.protocol.capabilities()``.
+    ``test_capability_payload_matches_the_installed_producer`` re-derives it from
+    a real producer when one is on disk, so a rename on either side cannot leave
+    these tests passing against a payload nobody emits.
+    """
+    payload = {
+        "rewrite_protocol_version": 2,
+        "artifact_schema_versions": [2],
+        "driver_contract_versions": [1],
+        "frameworks": ["aiter", "vllm", "sglang"],
+        "source_languages": ["triton", "hip", "cuda", "cpp"],
+        "source_kinds": ["triton", "hip_cpp"],
+        "result_sentinel": "__FORGE_RESULT__",
+        "driver_preparation": True,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _stub_capability_process(monkeypatch, *, stdout: str, returncode: int = 0) -> dict:
+    captured: dict = {"calls": 0}
+
+    def fake_run(command, **kwargs):
+        captured["calls"] += 1
+        captured["command"] = command
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(command, returncode, stdout, "")
+
+    monkeypatch.setattr(_flydsl_rewrite.subprocess, "run", fake_run)
+    return captured
+
+
+class _RecordingProbe:
+    """Stand-in for the producer probe that counts how often it is consulted."""
+
+    def __init__(self, capabilities):
+        self.capabilities = capabilities
+        self.calls = 0
+
+    def __call__(self, **_kwargs):
+        self.calls += 1
+        return self.capabilities
+
+
+_SUPPORTED_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
+    True,
+    "capability_ok",
+    "",
+    ("aiter", "sglang", "vllm"),
+    source_languages=("triton", "hip", "cuda", "cpp"),
+    source_kinds=("triton", "hip_cpp"),
+    driver_preparation=True,
+)
+
+# A producer predating driver preparation: it cannot author the measurement
+# driver, which is the one thing this route cannot supply itself.
+_NO_PREPARATION_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
+    True,
+    "capability_ok",
+    "",
+    ("aiter", "sglang", "vllm"),
+    source_languages=("triton", "hip", "cuda", "cpp"),
+    source_kinds=("triton", "hip_cpp"),
+)
+
+# A producer that ports Triton only, as the route assumed before the source
+# language became part of the handshake.
+_TRITON_ONLY_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
+    True,
+    "capability_ok",
+    "",
+    ("aiter", "sglang", "vllm"),
+    source_languages=("triton",),
+    source_kinds=("triton",),
+    driver_preparation=True,
+)
+
+
+def _written_invocation_spec(tmp_path) -> Path:
+    """The invocation evidence the producer authors its driver from."""
+    invocation_spec = tmp_path / "invocation_spec.json"
+    invocation_spec.write_text(json.dumps({"op": "vllm::fused_gemm", "calls": []}))
+    return invocation_spec
+
+
+def _rewrite_route_kwargs(tmp_path, **overrides) -> dict:
+    workspace = tmp_path / "worktree"
+    kernel = workspace / "vllm" / "fused_gemm.py"
+    kernel.parent.mkdir(parents=True, exist_ok=True)
+    kernel.write_text("TRITON\n")
+    invocation_spec = _written_invocation_spec(tmp_path)
+    kwargs = {
+        "candidate": {"name": "fused_gemm", "source_symbol": "matmul"},
+        "source_type": "triton",
+        "kernel_kind": "triton",
+        "logical_operator": "vllm::fused_gemm",
+        "source_kernel": str(kernel),
+        "workspace": str(workspace),
+        "implementation_sources": [str(kernel)],
+        "implementation_symbols": ["matmul"],
+        "framework": "vllm",
+        "gpu_target": "gfx942",
+        "shape_cases": [{"M": 8, "N": 16}],
+        "shapes": {"M": 8},
+        "branch": "forge/session/fused-gemm-abc123def456",
+        "attempt_id": "attempt-1",
+        "timeout_s": 7200,
+        "invocation_spec_file": str(invocation_spec),
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_capability_probe_reads_the_declared_rewrite_contract(monkeypatch):
+    captured = _stub_capability_process(
+        monkeypatch,
+        stdout="loading kernel_agents...\n" + json.dumps(_capabilities_payload()) + "\ndone\n",
+    )
+
+    capabilities = _flydsl_rewrite.probe_capabilities(forge_root="/forge/src")
+
+    assert capabilities.supported is True
+    assert capabilities.reason == "capability_ok"
+    assert capabilities.frameworks == ("aiter", "vllm", "sglang")
+    # The flag is an eager short-circuit; nothing else may be guessed onto it.
+    assert captured["command"] == [
+        sys.executable,
+        "-m",
+        "kernel_agents.cli",
+        "forge-rewrite-by-flydsl",
+        "--capabilities-json",
+    ]
+    assert captured["env"]["PYTHONPATH"].startswith("/forge/src")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"rewrite_protocol_version": 1}, "capability_protocol_unsupported"),
+        ({"rewrite_protocol_version": 3}, "capability_protocol_unsupported"),
+        ({"artifact_schema_versions": [1]}, "capability_artifact_schema_unsupported"),
+        ({"result_sentinel": "__FORGE_REWRITE_RESULT__"}, "capability_sentinel_mismatch"),
+        ({"frameworks": []}, "capability_frameworks_missing"),
+    ],
+)
+def test_capability_probe_rejects_an_incompatible_producer(monkeypatch, overrides, reason):
+    _stub_capability_process(monkeypatch, stdout=json.dumps(_capabilities_payload(**overrides)))
+
+    capabilities = _flydsl_rewrite.probe_capabilities()
+
+    assert capabilities.supported is False
+    assert capabilities.reason == reason
+
+
+def test_capability_probe_rejects_a_renamed_protocol_field(monkeypatch):
+    """A producer that spells the version under any other key is unreadable.
+
+    The consumer once read a ``protocol_versions`` list no producer has ever
+    emitted, which made every real handshake decline the route silently.
+    """
+    payload = _capabilities_payload()
+    del payload["rewrite_protocol_version"]
+    payload["protocol_versions"] = [2]
+    _stub_capability_process(monkeypatch, stdout=json.dumps(payload))
+
+    capabilities = _flydsl_rewrite.probe_capabilities()
+
+    assert capabilities.supported is False
+    assert capabilities.reason == "capability_protocol_unsupported"
+
+
+def test_installed_producer_capabilities_are_accepted():
+    producer_root = forge_submit._ensure_forge_on_path()
+    if not producer_root:
+        pytest.skip("no KernelForge checkout resolvable from $FORGE_PATH")
+
+    capabilities = _flydsl_rewrite.probe_capabilities(
+        forge_root=producer_root,
+    )
+
+    assert capabilities.supported is True, (
+        f"{capabilities.reason}: {capabilities.detail}"
+    )
+    assert set(capabilities.frameworks) == {"aiter", "vllm", "sglang"}
+
+
+def test_capability_probe_reports_a_producer_that_rejects_the_flag(monkeypatch):
+    _stub_capability_process(
+        monkeypatch,
+        stdout="Error: No such option '--capabilities-json'. Did you mean '--shapes-json'?",
+        returncode=2,
+    )
+
+    capabilities = _flydsl_rewrite.probe_capabilities()
+
+    assert capabilities.supported is False
+    assert capabilities.reason == "capability_probe_failed"
+    assert "rc=2" in capabilities.detail
+
+
+def _installed_producer_root() -> str:
+    """Return the source root of a KernelForge that speaks the rewrite command.
+
+    Resolves ``$FORGE_PATH`` the same way ``forge_submit`` does, then requires
+    the rewrite command itself: a checkout predating the rewrite route answers
+    the module but not the command, and must skip rather than fail.
+    """
+    root = forge_submit._ensure_forge_on_path()
+    if not root:
+        return ""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kernel_agents.cli",
+            _flydsl_rewrite.REWRITE_COMMAND,
+            _flydsl_rewrite.CAPABILITIES_FLAG,
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": root + os.pathsep + os.environ.get("PYTHONPATH", "")},
+        timeout=_flydsl_rewrite.CAPABILITY_PROBE_TIMEOUT_SEC,
+    )
+    return root if proc.returncode == 0 else ""
+
+
+def test_capability_payload_matches_the_installed_producer():
+    """The real producer must satisfy this consumer, unstubbed.
+
+    Every other capability test builds the payload itself, so both halves of
+    this cross-repo contract can drift into agreeing only with their own
+    fixtures. This runs the installed producer and pins its payload against the
+    fixture, which is the one check that catches a rename on either side.
+    """
+    root = _installed_producer_root()
+    if not root:
+        pytest.skip("no KernelForge with forge-rewrite-by-flydsl resolvable from $FORGE_PATH")
+
+    capabilities = _flydsl_rewrite.probe_capabilities(forge_root=root)
+
+    assert capabilities.supported is True, f"{capabilities.reason}: {capabilities.detail}"
+    assert capabilities.reason == "capability_ok"
+    assert set(capabilities.frameworks) >= {"aiter", "sglang", "vllm"}
+    # The route now asks the producer which sources it can port, so a producer
+    # that stopped naming them would silently decline every candidate.
+    assert "triton" in capabilities.accepted_sources()
+    # And a source-less kind must not appear on either advertised list.
+    assert not capabilities.accepted_sources() & {"aiter_asm", "prebuilt", "asm"}
+
+    # Ordering is not contractual, but the key set and value shapes are: a
+    # fixture that no longer mirrors them stops protecting the other tests.
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kernel_agents.cli",
+            _flydsl_rewrite.REWRITE_COMMAND,
+            _flydsl_rewrite.CAPABILITIES_FLAG,
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": root + os.pathsep + os.environ.get("PYTHONPATH", "")},
+        timeout=_flydsl_rewrite.CAPABILITY_PROBE_TIMEOUT_SEC,
+    )
+    published = _flydsl_rewrite._decode_capability_payload(proc.stdout)
+    fixture = _capabilities_payload()
+    assert published is not None
+    assert set(published) == set(fixture)
+    for key, expected in fixture.items():
+        assert type(published[key]) is type(expected), key
+    assert published["rewrite_protocol_version"] == _flydsl_rewrite.PROTOCOL_VERSION
+    assert _flydsl_rewrite.ARTIFACT_SCHEMA_VERSION in published["artifact_schema_versions"]
+    assert published["result_sentinel"] == _flydsl_rewrite.RESULT_SENTINEL
+
+
+def test_capability_probe_answers_once_per_process(monkeypatch):
+    captured = _stub_capability_process(monkeypatch, stdout=json.dumps(_capabilities_payload()))
+
+    first = _flydsl_rewrite.probe_capabilities()
+    second = _flydsl_rewrite.probe_capabilities()
+
+    assert first == second
+    assert captured["calls"] == 1
+
+
+def test_rewrite_route_needs_the_explicit_switch(tmp_path, monkeypatch):
+    monkeypatch.delenv(_flydsl_rewrite.REWRITE_ENV, raising=False)
+    probe = _RecordingProbe(_SUPPORTED_CAPABILITIES)
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=probe,
+        **_rewrite_route_kwargs(tmp_path),
+    )
+
+    assert decision.eligible is False
+    assert decision.reason == "route_disabled"
+    assert probe.calls == 0
+
+
+def test_a_traced_triton_kernel_is_rewritable_despite_its_python_language(tmp_path, monkeypatch):
+    """The curated kind decides, not the file's language.
+
+    The tracer reports a Triton kernel's ``source_type`` as ``python`` and
+    records that it is Triton in ``kernel_kind``. Reading the language alone
+    declined every Triton kernel the tracer resolved, which is all of them.
+    """
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    probe = _RecordingProbe(_SUPPORTED_CAPABILITIES)
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=probe,
+        **_rewrite_route_kwargs(tmp_path, source_type="python", kernel_kind="triton"),
+    )
+
+    assert decision.eligible is True
+    assert decision.reason == "eligible"
+
+
+def test_a_flydsl_kernel_is_declined_whatever_its_language_says(tmp_path, monkeypatch):
+    """Resolving the kind must not let an already-FlyDSL kernel through."""
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    probe = _RecordingProbe(_SUPPORTED_CAPABILITIES)
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=probe,
+        **_rewrite_route_kwargs(tmp_path, source_type="flydsl", kernel_kind=""),
+    )
+
+    assert decision.eligible is False
+    assert decision.reason == "already_flydsl_source"
+
+
+def test_the_route_requires_a_producer_that_authors_the_driver(tmp_path, monkeypatch):
+    """An operator's real invocation is not rebuildable from traced shapes.
+
+    Quantized and routed operands carry scale and index meanings the trace does
+    not describe, so the producer writes the driver from the invocation spec. A
+    producer that cannot do that leaves this route with nothing to measure.
+    """
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+
+    granted = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=_RecordingProbe(_SUPPORTED_CAPABILITIES),
+        **_rewrite_route_kwargs(tmp_path),
+    )
+    declined = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=_RecordingProbe(_NO_PREPARATION_CAPABILITIES),
+        **_rewrite_route_kwargs(tmp_path),
+    )
+
+    assert granted.eligible is True
+    assert granted.reason == "eligible"
+    assert declined.eligible is False
+    assert declined.reason == "driver_preparation_unsupported"
+
+
+@pytest.mark.parametrize("spec_file", ["", "/nonexistent/invocation_spec.json"])
+def test_the_route_declines_without_the_invocation_evidence(
+    tmp_path,
+    monkeypatch,
+    spec_file,
+):
+    """The same requirement as driver preparation, seen from the other side.
+
+    Preparation is only possible against a real invocation spec. Admitting the
+    route without one hands the producer nothing to author from and leaves it the
+    placeholder driver, which exits 1 -- so the whole budget would be spent
+    reaching a failure that is knowable at admission.
+    """
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=_RecordingProbe(_SUPPORTED_CAPABILITIES),
+        **_rewrite_route_kwargs(tmp_path, invocation_spec_file=spec_file),
+    )
+
+    assert decision.eligible is False
+    assert decision.reason == "invocation_spec_missing"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"kernel_kind": "flydsl"}, "already_flydsl_source"),
+        ({"kernel_kind": "aiter_asm"}, "prebuilt_binary_unsupported"),
+        ({"logical_operator": "vllm::all_reduce"}, "collective_unsupported"),
+        ({"framework": ""}, "framework_unsupported"),
+        ({"framework": "torch"}, "framework_unsupported"),
+        ({"timeout_s": 3600}, "budget_insufficient"),
+        ({"implementation_symbols": []}, "target_functions_missing"),
+    ],
+)
+def test_rewrite_route_rejects_candidates_before_probing_the_producer(
+    tmp_path,
+    monkeypatch,
+    overrides,
+    reason,
+):
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    probe = _RecordingProbe(_SUPPORTED_CAPABILITIES)
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=probe,
+        **_rewrite_route_kwargs(tmp_path, **overrides),
+    )
+
+    assert decision.eligible is False
+    assert decision.reason == reason
+    # An ineligible candidate must not spend a probe subprocess or any budget.
+    assert probe.calls == 0
+
+
+def test_a_source_without_readable_code_is_refused_whatever_the_producer_advertises(
+    tmp_path,
+    monkeypatch,
+):
+    """A prebuilt binary or hand-written ASM has nothing to port.
+
+    Negotiation decides which *languages* are portable, and widening that list
+    must not reach a candidate that ships no source at all -- so this refusal
+    stays local and ahead of the handshake.
+    """
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    generous = _flydsl_rewrite.RewriteCapabilities(
+        True,
+        "capability_ok",
+        "",
+        ("aiter", "sglang", "vllm"),
+        source_languages=("triton", "hip", "cuda", "cpp", "asm"),
+        source_kinds=("triton", "hip_cpp", "aiter_asm", "prebuilt"),
+        driver_preparation=True,
+    )
+    probe = _RecordingProbe(generous)
+
+    for kind in ("aiter_asm", "prebuilt"):
+        decision = _flydsl_rewrite.evaluate_rewrite_route(
+            capability_probe=probe,
+            **_rewrite_route_kwargs(tmp_path, source_type="asm", kernel_kind=kind),
+        )
+        assert decision.eligible is False
+        assert decision.reason == "prebuilt_binary_unsupported"
+    assert probe.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "capabilities", "expected"),
+    [
+        # A HIP/C++ candidate is portable once the producer says it can read it,
+        # and refused by the same producer that only ever handled Triton.
+        ({"source_type": "hip_cpp", "kernel_kind": "hip_cpp"}, _SUPPORTED_CAPABILITIES, True),
+        ({"source_type": "hip_cpp", "kernel_kind": "hip_cpp"}, _TRITON_ONLY_CAPABILITIES, False),
+        ({"source_type": "hip", "kernel_kind": ""}, _SUPPORTED_CAPABILITIES, True),
+        # A .py file is not on its own evidence of a rewritable kernel.
+        ({"source_type": "python", "kernel_kind": ""}, _SUPPORTED_CAPABILITIES, False),
+        # ...but the curated kind still overrides the file's language.
+        ({"source_type": "python", "kernel_kind": "triton"}, _TRITON_ONLY_CAPABILITIES, True),
+    ],
+)
+def test_the_producer_decides_which_source_languages_are_portable(
+    tmp_path,
+    monkeypatch,
+    overrides,
+    capabilities,
+    expected,
+):
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=_RecordingProbe(capabilities),
+        **_rewrite_route_kwargs(tmp_path, **overrides),
+    )
+
+    assert decision.eligible is expected, decision.detail
+    if not expected:
+        assert decision.reason == "source_type_unsupported"
+        # The reason names both advertised lists, so an operator can tell a
+        # producer limit from a candidate this consumer refused on its own.
+        assert str(list(capabilities.source_languages)) in decision.detail
+
+
+def test_a_producer_that_names_no_source_language_is_refused(tmp_path, monkeypatch):
+    """Silence is not permission: an unreadable contract admits nothing."""
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    payload = _capabilities_payload()
+    payload.pop("source_languages")
+    payload.pop("source_kinds")
+
+    capabilities = _flydsl_rewrite._validated_capabilities(payload)
+
+    assert capabilities.supported is False
+    assert capabilities.reason == "capability_source_languages_missing"
+
+
+def test_rewrite_route_rejects_a_source_outside_the_prepared_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    stray = tmp_path / "elsewhere" / "helper.py"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("HELPER\n")
+    probe = _RecordingProbe(_SUPPORTED_CAPABILITIES)
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=probe,
+        **_rewrite_route_kwargs(tmp_path, implementation_sources=[str(stray)]),
+    )
+
+    assert decision.eligible is False
+    assert decision.reason == "workspace_mapping_unresolved"
+    assert str(stray) in decision.detail
+    assert probe.calls == 0
+
+
+def test_rewrite_route_rejects_multi_node_before_the_apply_stage(tmp_path, monkeypatch):
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    probe = _RecordingProbe(_SUPPORTED_CAPABILITIES)
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=probe,
+        **_rewrite_route_kwargs(tmp_path),
+    )
+
+    assert decision.eligible is False
+    assert decision.reason == "multi_node_unsupported"
+    assert probe.calls == 0
+
+
+def test_rewrite_route_rejects_a_framework_the_producer_cannot_apply_back(tmp_path, monkeypatch):
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    probe = _RecordingProbe(
+        _flydsl_rewrite.RewriteCapabilities(True, "capability_ok", "", ("aiter",))
+    )
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=probe,
+        **_rewrite_route_kwargs(tmp_path),
+    )
+
+    assert decision.eligible is False
+    assert decision.reason == "capability_framework_unsupported"
+    assert probe.calls == 1
+
+
+def test_rewrite_route_forwards_the_incompatible_capability_reason(tmp_path, monkeypatch):
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    probe = _RecordingProbe(
+        _flydsl_rewrite.RewriteCapabilities(False, "capability_probe_failed", "rc=2")
+    )
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=probe,
+        **_rewrite_route_kwargs(tmp_path),
+    )
+
+    assert decision.eligible is False
+    assert decision.reason == "capability_probe_failed"
+    assert decision.capabilities is not None
+
+
+def test_eligible_rewrite_route_carries_the_producer_candidate_fields(tmp_path, monkeypatch):
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    kwargs = _rewrite_route_kwargs(tmp_path)
+    probe = _RecordingProbe(_SUPPORTED_CAPABILITIES)
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(capability_probe=probe, **kwargs)
+
+    assert decision.eligible is True
+    assert decision.reason == "eligible"
+    assert decision.spec is not None
+    assert decision.spec.as_dict() == {
+        "logical_operator": "vllm::fused_gemm",
+        "source_kernel": kwargs["source_kernel"],
+        "implementation_symbols": ["matmul"],
+        "source_entry": "matmul",
+        "shape_cases": [{"M": 8, "N": 16}],
+        "framework": "vllm",
+        "gpu_target": "gfx942",
+            # The producer needs this stated: the candidate's file is a .py that
+            # names no language, and only the trace knew it was Triton.
+            "source_language": "triton",
+            # The driver is generated only after the route is granted.
+            "driver": "",
+            "branch": "forge/session/fused-gemm-abc123def456",
+            "attempt_id": "attempt-1",
+        }
+    assert decision.with_driver("/ws/.forge_driver_x.py").spec.driver == "/ws/.forge_driver_x.py"
+
+
+def test_rewrite_spec_falls_back_to_the_single_shape_case(tmp_path, monkeypatch):
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    probe = _RecordingProbe(_SUPPORTED_CAPABILITIES)
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        capability_probe=probe,
+        **_rewrite_route_kwargs(
+            tmp_path,
+            shape_cases=[],
+            shapes={"M": 8, "K": 2048},
+            candidate={"name": "fused_gemm", "source_entry": "fused_gemm_forward"},
+        ),
+    )
+
+    assert decision.eligible is True
+    assert decision.spec.shape_cases == ({"M": 8, "K": 2048},)
+    assert decision.spec.source_entry == "fused_gemm_forward"
+
+
+def _submit_with_rewrite_route(tmp_path, monkeypatch, captured=None, **submit_overrides) -> dict:
+    repo, source = _make_repo(tmp_path)
+    output_dir = tmp_path / "results" / "rewrite-route"
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("# Optimize\n")
+
+    def fake_loop(**kwargs):
+        if captured is not None:
+            captured.update(kwargs)
+        return forge_submit.ForgeLoopOutcome(
+            baseline_ms=2.0,
+            best_ms=1.0,
+            improved=True,
+            output="forge-loop ran",
+            error=None,
+            timed_out=False,
+            checkpoint=None,
+            pristine_baseline_ms=2.0,
+            search_start_ms=2.0,
+            improved_during_search=True,
+            structured_result=None,
+        )
+
+    _stub_submit_environment(monkeypatch)
+    monkeypatch.setattr(forge_submit, "_run_loop_via_cli", fake_loop)
+
+    submit_kwargs = {
+        "source_file": str(source),
+        "prompt_file": prompt,
+        "output_dir": output_dir,
+        "test_command": "python -c 'print(\"allclose: True\")'",
+        "source_type": "triton",
+        "candidate": {
+            "name": "fused_gemm",
+            "operation": "vllm::fused_gemm",
+            "source_framework": "vllm",
+            "source_symbol": "matmul",
+            "kernel_sources": [str(source)],
+            "kernel_kind": "triton",
+            "platform": "mi355x",
+            "input_shapes": [{"call_num": 4, "shape": "(64,32) fp16<br>(32,16) fp16"}],
+            "input_dtypes": ["fp16", "fp16"],
+        },
+        "timeout_s": 7200,
+        "kernel_repo": str(repo),
+        # The rewrite route declines without it: the producer's driver-preparation
+        # stage has nothing to author a measurement driver from.
+        "invocation_spec_file": str(_written_invocation_spec(tmp_path)),
+    }
+    submit_kwargs.update(submit_overrides)
+    return forge_submit.submit(**submit_kwargs)
+
+
+def test_submit_omits_the_rewrite_verdict_when_the_route_is_off(tmp_path, monkeypatch):
+    monkeypatch.delenv(_flydsl_rewrite.REWRITE_ENV, raising=False)
+
+    result = _submit_with_rewrite_route(tmp_path, monkeypatch)
+
+    assert result["returncode"] == 0
+    assert "flydsl_rewrite" not in result
+
+
+_REWRITE_ARTIFACT_DIR = "forge_experiments/rewrite"
+_REWRITE_PINNED_REF = "refs/hyperloom/applyback/attempt-1"
+
+
+def _publish_applyback_in(
+    workspace: str,
+    base_commit: str,
+    *,
+    manifest_overrides: dict | None = None,
+    **outer_overrides,
+) -> dict:
+    """Commit an apply-back in the producer workspace and report its artifacts."""
+    root = Path(workspace)
+    (root / "kernel.py").write_text("def kernel(x):\n    return flydsl_kernel(x)\n")
+    (root / "flydsl_kernel.py").write_text("def flydsl_kernel(x):\n    return x\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "flydsl apply-back")
+    best_commit = _git(root, "rev-parse", "HEAD")
+    _git(root, "update-ref", _REWRITE_PINNED_REF, best_commit)
+
+    artifact_dir = root / _REWRITE_ARTIFACT_DIR
+    (artifact_dir / "files").mkdir(parents=True, exist_ok=True)
+    changed_files = ["flydsl_kernel.py", "kernel.py"]
+    for relative in changed_files:
+        (artifact_dir / "files" / relative).write_text((root / relative).read_text())
+    (artifact_dir / "forge.patch").write_text(
+        _git(root, "diff", f"{base_commit}..{best_commit}") + "\n"
+    )
+    scratch = artifact_dir / "scratch_port.py"
+    scratch.write_text("SCRATCH\n")
+    manifest = {
+        "schema_version": 2,
+        "artifact_kind": "framework_applyback",
+        "validation_scope": "reference",
+        "logical_op_name": "vllm::fused_gemm",
+        "operator_slug": "vllm_fused_gemm",
+        "source_entry": "matmul",
+        "reference_correctness_passed": True,
+        "reference_snr_db": 51.0,
+        "integration_validation_required": True,
+        "integration_validation_status": "pending",
+        "base_commit": base_commit,
+        "commit_hash": best_commit,
+        "commit_ref": _REWRITE_PINNED_REF,
+        "builder_symbol": "build_fused_gemm_module",
+        "flydsl_best_commit": "f" * 40,
+        "baseline_wall_ms": 4.0,
+        "best_wall_ms": 2.0,
+        "framework": "vllm",
+        "changed_files": changed_files,
+        "artifact_dir": "rewrite",
+        "patch_path": "rewrite/forge.patch",
+    }
+    manifest.update(manifest_overrides or {})
+    (artifact_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    outer = {
+        "success": True,
+        "applyback_required": True,
+        "applyback_ok": True,
+        "artifact_kind": "framework_applyback",
+        "artifact_schema_version": 2,
+        "best_commit": best_commit,
+        "canonical_manifest": f"{_REWRITE_ARTIFACT_DIR}/manifest.json",
+        "canonical_patch_path": f"{_REWRITE_ARTIFACT_DIR}/forge.patch",
+        "canonical_files_root": f"{_REWRITE_ARTIFACT_DIR}/files",
+        "temporary_paths": [f"{_REWRITE_ARTIFACT_DIR}/scratch_port.py"],
+    }
+    outer.update(outer_overrides)
+    return outer
+
+
+def _stub_rewrite_runner(
+    monkeypatch,
+    *,
+    publish=True,
+    error=None,
+    timed_out=False,
+    manifest_overrides=None,
+):
+    captured: dict = {}
+
+    def fake_runner(**kwargs):
+        captured.update(kwargs)
+        result = None
+        if publish:
+            base_commit = _git(Path(kwargs["workspace"]), "rev-parse", "HEAD")
+            result = _publish_applyback_in(
+                kwargs["workspace"],
+                base_commit,
+                manifest_overrides=manifest_overrides,
+            )
+        return forge_submit.RewriteRunOutcome(
+            result=result,
+            output="forge rewrite ran",
+            error=error,
+            timed_out=timed_out,
+        )
+
+    monkeypatch.setattr(forge_submit, "_run_rewrite_via_cli", fake_runner)
+    return captured
+
+
+@pytest.mark.parametrize(
+    ("best_wall_ms", "case_id"),
+    # The published baseline is 4.0ms, so these are slower and exactly tied.
+    [(5.0, "slower_than_the_source"), (4.0, "tied_with_the_source")],
+)
+def test_submit_declines_a_valid_applyback_that_is_not_faster(
+    tmp_path,
+    monkeypatch,
+    best_wall_ms,
+    case_id,
+):
+    """The decline must name the policy, not impugn the producer's artifact.
+
+    A contract-valid apply-back that is not faster is something the producer is
+    allowed to publish. Reporting it as "no validated apply-back patch" sends
+    whoever reads the log hunting a producer bug that does not exist.
+    """
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    monkeypatch.setattr(
+        _flydsl_rewrite,
+        "probe_capabilities",
+        lambda **_kwargs: _SUPPORTED_CAPABILITIES,
+    )
+    _stub_rewrite_runner(monkeypatch, manifest_overrides={"best_wall_ms": best_wall_ms})
+
+    result = _submit_with_rewrite_route(tmp_path, monkeypatch)
+
+    assert result["returncode"] == 1
+    assert "is not faster than the source" in result["stderr_tail"]
+    assert f"best={best_wall_ms}ms" in result["stderr_tail"]
+    assert "without a validated apply-back patch" not in result["stderr_tail"]
+    # Declined, so nothing downstream may read it as a keepable apply-back.
+    assert "flydsl_applyback" not in result
+    assert result["flydsl_rewrite"]["eligible"] is True
+
+
+def test_submit_consumes_a_canonical_applyback_instead_of_the_forge_loop(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    monkeypatch.setattr(
+        _flydsl_rewrite,
+        "probe_capabilities",
+        lambda **_kwargs: _SUPPORTED_CAPABILITIES,
+    )
+    rewrite_call = _stub_rewrite_runner(monkeypatch)
+
+    loop_call: dict = {}
+    result = _submit_with_rewrite_route(tmp_path, monkeypatch, captured=loop_call)
+
+    assert result["returncode"] == 0
+    # The generic loop is never reached once the rewrite route is granted.
+    assert loop_call == {}
+    verdict = result["flydsl_rewrite"]
+    assert verdict["eligible"] is True
+    driver = Path(verdict["spec"]["driver"])
+    assert driver.name.startswith(".forge_driver_")
+    assert rewrite_call["driver"] == str(driver)
+    assert rewrite_call["logical_op_name"] == "vllm::fused_gemm"
+
+    applyback = result["flydsl_applyback"]
+    assert applyback["artifact_kind"] == "framework_applyback"
+    assert applyback["integration_validation_status"] == "pending"
+    assert applyback["changed_files"] == ["flydsl_kernel.py", "kernel.py"]
+    assert result["best_commit"] == applyback["best_commit"]
+    assert result["best_ms"] == 2.0
+    assert result["mean_case_speedup"] == 2.0
+    assert result["salvaged"] is False
+    output_dir = tmp_path / "results" / "rewrite-route"
+    exported = output_dir / "optimized_versions"
+    assert sorted(path.name for path in (exported / "files").iterdir()) == [
+        "flydsl_kernel.py",
+        "kernel.py",
+    ]
+    # The micro gate stays readable by the only report scanner in the repo,
+    # while the integration verdict is stated separately.
+    report = (output_dir / "optimization_report.md").read_text()
+    assert "[correctness] pass" in report
+    assert "[integration_validation] pending" in report
+
+
+def test_reexported_patch_is_binary_safe(tmp_path, monkeypatch):
+    repo, kernel = _make_repo(tmp_path)
+    base_commit = _git(repo, "rev-parse", "HEAD")
+    (repo / "weights.bin").write_bytes(bytes(range(256)))
+    kernel.write_text("OPTIMIZED\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "binary artifact")
+    best_commit = _git(repo, "rev-parse", "HEAD")
+    output_dir = tmp_path / "attempt"
+    output_dir.mkdir()
+
+    _, changed = forge_submit._export_best_artifacts(
+        str(repo),
+        base_commit,
+        str(kernel),
+        str(kernel),
+        output_dir,
+        best_commit=best_commit,
+    )
+
+    assert sorted(changed) == ["kernel.py", "weights.bin"]
+    patch = (output_dir / "optimized_versions" / "forge.patch").read_text()
+    # Without --binary git emits a "Binary files differ" stub that cannot apply.
+    assert "GIT binary patch" in patch
+    assert "Binary files" not in patch
+
+
+def test_submit_salvages_an_applyback_published_before_a_hard_kill(tmp_path, monkeypatch):
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    monkeypatch.setattr(
+        _flydsl_rewrite,
+        "probe_capabilities",
+        lambda **_kwargs: _SUPPORTED_CAPABILITIES,
+    )
+    _stub_rewrite_runner(
+        monkeypatch,
+        error=RuntimeError("forge rewrite exceeded absolute deadline after 7200s"),
+        timed_out=True,
+    )
+
+    result = _submit_with_rewrite_route(tmp_path, monkeypatch)
+
+    assert result["returncode"] == 0
+    assert result["timed_out"] is True
+    assert result["salvaged"] is True
+    assert result["flydsl_applyback"]["validation_scope"] == "reference"
+
+
+@pytest.mark.parametrize(
+    ("publish", "error", "timed_out"),
+    [
+        pytest.param(False, None, False, id="clean_exit_without_an_applyback"),
+        pytest.param(False, RuntimeError("rc=1"), False, id="failed_without_an_applyback"),
+        pytest.param(False, RuntimeError("deadline"), True, id="killed_before_publishing"),
+    ],
+)
+def test_submit_produces_no_bundle_when_no_applyback_is_published(
+    tmp_path,
+    monkeypatch,
+    publish,
+    error,
+    timed_out,
+):
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    monkeypatch.setattr(
+        _flydsl_rewrite,
+        "probe_capabilities",
+        lambda **_kwargs: _SUPPORTED_CAPABILITIES,
+    )
+    _stub_rewrite_runner(monkeypatch, publish=publish, error=error, timed_out=timed_out)
+
+    result = _submit_with_rewrite_route(tmp_path, monkeypatch)
+
+    assert result["returncode"] == 1
+    assert result["salvaged"] is False
+    assert "best_commit" not in result
+    output_dir = tmp_path / "results" / "rewrite-route"
+    assert not (output_dir / "optimized_versions").exists()
+    assert not (output_dir / "optimization_report.md").exists()
+
+
+def test_submit_rejects_an_applyback_that_fails_its_own_contract(tmp_path, monkeypatch):
+    """A published-but-invalid result is discarded, not degraded into a keep."""
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    monkeypatch.setattr(
+        _flydsl_rewrite,
+        "probe_capabilities",
+        lambda **_kwargs: _SUPPORTED_CAPABILITIES,
+    )
+
+    def fake_runner(**kwargs):
+        base_commit = _git(Path(kwargs["workspace"]), "rev-parse", "HEAD")
+        outer = _publish_applyback_in(
+            kwargs["workspace"], base_commit, temporary_paths=None
+        )
+        return forge_submit.RewriteRunOutcome(
+            result=outer, output="", error=None, timed_out=False
+        )
+
+    monkeypatch.setattr(forge_submit, "_run_rewrite_via_cli", fake_runner)
+
+    result = _submit_with_rewrite_route(tmp_path, monkeypatch)
+
+    assert result["returncode"] == 1
+    assert "flydsl_applyback" not in result
+    assert not (tmp_path / "results" / "rewrite-route" / "optimization_report.md").exists()
+
+
+def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch):
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    kernel = workspace / "fused_gemm.py"
+    driver = workspace / ".forge_driver_abc.py"
+    kernel.write_text("pass\n")
+    driver.write_text("pass\n")
+    invocation_spec = tmp_path / "invocation_spec_fused_gemm.json"
+    invocation_spec.write_text('{"schema_version": 2}')
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
+    result_json = tmp_path / "attempt" / "forge_rewrite_result.json"
+    result_json.write_text('{"stale": true}')
+    captured = {}
+
+    class FakeProcess:
+        pid = 4242
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            captured["communicate_timeout"] = timeout
+            payload = {"success": True, "applyback_ok": True}
+            return f"__FORGE_RESULT__{json.dumps(payload)}", ""
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["popen_kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "/forge/src")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
+
+    deadline = time.time() + 7200.0
+    outcome = forge_submit._run_rewrite_via_cli(
+        source_kernel=str(kernel),
+        driver=str(driver),
+        logical_op_name="vllm::fused_gemm",
+        source_entry="matmul",
+        source_language="triton",
+        workspace=str(workspace),
+        experiments_dir=experiments,
+        result_json=result_json,
+        target_functions=["matmul", "matmul_kernel"],
+        shapes=[{"M": 8, "N": 16, "dtype": "fp16"}],
+        invocation_spec_file=str(invocation_spec),
+        driver_preparation=True,
+        snr_threshold=30.0,
+        gpu_target="gfx950",
+        max_iters=8,
+        max_hours=2.0,
+        branch="forge/session/fused-gemm",
+        framework="vllm",
+        forge_log=tmp_path / "forge.log",
+        timeout_s=7200,
+        deadline_unix=deadline,
+    )
+
+    command = captured["command"]
+    assert command[:4] == [sys.executable, "-m", "kernel_agents.cli", "forge-rewrite-by-flydsl"]
+    expected = {
+        "--source-kernel": str(kernel),
+        "--driver": str(driver),
+        "--logical-op-name": "vllm::fused_gemm",
+        "--source-entry": "matmul",
+        "--workspace": str(workspace),
+        "--experiments-dir": str(experiments),
+        "--target-functions": "matmul,matmul_kernel",
+        # A list of per-case dimension dicts: the producer coerces this with
+        # ``list()``, so a mapping would arrive as a list of its keys.
+        "--shapes-json": json.dumps([{"M": 8, "N": 16, "dtype": "fp16"}]),
+        "--invocation-spec-file": str(invocation_spec),
+        "--snr-threshold": "30.0",
+        "--gpu-target": "gfx950",
+        "--max-iters": "8",
+        "--framework": "vllm",
+        "--git-branch": "forge/session/fused-gemm",
+        "--result-json": str(result_json),
+    }
+    for flag, value in expected.items():
+        assert flag in command, flag
+        assert command[command.index(flag) + 1] == value, flag
+    # A boolean switch carries no value, so it is checked apart from the pairs.
+    assert "--prepare-driver" in command
+    # The producer is aimed one reserve short of this process's hard kill, so it
+    # publishes the apply-back inside its own budget instead of racing the kill.
+    producer_deadline = float(command[command.index("--deadline-unix") + 1])
+    assert producer_deadline == pytest.approx(
+        deadline - _flydsl_rewrite.APPLYBACK_RESERVE_SEC
+    )
+    producer_hours = float(command[command.index("--max-hours") + 1])
+    assert producer_hours == pytest.approx(
+        (7200 - _flydsl_rewrite.APPLYBACK_RESERVE_SEC) / 3600.0, abs=1e-3
+    )
+    assert producer_hours < 2.0
+    # Options that only exist on the generic loop must never be smuggled across.
+    for forbidden in (
+        "--kernel",
+        "--fellow",
+        "--experiment-id",
+        "--experience-id",
+        "--e2e-pct",
+        "--operator-name",
+        "--source-files",
+        "--program-md-file",
+        "--resume",
+        "--task-type",
+        "--workload-key",
+        "--return-after-read-kb",
+    ):
+        assert forbidden not in command, forbidden
+
+    assert captured["popen_kwargs"]["start_new_session"] is True
+    assert captured["popen_kwargs"]["cwd"] == str(workspace)
+    assert 7100.0 < captured["communicate_timeout"] <= 7200.0
+    # A stale result from an earlier attempt is cleared before the child starts.
+    assert outcome.result == {"success": True, "applyback_ok": True}
+    assert outcome.error is None
+    assert outcome.timed_out is False
+
+
+def test_rewrite_cli_hard_kills_the_producer_at_the_deadline(tmp_path, monkeypatch):
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    (workspace / "kernel.py").write_text("pass\n")
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
+    result_json = tmp_path / "attempt" / "forge_rewrite_result.json"
+    terminated = {}
+
+    class HangingProcess:
+        pid = 4321
+        returncode = -9
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd="forge-rewrite-by-flydsl", timeout=timeout)
+
+    def fake_terminate(proc):
+        terminated["pid"] = proc.pid
+        return "partial stdout", "killed"
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", lambda command, **kwargs: HangingProcess())
+    monkeypatch.setattr(forge_submit, "_terminate_forge_process", fake_terminate)
+
+    outcome = forge_submit._run_rewrite_via_cli(
+        source_kernel=str(workspace / "kernel.py"),
+        driver=str(workspace / "driver.py"),
+        logical_op_name="vllm::op",
+        source_entry="",
+        source_language="triton",
+        workspace=str(workspace),
+        experiments_dir=experiments,
+        result_json=result_json,
+        target_functions=None,
+        shapes=[],
+        invocation_spec_file="",
+        driver_preparation=False,
+        snr_threshold=30.0,
+        gpu_target="gfx942",
+        max_iters=4,
+        max_hours=1.0,
+        branch="forge/session/op",
+        framework="",
+        forge_log=tmp_path / "forge.log",
+        timeout_s=60,
+        deadline_unix=time.time() + 1.0,
+    )
+
+    # The whole process group is torn down, and a run that published nothing
+    # yields no result for the validator to consider.
+    assert terminated["pid"] == 4321
+    assert outcome.timed_out is True
+    assert outcome.result is None
+    assert "deadline" in str(outcome.error)
+    assert "killed" in outcome.output
+
+
+def test_rewrite_cli_prefers_the_caller_named_result_file(tmp_path, monkeypatch):
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    (workspace / "kernel.py").write_text("pass\n")
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
+    result_json = tmp_path / "attempt" / "forge_rewrite_result.json"
+
+    class FakeProcess:
+        pid = 4243
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            result_json.write_text(json.dumps({"success": True, "from": "sidecar"}))
+            return '__FORGE_RESULT__{"success": true, "from": "sentinel"}', ""
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", lambda command, **kwargs: FakeProcess())
+
+    outcome = forge_submit._run_rewrite_via_cli(
+        source_kernel=str(workspace / "kernel.py"),
+        driver=str(workspace / "driver.py"),
+        logical_op_name="vllm::op",
+        source_entry="",
+        source_language="triton",
+        workspace=str(workspace),
+        experiments_dir=experiments,
+        result_json=result_json,
+        target_functions=None,
+        shapes=[],
+        invocation_spec_file="",
+        driver_preparation=False,
+        snr_threshold=30.0,
+        gpu_target="gfx942",
+        max_iters=4,
+        max_hours=1.0,
+        branch="forge/session/op",
+        framework="",
+        forge_log=tmp_path / "forge.log",
+        timeout_s=60,
+    )
+
+    assert outcome.result == {"success": True, "from": "sidecar"}
+
+
+def test_finalizer_reclaims_only_declared_temporary_paths(tmp_path):
+    repo, kernel = _make_repo(tmp_path)
+    scratch_file = repo / "scratch_port.py"
+    scratch_file.write_text("SCRATCH\n")
+    scratch_dir = repo / "scratch_tree"
+    scratch_dir.mkdir()
+    (scratch_dir / "inner.py").write_text("INNER\n")
+    untouched = repo / "untracked_note.txt"
+    untouched.write_text("KEEP\n")
+
+    forge_submit._finalize_forge_workspace(
+        inplace=True,
+        restore_info=None,
+        driver="",
+        workspace=str(repo),
+        output_dir=tmp_path / "attempt",
+        branch="forge/session/kernel",
+        nogit_scratch=False,
+        temporary_paths=[str(scratch_file), str(scratch_dir)],
+    )
+
+    assert not scratch_file.exists()
+    assert not scratch_dir.exists()
+    assert untouched.exists()
+    assert kernel.exists()
+
+
+def test_finalizer_refuses_temporary_paths_outside_the_workspace(tmp_path):
+    repo, kernel = _make_repo(tmp_path)
+    outsider = tmp_path / "outside.py"
+    outsider.write_text("KEEP\n")
+
+    with pytest.raises(RuntimeError, match="escapes the workspace"):
+        forge_submit._finalize_forge_workspace(
+            inplace=True,
+            restore_info=None,
+            driver="",
+            workspace=str(repo),
+            output_dir=tmp_path / "attempt",
+            branch="forge/session/kernel",
+            nogit_scratch=False,
+            temporary_paths=[str(outsider), str(repo)],
+        )
+
+    assert outsider.exists()
+    assert kernel.exists()
+
+
+def test_retained_workspace_finalizer_ignores_temporary_paths(tmp_path):
+    """Only the in-place route reclaims; a retained worktree is left intact."""
+    repo, _kernel = _make_repo(tmp_path)
+    scratch = repo / "scratch_port.py"
+    scratch.write_text("SCRATCH\n")
+
+    forge_submit._finalize_forge_workspace(
+        inplace=False,
+        restore_info=None,
+        driver="",
+        workspace=str(repo),
+        output_dir=tmp_path / "attempt",
+        branch="forge/session/kernel",
+        nogit_scratch=False,
+        temporary_paths=[str(scratch)],
+    )
+
+    assert scratch.exists()
+
+
+def test_submit_falls_back_to_forge_loop_on_an_incompatible_producer(tmp_path, monkeypatch):
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    monkeypatch.setattr(
+        _flydsl_rewrite,
+        "probe_capabilities",
+        lambda **_kwargs: _flydsl_rewrite.RewriteCapabilities(
+            False,
+            "capability_artifact_schema_unsupported",
+            "producer artifact schemas [1] exclude 2",
+        ),
+    )
+
+    result = _submit_with_rewrite_route(tmp_path, monkeypatch)
+
+    assert result["returncode"] == 0
+    assert result["skipped"] is False
+    verdict = result["flydsl_rewrite"]
+    assert verdict["eligible"] is False
+    assert verdict["reason"] == "capability_artifact_schema_unsupported"
+    assert result["best_ms"] == 1.0

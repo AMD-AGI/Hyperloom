@@ -421,6 +421,84 @@ async def test_resume_consistency_explore_orphan_alerts_not_replayed(coord: Coor
 
 
 @pytest.mark.asyncio
+async def test_resume_consistency_framework_keep_in_stack_is_not_orphaned(coord: Coordinator) -> None:
+    """A landed framework KEEP reconciles against its own stack entry.
+
+    The stack records the ``framework`` family label plus the canonical
+    candidate key, while the event log records the ``framework_agent`` task
+    kind. Comparing the two without translating flagged every landed KEEP as
+    an orphan on every single resume.
+    """
+    coord._resumed_from["is_resume"] = True
+    coord.shared_state.optimization_stack = [
+        {
+            "action": "framework",
+            "variant_name": "https://example.com/pull/7",
+            "candidate_extra_server_args": "",
+            "extra_envs": {},
+            "tput": 130.0,
+        }
+    ]
+    await coord.bus.append_and_seq(
+        Message.new(
+            "coordinator",
+            "*",
+            "delegated_result",
+            {
+                "task_id": "tf-landed",
+                "kind": "framework_agent",
+                "state": "succeeded",
+                "result": {
+                    "status": "kept",
+                    "candidate": {"pr_url": "https://example.com/pull/7", "ref": "PR:7"},
+                    "output_throughput": 130.0,
+                },
+            },
+        )
+    )
+
+    report = await coord._resume_consistency_pass()
+
+    assert not [
+        w
+        for w in report["warnings"]
+        if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resume_consistency_framework_keep_absent_from_stack_still_alerts(coord: Coordinator) -> None:
+    """The reconciliation fix must not suppress a genuinely missing framework KEEP."""
+    coord._resumed_from["is_resume"] = True
+    await coord.bus.append_and_seq(
+        Message.new(
+            "coordinator",
+            "*",
+            "delegated_result",
+            {
+                "task_id": "tf-orphan",
+                "kind": "framework_agent",
+                "state": "succeeded",
+                "result": {
+                    "status": "kept",
+                    "candidate": {"pr_url": "https://example.com/pull/8", "ref": "PR:8"},
+                    "output_throughput": 140.0,
+                },
+            },
+        )
+    )
+
+    report = await coord._resume_consistency_pass()
+
+    orphan = next(
+        w
+        for w in report["warnings"]
+        if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
+    )
+    assert orphan["variant"] == "https://example.com/pull/8"
+
+
+@pytest.mark.asyncio
 async def test_resume_consistency_replays_pending_integrate_with_kept_result(coord: Coordinator) -> None:
     coord._resumed_from["is_resume"] = True
     coord.shared_state.baseline_tput = 100.0

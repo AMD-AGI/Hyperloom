@@ -2272,3 +2272,268 @@ def test_make_proposal_empty_artifact_error_falls_back_to_compile_failed():
     proposal = ko.make_proposal(verification)
     assert proposal["decision"] == "REVERT"
     assert proposal["reasons"] == ["compile failed"]
+
+
+def _applyback(**overrides):
+    payload = {
+        "artifact_kind": "framework_applyback",
+        "artifact_schema_version": 2,
+        "validation_scope": "reference",
+        "reference_correctness_passed": True,
+        "reference_snr_db": 48.5,
+        "integration_validation_required": True,
+        "integration_validation_status": "pending",
+        "best_commit": "a" * 40,
+        "commit_ref": "refs/hyperloom/applyback/attempt-1",
+        "builder_symbol": "build_fused_gemm_module",
+        "changed_files": ["flydsl_kernel.py", "kernel.py"],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _applyback_attempt(tmp_path, *, report_text="", **overrides):
+    report = tmp_path / "optimization_report.md"
+    report.write_text(report_text or "[correctness] pass\n[integration_validation] pending\n")
+    artifact = tmp_path / "optimized.py"
+    artifact.write_text(
+        "import torch\n\n\ndef flydsl_kernel(x):\n    return x + 1\n",
+        encoding="utf-8",
+    )
+    attempt = _attempt(report, artifact, backend="forge")
+    attempt["mean_case_speedup"] = 2.0
+    attempt["flydsl_applyback"] = _applyback(**overrides)
+    return attempt
+
+
+def test_reference_verified_applyback_answers_the_micro_correctness_gate(tmp_path):
+    verification = ko.build_verification(
+        _args(source_file=str(tmp_path / "kernel.py"), micro_speedup=1.6),
+        [_applyback_attempt(tmp_path)],
+        benchmark_available=True,
+    )
+
+    assert verification["correctness_passed"] is True
+    assert verification["correctness_source"] == "forge_rewrite_reference"
+    assert verification["integration_validation_status"] == "pending"
+
+
+def test_applyback_reference_outranks_the_report_scan(tmp_path):
+    """The validated manifest is the authority; report prose cannot override it."""
+    verification = ko.build_verification(
+        _args(source_file=str(tmp_path / "kernel.py"), micro_speedup=1.6),
+        [_applyback_attempt(tmp_path, report_text="correctness failed\n")],
+        benchmark_available=True,
+    )
+
+    assert verification["correctness_source"] == "forge_rewrite_reference"
+    assert verification["correctness_passed"] is True
+
+
+def test_cli_correctness_override_still_outranks_the_applyback(tmp_path):
+    verification = ko.build_verification(
+        _args(
+            source_file=str(tmp_path / "kernel.py"),
+            micro_speedup=1.6,
+            correctness_passed=False,
+        ),
+        [_applyback_attempt(tmp_path)],
+        benchmark_available=True,
+    )
+
+    assert verification["correctness_source"] == "cli_override"
+    assert verification["correctness_passed"] is False
+
+
+def test_verification_propagates_the_applyback_provenance(tmp_path):
+    verification = ko.build_verification(
+        _args(source_file=str(tmp_path / "kernel.py"), micro_speedup=1.6),
+        [_applyback_attempt(tmp_path)],
+        benchmark_available=True,
+    )
+
+    evidence = verification["framework_applyback"]
+    assert evidence["artifact_kind"] == "framework_applyback"
+    assert evidence["artifact_schema_version"] == 2
+    assert evidence["validation_scope"] == "reference"
+    assert evidence["reference_correctness_passed"] is True
+    assert evidence["reference_snr_db"] == 48.5
+    assert evidence["integration_validation_required"] is True
+    assert evidence["integration_validation_status"] == "pending"
+    assert evidence["commit"] == "a" * 40
+    assert evidence["commit_ref"] == "refs/hyperloom/applyback/attempt-1"
+    assert evidence["builder_symbol"] == "build_fused_gemm_module"
+    assert evidence["changed_files"] == ["flydsl_kernel.py", "kernel.py"]
+
+
+def test_verification_without_an_applyback_carries_no_evidence(tmp_path):
+    report = tmp_path / "optimization_report.md"
+    report.write_text("[correctness] pass\n")
+
+    verification = ko.build_verification(
+        _args(source_file=str(tmp_path / "kernel.py"), micro_speedup=1.6),
+        [_attempt(report, backend="geak")],
+        benchmark_available=True,
+    )
+
+    assert verification["framework_applyback"] == {}
+    assert verification["integration_validation_status"] == ""
+    assert verification["correctness_source"] == "report_scan"
+
+
+def test_pending_integration_keeps_the_micro_proposal_and_names_the_deferral(tmp_path):
+    """A pending framework verdict must not block the patch from reaching E2E."""
+    verification = ko.build_verification(
+        _args(source_file=str(tmp_path / "kernel.py"), micro_speedup=1.6),
+        [_applyback_attempt(tmp_path)],
+        benchmark_available=True,
+    )
+
+    proposal = ko.make_proposal(verification)
+
+    assert proposal["decision"] == "KEEP"
+    assert proposal["reasons"] == [
+        "framework apply-back reference-verified; framework E2E/accuracy "
+        "deferred to integrate"
+    ]
+
+
+def _git(repo, *args: str) -> str:
+    import subprocess
+
+    proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=True)
+    return proc.stdout.strip()
+
+
+def _rewrite_backend_result(tmp_path):
+    """Reproduce what the rewrite backend leaves behind for one attempt."""
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    _git(workspace, "init", "-q")
+    _git(workspace, "config", "user.email", "forge@test")
+    _git(workspace, "config", "user.name", "forge")
+    base_kernel = "def kernel(x):\n    return x\n"
+    (workspace / "kernel.py").write_text(base_kernel)
+    _git(workspace, "add", "-A")
+    _git(workspace, "commit", "-qm", "base")
+    base_commit = _git(workspace, "rev-parse", "HEAD")
+
+    patched_kernel = "def kernel(x):\n    return flydsl_kernel(x)\n"
+    flydsl_module = "def flydsl_kernel(x):\n    return x\n"
+    (workspace / "kernel.py").write_text(patched_kernel)
+    (workspace / "flydsl_kernel.py").write_text(flydsl_module)
+    _git(workspace, "add", "-A")
+    _git(workspace, "commit", "-qm", "apply-back")
+    best_commit = _git(workspace, "rev-parse", "HEAD")
+    patch_text = _git(workspace, "diff", "--binary", f"{base_commit}..{best_commit}")
+
+    canonical = workspace / "forge_experiments" / "rewrite"
+    (canonical / "files").mkdir(parents=True)
+    (canonical / "files" / "kernel.py").write_text(patched_kernel)
+    (canonical / "files" / "flydsl_kernel.py").write_text(flydsl_module)
+    (canonical / "forge.patch").write_text(patch_text + "\n")
+    (canonical / "manifest.json").write_text("{}", encoding="utf-8")
+
+    output_dir = tmp_path / "attempt"
+    exported = output_dir / "optimized_versions" / "files"
+    exported.mkdir(parents=True)
+    # The primary compatibility artifact is deliberately the unchanged base:
+    # only the multi-file bundle carries the real change.
+    (output_dir / "optimized_versions" / "v1_forge.py").write_text(base_kernel)
+    (exported / "kernel.py").write_text(patched_kernel)
+    (exported / "flydsl_kernel.py").write_text(flydsl_module)
+    (output_dir / "optimized_versions" / "forge.patch").write_text(patch_text + "\n")
+    (output_dir / "optimization_report.md").write_text(
+        "# Forge optimization report\n\n"
+        "[micro_speedup] 2.0000x\nmean_case_speedup=2.000000\n"
+        "[correctness] pass\n[integration_validation] pending\n"
+    )
+
+    return {
+        "returncode": 0,
+        "stdout": "forge rewrite done (cli)",
+        "cli_workspace": str(output_dir),
+        "output_dir": str(output_dir),
+        "best_commit": best_commit,
+        "best_ms": 1.0,
+        "pristine_baseline_ms": 2.0,
+        "mean_case_speedup": 2.0,
+        "search_start_mean_case_speedup": 1.0,
+        "improved": True,
+        "total_improved": True,
+        "incremental_improved": True,
+        "best_manifest": str(canonical / "manifest.json"),
+        "canonical_patch_path": str(canonical / "forge.patch"),
+        "canonical_files_root": str(canonical / "files"),
+        "changed_files": ["flydsl_kernel.py", "kernel.py"],
+        "forge_workspace": str(workspace),
+        "artifacts": [str(canonical / "forge.patch")],
+        "flydsl_applyback": _applyback(best_commit=best_commit),
+        "target_functions": ["kernel"],
+    }, workspace
+
+
+def test_rewrite_backend_result_reaches_a_reference_verified_keep(tmp_path, monkeypatch):
+    """The backend's result keys must line up with what verification reads."""
+    result, workspace = _rewrite_backend_result(tmp_path)
+    monkeypatch.setattr(ko, "invoke_backend", lambda *a, **k: result)
+
+    run_dir = tmp_path / "runs" / "sess001"
+    log_path = tmp_path / "run.log"
+    log_path.write_text("", encoding="utf-8")
+    args = _args(
+        source_file=str(workspace / "kernel.py"),
+        kernel_repo=str(workspace),
+        session_id="sess001",
+        budget_minutes=60,
+        num_gpus=1,
+        target_platform="",
+    )
+    attempt = ko.run_attempt(
+        "forge",
+        args=args,
+        candidate=_candidate(source_file=str(workspace / "kernel.py"), source_type="triton"),
+        run_dir=run_dir,
+        log_path=log_path,
+    )
+
+    assert attempt["flydsl_applyback"]["artifact_kind"] == "framework_applyback"
+    assert attempt["backend_paths"]["forge_canonical_files_root"].endswith("rewrite/files")
+
+    verification = ko.build_verification(args, [attempt], benchmark_available=True)
+
+    assert verification["correctness_source"] == "forge_rewrite_reference"
+    assert verification["correctness_passed"] is True
+    assert verification["integration_validation_status"] == "pending"
+    assert verification["framework_applyback"]["changed_files"] == [
+        "flydsl_kernel.py",
+        "kernel.py",
+    ]
+    # The unchanged primary artifact must not stand in for the real change.
+    bundle = verification["best_artifact_bundle"]
+    assert verification["artifact_valid"] is True
+    assert bundle["type"] == "patch_snapshot"
+    assert sorted(bundle["write_paths"]) == ["flydsl_kernel.py", "kernel.py"]
+    snapshot = Path(bundle["snapshot_dir"])
+    assert (snapshot / "flydsl_kernel.py").is_file()
+    assert (snapshot / "kernel.py").read_text() == "def kernel(x):\n    return flydsl_kernel(x)\n"
+
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "KEEP"
+    assert proposal["reasons"] == [
+        "framework apply-back reference-verified; framework E2E/accuracy "
+        "deferred to integrate"
+    ]
+
+
+def test_pending_integration_does_not_rescue_a_below_threshold_speedup(tmp_path):
+    verification = ko.build_verification(
+        _args(source_file=str(tmp_path / "kernel.py"), micro_speedup=1.02),
+        [_applyback_attempt(tmp_path)],
+        benchmark_available=True,
+    )
+
+    proposal = ko.make_proposal(verification)
+
+    assert proposal["decision"] == "NEEDS_REVIEW"
+    assert any("below KEEP threshold" in reason for reason in proposal["reasons"])
