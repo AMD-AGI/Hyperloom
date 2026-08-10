@@ -1902,12 +1902,20 @@ class Coordinator(metaclass=_CoordinatorMeta):
         if agent_name == "orchestration" and self._orchestration_conversational():
             try:
                 md = getattr(result, "metadata", None) or {}
+                self._checkpoint_tracker.set_context_tokens(int(md.get("context_tokens_peak") or 0))
+                self._checkpoint_tracker.chars_add(len(prompt) + len(getattr(result, "raw_text", "") or ""))
+            except Exception:  # noqa: BLE001 — accounting must never break routing
+                pass
+        # Kept out of the ledger's try above: that one exists so a missing token
+        # figure still leaves the char ledger updating, and a throw from here
+        # would stop it too.
+        if agent_name == "orchestration" and self._orchestration_conversational():
+            try:
+                md = getattr(result, "metadata", None) or {}
                 self._checkpoint_policy.adopt_context_window(
                     int(md.get("model_context_window") or 0),
                     self._checkpoint_soft_fraction,
                 )
-                self._checkpoint_tracker.set_context_tokens(int(md.get("context_tokens_peak") or 0))
-                self._checkpoint_tracker.chars_add(len(prompt) + len(getattr(result, "raw_text", "") or ""))
             except Exception:  # noqa: BLE001 — accounting must never break routing
                 pass
         # Completed orchestration turn means SEED delivered; later turns send DELTA.

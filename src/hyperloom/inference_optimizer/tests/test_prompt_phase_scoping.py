@@ -595,3 +595,28 @@ def test_every_declared_transport_still_renders(registry, transport):
     )
 
     assert "Output protocol" in prompt
+
+
+def test_a_role_with_no_constraints_gets_no_constraints_line():
+    """Say nothing rather than an empty clause.
+
+    ``payload_constraints`` returns an empty string for an intent set where no
+    type carries a note, and both callers embedded it unconditionally -- so such
+    a role was told "Constraints: ." The orchestration role always has notes and
+    Claude's tool takes every intent type, so production does not reach it today;
+    these are public functions taking any role's intent set, and assuming the
+    current configuration is the habit this whole contract exists to break.
+    """
+    from hyperloom.inference_optimizer.protocol.intent import IntentType
+    from hyperloom.orchestrator.roles.codex import build_output_instructions
+    from hyperloom.orchestrator.roles.mcp_emit_intent import build_intent_envelope_schema
+
+    only_send = frozenset({IntentType.SEND_MESSAGE})
+
+    block = build_output_instructions(only_send)
+    schema = build_intent_envelope_schema(only_send)
+    payload_description = schema["properties"]["intents"]["items"]["properties"]["payload"]["description"]
+
+    assert "Constraints" not in block
+    assert "Constraints" not in payload_description
+    assert "send_message:{topic}" in block

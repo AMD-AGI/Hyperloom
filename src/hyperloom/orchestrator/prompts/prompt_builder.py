@@ -1033,6 +1033,12 @@ def build_orchestration_prompt(
 
     Returns:
         The composed Orchestration system prompt text.
+
+    Raises:
+        ValueError: If ``transport`` is neither empty nor one of
+            :data:`TRANSPORTS`. Raised rather than tolerated because the caller
+            builds this at start-up, and an unknown transport silently strips
+            the Output protocol instead of failing.
     """
     # Checked here rather than tolerated downstream: a transport nobody declares
     # matches no `<!-- transport: ... -->` block, and both Output protocol blocks

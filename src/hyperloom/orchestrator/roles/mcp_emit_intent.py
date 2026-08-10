@@ -75,14 +75,9 @@ def payload_contract(allowed_intents: Iterable[IntentType]) -> str:
     """Describe the required payload keys of each allowed intent type.
 
     Generated from ``_PAYLOAD_REQUIRED`` so the description cannot drift from
-    what :func:`validate_envelope` actually enforces.
-
-    Args:
-        allowed_intents: The intent types a role may emit.
-
-    Only the required keys: what a value may be, and which optional dial a type
-    honours, are different claims and are rendered by
-    :func:`payload_constraints`.
+    what :func:`validate_envelope` actually enforces. Only the required keys:
+    what a value may be, and which optional dial a type honours, are different
+    claims and are rendered by :func:`payload_constraints`.
 
     Args:
         allowed_intents: The intent types a role may emit.
@@ -116,6 +111,22 @@ def payload_constraints(allowed_intents: Iterable[IntentType]) -> str:
         for note in _PAYLOAD_FIELD_NOTES.get(intent_type, ()):
             parts.append(f"{intent_type.value}.{note}")
     return "; ".join(parts)
+
+
+def constraints_sentence(allowed_intents: Iterable[IntentType]) -> str:
+    """Render the constraints as a trailing sentence, or nothing at all.
+
+    A role whose types carry no note has no constraints to state, and embedding
+    the empty string unconditionally told it ``Constraints: .``
+
+    Args:
+        allowed_intents: The intent types a role may emit.
+
+    Returns:
+        ``" Constraints: <clauses>."`` with a leading space, or ``""``.
+    """
+    constraints = payload_constraints(allowed_intents)
+    return f" Constraints: {constraints}." if constraints else ""
 
 
 def build_intent_envelope_schema(allowed_intents: Iterable[IntentType]) -> dict[str, Any]:
@@ -160,8 +171,8 @@ def build_intent_envelope_schema(allowed_intents: Iterable[IntentType]) -> dict[
                             "type": "string",
                             "description": (
                                 "The intent payload as a JSON object serialized into a string. "
-                                f"Required keys per intent_type: {payload_contract(ordered)}. "
-                                f"Constraints: {payload_constraints(ordered)}."
+                                f"Required keys per intent_type: {payload_contract(ordered)}."
+                                f"{constraints_sentence(ordered)}"
                             ),
                         },
                     },
@@ -184,8 +195,8 @@ EMIT_INTENT_TOOL_INPUT_SCHEMA: dict[str, Any] = {
             "type": "object",
             "description": (
                 "Per-intent payload. Required keys per intent_type: "
-                f"{payload_contract(IntentType)}. "
-                f"Constraints: {payload_constraints(IntentType)}."
+                f"{payload_contract(IntentType)}."
+                f"{constraints_sentence(IntentType)}"
             ),
         },
     },

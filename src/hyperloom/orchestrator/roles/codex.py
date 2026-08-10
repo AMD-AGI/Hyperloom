@@ -56,7 +56,7 @@ from .base import (
 )
 from .mcp_emit_intent import (
     build_intent_envelope_schema,
-    payload_constraints,
+    constraints_sentence,
     payload_contract,
 )
 
@@ -85,7 +85,8 @@ def build_output_instructions(allowed_intents: Iterable[IntentType]) -> str:
         instructions.
     """
     contract = payload_contract(allowed_intents)
-    constraints = payload_constraints(allowed_intents)
+    constraints = constraints_sentence(allowed_intents)
+    constraints_line = f"\n-{constraints}" if constraints else ""
     heartbeat = json.dumps({"topic": "heartbeat", "body_md": "ok"})
     return f"""
 ==== OUTPUT FORMAT (REQUIRED) ====
@@ -96,8 +97,7 @@ output schema — no prose, no code fences, nothing around it:
 
 - `payload` is a STRING holding a serialized JSON object. The schema cannot
   express a free-form object, so serialize the payload and escape it.
-- Required keys per intent_type: {contract}.
-- Constraints: {constraints}.
+- Required keys per intent_type: {contract}.{constraints_line}
 - Emit several intents by adding entries to `intents`.
 - Put only NEW information in payload bodies; do not restate context already
   in SharedState, your inbox, or analysis.md. Keep length proportional to
@@ -366,12 +366,10 @@ class CodexBackend:
             # resets the conversation this backend exists to keep.
             "context_tokens_peak": input_tokens,
             # Stated by Codex per turn, and better than any table this side
-            # keeps: the compaction trigger is a fraction of it.
-            **(
-                {"model_context_window": safe_int(usage.get("model_context_window"))}
-                if safe_int(usage.get("model_context_window")) > 0
-                else {}
-            ),
+            # keeps: the compaction trigger is a fraction of it. Written
+            # unconditionally — 0 means "not reported", which is what
+            # adopt_context_window ignores.
+            "model_context_window": safe_int(usage.get("model_context_window")),
             # Full conversation text for conversations.jsonl, handed up for
             # the caller to persist.
             "prompt": prompt,

@@ -1107,7 +1107,13 @@ class CodexSession:
             await stack.aclose()
 
     async def _open_thread(self) -> Any:
-        """Return the open conversation, opening one on first use."""
+        """Return the open conversation, opening one on first use.
+
+        Raises:
+            CodexSessionError: If the session was never started, or was closed.
+        """
+        if self._client is None or self._sdk is None:
+            raise CodexSessionError("Codex session is not started; call start() first")
         if self._thread is None:
             self._thread = await self._client.thread_start(
                 approval_mode=self._sdk.ApprovalMode.deny_all,
@@ -1150,7 +1156,11 @@ class CodexSession:
             CodexSessionError: If the session is not started, or the SDK failed
                 for any other reason.
         """
-        if self._client is None:
+        # Both, not just the client: ``start()`` sets them together and
+        # ``aclose()`` clears them together, and ``_open_thread`` reaches for the
+        # SDK as well. Naming the whole invariant is what lets a type checker
+        # follow it into the attribute accesses below.
+        if self._client is None or self._sdk is None:
             raise CodexSessionError("Codex session is not started; call start() before turn()")
         turn_task: asyncio.Task[Any] | None = None
         try:
