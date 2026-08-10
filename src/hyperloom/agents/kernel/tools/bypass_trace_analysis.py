@@ -475,6 +475,53 @@ def _should_enable_steady(*, steady_state_mode: str, framework: str, env_steady:
     return bool(env_steady) or (framework or "").lower() == "xdit" or mode not in _STEADY_OFF_VALUES
 
 
+#: Mirrors of the ``framework_registry``, used only when that package is not
+#: importable (standalone invocation). Keep in sync when a framework is added;
+#: tests assert both against the registry so a divergence cannot land.
+_STANDALONE_UNITS = {"xdit": "img/s", "custom": "unit/s"}
+_STANDALONE_SCRIPTABLE = frozenset({"xdit", "custom"})
+
+
+def _is_scriptable_framework(framework: str | None) -> bool:
+    """Return whether ``framework`` is a server-less scriptable workload.
+
+    Args:
+        framework: Framework name (matched case-insensitively).
+
+    Returns:
+        bool: ``True`` for ``kind=scriptable`` frameworks.
+    """
+    try:
+        from hyperloom.inference_optimizer.framework_registry import is_scriptable
+
+        return is_scriptable(framework)
+    except ImportError:  # standalone invocation without the package installed.
+        return str(framework or "").strip().lower() in _STANDALONE_SCRIPTABLE
+
+
+def _throughput_unit(framework: str | None) -> str:
+    """Return the throughput unit ``framework`` reports, per the registry.
+
+    The registry is the single source of truth here, so an operator's ``custom``
+    workload reports its own neutral ``unit/s`` instead of being mislabelled
+    ``tok/s``. Falls back to ``_STANDALONE_UNITS`` for standalone invocation,
+    where the ``hyperloom`` package may not be importable (see the provenance
+    import above).
+
+    Args:
+        framework: Framework name (matched case-insensitively).
+
+    Returns:
+        str: The unit string, e.g. ``"tok/s"``, ``"img/s"`` or ``"unit/s"``.
+    """
+    try:
+        from hyperloom.inference_optimizer.framework_registry import throughput_unit
+
+        return throughput_unit(framework)
+    except ImportError:  # standalone invocation without the package installed.
+        return _STANDALONE_UNITS.get(str(framework or "").strip().lower(), "tok/s")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point: emit the minimal bypass artifact set and a result JSON.
 
@@ -694,7 +741,7 @@ def main(argv: list[str] | None = None) -> int:
     for cand in candidates.get("hot_kernels", []):
         cand["trace_report_path"] = str(analysis_md_path)
 
-    throughput_unit = "img/s" if (args.framework or "").lower() == "xdit" else "tok/s"
+    throughput_unit = _throughput_unit(args.framework)
     write_text(
         analysis_md_path,
         _report.render_analysis_md(
@@ -773,8 +820,10 @@ def main(argv: list[str] | None = None) -> int:
     # analytical roofline into an end-to-end workload roofline + per-denoise-step
     # split. Best-effort sidecar over all device kernels, independent of the
     # per-kernel high-idle gate, so still emitted in the high-idle regime.
+    # Gated on scriptable, not on a framework name: this sidecar is built purely
+    # from the trace, so it needs no denoiser config the operator may not supply.
     diffusion_roofline_path: str | None = None
-    if (args.framework or "").lower() == "xdit":
+    if _is_scriptable_framework(args.framework):
         try:
             from diffusion_roofline import build_report_from_bypass  # noqa: E402
 

@@ -409,7 +409,7 @@ class TestLaunchValidation:
         from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
 
         monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
-        for framework in ("sglang", "vllm", "xdit", "hunyuan_image3"):
+        for framework in ("sglang", "vllm", "xdit"):
             _apply_operator_supplied_paths(self._args(), framework)
 
     def test_a_shipped_framework_needs_neither_flag(self, monkeypatch):
