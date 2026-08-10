@@ -1085,19 +1085,41 @@ def _invalidate_aiter_jit_build(
     }
 
 
-def _trusted_installed_aiter_jit_build_dir(path: Path) -> bool:
-    """Validate a strategy-persisted installed AITER JIT destination."""
+def _trusted_aiter_jit_build_dir(path: Path) -> bool:
+    """Validate a strategy-persisted AITER JIT destination.
+
+    Accepts both deployment shapes the apply strategy can emit: a wheel install
+    (``<site-packages>/aiter/jit/build``) and an editable checkout
+    (``<checkout>/aiter/jit/build``). Only recognising the wheel shape rejected
+    the editable path that ``_detect_strategy`` itself pins, so every revert
+    against an in-place aiter tree failed and left the cache parked in the
+    backup directory.
+
+    Args:
+        path: The strategy-persisted ``jit/build`` directory to validate.
+
+    Returns:
+        ``True`` when ``path`` is exactly the ``jit/build`` directory of an
+        aiter package rooted at a known install or editable root.
+    """
     resolved = path.resolve()
-    runtime_root = _installed_aiter_runtime_root(resolved)
-    if (
-        runtime_root is None
-        or resolved != (runtime_root / "aiter" / "jit" / "build").resolve()
-    ):
-        return False
-    return (
-        (runtime_root / "aiter" / "__init__.py").is_file()
-        and (runtime_root / "aiter" / "jit" / "__init__.py").is_file()
-    )
+    roots: list[Path] = []
+    installed_root = _installed_aiter_runtime_root(resolved)
+    if installed_root is not None:
+        roots.append(installed_root)
+    roots.extend(_EDITABLE_KERNEL_DEPLOY_ROOTS)
+    for root in roots:
+        try:
+            expected = (root / "aiter" / "jit" / "build").resolve()
+        except (OSError, RuntimeError):
+            continue
+        if resolved != expected:
+            continue
+        return (
+            (root / "aiter" / "__init__.py").is_file()
+            and (root / "aiter" / "jit" / "__init__.py").is_file()
+        )
+    return False
 
 
 def _restore_aiter_jit_build(
@@ -1141,7 +1163,7 @@ def _restore_aiter_jit_build(
     # Only the strategy-pinned or importable aiter jit/build dir is legitimate.
     expected_raw = str(expected_jit_build_dir or "").strip()
     expected = Path(expected_raw) if expected_raw else _aiter_jit_build_dir()
-    if expected_raw and not _trusted_installed_aiter_jit_build_dir(expected):
+    if expected_raw and not _trusted_aiter_jit_build_dir(expected):
         return {
             "status": "failed",
             "error": f"untrusted strategy jit/build dir: {expected}",
