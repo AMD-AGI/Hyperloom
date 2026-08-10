@@ -272,7 +272,7 @@ def test_evidence_that_exists_but_will_not_render_says_so(tmp_path):
     assert "has been collected yet" not in note
 
 
-@pytest.mark.parametrize("framework", ["custom", "custom", "xdit", "hunyuan_image3"])
+@pytest.mark.parametrize("framework", ["custom", "xdit"])
 def test_scriptable_frameworks_route_to_the_rewrite_domain(framework):
     """A server-less iterative pipeline gets the rewrite domain."""
     assert _Phase(framework)._authoring_specialist_domain() == DOMAIN_KEY

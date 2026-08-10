@@ -47,9 +47,8 @@ class TestDiffusionCeilingGate:
         """Hyperloom never sees the operator's model, so it cannot bound it."""
         assert tl._has_diffusion_ceiling("custom") is False
 
-    @pytest.mark.parametrize("framework", ["xdit", "hunyuan_image3"])
-    def test_shipped_scriptable_frameworks_keep_theirs(self, framework):
-        assert tl._has_diffusion_ceiling(framework) is True
+    def test_the_shipped_scriptable_framework_keeps_its_own(self):
+        assert tl._has_diffusion_ceiling("xdit") is True
 
     @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom", "", None, "bogus"])
     def test_non_diffusion_frameworks_have_none(self, framework):

@@ -477,7 +477,7 @@ def _should_enable_steady(*, steady_state_mode: str, framework: str, env_steady:
 
 #: Mirror of the ``framework_registry`` units, used only when that package is not
 #: importable (standalone invocation). Keep in sync when a framework is added.
-_STANDALONE_UNITS = {"xdit": "img/s", "hunyuan_image3": "img/s", "custom": "unit/s"}
+_STANDALONE_UNITS = {"xdit": "img/s", "custom": "unit/s"}
 
 
 def _throughput_unit(framework: str | None) -> str:
