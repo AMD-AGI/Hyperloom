@@ -1510,3 +1510,104 @@ async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monk
 
     # 3801 < 4616 → REVERT, not KEEP.
     assert result["status"] == "reverted", f"expected revert, got {result['status']}"
+
+
+# ---- enablement_effective_config round-trip ----
+
+
+@pytest.mark.asyncio
+async def test_enablement_keep_publishes_effective_config(tmp_path: Path, monkeypatch):
+    """KEEP result carries the base+variant env/arg union in enablement_effective_config."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-eff", patch_contents=[_VALID_PATCH])
+
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+
+    async def _fake_bench(**_kwargs):
+        return {"output_throughput": 200.0, "error": ""}, {
+            "accuracy_pass": None,
+            "enablement_accuracy": 0.6,
+            "enablement_accuracy_task": "gsm8k",
+            "enablement_accuracy_metric": "exact_match",
+            "timed_out": False,
+        }
+
+    async def _noop_kb(**_kwargs):
+        return None
+
+    monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
+    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
+
+    params = {
+        "specialist_task_id": "t-spec-eff",
+        "framework_source_root": str(repo),
+        "enablement": True,
+        "enablement_origin": "eval",
+        "enablement_accuracy_floor": 0.05,
+        "enable_stack_rebench": False,
+        # Base stack layer from current_best.
+        "base_extra_envs": {"VLLM_ROCM_USE_AITER_FP4BMM": "0", "VLLM_ROCM_USE_AITER_FP8BMM": "0"},
+        "base_extra_args": "",
+        "base_args_mode": "append",
+        # Candidate's own levers.
+        "extra_envs": {"VLLM_ROCM_USE_AITER_MOE": "0"},
+        "extra_server_args": "",
+    }
+    ctx = _make_ctx("t-int-eff", params)
+    result = await executor(ctx)
+
+    assert result["status"] == "kept"
+    ec = result.get("enablement_effective_config")
+    assert isinstance(ec, dict), f"enablement_effective_config missing from result: {list(result)}"
+    assert ec["extra_envs"] == {
+        "VLLM_ROCM_USE_AITER_FP4BMM": "0",
+        "VLLM_ROCM_USE_AITER_FP8BMM": "0",
+        "VLLM_ROCM_USE_AITER_MOE": "0",
+    }, f"unexpected effective envs: {ec['extra_envs']}"
+    assert ec["args_mode"] == "append"
+
+
+@pytest.mark.asyncio
+async def test_enablement_keep_effective_config_no_levers(tmp_path: Path, monkeypatch):
+    """Boot-origin round with no levers produces an empty-env effective config."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-nolev", patch_contents=[_VALID_PATCH])
+
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+
+    async def _fake_bench(**_kwargs):
+        return {"output_throughput": 150.0, "error": ""}, {
+            "accuracy_pass": None,
+            "enablement_accuracy": None,
+            "enablement_accuracy_task": "",
+            "enablement_accuracy_metric": "",
+            "timed_out": False,
+        }
+
+    async def _noop_kb(**_kwargs):
+        return None
+
+    monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
+    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
+
+    params = {
+        "specialist_task_id": "t-spec-nolev",
+        "framework_source_root": str(repo),
+        "enablement": True,
+        "enable_stack_rebench": False,
+        # No base envs, no candidate envs.
+    }
+    ctx = _make_ctx("t-int-nolev", params)
+    result = await executor(ctx)
+
+    assert result["status"] == "kept"
+    ec = result.get("enablement_effective_config")
+    assert isinstance(ec, dict)
+    assert ec["extra_envs"] == {}
+    assert ec["extra_server_args"] == ""
