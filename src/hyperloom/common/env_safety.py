@@ -95,6 +95,12 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_BASE_URL",
+        # Gateway auth header. Setup writes this one into .env (the AMD APIM
+        # subscription key), so the loader has to read it back or a
+        # header-authenticated gateway silently loses its credential whenever the
+        # shell has not exported it already. Its OpenAI-side counterpart below is
+        # operator-written only.
+        "ANTHROPIC_CUSTOM_HEADERS",
         "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
@@ -127,6 +133,7 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "KERNEL_OPT_BACKEND_ORDER",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
+        "OPENAI_CUSTOM_HEADERS",
         "NO_PROXY",
         "ROCM_PATH",
         "SGLANG_ROCM_EXTRA",

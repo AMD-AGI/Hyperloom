@@ -746,10 +746,16 @@ async def test_compose_prompt_time_only_objective_leaves_no_gap(coord: Coordinat
     assert coord.shared_state.target_gap_pct == 0.0
 
 
+def _pin_conversational_with_context_tools(coord: Coordinator, monkeypatch) -> None:
+    """Pin the delta path AND the mounted pull tools the banner advertises."""
+    monkeypatch.setattr(coord.conversation, "_orchestration_conversational", lambda: True)
+    monkeypatch.setattr(coord.conversation, "_orchestration_context_tools_mounted", lambda: True)
+    coord._orchestration_seeded = True
+
+
 @pytest.mark.asyncio
 async def test_delta_banner_names_every_registered_context_tool(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(coord.conversation, "_orchestration_conversational", lambda: True)
-    coord._orchestration_seeded = True
+    _pin_conversational_with_context_tools(coord, monkeypatch)
     text = await coord._compose_prompt("orchestration")
     banner_start = text.find("=== Context (pull on demand) ===")
     assert banner_start != -1, "DELTA banner missing"
@@ -760,10 +766,20 @@ async def test_delta_banner_names_every_registered_context_tool(coord: Coordinat
 
 @pytest.mark.asyncio
 async def test_compose_prompt_conversational_delta(coord: Coordinator, monkeypatch) -> None:
+    _pin_conversational_with_context_tools(coord, monkeypatch)
+    out = await coord._compose_prompt("orchestration")
+    assert "Context (pull on demand)" in out
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_delta_without_context_tools_names_none(coord: Coordinator, monkeypatch) -> None:
+    """A backend with no pull tools must not be told to call them."""
     monkeypatch.setattr(coord.conversation, "_orchestration_conversational", lambda: True)
     coord._orchestration_seeded = True
     out = await coord._compose_prompt("orchestration")
-    assert "Context (pull on demand)" in out
+    assert "=== Context (delta turn) ===" in out
+    for tool in CONTEXT_TOOL_NAMES:
+        assert tool not in out
 
 
 @pytest.mark.asyncio

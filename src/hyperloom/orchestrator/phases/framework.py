@@ -2807,8 +2807,9 @@ class FrameworkPhase(PhaseHandler):
             except Exception:  # noqa: BLE001 — fall through to direct build
                 log.debug("FRAMEWORK: scorer client unavailable for ranker", exc_info=True)
         # Reuse the orchestration backend's own OpenAI-compatible client when it
-        # exposes one (e.g. CodexBackend): same gateway + auth as the running
-        # session, so the ranker is default-on without extra configuration.
+        # exposes one: same gateway + auth as the running session, so the ranker
+        # is default-on without extra configuration. Agent-runtime backends own
+        # no client of their own, so those fall through to the build below.
         backend = self.backends.get("orchestration")
         backend_client = getattr(backend, "_client", None)
         if backend_client is not None and hasattr(backend_client, "chat"):

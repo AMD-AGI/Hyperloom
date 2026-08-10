@@ -91,6 +91,7 @@ from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
 from hyperloom.orchestrator.state.objective import Objective, build_objective
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.prompts.prompt_builder import (
+    TRANSPORT_TOOLS,
     build_orchestration_prompt,
     default_enabled_actions,
 )
@@ -261,6 +262,7 @@ def _build_orchestration_prompt(
     macro_cycle: int = 0,
     cycle_directive: str = "",
     phase: str = "",
+    transport: str = TRANSPORT_TOOLS,
     action_registry: ActionRegistry | None = None,
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides).
@@ -276,6 +278,8 @@ def _build_orchestration_prompt(
         cycle_directive (str): LLM-authored focus text for this cycle; empty renders the default arc.
         phase (str): Current pipeline phase; omits the prompt modules whose
             behaviour that phase cannot reach. Empty renders every module.
+        transport (str): How the orchestration backend carries an intent; omits
+            the prompt modules describing a tool surface it does not mount.
         action_registry (ActionRegistry | None): The action registry to use;
             a fresh loaded registry is built when ``None``.
 
@@ -298,6 +302,7 @@ def _build_orchestration_prompt(
         macro_cycle=int(macro_cycle),
         cycle_directive=cycle_directive,
         phase=phase,
+        transport=transport,
         rules_fragment_path=_orchestration_rules_fragment_path(),
         framework_source_roots=resolve_source_file_allowlist(),
     )
@@ -2245,6 +2250,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     from hyperloom.orchestrator.phases.machine_state import PHASE_PRELUDE as _PHASE_PRELUDE
 
     _initial_phase = coordinator.shared_state.phase or _PHASE_PRELUDE
+    # The role record always names Claude; the deployment's provider shape is
+    # what actually decides, so read the transport off the built backend.
+    _orch_transport = getattr(coordinator.backends.get("orchestration"), "transport", TRANSPORT_TOOLS)
     prompts: dict[str, str] = {
         "orchestration": args.orch_prompt
         or _build_orchestration_prompt(
@@ -2257,6 +2265,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             macro_cycle=_initial_macro_cycle,
             cycle_directive=_initial_directive,
             phase=_initial_phase,
+            transport=_orch_transport,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
@@ -2275,6 +2284,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         framework=framework_for_prompt,
         objective=objective,
         max_minutes=max_minutes_for_prompt,
+        transport=_orch_transport,
     )
     # ``fa phase-discover`` timeout override (falsy -> DEFAULT_FA_PHASE_TIMEOUT_SEC 180s).
     # Reads the parser dest ``framework_discover_timeout_sec`` first, then the

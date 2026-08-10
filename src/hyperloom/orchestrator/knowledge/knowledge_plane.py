@@ -35,6 +35,7 @@ class KnowledgePlane:
     recipe_kb: Any = None
     config: KnowledgeConfig | None = None
     kernel_experience: KernelExperienceBridge | None = None
+    kb_disabled: bool = False
 
     @classmethod
     def from_clients(
@@ -44,6 +45,7 @@ class KnowledgePlane:
         pr_monitor_mcp_url: str = DEFAULT_PR_MONITOR_MCP_URL,
         recipe_kb: Any = None,
         config: KnowledgeConfig | None = None,
+        kb_disabled: bool = False,
     ) -> "KnowledgePlane":
         """Construct a plane from injected clients and config.
 
@@ -61,7 +63,10 @@ class KnowledgePlane:
             pr_monitor_mcp_url=(pr_monitor_mcp_url or DEFAULT_PR_MONITOR_MCP_URL).strip(),
             recipe_kb=recipe_kb,
             config=resolved,
-            kernel_experience=KernelExperienceBridge(resolved),
+            kernel_experience=(
+                None if kb_disabled else KernelExperienceBridge(resolved)
+            ),
+            kb_disabled=kb_disabled,
         )
 
     @property
@@ -69,18 +74,43 @@ class KnowledgePlane:
         """Return secret-free Recipe, graph, and KernelForge status."""
 
         config = self.config or KnowledgeConfig.from_env()
+        gbrain_configured = bool(
+            config.gbrain_base_url and config.gbrain_token
+        )
         graph_status = {
             "mode": config.mode.value,
-            "backend": "local-filesystem" if config.mode is KnowledgeStoreMode.LOCAL else "gbrain",
+            "backend": (
+                "local-filesystem"
+                if config.mode is KnowledgeStoreMode.LOCAL
+                else ("gbrain" if gbrain_configured else "disabled")
+            ),
             "root": (
                 str(Path(config.local_root) / "hyperloom" / "kg")
                 if config.mode is KnowledgeStoreMode.LOCAL
                 else ""
             ),
-            "remote_configured": config.mode is KnowledgeStoreMode.REMOTE,
+            "remote_configured": (
+                config.mode is KnowledgeStoreMode.REMOTE
+                and gbrain_configured
+            ),
         }
         return {
-            "recipe": {**config.public_dict(), "enabled": self.recipe_kb is not None},
+            "recipe": {
+                **config.public_dict(),
+                "enabled": (
+                    not self.kb_disabled
+                    and (
+                        self.recipe_kb is not None
+                        or config.mode is KnowledgeStoreMode.REMOTE
+                    )
+                ),
+                "read_enabled": (
+                    not self.kb_disabled and self.recipe_kb is not None
+                ),
+                "disabled_reason": (
+                    "degraded_kb" if self.kb_disabled else ""
+                ),
+            },
             "kg": graph_status,
             "kernel_experience": (
                 self.kernel_experience.status.to_dict()

@@ -349,8 +349,10 @@ def test_baremetal_setup_keeps_hand_written_dual_protocol_openai_side(tmp_path: 
             [
                 "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic",
                 "ANTHROPIC_API_KEY=deepseek-test-key",
+                'ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: deepseek-test-key"',
                 "OPENAI_BASE_URL=https://api.deepseek.com/v1",
                 "OPENAI_API_KEY=deepseek-test-key",
+                'OPENAI_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: deepseek-test-key"',
             ]
         )
         + "\n",
@@ -385,6 +387,11 @@ def test_baremetal_setup_keeps_hand_written_dual_protocol_openai_side(tmp_path: 
     assert "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic" in text
     assert "OPENAI_BASE_URL=https://api.deepseek.com/v1" in text
     assert "OPENAI_API_KEY=deepseek-test-key" in text
+    # A gateway that authenticates on a header needs both sides' headers to
+    # survive: this deployment shape is exactly the one that cannot re-derive
+    # them from the keys.
+    assert 'ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: deepseek-test-key"' in text
+    assert 'OPENAI_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: deepseek-test-key"' in text
 
 
 def test_baremetal_setup_drops_openai_side_of_a_separate_provider(tmp_path: Path):

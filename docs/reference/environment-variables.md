@@ -31,6 +31,8 @@ These variables configure LLM gateway access and optional backend credentials.
 | `ANTHROPIC_BASE_URL`   | Conditional | —    | Anthropic-side endpoint. Required together with `ANTHROPIC_API_KEY` to enable Claude. Never derived from `OPENAI_BASE_URL`.                                                                                                        |
 | `ANTHROPIC_API_KEY`    | Conditional | —    | Anthropic-side key. Pairs with `ANTHROPIC_BASE_URL`; may omit it only when the OpenAI side has no base URL either, in which case the official Anthropic endpoint is implied. Never derived from `OPENAI_API_KEY`; setting it alongside an `OPENAI_BASE_URL` but without its own base URL fails preflight.                                                                                                                                |
 | `ANTHROPIC_AUTH_TOKEN` | No       | —    | Claude CLI auth token alias, accepted in place of `ANTHROPIC_API_KEY`. Preflight never fills it; the Ray / e2e / forge-fusion env builders default it from the Anthropic-side key when they hand credentials to a subprocess.                                                                        |
+| `ANTHROPIC`<br>`_CUSTOM_HEADERS` | No | —    | Extra request headers for the Anthropic side, for gateways that authenticate on a header of their own (for example Azure API Management). Newline-delimited `Name: value` as in the Anthropic SDK; a JSON object is accepted too. `${VAR}` references are expanded from the same environment, so a gateway header can reuse `ANTHROPIC_API_KEY` instead of duplicating the secret. |
+| `OPENAI`<br>`_CUSTOM_HEADERS` | No  | —    | OpenAI-side equivalent, passed to the SDK client as `default_headers`. Used whenever `OPENAI_BASE_URL` is set explicitly; when the OpenAI base URL is instead derived from `ANTHROPIC_BASE_URL` (one gateway, no explicit OpenAI endpoint) the client falls back to `ANTHROPIC_CUSTOM_HEADERS`. Setup keeps it in `.env` unless the deployment is Anthropic-only, where the whole OpenAI side is scrubbed. |
 | `CLAUDE_CODE`<br>`_OAUTH_TOKEN` | No | — | Claude Max/Pro subscription token from `claude setup-token`. Lowest-priority Anthropic credential: either API-key variable outranks it. On its own it implies `https://api.anthropic.com`. Passed to subprocesses verbatim and never copied into `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `~/.claude/config.json`, which would switch the run to API-credits billing. |
 | `GEAK_API_KEY`         | No       | —    | Internal alias, never derived from either side. GEAK runs on the Anthropic side (`ANTHROPIC_*` + `GEAK_CLAUDE_MODEL`); set this only to point GEAK elsewhere.                                                                                                                              |
 | `GEAK_BASE_URL`        | No       | —    | Internal alias, never derived from either side. Set it only to point GEAK at a different endpoint than the Anthropic side.                                                                                                                          |
@@ -321,22 +323,6 @@ same way under `trace_resolver_error: ...`, and both are logged at `WARNING`.
 
 ---
 
-## Codex (OpenAI) backend web search
-
-The following variables enable OpenAI's built-in server-side web search for the
-Codex (GPT-style) backend. When enabled, every Codex turn is issued through the
-OpenAI **Responses API** with the built-in `web_search` tool instead of
-`chat.completions`; the search resolves server-side in one call and the model's
-reply still carries the intent envelope. Only affects deployments whose Codex
-endpoint is OpenAI-compatible and supports the Responses API `web_search` tool.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HYPERLOOM_CODEX_WEB_SEARCH` | Unset (off) | Set to `1`/`true` to route every Codex turn through the OpenAI Responses API with the built-in `web_search` tool. Default keeps the existing `chat.completions` path unchanged. |
-| `HYPERLOOM_`<br>`CODEX_WEB_SEARCH`<br>`_CONTEXT_SIZE` | `medium` | Passed through as the `web_search` tool's `search_context_size` (`low` / `medium` / `high`). Ignored unless `HYPERLOOM_CODEX_WEB_SEARCH` is on. |
-
----
-
 ## Codex (OpenAI) agent sandbox
 
 Selects how a Codex agent session (TraceLens analysis and every future
@@ -499,7 +485,7 @@ deployments.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Bash-enabled specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
+| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Bash-enabled specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `OPENAI_CUSTOM_HEADERS`, `LLM_GATEWAY_KEY`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ---
@@ -510,13 +496,16 @@ The following variables configure the Critic, Robustness, and knowledge base com
 
 | Variable                              | Default                | Description                                                                                                                          |
 |---------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
-| `KNOWLEDGE_STORE_MODE`                | `local`                | Exclusive Recipe/KG backend: `local` or `remote`. Ambient GBrain credentials do not select remote mode. |
-| `KNOWLEDGE_LOCAL_ROOT`                | `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` | Shared knowledge root. Remote mode uses only `.remote-locks/recipes` beneath it. |
+| `KNOWLEDGE_STORE_MODE`                | `local`                | Exclusive Recipe backend: `local` or `remote`. Ambient KB Store or GBrain credentials do not select remote mode. |
+| `KNOWLEDGE_LOCAL_ROOT`                | `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` | Local Recipe/KG root. It is not used for Recipe data in remote mode. |
 | `HYPERLOOM_`<br>`LOCAL_KB_ROOT`       | Unset                  | Deprecated explicit local Recipe root compatibility input, overridden by `--local-kb-root`; explicit use skips automatic legacy migration. |
 | `INFERENCE_OPTIMIZER_`<br>`FA_KB_PATH` | `$USER_DATA_PATH/framework-kb`, otherwise `/workspace/hyperloom/framework-kb` | Framework-agent KB root, holding the lessons ledger the FRAMEWORK phase reads and writes. The only supported override: the `fa` reader and the orchestrator's writeback both resolve through it, so it moves both halves at once. The withdrawn `FRAMEWORK_AGENT_KB_DIR` is ignored with a warning naming the resolved root. On first start-up an existing partition under the legacy `$USER_DATA_PATH/kb` is copied across once; a copy that fails warns and leaves the phase to cold-start. |
-| `GBRAIN_BASE_URL`                     | Unset                  | GBrain endpoint; required with `KNOWLEDGE_STORE_MODE=remote` and ignored in local mode. |
-| `GBRAIN_TOKEN`                        | Unset                  | GBrain bearer token; required with `KNOWLEDGE_STORE_MODE=remote` and ignored in local mode. |
-| `RECIPE_KB_MIRROR_MODE`               | Obsolete               | Ignored. Remove it and select `KNOWLEDGE_STORE_MODE=local` or `remote`. |
+| `KB_STORE_URL`                        | Unset                  | KB Store endpoint. Required when `KNOWLEDGE_STORE_MODE=remote`; remote Recipe mode reads the direct best-session record, currently replays only its Explore args/env at T0, and writes one final session at CLOSE. |
+| `KB_STORE_TOKEN`                      | Unset                  | KB Store bearer token. Required when `KNOWLEDGE_STORE_MODE=remote`; transport failures during the final write are non-fatal. |
+| `KB_DRAFT_DIR`                        | Runtime-generated      | Internal remote-mode handoff where out-of-process agents stage their section knowledge and files. Hyperloom creates and exports it; operators must not set it. The facade is inactive when it is absent. |
+| `KB_WARM_START_DIR`                   | Runtime-generated      | Internal remote-mode handoff pointing agents at the downloaded `recipe.json + files/` best record. Hyperloom creates and exports it; operators must not set it. |
+| `GBRAIN_BASE_URL`                     | Unset                  | Optional GBrain endpoint for non-Recipe KG and Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
+| `GBRAIN_TOKEN`                        | Unset                  | Optional GBrain bearer token for non-Recipe KG and Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
 | `CRITIC_AGENT_ROOT`                   | Derived from `REPO_ROOT` | Override location of the critic-agent runtime.                                                                                    |
 | `ROBUSTNESS_AGENT_ROOT`               | Derived from `REPO_ROOT` | Override location of the robustness-agent runtime.                                                                                |
 | `ROBUSTNESS_LLM_RCA_DISABLED`         | Unset                  | Set to `1` to forcibly disable the LLM root cause analysis (RCA) engine even when credentials are present.                                                 |
@@ -543,7 +532,7 @@ Primary switch (default **off**) for live Langfuse trace push.
 - **Local ledger**: `reports/trace/*.jsonl` is always written regardless of this flag. If the SDK is unavailable, live push degrades to a no-op.
 - **Correlation**: the Langfuse trace ID and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session ID for standalone runs. Live push and the offline `backfill_langfuse` CLI collapse onto one trace per Primus-Claw session.
 - **Span layout**: `trace → phase span (PRELUDE/FRAMEWORK_AGENT/EXPLORE/KERNEL_AGENT/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
-- **Recipe-KB spans**: under the `recipe_kb` agent span, both directions of the cross-session recipe KB are recorded — `kb:recipe_snapshot:<method>` for reads (`get_recipe` / `search`) and `kb:recipe_write:<generator>` for writes. The generator suffix separates the session-opening `t0_anchor` identity stamp from the `coordinator` KEEP/REVERT/PR/CLOSE amends. Because a write rewrites the whole row, each write span carries `<field>_delta` metadata (`lessons_delta`, `pitfalls_delta`, …) reporting what that write actually contributed — a restamp that adds nothing shows no delta keys, so it is distinguishable from a real amend. The full audit row is attached as span output.
+- **Recipe-KB spans**: under the `recipe_kb` agent span, local reads/writes and remote KB Store publish attempts are recorded from `runtime/recipe_snapshot/.audit.jsonl`. Read spans use `kb:recipe_snapshot:<method>`; write spans use `kb:recipe_write:<generator>`, where the generator distinguishes normal `close` from `t4_fallback`. Remote rows report `written`, `skipped`, or `error` without recording credentials or payload bodies.
 - **Receipt**: every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting:
   - Whether push was enabled (or the `disabled_reason`)
   - The redacted connection config (host and key-presence booleans — never the keys themselves)

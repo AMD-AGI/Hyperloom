@@ -324,7 +324,7 @@ appear under the selected local KB root.
 
 **Cause**: The selected local root is read-only/full, permission is denied, a
 one-time legacy Recipe migration failed, or the explicitly selected remote
-GBrain backend is unreachable.
+KB Store backend is unreachable.
 
 **Fix**:
 
@@ -335,8 +335,9 @@ GBrain backend is unreachable.
    mkdir -p "$KB_ROOT"
    touch "$KB_ROOT/.write-test" && rm "$KB_ROOT/.write-test"
    ```
-2. If `KNOWLEDGE_STORE_MODE=remote`, verify `GBRAIN_BASE_URL` reachability and
-   the token from the same pod. Remote mode does not fall back to local.
+2. If `KNOWLEDGE_STORE_MODE=remote`, verify `KB_STORE_URL` reachability and
+   `KB_STORE_TOKEN` from the same pod. Remote mode does not fall back to local
+   and currently writes only at CLOSE.
 3. After an upgrade, inspect the startup error before moving data manually.
    Stop old writers, back up `$USER_DATA_PATH/kb` (or
    `/workspace/hyperloom/kb`), correct permissions, and retry the one-time

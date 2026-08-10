@@ -47,6 +47,29 @@ _MAX_INTEGRATE_FAULT_ATTEMPTS = 2
 # It does NOT block ``report``.
 _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 10.0
 
+
+def resolve_hot_kernel_min_gpu_pct() -> float:
+    """Resolve the GPU-share threshold a hot kernel must clear to be dispatched.
+
+    The dispatch batch filter, the phase-advance gate and the report's
+    unattempted-reason breakdown must all name the same number, or the report
+    explains a skip the dispatcher never made.
+
+    Returns:
+        float: The threshold from ``HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT``, or the
+            shipped default when it is unset or unparseable.
+    """
+    try:
+        return float(
+            os.environ.get(
+                "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT",
+                _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
+            )
+        )
+    except (TypeError, ValueError):
+        return _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
+
+
 # Only the top-N reusable hot kernels are enforced.
 _DEFAULT_HOT_KERNEL_GATE_TOP_N = 5
 
