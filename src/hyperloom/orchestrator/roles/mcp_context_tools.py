@@ -93,7 +93,7 @@ class ContextProvider:
         Returns:
             The open-gaps summary string.
         """
-        return self._safe(self.shared_state.to_gaps_summary, "gaps")
+        return self._safe(lambda: self.shared_state.to_gaps_summary(max_attempts=5), "gaps")
 
     def warm_start(self) -> str:
         """Return the warm-start summary projection.
@@ -266,7 +266,8 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
     (
         "get_gaps",
         "Return the structured gaps[] ledger: canonical_id / layer / "
-        "severity / symptom / attempts for each open performance gap.",
+        "severity / symptom / attempt count and up to 5 recent attempts "
+        "(each with action, outcome, error_class, and failure_id when present).",
         _NO_ARGS_SCHEMA,
         "gaps",
     ),

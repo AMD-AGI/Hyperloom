@@ -189,6 +189,8 @@ class ConversationCollaborator:
         lines = [_format_inbox_event(m) for m in msgs]
         return "\n".join(lines)
 
+    _RECENT_OUTCOMES_LINE_CAP = 120
+
     def _context_recent_outcomes_reader(self, top_k: int = 8) -> str:
         """Synchronous projection of recent action outcomes.
 
@@ -217,7 +219,12 @@ class ConversationCollaborator:
         # Flip newest-first query to newest-last for chronological reading.
         msgs = [Message.from_row(r) for r in rows][::-1]
         lines = ["=== Recent action outcomes (newest last) ==="]
-        lines.extend(_format_inbox_event(m) for m in msgs)
+        for m in msgs:
+            lines.append(_format_inbox_event(m, max_variant_rows=12))
+        # Guard against a very wide top_k × many failures blowing the context budget.
+        if len(lines) > self._RECENT_OUTCOMES_LINE_CAP:
+            lines = lines[: self._RECENT_OUTCOMES_LINE_CAP]
+            lines.append(f"(truncated to {self._RECENT_OUTCOMES_LINE_CAP} lines; use get_recent_outcomes with smaller top_k)")
         return "\n".join(lines)
 
     def _context_running_tasks_reader(self) -> str:
@@ -680,8 +687,9 @@ class ConversationCollaborator:
             rendered = await self._augment_critic_inbox_with_pending(rendered)
         if rendered:
             sections.append(f"=== Inbox for {agent_name} (newest last) ===")
+            _variant_rows = 3 if agent_name == "orchestration" else 0
             for m in rendered:
-                sections.append(f"  {_format_inbox_event(m)}")
+                sections.append(f"  {_format_inbox_event(m, max_variant_rows=_variant_rows)}")
         else:
             sections.append(f"=== Inbox for {agent_name} ===")
             sections.append("(no new messages)")

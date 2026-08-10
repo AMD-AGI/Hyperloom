@@ -372,11 +372,14 @@ class _RenderMixin:
             out.append(f"  · (truncated to {max_lines} lines; see runtime/recipe_kb/.kb_warm.json for full snapshot)")
         return "\n".join(out)
 
-    def to_gaps_summary(self, *, max_entries: int = 10) -> str:
+    def to_gaps_summary(self, *, max_entries: int = 10, max_attempts: int = 0) -> str:
         """Render :attr:`gaps` for prompt injection; empty when no gaps. Capped at ``max_entries`` newest rows.
 
         Args:
             max_entries (int): Maximum number of newest gap rows to render.
+            max_attempts (int): When > 0, include the ``max_attempts`` most
+                recent attempt rows for each gap.  0 (default) shows the count
+                and last action only (prompt-compact mode).
 
         Returns:
             str: The rendered gaps block, or ``""`` when no gaps exist.
@@ -409,6 +412,16 @@ class _RenderMixin:
                 if isinstance(last, dict):
                     last_tag = f" last={last.get('action', '?')}:{last.get('outcome', '?')}"
             rows.append(f"  - {cid} [{layer}/{severity}] {symptom}\n      attempts={attempt_n}{last_tag}")
+            if max_attempts > 0 and isinstance(attempts, list) and attempts:
+                for a in attempts[-max_attempts:]:
+                    if not isinstance(a, dict):
+                        continue
+                    fid = a.get("failure_id") or ""
+                    fid_s = f" fid={fid}" if fid else ""
+                    rows.append(
+                        f"        attempt: {a.get('action','?')} outcome={a.get('outcome','?')}"
+                        f" err={a.get('error_class','')}{fid_s}"
+                    )
         if len(ordered) > max_entries:
             rows.append(f"  · (+{len(ordered) - max_entries} older gaps elided; see state.json `gaps[]`)")
         return "\n".join(rows)
@@ -714,9 +727,30 @@ class _RenderMixin:
         if reason and reason not in ("not_keep", "gain_below_threshold"):
             ratio = entry.get("wall_clock_ratio_vs_baseline")
             ratio_s = f" {ratio:.2f}x" if isinstance(ratio, (int, float)) and ratio > 0 else ""
-            parts.append(f"reason={reason[:120]}{ratio_s}")
+            # Prefer the tail-truncated error body; fall back to the reason tag.
+            body = str(entry.get("error_excerpt") or reason)
+            parts.append(f"reason={body[:120]}{ratio_s}")
+
+        # Artifact anchors: show only when present; paths truncated to last 2 segments.
+        _artifact_parts: list[str] = []
+        fid = str(entry.get("failure_id") or "").strip()
+        if fid:
+            _artifact_parts.append(f"fid={fid}")
+        ws = str(entry.get("workspace") or "").strip()
+        if ws:
+            from pathlib import PurePosixPath
+            _artifact_parts.append(f"ws={'/'.join(PurePosixPath(ws).parts[-2:])}")
+        log_path = str(entry.get("server_log_path") or "").strip()
+        if log_path:
+            from pathlib import PurePosixPath
+            _artifact_parts.append(f"log={'/'.join(PurePosixPath(log_path).parts[-2:])}")
+        artifact_s = "  " + " ".join(_artifact_parts) if _artifact_parts else ""
+        # Keep the appended block under ~60 chars; drop ws/log if over limit.
+        if len(artifact_s) > 62 and fid:
+            artifact_s = f"  fid={fid}"
+
         suffix = "  " + " ".join(parts) if parts else ""
-        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}{suffix}"
+        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}{suffix}{artifact_s}"
 
     @staticmethod
     def _enrich_with_tested_gain(
