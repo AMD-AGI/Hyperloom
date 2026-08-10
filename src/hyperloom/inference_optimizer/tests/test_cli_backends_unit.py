@@ -169,12 +169,11 @@ def test_build_backends_forced_openai_protocol_without_any_key_fails(monkeypatch
         )
 
 
-def test_build_backends_forced_anthropic_protocol_accepts_deepseek_key(monkeypatch) -> None:
-    """DeepSeek's key authenticates its Anthropic-compatible endpoint, so the
-    flag must accept it instead of rejecting a config that would have run."""
+def test_build_backends_forced_anthropic_protocol_accepts_a_subscription_token(monkeypatch) -> None:
+    """The Claude CLI authenticates from the token alone, so the flag must
+    accept it instead of rejecting a config that would have run."""
     _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
-    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://proxy.example.com/anthropic")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-token")
     b = _build(
         critic_choice="agent",
         critic_agent_root=Path("/tmp/critic"),
@@ -206,45 +205,30 @@ def test_build_backends_rejects_unknown_critic_protocol(monkeypatch) -> None:
         )
 
 
-def test_build_backends_deepseek_only_uses_openai_compatible_critic_agent(monkeypatch) -> None:
+def test_build_backends_dual_protocol_gateway_uses_standard_critic_agent(monkeypatch) -> None:
+    """A dual-protocol gateway (e.g. DeepSeek) is just "both sides configured".
+
+    Once normalized it carries an Anthropic AND an OpenAI endpoint, so it takes
+    the ordinary two-sided path rather than a provider-specific branch.
+    """
     _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-deepseek-key")
     b = _build(
         critic_choice="agent",
         critic_agent_root=Path("/tmp/critic"),
     )
-    # DeepSeek keeps the critic-agent on the OpenAI review path.
     assert b["critic"][0] == "critic_agent"
-    assert b["critic"][1]["protocol"] == "openai"
-    assert b["critic"][1]["codex_model"] == "claude-x"
-    assert callable(b["critic"][1]["codex_client_factory"])
+    assert b["critic"][1]["codex_model"] == "codex-y"
+    assert "codex_client_factory" not in b["critic"][1]
 
 
-def test_deepseek_factory_default_base_url_carries_v1(monkeypatch) -> None:
-    """The OpenAI SDK appends the route verbatim (no /v1 auto-insertion), so the
-    DeepSeek default base URL must carry the conventional /v1 suffix."""
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
-    import openai
-
-    captured: dict = {}
-    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: captured.update(kw))
-    clib._deepseek_openai_client_factory()()
-    assert captured["base_url"] == "https://api.deepseek.com/v1"
-    assert captured["api_key"] == "test-deepseek-key"
-
-
-def test_deepseek_factory_respects_explicit_base_url(monkeypatch) -> None:
-    """An explicit DEEPSEEK_BASE_URL is used as-is (custom gateways may not use /v1)."""
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
-    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://gw.example/openai/v2/")
-    import openai
-
-    captured: dict = {}
-    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: captured.update(kw))
-    clib._deepseek_openai_client_factory()()
-    assert captured["base_url"] == "https://gw.example/openai/v2"
+def test_backends_have_no_provider_specific_branch(monkeypatch) -> None:
+    """The retired DeepSeek branch and its hardcoded client factory are gone."""
+    assert not hasattr(clib, "_deepseek_only")
+    assert not hasattr(clib, "_deepseek_openai_client_factory")
 
 
 def test_build_backends_openai_only_uses_codex_for_orchestration(monkeypatch) -> None:

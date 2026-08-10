@@ -10,11 +10,10 @@ orchestrator's MCP-coupled backend), so this exposes
 ``HYPERLOOM_REPORT_LLM_BACKEND``, falling back to ``None``
 (deterministic-only) when config is missing.
 
-The underlying HTTP protocol skeleton (one POST, parse the response) is
-shared with the rest of the codebase via ``hyperloom.common.llm``
-(tree-reform.MD §4/§7); this module keeps the report-specific surface
-(``model``/``max_output_tokens`` field defaults, the
-``HYPERLOOM_REPORT_LLM_BACKEND``-driven env wiring) local.
+Provider credentials, client construction, and the request/response shape
+belong to ``hyperloom.common.llm_config``; this module keeps only the
+report-specific surface (``model``/``max_output_tokens`` defaults and the
+``HYPERLOOM_REPORT_LLM_BACKEND``-driven env wiring).
 """
 
 from __future__ import annotations
@@ -24,16 +23,16 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.common.llm import (
-    LLMClientError,
-    call_anthropic_messages,
-    call_openai_chat_completions,
-)
+from hyperloom.common import llm_config
 
 log = logging.getLogger(__name__)
 
+# Report narratives are a single long generation; the gateway is allowed a
+# generous window because the alternative is a deterministic-only report.
+REPORT_HTTP_TIMEOUT_SEC = 60.0
+
 __all__ = [
-    "LLMClientError",
+    "REPORT_HTTP_TIMEOUT_SEC",
     "NullClient",
     "OpenAIHttpClient",
     "AnthropicHttpClient",
@@ -60,83 +59,72 @@ class NullClient:
 
 @dataclass
 class OpenAIHttpClient:
-    """Minimal OpenAI-compatible chat-completions client (one POST, returns ``choices[0].message.content``)."""
+    """OpenAI-compatible chat-completions client for the narrative pass."""
 
-    base_url: str
-    api_key: str
+    client: Any
     model: str = "claude-opus-5"
     max_output_tokens: int = 1024
-    timeout_sec: float = 60.0
 
     def complete(self, *, system: str, user: str) -> str:
-        """Issue a single chat-completion request and return the text.
+        """Issue a single chat completion and return the text.
 
         Args:
             system: System prompt content.
             user: User prompt content.
 
         Returns:
-            The content of the first choice's message.
+            The reply text.
         """
-        return call_openai_chat_completions(
-            base_url=self.base_url,
-            api_key=self.api_key,
+        return llm_config.chat_completion(
+            self.client,
             model=self.model,
-            system=system,
-            user=user,
-            max_output_tokens=self.max_output_tokens,
-            timeout_sec=self.timeout_sec,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=self.max_output_tokens,
             temperature=0.2,
-        )
+        ).text
 
 
 @dataclass
 class AnthropicHttpClient:
-    """Minimal Anthropic Messages-API client (talks directly to ``ANTHROPIC_BASE_URL``)."""
+    """Anthropic Messages-API client for the narrative pass."""
 
-    base_url: str
-    api_key: str
+    client: Any
     model: str = "claude-opus-5"
     max_output_tokens: int = 1024
-    timeout_sec: float = 60.0
 
     def complete(self, *, system: str, user: str) -> str:
-        """POST one Messages-API request and return the concatenated text.
+        """Issue one Messages-API request and return the reply text.
 
         Args:
             system (str): The system prompt.
             user (str): The user message.
 
         Returns:
-            str: The joined text of all ``text`` content blocks in the
-                response.
-
-        Raises:
-            LLMClientError: If the HTTP request fails or the response shape is
-                unexpected.
+            str: The reply text.
         """
-        return call_anthropic_messages(
-            base_url=self.base_url,
-            api_key=self.api_key,
+        return llm_config.anthropic_messages(
+            self.client,
             model=self.model,
             system=system,
-            user=user,
-            max_output_tokens=self.max_output_tokens,
-            timeout_sec=self.timeout_sec,
-        )
+            messages=[{"role": "user", "content": user}],
+            max_tokens=self.max_output_tokens,
+        ).text
 
 
 def build_client_from_env() -> Any | None:
     """Construct an LLM client from environment.
 
     Reads ``HYPERLOOM_REPORT_LLM_BACKEND`` (default ``none``),
-    ``HYPERLOOM_REPORT_MODEL``, ``HYPERLOOM_REPORT_MAX_TOKENS`` and the
-    per-backend base-url/api-key vars; returns ``None``
-    (deterministic-only) when required vars are missing.
+    ``HYPERLOOM_REPORT_MODEL`` and ``HYPERLOOM_REPORT_MAX_TOKENS``; the
+    provider credentials come from ``hyperloom.common.llm_config``. Returns
+    ``None`` (deterministic-only) when the backend is off or unconfigured.
 
     Returns:
         A configured backend client instance, or ``None`` when the backend
-        is disabled or required environment variables are missing.
+        is disabled or the provider credentials are missing.
     """
     backend = (os.environ.get("HYPERLOOM_REPORT_LLM_BACKEND") or "none").lower()
     if backend in ("", "none", "off", "disabled"):
@@ -146,42 +134,29 @@ def build_client_from_env() -> Any | None:
         max_tokens = int(os.environ.get("HYPERLOOM_REPORT_MAX_TOKENS") or "1024")
     except ValueError:
         max_tokens = 1024
+    timeout = llm_config.build_http_timeout(
+        connect=REPORT_HTTP_TIMEOUT_SEC,
+        read=REPORT_HTTP_TIMEOUT_SEC,
+        write=REPORT_HTTP_TIMEOUT_SEC,
+        pool=REPORT_HTTP_TIMEOUT_SEC,
+    )
 
     if backend == "openai":
-        base = os.environ.get("OPENAI_BASE_URL")
-        key = os.environ.get("OPENAI_API_KEY")
-        if not (base and key):
-            log.warning(
-                "HYPERLOOM_REPORT_LLM_BACKEND=openai but OPENAI_BASE_URL or "
-                "OPENAI_API_KEY is unset; falling back to deterministic-only "
-                "report."
-            )
+        try:
+            client = llm_config.get_openai_client(timeout=timeout)
+        except llm_config.LLMConfigError as exc:
+            log.warning("HYPERLOOM_REPORT_LLM_BACKEND=openai but %s; falling back to deterministic-only report.", exc)
             return None
-        return OpenAIHttpClient(
-            base_url=base,
-            api_key=key,
-            model=model,
-            max_output_tokens=max_tokens,
-        )
+        return OpenAIHttpClient(client=client, model=model, max_output_tokens=max_tokens)
     if backend == "anthropic":
-        base = os.environ.get("ANTHROPIC_BASE_URL")
-        key = (
-            os.environ.get("ANTHROPIC_API_KEY")
-            or os.environ.get("CLAUDE_API_KEY")
-        )
-        if not (base and key):
+        try:
+            client = llm_config.get_anthropic_client(timeout=timeout)
+        except llm_config.LLMConfigError as exc:
             log.warning(
-                "HYPERLOOM_REPORT_LLM_BACKEND=anthropic but ANTHROPIC_BASE_URL "
-                "or ANTHROPIC_API_KEY is unset; falling back to "
-                "deterministic-only report."
+                "HYPERLOOM_REPORT_LLM_BACKEND=anthropic but %s; falling back to deterministic-only report.", exc
             )
             return None
-        return AnthropicHttpClient(
-            base_url=base,
-            api_key=key,
-            model=model,
-            max_output_tokens=max_tokens,
-        )
+        return AnthropicHttpClient(client=client, model=model, max_output_tokens=max_tokens)
     log.warning(
         "Unknown HYPERLOOM_REPORT_LLM_BACKEND=%r; falling back to deterministic-only report.",
         backend,

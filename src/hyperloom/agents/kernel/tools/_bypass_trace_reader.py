@@ -27,6 +27,7 @@ Design constraints:
 
 from __future__ import annotations
 
+import codecs
 import gzip
 import json
 import re
@@ -41,6 +42,12 @@ _GPU_CATS = frozenset((_GPU_KERNEL_CAT,) + _GPU_MEMCPY_CATS)
 _TRACE_EXTS = (".trace.json.gz", ".pt.trace.json.gz", ".trace.json", ".json.gz", ".json")
 
 _DECODER = json.JSONDecoder()
+
+# Hard caps keep a corrupt trace from turning the streaming reader into an
+# unbounded accumulator. Kineto prefixes are normally a few KiB and individual
+# events a few KiB, so these retain generous headroom for embedded metadata.
+_MAX_TRACE_PREFIX_CHARS = 16 * 1024 * 1024
+_MAX_EVENT_CHARS = 64 * 1024 * 1024
 
 # Per-rank trace filename pattern (e.g. ``rank_0.trace.json.gz``).
 _RANK_RE = re.compile(r"rank[_-]?(\d+)", re.IGNORECASE)
@@ -62,26 +69,34 @@ def _backfill_shape_signature(meta: dict[str, Any]) -> tuple[tuple[tuple[int, ..
     return (tuple(norm_shapes), norm_dtypes)
 
 
+# A graph trace is judged under-recorded when fewer than this fraction of its
+# graph-launch correlations actually recorded any kernel: activity-buffer
+# overflow drops whole replays, so recorded-launch coverage collapses toward
+# ~1/launch_count, whereas a fully-recorded (merely idle) workload keeps kernels
+# on essentially every launch.
+_GRAPH_RECORDED_LAUNCH_COVERAGE_MAX = 0.5
+
+
 def _graph_under_recorded(
     *,
     graph_mode: bool,
     graph_launch_count: int,
+    graph_launches_with_kernels: int,
     graph_kernels: int,
-    busy_fraction: float,
 ) -> bool:
-    """Return whether a graph-mode trace likely under-recorded replays."""
-    if not graph_mode or graph_launch_count < 2:
+    """Return whether a graph-mode trace likely under-recorded replays.
+
+    Keyed on *recorded-launch coverage* — the share of graph-launch correlations
+    that recorded at least one kernel — NOT on busy%. A low busy fraction alone
+    is ambiguous: a genuinely idle / sparse / host-bound workload whose replays
+    are all fully recorded also looks idle, and must still be gated by the
+    high-idle suppression. Only when the profiler dropped whole replays (coverage
+    far below 1.0) is idle% an unreliable capture artifact.
+    """
+    if not graph_mode or graph_launch_count < 2 or graph_kernels <= 0:
         return False
-    if busy_fraction < 0.5:
-        return True
-    if graph_launch_count >= 4 and graph_kernels > 0 and busy_fraction < 0.9:
-        return True
-    # Few graph-kernel events per launch suggests only ~1 replay was captured.
-    if graph_kernels > 0:
-        events_per_launch = graph_kernels / graph_launch_count
-        if events_per_launch < 2.0 and busy_fraction < 0.9:
-            return True
-    return False
+    coverage = graph_launches_with_kernels / graph_launch_count
+    return coverage < _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX
 
 
 def _file_size(fp: Path) -> int:
@@ -218,59 +233,278 @@ def _open_trace_binary(path: Path):
     return open(path, "rb")
 
 
-def stream_events(fileobj, bufsize: int = 8 * 1024 * 1024) -> Iterator[dict]:
+def stream_events(
+    fileobj,
+    bufsize: int = 8 * 1024 * 1024,
+    *,
+    errors: list[str] | None = None,
+) -> Iterator[dict]:
     """Yield each object inside the ``traceEvents`` array, one at a time.
 
     Locates the ``traceEvents`` array, then emits balanced ``{...}`` elements
-    via ``raw_decode``. Constant memory; refills the buffer on truncation.
+    via ``raw_decode``. Complete leading events remain recoverable from a
+    truncated file, while ``errors`` distinguishes that recovery from a clean
+    end of the array.
 
     Args:
         fileobj: A binary, possibly-decompressing file object.
         bufsize: Read/refill chunk size in bytes (also the buffer-trim
             threshold).
+        errors: Optional output list for structural stream errors.
 
     Yields:
         Parsed trace-event dicts.
     """
+    def _record(message: str) -> None:
+        """Append one structural error when the caller requested diagnostics."""
+        if errors is not None:
+            errors.append(message)
+
+    chunk_size = max(1, int(bufsize))
+    utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     buf = ""
-    key = '"traceEvents"'
-    while key not in buf:
-        chunk = fileobj.read(bufsize)
-        if not chunk:
-            return
-        buf += chunk.decode("utf-8", "replace")
-    pos = buf.index("[", buf.index(key)) + 1
     eof = False
-    while True:
-        while pos < len(buf) and buf[pos] in " \t\r\n,":
-            pos += 1
-        if pos < len(buf) and buf[pos] == "]":
-            return
-        if pos >= len(buf) or buf[pos] != "{":
-            if eof:
-                return
-            chunk = fileobj.read(bufsize)
-            if not chunk:
-                eof = True
-            else:
-                buf += chunk.decode("utf-8", "replace")
-            continue
+
+    def _refill(max_bytes: int | None = None) -> bool:
+        """Decode one bounded chunk and turn gzip failures into stream errors."""
+        nonlocal buf, eof
+        if eof:
+            return False
+        read_size = chunk_size
+        if max_bytes is not None:
+            read_size = max(1, min(read_size, max_bytes))
         try:
-            obj, end = _DECODER.raw_decode(buf, pos)
-        except json.JSONDecodeError:
-            if eof:
-                return
-            chunk = fileobj.read(bufsize)
-            if not chunk:
-                eof = True
-            else:
-                buf += chunk.decode("utf-8", "replace")
-            continue
-        yield obj
-        pos = end
-        if pos > bufsize:
+            chunk = fileobj.read(read_size)
+        except (EOFError, gzip.BadGzipFile) as exc:
+            _record(f"trace input error: {type(exc).__name__}: {exc}")
+            eof = True
+            tail = utf8_decoder.decode(b"", final=True)
+            if tail:
+                buf += tail
+            return bool(tail)
+        if not chunk:
+            eof = True
+            tail = utf8_decoder.decode(b"", final=True)
+            if tail:
+                buf += tail
+            return bool(tail)
+        buf += utf8_decoder.decode(chunk, final=False)
+        return True
+
+    def _trim_consumed() -> None:
+        """Discard parsed input once it exceeds one refill chunk."""
+        nonlocal buf, pos
+        if pos > chunk_size:
             buf = buf[pos:]
             pos = 0
+
+    key = '"traceEvents"'
+    search_from = 0
+    while True:
+        key_pos = buf.find(key, search_from)
+        if key_pos < 0:
+            if eof:
+                _record("traceEvents array not found")
+                return
+            if len(buf) >= _MAX_TRACE_PREFIX_CHARS:
+                _record(
+                    f"traceEvents prefix exceeds {_MAX_TRACE_PREFIX_CHARS} characters"
+                )
+                return
+            search_from = max(0, len(buf) - len(key) + 1)
+            _refill(_MAX_TRACE_PREFIX_CHARS - len(buf))
+            continue
+
+        pos = key_pos + len(key)
+        while pos >= len(buf):
+            if eof:
+                break
+            if len(buf) >= _MAX_TRACE_PREFIX_CHARS:
+                _record(
+                    f"traceEvents prefix exceeds {_MAX_TRACE_PREFIX_CHARS} characters"
+                )
+                return
+            _refill(_MAX_TRACE_PREFIX_CHARS - len(buf))
+        while pos < len(buf) and buf[pos] in " \t\r\n":
+            pos += 1
+            if pos == len(buf) and not eof:
+                if len(buf) >= _MAX_TRACE_PREFIX_CHARS:
+                    _record(
+                        "traceEvents prefix exceeds "
+                        f"{_MAX_TRACE_PREFIX_CHARS} characters"
+                    )
+                    return
+                _refill(_MAX_TRACE_PREFIX_CHARS - len(buf))
+        if pos < len(buf) and buf[pos] == ":":
+            break
+        search_from = key_pos + len(key)
+
+    pos += 1
+    while True:
+        while pos < len(buf) and buf[pos] in " \t\r\n":
+            pos += 1
+        if pos < len(buf):
+            break
+        if eof:
+            _record("traceEvents array opener not found")
+            return
+        if len(buf) >= _MAX_TRACE_PREFIX_CHARS:
+            _record(
+                f"traceEvents prefix exceeds {_MAX_TRACE_PREFIX_CHARS} characters"
+            )
+            return
+        _refill(_MAX_TRACE_PREFIX_CHARS - len(buf))
+    if buf[pos] != "[":
+        _record("traceEvents value is not an array")
+        return
+
+    buf = buf[pos + 1 :]
+    pos = 0
+    emitted = 0
+    while True:
+        while True:
+            while pos < len(buf) and buf[pos] in " \t\r\n,":
+                pos += 1
+            if pos < len(buf):
+                break
+            if eof:
+                _record(f"traceEvents array unterminated after {emitted} event(s)")
+                return
+            _trim_consumed()
+            _refill()
+
+        if buf[pos] == "]":
+            return
+
+        if buf[pos] != "{":
+            invalid_start = pos
+            scan = pos
+            curly_depth = 0
+            square_depth = 0
+            in_string = False
+            escaped = False
+            boundary: int | None = None
+            while boundary is None:
+                while scan < len(buf):
+                    char = buf[scan]
+                    if in_string:
+                        if escaped:
+                            escaped = False
+                        elif char == "\\":
+                            escaped = True
+                        elif char == '"':
+                            in_string = False
+                    elif char == '"':
+                        in_string = True
+                    elif char == "{":
+                        curly_depth += 1
+                    elif char == "}":
+                        curly_depth = max(0, curly_depth - 1)
+                    elif char == "[":
+                        square_depth += 1
+                    elif char == "]":
+                        if curly_depth == 0 and square_depth == 0:
+                            boundary = scan
+                            break
+                        square_depth = max(0, square_depth - 1)
+                    elif char == "," and curly_depth == 0 and square_depth == 0:
+                        boundary = scan + 1
+                        break
+                    scan += 1
+                if boundary is not None:
+                    break
+                buffered = len(buf) - invalid_start
+                if buffered >= _MAX_EVENT_CHARS:
+                    _record(
+                        "traceEvents element exceeds "
+                        f"{_MAX_EVENT_CHARS} characters after {emitted} event(s)"
+                    )
+                    return
+                if eof:
+                    _record(
+                        f"traceEvents array unterminated after {emitted} event(s)"
+                    )
+                    return
+                _refill(_MAX_EVENT_CHARS - buffered)
+            _record(
+                f"traceEvents element malformed after {emitted} event(s): "
+                "expected an object"
+            )
+            pos = boundary
+            _trim_consumed()
+            continue
+
+        object_start = pos
+        scan = pos
+        depth = 0
+        in_string = False
+        escaped = False
+        object_end: int | None = None
+        while object_end is None:
+            while scan < len(buf):
+                char = buf[scan]
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        in_string = False
+                elif char == '"':
+                    in_string = True
+                elif char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        object_end = scan + 1
+                        break
+                scan += 1
+            if object_end is not None:
+                break
+            buffered = len(buf) - object_start
+            if buffered >= _MAX_EVENT_CHARS:
+                _record(
+                    f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters "
+                    f"after {emitted} event(s)"
+                )
+                return
+            if eof:
+                _record(
+                    f"traceEvents object truncated after {emitted} event(s): "
+                    "unterminated object"
+                )
+                return
+            _refill(_MAX_EVENT_CHARS - buffered)
+
+        if object_end - object_start > _MAX_EVENT_CHARS:
+            _record(
+                f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters "
+                f"after {emitted} event(s)"
+            )
+            return
+        try:
+            obj, decoded_end = _DECODER.raw_decode(buf, object_start)
+        except json.JSONDecodeError as exc:
+            _record(
+                f"traceEvents object malformed after {emitted} event(s): "
+                f"{exc.msg}"
+            )
+            pos = object_end
+            _trim_consumed()
+            continue
+        if decoded_end != object_end or not isinstance(obj, dict):
+            _record(
+                f"traceEvents object malformed after {emitted} event(s): "
+                "invalid object boundary"
+            )
+            pos = object_end
+            _trim_consumed()
+            continue
+        yield obj
+        emitted += 1
+        pos = object_end
+        _trim_consumed()
 
 
 def _union_ms(intervals: list[tuple[float, float]]) -> float:
@@ -408,6 +642,17 @@ def _finalize(
         A dict with ``kernel_launches`` (when ``emit_launches``) / ``timeline`` /
         ``ops`` / ``kernels`` / ``attribution`` / ``graph_coverage``.
     """
+    # Graph capture health is a WHOLE-TRACE property (activity-buffer overflow
+    # drops replays across the run), so the recorded-launch coverage must be
+    # computed over the full event stream -- BEFORE any steady-window filter --
+    # to stay scope-consistent with ``graph_launch_count`` (also whole-trace).
+    # Otherwise a window holding one replay of a fully-recorded N-launch trace
+    # would read as 1/N and be misflagged as under-recorded.
+    _graph_corrs_full = graph_launch_corrs or frozenset()
+    graph_launch_corrs_with_kernels: set[int] = {
+        e[2] for e in k_events if e[2] is not None and e[2] in _graph_corrs_full
+    }
+
     ws = we = None
     if window is not None:
         ws, we = window
@@ -555,11 +800,12 @@ def _finalize(
     # many launches map to a single recorded replay's worth of kernels.
     graph_mode = graph_launch_count > 0
     busy_fraction = round(busy_ms / total_ms, 4) if total_ms > 0 else 0.0
+    graph_launches_with_kernels = len(graph_launch_corrs_with_kernels)
     graph_under_recorded = _graph_under_recorded(
         graph_mode=graph_mode,
         graph_launch_count=graph_launch_count,
+        graph_launches_with_kernels=graph_launches_with_kernels,
         graph_kernels=graph_kernels,
-        busy_fraction=busy_fraction,
     )
     kern_name_backfill_meta: dict[str, dict[str, Any]] = {}
     kern_name_backfill_ambiguous: set[str] = set()
@@ -662,6 +908,7 @@ def _finalize(
         "graph_coverage": {
             "graph_mode": graph_mode,
             "graph_launch_count": graph_launch_count,
+            "graph_launches_with_kernels": graph_launches_with_kernels,
             "graph_attributed_kernels": graph_kernels,
             "busy_fraction": busy_fraction,
             "graph_under_recorded": graph_under_recorded,
@@ -731,10 +978,11 @@ def analyze_trace(
     # their replayed kernels are classified graph-attributed, not (unlinked).
     graph_launch_corrs: set[int] = set()
     event_total = 0
+    stream_errors: list[str] = []
 
     fobj = _open_trace_binary(tf)
     try:
-        for ev in stream_events(fobj):
+        for ev in stream_events(fobj, errors=stream_errors):
             event_total += 1
             cat = ev.get("cat", "")
             if cat == "cuda_runtime":
@@ -825,6 +1073,7 @@ def analyze_trace(
         "status": "ok",
         "trace_file": str(tf),
         "event_total": event_total,
+        "stream_errors": stream_errors,
         "aggregation_scope": scope,
         "analyzed_rank": _rank_of(tf),
         "rank_count": _trace_rank_count(trace_input),

@@ -24,6 +24,12 @@ _RAY_ACTOR_DIED_RC: int = -913
 # Timeout for ray.get probes on specialist actor methods (is_alive/exit_code/stop).
 _LEASE_PROBE_TIMEOUT_SEC: float = 30.0
 
+_VISIBLE_DEVICE_ENV_KEYS: tuple[str, ...] = (
+    "ROCR_VISIBLE_DEVICES",
+    "HIP_VISIBLE_DEVICES",
+    "CUDA_VISIBLE_DEVICES",
+)
+
 
 class RayInfeasibleError(RuntimeError):
     """Raised when the cluster can never satisfy the requested resources."""
@@ -41,8 +47,7 @@ def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
     cluster_gpus = float(totals.get("GPU", 0))
     if cluster_gpus < num_gpus:
         raise RayInfeasibleError(
-            f"cluster has {cluster_gpus} GPU(s), {num_gpus} requested; "
-            "set INFERENCE_OPTIMIZER_RAY_EXEC=0 or add GPUs"
+            f"cluster has {cluster_gpus} GPU(s), {num_gpus} requested; set INFERENCE_OPTIMIZER_RAY_EXEC=0 or add GPUs"
         )
     if serving_slot and "serving_slot" not in totals:
         raise RayInfeasibleError(
@@ -87,6 +92,7 @@ class ManagedServerProcess:
         env: dict[str, str] | None = None,
         cwd: str | None = None,
         log_path: str | None = None,
+        stdin_path: str | None = None,
     ) -> int:
         """Launch the subprocess and return its pid.
 
@@ -96,6 +102,8 @@ class ManagedServerProcess:
                 the actor's ``os.environ``; pass a merged env if overlaying).
             cwd: Working directory.
             log_path: Optional path to redirect stdout/stderr.
+            stdin_path: Optional read-only file to use as stdin. Defaults to
+                ``subprocess.DEVNULL`` so actor stdin is never inherited.
 
         Returns:
             The launched process pid.
@@ -106,30 +114,50 @@ class ManagedServerProcess:
         if self._proc is not None and self._proc.poll() is None:
             raise RuntimeError("ManagedServerProcess already running")
         self._cmd = list(cmd)
+        stdin: Any = subprocess.DEVNULL
         stdout: Any = subprocess.DEVNULL
-        if log_path:
-            os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
-            stdout = open(log_path, "w", encoding="utf-8")  # noqa: SIM115 — closed on stop
-        if os.name == "posix":
-            # New session (distinct pgid) so the whole tree reaps atomically;
-            # PR_SET_PDEATHSIG so an unexpected owner death still kills the child.
-            self._proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
-                cmd,
-                env=env,
-                cwd=cwd,
-                stdout=stdout,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                preexec_fn=_pdeathsig_preexec,
-            )
-        else:  # pragma: no cover - non-posix fallback
-            self._proc = subprocess.Popen(  # noqa: S603
-                cmd,
-                env=env,
-                cwd=cwd,
-                stdout=stdout,
-                stderr=subprocess.STDOUT,
-            )
+        stdin_fh: Any = None
+        stdout_fh: Any = None
+        try:
+            if stdin_path:
+                stdin_fh = open(stdin_path, "rb")
+                stdin = stdin_fh
+            if log_path:
+                os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
+                stdout_fh = open(log_path, "w", encoding="utf-8")
+                stdout = stdout_fh
+            if os.name == "posix":
+                # New session (distinct pgid) so the whole tree reaps atomically;
+                # PR_SET_PDEATHSIG so an unexpected owner death still kills the child.
+                self._proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
+                    cmd,
+                    env=env,
+                    cwd=cwd,
+                    stdin=stdin,
+                    stdout=stdout,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    preexec_fn=_pdeathsig_preexec,
+                )
+            else:  # pragma: no cover - non-posix fallback
+                self._proc = subprocess.Popen(  # noqa: S603
+                    cmd,
+                    env=env,
+                    cwd=cwd,
+                    stdin=stdin,
+                    stdout=stdout,
+                    stderr=subprocess.STDOUT,
+                )
+        finally:
+            # Popen has transferred the descriptors to the child before it
+            # returns. Close the parent's copies immediately, including when
+            # spawning fails, so neither long-running actors nor retries leak fds.
+            for fh in (stdin_fh, stdout_fh):
+                if fh is not None:
+                    try:
+                        fh.close()
+                    except OSError:
+                        log.warning("failed to close parent subprocess file handle", exc_info=True)
         return self._proc.pid
 
     def pid(self) -> int | None:
@@ -199,23 +227,42 @@ def _serving_actor_body() -> Any:
             cwd=None,
             log_path=None,
             scrub_benchmark_env=False,
+            env_mode="merge",
+            stdin_path=None,
         ) -> int:
             """Launch the serving subprocess; Ray has set visible devices.
 
             GPU specialist actors retain control-plane credentials by default;
             benchmark serving ranks opt into scrubbing at their call site.
+            Specialists may request ``env_mode="replace"`` to start from their
+            filtered mapping without reintroducing actor credentials.
 
             Returns:
                 The launched pid.
             """
-            merged = dict(os.environ)
-            for key, value in (env or {}).items():
-                if key in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
-                    continue
-                merged[key] = value
+            if env_mode == "merge":
+                child_env = dict(os.environ)
+                for key, value in (env or {}).items():
+                    if key in _VISIBLE_DEVICE_ENV_KEYS:
+                        continue
+                    child_env[key] = value
+            elif env_mode == "replace":
+                child_env = dict(env or {})
+                for key in _VISIBLE_DEVICE_ENV_KEYS:
+                    if key in os.environ:
+                        child_env[key] = os.environ[key]
+            else:
+                raise ValueError(f"unsupported env_mode {env_mode!r}; expected 'merge' or 'replace'")
             if scrub_benchmark_env:
-                scrub_benchmark_process_env(merged)
-            return self._mgr.start(cmd, env=merged, cwd=cwd, log_path=log_path)
+                scrub_benchmark_process_env(child_env)
+            start_kwargs = {
+                "env": child_env,
+                "cwd": cwd,
+                "log_path": log_path,
+            }
+            if stdin_path is not None:
+                start_kwargs["stdin_path"] = stdin_path
+            return self._mgr.start(cmd, **start_kwargs)
 
         def run_blocking(
             self,
@@ -512,6 +559,8 @@ class GpuSpecialistLease:
         env: dict[str, str] | None = None,
         cwd: str | None = None,
         log_path: str | None = None,
+        env_mode: str = "merge",
+        stdin_path: str | None = None,
     ) -> None:
         """Create the actor and SUBMIT the subprocess launch without blocking.
 
@@ -520,6 +569,11 @@ class GpuSpecialistLease:
         start: Ray scheduling time is neither charged to the specialist's wall
         budget nor allowed to block the Coordinator's event loop.
 
+        ``env_mode="merge"`` preserves the existing actor-environment overlay
+        behavior. ``env_mode="replace"`` uses the supplied filtered environment
+        plus Ray's actor-assigned visible-device variables. ``stdin_path`` is
+        forwarded as file-backed stdin; when omitted, stdin is ``DEVNULL``.
+
         Raises :exc:`RayInfeasibleError` for a permanently-unschedulable request
         (caller turns this into a structured task failure).
         """
@@ -527,10 +581,15 @@ class GpuSpecialistLease:
 
         get_ray_backend().ensure(log_path=self._ensure_log_path)
         _assert_cluster_feasible(num_gpus=self._num_gpus, serving_slot=self._serving_slot)
-        self._actor = make_gpu_specialist_actor(
-            self._num_gpus, serving_slot=self._serving_slot
+        self._actor = make_gpu_specialist_actor(self._num_gpus, serving_slot=self._serving_slot)
+        self._start_ref = self._actor.start.remote(
+            cmd,
+            env=env,
+            cwd=cwd,
+            log_path=log_path,
+            env_mode=env_mode,
+            stdin_path=stdin_path,
         )
-        self._start_ref = self._actor.start.remote(cmd, env=env, cwd=cwd, log_path=log_path)
         self._pending_started_monotonic = time.monotonic()
 
     def poll_started(self) -> int | None:
@@ -584,9 +643,7 @@ class GpuSpecialistLease:
         import ray  # noqa: PLC0415
 
         try:
-            return bool(
-                ray.get(self._actor.is_alive.remote(), timeout=_LEASE_PROBE_TIMEOUT_SEC)
-            )
+            return bool(ray.get(self._actor.is_alive.remote(), timeout=_LEASE_PROBE_TIMEOUT_SEC))
         except ray.exceptions.GetTimeoutError:
             return True  # still-alive assumption on timeout (avoid premature kill)
         except Exception:  # noqa: BLE001 — dead actor reads as not-alive

@@ -223,6 +223,29 @@ _DISABLE_CUDA_GRAPH_FLAGS = {
 }
 
 
+def _config_framework(config_path: Path | str) -> str:
+    """Framework name from a materialized benchmark YAML (``""`` when unreadable)."""
+    try:
+        with Path(config_path).open(encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        return ""
+    return str((cfg.get("benchmark") or {}).get("framework") or "").strip().lower()
+
+
+def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:
+    """``server.log`` path for the subprocess watchdogs, or None when server-less.
+
+    A scriptable framework never writes a ``server.log``, so passing one would
+    arm the dead/stall watchdogs against a file that can never exist.
+    """
+    from hyperloom.inference_optimizer import framework_registry
+
+    if framework_registry.is_scriptable(framework):
+        return None
+    return str(output_dir / "server.log")
+
+
 def _disable_cuda_graph_flag(framework: str) -> str:
     """Return the framework-correct flag that disables cuda-graph capture.
 
@@ -2005,6 +2028,7 @@ class BaselineExecutor:
                 reference_envs=ref_envs,
                 establish_quality_ref=is_genuine_baseline,
                 drop_moe_runner_backend=force_drop_moe_runner_backend,
+                flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
             )
         except FrameworkScriptMismatchError as exc:
             # Cross-framework script override: return a structured failure.
@@ -2611,6 +2635,15 @@ class BaselineExecutor:
         env["SERVER_LOG"] = str(output_dir / "server.log")
         env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
 
+        # The materialized YAML is authoritative for the framework: params and
+        # $FRAMEWORK are both optional on a baseline task.
+        framework = (
+            _config_framework(materialized_config_path)
+            or str(params.get("framework") or "").strip().lower()
+            or os.environ.get("FRAMEWORK", "").strip().lower()
+        )
+        watchdog_server_log = _watchdog_server_log_path(output_dir, framework)
+
         # Multi-node (--nodes >= 2): inject MAGPIE_RUN_PHASE=client +
         # BENCHMARK_BASE_URL so Magpie skips its server launch and targets
         # the RayJob head. No-op ({}) in single-node.
@@ -2712,7 +2745,7 @@ class BaselineExecutor:
                     env=_mn_warm_env,
                     cwd=str(_mn_warm_dir),
                     timeout=timeout_sec,
-                    server_log_path=str(_mn_warm_dir / "server.log"),
+                    server_log_path=_watchdog_server_log_path(_mn_warm_dir, framework),
                 )
                 log.info("baseline_executor: MN warmup pass done (discarded)")
             except Exception as exc:  # noqa: BLE001 - warmup is best-effort
@@ -2759,7 +2792,7 @@ class BaselineExecutor:
                     env=env,
                     cwd=str(output_dir),
                     timeout=timeout_sec,
-                    server_log_path=str(output_dir / "server.log"),
+                    server_log_path=watchdog_server_log,
                 )
                 subprocess_runtime_sec = max(0.0, time.time() - subprocess_started_unix)
             else:
@@ -2769,7 +2802,7 @@ class BaselineExecutor:
                     env=env,
                     cwd=str(output_dir),
                     timeout=timeout_sec,
-                    server_log_path=str(output_dir / "server.log"),
+                    server_log_path=watchdog_server_log,
                 )
                 subprocess_runtime_sec = max(
                     0.0,

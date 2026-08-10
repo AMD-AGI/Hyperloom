@@ -133,6 +133,65 @@ def _normalise_framework_name(value: str | None) -> str:
     return str(value or "").strip().lower().replace("_", "-")
 
 
+def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
+    """Publish ``--framework-path`` / ``--benchmark-scripts-dir`` as env.
+
+    Both flags are friendlier spellings of env vars the executors already read,
+    so this only forwards them; an explicitly exported env still wins, matching
+    how every other path override in the loop behaves.
+
+    ``custom`` has no shipped checkout or entrypoint to fall back on, so a
+    missing or non-existent directory is fatal here rather than at the first
+    benchmark, half an hour in. The benchmark backend is checked for the same
+    reason: it defaults to Magpie, which cannot run an operator's script at all,
+    and nothing downstream rejects the combination — the run would simply take
+    the wrong executor and fail somewhere less obvious.
+    """
+    fatal: list[str] = []
+    if framework == "custom":
+        from hyperloom.orchestrator.actions.executors.benchmark_backend import (
+            BENCHMARK_BACKEND_ENV,
+            DEFAULT_BENCHMARK_BACKEND,
+        )
+
+        # Matches install.sh's normalisation so the two gates agree on a value
+        # like " Bypass "; anything else, including unset, is refused.
+        backend = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip().lower()
+        if backend != "bypass":
+            shown = f"{backend!r}" if backend else f"unset (defaults to {DEFAULT_BENCHMARK_BACKEND!r})"
+            fatal.append(
+                f"--framework custom requires {BENCHMARK_BACKEND_ENV}=bypass; it is {shown}. "
+                "The default backend cannot run an operator-supplied script."
+            )
+    for flag, value, env_name in (
+        ("--framework-path", getattr(args, "framework_path", None), "FRAMEWORK_REPO_PATH"),
+        (
+            "--benchmark-scripts-dir",
+            getattr(args, "benchmark_scripts_dir", None),
+            "HYPERLOOM_BYPASS_SCRIPTS_DIR",
+        ),
+    ):
+        raw = str(value or "").strip()
+        # An exported-but-empty var is not a choice, it is an unset one; treating
+        # it as set would let a stray `export FRAMEWORK_REPO_PATH=` silently
+        # swallow the flag.
+        already = os.environ.get(env_name, "").strip()
+        if raw:
+            path = Path(raw).expanduser()
+            if not path.is_dir():
+                fatal.append(f"{flag}={raw!r} is not a directory")
+                continue
+            if not already:
+                os.environ[env_name] = str(path.resolve())
+        elif framework == "custom" and not already:
+            fatal.append(f"{flag} is required for --framework custom (or export {env_name})")
+
+    if fatal:
+        for line in fatal:
+            print(f"ERROR: {line}", file=sys.stderr)
+        sys.exit(2)
+
+
 def _enforce_expected_framework(
     framework: str,
     *,
@@ -592,6 +651,22 @@ def _catalog_compare_model_id(model_id: str) -> str:
     return lowered
 
 
+def _same_gateway(anthropic_url: str, openai_url: str) -> bool:
+    """True when both protocol sides are served by one gateway.
+
+    Either the same URL, or the same host with a different path per protocol
+    (``/anthropic`` vs ``/v1``) — the shape the installers call a dual-protocol
+    gateway.
+    """
+    if not anthropic_url or not openai_url:
+        return False
+    if anthropic_url == openai_url:
+        return True
+    from urllib.parse import urlsplit
+
+    return urlsplit(anthropic_url).netloc == urlsplit(openai_url).netloc
+
+
 def _codex_model_should_follow_claude() -> bool:
     """True when the operator supplied only Anthropic config."""
     return _official_anthropic_only()
@@ -615,7 +690,7 @@ def _catalog_probe_has_no_credential() -> bool:
         return False
     return not any(
         os.environ.get(name, "").strip()
-        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DEEPSEEK_API_KEY", "OPENAI_API_KEY")
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY")
     )
 
 
@@ -724,7 +799,6 @@ def _validate_and_resolve_claude_model(
         api_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-            or os.environ.get("DEEPSEEK_API_KEY", "")
             or os.environ.get("OPENAI_API_KEY", "")
         )
         catalog_ids = _probe_llm_catalog(base_url=override_url, api_key=api_key)
@@ -735,16 +809,14 @@ def _validate_and_resolve_claude_model(
             anthropic_url = resolved_urls[0]
         if not openai_url and resolved_urls is not None:
             openai_url = resolved_urls[1]
-        anthropic_key = (
-            os.environ.get("ANTHROPIC_API_KEY", "")
-            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-            or os.environ.get("DEEPSEEK_API_KEY", "")
-        )
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
         # OpenAI-side key only.
         openai_key = os.environ.get("OPENAI_API_KEY", "")
-        # The Claude catalog must come from the Anthropic side. Fall back to the
-        # OpenAI side only for a single-gateway deploy where both sides resolve
-        # to the same endpoint.
+        # The Claude catalog must come from the Anthropic side. The OpenAI side
+        # is offered as a second candidate only when both sides are the same
+        # gateway -- identical URLs, or one host serving each protocol on its
+        # own path -- and the loop below only reaches it when the first side
+        # turns out to have no /models route at all.
         candidates: list[tuple[str, str]] = []
         if _claude_model_should_follow_codex():
             if openai_url:
@@ -757,8 +829,11 @@ def _validate_and_resolve_claude_model(
             # slot and leave a configured OpenAI gateway unverified.
             if anthropic_url and anthropic_key:
                 candidates.append((anthropic_url, anthropic_key))
-            if openai_url and (openai_url == anthropic_url or not candidates):
-                # Single gateway serving both sides, or the only side left.
+            if openai_url and (
+                (anthropic_url and _same_gateway(anthropic_url, openai_url)) or not candidates
+            ):
+                # One gateway serving both protocols, or the only side left once
+                # a keyless Anthropic side was skipped above.
                 candidates.append((openai_url, openai_key))
         seen_urls: set[str] = set()
         for cand_url, cand_key in candidates:
@@ -766,7 +841,13 @@ def _validate_and_resolve_claude_model(
                 continue
             seen_urls.add(cand_url)
             catalog_ids = _probe_llm_catalog(base_url=cand_url, api_key=cand_key)
-            if catalog_ids is not None:
+            # A missing /models route is the only answer worth re-asking on the
+            # other side, and only because a dual-protocol gateway lists its
+            # models there. An unreachable side (None) means the gateway is
+            # flaky rather than route-less: probing the OpenAI side would then
+            # answer a Claude question with an OpenAI catalog and fail every
+            # allowlisted id, so stop and let the caller degrade to its WARN.
+            if catalog_ids is not _CATALOG_NO_MODELS_ENDPOINT:
                 break
 
     if catalog_ids is _CATALOG_NO_MODELS_ENDPOINT:
@@ -1739,6 +1820,23 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             override_note = " (--force-resume override)" if force_resume and prior_stop in gated_terminal else ""
             print(f"  → cleared stop_reason and reset crash_count (was {prior_crash}) for fresh resume{override_note}")
             print(f"  → reset start_ts to {state.start_ts} (resume budget)")
+        else:
+            # A clean stop (no stop_reason, crash_count < 3) keeps start_ts, so
+            # --max-hours is measured from the ORIGINAL session start and the
+            # earlier legs' wall-clock is already spent. Say so: an operator who
+            # stops a run by hand reads --max-hours as "from now".
+            elapsed_h = state.elapsed_minutes() / 60.0
+            budget_h = float(getattr(args, "max_hours", 0) or 0)
+            print(
+                f"  → start_ts kept at {state.start_ts} (clean stop, no stop_reason): "
+                f"--max-hours counts from the original session start"
+            )
+            print(f"  → budget: {elapsed_h:.2f}h already elapsed of {budget_h:.2f}h → {budget_h - elapsed_h:.2f}h left")
+            if budget_h and elapsed_h >= budget_h:
+                print(
+                    "  → WARNING: this budget is already exhausted; raise --max-hours "
+                    "or start a fresh session, or the run stops almost immediately"
+                )
         # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.
         recipe_kb_client = _bootstrap_recipe_kb(
             args,
@@ -1789,6 +1887,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _enforce_expected_framework(framework)
         os.environ["FRAMEWORK"] = framework
         print(f"Framework       : {framework}")
+        _apply_operator_supplied_paths(args, framework)
 
         # B3: --framework atom auto-tightens incompatible phases (see _apply_atom_auto_tighten).
         if framework == "atom":

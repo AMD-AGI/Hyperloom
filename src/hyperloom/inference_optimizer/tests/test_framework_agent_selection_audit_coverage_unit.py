@@ -73,7 +73,7 @@ def test_config_levers_preserve_envs_and_args() -> None:
         }
     )
     assert levers == {
-        "extra_server_args": extra_args,
+        "extra_server_args": '--enable-x --compilation-config {"mode":"max-autotune"} --bare',
         "extra_envs": {"VLLM_FOO": "1"},
     }
 
@@ -81,8 +81,43 @@ def test_config_levers_preserve_envs_and_args() -> None:
 def test_config_levers_args_as_list() -> None:
     f = coord_mod._framework_config_levers_from_done
     levers = f({"proposal_set": [{"extra_args": ["--flag", "value with space"]}]})
+    assert levers == {}
+
+
+def test_invalid_config_args_preserve_independent_env_overrides() -> None:
+    f = coord_mod._framework_config_levers_from_done
+    levers = f(
+        {
+            "proposal_set": [
+                {
+                    "extra_args": ["--flag", "value with space"],
+                    "extra_envs": {"SAFE_ENV": "1"},
+                }
+            ]
+        }
+    )
     assert levers == {
-        "extra_server_args": "--flag 'value with space'",
+        "extra_server_args": "",
+        "extra_envs": {"SAFE_ENV": "1"},
+    }
+
+
+def test_config_levers_json_args_as_list_stay_unquoted() -> None:
+    f = coord_mod._framework_config_levers_from_done
+    levers = f(
+        {
+            "proposal_set": [
+                {
+                    "extra_args": [
+                        "--json-model-override-args",
+                        '{"rope_scaling":null}',
+                    ],
+                }
+            ]
+        }
+    )
+    assert levers == {
+        "extra_server_args": '--json-model-override-args {"rope_scaling":null}',
         "extra_envs": {},
     }
 
@@ -238,19 +273,17 @@ async def test_record_audit_skip_not_applicable(coord: Coordinator, monkeypatch)
 # _collect_framework_agent_candidate_priors
 # --------------------------------------------------------------------------
 def test_collect_framework_agent_candidate_priors(coord: Coordinator) -> None:
-    coord.shared_state.framework_agent_critic_decisions = [
-        "not-a-dict",  # skipped via the continue branch
-        {"candidate_id": "c1", "verdict": "approve", "rationale": "looks good"},
-    ]
     coord.shared_state.framework_agent_phase_progress = [
+        "not-a-dict",  # skipped via the isinstance filter
         {"candidate_id": "c1", "status": "kept", "gain_pct": 3.2},
         {"candidate_id": "c2", "status": "in_flight"},  # non-terminal -> excluded
-        {"candidate_id": "c3", "status": "critic_denied"},
+        {"candidate_id": "c3", "status": "critic_denied", "rationale": "off the bottleneck"},
     ]
     priors = coord._collect_framework_agent_candidate_priors()
-    assert priors["recent_decisions"] == [{"candidate_id": "c1", "verdict": "approve", "rationale": "looks good"}]
     statuses = {o["status"] for o in priors["recent_outcomes"]}
     assert statuses == {"kept", "critic_denied"}
+    denied = next(o for o in priors["recent_outcomes"] if o["status"] == "critic_denied")
+    assert denied["rationale"] == "off the bottleneck"
 
 
 # --------------------------------------------------------------------------
@@ -328,7 +361,16 @@ def test_ranker_client_none_for_anthropic_only_deploy(coord: Coordinator, monkey
 
 
 def test_ranker_client_builds_from_env(coord: Coordinator, monkeypatch) -> None:
-    pytest.importorskip("openai")
+    from hyperloom.common import llm_config
+
+    # ``raising=False``: get_async_openai_client is llm_config's client-construction
+    # contract, so stubbing it keeps this test off the real ``openai`` SDK.
+    monkeypatch.setattr(
+        llm_config,
+        "get_async_openai_client",
+        lambda **_kw: types.SimpleNamespace(chat=object()),
+        raising=False,
+    )
     coord._fa_ranker_client = None  # type: ignore[attr-defined]
     coord._proposal_scorer = None  # type: ignore[attr-defined]
     monkeypatch.setenv("OPENAI_API_KEY", "safe-test-key")

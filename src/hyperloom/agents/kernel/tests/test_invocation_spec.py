@@ -749,3 +749,19 @@ def test_native_operation_key_normalizes_graph_wrapped_mangled_symbols():
     assert native_operation_key(
         "hipGraphLaunch->_ZN5aiter24add_rmsnorm_quant_kernelIDF16bEEv.kd"
     ) == "aiter::add_rmsnorm_quant_kernel"
+
+
+def _rewrite_candidate(rows: list[dict], **extra) -> dict:
+    candidate = {
+        "name": "fused_gemm",
+        "operation": "vllm::fused_gemm",
+        "source_symbol": "matmul",
+        "task_group": {
+            "task_group_id": "tg001",
+            "primary_kernel_id": "k001",
+            "kernel_ids": [row["kernel_id"] for row in rows],
+            "rows": rows,
+        },
+    }
+    candidate.update(extra)
+    return candidate

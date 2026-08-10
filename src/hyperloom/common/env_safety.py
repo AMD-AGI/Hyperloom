@@ -98,8 +98,11 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
+        # Retired provider variables, still readable so a pre-migration .env can
+        # be normalized by hyperloom.common.llm_config.deepseek_compat_env.
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_MODEL",
         "FORGE_PATH",
         "FRAMEWORK",
         "GEAK_CLAUDE_MODEL",
@@ -163,6 +166,7 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "GEAK_RUN_MODE",
         "GEAK_SCORE_TARGET",
         "GEAK_SKIP_PROFILE",
+        "HYPERLOOM_FORGE_REWRITE_BY_FLYDSL",
         "HYPERLOOM_KERNEL_AGENT_ROOT",
         "HYPERLOOM_ROOT",
         "HYPERLOOM_RUNTIME_DIR",

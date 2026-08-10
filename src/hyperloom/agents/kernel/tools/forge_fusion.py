@@ -4,8 +4,9 @@
 
 """Run forge-fusion as a Hyperloom kernel-agent tool.
 
-The orchestrator writes an input JSON and calls this script; the autonomous
-fusion loop itself lives in the standalone ``forge_fusion`` package.
+The orchestrator writes an input JSON with one validated agent backend, model,
+and sandbox policy and calls this script; the autonomous fusion loop itself
+lives in the standalone ``forge_fusion`` package.
 
 forge-fusion emits a ``fusion_manifest.json``; this wrapper normalizes that into
 the Hyperloom kernel-result contract (a ``FORGE_FUSION_RESULT_BEGIN/END`` stdout
@@ -45,23 +46,53 @@ RESULT_END = "FORGE_FUSION_RESULT_END"
 # _normalize_manifest.
 LLM_UNAVAILABLE_VERDICT = "llm_unavailable"
 DEFAULT_TIMEOUT_SEC = 7200
+_AGENT_BACKENDS = frozenset({"claude", "codex"})
 
 
-def _inject_author_gateway_env() -> None:
-    """Seed the ``claude`` author subprocess's auth from the Anthropic-side env.
+def _validated_agent_backend(value: Any) -> str:
+    """Return a canonical forge-fusion agent backend or raise."""
+    backend = str(value or "").strip().lower()
+    if backend not in _AGENT_BACKENDS:
+        raise ValueError(f"agent_backend={value!r} is invalid; choose one of: {', '.join(sorted(_AGENT_BACKENDS))}")
+    return backend
 
-    forge-fusion's ``author`` stage drives the ``claude`` CLI, which
-    authenticates via ``ANTHROPIC_*``. Only the Anthropic side is used. With no
-    Anthropic-side credentials the stage is left unconfigured and fails with the
-    CLI's own auth error. A ``CLAUDE_CODE_OAUTH_TOKEN`` is inherited as-is and
-    deliberately not mirrored here, since either key var would disable it.
+
+def _validated_agent_sandbox_mode(value: Any) -> str:
+    """Delegate sandbox validation, including bypass opt-in, to Hyperloom."""
+    stated = str(value or "").strip()
+    if not stated:
+        raise ValueError("agent_sandbox_mode is required")
+
+    from hyperloom.common.codex_session import (  # noqa: PLC0415 - standalone import-light
+        resolve_codex_sandbox_mode,
+    )
+
+    return resolve_codex_sandbox_mode(sandbox_mode=stated)
+
+
+def _inject_author_gateway_env(agent_backend: str) -> None:
+    """Prepare the selected author runtime without crossing provider shapes.
+
+    Codex needs none of the Claude-only auth aliases, root sandbox escape, or
+    stability variables, so its environment is left untouched. Claude keeps the
+    established behavior: credential alias resolution is delegated to
+    :mod:`hyperloom.common.llm_config`, then Claude-specific process defaults are
+    applied. Selection is driven only by the explicit backend contract, never by
+    a model-name prefix. A ``CLAUDE_CODE_OAUTH_TOKEN`` is inherited as-is and
+    deliberately not mirrored into a key var, since either one would disable it.
     """
-    token = str(
-        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN") or ""
-    ).strip()
-    if token:
-        os.environ.setdefault("ANTHROPIC_API_KEY", token)
-        os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", token)
+    if _validated_agent_backend(agent_backend) == "codex":
+        return
+
+    from hyperloom.common import llm_config  # noqa: PLC0415 - standalone import-light
+
+    options = llm_config.claude_sdk_env_options(env=os.environ)
+    resolved_env = options.get("env")
+    if isinstance(resolved_env, dict):
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+            value = str(resolved_env.get(name) or "").strip()
+            if value:
+                os.environ.setdefault(name, value)
     # claude's bypassPermissions refuses to start under root unless IS_SANDBOX=1.
     # Only set it when actually running as root so we do not defeat the guard
     # for non-root sessions that never needed the escape hatch.
@@ -110,7 +141,9 @@ def _git_toplevel(path: str) -> str:
                 rel = str(Path(path).resolve().relative_to(Path(toplevel).resolve()))
                 tracked = subprocess.run(
                     ["git", "-C", toplevel, "ls-files", "--error-unmatch", "--", rel],
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 )
                 if tracked.returncode == 0:
                     return toplevel
@@ -141,13 +174,17 @@ def _add_opt(cmd: list[str], args: dict[str, Any], key: str, flag: str, *, requi
 
 
 def _build_cmd(args: dict[str, Any]) -> list[str]:
+    agent_backend = _validated_agent_backend(args.get("agent_backend"))
+    agent_sandbox_mode = _validated_agent_sandbox_mode(args.get("agent_sandbox_mode"))
     cmd = [sys.executable, "-m", "forge_fusion.cli", "run"]
     _add_opt(cmd, args, "trace_path", "--trace", required=True)
     _add_opt(cmd, args, "model_path", "--model-path", required=True)
     _add_opt(cmd, args, "framework", "--framework", required=True)
     _add_opt(cmd, args, "output_dir", "--output-dir", required=True)
     _add_opt(cmd, args, "discover_mode", "--discover")
-    _add_opt(cmd, args, "llm_model", "--llm-model")
+    cmd.extend(["--agent-backend", agent_backend])
+    _add_opt(cmd, args, "llm_model", "--llm-model", required=True)
+    cmd.extend(["--agent-sandbox-mode", agent_sandbox_mode])
     _add_opt(cmd, args, "max_turns", "--max-turns")
     _add_opt(cmd, args, "gpu", "--gpu")
     _add_opt(cmd, args, "decode_batch", "--decode-batch")
@@ -291,11 +328,13 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         attempts = detail.get("attempts")
         tried = f" after {attempts} attempt(s)" if attempts else ""
         message = str(detail.get("message") or "no detail reported")
-        result.update({
-            "verdict": LLM_UNAVAILABLE_VERDICT,
-            "error_class": LLM_UNAVAILABLE_VERDICT,
-            "error": f"forge-fusion never reached the LLM ({kind}{tried}): {message}"[:1500],
-        })
+        result.update(
+            {
+                "verdict": LLM_UNAVAILABLE_VERDICT,
+                "error_class": LLM_UNAVAILABLE_VERDICT,
+                "error": f"forge-fusion never reached the LLM ({kind}{tried}): {message}"[:1500],
+            }
+        )
         return result
 
     best = loop.get("best") or {}
@@ -321,8 +360,7 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
             "source_file": src_file,
             # Prefer the root forge-fusion exported the patch against (authoritative,
             # may be a site-packages dir); fall back to deriving it from src_file.
-            "kernel_repo": str(artifacts.get("repo_root") or "")
-            or (_git_toplevel(src_file) if src_file else ""),
+            "kernel_repo": str(artifacts.get("repo_root") or "") or (_git_toplevel(src_file) if src_file else ""),
             "best_pattern": loop.get("best_pattern"),
             "verdict": m.get("verdict"),
             # A KEPT fusion passed kernel parity + serving smoke; the orchestrator
@@ -410,7 +448,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    _inject_author_gateway_env()
+    _inject_author_gateway_env(str(payload.get("agent_backend") or ""))
     output_dir = str(payload.get("output_dir") or "")
     timeout_sec = _timeout_sec(payload)
     try:

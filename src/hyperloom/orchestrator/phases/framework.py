@@ -34,7 +34,13 @@ from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
 
-# Watchdog grace period (in coordinator ticks) before an in-flight enablement
+# Specialist attempts a local-exploration candidate gets before the phase moves
+# on. A candidate that keeps failing to author is not worth the wall clock, but
+# one interrupted run — a process restart reclaims an in-flight specialist as
+# failed — must not retire it.
+_LOCAL_EXPLORE_MAX_ATTEMPTS: int = 3
+
+
 def _derive_gpu_arch(gpu_type: str) -> str:
     """Map a gpu_type label to an explicit GFX arch (never silent fallback)."""
     _MAP = {
@@ -160,6 +166,12 @@ def _maybe_build_localization_candidate(
     except Exception:  # noqa: BLE001 — candidate construction is best-effort
         log.debug("enablement: localization-candidate construction failed", exc_info=True)
         return None
+
+
+#: Progress-row status for a candidate the Critic rejected. The gate writes it
+#: and the working-memory and priors readers select on it, so the ledger is the
+#: only record of a denial and the three sites agree by construction.
+FRAMEWORK_CRITIC_DENIED_STATUS: str = "critic_denied"
 
 
 class FrameworkPhase(PhaseHandler):
@@ -862,8 +874,13 @@ class FrameworkPhase(PhaseHandler):
             notes_lines.extend(fb_lines)
         notes = "\n".join(notes_lines).strip()
         params: dict[str, Any] = {
-            # Cross-framework ports route to a dedicated rewrite domain.
-            "domain": ("cross_framework_rewrite_specialist" if is_cross_framework else "serving_specialist"),
+            # Cross-framework ports route to a dedicated rewrite domain; the
+            # same-framework case follows the session's framework kind.
+            "domain": (
+                "cross_framework_rewrite_specialist"
+                if is_cross_framework
+                else self._authoring_specialist_domain()
+            ),
             "gap_canonical_id": gap_cid,
             "gap_symptom": (title or f"Author a framework source patch inspired by {pr_url or cand_id}"),
             "gap_layer": "framework",
@@ -2261,6 +2278,79 @@ class FrameworkPhase(PhaseHandler):
         # Deterministic fallback: discovery order (never the pseudo-candidate).
         return unprocessed[0]
 
+    def _authoring_specialist_domain(self) -> str:
+        """Pick the authoring domain that matches the session's framework kind.
+
+        Returns:
+            ``"framework_rewrite_specialist"`` for a scriptable (server-less)
+            framework, else ``"serving_specialist"``.
+        """
+        from ..specialists.domains import authoring_domain_for_framework
+
+        return authoring_domain_for_framework(getattr(self.shared_state, "framework", ""))
+
+    def _render_rewrite_evidence_for_prompt(self) -> str:
+        """Render the measured host-side rewrite evidence as prompt lines.
+
+        Returns:
+            The evidence block, or ``""`` when no profile has produced one yet.
+            Empty is normal on the first FRAMEWORK pass (the arm can run before
+            any profile has landed), and the specialist's own reading of the
+            source is the fallback.
+        """
+        path = str(getattr(self.shared_state, "last_framework_rewrite_evidence", "") or "").strip()
+        if not path:
+            return ""
+        try:
+            import json as _json
+
+            from ..actions.executors._framework_rewrite_evidence import summarize_for_prompt
+
+            document = _json.loads(Path(path).read_text(encoding="utf-8"))
+            return summarize_for_prompt(document)
+        except Exception:  # noqa: BLE001 — advisory only
+            log.warning("FRAMEWORK: rewrite-evidence render failed path=%s", path, exc_info=True)
+            return ""
+
+    def _rewrite_evidence_absence_note(self) -> str:
+        """Explain an empty evidence block instead of implying there is nothing to find.
+
+        "No candidates" and "the probe never produced any" read identically to a
+        specialist, and only the first one means the source is already clean.
+        Saying which it is decides whether the specialist should trust the
+        silence or go read the loop itself.
+
+        Returns:
+            str: The prompt note describing why no evidence is present.
+        """
+        read_the_source = (
+            "Locate the candidates by reading the source: find the denoising / "
+            "rollout loop and ask, for each call inside it, whether the result "
+            "can change across iterations."
+        )
+        status = str(getattr(self.shared_state, "last_framework_rewrite_evidence_status", "") or "").strip()
+        if status == "no_candidates":
+            return (
+                "The host-side probe ran and found no rewrite candidates. Treat "
+                "that as a measured negative for the patterns it covers "
+                "(host round-trips, host syncs, device residency, collective "
+                "fusion, memoization, loop hoisting) and look elsewhere. " + read_the_source
+            )
+        if status and status != "ok":
+            return (
+                "No host-side rewrite evidence is available because the probe did "
+                f"not deliver any: {status}. This is a broken instrument, NOT a "
+                "measured negative -- do not conclude the loop is clean. " + read_the_source
+            )
+        if str(getattr(self.shared_state, "last_framework_rewrite_evidence", "") or "").strip():
+            # Reached only when a document is on record but rendering it produced
+            # nothing, so the evidence exists and this prompt cannot show it.
+            return (
+                "Host-side rewrite evidence was collected but could not be "
+                "rendered here, so its absence below means nothing. " + read_the_source
+            )
+        return "No host-side rewrite evidence has been collected yet for this session. " + read_the_source
+
     def _framework_local_explore_arm_enabled(self) -> bool:
         """True when the candidate-free local-exploration arm may run.
 
@@ -2295,6 +2385,7 @@ class FrameworkPhase(PhaseHandler):
                 model_class=str(getattr(state, "model_class", "") or ""),
                 precision=str(getattr(state, "precision", "") or ""),
                 profile_kernel_breakdown_path=getattr(state, "last_profile_kernel_breakdown", None),
+                rewrite_evidence_path=getattr(state, "last_framework_rewrite_evidence", None),
             )
         except Exception:  # noqa: BLE001 — advisory only
             log.debug("FRAMEWORK: local-explore gap compose failed", exc_info=True)
@@ -2394,13 +2485,25 @@ class FrameworkPhase(PhaseHandler):
         gap = str(candidate.get("gap_description") or "").strip()
         gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework.local_explore.{cand_id}"
         framework = str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower()
+        # Route by framework kind. An iterative model pipeline and a
+        # request-serving framework share almost no optimization surface, so the
+        # scriptable case goes to the rewrite domain; everything else resolves to
+        # the serving domain this dispatch has always used. The static guidance
+        # for each lives in its domain description, and the per-kind brief in
+        # ``_TASK_KIND_BRIEFS``; only measured, per-dispatch evidence is passed
+        # as notes below.
+        domain = self._authoring_specialist_domain()
+        rewrite_arm = domain == "framework_rewrite_specialist"
+        notes = ""
+        if rewrite_arm:
+            notes = self._render_rewrite_evidence_for_prompt() or self._rewrite_evidence_absence_note()
         try:
             state.upsert_gap({
                 "canonical_id": gap_cid,
                 "symptom": gap or "Author a throughput patch from live source + profiling evidence",
                 "layer": "framework",
                 "severity": "medium",
-                "domain_hint": "serving_specialist",
+                "domain_hint": domain,
                 "source": "coordinator_internal",
             })
         except Exception:  # noqa: BLE001
@@ -2414,13 +2517,14 @@ class FrameworkPhase(PhaseHandler):
         except Exception:  # noqa: BLE001
             pass
         params: dict[str, Any] = {
-            "domain": "serving_specialist",
+            "domain": domain,
             "gap_canonical_id": gap_cid,
             "gap_symptom": (gap or "Author a framework source patch from live source + profile evidence"),
             "gap_layer": "framework",
             "framework": framework,
             "task_kind": "framework_local_explore",
             "prior_attempts": prior_attempts,
+            "notes": notes,
             # Same provenance markers as the PR-authoring track so the
             # autosubmit -> integrate_patch -> authored-outcome bridge applies.
             "framework_agent_authoring": True,
@@ -2436,14 +2540,12 @@ class FrameworkPhase(PhaseHandler):
             await self._warm_specialist_params(params)
         except Exception:  # noqa: BLE001 — best-effort warmup
             log.debug("FRAMEWORK local-explore: warm specialist params failed", exc_info=True)
-        idem = f"framework_agent_local_explore:{cand_id}"
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
-        spec_task, _spec_existing = await self.tasks.create_or_return_existing(
-            kind="specialist",
-            params=params,
-            idempotency_key=idem,
-            requires_lanes=lanes,
-            allowed_tools=[
+        create_kwargs: dict[str, Any] = {
+            "kind": "specialist",
+            "params": params,
+            "requires_lanes": lanes,
+            "allowed_tools": [
                 "Read",
                 "Grep",
                 "Glob",
@@ -2453,9 +2555,40 @@ class FrameworkPhase(PhaseHandler):
                 "WebSearch",
                 "WebFetch",
             ],
-            side_effects=["writes_results", "writes_patches"],
-            lease_ttl_sec=ttl,
-        )
+            "side_effects": ["writes_results", "writes_patches"],
+            "lease_ttl_sec": ttl,
+        }
+        # The registry de-duplicates by key and hands back whatever row it finds,
+        # so a candidate whose specialist failed keeps resolving to that failure:
+        # the phase re-selects the candidate every tick, logs a dispatch, and
+        # nothing runs. A specialist that was mid-flight when the process died is
+        # reclaimed as failed, so one interrupted run retires a candidate for
+        # good. Retries take a fresh key, which is what this registry documents.
+        base_idem = f"framework_agent_local_explore:{cand_id}{self._cycle_idem_suffix()}"
+        spec_task = None
+        _spec_existing = False
+        for attempt in range(_LOCAL_EXPLORE_MAX_ATTEMPTS):
+            idem = base_idem if attempt == 0 else f"{base_idem}:r{attempt}"
+            spec_task, _spec_existing = await self.tasks.create_or_return_existing(
+                idempotency_key=idem,
+                **create_kwargs,
+            )
+            if not (_spec_existing and str(getattr(spec_task, "state", "") or "") == "failed"):
+                break
+            log.info(
+                "FRAMEWORK local-explore: %s already failed under %s; retrying candidate %s",
+                getattr(spec_task, "task_id", "?"),
+                idem,
+                cand_id,
+            )
+        else:
+            log.warning(
+                "FRAMEWORK local-explore: candidate %s exhausted %d specialist "
+                "attempt(s); leaving it to the phase to select another",
+                cand_id,
+                _LOCAL_EXPLORE_MAX_ATTEMPTS,
+            )
+            return ""
         from ..state.task_registry import TERMINAL_STATES as _TERMINAL_STATES
 
         if _spec_existing and str(getattr(spec_task, "state", "") or "") in _TERMINAL_STATES:
@@ -2651,8 +2784,10 @@ class FrameworkPhase(PhaseHandler):
 
         Reuses the ProposalScorer's client when present (same gateway/auth),
         then the orchestration backend's own client (so the LLM ranker is on by
-        default whenever orchestration has LLM credentials); otherwise builds one
-        from ``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``. Returns ``None`` when the
+        default whenever orchestration has LLM credentials); otherwise asks
+        :func:`hyperloom.common.llm_config.get_async_openai_client` -- the only
+        sanctioned owner of provider client construction -- for one built from
+        ``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``. Returns ``None`` when the
         OpenAI side is unconfigured, which leaves the LLM ranker disabled.
         Cached on first successful build.
         """
@@ -2679,25 +2814,20 @@ class FrameworkPhase(PhaseHandler):
         if backend_client is not None and hasattr(backend_client, "chat"):
             self._coord._fa_ranker_client = backend_client
             return backend_client
-        try:
-            from openai import AsyncOpenAI  # type: ignore[import-not-found]
-        except ImportError:
-            return None
+        from hyperloom.common import llm_config as _llm_cfg
+
         # This client speaks the OpenAI protocol, so it authenticates from the
         # OpenAI side only. The orchestration backend's own ``api_key_env`` is not
         # consulted: the orchestration role is Claude, so it names the Anthropic
-        # key, which must never reach an OpenAI-protocol endpoint.
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
+        # key, which must never reach an OpenAI-protocol endpoint. The explicit
+        # gate keeps ``llm_config``'s ``LLM_GATEWAY_KEY`` fallback out of play.
+        if not os.environ.get("OPENAI_API_KEY"):
             log.debug("FRAMEWORK: LLM ranker disabled (OPENAI_API_KEY not set; ranker needs the OpenAI side)")
             return None
-        base_url = os.environ.get("OPENAI_BASE_URL")
-        kwargs: dict[str, Any] = {"api_key": api_key}
-        if base_url:
-            kwargs["base_url"] = base_url.strip()
         try:
-            client = AsyncOpenAI(**kwargs)
-        except Exception:  # noqa: BLE001
+            client = _llm_cfg.get_async_openai_client()
+        except Exception:  # noqa: BLE001 — the ranker is optional, so it degrades to off
+            log.debug("FRAMEWORK: LLM ranker disabled (async OpenAI client unavailable)", exc_info=True)
             return None
         self._coord._fa_ranker_client = client
         return client
@@ -2752,8 +2882,9 @@ class FrameworkPhase(PhaseHandler):
         learned", so discovery and the candidate ranker can be biased away from
         repeating failed candidates. No new data source — it aggregates
         ``framework_agent_phase_progress`` (terminal rows, reliably populated
-        after the P0 fix), ``framework_agent_critic_decisions`` (recent Critic
-        verdicts) and the batch dedup set.
+        after the P0 fix) and the batch dedup set. Critic denials are part of
+        that ledger: the gate stamps them as ``critic_denied`` rows carrying
+        the rationale.
 
         Returns:
             A dict with:
@@ -2782,14 +2913,15 @@ class FrameworkPhase(PhaseHandler):
                 }
             )
         # Learnings: distinct Critic denial rationales (negative priors), capped.
+        # Read from the progress ledger, the only place a denial is recorded:
+        # ``_record_framework_agent_critic_denied`` stamps a ``critic_denied``
+        # row carrying the Critic's reasoning.
         learnings: list[str] = []
         seen_learn: set[str] = set()
-        for dec in getattr(state, "framework_agent_critic_decisions", None) or []:
-            if not isinstance(dec, dict):
+        for row in rows:
+            if str(row.get("status") or "").strip().lower() != FRAMEWORK_CRITIC_DENIED_STATUS:
                 continue
-            if str(dec.get("verdict") or "").strip().lower() not in ("reject", "critic_denied", "deny"):
-                continue
-            rationale = str(dec.get("rationale") or "").strip()
+            rationale = str(row.get("rationale") or "").strip()
             if rationale and rationale not in seen_learn:
                 seen_learn.add(rationale)
                 learnings.append(rationale[:200])
@@ -2856,6 +2988,8 @@ class FrameworkPhase(PhaseHandler):
         Returns:
             An order-preserving, deduped list of repo URLs to query.
         """
+        from hyperloom.inference_optimizer import framework_registry
+
         from ..framework import client as _fa_client
         from ..specialists.domains import PR_QUERY_REPOS
 
@@ -2872,17 +3006,23 @@ class FrameworkPhase(PhaseHandler):
                 urls.append(u)
 
         # Primary: the framework's own repo.
-        _add(_fa_client.repo_url_for_framework(framework))
+        primary_repo_url = _fa_client.repo_url_for_framework(framework)
+        _add(primary_repo_url)
 
-        # Global allowlist (owner/name -> URL).
-        for repo in PR_QUERY_REPOS:
-            repo = str(repo or "").strip()
-            if repo and "/" in repo:
-                _add(f"https://github.com/{repo}.git")
-
-        if not urls:
-            # Last-ditch: let phase_discover resolve from framework itself.
-            _add(_fa_client.repo_url_for_framework(framework or "sglang"))
+        # Serving/infra PRs cannot be git-applied to scriptable model repos, so
+        # a scriptable session queries its own repo and nothing else. Scoping on
+        # scriptability alone is deliberate: keying it on also having a repo URL
+        # excluded the case that needs it most, since an operator-supplied
+        # workload has no upstream repo by construction and so inherited the
+        # whole serving allowlist. It queries nothing now rather than everything.
+        if not framework_registry.is_scriptable(framework):
+            for repo in PR_QUERY_REPOS:
+                repo = str(repo or "").strip()
+                if repo and "/" in repo:
+                    _add(f"https://github.com/{repo}.git")
+            if not urls:
+                # Last-ditch: let phase_discover resolve from framework itself.
+                _add(_fa_client.repo_url_for_framework(framework or "sglang"))
         return urls
 
     @staticmethod
@@ -2933,7 +3073,7 @@ class FrameworkPhase(PhaseHandler):
         if not isinstance(result_dict, dict):
             return
         status = str(result_dict.get("status") or "")
-        if status not in ("kept", "reverted"):
+        if status not in ("kept", "kept_inert", "reverted"):
             return
         # Extract patch info from result
         patches_applied = result_dict.get("patches_applied") or []
@@ -2944,7 +3084,9 @@ class FrameworkPhase(PhaseHandler):
         repo = candidate.get("repo") or ""
         error_class = result_dict.get("error_class") or ""
         # Build prs_tested entry
-        outcome = "KEEP" if status == "kept" else "REVERT"
+        # An inert KEEP is not a throughput win: the code is applied but every
+        # switch is off, so warm replay must not reuse it as a proven recipe.
+        outcome = "KEEP" if status == "kept" else "KEEP_INERT" if status == "kept_inert" else "REVERT"
         ss = self.shared_state
         entry = {
             "repo": repo
@@ -3157,6 +3299,11 @@ class FrameworkPhase(PhaseHandler):
                     "last_profile_kernel_breakdown",
                     None,
                 ),
+                rewrite_evidence_path=getattr(
+                    state,
+                    "last_framework_rewrite_evidence",
+                    None,
+                ),
             )
         except Exception:  # noqa: BLE001 — defensive
             directed_gap, directed_keywords = "", []
@@ -3190,7 +3337,7 @@ class FrameworkPhase(PhaseHandler):
         timeout_sec = float(
             getattr(self, "framework_agent_discover_timeout_sec", 0.0) or _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC
         )
-        max_candidates = int(getattr(state, "framework_max_candidates", 0) or 0) or DEFAULT_FRAMEWORK_MAX_CANDIDATES
+        max_candidates = DEFAULT_FRAMEWORK_MAX_CANDIDATES
         # Cross-repo: query every pr_intel_specialist repo so discovery isn't confined to one framework repo.
         repo_urls = self._framework_agent_discover_repo_urls(framework)
         # Step A/B — feed the session working memory into discovery so fa
@@ -3371,13 +3518,13 @@ class FrameworkPhase(PhaseHandler):
         return True
 
     async def _enqueue_framework_agent_task(self, candidate: dict[str, Any]) -> None:
-        """Enqueue a single ``framework`` task for ``candidate``.
+        """Enqueue a single ``framework_agent`` task for ``candidate``.
 
         Builds the task params (candidate, batch id, baseline throughput,
-        framework) and creates an idempotent ``framework`` task holding the
-        server / workspace / benchmark lanes. On enqueue failure, records an
-        ``enqueue_failed`` progress row so the pump skips the candidate next
-        tick instead of spinning.
+        framework) and creates an idempotent ``framework_agent`` task whose
+        lanes and lease TTL come from the action registry. On enqueue failure,
+        records an ``enqueue_failed`` progress row so the pump skips the
+        candidate next tick instead of spinning.
 
         Args:
             candidate (dict[str, Any]): The discovered PR candidate to apply
@@ -3398,16 +3545,24 @@ class FrameworkPhase(PhaseHandler):
         }
         cand_id = self._framework_candidate_key(candidate)
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
+        lanes, ttl = self._registry_lanes_ttl("framework_agent")
         try:
+            # A framework candidate rebuilds and benchmarks, so it cannot share
+            # the GPU. ``_registry_lanes_ttl`` also answers ([], 0) when the
+            # registry failed to load, and enqueueing then would run this
+            # unserialised against every other task; refuse instead. The
+            # handler below turns it into a warning plus a progress row.
+            if not lanes:
+                raise RuntimeError(
+                    "framework_agent resolved to no lanes — the action registry is missing "
+                    "or failed to load, so the task would run without GPU exclusivity."
+                )
             await self.tasks.create_or_return_existing(
                 kind="framework_agent",
                 params=params,
                 idempotency_key=idem,
-                requires_lanes=[
-                    "server_lifecycle",
-                    "workspace_mutation",
-                    "benchmark_lane",
-                ],
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
             )
             log.info(
                 "FRAMEWORK: enqueued candidate=%s batch=%s",
@@ -3432,46 +3587,41 @@ class FrameworkPhase(PhaseHandler):
             )
 
     def _collect_framework_agent_candidate_priors(self) -> dict[str, Any]:
-        """Return compact session-local priors for the Critic gate (recent_decisions + recent_outcomes); best-effort.
+        """Return compact session-local priors for the Critic gate.
+
+        Everything the Critic needs about earlier candidates lives in the
+        progress ledger, denials included, so the outcomes carry the rationale
+        rather than being paired with a separate decision list. Only the rows
+        that were stamped with a reason have one — bench results record their
+        numbers instead — so the key is omitted rather than sent empty.
 
         Returns:
-            A dict with ``recent_decisions`` (recent critic verdicts) and
-            ``recent_outcomes`` (recent terminal apply/bench results), each
+            A dict with ``recent_outcomes`` (recent terminal apply/bench
+            results, each with the reason recorded for it, where there is one),
             bounded to a short tail.
         """
-        state = self.shared_state
-        decisions: list[dict[str, Any]] = []
-        try:
-            raw_decisions = getattr(state, "framework_agent_critic_decisions", None) or []
-            for row in raw_decisions[-self._CRITIC_PRIORS_DECISION_TAIL :]:
-                if not isinstance(row, dict):
-                    continue
-                decisions.append(
-                    {
-                        "candidate_id": str(row.get("candidate_id") or ""),
-                        "verdict": str(row.get("verdict") or ""),
-                        "rationale": str(row.get("rationale") or "")[:200],
-                    }
-                )
-        except Exception:  # noqa: BLE001
-            decisions = []
+        raw_progress = getattr(self.shared_state, "framework_agent_phase_progress", None) or []
+        terminal = {
+            "kept",
+            "kept_inert",
+            "reverted",
+            "no_patch",
+            "enqueue_failed",
+            FRAMEWORK_CRITIC_DENIED_STATUS,
+        }
+        tail = [r for r in raw_progress if isinstance(r, dict) and str(r.get("status") or "") in terminal]
         outcomes: list[dict[str, Any]] = []
-        try:
-            raw_progress = getattr(state, "framework_agent_phase_progress", None) or []
-            terminal = {"kept", "reverted", "no_patch", "enqueue_failed", "critic_denied"}
-            tail = [r for r in raw_progress if isinstance(r, dict) and str(r.get("status") or "") in terminal]
-            for row in tail[-self._CRITIC_PRIORS_OUTCOME_TAIL :]:
-                outcomes.append(
-                    {
-                        "candidate_id": str(row.get("candidate_id") or ""),
-                        "status": str(row.get("status") or ""),
-                        "gain_pct": row.get("gain_pct"),
-                    }
-                )
-        except Exception:  # noqa: BLE001
-            outcomes = []
+        for row in tail[-self._CRITIC_PRIORS_OUTCOME_TAIL :]:
+            entry: dict[str, Any] = {
+                "candidate_id": str(row.get("candidate_id") or ""),
+                "status": str(row.get("status") or ""),
+                "gain_pct": row.get("gain_pct"),
+            }
+            rationale = str(row.get("rationale") or "")[:200]
+            if rationale:
+                entry["rationale"] = rationale
+            outcomes.append(entry)
         return {
-            "recent_decisions": decisions,
             "recent_outcomes": outcomes,
         }
 
@@ -3794,7 +3944,7 @@ class FrameworkPhase(PhaseHandler):
         self._stamp_framework_progress(
             candidate_id=cand_id,
             batch_id=batch_id,
-            status="critic_denied",
+            status=FRAMEWORK_CRITIC_DENIED_STATUS,
             kept=False,
             rationale=str(reasoning or ""),
             provenance="critic",
@@ -4645,10 +4795,15 @@ class FrameworkPhase(PhaseHandler):
                 continue
             result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
             done_payload = result.get("specialist_done")
-            if isinstance(done_payload, dict):
+            # A run that failed before delivering carries its error on the bus
+            # entry rather than in the result, and must reach the recorder for
+            # the same reason it does on the live path.
+            run_error = str(payload.get("error") or "")
+            if isinstance(done_payload, dict) or run_error:
                 self._record_framework_agent_authoring_empty_outcome(
                     task=specialist_task,
-                    done_payload=done_payload,
+                    done_payload=done_payload if isinstance(done_payload, dict) else {},
+                    run_error=run_error,
                 )
                 if cand_id in self._framework_processed_candidate_keys():
                     return True
@@ -4679,11 +4834,50 @@ class FrameworkPhase(PhaseHandler):
                 return True
         return False
 
+    def _record_framework_agent_dispatch_failure(
+        self,
+        *,
+        task: "Task",
+        run_error: str,
+    ) -> None:
+        """Stamp a terminal row for a candidate whose specialist never ran.
+
+        The row is what stops the pump re-selecting the candidate every tick, so
+        it must exist; ``dispatch_failed`` is what keeps the plateau streak from
+        counting it as a search that came back empty.
+
+        Args:
+            task: The specialist task that failed before delivering.
+            run_error: The dispatch error, recorded as the row's rationale.
+        """
+        params = getattr(task, "params", None) or {}
+        cand_id = str(params.get("framework_agent_candidate_id") or "")
+        if not cand_id:
+            return
+        recorded = self._stamp_framework_progress(
+            candidate_id=cand_id,
+            batch_id=str(params.get("framework_batch_id") or ""),
+            status="dispatch_failed",
+            kept=False,
+            rationale=run_error[:500],
+            provenance="dispatch_failed",
+            gain_pct=0.0,
+            extra={"specialist_task_id": str(getattr(task, "task_id", "") or "")},
+        )
+        if not recorded:
+            return
+        log.warning(
+            "FRAMEWORK: authoring specialist never delivered candidate=%s: %s",
+            cand_id,
+            run_error[:300],
+        )
+
     def _record_framework_agent_authoring_empty_outcome(
         self,
         *,
         task: "Task",
         done_payload: dict[str, Any] | None,
+        run_error: str = "",
     ) -> None:
         """Record a terminal FRAMEWORK row when an authoring specialist finishes WITHOUT a patch.
 
@@ -4701,11 +4895,20 @@ class FrameworkPhase(PhaseHandler):
             task: The completed authoring specialist task (carries the
                 ``framework_*`` provenance markers).
             done_payload: The specialist's ``specialist_done`` payload.
+            run_error: The dispatch error when the run failed before delivering
+                anything. Together with an absent payload it separates "the
+                specialist ran and found nothing" from "the specialist never
+                ran", which the plateau streak must not treat alike.
         """
         params = getattr(task, "params", None) or {}
         if not bool(params.get("framework_agent_authoring")):
             return
         payload = done_payload if isinstance(done_payload, dict) else {}
+        # No payload at all plus an error means the run never delivered: there is
+        # no deliverable to judge, so this is infrastructure, not a search result.
+        if run_error and not payload:
+            self._record_framework_agent_dispatch_failure(task=task, run_error=run_error)
+            return
         inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
         # A downstream integrate_patch (owned by the authored-outcome bridge
         # that writes the terminal row) is created by

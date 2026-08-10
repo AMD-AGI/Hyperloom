@@ -3,8 +3,9 @@
 
 """``fa phase-audit`` static local-source judging.
 
-Hermetic: no network / LLM. The opt-in LLM layer is exercised only via the
-no-credentials skip path.
+Hermetic: no network / LLM. The opt-in LLM layer is exercised with
+``llm_config``'s sanctioned client-construction and streaming contract stubbed
+out, so no provider SDK has to be installed.
 """
 
 from __future__ import annotations
@@ -230,11 +231,28 @@ def test_audit_use_llm_without_creds_keeps_static(tmp_path: Path, monkeypatch):
     assert any("missing" in r.lower() for r in out["risks"])
 
 
+def _stub_sanctioned_client(monkeypatch, recorder: list[dict] | None = None):
+    """Patch the sanctioned sync-client contract and return the stub client.
+
+    ``raising=False``: ``get_openai_client`` is ``llm_config``'s client-construction
+    contract, so patching it keeps these tests independent of whether the ``openai``
+    SDK is installed (and of whether the contract has landed in this checkout yet).
+    """
+    from hyperloom.common import llm_config
+
+    client = object()
+
+    def _fake(**kwargs):
+        if recorder is not None:
+            recorder.append(kwargs)
+        return client
+
+    monkeypatch.setattr(llm_config, "get_openai_client", _fake, raising=False)
+    return client
+
+
 # opt-in LLM layer: stream_chat_completion_text is called (stream=True path)
 def test_audit_llm_refine_uses_streaming(tmp_path: Path, monkeypatch):
-    import sys
-    import types
-
     captured: list[dict] = []
 
     _valid_reply = '{"semantic_status":"not_present","applicability":"direct_apply","confidence":0.9,"recommended_next_step":"author_via_specialist","note":""}'
@@ -247,9 +265,7 @@ def test_audit_llm_refine_uses_streaming(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://fake-gateway/v1")
 
-    fake_openai = types.ModuleType("openai")
-    fake_openai.OpenAI = lambda **_kw: object()  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    _stub_sanctioned_client(monkeypatch)
 
     content = "def scaled_op(q, k):\n    return q + k\n"
     root = _make_root(tmp_path, "model_executor/layer.py", content)
@@ -271,9 +287,6 @@ def test_audit_llm_refine_uses_streaming(tmp_path: Path, monkeypatch):
 
 # opt-in LLM layer: exception in refine leaves a risk entry
 def test_audit_llm_refine_exception_leaves_risk(tmp_path: Path, monkeypatch):
-    import sys
-    import types
-
     def _boom(client, **_kw):
         raise RuntimeError("boom")
 
@@ -281,9 +294,7 @@ def test_audit_llm_refine_exception_leaves_risk(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://fake-gateway/v1")
 
-    fake_openai = types.ModuleType("openai")
-    fake_openai.OpenAI = lambda **_kw: object()  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    _stub_sanctioned_client(monkeypatch)
 
     content = "def scaled_op(q, k):\n    return q + k\n"
     root = _make_root(tmp_path, "model_executor/layer.py", content)
@@ -301,6 +312,72 @@ def test_audit_llm_refine_exception_leaves_risk(tmp_path: Path, monkeypatch):
     )
     assert out["layer"] == "static"
     assert any("exception" in r.lower() or "boom" in r.lower() for r in out.get("risks", []))
+
+
+# opt-in LLM layer: the client is built by llm_config, from the request's creds
+def test_audit_llm_refine_builds_client_via_llm_config(tmp_path: Path, monkeypatch):
+    for var in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "LLM_GATEWAY_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(
+        "hyperloom.common.llm_config.stream_chat_completion_text",
+        lambda client, **_kw: ("{}", None),
+    )
+    calls: list[dict] = []
+    _stub_sanctioned_client(monkeypatch, calls)
+
+    content = "def scaled_op(q, k):\n    return q + k\n"
+    root = _make_root(tmp_path, "model_executor/layer.py", content)
+    run_phase_audit(
+        {
+            "candidate": {"candidate_id": "c"},
+            "framework_source_roots": [str(root)],
+            "diff_text": _diff(
+                added=["    q = apply_rotary(q)"],
+                context=["def scaled_op(q, k):", "    return q + k"],
+            ),
+            "work_dir": str(tmp_path / "wd"),
+            "use_llm": True,
+            "api_key": "req-key",
+            "openai_base_url": "http://req-gateway/v1",
+        }
+    )
+    assert len(calls) == 1, "the refine layer must build its client through llm_config"
+    env = calls[0]["env"]
+    assert env["OPENAI_API_KEY"] == "req-key"
+    assert env["OPENAI_BASE_URL"] == "http://req-gateway/v1"
+
+
+# opt-in LLM layer: an unusable SDK is a deliberate degrade, not a hard failure
+def test_audit_llm_refine_skips_when_client_unavailable(tmp_path: Path, monkeypatch):
+    from hyperloom.common import llm_config
+
+    def _no_sdk(**_kwargs):
+        raise ImportError("No module named 'openai'")
+
+    def _unreachable(client, **_kw):
+        raise AssertionError("the refine call must not run without a client")
+
+    monkeypatch.setattr(llm_config, "get_openai_client", _no_sdk, raising=False)
+    monkeypatch.setattr(llm_config, "stream_chat_completion_text", _unreachable)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://fake-gateway/v1")
+
+    content = "def scaled_op(q, k):\n    return q + k\n"
+    root = _make_root(tmp_path, "model_executor/layer.py", content)
+    out = run_phase_audit(
+        {
+            "candidate": {"candidate_id": "c"},
+            "framework_source_roots": [str(root)],
+            "diff_text": _diff(
+                added=["    q = apply_rotary(q)"],
+                context=["def scaled_op(q, k):", "    return q + k"],
+            ),
+            "work_dir": str(tmp_path / "wd"),
+            "use_llm": True,
+        }
+    )
+    assert out["layer"] == "static"
+    assert "llm refine skipped: openai sdk unavailable" in out["risks"]
 
 
 # CLI end-to-end

@@ -316,6 +316,56 @@ async def test_promote_roofline_succeeded_writes_audit(session_dir):
     assert s.last_roofline["extras"]["snapshot_id"] == 5
 
 
+@pytest.mark.asyncio
+async def test_roofline_with_an_analysis_anchors_the_watermark(session_dir):
+    """A roofline that produced an analysis costs the next one a 10% climb."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.cumulative_gain_validated = 75.0
+    s.last_roofline_tput = 0.0
+    s.last_trace_analyze = {
+        "roofline_snapshot_id": 5,
+        "analysis_md_path": "/tmp/a.md",
+        "analysis_md_text": "# roofline\nattention is 64.8% of GPU time\n",
+    }
+
+    await coord._promote_to_shared_state(
+        "roofline",
+        {"status": "succeeded", "snapshot_id": 5},
+        task=_task("roofline"),
+    )
+
+    assert s.last_roofline_tput == 175.0
+
+
+@pytest.mark.asyncio
+async def test_roofline_without_an_analysis_leaves_the_watermark_armed(session_dir):
+    """An empty analysis must not buy a cycle of silence.
+
+    The anchor is what stops the watermark firing again until throughput climbs
+    another 10%. A roofline that recorded nothing once anchored anyway, so the
+    specialist kept reading "(none — no fresh roofline snapshot has been
+    recorded yet)" while the anchor insisted one had been taken there, and the
+    only thing that could have lifted throughput past the anchor was the
+    evidence the empty snapshot was standing in for.
+    """
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.cumulative_gain_validated = 75.0
+    s.last_roofline_tput = 0.0
+    s.last_trace_analyze = {"roofline_snapshot_id": 5, "analysis_md_text": ""}
+
+    await coord._promote_to_shared_state(
+        "roofline",
+        {"status": "succeeded", "snapshot_id": 5},
+        task=_task("roofline"),
+    )
+
+    assert s.last_roofline_tput == 0.0
+
+
 # ---------------------------------------------------------------------------
 # GAP 3: successful profile with a trace clears the stale trace_analyze cache.
 # ---------------------------------------------------------------------------
@@ -538,7 +588,60 @@ async def test_promote_framework_agent_kept_lifts_and_records_progress(session_d
     assert s.current_best["tput"] == 130.0
     assert s.optimization_stack[-1]["source_phase"] == "FRAMEWORK_AGENT"
     assert s.optimization_stack[-1]["provenance"] == "framework_agent"
+    # The stack variant must be the canonical candidate key, undecorated, so
+    # resume can reconcile it against the recorded framework_agent KEEP.
+    assert s.optimization_stack[-1]["variant_name"] == "https://x/pull/1"
     assert not hasattr(s, "last_framework_agent")
+
+
+@pytest.mark.asyncio
+async def test_promote_framework_agent_kept_without_a_candidate_key_is_skipped_loudly(
+    session_dir,
+    caplog,
+):
+    """A KEEP with no identity advances current_best but leaves no stack entry.
+
+    Promote used to name the stack entry ``f"framework:{cand_id}"``, which is
+    truthy even when the key is empty, so a candidate carrying no candidate_id,
+    pr_url or ref was stacked under the bare name ``"framework:"``. The
+    undecorated key is falsy, so ``_lift_to_current_best``'s guard now skips the
+    append instead.
+
+    Only the append: current_best and cumulative_gain are set unconditionally
+    further down, so the win still counts — it just is not recorded as a step
+    anything can later reconcile, dedupe or replay. Pinned because that split is
+    easy to misread in either direction, and because a KEEP that leaves no trace
+    in the stack has to at least leave one in the log.
+    """
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.current_best = {"action": "baseline", "tput": 100.0}
+
+    with caplog.at_level("WARNING"):
+        await coord._promote_to_shared_state(
+            "framework_agent",
+            {
+                "status": "kept",
+                "output_throughput": 130.0,
+                "delta_pct": 30.0,
+                "batch_id": "b1",
+                # No candidate_id, no pr_url, no ref — and no task params to
+                # recover one from either.
+                "candidate": {},
+            },
+            task=_task("framework_agent", task_id="t-nameless"),
+        )
+
+    # The win lands, ...
+    assert s.current_best["action"] == "framework"
+    assert s.current_best["tput"] == 130.0
+    # ... but nothing in the stack says how it was reached.
+    assert not [e for e in s.optimization_stack if str(e.get("action")) == "framework"]
+    assert "no candidate key" in caplog.text
+    # The outcome is still recorded, so the pump does not re-select it.
+    assert len(s.framework_agent_phase_progress) == 1
+    assert s.framework_agent_phase_progress[0]["status"] == "kept"
 
 
 @pytest.mark.asyncio
