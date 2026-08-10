@@ -1818,12 +1818,14 @@ def test_accumulate_anthropic_usage_folds_tokens_and_tolerates_garbage():
     CriticAgentBackend._accumulate_anthropic_usage(acc, {"input_tokens": 3, "output_tokens": 4})
     CriticAgentBackend._accumulate_anthropic_usage(acc, {"input_tokens": "x", "output_tokens": None})
     CriticAgentBackend._accumulate_anthropic_usage(acc, None)
-    assert acc == {"input_tokens": 3, "output_tokens": 4}
+    assert acc["input_tokens"] == 3
+    assert acc["output_tokens"] == 4
 
 
-def test_accumulate_anthropic_usage_counts_cached_input_tokens():
+def test_accumulate_anthropic_usage_keeps_cache_counters_in_their_own_columns():
     """The judge bundle repeats across turns, so most of the input side arrives
-    as cache reads; counting only ``input_tokens`` under-reports every call."""
+    as cache reads. They stay split so a critic row can be compared with — and
+    summed alongside — the orchestration rows ClaudeBackend writes."""
     acc = {"input_tokens": 0, "output_tokens": 0}
     CriticAgentBackend._accumulate_anthropic_usage(
         acc,
@@ -1834,4 +1836,55 @@ def test_accumulate_anthropic_usage_counts_cached_input_tokens():
             "output_tokens": 500,
         },
     )
-    assert acc == {"input_tokens": 4312, "output_tokens": 500}
+    assert acc == {
+        "input_tokens": 12,
+        "output_tokens": 500,
+        "cache_read_input_tokens": 4000,
+        "cache_creation_input_tokens": 300,
+    }
+
+
+@pytest.mark.asyncio
+async def test_anthropic_protocol_traces_cache_counters_separately(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A real subscription run reads most of its input from the prompt cache;
+    folding it into input_tokens would make critic rows incomparable with the
+    orchestration ones."""
+    result = _anthropic_review_result(
+        '{"review_verdicts": []}',
+        usage={
+            "input_tokens": 12,
+            "cache_read_input_tokens": 4000,
+            "cache_creation_input_tokens": 300,
+            "output_tokens": 500,
+        },
+    )
+    backend, _ = _make_anthropic_backend(
+        fake_critic_root,
+        fake_session_dir,
+        monkeypatch,
+        results=[result],
+        judge_bundle=_minimal_judge_bundle(),
+    )
+
+    await backend.run("prompt", system_prompt="critic system")
+
+    import json as _json
+
+    from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
+
+    rows = [
+        _json.loads(line)
+        for line in llm_calls_path(fake_session_dir).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    critic_rows = [r for r in rows if r["component"] == "critic"]
+    assert critic_rows
+    row = critic_rows[0]
+    assert row["input_tokens"] == 12
+    assert row["cache_read_input_tokens"] == 4000
+    assert row["cache_creation_input_tokens"] == 300
+    assert row["output_tokens"] == 500
