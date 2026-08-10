@@ -319,14 +319,19 @@ HYPERLOOM_RUN_MODE=baremetal
 EOF
 ```
 
-Gateways that authenticate on a header of their own, such as Azure API
-Management, need that header in addition to the bearer key. Add one more line to
-`.env` — `${VAR}` references are expanded from the same file, so the secret stays
-in one place:
+Gateways that authenticate on a header of their own need that header in addition
+to the bearer key. AMD's gateway is one of them: `llm-api.amd.com` requires the
+API key to also travel as an `Ocp-Apim-Subscription-Key` header. Add one more line
+to `.env` below `ANTHROPIC_API_KEY` — `${VAR}` references are expanded from the
+same file, so the secret stays in one place:
 
 ```bash
-ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}
+ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}"
 ```
+
+Keep the double quotes. Setup and the launch scripts may load `.env` with a shell
+`source`, and an unquoted value containing a space and a colon is parsed as a
+command, failing with exit 127.
 
 If the gateway also serves an OpenAI-compatible route, set `OPENAI_BASE_URL` and
 `OPENAI_API_KEY` against it to enable the Codex-side features. On the AMD

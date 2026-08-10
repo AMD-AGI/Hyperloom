@@ -176,14 +176,18 @@ proceeds instead of refusing to start, so no opt-in is needed for that case.
 
 Some enterprise gateways authenticate on a header of their own — Azure API
 Management's `Ocp-Apim-Subscription-Key`, a corporate proxy's tenant header — in
-addition to, or instead of, the bearer key. Supply it per side with
-`ANTHROPIC_CUSTOM_HEADERS` or `OPENAI_CUSTOM_HEADERS`. Both accept the Anthropic
-SDK's newline-delimited `Name: value` form, and a JSON object as a convenience
-for launchers that already store structured values.
+addition to, or instead of, the bearer key. AMD's own `llm-api.amd.com` gateway
+is one of them: it requires the API key to also travel as an
+`Ocp-Apim-Subscription-Key` header, which the guided setup writes for you when
+you pick that gateway. Supply it per side with `ANTHROPIC_CUSTOM_HEADERS` or
+`OPENAI_CUSTOM_HEADERS`. Both accept the Anthropic SDK's newline-delimited
+`Name: value` form, and a JSON object as a convenience for launchers that already
+store structured values.
 
-`${VAR}` references are expanded by Hyperloom from the same environment, so
-`.env` keeps a single copy of the secret. Quote with single quotes so the shell
-leaves the reference intact:
+`${VAR}` references are expanded by Hyperloom from the same environment, so a
+single copy of the secret is enough. Quote the value so the space and the colon
+survive: use single quotes when exporting in a shell, and double quotes in
+`.env`, which setup and the launch scripts may load with `source`.
 
 ```bash
 export ANTHROPIC_BASE_URL=https://<your-gateway-host>/api/v1/llm-proxy
@@ -194,6 +198,11 @@ export ANTHROPIC_CUSTOM_HEADERS='Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}
 Each side reads only its own variable: the Anthropic side never picks up
 `OPENAI_CUSTOM_HEADERS`, and the reverse. Headers are operator-supplied and are
 never synthesized from the configured keys.
+
+The two variables are not persisted symmetrically. `ANTHROPIC_CUSTOM_HEADERS`
+survives in `.env`, but bare-metal setup drops `OPENAI_CUSTOM_HEADERS` from `.env`
+whenever it writes resolved credentials. Export the OpenAI-side header in the
+shell, or re-add it after running setup.
 
 ---
 
