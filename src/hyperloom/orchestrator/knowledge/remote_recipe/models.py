@@ -82,7 +82,7 @@ def extract_knowledge_artifact_refs(
         try:
             normalized = validate_relative_path(raw)
         except RemoteRecipeValidationError:
-            raise
+            return None
         if key == "files" or normalized.startswith(_BUILDER_REF_PREFIXES):
             return normalized
         return None
