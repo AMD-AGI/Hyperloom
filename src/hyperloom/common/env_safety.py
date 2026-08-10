@@ -93,6 +93,10 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_BASE_URL",
+        # Gateway auth headers: setup writes these into .env, so the .env loader
+        # has to read them back or a header-authenticated gateway silently loses
+        # its credential whenever the shell has not exported it already.
+        "ANTHROPIC_CUSTOM_HEADERS",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
         # Retired provider variables, still readable so a pre-migration .env can
@@ -124,6 +128,7 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "KERNEL_OPT_BACKEND_ORDER",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
+        "OPENAI_CUSTOM_HEADERS",
         "NO_PROXY",
         "ROCM_PATH",
         "SGLANG_ROCM_EXTRA",
