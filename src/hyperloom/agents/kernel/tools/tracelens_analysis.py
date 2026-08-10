@@ -67,6 +67,7 @@ from tracelens_skill_runner import (
 )
 
 from _io_utils import append_log, atomic_write_json, read_last_lines, safe_float, utc_now
+from _nccl_summary_candidates import extract_collective_candidates
 
 # Standalone-tool workspace-root resolver (cannot import hyperloom.inference_optimizer.session.paths; see _paths.py).
 from _paths import workspace_root
@@ -1989,6 +1990,213 @@ def locate_source_via_grep(name: str) -> str:
     return ""
 
 
+def _inject_collective_candidates(
+    tracelens_dir: Path,
+    candidates: list[dict[str, Any]],
+    *,
+    source_roots: list[str] | None = None,
+    log_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Merge source-resolved NCCL rows with traced all-reduce workloads."""
+    if not isinstance(candidates, list) or any(
+        not isinstance(item, dict) for item in candidates
+    ):
+        raise ValueError("Collective candidates must be a list of mappings")
+    existing = [dict(item) for item in candidates]
+    roots = list(source_roots or [])
+    if not roots:
+        aiter_csrc = _aiter_csrc_root().rstrip("/")
+        if aiter_csrc and Path(aiter_csrc).is_dir():
+            roots.append(aiter_csrc)
+    if not roots:
+        if log_path is not None:
+            append_log(log_path, "nccl_summary: no bounded collective source root; skipping injection")
+        return existing
+
+    messages: list[str] = []
+    try:
+        extracted = extract_collective_candidates(
+            tracelens_dir,
+            roots,
+            log_fn=messages.append,
+        )
+    except ValueError as exc:
+        message = f"nccl_summary: {exc}; skipping injection"
+        log.warning(message)
+        if log_path is not None:
+            append_log(log_path, message)
+        return existing
+
+    def _name(item: dict[str, Any]) -> str:
+        """Return the normalized trace name for one candidate."""
+        return str(item.get("name") or "").strip().lower()
+
+    def _workload_dtypes(item: dict[str, Any]) -> list[str]:
+        """Return explicit or shape-derived input dtypes for one workload."""
+        values = item.get("input_dtypes") or item.get("dtypes") or []
+        if not values:
+            values = _dtypes_from_shapes(item.get("shapes") or [])
+        return [
+            str(value).strip()
+            for value in values
+            if isinstance(value, str) and value.strip()
+        ]
+
+    def _has_workload(item: dict[str, Any]) -> bool:
+        """Return whether the trace row carries driver inputs."""
+        return bool(
+            item.get("input_shapes") or item.get("shapes")
+        ) and bool(_workload_dtypes(item))
+
+    def _is_all_reduce_workload(item: dict[str, Any]) -> bool:
+        """Return whether a traced workload has all-reduce semantics."""
+        contract = item.get("kernel_contract")
+        if (
+            isinstance(contract, dict)
+            and str(contract.get("kind") or "") == "collective"
+        ):
+            return str(contract.get("collective_op") or "") == "all_reduce"
+        name = _name(item)
+        return any(
+            tag in name
+            for tag in ("all_reduce", "allreduce", "cross_device_reduce")
+        )
+
+    def _workload_family(item: dict[str, Any]) -> str:
+        """Collapse prefill and decode rows from one profiled wrapper."""
+        name = _name(item)
+        if name.startswith(("sglang_profiler::", "vllm_profiler::")):
+            name = name.split("->", 1)[0]
+        return re.sub(r"\s+\((?:prefill|decode)\)\s*$", "", name)
+
+    def _first_shape_record(item: dict[str, Any]) -> dict[str, Any] | None:
+        """Return the first tensor shape record from one invocation."""
+        records = item.get("input_shapes")
+        if isinstance(records, list):
+            for record in records:
+                if isinstance(record, dict) and str(record.get("shape") or "").strip():
+                    return dict(record)
+        shapes = item.get("shapes")
+        if isinstance(shapes, list):
+            for shape in shapes:
+                text = str(shape or "").strip()
+                if text:
+                    return {
+                        "call_num": int(item.get("call_count") or 1),
+                        "shape": text,
+                    }
+        return None
+
+    def _merge_workloads(
+        target: dict[str, Any],
+        donors: list[dict[str, Any]],
+    ) -> None:
+        """Attach distinct first-input cases from one workload family."""
+        records: list[dict[str, Any]] = []
+        shapes: list[str] = []
+        dtypes: list[str] = []
+        seen_shapes: set[str] = set()
+        for donor in donors:
+            record = _first_shape_record(donor)
+            if record is None:
+                continue
+            shape = str(record["shape"]).strip()
+            if shape in seen_shapes:
+                continue
+            seen_shapes.add(shape)
+            records.append(record)
+            shapes.append(shape)
+            donor_dtypes = _workload_dtypes(donor)
+            if donor_dtypes:
+                dtypes.append(donor_dtypes[0])
+        if records:
+            target["input_shapes"] = records
+            target["shapes"] = shapes
+        if dtypes:
+            target["input_dtypes"] = dtypes
+        provenance = next(
+            (
+                str(donor.get("shape_provenance") or "")
+                for donor in donors
+                if donor.get("shape_provenance")
+            ),
+            "",
+        )
+        if provenance:
+            target["shape_provenance"] = provenance
+        target["workload_source_kernels"] = [
+            str(donor.get("name") or "") for donor in donors
+        ]
+        hottest = max(
+            donors,
+            key=lambda donor: float(donor.get("duration_us") or 0.0),
+        )
+        target["workload_source_kernel"] = str(hottest.get("name") or "")
+
+    by_name = {_name(item): item for item in existing if _name(item)}
+    workload_rows = [
+        item
+        for item in existing
+        if _has_workload(item) and _is_all_reduce_workload(item)
+    ]
+    workload_families: dict[str, list[dict[str, Any]]] = {}
+    for row in workload_rows:
+        family = _workload_family(row)
+        if family:
+            workload_families.setdefault(family, []).append(row)
+    appended: list[dict[str, Any]] = []
+    for item in extracted:
+        exact = by_name.get(_name(item))
+        target = exact or dict(item)
+        for key in (
+            "source_file",
+            "source_line",
+            "source_function",
+            "source_resolution_method",
+            "candidate_source",
+            "collective_stream",
+            "nccl_summary_total_ms",
+            "duration_provenance",
+        ):
+            target[key] = item[key]
+        donors = (
+            [exact]
+            if exact is not None and _has_workload(exact)
+            else next(iter(workload_families.values()))
+            if len(workload_families) == 1
+            else []
+        )
+        if len(donors) == 1:
+            donor = donors[0]
+            for key in ("input_shapes", "shapes", "input_dtypes", "dtypes", "shape_provenance"):
+                if donor.get(key):
+                    target[key] = donor[key]
+            if not target.get("input_dtypes"):
+                target["input_dtypes"] = _workload_dtypes(donor)
+            target["workload_source_kernel"] = str(donor.get("name") or "")
+        elif donors:
+            _merge_workloads(target, donors)
+        if exact is None:
+            if not donors:
+                messages.append(
+                    "nccl_summary: no unique traced all-reduce workload for "
+                    f"{item.get('source_function')!r}; dropping candidate"
+                )
+                continue
+            appended.append(target)
+            by_name[_name(target)] = target
+    if log_path is not None:
+        for message in messages:
+            append_log(log_path, message)
+        for item in appended:
+            append_log(
+                log_path,
+                "nccl_summary: injected source-resolved collective "
+                f"{item.get('source_function')!r} from {item.get('source_file')}",
+            )
+    return existing + appended
+
+
 def collect_source_candidates_via_grep(name: str, limit: int = 8) -> list[str]:
     """Shortlist every plausible source for ``name``, ranked, without deciding.
 
@@ -2574,16 +2782,7 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
 
 
 def is_multigpu_kernel(name: str, source_file: str) -> bool:
-    """Heuristic: kernel is a multi-GPU collective if name/source hints it.
-
-    Args:
-        name (str): Kernel symbol/name.
-        source_file (str): Resolved source-file path (may be empty).
-
-    Returns:
-        bool: ``True`` when the name/source contains a collective /
-            distributed marker.
-    """
+    """Return whether a kernel name or source identifies a collective."""
     blob = f"{name} {source_file}".lower()
     return any(
         tag in blob
@@ -6024,6 +6223,8 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any] |
         ("reduce_scatter", "reducescatter"),
         ("all_to_all", "alltoall"),
         ("broadcast",),
+        # aiter cross_device_reduce_* kernels use all-reduce semantics.
+        ("cross_device_reduce",),
         ("reduce",),
     )
     _OPMAP = {
@@ -6036,6 +6237,7 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any] |
         "all_to_all": "all_to_all",
         "alltoall": "all_to_all",
         "broadcast": "broadcast",
+        "cross_device_reduce": "all_reduce",
         "reduce": "reduce",
     }
     if bool(item.get("is_multigpu")) or any(tag in name for grp in _COLL for tag in grp):
@@ -7182,6 +7384,11 @@ def main() -> int:
                         log_path=log_path,
                         fail_on_corrupt_priority=True,
                     )
+                    raw_det_candidates = _inject_collective_candidates(
+                        tracelens_dir,
+                        raw_det_candidates,
+                        log_path=log_path,
+                    )
                     if raw_det_candidates:
                         total_dur = _extract_total_time_us_from_gpu_timeline(tracelens_dir) or sum(
                             float(c.get("duration_us") or 0) for c in raw_det_candidates
@@ -7313,9 +7520,19 @@ def main() -> int:
                         )
                         if fallback_cands:
                             report_cands = report_cands + fallback_cands
-                        if report_cands:
-                            raw_agent_candidates = report_cands
-                            report_source = "analysis.md+other_bucket_fallback" if fallback_cands else "analysis.md"
+                        raw_agent_candidates = _inject_collective_candidates(
+                            skill_result.output_dir,
+                            report_cands,
+                            log_path=log_path,
+                        )
+                        collective_injected = len(raw_agent_candidates) > len(report_cands)
+                        if raw_agent_candidates:
+                            source_parts = ["analysis.md"]
+                            if fallback_cands:
+                                source_parts.append("other_bucket_fallback")
+                            if collective_injected:
+                                source_parts.append("nccl_summary")
+                            report_source = "+".join(source_parts)
                         else:
                             agent_candidates = []
                             allow_empty_candidates = True

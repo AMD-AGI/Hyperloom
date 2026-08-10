@@ -59,6 +59,16 @@ def test_delegated_missing_attr_raises_attribute_error_not_recursion(monkeypatch
         getattr(coord, "_deleted_delegate")
 
 
+def test_collective_resume_gate_is_delegated_to_kernel_phase() -> None:
+    """Writeback resume must resolve the Collective gate."""
+    assert (
+        Coordinator._DELEGATED.get(
+            "_collective_required_before_kernel_opt"
+        )
+        == "phase_kernel"
+    )
+
+
 @pytest.fixture
 def coord(session_dir) -> Coordinator:
     return Coordinator(session_dir, backends=_build_backends())

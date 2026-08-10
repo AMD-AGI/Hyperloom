@@ -635,6 +635,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "kernel_opt_attempts",
         "kernel_opt_task_attempts",
         "pending_kernel_integrations",
+        "last_collective",
+        "collective_attempts",
+        "collective_only_mode",
         # closing_phase and baseline_config_path are Coordinator-only fact
         # fields, locked here so non-coordinator roles cannot mutate them via
         # UPDATE_STATE.

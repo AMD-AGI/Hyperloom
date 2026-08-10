@@ -11,6 +11,7 @@ forge results on the per-tuner E2E path while GEAK results promote inline.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from pathlib import Path
 
@@ -555,6 +556,369 @@ class TestPromoteFusionIntegrateKeep:
 
         assert coord.shared_state.last_fusion["decision"] == "REVERT"
         assert coord.shared_state.last_fusion["error_class"] == "RuntimeError"
+
+
+class TestCollectiveIntegratePromotion:
+    """Collective KEEP results must pass through the same E2E adoption gate."""
+
+    @pytest.mark.asyncio
+    async def test_collective_only_preempts_default_geak(
+        self, tmp_path, monkeypatch
+    ):
+        """The directed lane must run before the default GEAK selection."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        phase = KernelPhase(coord)
+        calls: list[str] = []
+
+        def _unexpected_geak():
+            """Fail if Collective-only consults the default GEAK backend."""
+            raise AssertionError("GEAK must not preempt Collective-only")
+
+        async def _reprofile():
+            """Record the directed lane's required profile refresh."""
+            calls.append("reprofile")
+
+        async def _collective():
+            """Record the directed Collective dispatch."""
+            calls.append("collective")
+
+        monkeypatch.setenv("HYPERLOOM_COLLECTIVE_ONLY", "1")
+        monkeypatch.setattr(phase, "_kernel_enabled", lambda: True)
+        monkeypatch.setattr(phase, "_geak_enabled", _unexpected_geak)
+        monkeypatch.setattr(phase, "_maybe_reprofile_for_kernel", _reprofile)
+        monkeypatch.setattr(
+            phase,
+            "_maybe_run_collective_before_kernel_opt",
+            _collective,
+        )
+
+        await phase._on_enter_kernel(from_phase="EXPLORE")
+
+        assert calls == ["reprofile", "collective"]
+        assert coord.shared_state.collective_only_mode is True
+
+    def test_promotes_and_deduplicates_collective_keep(self, tmp_path):
+        """An E2E KEEP should become one durable Collective stack entry."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        phase = KernelPhase(coord)
+        collective = {
+            "integration_id": "collective-promote",
+            "patch": "/tmp/collective.patch",
+            "source_file": "/repo/custom_all_reduce.cuh",
+            "kernel_speedup": 1.2,
+            "collective_op": "all_reduce",
+            "world_size": 8,
+        }
+        integrate = {
+            "status": "ok",
+            "decision": "KEEP",
+            "new_tput": 130.0,
+            "gain_pct": 30.0,
+            "workspace": "/tmp/run",
+            "apply_result": {
+                "status": "ok",
+                "manifest_path": "/tmp/collective-manifest.json",
+            },
+        }
+
+        phase._promote_collective_integrate_keep(collective, integrate)
+        assert coord.shared_state.current_best["engine"] == "forge_collective"
+        coord.shared_state.current_best = {
+            "engine": "later_lane",
+            "tput": 150.0,
+        }
+        coord.shared_state.cumulative_gain = 50.0
+        coord.shared_state.cumulative_gain_validated = 50.0
+        phase._promote_collective_integrate_keep(collective, integrate)
+
+        assert len(coord.shared_state.optimization_stack) == 1
+        entry = coord.shared_state.optimization_stack[0]
+        assert entry["action"] == "collective"
+        assert entry["collective_op"] == "all_reduce"
+        assert entry["world_size"] == 8
+        assert coord.shared_state.current_best["engine"] == "later_lane"
+        assert coord.shared_state.cumulative_gain_validated == pytest.approx(50.0)
+        assert coord.shared_state.gain_per_stack_entry == [30.0]
+
+    @pytest.mark.asyncio
+    async def test_handle_collective_posts_and_integrates_kept_candidate(
+        self, tmp_path, monkeypatch
+    ):
+        """The run verdict must be recorded before its E2E integration starts."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        integrated: list[dict] = []
+
+        async def _fake_integrate(result):
+            """Capture the candidate handed to the integration gate."""
+            integrated.append(result)
+
+        monkeypatch.setattr(phase, "_integrate_collective", _fake_integrate)
+        result = {
+            "status": "ok",
+            "decision": "KEEP",
+            "kept": True,
+            "requires_e2e_validation": True,
+            "engine": "forge_collective",
+        }
+
+        await phase._handle_collective_result(result)
+        first_attempt_id = coord.shared_state.last_collective[
+            "collective_attempt_id"
+        ]
+        await phase._handle_collective_result(result)
+
+        assert coord.shared_state.last_collective["status"] == "ok"
+        assert coord.shared_state.last_collective["integration_status"] == "pending"
+        assert integrated[0]["integration_status"] == "pending"
+        assert (
+            coord.shared_state.last_collective[
+                "collective_attempt_id"
+            ]
+            == first_attempt_id
+        )
+        assert len(coord.shared_state.collective_attempts) == 1
+        assert coord.bus.messages[0].payload["kind"] == "run_collective_done"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("finalize_status", ["ok", "partial"])
+    async def test_integrate_collective_builds_payload_and_records_keep(
+        self, tmp_path, monkeypatch, finalize_status
+    ):
+        """Collective integration must use an isolated kernel id and snapshot."""
+        coord = _coord(
+            tmp_path,
+            baseline_tput=100.0,
+            current_best={"extra_envs": {"SGLANG_USE_AITER": "1"}},
+        )
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        calls: list[dict] = []
+        integration_id = "collective-keep"
+        manifest_path = tmp_path / "manifest.json"
+
+        async def _fake_integrate(payload, *, session_dir):
+            """Return a deterministic E2E KEEP for payload inspection."""
+            assert session_dir == tmp_path
+            calls.append(payload)
+            return {
+                "status": "ok",
+                "decision": "KEEP",
+                "new_tput": 140.0,
+                "gain_pct": 40.0,
+                "workspace": str(tmp_path / "integrate"),
+                "apply_result": {
+                    "status": "ok",
+                    "manifest_path": str(manifest_path),
+                },
+                "finalize_result": {
+                    "status": "skipped",
+                    "reason": "deferred to caller durability checkpoint",
+                },
+            }
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
+        monkeypatch.setattr(
+            krh_mod,
+            "materialize_unified_patch_snapshot",
+            lambda **_kwargs: str(tmp_path / "collective_snapshot"),
+        )
+        monkeypatch.setattr(
+            krh_mod,
+            "_maybe_finalize_kernel_patch",
+            lambda _apply: {"status": finalize_status},
+        )
+
+        campaign = {
+            "collective_attempt_id": "collective-attempt-keep",
+            "integration_id": integration_id,
+            "status": "ok",
+            "decision": "KEEP",
+            "engine": "forge_collective",
+            "kept": True,
+            "requires_e2e_validation": True,
+            "patch": str(tmp_path / "forge.patch"),
+            "source_file": "/repo/custom_all_reduce.cuh",
+            "kernel_repo": "/repo",
+            "kernel_speedup": 1.2,
+            "collective_op": "all_reduce",
+            "world_size": 8,
+        }
+        coord.shared_state.record_collective(campaign, tmp_path)
+        await phase._integrate_collective(campaign)
+
+        assert calls[0]["source"] == "forge_collective"
+        assert calls[0]["kernel_id"] == "forge_collective"
+        assert calls[0]["snapshot_dir"] == str(tmp_path / "collective_snapshot")
+        assert calls[0]["extra_envs"] == {"SGLANG_USE_AITER": "1"}
+        assert calls[0]["defer_patch_finalize"] is True
+        assert calls[0]["backup_root"].endswith("/backup")
+        assert calls[0]["apply_checkpoint_path"].endswith(
+            "/apply_checkpoint.json"
+        )
+        assert coord.shared_state.last_collective["integration_decision"] == "KEEP"
+        assert coord.shared_state.last_collective["integration_status"] == "complete"
+        assert coord.shared_state.current_best["action"] == "collective"
+        assert coord.bus.messages[-1].payload["kind"] == "collective_integrate_done"
+
+    @pytest.mark.asyncio
+    async def test_pending_collective_reuses_applied_manifest(
+        self, tmp_path, monkeypatch
+    ):
+        """Resume must benchmark an existing apply without overwriting backups."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        integration_id = "resume-collective"
+        identity = hashlib.sha256(integration_id.encode("utf-8")).hexdigest()[:16]
+        patch_root = (
+            tmp_path
+            / "patches"
+            / f"forge_collective_{identity}"
+        )
+        manifest = patch_root / "backup" / "forge_collective_x" / "manifest.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            json.dumps({"status": "applied"}),
+            encoding="utf-8",
+        )
+        checkpoint = patch_root / "apply_checkpoint.json"
+        checkpoint.write_text(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "manifest_path": str(manifest),
+                }
+            ),
+            encoding="utf-8",
+        )
+        calls: list[dict] = []
+
+        async def _fake_integrate(payload, *, session_dir):
+            """Capture the resumed pre-applied payload."""
+            assert session_dir == tmp_path
+            calls.append(payload)
+            return {
+                "status": "ok",
+                "decision": "REVERT",
+                "new_tput": 90.0,
+                "gain_pct": -10.0,
+                "apply_result": payload["preapplied_apply_result"],
+                "revert_result": {"status": "ok"},
+            }
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
+        monkeypatch.setattr(
+            krh_mod,
+            "materialize_unified_patch_snapshot",
+            lambda **_kwargs: str(tmp_path / "collective_snapshot"),
+        )
+
+        campaign = {
+            "collective_attempt_id": "collective-attempt-resume",
+            "integration_id": integration_id,
+            "integration_status": "pending",
+            "status": "ok",
+            "decision": "KEEP",
+            "engine": "forge_collective",
+            "kept": True,
+            "requires_e2e_validation": True,
+            "patch": str(tmp_path / "forge.patch"),
+            "source_file": "/repo/custom_all_reduce.cuh",
+            "kernel_repo": "/repo",
+        }
+        coord.shared_state.record_collective(campaign, tmp_path)
+        await phase._integrate_collective(campaign)
+
+        assert calls[0]["preapplied_apply_result"]["manifest_path"] == str(
+            manifest
+        )
+        assert not checkpoint.exists()
+
+    @pytest.mark.asyncio
+    async def test_revert_recovery_does_not_repeat_e2e(
+        self, tmp_path, monkeypatch
+    ):
+        """An explicit recovery verdict must revert without remeasurement."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        integration_id = "revert-collective"
+        identity = hashlib.sha256(
+            integration_id.encode("utf-8")
+        ).hexdigest()[:16]
+        patch_root = (
+            tmp_path
+            / "patches"
+            / f"forge_collective_{identity}"
+        )
+        manifest = (
+            patch_root
+            / "backup"
+            / "forge_collective_x"
+            / "manifest.json"
+        )
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            json.dumps({"status": "applied"}),
+            encoding="utf-8",
+        )
+        checkpoint = patch_root / "apply_checkpoint.json"
+        checkpoint.write_text(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "manifest_path": str(manifest),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        async def _unexpected_integrate(*_args, **_kwargs):
+            """Fail if recovery re-enters the E2E measurement path."""
+            raise AssertionError("integration must not be repeated")
+
+        monkeypatch.setattr(
+            krh_mod,
+            "integrate_handler",
+            _unexpected_integrate,
+        )
+        monkeypatch.setattr(
+            krh_mod,
+            "_maybe_revert_kernel_patch",
+            lambda _apply: {"status": "partial"},
+        )
+        campaign = {
+            "collective_attempt_id": "collective-attempt-revert",
+            "integration_id": integration_id,
+            "integration_status": "recovery_required",
+            "integration_recovery_action": "revert",
+            "integration_decision": "REVERT",
+            "status": "ok",
+            "decision": "KEEP",
+            "engine": "forge_collective",
+            "kept": True,
+            "requires_e2e_validation": True,
+            "patch": str(tmp_path / "forge.patch"),
+            "source_file": "/repo/custom_all_reduce.cuh",
+            "kernel_repo": "/repo",
+        }
+        coord.shared_state.record_collective(campaign, tmp_path)
+
+        await phase._integrate_collective(campaign)
+
+        assert (
+            coord.shared_state.last_collective["integration_status"]
+            == "complete"
+        )
+        assert (
+            coord.shared_state.last_collective[
+                "integration_decision"
+            ]
+            == "REVERT"
+        )
+        assert not checkpoint.exists()
 
 
 class TestForgeGemmRuntimeConfigMerge:

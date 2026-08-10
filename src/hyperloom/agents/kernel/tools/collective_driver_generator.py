@@ -1,0 +1,556 @@
+###############################################################################
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""Generate the torchrun rig used to optimize a traced all-reduce kernel."""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+from pathlib import Path
+from string import Template
+from typing import Any
+
+_REFERENCE_CALL = "dist.all_reduce(out, op=dist.ReduceOp.SUM, group=ctx.group)"
+SNR_FLOOR_DB = 30.0
+
+_SHAPE_RE = re.compile(r"(\d+)")
+
+
+def _parse_shapes(candidate: dict[str, Any]) -> list[tuple[int, ...]]:
+    """Return distinct traced first-input tensor shapes."""
+    records = candidate.get("input_shapes")
+    if not isinstance(records, list) or not records:
+        raise ValueError("collective candidate has no traced input shape")
+    shapes: list[tuple[int, ...]] = []
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise ValueError(f"collective input_shapes[{index}] must be an object")
+        text = str(record.get("shape") or "").strip()
+        match = re.search(r"[\[(]([0-9,\s]+)[\])]", text)
+        if match is None:
+            raise ValueError(f"invalid collective input shape: {text!r}")
+        dims = tuple(int(d) for d in _SHAPE_RE.findall(match.group(1)))
+        if not dims or any(dim <= 0 for dim in dims):
+            raise ValueError(f"invalid collective input shape: {text!r}")
+        if dims not in shapes:
+            shapes.append(dims)
+    return shapes
+
+
+def _dtype_of(candidate: dict[str, Any]) -> str:
+    """Return the single traced input dtype accepted by the driver."""
+    values = candidate.get("input_dtypes")
+    if not isinstance(values, list) or not values:
+        raise ValueError("collective candidate has no traced input dtype")
+    resolved: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"invalid collective input dtype: {value!r}")
+        text = value.lower()
+        if "bfloat16" in text or "bf16" in text:
+            resolved.add("bf16")
+        elif "float16" in text or "fp16" in text:
+            resolved.add("fp16")
+        elif "float32" in text or "fp32" in text:
+            resolved.add("fp32")
+        else:
+            raise ValueError(f"unsupported collective input dtype: {value!r}")
+    if len(resolved) != 1:
+        raise ValueError(f"collective candidate has conflicting input dtypes: {values!r}")
+    return resolved.pop()
+
+
+def _collective_op(candidate: dict[str, Any]) -> str:
+    """Validate and return the supported collective operation."""
+    contract = candidate.get("kernel_contract")
+    if not isinstance(contract, dict) or contract.get("kind") != "collective":
+        raise ValueError("candidate kernel_contract.kind must be 'collective'")
+    op = str(contract.get("collective_op") or "").strip().lower()
+    if op != "all_reduce":
+        raise ValueError(f"unsupported collective operation: {op or '<missing>'}")
+    return op
+
+
+def _world_size(tp: int) -> int:
+    """Return an explicit tensor-parallel world size."""
+    if isinstance(tp, bool) or not isinstance(tp, int):
+        raise ValueError(f"invalid collective tp: {tp!r}")
+    requested = tp
+    if requested <= 1:
+        raise ValueError("collective tp must be greater than one")
+    return requested
+
+
+_DRIVER_TEMPLATE = Template('''#!/usr/bin/env python3
+"""Measure a traced all-reduce implementation under torchrun."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import statistics
+import subprocess
+import sys
+from dataclasses import dataclass
+from datetime import timedelta
+from typing import Any
+
+import torch
+import torch.distributed as dist
+
+WORLD_SIZE = $world_size
+SNR_FLOOR_DB = $snr_floor
+SNR_LIMIT_DB = 300.0
+DIST_TIMEOUT_SEC = 120
+DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+CASES = $cases
+DTYPE = "$dtype"
+_DIST_ENV = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
+
+
+def self_launch(argv: list[str]) -> int:
+    """Launch the configured rank count unless torchrun already did."""
+    distributed_env = [bool(os.environ.get(key)) for key in _DIST_ENV]
+    if any(distributed_env) and not all(distributed_env):
+        raise RuntimeError("incomplete torchrun environment")
+    if all(distributed_env):
+        actual_world_size = int(os.environ["WORLD_SIZE"])
+        if actual_world_size != WORLD_SIZE:
+            raise RuntimeError(
+                f"expected world_size={WORLD_SIZE}, got {actual_world_size}"
+            )
+        return -1
+    visible = torch.cuda.device_count()
+    if visible < WORLD_SIZE:
+        print(
+            f"ERROR: need {WORLD_SIZE} visible GPUs for this collective, found {visible}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
+    cmd = [
+        sys.executable, "-m", "torch.distributed.run",
+        "--standalone", f"--nproc-per-node={WORLD_SIZE}",
+        os.path.abspath(__file__), *argv,
+    ]
+    env = os.environ.copy()
+    for key in _DIST_ENV:
+        env.pop(key, None)
+    return subprocess.call(cmd, env=env)
+
+
+@dataclass
+class WorkerCtx:
+    """Distributed state owned by one driver rank."""
+
+    rank: int
+    world_size: int
+    device: torch.device
+    group: Any
+
+
+def init_worker() -> WorkerCtx:
+    """Initialise the process group and pin this rank to its own device."""
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    if world_size != WORLD_SIZE:
+        raise RuntimeError(f"expected world_size={WORLD_SIZE}, got {world_size}")
+    visible = torch.cuda.device_count()
+    if world_size > visible:
+        raise RuntimeError(
+            f"world_size={world_size} exceeds {visible} visible GPUs; "
+            "ranks would share a device and the collective would not be measured"
+        )
+    if local_rank < 0 or local_rank >= visible:
+        raise RuntimeError(f"LOCAL_RANK={local_rank} is outside {visible} visible GPUs")
+    torch.cuda.set_device(local_rank)
+    if not dist.is_initialized():
+        dist.init_process_group(
+            backend="nccl",
+            rank=rank,
+            world_size=world_size,
+            timeout=timedelta(seconds=DIST_TIMEOUT_SEC),
+        )
+    return WorkerCtx(rank, world_size, torch.device("cuda", torch.cuda.current_device()), dist.group.WORLD)
+
+
+def make_inputs(shape: tuple[int, ...], ctx: WorkerCtx, seed: int = 0) -> dict:
+    """Rank-distinct inputs, so a collective that drops ranks cannot pass."""
+    gen = torch.Generator(device="cuda").manual_seed(seed + ctx.rank)
+    dtype = DTYPES[DTYPE]
+    x = torch.randn(shape, generator=gen, device=ctx.device, dtype=torch.float32).to(dtype)
+    return {"x": x}
+
+
+def snr_db(ref: torch.Tensor, got: torch.Tensor) -> float:
+    """Return a finite signal-to-noise ratio in dB."""
+    ref32, got32 = ref.float(), got.float()
+    noise = (ref32 - got32).pow(2).sum().item()
+    if not math.isfinite(noise) or noise < 0.0:
+        return -SNR_LIMIT_DB
+    if noise == 0.0:
+        return SNR_LIMIT_DB
+    signal = ref32.pow(2).sum().item()
+    if not math.isfinite(signal) or signal <= 0.0:
+        return -SNR_LIMIT_DB
+    value = 10.0 * math.log10(signal / noise)
+    if not math.isfinite(value):
+        return -SNR_LIMIT_DB
+    return max(-SNR_LIMIT_DB, min(SNR_LIMIT_DB, value))
+
+
+def run_candidate(inputs: dict, ctx: WorkerCtx):
+    """Run the implementation under optimisation."""
+    raise NotImplementedError(
+        "run_candidate must invoke the launcher for " + $launcher_hint_literal
+    )
+
+
+def run_reference(inputs: dict, ctx: WorkerCtx):
+    """Independent reference via torch.distributed."""
+    out = inputs["x"].clone()
+    $reference_call
+    return out
+
+
+def check_case(
+    shape: tuple[int, ...],
+    ctx: WorkerCtx,
+    snr_threshold: float = SNR_FLOOR_DB,
+    seed: int = 0,
+) -> dict:
+    """Parity of candidate vs reference for one shape."""
+    ref = run_reference(make_inputs(shape, ctx, seed), ctx)
+    got = run_candidate(make_inputs(shape, ctx, seed), ctx)
+    if not isinstance(got, torch.Tensor):
+        raise TypeError("run_candidate must return a torch.Tensor")
+    value = snr_db(ref, got)
+    score = torch.tensor([value], dtype=torch.float32, device=ctx.device)
+    dist.all_reduce(score, op=dist.ReduceOp.MIN, group=ctx.group)
+    value = float(score.item())
+    return {"shape": list(shape), "snr_db": value, "passed": value >= snr_threshold}
+
+
+def capture_chain(inputs: dict, ctx: WorkerCtx, chain: int):
+    """Capture a chain of candidate calls for device-side timing."""
+    graph = torch.cuda.CUDAGraph()
+    capture_stream = torch.cuda.Stream()
+    current_stream = torch.cuda.current_stream()
+    capture_stream.wait_stream(current_stream)
+    with torch.cuda.stream(capture_stream):
+        with torch.cuda.graph(graph, stream=capture_stream):
+            for _ in range(chain):
+                run_candidate(inputs, ctx)
+    current_stream.wait_stream(capture_stream)
+    return graph
+
+
+def bench_case(
+    shape: tuple[int, ...],
+    ctx: WorkerCtx,
+    warmup: int = 20,
+    iters: int = 100,
+    repeat: int = 1,
+) -> float:
+    """Return graph-replay latency, maximised across ranks."""
+    inputs = make_inputs(shape, ctx)
+    for _ in range(warmup):
+        run_candidate(inputs, ctx)
+    torch.cuda.synchronize()
+
+    chain = 1
+    graph = capture_chain(inputs, ctx, chain)
+    start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    rounds = []
+
+    for _ in range(max(1, warmup)):
+        graph.replay()
+    torch.cuda.synchronize()
+    for _ in range(max(1, repeat)):
+        samples = []
+        for _ in range(iters):
+            dist.barrier(group=ctx.group)
+            start.record()
+            graph.replay()
+            end.record()
+            end.synchronize()
+            latency_ms = start.elapsed_time(end) / chain
+            if not math.isfinite(latency_ms) or latency_ms <= 0.0:
+                raise RuntimeError("graph replay produced invalid latency")
+            samples.append(latency_ms)
+        rounds.append(statistics.median(samples))
+    del graph
+
+    median = torch.tensor([statistics.median(rounds)], device=ctx.device)
+    dist.all_reduce(median, op=dist.ReduceOp.MAX, group=ctx.group)
+    value = float(median.item())
+    if not math.isfinite(value) or value <= 0.0:
+        raise RuntimeError("cross-rank latency is invalid")
+    return value
+
+
+def profile_case(ctx: WorkerCtx) -> None:
+    """Dispatch the first case for hardware profiling."""
+    inputs = make_inputs(tuple(CASES[0]), ctx)
+    for _ in range(3):
+        run_candidate(inputs, ctx)
+    torch.cuda.synchronize()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI accepted by forge-loop."""
+    p = argparse.ArgumentParser(description="Collective kernel driver ($collective_op)")
+    p.add_argument("--bench-mode", action="store_true")
+    p.add_argument("--profile-run", action="store_true")
+    p.add_argument("--warmup", type=int, default=20)
+    p.add_argument("--iters", type=int, default=100)
+    p.add_argument("--repeat", type=int, default=1, help="in-process repeats of the sweep")
+    p.add_argument("--snr-threshold", type=float, default=SNR_FLOOR_DB)
+    p.add_argument("--seed", type=int, default=0)
+    return p
+
+
+def case_id(shape: tuple[int, ...]) -> str:
+    """Return a stable identifier for one measured shape."""
+    return "x".join(str(dim) for dim in shape)
+
+
+def main(argv: list[str]) -> int:
+    """Run correctness, benchmark, or profile mode on every rank."""
+    ctx = None
+    result = {
+        "kernel": $kernel_name_literal,
+        "collective_op": "$collective_op",
+        "world_size": WORLD_SIZE,
+    }
+    try:
+        args = build_parser().parse_args(argv)
+        if args.warmup < 0 or args.iters <= 0 or args.repeat <= 0:
+            raise ValueError(
+                "warmup must be non-negative; iters and repeat must be positive"
+            )
+        if not math.isfinite(args.snr_threshold):
+            raise ValueError("snr-threshold must be finite")
+
+        rc = self_launch(argv)
+        if rc >= 0:
+            if rc != 0:
+                result.update(
+                    {
+                        "status": "failed",
+                        "error_class": "self_launch_failed",
+                        "error": f"torchrun exited with rc={rc}",
+                    }
+                )
+                print(json.dumps(result, sort_keys=True, allow_nan=False), flush=True)
+            return rc
+
+        ctx = init_worker()
+        result["world_size"] = ctx.world_size
+        if args.profile_run:
+            profile_case(ctx)
+            result["status"] = "ok"
+        elif args.bench_mode:
+            timings = {
+                case_id(tuple(s)): bench_case(tuple(s), ctx, args.warmup, args.iters, args.repeat)
+                for s in CASES
+            }
+            result["latency_ms"] = timings
+            result["mean_ms"] = statistics.fmean(timings.values())
+            if not math.isfinite(result["mean_ms"]) or result["mean_ms"] <= 0.0:
+                raise RuntimeError("benchmark mean latency is invalid")
+            result["status"] = "ok"
+            if ctx.rank == 0:
+                for name, latency_ms in timings.items():
+                    print(f"case_ms: {name} {latency_ms:.9f}", flush=True)
+                print(f"mean_ms: {result['mean_ms']:.9f}", flush=True)
+        else:
+            checks = [check_case(tuple(s), ctx, args.snr_threshold, args.seed) for s in CASES]
+            result["correctness"] = checks
+            result["correctness_passed"] = all(c["passed"] for c in checks)
+            result["status"] = "ok" if result["correctness_passed"] else "failed"
+            if ctx.rank == 0:
+                minimum = min(c["snr_db"] for c in checks)
+                print(f"SNR: {minimum:.6f} dB", flush=True)
+                print(f"allclose: {str(result['correctness_passed']).lower()}", flush=True)
+        if ctx.rank == 0:
+            print(
+                json.dumps(result, sort_keys=True, allow_nan=False),
+                flush=True,
+            )
+        return 0 if result.get("status") == "ok" else 1
+    except Exception as exc:
+        result.update(
+            {
+                "status": "failed",
+                "error_class": exc.__class__.__name__,
+                "error": str(exc),
+            }
+        )
+        rank_zero = (
+            ctx.rank == 0
+            if ctx is not None
+            else os.environ.get("RANK", "0") == "0"
+        )
+        if rank_zero:
+            print("allclose: false", flush=True)
+            print(
+                json.dumps(result, sort_keys=True, allow_nan=False),
+                flush=True,
+            )
+        return 1
+    finally:
+        if dist.is_initialized():
+            try:
+                dist.destroy_process_group()
+            except Exception as exc:
+                print(
+                    f"process-group cleanup failed: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
+''')
+
+
+_PROGRAM_TEMPLATE = Template('''# Optimize `$kernel_name`
+
+| | |
+|---|---|
+| Collective op | `$collective_op` |
+| World size | $world_size |
+| GPU time share | $gpu_pct% |
+| Source | `$source_file` |
+| Device symbol | `$launcher_hint` |
+
+## What to do
+
+1. Resolve the framework callable that launches the device symbol above and
+   implement only `run_candidate` in `driver.py`.
+2. Optimise the kernel source at `$source_file`.
+3. Keep only changes that improve the traced cases and preserve parity.
+
+## Gates
+
+- SNR must remain at least $snr_floor dB against
+  `torch.distributed.$collective_op`.
+- SNR permits expected bf16 differences from fp32 reduction accumulation.
+- Inputs remain rank-distinct.
+- Latency uses graph replay and the slowest rank.
+
+## Shapes under test
+
+$cases_md
+
+## Constraints
+
+- Every rank runs the same code path; do not branch on rank in the fast path.
+- Do not weaken or bypass the parity gate.
+- Keep graph replay and `--nproc-per-node=$world_size`.
+''')
+
+
+def generate_collective_driver(
+    candidate: dict[str, Any],
+    out_dir: Path | str,
+    *,
+    tp: int,
+    overwrite_driver: bool = False,
+) -> dict[str, str]:
+    """Write a strict all-reduce driver and Forge task brief."""
+    if not isinstance(candidate, dict):
+        raise TypeError("collective candidate must be a mapping")
+    if not isinstance(overwrite_driver, bool):
+        raise TypeError("overwrite_driver must be boolean")
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    op = _collective_op(candidate)
+    world_size = _world_size(tp)
+    shapes = _parse_shapes(candidate)
+    dtype = _dtype_of(candidate)
+    kernel_name_raw = candidate.get("device_kernel_name") or candidate.get("name")
+    source_file_raw = candidate.get("source_file")
+    function_raw = candidate.get("source_function")
+    if not isinstance(kernel_name_raw, str) or not kernel_name_raw.strip():
+        raise ValueError("collective candidate has no kernel name")
+    if (
+        not isinstance(source_file_raw, str)
+        or not source_file_raw.strip()
+        or not isinstance(function_raw, str)
+        or not function_raw.strip()
+    ):
+        raise ValueError("collective candidate requires source_file and source_function")
+    kernel_name = kernel_name_raw.strip()
+    source_file = source_file_raw.strip()
+    function = function_raw.strip()
+    gpu_pct_raw = candidate.get("gpu_pct")
+    if (
+        isinstance(gpu_pct_raw, bool)
+        or not isinstance(gpu_pct_raw, (int, float))
+    ):
+        raise ValueError("collective candidate has invalid gpu_pct")
+    gpu_pct = float(gpu_pct_raw)
+    if not math.isfinite(gpu_pct) or gpu_pct < 0:
+        raise ValueError("collective candidate gpu_pct must be finite and non-negative")
+
+    line = candidate.get("source_line")
+    if line is not None and (
+        isinstance(line, bool)
+        or not isinstance(line, int)
+        or line <= 0
+    ):
+        raise ValueError("collective candidate source_line must be positive")
+    if line is not None:
+        launcher_hint = f"{source_file}({line}): {function}"
+    else:
+        launcher_hint = f"{source_file}: {function}"
+
+    driver_src = _DRIVER_TEMPLATE.substitute(
+        collective_op=op,
+        world_size=world_size,
+        snr_floor=SNR_FLOOR_DB,
+        cases=json.dumps([list(s) for s in shapes]),
+        dtype=dtype,
+        launcher_hint_literal=repr(launcher_hint),
+        kernel_name_literal=repr(kernel_name),
+        reference_call=_REFERENCE_CALL,
+    )
+    program_src = _PROGRAM_TEMPLATE.substitute(
+        kernel_name=kernel_name,
+        collective_op=op,
+        world_size=world_size,
+        gpu_pct=gpu_pct,
+        source_file=source_file,
+        launcher_hint=launcher_hint,
+        snr_floor=SNR_FLOOR_DB,
+        cases_md="\n".join(f"- `{tuple(s)}` ({dtype})" for s in shapes),
+    )
+
+    driver_path = out_path / "driver.py"
+    program_path = out_path / "program.md"
+    if overwrite_driver or not driver_path.exists():
+        driver_path.write_text(driver_src, encoding="utf-8")
+    program_path.write_text(program_src, encoding="utf-8")
+
+    return {
+        "driver": str(driver_path),
+        "program": str(program_path),
+        "collective_op": op,
+        "world_size": str(world_size),
+    }
+
+
+__all__ = ["SNR_FLOOR_DB", "generate_collective_driver"]

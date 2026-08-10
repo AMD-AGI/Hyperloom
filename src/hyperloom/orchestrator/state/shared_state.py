@@ -37,12 +37,16 @@ Fields::
     last_profile_trace  str   — set by Coordinator when `profile` returns a
                                 trace path; consumed by Orch to populate
                                 `trace_analyze` REQUEST `trace_input` param
+    last_collective     dict  — latest collective campaign and integration state
+    collective_attempts list  — capped collective campaign audit
+    collective_only_mode bool — disable non-collective KERNEL lanes
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shlex
 import time
@@ -740,6 +744,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # so resume does not rerun a completed fusion loop or lose the adoption audit.
     last_fusion: dict[str, Any] = field(default_factory=dict)
     last_fusion_integrate: dict[str, Any] = field(default_factory=dict)
+    # Most recent collective campaign and capped integration audit.
+    last_collective: dict[str, Any] = field(default_factory=dict)
+    collective_attempts: list[dict[str, Any]] = field(default_factory=list)
+    collective_only_mode: bool = False
     # Most recent run_optimization dispatch skipped with no eligible kernels;
     # recorded as a non-failure so the breakdown can surface it.
     last_kernel_opt_dispatch_skip: dict[str, Any] = field(default_factory=dict)
@@ -1838,6 +1846,292 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             return str(latest.get("top_bottleneck") or "")
         return ""
 
+    def current_comm_pct(self) -> float | None:
+        """Return the latest exposed-communication percentage."""
+        snaps = self.roofline_snapshots if isinstance(self.roofline_snapshots, list) else []
+        if not snaps:
+            return None
+        latest = snaps[-1]
+        if not isinstance(latest, dict):
+            raise ValueError("Latest roofline snapshot must be a mapping")
+        value = latest.get("comm_pct")
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError("Latest comm_pct must be numeric")
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0:
+            raise ValueError("Latest comm_pct must be finite and non-negative")
+        return parsed
+
+    @staticmethod
+    def _collective_attempt_snapshot(result: dict[str, Any]) -> dict[str, Any]:
+        """Build one compact collective campaign record."""
+        return {
+            "collective_attempt_id": str(result["collective_attempt_id"]),
+            "integration_id": str(result.get("integration_id") or ""),
+            "experiment_id": str(result.get("experiment_id") or ""),
+            "analysis_key": str(result.get("analysis_key") or ""),
+            "status": str(result.get("status") or ""),
+            "decision": str(result.get("decision") or ""),
+            "kept": result["kept"],
+            "requires_e2e_validation": result[
+                "requires_e2e_validation"
+            ],
+            "integration_status": str(
+                result.get("integration_status") or ""
+            ),
+            "integration_decision": str(
+                result.get("integration_decision") or ""
+            ),
+            "kernel_id": str(result.get("kernel_id") or ""),
+            "kernel_name": str(result.get("kernel_name") or ""),
+            "source_file": str(
+                result.get("source_file") or result.get("target_file") or ""
+            ),
+            "kernel_repo": str(result.get("kernel_repo") or ""),
+            "backend": "forge_collective",
+            "engine": str(result.get("engine") or "forge_collective"),
+            "kernel_speedup": result.get("kernel_speedup"),
+            "gpu_pct": result.get("gpu_pct"),
+            "collective_op": str(result.get("collective_op") or ""),
+            "world_size": result.get("world_size"),
+            "workspace": str(result.get("workspace") or ""),
+            "patch_path": str(
+                result.get("patch") or result.get("patch_path") or ""
+            ),
+            "iterations": result.get("iterations"),
+            "salvaged": bool(result.get("salvaged")),
+            "duration_sec": (
+                result.get("duration_sec")
+                or result.get("elapsed_sec")
+                or result.get("runtime_sec")
+            ),
+            "error_class": str(result.get("error_class") or ""),
+            "error": str(result.get("error") or "")[-1200:],
+            "ts": str(result.get("ts") or _now_iso()),
+        }
+
+    @staticmethod
+    def _collective_integration_snapshot(
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build the integration fields stored on a collective campaign."""
+        revert = result.get("revert_result")
+        finalize = result.get("finalize_result")
+        return {
+            "integration_status": str(result["integration_status"]),
+            "integration_recovery_action": str(
+                result.get("integration_recovery_action") or ""
+            ),
+            "integration_decision": str(result["decision"]).strip().upper(),
+            "integration_result_status": str(result.get("status") or ""),
+            "integration_gain_pct": result.get("gain_pct"),
+            "integration_base_tput": result.get("base_tput"),
+            "integration_new_tput": result.get("new_tput"),
+            "integration_workspace": str(result.get("workspace") or ""),
+            "integration_report_path": str(result.get("report_path") or ""),
+            "integration_error_class": str(result.get("error_class") or ""),
+            "integration_error": str(result.get("error") or "")[-1200:],
+            "integration_revert_status": (
+                str(revert.get("status") or "")
+                if isinstance(revert, dict)
+                else ""
+            ),
+            "integration_finalize_status": (
+                str(finalize.get("status") or "")
+                if isinstance(finalize, dict)
+                else ""
+            ),
+            "integration_ts": _now_iso(),
+        }
+
+    def record_collective(self, result: dict[str, Any], session_dir: Path) -> None:
+        """Upsert and persist one collective campaign."""
+        if not isinstance(result, dict):
+            raise TypeError("Collective result must be a mapping")
+        incoming = dict(result)
+        incoming_attempt_id = str(
+            incoming.get("collective_attempt_id") or ""
+        ).strip()
+        previous = (
+            dict(self.last_collective)
+            if isinstance(self.last_collective, dict)
+            and incoming_attempt_id
+            and str(
+                self.last_collective.get("collective_attempt_id") or ""
+            ).strip()
+            == incoming_attempt_id
+            else {}
+        )
+        recorded = {**previous, **incoming}
+        recorded.setdefault("ts", _now_iso())
+        status = recorded.get("status")
+        decision = recorded.get("decision")
+        if not isinstance(status, str) or not status.strip():
+            raise ValueError("Collective result is missing status")
+        if decision not in {"KEEP", "REVERT"}:
+            raise ValueError("Collective result has invalid decision")
+        if recorded.get("engine") != "forge_collective":
+            raise ValueError("Collective result has invalid engine")
+        kept = recorded.setdefault("kept", False)
+        requires_e2e = recorded.setdefault(
+            "requires_e2e_validation",
+            False,
+        )
+        if not isinstance(kept, bool) or not isinstance(requires_e2e, bool):
+            raise ValueError("Collective result E2E flags must be boolean")
+        if kept != (decision == "KEEP") or requires_e2e != kept:
+            raise ValueError("Collective result contract is inconsistent")
+        attempt_id = str(
+            recorded.get("collective_attempt_id") or ""
+        ).strip()
+        if not attempt_id:
+            raise ValueError("Collective result is missing a stable attempt identity")
+        recorded["collective_attempt_id"] = attempt_id
+        if kept and not str(recorded.get("integration_id") or "").strip():
+            raise ValueError("Collective KEEP is missing integration_id")
+        for field_name in ("kernel_speedup", "gpu_pct"):
+            value = recorded.get(field_name)
+            if value is None:
+                continue
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or (field_name == "kernel_speedup" and value <= 0)
+                or (field_name == "gpu_pct" and value < 0)
+            ):
+                raise ValueError(
+                    f"Collective result has invalid {field_name}"
+                )
+        recorded.setdefault(
+            "integration_status",
+            "pending"
+            if requires_e2e
+            else "complete",
+        )
+
+        snapshot = self._collective_attempt_snapshot(recorded)
+        if not isinstance(self.collective_attempts, list) or any(
+            not isinstance(item, dict) for item in self.collective_attempts
+        ):
+            raise ValueError("collective_attempts must contain mappings")
+        history = [dict(item) for item in self.collective_attempts]
+        for index, item in enumerate(history):
+            if str(item.get("collective_attempt_id") or "") == attempt_id:
+                history[index] = snapshot
+                break
+        else:
+            history.append(snapshot)
+        previous_last = self.last_collective
+        previous_history = self.collective_attempts
+        self.last_collective = recorded
+        self.collective_attempts = history[-_DEFAULT_ATTEMPTS_HISTORY:]
+        try:
+            self.save(session_dir)
+        except Exception:
+            self.last_collective = previous_last
+            self.collective_attempts = previous_history
+            raise
+
+    def record_collective_integration(
+        self,
+        result: dict[str, Any],
+        session_dir: Path,
+        *,
+        integration_id: str = "",
+    ) -> None:
+        """Attach and persist an integration verdict to its campaign."""
+        if not isinstance(result, dict):
+            raise TypeError("Collective integration result must be a mapping")
+        integration = dict(result)
+        integration_id = str(
+            integration_id or integration.get("integration_id") or ""
+        ).strip()
+        if not integration_id:
+            raise ValueError("Collective integration is missing integration_id")
+        decision = str(integration.get("decision") or "").strip().upper()
+        if decision not in {"KEEP", "REVERT", "NEEDS_REVIEW"}:
+            raise ValueError(
+                f"Invalid collective integration decision: {decision!r}"
+            )
+        integration_status = str(
+            integration.get("integration_status") or ""
+        ).strip()
+        if integration_status not in {"complete", "recovery_required"}:
+            raise ValueError(
+                "Collective integration_status must be complete or "
+                "recovery_required"
+            )
+        recovery_action = str(
+            integration.get("integration_recovery_action") or ""
+        ).strip()
+        if integration_status == "complete" and recovery_action:
+            raise ValueError(
+                "Completed collective integration cannot require recovery"
+            )
+        if (
+            integration_status == "recovery_required"
+            and recovery_action not in {"finalize", "revert"}
+        ):
+            raise ValueError(
+                "Collective recovery action must be finalize or revert"
+            )
+        for field_name in ("gain_pct", "base_tput", "new_tput"):
+            value = integration.get(field_name)
+            if value is None:
+                continue
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                raise ValueError(
+                    f"Collective integration has invalid {field_name}"
+                )
+        integration["decision"] = decision
+        integration["integration_status"] = integration_status
+        if not isinstance(self.last_collective, dict):
+            raise ValueError("last_collective must be a mapping")
+        last = dict(self.last_collective)
+        if str(last.get("integration_id") or "") != integration_id:
+            raise ValueError(
+                "Collective integration_id does not match last_collective"
+            )
+        attempt_id = str(last.get("collective_attempt_id") or "").strip()
+        if not attempt_id:
+            raise ValueError("last_collective is missing collective_attempt_id")
+        if not isinstance(self.collective_attempts, list) or any(
+            not isinstance(item, dict) for item in self.collective_attempts
+        ):
+            raise ValueError("collective_attempts must contain mappings")
+        history = [dict(item) for item in self.collective_attempts]
+        matches = [
+            index
+            for index, item in enumerate(history)
+            if str(item.get("collective_attempt_id") or "") == attempt_id
+            and str(item.get("integration_id") or "") == integration_id
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                "Collective integration must match exactly one campaign"
+            )
+        integration_fields = self._collective_integration_snapshot(integration)
+        last.update(integration_fields)
+        history[matches[0]].update(integration_fields)
+
+        previous_last = self.last_collective
+        previous_history = self.collective_attempts
+        self.last_collective = last
+        self.collective_attempts = history
+        try:
+            self.save(session_dir)
+        except Exception:
+            self.last_collective = previous_last
+            self.collective_attempts = previous_history
+            raise
+
     def mark_bottleneck_switch(self, prev_bottleneck: str = "") -> None:
         """Flag that the next macro-cycle should redirect off ``prev_bottleneck`` (R3).
 
@@ -2880,6 +3174,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 "rocprof_roofline": rocprof_roofline,
                 "source_file": entry.get("source_file"),
                 "reusable_native_kernel": reusable,
+                "kernel_contract": entry.get("kernel_contract"),
+                "is_multigpu": entry.get("is_multigpu") is True,
                 "recommended_backends": entry.get("recommended_backends") or [],
                 "recommended_actions": entry.get("recommended_actions") or [],
             }

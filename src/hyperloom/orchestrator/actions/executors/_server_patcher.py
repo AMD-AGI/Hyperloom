@@ -675,22 +675,29 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     sglang_pkg = sglang_module.parent
     # Also verify the annotation pipeline sentinels so a partial apply (main
     # sentinel present but annotations missing) is still detected.
+    # Markers must match what the TraceLens patch set actually writes. The
+    # v1.0.1 set split scheduler_profiler_mixin.py into
+    # scheduler_components/profiler_manager.py and ships no http_server.patch,
+    # so the pre-v1.0.1 sentinels could never be satisfied — every apply passed
+    # and was then rolled back by the post-apply check. These four cover the
+    # annotation pipeline end to end: scheduler callback -> profiler_manager
+    # toggle -> io_struct request fields -> step-span aggregates.
     extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = (
         (
             sglang_pkg / "srt" / "managers" / "scheduler.py",
-            ("_build_profile_annotation", "profile_annotation"),
+            ("roofline_annotations",),
         ),
         (
-            sglang_pkg / "srt" / "managers" / "scheduler_profiler_mixin.py",
-            ("roofline_annotations", "execute_", "torch.profiler.record_function"),
+            sglang_pkg / "srt" / "managers" / "scheduler_components" / "profiler_manager.py",
+            ("roofline_annotations", "shape_discovery", "kernel_shape_profiler"),
         ),
         (
             sglang_pkg / "srt" / "managers" / "io_struct.py",
             ("shape_discovery", "roofline_annotations"),
         ),
         (
-            sglang_pkg / "srt" / "entrypoints" / "http_server.py",
-            ("shape_discovery", "roofline_annotations"),
+            sglang_pkg / "srt" / "model_executor" / "step_span_utils.py",
+            ("roofline_annotations",),
         ),
     )
     optional_patches = frozenset(

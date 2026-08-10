@@ -278,7 +278,8 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
     integrated_entries = [
         entry
         for entry in (state.optimization_stack or [])
-        if isinstance(entry, dict) and entry.get("action") == "integrate"
+        if isinstance(entry, dict)
+        and entry.get("action") in {"integrate", "collective"}
     ]
     attempted_entries = [
         entry
@@ -1265,31 +1266,34 @@ def record_gemm_tuning(state, result: dict[str, Any]) -> None:
         pass
 
 
-def _kernel_ids_in_optimization_stack(state) -> set[str]:
-    """kernel_ids already absorbed into optimization_stack as integrate entries.
+def is_collective_candidate(candidate: dict[str, Any]) -> bool:
+    """Return whether a trace row requires the dedicated collective lane."""
+    contract = candidate.get("kernel_contract")
+    return bool(
+        isinstance(contract, dict)
+        and str(contract.get("kind") or "") == "collective"
+    )
 
-    Returns:
-        set[str]: The set of ``kernel_id`` values that appear on an
-            ``integrate`` entry of :attr:`optimization_stack`.
-    """
+
+def _kernel_ids_in_optimization_stack(state) -> set[str]:
+    """Return kernel ids already integrated by a kernel lane."""
     return {
         str(e.get("kernel_id"))
         for e in (state.optimization_stack or [])
-        if isinstance(e, dict) and e.get("action") == "integrate" and e.get("kernel_id")
+        if isinstance(e, dict)
+        and e.get("action") in {"integrate", "collective"}
+        and e.get("kernel_id")
     }
 
 
 def _source_files_in_optimization_stack(state) -> set[str]:
-    """source_file paths already touched by an integrate entry; enforces "same source_file, only strongest KEEP integrated" (apply_kernel_patch is a whole-file overwrite).
-
-    Returns:
-        set[str]: The set of ``target_file`` / ``source_file`` paths
-            referenced by ``integrate`` entries of
-            :attr:`optimization_stack`.
-    """
+    """Return source paths already integrated by a kernel lane."""
     sources: set[str] = set()
     for e in state.optimization_stack or []:
-        if not isinstance(e, dict) or e.get("action") != "integrate":
+        if (
+            not isinstance(e, dict)
+            or e.get("action") not in {"integrate", "collective"}
+        ):
             continue
         src = str(e.get("target_file") or e.get("source_file") or "")
         if src:
@@ -1544,7 +1548,8 @@ def untried_hot_reusable_kernels(
     integrated_entries = [
         entry
         for entry in (state.optimization_stack or [])
-        if isinstance(entry, dict) and entry.get("action") == "integrate"
+        if isinstance(entry, dict)
+        and entry.get("action") in {"integrate", "collective"}
     ]
     rejected = set(state.rejected_kernel_ids or [])
     _ensure_kernel_task_state(state)
@@ -1557,6 +1562,8 @@ def untried_hot_reusable_kernels(
         if not isinstance(k, dict):
             continue
         if k.get("reusable_native_kernel") is not True:
+            continue
+        if is_collective_candidate(k):
             continue
         # Bypass path tags a kernel non-dispatchable when its shape is
         # geometry-only (launch_grid/tile_name) and would fail the kernel-opt

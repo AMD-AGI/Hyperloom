@@ -1,0 +1,439 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Test Collective candidate selection, KERNEL gating, and state."""
+
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from hyperloom.orchestrator.kernel.request_handlers import (
+    KERNEL_REQUEST_HANDLERS,
+    _collective_budget,
+    select_collective_candidate,
+)
+from hyperloom.orchestrator.kernel._kernel_decisions import (
+    untried_hot_reusable_kernels,
+)
+from hyperloom.orchestrator.state.shared_state import SharedState
+
+
+def _state_with_remaining(minutes):
+    return SimpleNamespace(remaining_minutes=lambda: minutes)
+
+
+class TestCollectiveBudget:
+    """Collective campaigns must fit preparation and finalization."""
+
+    def test_budget_follows_the_session_minus_a_reserve(self):
+        hours, timeout = _collective_budget(_state_with_remaining(600.0), None, 0)
+        assert hours == 8.16
+        assert timeout == 33276
+
+    def test_short_session_skips_when_one_hour_cannot_fit(self):
+        """KernelForge rejects a campaign shorter than one hour."""
+        hours, timeout = _collective_budget(_state_with_remaining(90.0), None, 14400)
+        assert hours is None
+        assert timeout == 0
+
+    def test_explicit_request_wins(self):
+        hours, timeout = _collective_budget(_state_with_remaining(600.0), 2.0, 14400)
+        assert hours == 2.0
+        assert timeout == 11100
+
+    def test_explicit_request_is_clamped_by_remaining_session(self):
+        hours, timeout = _collective_budget(_state_with_remaining(180.0), 3.0, 0)
+        assert hours == 1.16
+        assert timeout == 8076
+
+    def test_explicit_timeout_skips_when_minimum_campaign_cannot_fit(self):
+        hours, timeout = _collective_budget(_state_with_remaining(600.0), 2.0, 7200)
+        assert hours is None
+        assert timeout == 0
+
+    def test_unbounded_session_uses_an_explicit_wall_window(self):
+        assert _collective_budget(_state_with_remaining(None), None, 14400) == (2.91, 14376)
+
+    def test_unbounded_session_without_limits_defers_to_forge(self):
+        assert _collective_budget(_state_with_remaining(None), None, 0) == (None, 14400)
+
+    def test_budget_below_the_reserve_skips(self):
+        assert _collective_budget(_state_with_remaining(30.0), None, 14400) == (None, 0)
+
+    def test_state_without_the_hook_is_tolerated(self):
+        assert _collective_budget(SimpleNamespace(), None, 14400) == (2.91, 14376)
+from hyperloom.orchestrator.phases.kernel import KernelPhase
+
+
+def _collective_entry(**extra) -> dict:
+    entry = {
+        "kernel_id": "k007",
+        "name": "hipLaunchKernel->_ZN5aiter18all_reduce... (Synthetic Op)",
+        "gpu_pct": 4.5,
+        "reusable_native_kernel": True,
+        "source_file": "/sgl-workspace/aiter/csrc/include/custom_all_reduce.cuh",
+        "source_function": "all_reduce_cross_device",
+        "input_shapes": [{"shape": "(4096, 7168)"}],
+        "input_dtypes": ["bf16"],
+        "kernel_contract": {"kind": "collective", "collective_op": "all_reduce", "world_size": 8},
+    }
+    entry.update(extra)
+    return entry
+
+
+def _projection(entry: dict) -> dict:
+    """Build the routing fields retained in shared state."""
+    keep = (
+        "kernel_id",
+        "name",
+        "gpu_pct",
+        "source_file",
+        "reusable_native_kernel",
+        "kernel_contract",
+        "is_multigpu",
+    )
+    return {k: entry[k] for k in keep if k in entry}
+
+
+def _state_from_disk(tmp_path, *entries) -> SimpleNamespace:
+    """State shaped like a real session: projection in memory, full rows on disk."""
+    path = tmp_path / "kernel_candidates.json"
+    path.write_text(json.dumps({"hot_kernels": list(entries)}), encoding="utf-8")
+    return SimpleNamespace(
+        last_trace_analyze={
+            "hot_kernels_top15": [_projection(e) for e in entries],
+            "candidates_path": str(path),
+        }
+    )
+
+
+# --- Candidate selection ------------------------------------------------------
+
+
+def test_selects_the_hottest_collective(tmp_path):
+    hot = _collective_entry(kernel_id="k002", gpu_pct=9.1)
+    picked = select_collective_candidate(
+        _state_from_disk(tmp_path, _collective_entry(), hot)
+    )
+    assert picked["kernel_id"] == "k002"
+
+
+def test_prefers_source_resolved_nccl_summary_over_wrapper(tmp_path):
+    wrapper = _collective_entry(kernel_id="k002", gpu_pct=20.0)
+    resolved = _collective_entry(
+        kernel_id="k009",
+        gpu_pct=4.0,
+        candidate_source="nccl_summary",
+    )
+    picked = select_collective_candidate(
+        _state_from_disk(tmp_path, wrapper, resolved)
+    )
+    assert picked["kernel_id"] == "k009"
+
+
+def test_skips_non_collective_kernels(tmp_path):
+    gemm = _collective_entry(kernel_id="k001", gpu_pct=40.0, kernel_contract={"kind": "gemm"})
+    picked = select_collective_candidate(
+        _state_from_disk(tmp_path, gemm, _collective_entry())
+    )
+    assert picked["kernel_id"] == "k007"
+
+
+def test_skips_non_reusable_candidates(tmp_path):
+    """nccl/rccl reach here already marked non-reusable; they must stay out."""
+    vendor = _collective_entry(kernel_id="k003", gpu_pct=30.0, reusable_native_kernel=False)
+    assert select_collective_candidate(_state_from_disk(tmp_path, vendor)) is None
+
+
+def test_skips_candidates_without_source(tmp_path):
+    state = _state_from_disk(tmp_path, _collective_entry(source_file=""))
+    assert select_collective_candidate(state) is None
+
+
+def test_invalid_candidate_does_not_hide_a_valid_candidate(tmp_path):
+    """One incomplete summary row must not poison the candidate pool."""
+    invalid = _collective_entry(
+        kernel_id="k001",
+        candidate_source="nccl_summary",
+        input_shapes=[],
+        input_dtypes=[],
+    )
+    valid = _collective_entry(kernel_id="k002")
+
+    picked = select_collective_candidate(
+        _state_from_disk(tmp_path, invalid, valid)
+    )
+
+    assert picked["kernel_id"] == "k002"
+
+
+def test_returns_none_without_analysis():
+    assert select_collective_candidate(SimpleNamespace(last_trace_analyze=None)) is None
+    assert select_collective_candidate(SimpleNamespace()) is None
+
+
+# --- The enriched rows live on disk, not in shared state ----------------------
+
+
+def test_reads_the_enriched_rows_from_candidates_path(tmp_path):
+    """Selection reads complete driver inputs from the artifact."""
+    state = _state_from_disk(tmp_path, _collective_entry())
+    picked = select_collective_candidate(state)
+    assert picked is not None
+    assert picked["kernel_id"] == "k007"
+    assert all(
+        "kernel_contract" in row
+        for row in state.last_trace_analyze["hot_kernels_top15"]
+    )
+
+
+def test_still_ranks_by_gpu_pct_when_reading_from_disk(tmp_path):
+    hot = _collective_entry(kernel_id="k002", gpu_pct=9.1)
+    picked = select_collective_candidate(_state_from_disk(tmp_path, _collective_entry(), hot))
+    assert picked["kernel_id"] == "k002"
+
+
+def test_trace_projection_preserves_collective_queue_isolation(tmp_path):
+    """Persisted routing fields must keep collectives out of kernel_opt."""
+    state = SharedState.load_or_init(tmp_path)
+    state.record_trace_analyze(
+        {"trace_input": "/trace"},
+        {
+            "status": "ok",
+            "hot_kernels": [
+                _collective_entry(is_multigpu=True),
+            ],
+            "trace_health_warnings": [],
+        },
+    )
+
+    projected = state.last_trace_analyze["hot_kernels_top15"][0]
+    assert projected["kernel_contract"]["kind"] == "collective"
+    assert projected["is_multigpu"] is True
+    assert untried_hot_reusable_kernels(state) == []
+
+
+def test_multigpu_hint_without_collective_contract_stays_routable(tmp_path):
+    """A coarse multi-GPU hint must not suppress a dense candidate."""
+    state = SharedState.load_or_init(tmp_path)
+    state.record_trace_analyze(
+        {"trace_input": "/trace"},
+        {
+            "status": "ok",
+            "hot_kernels": [
+                _collective_entry(
+                    is_multigpu=True,
+                    kernel_contract={"kind": "gemm"},
+                ),
+            ],
+            "trace_health_warnings": [],
+        },
+    )
+
+    assert untried_hot_reusable_kernels(
+        state,
+        min_gpu_pct=0.0,
+        top_n=10,
+    ) == ["k007"]
+
+
+def test_collective_replay_preserves_completed_integration(tmp_path):
+    """Replaying a campaign must not reopen its completed integration."""
+    state = SharedState.load_or_init(tmp_path)
+    campaign = {
+        "collective_attempt_id": "attempt-1",
+        "integration_id": "integration-1",
+        "status": "ok",
+        "decision": "KEEP",
+        "engine": "forge_collective",
+        "kept": True,
+        "requires_e2e_validation": True,
+    }
+    state.record_collective(campaign, tmp_path)
+    state.record_collective_integration(
+        {
+            "status": "ok",
+            "decision": "KEEP",
+            "integration_status": "complete",
+            "integration_recovery_action": "",
+        },
+        tmp_path,
+        integration_id="integration-1",
+    )
+
+    state.record_collective(campaign, tmp_path)
+
+    assert state.last_collective["integration_status"] == "complete"
+    assert state.last_collective["integration_decision"] == "KEEP"
+
+
+def test_rejects_a_missing_candidate_artifact(tmp_path):
+    state = SimpleNamespace(
+        last_trace_analyze={
+            "hot_kernels_top15": [_collective_entry()],
+            "candidates_path": str(tmp_path / "gone.json"),
+        }
+    )
+    with pytest.raises(ValueError, match="invalid collective candidate artifact"):
+        select_collective_candidate(state)
+
+
+def test_rejects_an_unreadable_candidate_artifact(tmp_path):
+    bad = tmp_path / "kernel_candidates.json"
+    bad.write_text("{not json", encoding="utf-8")
+    state = SimpleNamespace(
+        last_trace_analyze={"hot_kernels_top15": [_collective_entry()], "candidates_path": str(bad)}
+    )
+    with pytest.raises(ValueError, match="invalid collective candidate artifact"):
+        select_collective_candidate(state)
+
+
+# --- KERNEL-entry gate --------------------------------------------------------
+
+
+def _gate(*, tp=8, comm_pct=5.0, last_collective=None, skip_env=None, monkeypatch=None, analysis=True):
+    if monkeypatch is not None:
+        monkeypatch.setenv("HYPERLOOM_SKIP_COLLECTIVE", skip_env or "")
+    state = SimpleNamespace(
+        tp=tp,
+        last_collective=last_collective or {},
+        current_comm_pct=lambda: comm_pct,
+        last_trace_analyze={"hot_kernels_top15": []} if analysis else {},
+    )
+    fake = SimpleNamespace(
+        shared_state=state,
+        COLLECTIVE_COMM_PCT_FLOOR=KernelPhase.COLLECTIVE_COMM_PCT_FLOOR,
+    )
+    return KernelPhase._collective_required_before_kernel_opt(fake)
+
+
+def test_gate_opens_for_multi_gpu_with_exposed_comm():
+    assert _gate(tp=8, comm_pct=5.0) is True
+
+
+@pytest.mark.parametrize("tp", [0, 1])
+def test_gate_closed_below_tp2(tp):
+    """A single rank issues no collective at all."""
+    assert _gate(tp=tp) is False
+
+
+def test_gate_closed_when_comm_is_overlapped():
+    """Communication hidden behind compute is not worth a tuning round."""
+    assert _gate(comm_pct=0.2) is False
+
+
+def test_gate_closed_without_a_roofline_snapshot():
+    assert _gate(comm_pct=None) is False
+
+
+@pytest.mark.parametrize("status", ["ok", "complete", "kept"])
+def test_gate_is_idempotent_after_a_completed_run(status):
+    assert _gate(last_collective={"status": status}) is False
+
+
+def test_gate_reopens_after_a_failed_run():
+    assert _gate(last_collective={"status": "failed"}) is True
+
+
+# --- A skip is scoped to its analysis, not to the session --------------------
+
+
+def _gate_with_analysis(candidates_path: str, last_collective: dict) -> bool:
+    state = SimpleNamespace(
+        tp=8,
+        last_collective=last_collective,
+        current_comm_pct=lambda: 5.0,
+        last_trace_analyze={"hot_kernels_top15": [], "candidates_path": candidates_path},
+    )
+    fake = SimpleNamespace(
+        shared_state=state,
+        COLLECTIVE_COMM_PCT_FLOOR=KernelPhase.COLLECTIVE_COMM_PCT_FLOOR,
+    )
+    return KernelPhase._collective_required_before_kernel_opt(fake)
+
+
+def test_skip_is_terminal_for_the_analysis_that_produced_it():
+    """Re-deciding the same analysis on every KERNEL re-entry is noise."""
+    assert _gate_with_analysis("/run/a/kernel_candidates.json",
+                               {"status": "skipped", "analysis_key": "/run/a/kernel_candidates.json"}) is False
+
+
+def test_skip_does_not_block_a_later_analysis():
+    """Nothing clears last_collective, so an unscoped skip would lock the lane
+    out for the whole session even after a new trace exposes a collective."""
+    assert _gate_with_analysis("/run/b/kernel_candidates.json",
+                               {"status": "skipped", "analysis_key": "/run/a/kernel_candidates.json"}) is True
+
+
+def test_skip_without_an_analysis_key_does_not_block():
+    assert _gate_with_analysis("/run/a/kernel_candidates.json", {"status": "skipped"}) is True
+
+
+def test_gate_closed_before_any_trace_analysis():
+    """Candidate selection reads the analysis, so a skip recorded before one
+    exists would wrongly become terminal."""
+    assert _gate(analysis=False) is False
+
+
+def test_gate_respects_the_kill_switch(monkeypatch):
+    assert _gate(skip_env="1", monkeypatch=monkeypatch) is False
+
+
+@pytest.mark.asyncio
+async def test_collective_only_mode_never_falls_through_to_kernel_opt(
+    tmp_path, monkeypatch
+):
+    """A directed Collective session must wind down even when its gate is closed."""
+    from hyperloom.orchestrator.phases import machine_state
+
+    class _State:
+        """Minimal state sink for the Collective-only wind-down hint."""
+
+        def __init__(self):
+            self.hint = ""
+
+        def set_pending_escalate_hint(self, hint):
+            """Record the requested phase escalation."""
+            self.hint = hint
+
+        def save(self, _session_dir):
+            """Accept the durable-save call made by the phase."""
+
+    state = _State()
+    fake = SimpleNamespace(
+        shared_state=state,
+        session_dir=tmp_path,
+        _collective_required_before_kernel_opt=lambda: False,
+        _collective_only_mode=lambda: True,
+    )
+    monkeypatch.setenv("HYPERLOOM_COLLECTIVE_ONLY", "1")
+
+    await KernelPhase._maybe_run_collective_before_kernel_opt(fake)
+
+    assert state.hint == machine_state.ESCALATE_HINT_SKIP_TO_SWEEP
+
+
+# --- Registration -------------------------------------------------------------
+
+
+def test_handler_is_registered():
+    assert "run_collective" in KERNEL_REQUEST_HANDLERS
+
+
+def test_lane_is_not_exposed_to_the_llm():
+    """Deterministic gate => Coordinator-only, same posture as fusion."""
+    from hyperloom.inference_optimizer.protocol.action_surfaces import (
+        FULL_ENABLED_ACTIONS,
+        KERNEL_AGENT_OWNED_ACTIONS,
+    )
+    from hyperloom.orchestrator.phases.machine_state import (
+        PHASE_ALLOWED_ACTIONS,
+        PHASE_KERNEL_AGENT,
+    )
+
+    assert "run_collective" not in KERNEL_AGENT_OWNED_ACTIONS
+    assert "run_collective" not in FULL_ENABLED_ACTIONS
+    assert "run_collective" not in PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGENT]

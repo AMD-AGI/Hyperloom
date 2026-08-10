@@ -545,7 +545,7 @@ class _RenderMixin:
                 audit fields (baseline / current best / gains / kernel-opt
                 queue / attempts history / failures / phase status).
         """
-        from ...kernel import request_handlers as _kernel_request_handlers
+        from ...kernel import _kernel_decisions
 
         lines = [
             f"session_id={self.session_id or '(unset)'}",
@@ -581,7 +581,7 @@ class _RenderMixin:
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"explore_search={self._format_search_state(self.explore_search)}",
             f"discovered_flags={self._format_discovered_flags()}",
-            f"last_kernel_opt={_kernel_request_handlers._format_last_kernel_opt(self)}",
+            f"last_kernel_opt={_kernel_decisions._format_last_kernel_opt(self)}",
             # Pending KEEPs the integrate gate will drain, plus per-kernel attempt count.
             (f"pending_keep_kernels={self.pending_keep_kernel_ids() or '(none)'}"),
             (f"has_keep_pending_integrate={'true' if self.has_keep_pending_integrate else 'false'}"),

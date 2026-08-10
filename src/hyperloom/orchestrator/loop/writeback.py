@@ -4855,33 +4855,11 @@ class WritebackCollaborator:
         return {"validated": False, "status": res.get("status"), "reason": reason}
 
     async def _resume_reenter_kernel_if_needed(self) -> None:
-        """Idempotently re-fire the KERNEL_AGENT entry hook on resume.
-
-        Phase-entry side effects (the GEAK delegation + its ``result.json``
-        crash-recovery) are bound to a phase *transition* via
-        ``_on_phase_entered``; a resume only restores ``phase`` from state.json
-        and never re-enters the current phase. Without this, a session that
-        crashed mid ``KERNEL_AGENT`` sits idle until the phase budget cap fires,
-        then hands SWEEP an empty result — the whole delegation is silently lost.
-
-        General across every crash timing (not case-by-case): the decision is
-        driven purely by whether THIS KERNEL phase's history row already carries
-        a ``geak`` completion record, so it self-classifies:
-
-          * completed-this-phase -> only re-arm (+persist) the ``skip_to_sweep``
-            hint the delegation sets, so the phase machine winds down to SWEEP
-            with no e2e re-run;
-          * not-completed -> re-enter ``_on_enter_kernel``; its own entry guard
-            promotes an existing OK ``result.json`` (crash-before-handback) and
-            re-runs the e2e only when there is genuinely nothing to recover
-            (run_e2e itself then continues from the pinned eval_dir on disk).
-
-        No-op unless resumed while parked in ``KERNEL_AGENT`` with the GEAK
-        backend selected.
-        """
+        """Re-enter unfinished Collective or GEAK work after resume."""
         from ..phases.machine_state import (
             ESCALATE_HINT_SKIP_TO_SWEEP,
             PHASE_KERNEL_AGENT,
+            collective_integration_pending,
         )
 
         if not self._resumed_from.get("is_resume"):
@@ -4889,7 +4867,29 @@ class WritebackCollaborator:
         state = self.shared_state
         if (state.phase or "").strip().upper() != PHASE_KERNEL_AGENT:
             return
-        if not (self._kernel_enabled() and self._geak_enabled()):
+        kernel_enabled = self._kernel_enabled()
+        collective_only = bool(getattr(state, "collective_only_mode", False))
+        if kernel_enabled:
+            try:
+                collective_required = bool(
+                    collective_integration_pending(state)
+                    or self._collective_required_before_kernel_opt()
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("resume: Collective state check failed")
+                return
+            if collective_required:
+                log.info("resume: re-entering unfinished Collective work")
+                try:
+                    await self._on_enter_kernel(from_phase="resume")
+                except Exception:  # noqa: BLE001
+                    log.exception("resume: Collective re-entry failed")
+                return
+            if collective_only:
+                state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
+                state.save(self.session_dir)
+                return
+        if not (kernel_enabled and self._geak_enabled()):
             return
         history = state.phase_history or []
         row = history[-1] if history else {}

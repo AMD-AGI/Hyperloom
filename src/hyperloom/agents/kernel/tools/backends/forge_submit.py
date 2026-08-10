@@ -1002,35 +1002,29 @@ def _release_repo_lock(lock: _RepoLock | None) -> None:
         pass
 
 
-def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[str, str, dict] | None:
-    """In-place mode (Option 1): edit the LIVE repo so an editable-finder import
-    sees the changes. Snapshots the original branch/HEAD + source bytes for a
-    per-file restore in finally. Returns (workspace=repo, kernel_file=source_file,
-    restore_info) or None when the repo is not a usable git checkout.
-
-    Safety:
-      - if HEAD is already on a forge/ temp branch (a prior crashed/SIGKILL'd
-        run that never restored), AUTO-RECOVER: force-checkout the repo's
-        default branch and delete the stale temp branch, then proceed from a
-        pristine baseline (falls back to skip only if the default branch can't
-        be resolved),
-      - hold a per-repo lock so concurrent forge runs never interleave,
-      - dirty working trees are allowed: restore only touches the source_file
-        (per-file write-back, no ``reset --hard``), so other uncommitted changes
-        in the repo are never destroyed.
-    """
+def _prepare_inplace(
+    source_file: str,
+    kernel_repo: str,
+    branch: str,
+    *,
+    lock_fd: _RepoLock | None = None,
+) -> tuple[str, str, dict] | None:
+    """Prepare a locked live repository and its restoration state."""
     repo = kernel_repo or _git_toplevel(source_file)
     if not repo or not (Path(repo) / ".git").exists():
+        _release_repo_lock(lock_fd)
         return None
     if not Path(source_file).is_file():
+        _release_repo_lock(lock_fd)
         return None
     try:
         relpath = str(Path(source_file).resolve().relative_to(Path(repo).resolve()))
     except ValueError:
+        _release_repo_lock(lock_fd)
         return None  # source not inside repo
 
     # Serialize in-place runs on this repo before touching any git state.
-    lock_fd = _acquire_repo_lock(repo)
+    lock_fd = lock_fd or _acquire_repo_lock(repo)
     if lock_fd is None:
         return None  # another forge in-place run holds this repo; skip cleanly
 
@@ -1101,6 +1095,58 @@ def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[s
     return repo, source_file, restore
 
 
+def _untracked_paths(repo: str) -> set[str]:
+    """Return untracked repository paths without shell quoting."""
+    proc = _run(
+        [
+            "git",
+            "-C",
+            repo,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"could not inspect untracked files in {repo}")
+    return {
+        path
+        for path in (proc.stdout or "").split("\0")
+        if path
+    }
+
+
+def _remove_new_untracked(repo: str, baseline: set[str]) -> None:
+    """Remove only untracked paths created after the baseline."""
+    root = Path(repo)
+    created = _untracked_paths(repo) - baseline
+    for relpath in sorted(
+        created,
+        key=lambda value: len(Path(value).parts),
+        reverse=True,
+    ):
+        relative = Path(relpath)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError(f"unsafe untracked path: {relpath}")
+        target = root / relative
+        try:
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+        except OSError as exc:
+            raise RuntimeError(
+                f"could not remove campaign file: {target}"
+            ) from exc
+        parent = target.parent
+        while parent != root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
+
 def _restore_inplace(restore: dict) -> None:
     """Restore the live repo after in-place editing: revert EVERY file the agent
     changed back to its pre-forge content, return to the original branch/HEAD,
@@ -1148,6 +1194,14 @@ def _restore_inplace(restore: dict) -> None:
         Path(restore["source_file"]).write_bytes(restore["backup"])
     except OSError:
         pass
+    baseline_untracked = restore.get("baseline_untracked")
+    if baseline_untracked is not None:
+        if not isinstance(baseline_untracked, list) or any(
+            not isinstance(path, str) or not path
+            for path in baseline_untracked
+        ):
+            raise RuntimeError("invalid in-place untracked baseline")
+        _remove_new_untracked(repo, set(baseline_untracked))
     # Delete the temp branch (safe now that HEAD points elsewhere).
     if restore.get("branch"):
         _run(["git", "-C", repo, "branch", "-D", restore["branch"]], timeout=30)
