@@ -1238,21 +1238,27 @@ def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0
         return None
     if not isinstance(cfg, dict):
         return None
-    num_layers = int(cfg.get("num_layers") or cfg.get("num_hidden_layers") or 0)
-    num_single_layers = int(cfg.get("num_single_layers") or 0)
-    hidden = int(cfg.get("hidden_size") or cfg.get("inner_dim") or 0)
-    if hidden <= 0:
-        heads = int(cfg.get("num_attention_heads") or 0)
-        head_dim = int(cfg.get("attention_head_dim") or cfg.get("head_dim") or 0)
-        hidden = heads * head_dim
-    # ``patch_size`` may be a sequence; a 3-element one is (temporal, h, w) --
-    # e.g. Wan ships [1, 2, 2] -- so the spatial patch is the trailing entry.
-    _ps = cfg.get("patch_size")
-    if isinstance(_ps, (list, tuple)):
-        patch = (int(_ps[-1]) or 1) if _ps else 1
-    else:
+    # Every field below is attacker-shaped JSON, so a non-numeric value must
+    # degrade to "unreadable" rather than escape as TypeError past the caller.
+    try:
+        num_layers = int(cfg.get("num_layers") or cfg.get("num_hidden_layers") or 0)
+        num_single_layers = int(cfg.get("num_single_layers") or 0)
+        hidden = int(cfg.get("hidden_size") or cfg.get("inner_dim") or 0)
+        if hidden <= 0:
+            heads = int(cfg.get("num_attention_heads") or 0)
+            head_dim = int(cfg.get("attention_head_dim") or cfg.get("head_dim") or 0)
+            hidden = heads * head_dim
+        _ps = cfg.get("patch_size")
+        if isinstance(_ps, (list, tuple)):
+            # A 3-element patch is (temporal, h, w): a video denoiser, whose token
+            # count needs the frame axis nothing in this module models.
+            if len(_ps) >= 3:
+                return None
+            _ps = _ps[-1] if _ps else 1
         patch = int(_ps or 1) or 1
-    sample = int(cfg.get("sample_size") or 0)
+        sample = int(cfg.get("sample_size") or 0)
+    except (TypeError, ValueError):
+        return None
     if num_layers <= 0 or hidden <= 0:
         return None
 
