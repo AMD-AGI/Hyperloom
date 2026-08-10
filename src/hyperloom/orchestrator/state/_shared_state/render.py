@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Any
 
 
@@ -22,6 +23,9 @@ def _shared_state_module():
 # Failure rows rendered into the prompt, and per-row excerpt budget.
 _FAILURES_RENDERED = 10
 _FAILURE_EXCERPT_CHARS = 600
+
+# Width budget for the artifact anchors appended to a variant line.
+_VARIANT_ANCHOR_MAX_CHARS = 62
 
 
 class _RenderMixin:
@@ -144,12 +148,7 @@ class _RenderMixin:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-tick ``=== Phase ===`` block.
-
-        5 base lines + a ``force_exit`` line for EXPLORE + a ``reloop``
-        line for FRAMEWORK_AGENT / EXPLORE / KERNEL_AGENT / SWEEP showing
-        whether a new macro-cycle can still be opened.  Outside SWEEP the
-        value is a projection (remaining time will only decrease).
+        """Render the per-tick ``=== Phase ===`` block (≤7 lines). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate; the mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable.
 
         Args:
             budget_pct (dict[str, float] | None): Per-phase budget fractions;
@@ -162,9 +161,10 @@ class _RenderMixin:
         from ...phases.machine_state import (
             DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
             DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
-            PHASE_CLOSE,
             PHASE_EXPLORE,
-            PHASE_PRELUDE,
+            PHASE_FRAMEWORK_AGENT,
+            PHASE_KERNEL_AGENT,
+            PHASE_SWEEP,
             _phase_budget_total_seconds,
             llm_proposable_actions_for,
             normalize_budget_pct,
@@ -239,26 +239,24 @@ class _RenderMixin:
             if phase_remaining_pct is not None:
                 force_line += f" phase_remaining_pct={phase_remaining_pct:.3f}"
             lines.append(force_line)
-        # Append a cycle_reloop line for all phases except CLOSE and PRELUDE.
-        # Enables model to know whether "advance out of this phase" is safe.
-        if phase not in (PHASE_CLOSE, PHASE_PRELUDE, "UNSET"):
-            try:
-                feasible, _ev = should_reloop_to_explore(self, now_unix=now_unix)
-                eff = _ev.get("min_remaining_sec_effective")
-                remaining_sec = _ev.get("session_remaining_seconds")
-                reloop_line = f"cycle_reloop: feasible={feasible}"
-                if eff is not None:
-                    reloop_line += f" threshold_sec={int(eff)}"
-                if remaining_sec is not None:
-                    reloop_line += f" session_remaining_sec={int(remaining_sec)}"
-                blocked = _ev.get("reloop_blocked")
-                if blocked:
-                    reloop_line += f" blocked={blocked}"
-                if phase != "SWEEP":
-                    reloop_line += " (projected)"
-                lines.append(reloop_line)
-            except Exception:  # noqa: BLE001 — rendering must never crash
-                pass
+        # Whether deferring work to a later cycle is still a real option. Mirrors
+        # the SWEEP-exit decision, so it is a projection before SWEEP is reached.
+        if phase in (PHASE_FRAMEWORK_AGENT, PHASE_EXPLORE, PHASE_KERNEL_AGENT, PHASE_SWEEP):
+            reloop, evidence = should_reloop_to_explore(self, now_unix=now_unix)
+            feasible = reloop and (self.framework_agent_phase_enabled or self.explore_enabled)
+            reloop_line = f"reloop    : feasible={feasible}"
+            threshold = evidence.get("min_remaining_sec_effective")
+            if threshold is not None:
+                reloop_line += f" threshold_sec={int(threshold)}"
+            session_remaining = session_remaining_seconds(self, now_unix=now_unix)
+            if session_remaining is not None:
+                reloop_line += f" session_remaining_sec={int(session_remaining)}"
+            blocked = evidence.get("reloop_blocked")
+            if blocked:
+                reloop_line += f" blocked={blocked}"
+            if phase != PHASE_SWEEP:
+                reloop_line += " (projected)"
+            lines.append(reloop_line)
         return "\n".join(lines)
 
     def to_phase_budget_telemetry(
@@ -440,15 +438,14 @@ class _RenderMixin:
                 if isinstance(last, dict):
                     last_tag = f" last={last.get('action', '?')}:{last.get('outcome', '?')}"
             rows.append(f"  - {cid} [{layer}/{severity}] {symptom}\n      attempts={attempt_n}{last_tag}")
-            if max_attempts > 0 and isinstance(attempts, list) and attempts:
+            if max_attempts > 0 and isinstance(attempts, list):
                 for a in attempts[-max_attempts:]:
                     if not isinstance(a, dict):
                         continue
                     fid = a.get("failure_id") or ""
-                    fid_s = f" fid={fid}" if fid else ""
                     rows.append(
-                        f"        attempt: {a.get('action','?')} outcome={a.get('outcome','?')}"
-                        f" err={a.get('error_class','')}{fid_s}"
+                        f"        attempt: {a.get('action', '?')} outcome={a.get('outcome', '?')}"
+                        f" err={a.get('error_class', '')}" + (f" fid={fid}" if fid else "")
                     )
         if len(ordered) > max_entries:
             rows.append(f"  · (+{len(ordered) - max_entries} older gaps elided; see state.json `gaps[]`)")
@@ -755,30 +752,25 @@ class _RenderMixin:
         if reason and reason not in ("not_keep", "gain_below_threshold"):
             ratio = entry.get("wall_clock_ratio_vs_baseline")
             ratio_s = f" {ratio:.2f}x" if isinstance(ratio, (int, float)) and ratio > 0 else ""
-            # Prefer the tail-truncated error body; fall back to the reason tag.
             body = str(entry.get("error_excerpt") or reason)
             parts.append(f"reason={body[:120]}{ratio_s}")
 
-        # Artifact anchors: show only when present; paths truncated to last 2 segments.
-        _artifact_parts: list[str] = []
+        # Paths keep only their last two segments; the full value comes from
+        # ``get_failure(fid)``, so the line stays inside the prompt's width.
+        anchors: list[str] = []
         fid = str(entry.get("failure_id") or "").strip()
         if fid:
-            _artifact_parts.append(f"fid={fid}")
-        ws = str(entry.get("workspace") or "").strip()
-        if ws:
-            from pathlib import PurePosixPath
-            _artifact_parts.append(f"ws={'/'.join(PurePosixPath(ws).parts[-2:])}")
-        log_path = str(entry.get("server_log_path") or "").strip()
-        if log_path:
-            from pathlib import PurePosixPath
-            _artifact_parts.append(f"log={'/'.join(PurePosixPath(log_path).parts[-2:])}")
-        artifact_s = "  " + " ".join(_artifact_parts) if _artifact_parts else ""
-        # Keep the appended block under ~60 chars; drop ws/log if over limit.
-        if len(artifact_s) > 62 and fid:
-            artifact_s = f"  fid={fid}"
+            anchors.append(f"fid={fid}")
+        for label, key in (("ws", "workspace"), ("log", "server_log_path")):
+            raw = str(entry.get(key) or "").strip()
+            if raw:
+                anchors.append(f"{label}={'/'.join(PurePosixPath(raw).parts[-2:])}")
+        anchor_s = "  " + " ".join(anchors) if anchors else ""
+        if len(anchor_s) > _VARIANT_ANCHOR_MAX_CHARS and fid:
+            anchor_s = f"  fid={fid}"
 
         suffix = "  " + " ".join(parts) if parts else ""
-        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}{suffix}{artifact_s}"
+        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}{suffix}{anchor_s}"
 
     @staticmethod
     def _enrich_with_tested_gain(

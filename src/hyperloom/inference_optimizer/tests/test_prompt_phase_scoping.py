@@ -10,6 +10,8 @@ decision needs survive every phase.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir, asset_system_prompts_dir
@@ -490,43 +492,53 @@ def test_inject_phase_constraints_is_a_noop_without_a_phase():
     assert "review_constraints" not in bundle
 
 
-# Stage 5 additions — cycle_reloop_feasible in to_phase_status_summary
+# Reloop feasibility must reach the phases where the defer/advance call is made.
 
 
-def _make_render_state(phase: str, max_minutes: float = 120.0):
-    """Build a minimal SharedState for render testing."""
+def _render_state(phase: str, max_minutes: float = 120.0):
+    """Build a minimal SharedState parked in ``phase`` with a live clock."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     s = SharedState()
     s.phase = phase
     s.max_minutes = max_minutes
-    s.start_ts = "2026-01-01T00:00:00+00:00"
+    s.start_ts = datetime.now(timezone.utc).isoformat()
     return s
 
 
-def test_cycle_reloop_line_present_in_middle_phases():
+def _reloop_line(phase: str) -> str | None:
+    out = _render_state(phase).to_phase_status_summary()
+    return next((line for line in out.splitlines() if line.startswith("reloop")), None)
+
+
+def test_reloop_line_reaches_every_mid_chain_phase():
     for phase in (_ps.PHASE_FRAMEWORK_AGENT, _ps.PHASE_EXPLORE, _ps.PHASE_KERNEL_AGENT, _ps.PHASE_SWEEP):
-        s = _make_render_state(phase)
-        out = s.to_phase_status_summary()
-        assert "cycle_reloop:" in out, f"cycle_reloop line missing for {phase}"
+        line = _reloop_line(phase)
+        assert line is not None, f"reloop line missing for {phase}"
+        assert "feasible=" in line
+        assert "threshold_sec=" in line
+        assert "session_remaining_sec=" in line
 
 
-def test_cycle_reloop_line_absent_in_close_and_prelude():
-    for phase in (_ps.PHASE_CLOSE, _ps.PHASE_PRELUDE):
-        s = _make_render_state(phase)
-        out = s.to_phase_status_summary()
-        assert "cycle_reloop:" not in out, f"cycle_reloop line should not appear in {phase}"
+def test_reloop_line_absent_in_wind_down_phases():
+    for phase in (_ps.PHASE_PRELUDE, _ps.PHASE_CLOSE):
+        assert _reloop_line(phase) is None, f"reloop line leaked into {phase}"
 
 
-def test_cycle_reloop_projected_label_outside_sweep():
-    s = _make_render_state(_ps.PHASE_EXPLORE)
-    out = s.to_phase_status_summary()
-    assert "(projected)" in out
+def test_reloop_is_a_projection_before_sweep():
+    assert "(projected)" in (_reloop_line(_ps.PHASE_EXPLORE) or "")
+    assert "(projected)" not in (_reloop_line(_ps.PHASE_SWEEP) or "")
 
 
-def test_cycle_reloop_no_projected_label_in_sweep():
-    s = _make_render_state(_ps.PHASE_SWEEP)
-    out = s.to_phase_status_summary()
-    reloop_line = next((l for l in out.splitlines() if "cycle_reloop:" in l), None)
-    assert reloop_line is not None
-    assert "(projected)" not in reloop_line
+def test_reloop_feasibility_matches_the_transition_decision():
+    s = _render_state(_ps.PHASE_SWEEP)
+    reloop, _ = _ps.should_reloop_to_explore(s)
+    assert f"feasible={reloop}" in (_reloop_line(_ps.PHASE_SWEEP) or "")
+
+
+def test_reloop_infeasible_when_both_target_phases_are_disabled():
+    s = _render_state(_ps.PHASE_SWEEP)
+    s.explore_enabled = False
+    s.framework_agent_phase_enabled = False
+    line = next(line for line in s.to_phase_status_summary().splitlines() if line.startswith("reloop"))
+    assert "feasible=False" in line

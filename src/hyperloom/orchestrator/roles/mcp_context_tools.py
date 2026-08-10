@@ -215,66 +215,60 @@ class ContextProvider:
         return self._safe(lambda: self.reference_reader(name), "read_reference")
 
     def get_failure(self, failure_id: str = "") -> str:
-        """Return the full failure evidence packet for a single failure_id.
+        """Return one failure evidence packet as JSON.
 
         Args:
             failure_id: The stable failure id to look up.
 
         Returns:
-            JSON-encoded failure packet, or a not-found message.
+            The JSON-encoded packet, or a not-found marker.
         """
-        import json as _json
-
         fid = str(failure_id or "").strip()
         if not fid:
             return "(get_failure: failure_id is required)"
-        try:
+
+        def _read() -> str:
             fe = self.shared_state.find_failure(fid)
-        except Exception as exc:  # noqa: BLE001
-            return f"(get_failure: error: {exc!r})"
-        if fe is None:
-            return f"(get_failure: no entry for {fid!r})"
-        return _json.dumps(fe, default=str, indent=2)
+            if fe is None:
+                return f"(get_failure: no entry for {fid!r})"
+            return json.dumps(fe, default=str, indent=2)
+
+        return self._safe(_read, "get_failure")
 
     def get_variant_failures(self, task_id: str = "", top_k: int = 10) -> str:
-        """Return the most recent failure evidence entries, optionally filtered by task.
+        """Return recent failure evidence packets, newest first.
 
         Args:
-            task_id: When non-empty, only entries for this task are returned.
+            task_id: When non-empty, restricts the result to that task.
             top_k: Maximum number of entries to return.
 
         Returns:
-            Newline-separated JSON objects, one per entry.
+            One JSON object per line.
         """
-        import json as _json
-
-        k = max(1, min(int(top_k or 10), 50))
+        k = max(1, min(top_k, 50))
 
         def _read() -> str:
             if task_id:
                 entries = self.shared_state.failures_for_task(task_id)
             else:
                 entries = list(reversed(self.shared_state.failures or []))
-            shown = entries[:k]
-            if not shown:
+            if not entries:
                 return "(no failure entries)"
-            lines = [_json.dumps(e, default=str) for e in shown]
-            return "\n".join(lines)
+            return "\n".join(json.dumps(e, default=str) for e in entries[:k])
 
         return self._safe(_read, "get_variant_failures")
 
     def read_artifact(self, path: str = "", offset: int = 0, limit: int = 200, mode: str = "tail") -> str:
-        """Return a windowed view of a log or artifact file within the session directory.
+        """Return a bounded window of a log or artifact file under the session dir.
 
         Args:
-            path: Absolute path to the file; must reside under session_dir.
-            offset: Line offset for ``head`` mode; ignored in ``tail`` mode.
+            path: Absolute path to the file.
+            offset: Starting line index for ``head`` mode.
             limit: Maximum number of lines to return.
-            mode: ``tail`` (default) returns the last ``limit`` lines;
-                ``head`` returns ``limit`` lines starting at ``offset``.
+            mode: ``tail`` (default) or ``head``.
 
         Returns:
-            File content window, or an error string.
+            The text window, or a not-wired / error marker.
         """
         if self.artifact_reader is None:
             return "(read_artifact not wired)"
@@ -537,15 +531,9 @@ def _make_handler(
         kwargs: dict[str, Any] = {}
         if isinstance(args, dict):
             if "top_k" in args:
-                try:
-                    kwargs["top_k"] = int(args["top_k"])
-                except (TypeError, ValueError):
-                    pass
+                kwargs["top_k"] = int(args["top_k"])
             if "since_seq" in args:
-                try:
-                    kwargs["since_seq"] = int(args["since_seq"])
-                except (TypeError, ValueError):
-                    pass
+                kwargs["since_seq"] = int(args["since_seq"])
             if "action_name" in args:
                 kwargs["action_name"] = str(args["action_name"])
             if "params" in args and isinstance(args["params"], dict):
@@ -559,15 +547,9 @@ def _make_handler(
             if "path" in args:
                 kwargs["path"] = str(args["path"])
             if "offset" in args:
-                try:
-                    kwargs["offset"] = int(args["offset"])
-                except (TypeError, ValueError):
-                    pass
+                kwargs["offset"] = int(args["offset"])
             if "limit" in args:
-                try:
-                    kwargs["limit"] = int(args["limit"])
-                except (TypeError, ValueError):
-                    pass
+                kwargs["limit"] = int(args["limit"])
             if "mode" in args:
                 kwargs["mode"] = str(args["mode"])
         try:

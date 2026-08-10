@@ -52,6 +52,7 @@ _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
 # of its recorded tput is flagged as drift.
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
 from ..phases import machine_state as _phase_state
+from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.optimization_journal import Journal
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from ..actions.registry import ActionRegistry
@@ -349,11 +350,10 @@ def _defang_prompt_structure(text: str) -> str:
 
 
 def _flatten_for_inbox(text: str) -> str:
-    """Collapse newlines and neutralise section-header syntax in untrusted text.
+    """Fold untrusted text onto one inbox line that cannot forge a section header.
 
-    Server-log excerpts reach agent prompts via inbox lines.  Embedded newlines
-    would break the one-event-one-line contract; a leading ``=`` could be
-    misread as a ``=== ... ===`` section header by the critic inbox parser.
+    Newlines would break the one-event-one-line contract; a leading ``=`` would
+    be read as a ``=== ... ===`` header by the Critic's inbox parser.
     """
     flat = str(text or "").replace("\r\n", "\u23ce").replace("\r", "\u23ce").replace("\n", "\u23ce")
     if flat.startswith("="):
@@ -376,30 +376,21 @@ def _defang_alert_payload(value: Any) -> Any:
     return value
 
 
-_INBOX_FAILURE_OUTCOMES: frozenset[str] = frozenset({"FAILED", "KILLED_OVERTIME"})
-
 
 def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
     """Render one inbox ``Message`` as a compact, high-signal line.
-
-    When ``max_variant_rows > 0``, ``delegated_result`` events that carry
-    ``per_variant_outcomes`` entries with FAILED or KILLED_OVERTIME outcomes
-    get indented continuation lines appended (one per failing variant, capped
-    at ``max_variant_rows``).  The first line is unchanged.
 
     Args:
         m: The inbox message to render; its topic selects a per-topic
             formatting branch (delegated_result, policy_denial, review_verdict,
             observation) with a generic fallback.
-        max_variant_rows: Maximum number of per-variant failure lines to
-            append.  Pass 0 to suppress them.
+        max_variant_rows: Cap on the indented per-variant failure lines
+            appended to a ``delegated_result``; 0 suppresses them.
 
     Returns:
-        A string summarising the message; may span multiple lines only via
-        indented continuations (the first line is a single line).
+        The header line, plus one indented continuation line per rendered
+        variant failure.
     """
-    from ..state.failure_evidence import render_failure_line
-
     topic = (m.topic or "").strip()
     payload = m.payload if isinstance(m.payload, dict) else {}
     # Canonical inbox header ordering that downstream parsers anchor on.
@@ -441,30 +432,25 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
             shown = "; ".join(str(n) for n in notes)
             parts.append(f"notes={shown[:300]!r}")
         header_line = " ".join(parts)
-
-        # Append per-variant failure rows as indented continuations.
-        if max_variant_rows > 0 and isinstance(result, dict):
-            pvos = result.get("per_variant_outcomes")
-            if isinstance(pvos, list):
-                failures = [v for v in pvos if str(v.get("outcome") or "").upper() in _INBOX_FAILURE_OUTCOMES]
-                extra = len(failures) - max_variant_rows
-                shown_rows = failures[:max_variant_rows]
-                lines = [header_line]
-                for vo in shown_rows:
-                    # Build a minimal fe dict for render_failure_line.
-                    fe = {
-                        "failure_id": vo.get("failure_id") or "",
-                        "variant_name": vo.get("variant_name") or "",
-                        "stage": vo.get("stage") or "",
-                        "error_class": vo.get("error_class") or "",
-                        "error_excerpt": _flatten_for_inbox(vo.get("error_excerpt") or vo.get("reason") or ""),
-                        "reason": vo.get("reason") or "",
-                    }
-                    lines.append("  failure: " + render_failure_line(fe, excerpt_chars=120))
-                if extra > 0:
-                    lines.append(f"  (+{extra} more failures; pull get_variant_failures)")
-                return "\n".join(lines)
-        return header_line
+        if max_variant_rows <= 0 or not isinstance(result, dict):
+            return header_line
+        pvos = result.get("per_variant_outcomes")
+        if not isinstance(pvos, list):
+            return header_line
+        failures = [
+            v for v in pvos if isinstance(v, dict) and str(v.get("outcome") or "").upper() in UNMEASURED_OUTCOMES
+        ]
+        if not failures:
+            return header_line
+        lines = [header_line]
+        for vo in failures[:max_variant_rows]:
+            row = dict(vo)
+            row["error_excerpt"] = _flatten_for_inbox(vo.get("error_excerpt") or vo.get("reason") or "")
+            lines.append("  failure: " + render_failure_line(row, excerpt_chars=120))
+        elided = len(failures) - max_variant_rows
+        if elided > 0:
+            lines.append(f"  (+{elided} more failures; pull get_variant_failures)")
+        return "\n".join(lines)
 
     if topic in ("policy_denial", "denial") or (topic == "observation" and payload.get("kind") == "policy_denial"):
         return (

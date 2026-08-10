@@ -37,15 +37,15 @@ from typing import Any
 import yaml
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.gain_math import gain_pct
+from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...state.failure_evidence import (
     FAILURE_STAGE_DECISION,
     FAILURE_STAGE_WARMUP,
     make_failure_id,
     tail_excerpt,
 )
-from hyperloom.common.gain_math import gain_pct
-from hyperloom.common.timeutil import now_iso
-from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...state.shared_state import first_positive_tput, resolve_grading_anchor_tput, stack_base_params
 from ._accuracy_gate import (
     accuracy_passed,
@@ -1233,9 +1233,9 @@ class ExploreExecutor:
                                 "error_class": w.error_class if w is not None else "",
                                 "server_log_path": w.server_log_path if w is not None else None,
                                 "stage": FAILURE_STAGE_WARMUP,
-                                "error_excerpt": tail_excerpt(getattr(w, "error", None)) if w is not None else None,
-                                "workspace": getattr(w, "workspace", None) if w is not None else None,
-                                "raw_result_path": getattr(w, "raw_result_path", None) if w is not None else None,
+                                "error_excerpt": tail_excerpt(w.error) if w is not None else None,
+                                "workspace": w.workspace if w is not None else None,
+                                "raw_result_path": w.raw_result_path if w is not None else None,
                             }
                             if gv.name:
                                 name_index[gv.name] = fp
@@ -1254,8 +1254,8 @@ class ExploreExecutor:
                                     "ts": _now_iso(),
                                     "provenance": provenance,
                                     "stage": FAILURE_STAGE_WARMUP,
-                                    "error_excerpt": tail_excerpt(getattr(w, "error", None)) if w is not None else None,
-                                    "workspace": getattr(w, "workspace", None) if w is not None else None,
+                                    "error_excerpt": tail_excerpt(w.error) if w is not None else None,
+                                    "workspace": w.workspace if w is not None else None,
                                 }
                             )
                             losers.append(
@@ -1803,21 +1803,18 @@ class ExploreExecutor:
                 metrics["wall_clock_ratio_vs_baseline"] = te.get(
                     "wall_clock_ratio_vs_baseline",
                 )
-            _pvo_fp = fp_key
-            _pvo_stage = str(te.get("stage") or FAILURE_STAGE_DECISION)
-            _pvo_excerpt = te.get("error_excerpt")
             per_variant_outcomes.append(
                 {
                     "variant_name": str(te.get("name") or ""),
                     "outcome": outcome,
-                    "fingerprint": _pvo_fp,
+                    "fingerprint": fp_key,
                     "failure_id": make_failure_id(
                         task_id=str(ctx.task.task_id),
-                        fingerprint=_pvo_fp,
+                        fingerprint=fp_key,
                         variant_name=str(te.get("name") or ""),
                     ),
-                    "stage": _pvo_stage,
-                    "error_excerpt": _pvo_excerpt,
+                    "stage": str(te.get("stage") or FAILURE_STAGE_DECISION),
+                    "error_excerpt": te.get("error_excerpt"),
                     "provenance": str(te.get("provenance") or ""),
                     "scope": str(te.get("scope") or ""),
                     "metrics": metrics,

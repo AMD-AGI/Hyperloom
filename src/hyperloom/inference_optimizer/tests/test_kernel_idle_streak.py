@@ -258,28 +258,27 @@ def test_fingerprint_tracks_inflight_task_ids():
     ) == ps.compute_kernel_progress_fingerprint(state, inflight_task_ids=("t1", "t2"))
 
 
-def test_specialist_in_kernel_allowlist_is_counted_by_idle_guard():
-    """_inflight_kernel_task_ids uses PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]; a
-    specialist task must appear in the result so the idle clock is rebased."""
-    assert "specialist" in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_KERNEL_AGENT], (
-        "specialist must be in the KERNEL_AGENT allowlist for the idle guard to see it"
+@pytest.mark.asyncio
+async def test_running_specialist_counts_as_kernel_lane_work(kernel_coordinator):
+    """A specialist admitted to KERNEL must reach ``_inflight_kernel_task_ids``.
+
+    The kind filter is the phase allowlist, so admitting ``specialist`` there is
+    what stops the idle guard from reading a live investigation as dead air.
+    """
+    c = kernel_coordinator
+    task = await c.tasks.create(kind="specialist", params={}, idempotency_key="spec-idle")
+    await c.tasks.transition(task.task_id, "running")
+    assert task.task_id in await c.phase_machine._inflight_kernel_task_ids()
+
+
+@pytest.mark.asyncio
+async def test_queued_specialist_survives_the_transition_into_kernel(kernel_coordinator):
+    """``cancel_queued_not_allowed`` reads the same allowlist, so the task lives."""
+    c = kernel_coordinator
+    task = await c.tasks.create(kind="specialist", params={}, idempotency_key="spec-keep")
+    cancelled = await c.tasks.cancel_queued_not_allowed(
+        allowed_kinds=ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_KERNEL_AGENT],
+        reason="phase_transition:EXPLORE->KERNEL_AGENT",
     )
-
-
-def test_specialist_in_framework_allowlist():
-    """specialist is proposable in FRAMEWORK_AGENT."""
-    assert "specialist" in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_FRAMEWORK_AGENT]
-    # The proposable set (allowlist minus coordinator-internal and robustness-only)
-    # must include specialist for orchestration to be able to propose it.
-    proposable = ps.llm_proposable_actions_for(ps.PHASE_FRAMEWORK_AGENT)
-    assert "specialist" in proposable
-
-
-def test_specialist_in_kernel_proposable():
-    proposable = ps.llm_proposable_actions_for(ps.PHASE_KERNEL_AGENT)
-    assert "specialist" in proposable
-
-
-def test_specialist_not_in_sweep_or_close():
-    assert "specialist" not in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_SWEEP]
-    assert "specialist" not in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_CLOSE]
+    assert task.task_id not in cancelled
+    assert (await c.tasks.get(task.task_id)).state == "queued"

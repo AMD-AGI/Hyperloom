@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 import json
+import os
 import time
+from pathlib import Path
 from typing import Any
 from ..phases import machine_state as _phase_state
 from ..roles.base import BackendTurnResult
@@ -14,6 +16,7 @@ from ..bus.message_bus import Message
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 
 from .coordinator import (
+    _defang_prompt_structure,
     _format_inbox_event,
 )
 from .coordinator_helpers import _parse_iso_unix
@@ -22,6 +25,14 @@ from hyperloom.inference_optimizer.session.session_paths import runs_dir
 import logging as _logging
 
 log = _logging.getLogger(__name__)
+
+# read_artifact window bounds.
+_ARTIFACT_LINE_CAP = 400
+_ARTIFACT_BYTE_CAP = 65536
+# Per-variant failure lines expanded by get_recent_outcomes, and the total cap
+# that keeps a wide top_k from flooding the turn.
+_RECENT_OUTCOMES_VARIANT_ROWS = 12
+_RECENT_OUTCOMES_LINE_CAP = 120
 
 
 class ConversationCollaborator:
@@ -165,53 +176,42 @@ class ConversationCollaborator:
             return f"(read_reference: {name!r} not found; available: {available})"
         return candidate.read_text(encoding="utf-8")
 
-    _ARTIFACT_LINE_CAP = 400
-    _ARTIFACT_BYTE_CAP = 65536
-
     def _context_artifact_reader(self, path: str = "", offset: int = 0, limit: int = 200, mode: str = "tail") -> str:
-        """Return a bounded window of a session-sandboxed file.
+        """Return a bounded window of a file inside the session directory.
 
         Args:
             path: Absolute path to the file; must resolve within session_dir.
-            offset: Starting line index for ``head`` mode (0-based); ignored
-                in ``tail`` mode.
-            limit: Maximum lines to return; capped at
-                :attr:`_ARTIFACT_LINE_CAP`.
+            offset: Starting line index for ``head`` mode; unused for ``tail``.
+            limit: Maximum lines to return, capped at ``_ARTIFACT_LINE_CAP``.
             mode: ``tail`` (default) or ``head``.
 
         Returns:
-            Defanged text window, or an error string.
+            Defanged text window, or a parenthesised error string.
         """
-        from pathlib import Path
-        from ..loop.coordinator import _defang_prompt_structure
-
         p = (path or "").strip()
         if not p:
             return "(read_artifact: path is required)"
-        try:
-            resolved = Path(p).resolve()
-        except Exception:  # noqa: BLE001
-            return f"(read_artifact: invalid path {p!r})"
-        session_root = self.session_dir.resolve()
-        if not str(resolved).startswith(str(session_root)):
-            return f"(read_artifact: path not within session directory)"
-        if not resolved.exists():
+        resolved = Path(p).resolve()
+        if not resolved.is_relative_to(self.session_dir.resolve()):
+            return "(read_artifact: path is outside the session directory)"
+        if not resolved.is_file():
             return f"(read_artifact: file not found: {p!r})"
         try:
-            raw_bytes = resolved.read_bytes()
+            with resolved.open("rb") as fh:
+                if mode == "head":
+                    blob = fh.read(_ARTIFACT_BYTE_CAP)
+                else:
+                    size = fh.seek(0, os.SEEK_END)
+                    fh.seek(max(0, size - _ARTIFACT_BYTE_CAP))
+                    blob = fh.read()
         except OSError as exc:
             return f"(read_artifact: cannot read {p!r}: {exc})"
-        try:
-            text = raw_bytes[:self._ARTIFACT_BYTE_CAP].decode("utf-8", errors="strict")
-        except (UnicodeDecodeError, ValueError):
-            return f"(read_artifact: file is binary or non-UTF-8: {p!r})"
-        lines = text.splitlines()
-        n = max(1, min(int(limit or 200), self._ARTIFACT_LINE_CAP))
-        if mode == "head":
-            start = max(0, int(offset or 0))
-            window = lines[start : start + n]
-        else:
-            window = lines[-n:]
+        if b"\x00" in blob:
+            return f"(read_artifact: file is not text: {p!r})"
+        # A byte-window boundary can split a codepoint, so never decode strictly.
+        lines = blob.decode("utf-8", errors="replace").splitlines()
+        n = max(1, min(limit, _ARTIFACT_LINE_CAP))
+        window = lines[offset : offset + n] if mode == "head" else lines[-n:]
         return _defang_prompt_structure("\n".join(window))
 
     def _context_inbox_reader(self, since_seq: int = 0) -> str:
@@ -238,8 +238,6 @@ class ConversationCollaborator:
         msgs = [Message.from_row(r) for r in rows]
         lines = [_format_inbox_event(m) for m in msgs]
         return "\n".join(lines)
-
-    _RECENT_OUTCOMES_LINE_CAP = 120
 
     def _context_recent_outcomes_reader(self, top_k: int = 8) -> str:
         """Synchronous projection of recent action outcomes.
@@ -269,13 +267,12 @@ class ConversationCollaborator:
         # Flip newest-first query to newest-last for chronological reading.
         msgs = [Message.from_row(r) for r in rows][::-1]
         lines = ["=== Recent action outcomes (newest last) ==="]
-        for m in msgs:
-            lines.append(_format_inbox_event(m, max_variant_rows=12))
-        # Guard against a very wide top_k × many failures blowing the context budget.
-        if len(lines) > self._RECENT_OUTCOMES_LINE_CAP:
-            lines = lines[: self._RECENT_OUTCOMES_LINE_CAP]
-            lines.append(f"(truncated to {self._RECENT_OUTCOMES_LINE_CAP} lines; use get_recent_outcomes with smaller top_k)")
-        return "\n".join(lines)
+        lines.extend(_format_inbox_event(m, max_variant_rows=_RECENT_OUTCOMES_VARIANT_ROWS) for m in msgs)
+        rendered = "\n".join(lines).splitlines()
+        if len(rendered) > _RECENT_OUTCOMES_LINE_CAP:
+            rendered = rendered[:_RECENT_OUTCOMES_LINE_CAP]
+            rendered.append(f"(truncated at {_RECENT_OUTCOMES_LINE_CAP} lines; re-query with a smaller top_k)")
+        return "\n".join(rendered)
 
     def _context_running_tasks_reader(self) -> str:
         """Synchronous projection of in-flight tasks with their held resources.
@@ -737,9 +734,10 @@ class ConversationCollaborator:
             rendered = await self._augment_critic_inbox_with_pending(rendered)
         if rendered:
             sections.append(f"=== Inbox for {agent_name} (newest last) ===")
-            _variant_rows = 3 if agent_name == "orchestration" else 0
+            # Only Orchestration acts on variant-level failures; the reviewers do not.
+            variant_rows = 3 if agent_name == "orchestration" else 0
             for m in rendered:
-                sections.append(f"  {_format_inbox_event(m, max_variant_rows=_variant_rows)}")
+                sections.append(f"  {_format_inbox_event(m, max_variant_rows=variant_rows)}")
         else:
             sections.append(f"=== Inbox for {agent_name} ===")
             sections.append("(no new messages)")

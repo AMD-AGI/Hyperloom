@@ -21,6 +21,7 @@ from ..policy.gate import (
 from ..loop.sub_agent_runner import SubAgentResult
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
 from ..specialists.runner import SpecialistFailureType
+from ..state.failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_outcome
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import Task
 from ..loop.coordinator import (
@@ -31,9 +32,17 @@ from ..loop.coordinator import (
     _framework_config_levers_from_done,
 )
 from .base import PhaseHandler
-from ..state.failure_evidence import failure_from_variant_outcome
 
 log = _logging.getLogger(__name__)
+
+# Artifact references copied from a per-variant outcome onto its gap attempt.
+_GAP_ATTEMPT_ARTIFACT_KEYS: tuple[str, ...] = (
+    "failure_id",
+    "fingerprint",
+    "stage",
+    "workspace",
+    "server_log_path",
+)
 
 
 def _forward_enablement_carriers(src: dict[str, Any], dst: dict[str, Any]) -> None:
@@ -1376,16 +1385,10 @@ class ExplorePhase(PhaseHandler):
                 "reason": str(outcome.get("reason") or ""),
                 "error_class": str(outcome.get("error_class") or ""),
             }
-            if outcome.get("failure_id"):
-                attempt["failure_id"] = str(outcome["failure_id"])
-            if outcome.get("fingerprint"):
-                attempt["fingerprint"] = str(outcome["fingerprint"])
-            if outcome.get("stage"):
-                attempt["stage"] = str(outcome["stage"])
-            if outcome.get("workspace"):
-                attempt["workspace"] = str(outcome["workspace"])
-            if outcome.get("server_log_path"):
-                attempt["server_log_path"] = str(outcome["server_log_path"])
+            for key in _GAP_ATTEMPT_ARTIFACT_KEYS:
+                value = outcome.get(key)
+                if value:
+                    attempt[key] = str(value)
             state.append_gap_attempt(canonical, attempt)
 
     def _record_explore_variant_failures(
@@ -1394,7 +1397,7 @@ class ExplorePhase(PhaseHandler):
         task: "Task | None",
         result: dict[str, Any],
     ) -> None:
-        """Record each FAILED ``per_variant_outcomes`` row into ``last_action_failures``.
+        """Record each unmeasured ``per_variant_outcomes`` row as failure evidence + ``last_action_failures``.
 
         A crashed variant does not fail the round, so the round-level recorder
         never sees it.
@@ -1409,12 +1412,13 @@ class ExplorePhase(PhaseHandler):
         if not isinstance(per_variant, list):
             return
         task_id = str(task.task_id or "")
+        round_id = str(result.get("round_id") or "")
         for vo in per_variant:
             if not isinstance(vo, dict):
                 continue
-            if str(vo.get("outcome") or "").upper() not in {"FAILED", "KILLED_OVERTIME"}:
+            if str(vo.get("outcome") or "").upper() not in UNMEASURED_OUTCOMES:
                 continue
-            fe = failure_from_variant_outcome(task_id=task_id, round_id="", vo=vo)
+            fe = failure_from_variant_outcome(task_id=task_id, round_id=round_id, vo=vo)
             self.shared_state.record_failure_evidence(fe)
             self.shared_state.record_action_failure(
                 action="explore",
