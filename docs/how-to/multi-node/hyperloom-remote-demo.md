@@ -91,8 +91,7 @@ KubeRay cluster and Hyperloom drives them through the Ray Dashboard:
 
 Example: `…/custom/hyperloom-sglang:v0.5.16-rocm7.2.0-mi300x-ray2.44.1` adds
 `ray 2.44.1` to the `rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x` base, which
-does not ship Ray. The image already ships `click`, so pin it below 8.2
-(e.g. `click==8.1.8`) as explained below, since Ray's CLI breaks on click 8.2. Keep click below 8.2 whatever the Ray version claims:
+does not ship it. Keep click below 8.2 whatever the Ray version claims:
 ray 2.44.1 declares only `click>=7.0`, but click 8.2 changed `Sentinel` and ray's
 CLI then dies on import, so KubeRay's `ray start` never runs.
 
