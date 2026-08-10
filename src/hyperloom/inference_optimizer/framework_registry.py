@@ -92,17 +92,6 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         supports_server_reuse=False,
         throughput_unit="img/s",
     ),
-    # HunyuanImage-3.0: an 80B multimodal MoE text-to-image model run as a
-    # transformers AutoModelForCausalLM. Treated as a SCRIPTABLE image workload.
-    "hunyuan_image3": FrameworkSpec(
-        name="hunyuan_image3",
-        kind=SCRIPTABLE,
-        extra_args_env="EXTRA_HUNYUAN_IMAGE3_ARGS",
-        # No framework-agent source repo; repo_url stays None.
-        repo_url=None,
-        supports_server_reuse=False,
-        throughput_unit="img/s",
-    ),
     # An operator's own workload. Everything the entries above hardcode — the
     # checkout, the entrypoint, the knobs the script reads — arrives at launch
     # instead: ``--framework-path`` and ``--benchmark-scripts-dir`` (or their

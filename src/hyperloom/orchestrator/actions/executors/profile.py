@@ -10,7 +10,7 @@ under ``torch_trace/`` (or ``capture_traces/`` for TraceLens vLLM capture).
 Result schema (delivered on the bus as ``delegated_result``)::
 
     status:        "succeeded" | "failed"
-    framework:     "sglang" | "vllm" | "atom" | "xdit" | "hunyuan_image3"
+    framework:     "sglang" | "vllm" | "atom" | "xdit" | "custom"
     model:         path
     request/output/total_token_throughput, latency stats (same as baseline)
     workspace:     absolute path of the Magpie workspace
@@ -494,8 +494,6 @@ def _default_profile_config() -> Path:
         name = "profile_vllm.yaml"
     elif fw == "xdit":
         name = "profile_xdit.yaml"
-    elif fw == "hunyuan_image3":
-        name = "profile_hunyuan_image3.yaml"
     elif fw == "custom":
         name = "profile_custom.yaml"
     else:
@@ -722,9 +720,9 @@ class ProfileExecutor(BaselineExecutor):
 
         if framework_registry.is_scriptable(framework):
             # The baked-profiler verifier is xDiT/xfuser-specific (it inspects
-            # xfuser's base_model.py). Other scriptable frameworks (e.g.
-            # hunyuan_image3, a transformers CausalLM with no xfuser tree) share
-            # the server-less early-return but must not trigger the xDiT check.
+            # xfuser's base_model.py). Other scriptable frameworks (e.g. an
+            # operator's ``custom`` workload) share the server-less early-return
+            # but must not trigger the xDiT check.
             if str(framework or "").strip().lower() == "xdit":
                 verify_xdit_profiler_baked()
             return None
