@@ -791,8 +791,8 @@ def _validate_and_resolve_claude_model(
         # The static allowlist gate above already ran; this is the only check the
         # probe would have added, so proceed with the operator's id.
         print(
-            f"Preflight: catalog probe skipped: oauth-only credential ({CLAUDE_OAUTH_TOKEN_ENV}); "
-            f"cannot verify --claude-model={chosen!r}. Proceeding."
+            "Preflight: catalog probe skipped: oauth-only credential "
+            f"(CLAUDE_CODE_OAUTH_TOKEN); cannot verify --claude-model={chosen!r}. Proceeding."
         )
         return None
     if override_url:
