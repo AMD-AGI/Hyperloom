@@ -235,6 +235,11 @@ GEMMs), drain `pending_keep_kernels` then emit
 tuning is an EXPLORE lever — `integrate` no-ops on configs; the cyclic
 reloop gives EXPLORE another round.
 
+**Source-level failures can go straight to a specialist.** A variant
+crash uncovered during KERNEL_AGENT does not need to wait for a reloop;
+`delegate{action_name='specialist', params={scope='freeform', ...}}`
+is allowed here and uses the same GPU pool / lane isolation as in EXPLORE.
+
 **Never fabricate a measurement.** Only report outcomes you dispatched
 and observed via `get_recent_outcomes` / `delegated_result` / SharedState.
 

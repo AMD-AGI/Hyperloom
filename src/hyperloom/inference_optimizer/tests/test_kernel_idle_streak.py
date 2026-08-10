@@ -256,3 +256,30 @@ def test_fingerprint_tracks_inflight_task_ids():
     assert ps.compute_kernel_progress_fingerprint(
         state, inflight_task_ids=("t2", "t1")
     ) == ps.compute_kernel_progress_fingerprint(state, inflight_task_ids=("t1", "t2"))
+
+
+def test_specialist_in_kernel_allowlist_is_counted_by_idle_guard():
+    """_inflight_kernel_task_ids uses PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]; a
+    specialist task must appear in the result so the idle clock is rebased."""
+    assert "specialist" in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_KERNEL_AGENT], (
+        "specialist must be in the KERNEL_AGENT allowlist for the idle guard to see it"
+    )
+
+
+def test_specialist_in_framework_allowlist():
+    """specialist is proposable in FRAMEWORK_AGENT."""
+    assert "specialist" in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_FRAMEWORK_AGENT]
+    # The proposable set (allowlist minus coordinator-internal and robustness-only)
+    # must include specialist for orchestration to be able to propose it.
+    proposable = ps.llm_proposable_actions_for(ps.PHASE_FRAMEWORK_AGENT)
+    assert "specialist" in proposable
+
+
+def test_specialist_in_kernel_proposable():
+    proposable = ps.llm_proposable_actions_for(ps.PHASE_KERNEL_AGENT)
+    assert "specialist" in proposable
+
+
+def test_specialist_not_in_sweep_or_close():
+    assert "specialist" not in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_SWEEP]
+    assert "specialist" not in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_CLOSE]

@@ -69,6 +69,7 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             # Coordinator-internal; integrate_patch is the Critic-gated consume side.
             "framework_agent",
             "integrate_patch",
+            "specialist",
             "roofline",
             "profile",
             "recover",
@@ -94,9 +95,13 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "operator_tuning",
             "vendor_kernel_config",
             "gemm_tuning",
+            "specialist",
             "roofline",
             "profile",
             "recover",
+            # SWEEP and CLOSE do not include specialist: SWEEP is the validation
+            # window and CLOSE is the report phase; there is no appropriate
+            # investigation target in either.
         }
     ),
     PHASE_SWEEP: frozenset(

@@ -215,7 +215,9 @@ canonical `explore` ledger:
 - `specialist` delegates targeted research or patch proposals. A single
   unified specialist covers single-domain, cross-domain (`scope=domains`),
   and free-form (`scope=freeform`) investigations through its dispatch dials
-  (`scope` / `mode` / `bench` / `lane`).
+  (`scope` / `mode` / `bench` / `lane`). Specialist is also available in
+  FRAMEWORK_AGENT and KERNEL_AGENT so source-level failures can go straight
+  to investigation without waiting for a reloop.
 - `integrate_patch` applies Critic-reviewed specialist patches and
   benchmarks them.
 
