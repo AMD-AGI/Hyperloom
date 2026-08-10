@@ -3,9 +3,10 @@
 
 """Unit tests for the report-narrative LLM client adapters.
 
-The adapters call through ``hyperloom.common.llm_config``, so these tests patch
-its entry points by their real names: a rename on the contract side has to fail
-here rather than silently install an unused stub.
+The adapters call through ``hyperloom.common.llm_config`` and, on the Anthropic
+side, ``hyperloom.common.claude_oneshot``, so these tests patch their entry
+points by their real names: a rename on the contract side has to fail here
+rather than silently install an unused stub.
 """
 
 from __future__ import annotations
@@ -15,15 +16,17 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.llm_config import LLMConfigError
+from hyperloom.common.claude_oneshot import ClaudeOneShotClient
 from hyperloom.inference_optimizer.breakdown.reporters.llm_client import (
-    AnthropicHttpClient,
+    REPORT_HTTP_TIMEOUT_SEC,
+    AnthropicSdkClient,
     NullClient,
     OpenAIHttpClient,
     build_client_from_env,
 )
 
 _LLM_CONFIG = "hyperloom.common.llm_config"
+_CLAUDE_ONESHOT = "hyperloom.common.claude_oneshot"
 
 _REPORT_ENV_VARS = (
     "HYPERLOOM_REPORT_LLM_BACKEND",
@@ -68,14 +71,13 @@ def _install_factories(
             raise openai_error
         return "openai-client"
 
-    def _anthropic(**kwargs: Any) -> str:
-        built["anthropic"].append(kwargs)
+    def _ensure_available() -> None:
+        built["anthropic"].append({})
         if anthropic_error is not None:
             raise anthropic_error
-        return "anthropic-client"
 
     monkeypatch.setattr(f"{_LLM_CONFIG}.get_openai_client", _openai)
-    monkeypatch.setattr(f"{_LLM_CONFIG}.get_anthropic_client", _anthropic)
+    monkeypatch.setattr(f"{_CLAUDE_ONESHOT}.ensure_available", _ensure_available)
     monkeypatch.setattr(f"{_LLM_CONFIG}.build_http_timeout", lambda **kwargs: kwargs)
     return built
 
@@ -105,18 +107,16 @@ def test_openai_client_delegates_to_the_shared_chat_helper(monkeypatch: pytest.M
     assert calls[0]["temperature"] == 0.2
 
 
-def test_anthropic_client_delegates_to_the_shared_messages_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_anthropic_client_delegates_to_the_one_shot_claude_client() -> None:
     calls: list[dict[str, Any]] = []
 
-    def _fake(client: Any, **params: Any) -> _MessageReply:
-        calls.append({"client": client, **params})
-        return _MessageReply("narrative")
+    class _Recorder:
+        def messages(self, **params: Any) -> _MessageReply:
+            calls.append(params)
+            return _MessageReply("narrative")
 
-    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_messages", _fake)
-
-    client = AnthropicHttpClient(client="anthropic-client", model="m", max_output_tokens=8)
+    client = AnthropicSdkClient(client=_Recorder(), model="m", max_output_tokens=8)
     assert client.complete(system="sys", user="user") == "narrative"
-    assert calls[0]["client"] == "anthropic-client"
     assert calls[0]["model"] == "m"
     assert calls[0]["system"] == "sys"
     assert calls[0]["messages"] == [{"role": "user", "content": "user"}]
@@ -173,17 +173,18 @@ def test_build_client_wires_the_anthropic_backend(monkeypatch: pytest.MonkeyPatc
 
     client = build_client_from_env()
 
-    assert isinstance(client, AnthropicHttpClient)
-    assert client.client == "anthropic-client"
+    assert isinstance(client, AnthropicSdkClient)
+    assert isinstance(client.client, ClaudeOneShotClient)
+    assert client.client.timeout_s == REPORT_HTTP_TIMEOUT_SEC
     assert client.model == "claude-opus-5"
     assert client.max_output_tokens == 1024
     assert built["openai"] == []
 
 
-def test_build_client_falls_back_to_deterministic_when_credentials_are_missing(
+def test_build_client_falls_back_to_deterministic_when_the_claude_sdk_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install_factories(monkeypatch, anthropic_error=LLMConfigError("ANTHROPIC_API_KEY not set in env"))
+    _install_factories(monkeypatch, anthropic_error=RuntimeError("claude_agent_sdk is not installed"))
     monkeypatch.setenv("HYPERLOOM_REPORT_LLM_BACKEND", "anthropic")
 
     assert build_client_from_env() is None

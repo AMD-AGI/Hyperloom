@@ -5,13 +5,14 @@
 
 The report layer only needs ``(system, user) -> str`` (not the
 orchestrator's MCP-coupled backend), so this exposes
-:class:`OpenAIHttpClient`, :class:`AnthropicHttpClient`, and a no-op
+:class:`OpenAIHttpClient`, :class:`AnthropicSdkClient`, and a no-op
 :class:`NullClient`. :func:`build_client_from_env` picks one from
 ``HYPERLOOM_REPORT_LLM_BACKEND``, falling back to ``None``
 (deterministic-only) when config is missing.
 
 Provider credentials, client construction, and the request/response shape
-belong to ``hyperloom.common.llm_config``; this module keeps only the
+belong to ``hyperloom.common.llm_config`` and, for the Anthropic side,
+``hyperloom.common.claude_oneshot``; this module keeps only the
 report-specific surface (``model``/``max_output_tokens`` defaults and the
 ``HYPERLOOM_REPORT_LLM_BACKEND``-driven env wiring).
 """
@@ -23,7 +24,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.common import llm_config
+from hyperloom.common import claude_oneshot, llm_config
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ __all__ = [
     "REPORT_HTTP_TIMEOUT_SEC",
     "NullClient",
     "OpenAIHttpClient",
-    "AnthropicHttpClient",
+    "AnthropicSdkClient",
     "build_client_from_env",
 ]
 
@@ -88,15 +89,15 @@ class OpenAIHttpClient:
 
 
 @dataclass
-class AnthropicHttpClient:
-    """Anthropic Messages-API client for the narrative pass."""
+class AnthropicSdkClient:
+    """Anthropic client for the narrative pass, driven by the Claude CLI."""
 
     client: Any
     model: str = "claude-opus-5"
     max_output_tokens: int = 1024
 
     def complete(self, *, system: str, user: str) -> str:
-        """Issue one Messages-API request and return the reply text.
+        """Issue one single-shot completion and return the reply text.
 
         Args:
             system (str): The system prompt.
@@ -105,8 +106,7 @@ class AnthropicHttpClient:
         Returns:
             str: The reply text.
         """
-        return llm_config.anthropic_messages(
-            self.client,
+        return self.client.messages(
             model=self.model,
             system=system,
             messages=[{"role": "user", "content": user}],
@@ -150,13 +150,14 @@ def build_client_from_env() -> Any | None:
         return OpenAIHttpClient(client=client, model=model, max_output_tokens=max_tokens)
     if backend == "anthropic":
         try:
-            client = llm_config.get_anthropic_client(timeout=timeout)
-        except llm_config.LLMConfigError as exc:
+            claude_oneshot.ensure_available()
+        except RuntimeError as exc:
             log.warning(
                 "HYPERLOOM_REPORT_LLM_BACKEND=anthropic but %s; falling back to deterministic-only report.", exc
             )
             return None
-        return AnthropicHttpClient(client=client, model=model, max_output_tokens=max_tokens)
+        client = claude_oneshot.ClaudeOneShotClient(timeout_s=REPORT_HTTP_TIMEOUT_SEC)
+        return AnthropicSdkClient(client=client, model=model, max_output_tokens=max_tokens)
     log.warning(
         "Unknown HYPERLOOM_REPORT_LLM_BACKEND=%r; falling back to deterministic-only report.",
         backend,

@@ -445,6 +445,10 @@ def _discover_llm_credentials() -> tuple[str, str, str]:
             anthropic_key,
             "anthropic",
         )
+    # A Claude Max/Pro subscription token is resolved by the CLI itself, so it is
+    # deliberately not returned as an api_key; the provider alone selects it.
+    if env.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
+        return env.get("ANTHROPIC_BASE_URL", "").strip(), "", "anthropic"
 
     return "", "", "openai"
 
