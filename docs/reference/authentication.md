@@ -169,6 +169,45 @@ stricter AMD Claude allowlist (`claude-opus-5` preferred, `claude-opus-4-8` /
 `claude-opus-4-7` / `claude-opus-4-6` fallback), set
 `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`.
 
+A gateway that exposes no `/models` route cannot be probed; preflight warns and
+proceeds instead of refusing to start, so no opt-in is needed for that case.
+
+### Gateways that require extra headers
+
+Some enterprise gateways authenticate on a header of their own — Azure API
+Management's `Ocp-Apim-Subscription-Key`, a corporate proxy's tenant header — in
+addition to, or instead of, the bearer key. AMD's own `llm-api.amd.com` gateway
+is one of them: it requires the API key to also travel as an
+`Ocp-Apim-Subscription-Key` header, which the guided setup writes for you when
+you pick that gateway. Supply it per side with `ANTHROPIC_CUSTOM_HEADERS` or
+`OPENAI_CUSTOM_HEADERS`. Both accept the Anthropic SDK's newline-delimited
+`Name: value` form, and a JSON object as a convenience for launchers that already
+store structured values.
+
+`${VAR}` references are expanded by Hyperloom from the same environment, so a
+single copy of the secret is enough. Quote the value so the space and the colon
+survive: use single quotes when exporting in a shell, and double quotes in
+`.env`, which setup and the launch scripts may load with `source`.
+
+```bash
+export ANTHROPIC_BASE_URL=https://<your-gateway-host>/api/v1/llm-proxy
+export ANTHROPIC_API_KEY=ak-your-gateway-apikey
+export ANTHROPIC_CUSTOM_HEADERS='Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}'
+```
+
+The Anthropic side reads only `ANTHROPIC_CUSTOM_HEADERS`. The OpenAI side reads
+`OPENAI_CUSTOM_HEADERS` whenever you set `OPENAI_BASE_URL` explicitly — that
+endpoint may be a different host, whose headers Hyperloom will not guess at. Only
+when the OpenAI base URL was *derived* from `ANTHROPIC_BASE_URL` (one gateway, no
+explicit OpenAI endpoint) does the OpenAI client fall back to
+`ANTHROPIC_CUSTOM_HEADERS`, because then both protocols are the same host and the
+subscription header was only ever written to the Anthropic variable. Headers are
+operator-supplied either way and are never synthesized from the configured keys.
+
+Both survive in `.env` across setup runs. An Anthropic-only deployment is the one
+exception: setup scrubs the whole OpenAI side there, header included, because that
+side is a second provider rather than part of the same gateway credential.
+
 ---
 
 ## Optional credentials
