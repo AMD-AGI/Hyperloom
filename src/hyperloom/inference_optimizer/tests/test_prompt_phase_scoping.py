@@ -488,3 +488,135 @@ def test_inject_phase_constraints_is_a_noop_without_a_phase():
     _inject_phase_constraints(bundle, "")
     assert "phase" not in bundle
     assert "review_constraints" not in bundle
+
+
+def test_the_payload_contract_lists_only_required_keys():
+    """Required keys and value constraints are different claims.
+
+    The notes were appended to the generated required-field list, under a label
+    that says "Required keys". That printed `alert:{severity,summary,severity ∈
+    low|medium|high}` -- severity twice -- and presented `kill_task.scope`,
+    `prune_branch.scope` and `extend_lease.reason` as required when
+    validate_envelope requires none of them. The same string is the description
+    of Claude's emit_intent tool, so the drift this contract exists to prevent
+    was introduced into it.
+    """
+    from hyperloom.inference_optimizer.protocol.intent import IntentType
+    from hyperloom.orchestrator.roles.mcp_emit_intent import (
+        _PAYLOAD_REQUIRED,
+        payload_contract,
+    )
+
+    rendered = payload_contract(IntentType)
+
+    assert "alert:{severity,summary}" in rendered
+    assert "severity ∈" not in rendered
+    assert "kill_task:{task_id,reason}" in rendered
+    assert "scope" not in rendered
+    for intent_type, required in _PAYLOAD_REQUIRED.items():
+        assert f"{intent_type.value}:{{{','.join(required)}}}" in rendered
+
+
+def test_the_payload_constraints_are_rendered_separately():
+    """State the closed value sets and the optional dials as what they are."""
+    from hyperloom.inference_optimizer.protocol.intent import IntentType
+    from hyperloom.orchestrator.roles.mcp_emit_intent import payload_constraints
+
+    rendered = payload_constraints(IntentType)
+
+    assert "alert.severity ∈ low|medium|high" in rendered
+    assert "kill_task.scope must be 'task'" in rendered
+    assert "prune_branch.scope ∈ family|queued" in rendered
+    assert "extend_lease.reason is optional" in rendered
+
+
+def test_both_provider_descriptions_carry_the_constraints():
+    """Claude's tool description and Codex's output block say the same thing."""
+    from hyperloom.inference_optimizer.protocol.intent import IntentType
+    from hyperloom.orchestrator.roles.codex import build_output_instructions
+    from hyperloom.orchestrator.roles.mcp_emit_intent import (
+        EMIT_INTENT_TOOL_INPUT_SCHEMA,
+        payload_constraints,
+    )
+
+    constraints = payload_constraints(IntentType)
+    claude_description = EMIT_INTENT_TOOL_INPUT_SCHEMA["properties"]["payload"]["description"]
+    codex_block = build_output_instructions(frozenset(IntentType))
+
+    assert constraints in claude_description
+    assert constraints in codex_block
+
+
+def test_an_unknown_transport_is_refused_not_rendered_empty(registry):
+    """A transport nobody declares must not quietly delete the output protocol.
+
+    Every `<!-- transport: ... -->` block is dropped when the requested
+    transport is not among the ones it names, and both Output protocol blocks
+    are scoped that way. A misspelled or renamed transport therefore produced a
+    prompt telling the model nothing about how to answer -- the exact shape of
+    silent degradation this contract is built to prevent, and TRANSPORTS was
+    imported here without ever being consulted.
+    """
+    from hyperloom.orchestrator.prompts.transport import TRANSPORTS
+
+    with pytest.raises(ValueError, match="carrier-pigeon"):
+        build_orchestration_prompt(
+            action_registry=registry,
+            enabled_actions=default_enabled_actions(no_kernel=False),
+            framework="sglang",
+            kernel_enabled=True,
+            explore_enabled=True,
+            framework_agent_phase_enabled=True,
+            objective_kind="gain_pct",
+            objective_value=15.0,
+            max_minutes=480,
+            transport="carrier-pigeon",
+            rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
+        )
+
+    assert "carrier-pigeon" not in TRANSPORTS
+
+
+@pytest.mark.parametrize("transport", ["", "tools", "structured_output"])
+def test_every_declared_transport_still_renders(registry, transport):
+    """The declared transports, and the unscoped default, keep working."""
+    prompt = build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=default_enabled_actions(no_kernel=False),
+        framework="sglang",
+        kernel_enabled=True,
+        explore_enabled=True,
+        framework_agent_phase_enabled=True,
+        objective_kind="gain_pct",
+        objective_value=15.0,
+        max_minutes=480,
+        transport=transport,
+        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
+    )
+
+    assert "Output protocol" in prompt
+
+
+def test_a_role_with_no_constraints_gets_no_constraints_line():
+    """Say nothing rather than an empty clause.
+
+    ``payload_constraints`` returns an empty string for an intent set where no
+    type carries a note, and both callers embedded it unconditionally -- so such
+    a role was told "Constraints: ." The orchestration role always has notes and
+    Claude's tool takes every intent type, so production does not reach it today;
+    these are public functions taking any role's intent set, and assuming the
+    current configuration is the habit this whole contract exists to break.
+    """
+    from hyperloom.inference_optimizer.protocol.intent import IntentType
+    from hyperloom.orchestrator.roles.codex import build_output_instructions
+    from hyperloom.orchestrator.roles.mcp_emit_intent import build_intent_envelope_schema
+
+    only_send = frozenset({IntentType.SEND_MESSAGE})
+
+    block = build_output_instructions(only_send)
+    schema = build_intent_envelope_schema(only_send)
+    payload_description = schema["properties"]["intents"]["items"]["properties"]["payload"]["description"]
+
+    assert "Constraints" not in block
+    assert "Constraints" not in payload_description
+    assert "send_message:{topic}" in block

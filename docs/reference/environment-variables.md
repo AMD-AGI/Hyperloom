@@ -320,22 +320,6 @@ same way under `trace_resolver_error: ...`, and both are logged at `WARNING`.
 
 ---
 
-## Codex (OpenAI) backend web search
-
-The following variables enable OpenAI's built-in server-side web search for the
-Codex (GPT-style) backend. When enabled, every Codex turn is issued through the
-OpenAI **Responses API** with the built-in `web_search` tool instead of
-`chat.completions`; the search resolves server-side in one call and the model's
-reply still carries the intent envelope. Only affects deployments whose Codex
-endpoint is OpenAI-compatible and supports the Responses API `web_search` tool.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HYPERLOOM_CODEX_WEB_SEARCH` | Unset (off) | Set to `1`/`true` to route every Codex turn through the OpenAI Responses API with the built-in `web_search` tool. Default keeps the existing `chat.completions` path unchanged. |
-| `HYPERLOOM_`<br>`CODEX_WEB_SEARCH`<br>`_CONTEXT_SIZE` | `medium` | Passed through as the `web_search` tool's `search_context_size` (`low` / `medium` / `high`). Ignored unless `HYPERLOOM_CODEX_WEB_SEARCH` is on. |
-
----
-
 ## Codex (OpenAI) agent sandbox
 
 Selects how a Codex agent session (TraceLens analysis and every future
