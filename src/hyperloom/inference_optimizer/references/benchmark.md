@@ -3,8 +3,8 @@
 Default configs live in
 `src/hyperloom/inference_optimizer/assets/configs/`, one
 `baseline_<framework>.yaml` + `profile_<framework>.yaml` pair per supported
-framework (`sglang`, `vllm`, `atom`, `xdit`, `custom`). The resolvers
-are the source of truth: `_workload_envs.py` for the baseline map and
+framework (`sglang`, `vllm`, `atom`, `xdit`, `custom`). The resolvers are the
+source of truth: `_workload_envs.py` for the baseline map and
 `_default_profile_config()` in
 `src/hyperloom/orchestrator/actions/executors/profile.py` for the profile map.
 

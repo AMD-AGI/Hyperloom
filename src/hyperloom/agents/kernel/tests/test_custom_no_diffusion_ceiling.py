@@ -57,6 +57,12 @@ def _without_hyperloom(monkeypatch):
 
 
 class TestDiffusionCeilingGate:
+    @pytest.mark.parametrize("framework", sorted(fr.FRAMEWORKS))
+    def test_the_gate_is_whatever_the_registry_declares(self, framework):
+        """Asserted against the table itself, so a new entry is classified when it
+        is added rather than when someone remembers this call site."""
+        assert tl._has_diffusion_ceiling(framework) is fr.has_denoiser_config(framework)
+
     def test_custom_claims_no_diffusion_ceiling(self):
         """Hyperloom never sees the operator's model, so it cannot bound it."""
         assert tl._has_diffusion_ceiling("custom") is False
@@ -64,8 +70,8 @@ class TestDiffusionCeilingGate:
     def test_the_shipped_scriptable_framework_keeps_its_own(self):
         assert tl._has_diffusion_ceiling("xdit") is True
 
-    @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom", "", None, "bogus"])
-    def test_non_diffusion_frameworks_have_none(self, framework):
+    @pytest.mark.parametrize("framework", ["", None, "bogus"])
+    def test_unknown_frameworks_claim_none(self, framework):
         assert tl._has_diffusion_ceiling(framework) is False
 
     def test_custom_is_still_scriptable(self):
@@ -73,11 +79,11 @@ class TestDiffusionCeilingGate:
         (plain pytorch perf report, no decode steady-state splitter)."""
         assert tl._is_scriptable_framework("custom") is True
 
-    def test_custom_stays_excluded_without_the_registry(self, monkeypatch):
-        """The name check runs first, so the standalone path cannot re-admit it."""
+    @pytest.mark.parametrize("framework", sorted(fr.FRAMEWORKS))
+    def test_the_standalone_fallback_mirrors_the_registry(self, monkeypatch, framework):
+        expected = fr.has_denoiser_config(framework)
         _without_hyperloom(monkeypatch)
-        assert tl._has_diffusion_ceiling("custom") is False
-        assert tl._has_diffusion_ceiling("xdit") is True
+        assert tl._has_diffusion_ceiling(framework) is expected
 
 
 def _write_reports_for(tmp_path, framework):

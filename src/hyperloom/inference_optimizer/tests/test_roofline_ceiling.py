@@ -1184,14 +1184,26 @@ class TestDiffusionComputeCeiling:
         )
         return _read_diffusion_dit_meta(str(tmp_path))
 
-    def test_read_dit_meta_declines_a_3d_patch_size(self, tmp_path):
-        """A (t, h, w) patch marks a video denoiser, and nothing in this module
-        models frames -- so it must decline rather than return one frame's count."""
-        assert self._write_dit_config(tmp_path, [1, 2, 2]) is None
+    def test_read_dit_meta_abstains_on_tokens_for_a_3d_patch_size(self, tmp_path):
+        """A (t, h, w) patch marks a video denoiser and nothing here models frames,
+        so the sequence length is withheld -- but the weights still resolve, which
+        is what keeps the caller's memory bound DiT-only rather than whole-model."""
+        dit = self._write_dit_config(tmp_path, [1, 2, 2])
+        assert dit is not None
+        dit_params, latent_tokens, num_layers, hidden = dit
+        assert latent_tokens == 0
+        assert dit_params > 0 and num_layers == 20 and hidden == 2240
 
-    def test_read_dit_meta_reads_a_2d_patch_size_from_the_trailing_entry(self, tmp_path):
-        """Non-square so the entry chosen is observable: (h, w) -> w."""
-        dit = self._write_dit_config(tmp_path, [4, 2])
+    @pytest.mark.parametrize("patch_size", [[4, 2], [2, 4]])
+    def test_read_dit_meta_uses_both_axes_of_a_2d_patch_size(self, tmp_path, patch_size):
+        """A (h, w) patch need not be square, so collapsing it to one axis is a
+        2x error either way -- the grid is (sample/ph) * (sample/pw)."""
+        dit = self._write_dit_config(tmp_path, patch_size)
+        assert dit is not None
+        assert dit[1] == (32 // 4) * (32 // 2)
+
+    def test_read_dit_meta_squares_a_scalar_patch_size(self, tmp_path):
+        dit = self._write_dit_config(tmp_path, 2)
         assert dit is not None
         assert dit[1] == (32 // 2) ** 2
 
@@ -1204,6 +1216,33 @@ class TestDiffusionComputeCeiling:
     def test_read_dit_meta_declines_a_non_numeric_patch_size(self, tmp_path, patch_size):
         """``Never raises`` is the documented contract of the public entry point."""
         assert self._write_dit_config(tmp_path, patch_size) is None
+
+    def test_a_withheld_token_count_keeps_the_dit_only_memory_bound(self, monkeypatch):
+        """Returning ``None`` instead would fall the memory bound back to the whole
+        checkpoint -- text encoder and VAE included, neither of which runs per step.
+        Those extra bytes understate the ceiling, which in turn overstates how
+        close the measured run is to it."""
+        import types
+
+        import hyperloom.orchestrator.kernel.roofline_ceiling as rc
+
+        dit_params = 12 * 20 * 2240**2
+        dit_bytes = dit_params * 2  # bf16
+        whole_checkpoint = 10 * dit_bytes
+        monkeypatch.setattr(rc, "load_model_meta", lambda *a, **k: types.SimpleNamespace(weight_bytes=whole_checkpoint))
+        monkeypatch.setattr(rc, "_read_diffusion_num_steps", lambda state: 20)
+
+        monkeypatch.setattr(rc, "_read_diffusion_dit_meta", lambda mp, **k: (dit_params, 0, 20, 2240))
+        withheld = rc._compute_diffusion_breakdown_from_state(object(), self._rt())
+        monkeypatch.setattr(rc, "_read_diffusion_dit_meta", lambda mp, **k: None)
+        declined = rc._compute_diffusion_breakdown_from_state(object(), self._rt())
+
+        # Compute abstains either way; only the memory bound differs.
+        assert withheld.cmp_tok_per_sec == 0.0
+        assert withheld.mem_tok_per_sec > 0.0
+        # Fewer bytes per step => a higher, and here correct, img/s ceiling. The
+        # 10x checkpoint gives 10x fewer images per second.
+        assert withheld.mem_tok_per_sec == pytest.approx(declined.mem_tok_per_sec * 10, rel=1e-6)
 
     def test_read_dit_meta_declines_a_non_numeric_layer_count(self, tmp_path):
         """The sibling int() conversions carry the same exposure as patch_size."""
