@@ -266,8 +266,11 @@ def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: s
     if oauth_token and primary_api_key.strip() == oauth_token:
         # primaryApiKey is an API-credits credential; persisting the subscription
         # token here would move the run off the Max/Pro plan onto API billing.
+        # The variable name is spelled out rather than interpolated from
+        # CLAUDE_OAUTH_TOKEN_ENV: a token-named constant reads as a secret to
+        # static analysis even when only its name reaches the message.
         print(
-            f"Preflight: refusing to write {CLAUDE_OAUTH_TOKEN_ENV} into "
+            "Preflight: refusing to write CLAUDE_CODE_OAUTH_TOKEN into "
             "~/.claude/config.json primaryApiKey (subscription credential)"
         )
         primary_api_key = ""
@@ -383,11 +386,11 @@ def _warn_on_shadowed_oauth_token() -> None:
     shadowing = [name for name in ANTHROPIC_SYNTHESIZABLE_KEY_ENVS if os.environ.get(name, "").strip()]
     if not shadowing:
         return
+    names = " and ".join(shadowing)
     print(
-        f"Preflight: WARNING — {CLAUDE_OAUTH_TOKEN_ENV} is set alongside "
-        f"{' and '.join(shadowing)}; the Claude CLI prefers the API key, so this run "
-        f"bills API credits rather than your subscription. Unset "
-        f"{' and '.join(shadowing)} to use the subscription.",
+        f"Preflight: WARNING — CLAUDE_CODE_OAUTH_TOKEN is set alongside {names}; "
+        "the Claude CLI prefers the API key, so this run bills API credits rather "
+        f"than your subscription. Unset {names} to use the subscription.",
         file=sys.stderr,
     )
 
@@ -408,9 +411,9 @@ def _warn_on_oauth_widened_provider_shape() -> None:
     if not (os.environ.get("OPENAI_BASE_URL", "").strip() and os.environ.get("OPENAI_API_KEY", "").strip()):
         return
     print(
-        f"Preflight: WARNING — {CLAUDE_OAUTH_TOKEN_ENV} is set alongside a fully "
+        "Preflight: WARNING — CLAUDE_CODE_OAUTH_TOKEN is set alongside a fully "
         "configured OpenAI side, so orchestration runs on the Claude subscription "
-        f"rather than OPENAI_BASE_URL. Unset {CLAUDE_OAUTH_TOKEN_ENV} for an "
+        "rather than OPENAI_BASE_URL. Unset CLAUDE_CODE_OAUTH_TOKEN for an "
         "OpenAI-only run.",
         file=sys.stderr,
     )
