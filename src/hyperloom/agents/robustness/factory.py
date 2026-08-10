@@ -351,6 +351,24 @@ def build_reactor_components(
     )
 
 
+def _llm_credentials_ready(config: Config) -> bool:
+    """Whether the discovered provider can authenticate an RCA call.
+
+    The Anthropic side runs through the Claude CLI, which resolves its own
+    credential, so an empty ``llm_api_key`` there is not a missing credential.
+
+    Args:
+        config (Config): The configuration carrying the discovered provider
+            and credentials.
+
+    Returns:
+        bool: True when an RCA call can authenticate.
+    """
+    if config.llm_provider == "anthropic":
+        return True
+    return bool(config.llm_base_url and config.llm_api_key)
+
+
 def _build_rca_engine(
     config: Config,
     *,
@@ -373,9 +391,9 @@ def _build_rca_engine(
         return NoopRcaEngine()
     if config.llm_rca_enabled is False:
         return NoopRcaEngine()
-    if not config.llm_base_url or not config.llm_api_key:
+    if not _llm_credentials_ready(config):
         if config.llm_rca_enabled is True:
-            log.warning("llm_rca_enabled=True but base_url/api_key missing; using NoopRcaEngine")
+            log.warning("llm_rca_enabled=True but no usable LLM credential; using NoopRcaEngine")
         return NoopRcaEngine()
 
     severity_min = _parse_severity(config.llm_rca_severity_min)

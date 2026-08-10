@@ -26,6 +26,7 @@ from hyperloom.agents.robustness.decision.rca_engine import (
 from hyperloom.agents.robustness.signals import Symptom, SymptomSeverity
 
 _LLM_CONFIG = "hyperloom.common.llm_config"
+_CLAUDE_ONESHOT = "hyperloom.common.claude_oneshot"
 
 
 @dataclass
@@ -55,6 +56,22 @@ class _StubClient:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class _StubOneShotClient(_StubClient):
+    """Injected Claude one-shot client; the Anthropic transport is a method now."""
+
+    def __init__(self, *, reply: _Reply | None = None, error: Exception | None = None) -> None:
+        super().__init__()
+        self.calls: list[dict[str, Any]] = []
+        self._reply = reply
+        self._error = error
+
+    async def amessages(self, **params: Any) -> _Reply:
+        self.calls.append(params)
+        if self._error is not None:
+            raise self._error
+        return self._reply if self._reply is not None else _Reply("ok")
 
 
 def _sym(
@@ -99,25 +116,6 @@ def _install_chat(
     return calls
 
 
-def _install_messages(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    reply: _Reply | None = None,
-    error: Exception | None = None,
-) -> list[dict[str, Any]]:
-    """Patch the async Anthropic Messages entry point; return the recorded calls."""
-    calls: list[dict[str, Any]] = []
-
-    async def _fake(client: Any, **params: Any) -> _Reply:
-        calls.append({"client": client, **params})
-        if error is not None:
-            raise error
-        return reply if reply is not None else _Reply("ok")
-
-    monkeypatch.setattr(f"{_LLM_CONFIG}.aanthropic_messages", _fake, raising=False)
-    return calls
-
-
 def _install_client_factories(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[dict[str, Any]]]:
     """Patch both client factories; return per-provider construction kwargs."""
     built: dict[str, list[dict[str, Any]]] = {"openai": [], "anthropic": []}
@@ -126,12 +124,12 @@ def _install_client_factories(monkeypatch: pytest.MonkeyPatch) -> dict[str, list
         built["openai"].append(kwargs)
         return _StubClient()
 
-    def _anthropic(**kwargs: Any) -> _StubClient:
+    def _anthropic(**kwargs: Any) -> _StubOneShotClient:
         built["anthropic"].append(kwargs)
-        return _StubClient()
+        return _StubOneShotClient()
 
     monkeypatch.setattr(f"{_LLM_CONFIG}.get_async_openai_client", _openai, raising=False)
-    monkeypatch.setattr(f"{_LLM_CONFIG}.get_async_anthropic_client", _anthropic, raising=False)
+    monkeypatch.setattr(f"{_CLAUDE_ONESHOT}.ClaudeOneShotClient", _anthropic, raising=False)
     monkeypatch.setattr(f"{_LLM_CONFIG}.build_http_timeout", lambda **kwargs: kwargs, raising=False)
     return built
 
@@ -190,17 +188,17 @@ async def test_llm_engine_uses_max_completion_tokens_for_gpt5_models(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_anthropic_rca_engine_calls_messages_contract_and_returns_text(monkeypatch: pytest.MonkeyPatch):
-    calls = _install_messages(
-        monkeypatch,
+async def test_anthropic_rca_engine_calls_messages_contract_and_returns_text():
+    client = _StubOneShotClient(
         reply=_Reply("anthropic root cause", usage={"input_tokens": 11, "output_tokens": 7}),
     )
+    calls = client.calls
 
     engine = AnthropicRcaEngine(
         base_url="https://api.deepseek.com/anthropic",
         api_key="deepseek-token",
         model="deepseek-v4-pro",
-        client=_StubClient(),
+        client=client,
         throttle=_open_throttle(),
     )
     engine.set_tick(1)
@@ -253,22 +251,23 @@ async def test_llm_engine_builds_its_client_from_the_openai_factory(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_anthropic_engine_builds_its_client_from_the_anthropic_factory(monkeypatch: pytest.MonkeyPatch):
-    built = _install_client_factories(monkeypatch)
-    _install_messages(monkeypatch, reply=_Reply("ok"))
+async def test_anthropic_engine_builds_a_one_shot_client_without_in_process_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The CLI resolves its own credential, so only the timeout crosses over.
 
-    engine = AnthropicRcaEngine(
-        base_url="https://api.deepseek.com/anthropic",
-        api_key="deepseek-token",
-        throttle=_open_throttle(),
-    )
+    Passing no base_url/api_key is the normal shape for a subscription-token
+    host, and it must still build a working client.
+    """
+    built = _install_client_factories(monkeypatch)
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", timeout_s=7.0, throttle=_open_throttle())
     engine.set_tick(1)
     await engine.summarize(_sym())
 
     assert len(built["anthropic"]) == 1
     assert built["openai"] == []
-    assert built["anthropic"][0]["env"]["ANTHROPIC_API_KEY"] == "deepseek-token"
-    assert built["anthropic"][0]["env"]["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    assert built["anthropic"][0] == {"timeout_s": 7.0}
 
 
 @pytest.mark.asyncio
@@ -287,7 +286,6 @@ async def test_no_client_is_built_before_the_first_call(monkeypatch: pytest.Monk
 async def test_aclose_closes_only_engine_owned_clients(monkeypatch: pytest.MonkeyPatch, engine_cls):
     _install_client_factories(monkeypatch)
     _install_chat(monkeypatch, reply=_Reply("ok"))
-    _install_messages(monkeypatch, reply=_Reply("ok"))
 
     owned = engine_cls(base_url="https://gateway.example/v1", api_key="token", throttle=_open_throttle())
     owned.set_tick(1)
@@ -442,13 +440,11 @@ async def test_llm_engine_returns_empty_when_the_provider_call_fails(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_anthropic_engine_returns_empty_when_the_provider_call_fails(monkeypatch: pytest.MonkeyPatch):
-    _install_messages(monkeypatch, error=TimeoutError("slow"))
-
+async def test_anthropic_engine_returns_empty_when_the_provider_call_fails():
     engine = AnthropicRcaEngine(
         base_url="https://api.anthropic.com",
         api_key="key",
-        client=_StubClient(),
+        client=_StubOneShotClient(error=TimeoutError("slow")),
     )
     engine.set_tick(1)
 
@@ -476,16 +472,16 @@ def test_load_rca_system_prompt_reads_package_asset():
 
 
 @pytest.mark.asyncio
-async def test_anthropic_engine_sends_asset_as_system_field(monkeypatch: pytest.MonkeyPatch):
-    calls = _install_messages(monkeypatch)
+async def test_anthropic_engine_sends_asset_as_system_field():
+    client = _StubOneShotClient()
 
     engine = AnthropicRcaEngine(
         base_url="https://api.anthropic.com",
         api_key="key",
-        client=_StubClient(),
+        client=client,
         throttle=_open_throttle(),
     )
     engine.set_tick(1)
     await engine.summarize(_sym())
 
-    assert calls[0]["system"] == load_rca_system_prompt()
+    assert client.calls[0]["system"] == load_rca_system_prompt()

@@ -140,6 +140,31 @@ async def test_config_discover_uses_dual_protocol_gateway_anthropic_side(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_config_discover_selects_anthropic_for_a_subscription_token(monkeypatch, tmp_path: Path):
+    """A subscription token selects the Anthropic side without becoming a key.
+
+    Copying it into llm_api_key would hand an API-credits slot a credential the
+    CLI must resolve itself, so discovery reports the provider and nothing else.
+    """
+    monkeypatch.setenv("SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-token")
+    monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
+    monkeypatch.setattr("hyperloom.agents.robustness.config._probe_robustness_server", lambda: _async_value(""))
+
+    config = await Config.discover()
+
+    assert config.llm_provider == "anthropic"
+    assert config.llm_api_key == ""
+    assert "sk-ant-oat01-token" not in (config.llm_api_key, config.llm_base_url)
+
+
+@pytest.mark.asyncio
 async def test_config_discover_anthropic_model_follows_claude_model(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("SESSION_DIR", str(tmp_path))
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-token")
@@ -231,6 +256,50 @@ async def test_factory_uses_anthropic_engine_for_provider(tmp_path: Path):
         assert isinstance(engine, AnthropicRcaEngine)
         assert engine.model == "deepseek-v4-pro"
         await engine.aclose()
+    finally:
+        await bundle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_factory_uses_anthropic_engine_for_a_subscription_token_host(tmp_path: Path):
+    """An oauth-only host resolves no key in-process, and must still get RCA.
+
+    The Claude CLI reads CLAUDE_CODE_OAUTH_TOKEN itself, so the empty
+    base_url/api_key pair is a working configuration, not a missing one.
+    """
+    from hyperloom.agents.robustness.decision.rca_engine import AnthropicRcaEngine
+
+    config = Config(
+        session_dir=tmp_path,
+        robustness_server_url="",
+        llm_base_url="",
+        llm_api_key="",
+        llm_provider="anthropic",
+        llm_model="claude-opus-5",
+    )
+    bundle = build_reactor_components(config)
+    try:
+        engine = bundle.components.rca
+        assert isinstance(engine, AnthropicRcaEngine)
+        await engine.aclose()
+    finally:
+        await bundle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_factory_still_noops_when_the_openai_side_has_no_key(tmp_path: Path):
+    from hyperloom.agents.robustness.decision.rca_engine import NoopRcaEngine
+
+    config = Config(
+        session_dir=tmp_path,
+        robustness_server_url="",
+        llm_base_url="http://chat-server.invalid/v1",
+        llm_api_key="",
+        llm_provider="openai",
+    )
+    bundle = build_reactor_components(config)
+    try:
+        assert isinstance(bundle.components.rca, NoopRcaEngine)
     finally:
         await bundle.aclose()
 
