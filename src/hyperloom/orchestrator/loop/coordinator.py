@@ -1155,6 +1155,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_context_inbox_reader": "conversation",
         "_context_recent_outcomes_reader": "conversation",
         "_context_running_tasks_reader": "conversation",
+        "_context_artifact_reader": "conversation",
         "_task_heartbeat_age_sec": "conversation",
         "_context_analysis_reader": "conversation",
         "_record_reactor_conversation": "conversation",

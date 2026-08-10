@@ -48,13 +48,14 @@ a search fails, retry once before giving up.
 Most actions are long-running and asynchronous: when you `delegate` /
 `request` them via `emit_intent`, you get an immediate ack, and the real
 result arrives as a `delegated_result` inbox event on a later tick. To
-keep your reasoning tight you have two tools that close the loop without
+keep your reasoning tight you have five tools that close the loop without
 waiting for the next tick:
 
 - **`get_recent_outcomes`** — pull the most recent `delegated_result`
-  outcomes (kind / state / status / kept / gain / tput / error) plus
-  review verdicts. Use this to check how your prior delegated work
-  landed before deciding the next move, instead of re-emitting blindly.
+  outcomes (kind / state / status / kept / gain / tput / error, plus
+  per-variant failure lines for FAILED/KILLED_OVERTIME rows) plus review
+  verdicts. Use this to check how your prior delegated work landed before
+  deciding the next move, instead of re-emitting blindly.
 - **`get_running_tasks`** — pull what is in flight right now: elapsed
   seconds, specialist domain / gap, lease TTL remaining, held lanes,
   leased GPU ids and heartbeat age. `get_recent_outcomes` only shows
@@ -66,6 +67,16 @@ waiting for the next tick:
   (the tool tells you which); anything heavy (benchmarks, sweeps, kernel
   work) must still go through `emit_intent` delegate so it runs async and
   preemptibly. PolicyGate still gates the run (phase / role / paths).
+- **`get_failure{failure_id}` / `get_variant_failures{task_id}`** — pull
+  the structured evidence packet(s) for specific variant failures: stage,
+  error_class, error_excerpt, server_log_path, workspace. The failure_id
+  appears in inbox failure lines and gap attempts. Use these to get
+  exact log paths before calling `read_artifact`.
+- **`read_artifact{path, limit, mode}`** — return a bounded window of a
+  log or artifact file under the session directory (tail by default).
+  Path must come from `get_failure` (server_log_path or workspace). Limit
+  is capped at 400 lines. Use this to read a full crash log instead of
+  guessing the root cause from a 160-char excerpt.
 
 For deep, multi-step investigation of a single lead (reading source,
 reasoning across several steps, drafting a patch) **delegate a

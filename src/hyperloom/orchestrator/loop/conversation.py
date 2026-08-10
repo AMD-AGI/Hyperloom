@@ -142,6 +142,7 @@ class ConversationCollaborator:
                 running_tasks_reader=self._context_running_tasks_reader,
                 action_runner=self._run_action_now_sync,
                 reference_reader=self._context_reference_reader,
+                artifact_reader=self._context_artifact_reader,
             )
             setter(provider)
         except Exception:  # noqa: BLE001 — context pull is best-effort
@@ -163,6 +164,55 @@ class ConversationCollaborator:
             available = sorted(p.stem for p in refs_dir.glob("*.md"))
             return f"(read_reference: {name!r} not found; available: {available})"
         return candidate.read_text(encoding="utf-8")
+
+    _ARTIFACT_LINE_CAP = 400
+    _ARTIFACT_BYTE_CAP = 65536
+
+    def _context_artifact_reader(self, path: str = "", offset: int = 0, limit: int = 200, mode: str = "tail") -> str:
+        """Return a bounded window of a session-sandboxed file.
+
+        Args:
+            path: Absolute path to the file; must resolve within session_dir.
+            offset: Starting line index for ``head`` mode (0-based); ignored
+                in ``tail`` mode.
+            limit: Maximum lines to return; capped at
+                :attr:`_ARTIFACT_LINE_CAP`.
+            mode: ``tail`` (default) or ``head``.
+
+        Returns:
+            Defanged text window, or an error string.
+        """
+        from pathlib import Path
+        from ..loop.coordinator import _defang_prompt_structure
+
+        p = (path or "").strip()
+        if not p:
+            return "(read_artifact: path is required)"
+        try:
+            resolved = Path(p).resolve()
+        except Exception:  # noqa: BLE001
+            return f"(read_artifact: invalid path {p!r})"
+        session_root = self.session_dir.resolve()
+        if not str(resolved).startswith(str(session_root)):
+            return f"(read_artifact: path not within session directory)"
+        if not resolved.exists():
+            return f"(read_artifact: file not found: {p!r})"
+        try:
+            raw_bytes = resolved.read_bytes()
+        except OSError as exc:
+            return f"(read_artifact: cannot read {p!r}: {exc})"
+        try:
+            text = raw_bytes[:self._ARTIFACT_BYTE_CAP].decode("utf-8", errors="strict")
+        except (UnicodeDecodeError, ValueError):
+            return f"(read_artifact: file is binary or non-UTF-8: {p!r})"
+        lines = text.splitlines()
+        n = max(1, min(int(limit or 200), self._ARTIFACT_LINE_CAP))
+        if mode == "head":
+            start = max(0, int(offset or 0))
+            window = lines[start : start + n]
+        else:
+            window = lines[-n:]
+        return _defang_prompt_structure("\n".join(window))
 
     def _context_inbox_reader(self, since_seq: int = 0) -> str:
         """Synchronous projection of the orchestration inbox tail (sync SQLite path).
