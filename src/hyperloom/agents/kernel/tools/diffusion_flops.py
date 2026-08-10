@@ -155,6 +155,8 @@ _CLASS_FAMILY: dict[str, str] = {
     "ZImageTransformer2DModel": "single",
     "SanaTransformer2DModel": "sana",
     "UNet2DConditionModel": "unet",
+    # FLUX.2 keeps FLUX.1's dual + single stream structure, only wider.
+    "Flux2Transformer2DModel": "flux",
 }
 
 # Per-class overrides for constants the config does not expose (diffusers
@@ -162,6 +164,8 @@ _CLASS_FAMILY: dict[str, str] = {
 _CLASS_DEFAULTS: dict[str, dict[str, Any]] = {
     "SD3Transformer2DModel": {"text_tokens": 333, "default_steps": 28, "default_cfg_batch": 2},
     "FluxTransformer2DModel": {"text_tokens": 512, "default_steps": 28, "default_cfg_batch": 1},
+    # FLUX.2-dev is guidance-distilled like FLUX.1-dev, so one forward per step.
+    "Flux2Transformer2DModel": {"text_tokens": 512, "default_steps": 50, "default_cfg_batch": 1},
     "QwenImageTransformer2DModel": {"text_tokens": 256, "default_steps": 30, "default_cfg_batch": 2},
     "AuraFlowTransformer2DModel": {"text_tokens": 256, "default_steps": 50, "default_cfg_batch": 2},
     "HunyuanImageTransformer2DModel": {"text_tokens": 256, "default_steps": 50, "default_cfg_batch": 2},
@@ -173,6 +177,9 @@ _CLASS_DEFAULTS: dict[str, dict[str, Any]] = {
     "SanaTransformer2DModel": {"text_tokens": 300, "default_steps": 20, "default_cfg_batch": 2, "vae_spatial": 32},
     "UNet2DConditionModel": {"text_tokens": 77, "default_steps": 40, "default_cfg_batch": 2},
 }
+
+# Denoisers with a SwiGLU FFN whose config exposes no gating flag.
+_GATED_FFN_CLASSES = frozenset({"Flux2Transformer2DModel"})
 
 # Per-model-basename step/cfg refinements (turbo / schnell / fast distilled).
 _BASENAME_HINTS: dict[str, dict[str, Any]] = {
@@ -361,8 +368,8 @@ def resolve_geometry(model_dir: str | Path) -> DenoiserGeometry | None:
     if num_experts and not moe_inter:
         moe_inter = intermediate
 
-    # gated FFN heuristic: Sana / Z-Image style use gated MLP; MMDiT/Flux GELU are not.
-    gated = family in ("sana",) or bool(cfg.get("use_gated_mlp"))
+    # gated FFN: Sana / Z-Image style, plus classes that use SwiGLU without saying so.
+    gated = family in ("sana",) or model_class in _GATED_FFN_CLASSES or bool(cfg.get("use_gated_mlp"))
 
     defaults = dict(_CLASS_DEFAULTS.get(model_class, {}))
     basename = d.name.lower()
@@ -443,12 +450,22 @@ def _single_stream_layer(g: DenoiserGeometry, s: int, ffn_pt: float) -> float:
     return lin + attn
 
 
+def _cross_attention_block_flops(g: DenoiserGeometry, q_tokens: int, tt: int) -> float:
+    """Cross-attention over ``q_tokens`` queries against ``tt`` text tokens.
+
+    Counts all four projections: Q and O scale with the queries, K and V with
+    the text length.
+    """
+    qo = q_tokens * _linear_flops(1.0, g.hidden, g.hidden) * 2
+    kv = tt * _linear_flops(1.0, g.hidden, g.hidden) * 2
+    return _cross_attention_flops(q_tokens, tt, g.hidden) + qo + kv
+
+
 def _sana_layer(g: DenoiserGeometry, ti: int, tt: int, ffn_pt: float) -> float:
     """Sana block: linear self-attention over image tokens + cross-attn to text."""
     lin = ti * _qkvo_flops(1.0, g.hidden) + ti * ffn_pt
     self_attn = _linear_attention_flops(ti, g.hidden, g.head_dim or 32)
-    cross = _cross_attention_flops(ti, tt, g.hidden) + tt * _linear_flops(1.0, g.hidden, g.hidden) * 2
-    return lin + self_attn + cross
+    return lin + self_attn + _cross_attention_block_flops(g, ti, tt)
 
 
 def _unet_forward_flops(g: DenoiserGeometry, height: int, width: int) -> float:
