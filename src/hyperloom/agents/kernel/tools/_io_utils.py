@@ -31,9 +31,14 @@ def atomic_write_json(
     ensure_ascii: bool = True,
     trailing_newline: bool = True,
 ) -> None:
-    """Write JSON to ``path`` via a temp file then rename, creating parents."""
+    """Write JSON to ``path`` via a temp file then rename, creating parents.
+
+    The temp file is opened UTF-8 explicitly, like every other writer here: with
+    ``ensure_ascii=False`` callers the payload carries non-ASCII, which a
+    locale-derived default encoding cannot always represent.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tmp:
+    with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False, encoding="utf-8") as tmp:
         json.dump(data, tmp, indent=indent, sort_keys=sort_keys, ensure_ascii=ensure_ascii)
         if trailing_newline:
             tmp.write("\n")

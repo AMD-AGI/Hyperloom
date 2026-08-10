@@ -1212,9 +1212,12 @@ class TestDiffusionComputeCeiling:
         assert dit is not None
         assert dit[1] == 32**2
 
-    @pytest.mark.parametrize("patch_size", [["a"], {"h": 2}, "xx", [[2]]])
+    @pytest.mark.parametrize("patch_size", [["a"], {"h": 2}, "xx", [[2]], ["a", "b", "c"], [1, 2, "c"]])
     def test_read_dit_meta_declines_a_non_numeric_patch_size(self, tmp_path, patch_size):
-        """``Never raises`` is the documented contract of the public entry point."""
+        """``Never raises`` is the documented contract of the public entry point.
+
+        The 3-element cases matter separately: a video patch withholds only the
+        token count, but a broken one is still a broken config."""
         assert self._write_dit_config(tmp_path, patch_size) is None
 
     def test_a_withheld_token_count_keeps_the_dit_only_memory_bound(self, monkeypatch):

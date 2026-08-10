@@ -1231,10 +1231,20 @@ def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0
     Returns:
         ``(dit_params, latent_tokens, num_layers, hidden_size)`` where
         ``num_layers`` is the TOTAL block count (dual + single stream, for the
-        attention term), or ``None`` when the config is unreadable / missing
-        fields / carries a non-numeric value / declares a 3-element (video)
-        ``patch_size`` this function has no frame axis for / offers no way to
-        size the latent grid (caller degrades to memory-only).
+        attention term).
+
+        ``latent_tokens == 0`` is an in-band sentinel for "the weights resolved
+        but the sequence length did not", which today means a 3-element (video)
+        ``patch_size`` this function has no frame axis for. Callers must keep
+        using the other three fields in that case -- returning ``None`` instead
+        would cost the DiT-only weight count, and
+        ``_compute_diffusion_breakdown_from_state`` answers a missing one by
+        falling its per-step memory bound back to the whole checkpoint, text
+        encoder and VAE included. Only the compute half is unavailable.
+
+        ``None`` when the config is unreadable, is missing ``num_layers`` or the
+        hidden size, carries a non-numeric value where a number is required, or
+        offers no way to size the latent grid (caller degrades to memory-only).
     """
     try:
         cfg = json.loads((Path(model_path) / "transformer" / "config.json").read_text(encoding="utf-8"))
