@@ -34,10 +34,11 @@ _ALL_KEY_VARS = (
     "AMD_API_KEY",
 )
 _ALL_URL_VARS = ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE")
+_HEADER_VARS = ("ANTHROPIC_CUSTOM_HEADERS", "OPENAI_CUSTOM_HEADERS")
 
 
 def _clear(monkeypatch):
-    for name in (*_ALL_KEY_VARS, *_ALL_URL_VARS):
+    for name in (*_ALL_KEY_VARS, *_ALL_URL_VARS, *_HEADER_VARS):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -129,5 +130,26 @@ def test_no_credentials_leaves_aliases_unset(monkeypatch):
     """No key/URL configured: no alias is invented."""
     _clear(monkeypatch)
     env = ray_runtime.safe_runtime_env()["env_vars"]
-    for alias in (*_OPENAI_KEYS, *_ANTHROPIC_KEYS, *_URL_ALIASES):
+    for alias in (*_OPENAI_KEYS, *_ANTHROPIC_KEYS, *_URL_ALIASES, *_HEADER_VARS):
         assert alias not in env, alias
+
+
+def test_gateway_custom_headers_reach_the_worker(monkeypatch):
+    """Both sides' gateway auth headers cross the Ray boundary.
+
+    A worker that receives the base URL and the key but not the subscription
+    header is rejected by a header-authenticated gateway, and the header cannot
+    be re-derived from the key.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gw.example/anthropic")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example/v1")
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "X-Tenant: acme")
+
+    env = ray_runtime.safe_runtime_env()["env_vars"]
+
+    assert env["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: anthropic-key"
+    assert env["OPENAI_CUSTOM_HEADERS"] == "X-Tenant: acme"

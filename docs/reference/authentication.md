@@ -195,9 +195,14 @@ export ANTHROPIC_API_KEY=ak-your-gateway-apikey
 export ANTHROPIC_CUSTOM_HEADERS='Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}'
 ```
 
-Each side reads only its own variable: the Anthropic side never picks up
-`OPENAI_CUSTOM_HEADERS`, and the reverse. Headers are operator-supplied and are
-never synthesized from the configured keys.
+The Anthropic side reads only `ANTHROPIC_CUSTOM_HEADERS`. The OpenAI side reads
+`OPENAI_CUSTOM_HEADERS` whenever you set `OPENAI_BASE_URL` explicitly — that
+endpoint may be a different host, whose headers Hyperloom will not guess at. Only
+when the OpenAI base URL was *derived* from `ANTHROPIC_BASE_URL` (one gateway, no
+explicit OpenAI endpoint) does the OpenAI client fall back to
+`ANTHROPIC_CUSTOM_HEADERS`, because then both protocols are the same host and the
+subscription header was only ever written to the Anthropic variable. Headers are
+operator-supplied either way and are never synthesized from the configured keys.
 
 Both survive in `.env` across setup runs. An Anthropic-only deployment is the one
 exception: setup scrubs the whole OpenAI side there, header included, because that
