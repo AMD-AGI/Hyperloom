@@ -252,9 +252,7 @@ def test_derived_base_url_carries_the_anthropic_gateway_headers():
 
 def test_explicit_openai_base_url_does_not_borrow_anthropic_headers():
     """An explicit OpenAI URL may be a different host, whose headers we cannot guess."""
-    kwargs = openai_client_kwargs(
-        env={**_ANTHROPIC_ONLY_ENV, "OPENAI_BASE_URL": "https://other-host.example/v1"}
-    )
+    kwargs = openai_client_kwargs(env={**_ANTHROPIC_ONLY_ENV, "OPENAI_BASE_URL": "https://other-host.example/v1"})
     assert kwargs["base_url"] == "https://other-host.example/v1"
     assert "default_headers" not in kwargs
 
@@ -1189,6 +1187,266 @@ def test_migrated_call_sites_make_no_bare_llm_api_calls():
             if any(chain.endswith(endpoint) for endpoint in _SANCTIONED_ONLY_ENDPOINTS):
                 offenders.append(f"{rel}:{node.lineno} calls .{chain}(")
     assert not offenders, f"LLM calls must go through llm_config's entry points: {offenders}"
+
+
+# ---- anthropic_completion / aanthropic_completion: transport selection ----
+_ANTHROPIC_KEY = "_".join(("ANTHROPIC", "API", "KEY"))
+_ANTHROPIC_TOKEN = "_".join(("ANTHROPIC", "AUTH", "TOKEN"))
+_OAUTH_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+_OAUTH_VALUE = "sk-ant-oat01-fake"
+
+
+class _ClosingAnthropicTransport(_FakeAnthropicTransport):
+    """Sync transport that records whether the caller closed it."""
+
+    def __init__(self, response: Any = None, *, error: BaseException | None = None) -> None:
+        super().__init__(response, error=error)
+        self.closed = False
+
+    def __enter__(self) -> "_ClosingAnthropicTransport":
+        return self
+
+    def __exit__(self, *_exc: Any) -> bool:
+        self.closed = True
+        return False
+
+
+class _ClosingAsyncAnthropicTransport(_ClosingAnthropicTransport):
+    async def post(self, path: str, *, json: Any) -> Any:  # type: ignore[override]
+        return _FakeAnthropicTransport.post(self, path, json=json)
+
+    async def __aenter__(self) -> "_ClosingAsyncAnthropicTransport":
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> bool:
+        self.closed = True
+        return False
+
+
+class _FakeOneShotClient:
+    """Stands in for the Claude CLI client; records the completion arguments."""
+
+    instances: list["_FakeOneShotClient"] = []
+
+    def __init__(self, timeout_s: float = 60.0) -> None:
+        self.timeout_s = timeout_s
+        self.calls: list[dict[str, Any]] = []
+        _FakeOneShotClient.instances.append(self)
+
+    def messages(self, **kwargs: Any) -> llm_config.AnthropicMessageResult:
+        self.calls.append(kwargs)
+        return llm_config.AnthropicMessageResult(
+            text="cli reply",
+            stop_reason="end_turn",
+            usage={"input_tokens": 3, "output_tokens": 2},
+        )
+
+    async def amessages(self, **kwargs: Any) -> llm_config.AnthropicMessageResult:
+        return self.messages(**kwargs)
+
+
+@pytest.fixture
+def fake_one_shot(monkeypatch: pytest.MonkeyPatch) -> type[_FakeOneShotClient]:
+    """Replace the Claude CLI client where ``_one_shot_client`` imports it."""
+    from hyperloom.common import claude_oneshot
+
+    _FakeOneShotClient.instances = []
+    monkeypatch.setattr(claude_oneshot, "ClaudeOneShotClient", _FakeOneShotClient)
+    return _FakeOneShotClient
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({_ANTHROPIC_KEY: "sk-ant-key"}, llm_config.ANTHROPIC_TRANSPORT_HTTP),
+        ({_ANTHROPIC_TOKEN: "gateway-bearer"}, llm_config.ANTHROPIC_TRANSPORT_HTTP),
+        ({_OAUTH_ENV: _OAUTH_VALUE}, llm_config.ANTHROPIC_TRANSPORT_SDK),
+        # The CLI prefers a key over the subscription token, so the transport
+        # that key authenticates must win here too.
+        ({_ANTHROPIC_KEY: "sk-ant-key", _OAUTH_ENV: _OAUTH_VALUE}, llm_config.ANTHROPIC_TRANSPORT_HTTP),
+        ({}, ""),
+        ({_OAUTH_ENV: "   "}, ""),
+    ],
+)
+def test_anthropic_transport_follows_the_credential_that_can_authenticate(env, expected):
+    assert llm_config.anthropic_transport(env) == expected
+
+
+def test_anthropic_transport_ready_is_false_without_a_credential():
+    assert llm_config.anthropic_transport_ready({}) is False
+
+
+def test_anthropic_transport_ready_skips_the_sdk_probe_on_the_http_transport(monkeypatch):
+    """An API key needs no Claude CLI, so an absent SDK must not disable it."""
+    from hyperloom.common import claude_oneshot
+
+    def _missing() -> None:
+        raise RuntimeError("claude_agent_sdk not installed")
+
+    monkeypatch.setattr(claude_oneshot, "ensure_available", _missing)
+    assert llm_config.anthropic_transport_ready({_ANTHROPIC_KEY: "sk-ant-key"}) is True
+
+
+@pytest.mark.parametrize(
+    ("sdk_error", "expected"),
+    [(None, True), (RuntimeError("claude_agent_sdk not installed"), False)],
+)
+def test_anthropic_transport_ready_probes_the_sdk_for_a_subscription_token(monkeypatch, sdk_error, expected):
+    from hyperloom.common import claude_oneshot
+
+    def _probe() -> None:
+        if sdk_error is not None:
+            raise sdk_error
+
+    monkeypatch.setattr(claude_oneshot, "ensure_available", _probe)
+    assert llm_config.anthropic_transport_ready({_OAUTH_ENV: _OAUTH_VALUE}) is expected
+
+
+def test_anthropic_completion_posts_to_the_messages_api_when_a_key_is_configured(monkeypatch):
+    client = _ClosingAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
+    monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
+
+    result = llm_config.anthropic_completion(
+        model="claude-opus-5",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=64,
+        system="sys",
+        env={_ANTHROPIC_KEY: "sk-ant-key"},
+    )
+
+    assert result.text == "hello world"
+    assert client.calls[0]["path"] == "/v1/messages"
+    assert client.calls[0]["json"] == {
+        "model": "claude-opus-5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 64,
+        "system": "sys",
+    }
+    assert client.closed, "the HTTP client must be closed once the completion returns"
+
+
+def test_anthropic_completion_omits_an_absent_system_prompt(monkeypatch):
+    client = _ClosingAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
+    monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
+
+    llm_config.anthropic_completion(
+        model="claude-opus-5",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=8,
+        env={_ANTHROPIC_KEY: "sk-ant-key"},
+    )
+
+    assert "system" not in client.calls[0]["json"]
+
+
+def test_anthropic_completion_drives_the_claude_cli_for_a_subscription_token(monkeypatch, fake_one_shot):
+    def _refuse(**_kw: Any) -> Any:
+        raise AssertionError("a subscription token must not reach the Messages API")
+
+    monkeypatch.setattr(llm_config, "get_anthropic_client", _refuse)
+
+    result = llm_config.anthropic_completion(
+        model="claude-opus-5",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=64,
+        system="sys",
+        env={_OAUTH_ENV: _OAUTH_VALUE},
+        timeout_s=12.0,
+    )
+
+    assert result.text == "cli reply"
+    assert result.stop_reason == "end_turn"
+    client = fake_one_shot.instances[0]
+    assert client.timeout_s == 12.0
+    assert client.calls[0] == {
+        "model": "claude-opus-5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "system": "sys",
+        "max_tokens": 64,
+    }
+
+
+def test_anthropic_completion_keeps_the_cli_default_budget_when_unset(fake_one_shot):
+    llm_config.anthropic_completion(
+        model="claude-opus-5",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=8,
+        env={_OAUTH_ENV: _OAUTH_VALUE},
+    )
+    assert fake_one_shot.instances[0].timeout_s == 60.0
+
+
+def test_anthropic_completion_raises_when_no_credential_is_configured():
+    with pytest.raises(LLMConfigError) as excinfo:
+        llm_config.anthropic_completion(
+            model="claude-opus-5",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=8,
+            env={},
+        )
+    message = str(excinfo.value)
+    for name in ANTHROPIC_CREDENTIAL_ENV_ORDER:
+        assert name in message, f"the error must name every credential form: {name}"
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_completion_posts_to_the_messages_api_and_closes(monkeypatch):
+    client = _ClosingAsyncAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
+    monkeypatch.setattr(llm_config, "get_async_anthropic_client", lambda **_kw: client)
+
+    result = await llm_config.aanthropic_completion(
+        model="claude-opus-5",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=64,
+        env={_ANTHROPIC_KEY: "sk-ant-key"},
+    )
+
+    assert result.text == "hello world"
+    assert client.calls[0]["path"] == "/v1/messages"
+    assert client.closed
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_completion_drives_the_claude_cli_for_a_subscription_token(monkeypatch, fake_one_shot):
+    def _refuse(**_kw: Any) -> Any:
+        raise AssertionError("a subscription token must not reach the Messages API")
+
+    monkeypatch.setattr(llm_config, "get_async_anthropic_client", _refuse)
+
+    result = await llm_config.aanthropic_completion(
+        model="claude-opus-5",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=64,
+        env={_OAUTH_ENV: _OAUTH_VALUE},
+    )
+
+    assert result.text == "cli reply"
+    assert fake_one_shot.instances[0].calls[0]["max_tokens"] == 64
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_completion_raises_when_no_credential_is_configured():
+    with pytest.raises(LLMConfigError):
+        await llm_config.aanthropic_completion(
+            model="claude-opus-5",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=8,
+            env={},
+        )
+
+
+def test_anthropic_completion_reads_the_ambient_environment_by_default(monkeypatch, fake_one_shot):
+    for name in ANTHROPIC_CREDENTIAL_ENV_ORDER:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(_OAUTH_ENV, _OAUTH_VALUE)
+
+    result = llm_config.anthropic_completion(
+        model="claude-opus-5",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=8,
+    )
+
+    assert result.text == "cli reply"
 
 
 def test_claude_sdk_env_options_disables_advisor_tool_by_default():
