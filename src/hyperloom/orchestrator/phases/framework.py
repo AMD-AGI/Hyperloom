@@ -1765,11 +1765,12 @@ class FrameworkPhase(PhaseHandler):
             _reset_baseline_failure_backstop()
             _stack_setup_commands()
             _stack_kept_runtime()
-            # Persist the actual materialized config used for the KEEP'd bench so
-            # the revalidation baseline re-runs the identical effective config.
             accepted_cfg = str(res.get("enablement_accepted_config_path") or "").strip()
             if accepted_cfg:
                 state.enablement.accepted_config_path = accepted_cfg
+            effective = res.get("enablement_effective_config")
+            if isinstance(effective, dict) and effective:
+                state.enablement.accepted_config = dict(effective)
             if str(state.enablement.origin or "") == "eval":
                 # eval-origin: the patch boots and re-passed accuracy in the gate,
                 # but tput/accuracy only become official once a GENUINE baseline
@@ -4595,14 +4596,25 @@ class FrameworkPhase(PhaseHandler):
             "disable_run_eval": False,
             **_enablement_carrier_params(state),
         }
-        # Prefer the accepted (post-fix) config so revalidation uses the same
-        # effective config the KEEP'd candidate ran; fall back to the trigger
-        # probe config only when no accepted config was recorded.
         accepted_cfg = str(state.enablement.accepted_config_path or "").strip()
         probe_cfg = str(state.enablement.probe_config_path or "").strip()
         cfg = accepted_cfg or probe_cfg
         if cfg:
             params["config_path"] = cfg
+        # Forward the effective launch config (env + args layers from the KEEP bench)
+        # so the revalidation baseline runs the same configuration that was graded.
+        effective = state.enablement.accepted_config or {}
+        if isinstance(effective, dict):
+            if effective.get("extra_envs"):
+                params["extra_envs"] = dict(effective["extra_envs"])
+            if effective.get("extra_server_args"):
+                params["extra_server_args"] = str(effective["extra_server_args"])
+            if effective.get("remove_args"):
+                params["remove_args"] = list(effective["remove_args"])
+            if effective.get("unset_envs"):
+                params["unset_envs"] = list(effective["unset_envs"])
+            if effective.get("args_mode") and effective["args_mode"] != "append":
+                params["args_mode"] = str(effective["args_mode"])
         # Carry the active runtime override so the revalidation baseline runs
         # under the same framework runtime as the KEEP'd candidate.
         active_rt = state.enablement.active_runtime or {}

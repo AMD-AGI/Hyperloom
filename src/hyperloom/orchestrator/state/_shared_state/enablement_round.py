@@ -54,6 +54,9 @@ class EnablementRound:
     human_review_logged: list = field(default_factory=list)
     # Path to the materialized config produced by the KEEP'd candidate bench.
     accepted_config_path: str = ""
+    # Effective launch config from the KEEP'd bench (env + args union of the base
+    # stack layer and the candidate's own levers); fed to the revalidation baseline.
+    accepted_config: dict = field(default_factory=dict)
     # Task identity for the current revalidation baseline task.
     revalidation_task_id: str = ""
     # Monotonically increasing counter for fresh revalidation idempotency keys.
