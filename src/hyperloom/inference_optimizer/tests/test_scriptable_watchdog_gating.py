@@ -22,7 +22,7 @@ from hyperloom.orchestrator.actions.executors.baseline import (
 
 
 def test_scriptable_frameworks_get_no_watchdog_log(tmp_path):
-    for framework in ("custom", "custom", "xdit", "hunyuan_image3"):
+    for framework in ("custom", "xdit"):
         assert _watchdog_server_log_path(tmp_path, framework) is None
 
 

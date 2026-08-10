@@ -42,6 +42,8 @@ class KnowledgeConfig:
 
     mode: KnowledgeStoreMode
     local_root: str
+    kb_store_url: str = ""
+    kb_store_token: str = ""
     gbrain_base_url: str = ""
     gbrain_token: str = ""
 
@@ -54,56 +56,66 @@ class KnowledgeConfig:
         try:
             mode = KnowledgeStoreMode(raw_mode)
         except ValueError as exc:
-            raise ValueError(
-                f"invalid KNOWLEDGE_STORE_MODE={raw_mode!r}; expected 'local' or 'remote'"
-            ) from exc
+            raise ValueError(f"invalid KNOWLEDGE_STORE_MODE={raw_mode!r}; expected 'local' or 'remote'") from exc
 
         explicit_root = source.get("KNOWLEDGE_LOCAL_ROOT")
         local_root = (
-            _expanded(str(explicit_root).strip())
-            if explicit_root not in (None, "")
-            else _default_local_root(source)
+            _expanded(str(explicit_root).strip()) if explicit_root not in (None, "") else _default_local_root(source)
         )
-        base_url = str(source.get("GBRAIN_BASE_URL") or "").strip()
-        token = str(source.get("GBRAIN_TOKEN") or "").strip()
+        kb_store_url = str(source.get("KB_STORE_URL") or "").strip()
+        kb_store_token = str(source.get("KB_STORE_TOKEN") or "").strip()
+        gbrain_base_url = str(source.get("GBRAIN_BASE_URL") or "").strip()
+        gbrain_token = str(source.get("GBRAIN_TOKEN") or "").strip()
         if mode is KnowledgeStoreMode.REMOTE:
             missing = [
                 name
-                for name, value in (("GBRAIN_BASE_URL", base_url), ("GBRAIN_TOKEN", token))
+                for name, value in (
+                    ("KB_STORE_URL", kb_store_url),
+                    ("KB_STORE_TOKEN", kb_store_token),
+                )
                 if not value
             ]
             if missing:
-                raise ValueError(
-                    "KNOWLEDGE_STORE_MODE=remote requires " + " and ".join(missing)
-                )
+                raise ValueError("KNOWLEDGE_STORE_MODE=remote requires " + " and ".join(missing))
         return cls(
             mode=mode,
             local_root=local_root,
-            gbrain_base_url=base_url if mode is KnowledgeStoreMode.REMOTE else "",
-            gbrain_token=token if mode is KnowledgeStoreMode.REMOTE else "",
+            kb_store_url=kb_store_url if mode is KnowledgeStoreMode.REMOTE else "",
+            kb_store_token=kb_store_token if mode is KnowledgeStoreMode.REMOTE else "",
+            # GBrain is no longer a Recipe backend. Keep its optional
+            # credentials available for KG and Framework PR integrations.
+            gbrain_base_url=gbrain_base_url,
+            gbrain_token=gbrain_token,
         )
 
     @property
     def backend(self) -> str:
         """Stable audit backend label."""
 
-        return "gbrain" if self.mode is KnowledgeStoreMode.REMOTE else "local-json"
+        return "kb-store" if self.mode is KnowledgeStoreMode.REMOTE else "local-json"
 
     def apply_to_child_env(self, env: MutableMapping[str, str]) -> None:
         """Apply the exact shared contract to a KernelForge child environment."""
 
         env["KNOWLEDGE_STORE_MODE"] = self.mode.value
         env["KNOWLEDGE_LOCAL_ROOT"] = self.local_root
-        # This is derived state. Never honor an operator-provided value.
-        env["KERNELFORGE_GBRAIN_ENABLED"] = (
-            "true" if self.mode is KnowledgeStoreMode.REMOTE else "false"
-        )
         if self.mode is KnowledgeStoreMode.REMOTE:
-            env["GBRAIN_BASE_URL"] = self.gbrain_base_url
-            env["GBRAIN_TOKEN"] = self.gbrain_token
+            env["KB_STORE_URL"] = self.kb_store_url
+            env["KB_STORE_TOKEN"] = self.kb_store_token
         else:
-            env.pop("GBRAIN_BASE_URL", None)
-            env.pop("GBRAIN_TOKEN", None)
+            env.pop("KB_STORE_URL", None)
+            env.pop("KB_STORE_TOKEN", None)
+        # Rewrite knowledge is owned by KB Store. Legacy GBrain credentials
+        # remain available to Hyperloom's own KG/Framework integrations but
+        # never cross into the KernelForge child.
+        env.pop("GBRAIN_BASE_URL", None)
+        env.pop("GBRAIN_TOKEN", None)
+        env["KERNELFORGE_GBRAIN_ENABLED"] = "false"
+        # The section draft belongs to this run's inference document. A
+        # KernelForge child publishes its own ``kernel:`` record, so letting it
+        # inherit these would stage its sections into the wrong document.
+        env.pop("KB_DRAFT_DIR", None)
+        env.pop("KB_WARM_START_DIR", None)
 
     def public_dict(self) -> dict[str, Any]:
         """Return secret-free configuration suitable for status/audit output."""

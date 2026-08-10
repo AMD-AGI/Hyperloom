@@ -570,12 +570,12 @@ def collect_kb_provenance(
         st = str(row.get("status") or "unknown")
         status_counts[st] = status_counts.get(st, 0) + 1
 
-    # Recipe-snapshot / gbrain remote read audit: whether the snapshot KB was
+    # Recipe-snapshot remote read audit: whether the snapshot KB was
     # consulted, which backend served it, and how each read resolved.
     recipe_audit = _read_last_n_audit(_recipe_audit_path(session_dir), n=50)
     recipe_by_resolution: dict[str, int] = {}
     recipe_by_remote: dict[str, int] = {}
-    # Per-path (gbrain vs recipe KB) attribution. ``by_source`` counts contributed
+    # Per-backend (KB Store vs local Recipe KB) attribution. ``by_source`` counts contributed
     # rows; ``best_config_by_source`` counts who supplied the champion config.
     recipe_by_source: dict[str, int] = {}
     recipe_best_config_by_source: dict[str, int] = {}

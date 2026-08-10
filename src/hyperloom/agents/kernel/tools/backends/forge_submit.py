@@ -86,13 +86,13 @@ def _knowledge_config_for_forge():
             log.warning(
                 "Forge knowledge configuration is invalid (%s); disabling remote "
                 "knowledge for this process. Validate KNOWLEDGE_STORE_MODE and "
-                "GBRAIN credentials during startup.",
+                "KB Store credentials during startup.",
                 exc,
             )
             fallback = dict(source)
             fallback["KNOWLEDGE_STORE_MODE"] = "local"
-            fallback.pop("GBRAIN_BASE_URL", None)
-            fallback.pop("GBRAIN_TOKEN", None)
+            fallback.pop("KB_STORE_URL", None)
+            fallback.pop("KB_STORE_TOKEN", None)
             config = KnowledgeConfig.from_env(fallback)
         _KNOWLEDGE_CONFIG_CACHE = config
         _KNOWLEDGE_CONFIG_RESOLVED = True

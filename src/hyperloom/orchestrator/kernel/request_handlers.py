@@ -4956,21 +4956,12 @@ def _batch_kernel_candidates(
     attempts_by_task: dict[str, dict] = {}
     in_flight: set[str] = set()
     from ..state.shared_state import (
-        _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
+        resolve_hot_kernel_min_gpu_pct,
         resolve_kernel_opt_max_failures,
     )
 
     max_failures = resolve_kernel_opt_max_failures()
-    # min_gpu_pct mirrors SharedState.untried_hot_reusable_kernels' default.
-    try:
-        min_gpu_pct = float(
-            os.environ.get(
-                "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT",
-                _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
-            )
-        )
-    except (TypeError, ValueError):
-        min_gpu_pct = _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
+    min_gpu_pct = resolve_hot_kernel_min_gpu_pct()
     if session_dir is not None:
         try:
             from ..state.shared_state import SharedState

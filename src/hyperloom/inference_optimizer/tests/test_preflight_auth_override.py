@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.llm_config import deepseek_compat_env
+from hyperloom.common.llm_config import deepseek_compat_env, parse_custom_headers
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
@@ -166,6 +166,34 @@ def test_dotenv_fallback_parses_safe_lines_and_preserves_env_wins(tmp_path, monk
     assert "TRACELENS_ROOT" not in os.environ
     err = capsys.readouterr().err
     assert "BAD-NAME" in err
+
+
+def test_dotenv_fallback_loads_gateway_custom_headers(tmp_path, monkeypatch):
+    """A header-authenticated gateway survives .env -> environment -> parsing.
+
+    setup writes these headers into ``.env``, so the loader has to accept them.
+    It strips the quotes and leaves ``${VAR}`` intact; the expansion belongs to
+    ``parse_custom_headers``, which is what lets the secret live in one place.
+    """
+    anthropic_key_var = "_".join(("ANTHROPIC", "API", "KEY"))
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    for var in ("ANTHROPIC_CUSTOM_HEADERS", "OPENAI_CUSTOM_HEADERS", anthropic_key_var):
+        monkeypatch.delenv(var, raising=False)
+    (tmp_path / ".env").write_text(
+        f"{anthropic_key_var}=ak-gateway-token\n"
+        f'ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}"\n'
+        'OPENAI_CUSTOM_HEADERS="X-Tenant: acme"\n',
+        encoding="utf-8",
+    )
+
+    cli_preflight._load_dotenv_fallback()
+
+    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}"
+    assert os.environ["OPENAI_CUSTOM_HEADERS"] == "X-Tenant: acme"
+    assert parse_custom_headers(os.environ["ANTHROPIC_CUSTOM_HEADERS"]) == {
+        "Ocp-Apim-Subscription-Key": "ak-gateway-token"
+    }
+    assert parse_custom_headers(os.environ["OPENAI_CUSTOM_HEADERS"]) == {"X-Tenant": "acme"}
 
 
 def test_preflight_resolves_urls_and_fans_out_auth_aliases(

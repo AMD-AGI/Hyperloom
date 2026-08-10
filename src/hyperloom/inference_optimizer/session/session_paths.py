@@ -669,7 +669,7 @@ def recipe_snapshot_dir(session_dir: Path) -> Path:
 
 def recipe_snapshot_audit_jsonl(session_dir: Path) -> Path:
     """``<sd>/runtime/recipe_snapshot/.audit.jsonl`` — append-only audit of
-    every recipe-snapshot remote READ call (writes are local-only and skip it).
+    local Recipe operations and remote KB Store publish attempts.
 
     Args:
         session_dir: The session root directory.

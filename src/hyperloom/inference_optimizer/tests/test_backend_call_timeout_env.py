@@ -91,38 +91,17 @@ class TestClaudeBackendHonoursEnv:
 
 
 class TestCodexBackendHonoursEnv:
-    def test_default_when_env_unset(self, monkeypatch):
+    def test_default_when_env_unset(self, monkeypatch, tmp_path):
         monkeypatch.delenv(CODEX_ENV, raising=False)
-        from hyperloom.orchestrator.roles.codex import CodexBackend
+        assert _new_codex_backend(tmp_path).call_timeout_s == 300.0
 
-        backend = CodexBackend(
-            api_key_env="OPENAI_API_KEY_TEST",
-            base_url_env="OPENAI_BASE_URL_TEST",
-            client_factory=object,
-        )
-        assert backend.call_timeout_s == 120.0
-
-    def test_env_override_picked_up_at_instantiation(self, monkeypatch):
+    def test_env_override_picked_up_at_instantiation(self, monkeypatch, tmp_path):
         monkeypatch.setenv(CODEX_ENV, "240")
-        from hyperloom.orchestrator.roles.codex import CodexBackend
+        assert _new_codex_backend(tmp_path).call_timeout_s == 240.0
 
-        backend = CodexBackend(
-            api_key_env="OPENAI_API_KEY_TEST",
-            base_url_env="OPENAI_BASE_URL_TEST",
-            client_factory=object,
-        )
-        assert backend.call_timeout_s == 240.0
-
-    def test_bad_env_falls_back_to_default(self, monkeypatch):
+    def test_bad_env_falls_back_to_default(self, monkeypatch, tmp_path):
         monkeypatch.setenv(CODEX_ENV, "negative-one")
-        from hyperloom.orchestrator.roles.codex import CodexBackend
-
-        backend = CodexBackend(
-            api_key_env="OPENAI_API_KEY_TEST",
-            base_url_env="OPENAI_BASE_URL_TEST",
-            client_factory=object,
-        )
-        assert backend.call_timeout_s == 120.0
+        assert _new_codex_backend(tmp_path).call_timeout_s == 300.0
 
 
 def _new_claude_backend_with_seams():
@@ -133,6 +112,17 @@ def _new_claude_backend_with_seams():
         sdk_query_factory=lambda *a, **kw: iter(()),
         sdk_options_cls=type("FakeOpts", (), {"__init__": lambda self, **kw: None}),
         enable_mcp_emit_intent=False,
+    )
+
+
+def _new_codex_backend(tmp_path):
+    """Build a CodexBackend against a throwaway session-private cwd."""
+    from hyperloom.orchestrator.roles.agent_role import default_role_registry
+    from hyperloom.orchestrator.roles.codex import CodexBackend
+
+    return CodexBackend(
+        allowed_intents=default_role_registry()["orchestration"].allowed_intents,
+        cwd=tmp_path / "codex",
     )
 
 
