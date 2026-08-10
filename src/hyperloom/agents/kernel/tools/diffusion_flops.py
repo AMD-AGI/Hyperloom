@@ -155,6 +155,8 @@ _CLASS_FAMILY: dict[str, str] = {
     "ZImageTransformer2DModel": "single",
     "SanaTransformer2DModel": "sana",
     "UNet2DConditionModel": "unet",
+    # FLUX.2 keeps FLUX.1's dual + single stream structure, only wider.
+    "Flux2Transformer2DModel": "flux",
 }
 
 # Per-class overrides for constants the config does not expose (diffusers
@@ -162,6 +164,8 @@ _CLASS_FAMILY: dict[str, str] = {
 _CLASS_DEFAULTS: dict[str, dict[str, Any]] = {
     "SD3Transformer2DModel": {"text_tokens": 333, "default_steps": 28, "default_cfg_batch": 2},
     "FluxTransformer2DModel": {"text_tokens": 512, "default_steps": 28, "default_cfg_batch": 1},
+    # FLUX.2-dev is guidance-distilled like FLUX.1-dev, so one forward per step.
+    "Flux2Transformer2DModel": {"text_tokens": 512, "default_steps": 50, "default_cfg_batch": 1},
     "QwenImageTransformer2DModel": {"text_tokens": 256, "default_steps": 30, "default_cfg_batch": 2},
     "AuraFlowTransformer2DModel": {"text_tokens": 256, "default_steps": 50, "default_cfg_batch": 2},
     "HunyuanImageTransformer2DModel": {"text_tokens": 256, "default_steps": 50, "default_cfg_batch": 2},
@@ -443,12 +447,22 @@ def _single_stream_layer(g: DenoiserGeometry, s: int, ffn_pt: float) -> float:
     return lin + attn
 
 
+def _cross_attention_block_flops(g: DenoiserGeometry, q_tokens: int, tt: int) -> float:
+    """Cross-attention over ``q_tokens`` queries against ``tt`` text tokens.
+
+    Counts all four projections: Q and O scale with the queries, K and V with
+    the text length.
+    """
+    qo = q_tokens * _linear_flops(1.0, g.hidden, g.hidden) * 2
+    kv = tt * _linear_flops(1.0, g.hidden, g.hidden) * 2
+    return _cross_attention_flops(q_tokens, tt, g.hidden) + qo + kv
+
+
 def _sana_layer(g: DenoiserGeometry, ti: int, tt: int, ffn_pt: float) -> float:
     """Sana block: linear self-attention over image tokens + cross-attn to text."""
     lin = ti * _qkvo_flops(1.0, g.hidden) + ti * ffn_pt
     self_attn = _linear_attention_flops(ti, g.hidden, g.head_dim or 32)
-    cross = _cross_attention_flops(ti, tt, g.hidden) + tt * _linear_flops(1.0, g.hidden, g.hidden) * 2
-    return lin + self_attn + cross
+    return lin + self_attn + _cross_attention_block_flops(g, ti, tt)
 
 
 def _unet_forward_flops(g: DenoiserGeometry, height: int, width: int) -> float:
