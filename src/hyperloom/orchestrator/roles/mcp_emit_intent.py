@@ -42,12 +42,14 @@ EMIT_INTENT_TOOL_QUALIFIED = f"mcp__{MCP_SERVER_NAME}__{EMIT_INTENT_TOOL_NAME}"
 
 
 # Vocabulary a required-field name cannot carry on its own: closed value sets
-# and the one optional dial each type honours. Appended verbatim after the
-# generated required-field list for that intent type.
+# and the one optional dial each type honours. Rendered as its own clause by
+# :func:`payload_constraints`, never mixed into the required-field list --
+# appended there, they read as required keys, and a note naming a field that is
+# already required printed it twice.
 _PAYLOAD_FIELD_NOTES: dict[IntentType, tuple[str, ...]] = {
     IntentType.REVIEW_VERDICT: ("verdict ∈ approve|reject|redirect|advise|needs_review",),
     IntentType.KILL_TASK: ("scope must be 'task'",),
-    IntentType.EXTEND_LEASE: ("reason",),
+    IntentType.EXTEND_LEASE: ("reason is optional",),
     IntentType.PRUNE_BRANCH: ("scope ∈ family|queued",),
     IntentType.ALERT: ("severity ∈ low|medium|high",),
 }
@@ -78,14 +80,42 @@ def payload_contract(allowed_intents: Iterable[IntentType]) -> str:
     Args:
         allowed_intents: The intent types a role may emit.
 
+    Only the required keys: what a value may be, and which optional dial a type
+    honours, are different claims and are rendered by
+    :func:`payload_constraints`.
+
+    Args:
+        allowed_intents: The intent types a role may emit.
+
     Returns:
         A single-line ``"<type>:{<field>,...}"`` listing, comma separated.
     """
     parts: list[str] = []
     for intent_type in _ordered_intents(allowed_intents):
-        fields = [*_PAYLOAD_REQUIRED.get(intent_type, ()), *_PAYLOAD_FIELD_NOTES.get(intent_type, ())]
+        fields = _PAYLOAD_REQUIRED.get(intent_type, ())
         parts.append(f"{intent_type.value}:{{{','.join(fields)}}}")
     return ", ".join(parts)
+
+
+def payload_constraints(allowed_intents: Iterable[IntentType]) -> str:
+    """Describe the value sets and optional dials the required-key list cannot.
+
+    Kept apart from :func:`payload_contract` so neither claim is stated as the
+    other: a constraint listed among required keys reads as a key the model must
+    send, and one naming an already-required field printed that field twice.
+
+    Args:
+        allowed_intents: The intent types a role may emit.
+
+    Returns:
+        A single-line ``"<type>.<clause>"`` listing, semicolon separated, or an
+        empty string when no allowed type carries a note.
+    """
+    parts: list[str] = []
+    for intent_type in _ordered_intents(allowed_intents):
+        for note in _PAYLOAD_FIELD_NOTES.get(intent_type, ()):
+            parts.append(f"{intent_type.value}.{note}")
+    return "; ".join(parts)
 
 
 def build_intent_envelope_schema(allowed_intents: Iterable[IntentType]) -> dict[str, Any]:
@@ -130,7 +160,8 @@ def build_intent_envelope_schema(allowed_intents: Iterable[IntentType]) -> dict[
                             "type": "string",
                             "description": (
                                 "The intent payload as a JSON object serialized into a string. "
-                                f"Required keys per intent_type: {payload_contract(ordered)}."
+                                f"Required keys per intent_type: {payload_contract(ordered)}. "
+                                f"Constraints: {payload_constraints(ordered)}."
                             ),
                         },
                     },
@@ -151,7 +182,11 @@ EMIT_INTENT_TOOL_INPUT_SCHEMA: dict[str, Any] = {
         },
         "payload": {
             "type": "object",
-            "description": f"Per-intent payload. Required keys per intent_type: {payload_contract(IntentType)}.",
+            "description": (
+                "Per-intent payload. Required keys per intent_type: "
+                f"{payload_contract(IntentType)}. "
+                f"Constraints: {payload_constraints(IntentType)}."
+            ),
         },
     },
     "required": ["intent_type", "payload"],

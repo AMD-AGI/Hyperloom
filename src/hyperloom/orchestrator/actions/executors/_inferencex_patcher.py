@@ -223,7 +223,7 @@ except Exception:
 # quoted so nothing inside it is shell-expanded, and its terminator must sit at
 # column 0.
 _EVAL_PROBE_ANCHOR_RE = re.compile(
-    r'^([ \t]*)export PYTHONPATH="\$\{patch_dir\}.*$',
+    r'^(?:[ \t]*)export PYTHONPATH="\$\{patch_dir\}.*$',
     re.MULTILINE,
 )
 

@@ -1325,6 +1325,30 @@ def test_normalize_codex_usage_accepts_a_plain_mapping():
     }
 
 
+def test_normalize_codex_usage_carries_the_window_the_provider_reports():
+    """Keep the window Codex states for this model, beside the counts it states.
+
+    ``model_context_window`` sits on the usage object next to ``last``, so
+    reading only the breakdown dropped it. The compaction trigger is a fraction
+    of the window, and an unlisted model falls back to a conservative 200k --
+    for a model Codex reports at 258400, that compacts a fifth early, and
+    compaction resets the conversation.
+    """
+    usage = {
+        "last": {"input_tokens": 3, "output_tokens": 4},
+        "model_context_window": 258_400,
+    }
+
+    assert cs.normalize_codex_usage(usage)["model_context_window"] == 258_400
+
+
+def test_normalize_codex_usage_omits_a_window_the_provider_did_not_report():
+    """Say nothing rather than zero, so the caller keeps its own default."""
+    normalized = cs.normalize_codex_usage({"last": {"input_tokens": 3}})
+
+    assert "model_context_window" not in normalized
+
+
 def test_normalize_codex_usage_tolerates_missing_and_malformed_counts():
     """Token accounting is diagnostic; a bad count must not sink a good run."""
     assert cs.normalize_codex_usage(None) == {}

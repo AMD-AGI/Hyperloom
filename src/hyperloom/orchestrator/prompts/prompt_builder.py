@@ -1034,6 +1034,16 @@ def build_orchestration_prompt(
     Returns:
         The composed Orchestration system prompt text.
     """
+    # Checked here rather than tolerated downstream: a transport nobody declares
+    # matches no `<!-- transport: ... -->` block, and both Output protocol blocks
+    # are scoped by one, so an unknown value renders a prompt that never tells
+    # the model how to answer. Nothing later in the pipeline can tell that apart
+    # from a fragment that simply had nothing to say.
+    if transport and transport not in TRANSPORTS:
+        raise ValueError(
+            f"unknown prompt transport {transport!r}; expected one of "
+            f"{', '.join(sorted(TRANSPORTS))}"
+        )
     actions, kernel_enabled, framework_norm, rules_md = _resolve_prompt_prelude(
         action_registry,
         enabled_actions,

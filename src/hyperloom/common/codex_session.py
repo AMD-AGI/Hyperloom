@@ -855,10 +855,16 @@ def _usage_int(payload: dict[str, Any], key: str) -> int:
 def normalize_codex_usage(usage: Any) -> dict[str, int]:
     """Normalize ``ThreadTokenUsage`` into Hyperloom's transcript usage fields.
 
-    Only the ``last`` breakdown is read: it covers the turn that just ran,
-    whereas ``total`` accumulates across the whole thread. Reasoning tokens are
-    reported separately because on a reasoning model they dominate the output
-    budget and are invisible in the response text.
+    Only the ``last`` breakdown is read for the counts: it covers the turn that
+    just ran, whereas ``total`` accumulates across the whole thread. Reasoning
+    tokens are reported separately because on a reasoning model they dominate
+    the output budget and are invisible in the response text.
+
+    ``model_context_window`` sits beside the breakdowns rather than inside one,
+    and is carried through when Codex states it: the compaction trigger is a
+    fraction of the window, and a model absent from the caller's own table falls
+    back to a conservative default that compacts a run early. Omitted rather than
+    zeroed when unreported, so the caller keeps whatever default it has.
 
     Args:
         usage (Any): The SDK usage object, or ``None``.
@@ -873,12 +879,19 @@ def normalize_codex_usage(usage: Any) -> dict[str, int]:
         breakdown = breakdown.model_dump()
     if not isinstance(breakdown, dict):
         return {}
-    return {
+    normalized = {
         "input_tokens": _usage_int(breakdown, "input_tokens"),
         "output_tokens": _usage_int(breakdown, "output_tokens"),
         "cache_read_input_tokens": _usage_int(breakdown, "cached_input_tokens"),
         "reasoning_output_tokens": _usage_int(breakdown, "reasoning_output_tokens"),
     }
+    window_source = usage if isinstance(usage, dict) else getattr(usage, "__dict__", {}) or {}
+    if hasattr(usage, "model_dump"):
+        window_source = usage.model_dump()
+    window = _usage_int(window_source, "model_context_window")
+    if window > 0:
+        normalized["model_context_window"] = window
+    return normalized
 
 
 def _turn_error_message(result: Any) -> str:

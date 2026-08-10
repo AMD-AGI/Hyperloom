@@ -26,12 +26,23 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.codex_session import CodexSession, CodexSessionResult
+from hyperloom.common.codex_session import (
+    CodexSession,
+    CodexSessionError,
+    CodexSessionResult,
+    CodexSessionUnavailableError,
+)
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType, NoIntentEmitted
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.roles import MockBackend, MockTurn, ScriptedPlan
+from hyperloom.orchestrator.roles.base import BackendError
 from hyperloom.orchestrator.roles.agent_role import _ORCHESTRATION_INTENTS
 from hyperloom.orchestrator.roles.codex import CodexBackend, decode_intent_envelope
+
+
+async def _noop_aclose(session: CodexSession) -> None:
+    """Close nothing: these tests never open a real client."""
+    return None
 
 
 _SEED_MARKER = "=== Shared session state ==="
@@ -384,7 +395,15 @@ async def test_turn_reports_a_context_size_the_checkpoint_policy_can_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Growth is tracked from the per-request context size, not the char count."""
+    """Growth is tracked from the per-request context size, not the char count.
+
+    The cached tokens are part of the input count, not an addition to it: Codex
+    reports ``inputTokens: 5152, cachedInputTokens: 3072, outputTokens: 16,
+    totalTokens: 5168``, and 5152 + 16 is the total. Adding the cached half back
+    inflated the water level by the cache hit rate -- 60% in that sample -- so
+    the checkpoint policy compacted early, and compaction resets the very
+    conversation this backend keeps alive.
+    """
 
     async def _start(session: CodexSession) -> None:
         return None
@@ -400,4 +419,65 @@ async def test_turn_reports_a_context_size_the_checkpoint_policy_can_read(
 
     result = await _codex_backend(tmp_path).run("tick")
 
-    assert result.metadata["context_tokens_peak"] == 1000
+    assert result.metadata["context_tokens_peak"] == 900
+    assert result.metadata["cache_read_input_tokens"] == 100
+
+
+async def test_a_transient_session_start_failure_is_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opening the client is part of the turn, so it retries like the turn does.
+
+    ``retry_with_backoff`` is told to retry ``CodexSessionError``, but
+    ``_session_for`` caught it and raised ``LLMCallFailed`` from inside the
+    attempt, so the wrapper never saw one. A gateway that refused the first
+    connection ended the turn, while the identical error from ``turn()`` was
+    retried -- the parity this backend claims, missing on the leg that runs
+    first. A configuration fault still fails immediately, through
+    ``CodexSessionUnavailableError`` and ``BackendError``.
+    """
+    starts: list[int] = []
+
+    async def _start(session: CodexSession) -> None:
+        starts.append(len(starts))
+        if len(starts) == 1:
+            raise CodexSessionError("gateway refused the connection")
+
+    async def _turn(
+        session: CodexSession,
+        prompt: str,
+        *,
+        timeout_sec: float,
+        output_schema: dict[str, Any] | None = None,
+    ) -> CodexSessionResult:
+        return CodexSessionResult(text=_HEARTBEAT_ENVELOPE, thread_id="thread-1")
+
+    monkeypatch.setattr(CodexSession, "start", _start)
+    monkeypatch.setattr(CodexSession, "turn", _turn)
+    monkeypatch.setattr(CodexSession, "aclose", _noop_aclose)
+
+    result = await _codex_backend(tmp_path).run("tick")
+
+    assert len(starts) == 2
+    assert result.intents
+
+
+async def test_an_unusable_session_configuration_still_fails_at_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sandbox or config fault is identical on every attempt; do not spend one."""
+    starts: list[int] = []
+
+    async def _start(session: CodexSession) -> None:
+        starts.append(len(starts))
+        raise CodexSessionUnavailableError("sandbox mode 'bypass' needs bubblewrap")
+
+    monkeypatch.setattr(CodexSession, "start", _start)
+    monkeypatch.setattr(CodexSession, "aclose", _noop_aclose)
+
+    with pytest.raises(BackendError):
+        await _codex_backend(tmp_path).run("tick")
+
+    assert len(starts) == 1

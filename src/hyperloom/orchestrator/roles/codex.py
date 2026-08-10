@@ -54,7 +54,11 @@ from .base import (
     retry_with_backoff,
     safe_int,
 )
-from .mcp_emit_intent import build_intent_envelope_schema, payload_contract
+from .mcp_emit_intent import (
+    build_intent_envelope_schema,
+    payload_constraints,
+    payload_contract,
+)
 
 # Prepended to a turn that runs without the enforced schema. Thread developer
 # instructions are fixed at thread_start, so the standing OUTPUT FORMAT block
@@ -81,6 +85,7 @@ def build_output_instructions(allowed_intents: Iterable[IntentType]) -> str:
         instructions.
     """
     contract = payload_contract(allowed_intents)
+    constraints = payload_constraints(allowed_intents)
     heartbeat = json.dumps({"topic": "heartbeat", "body_md": "ok"})
     return f"""
 ==== OUTPUT FORMAT (REQUIRED) ====
@@ -92,6 +97,7 @@ output schema — no prose, no code fences, nothing around it:
 - `payload` is a STRING holding a serialized JSON object. The schema cannot
   express a free-form object, so serialize the payload and escape it.
 - Required keys per intent_type: {contract}.
+- Constraints: {constraints}.
 - Emit several intents by adding entries to `intents`.
 - Put only NEW information in payload bodies; do not restate context already
   in SharedState, your inbox, or analysis.md. Keep length proportional to
@@ -153,6 +159,15 @@ def decode_intent_envelope(text: str) -> dict[str, Any]:
 @dataclass
 class CodexBackend:
     """Production Codex reactor backend. Implements :class:`Backend`.
+
+    One behaviour differs from the Claude path and cannot be made to match. A
+    thread's developer instructions are fixed when it starts, so a phase re-scope
+    has to open a new thread, and the model's own reasoning and plan go with the
+    old one. :meth:`needs_seed_for` makes the Coordinator push a full SEED across
+    that seam, and the seam checkpoint that normally runs first carries the
+    distilled memory over -- but that checkpoint is skipped when checkpointing is
+    disabled or the conversation was never seeded, and then only SharedState
+    survives. Claude resumes by ``session_id`` and keeps everything.
 
     Args:
         allowed_intents: The emitting role's intent set; becomes the enforced
@@ -343,8 +358,20 @@ class CodexBackend:
             "reasoning_output_tokens": reasoning_tokens,
             # Codex reports per-turn counts, so the input side already is this
             # request's context size — the figure the checkpoint policy compares
-            # against the model's window.
-            "context_tokens_peak": input_tokens + cache_read_tokens,
+            # against the model's window. The cached tokens are part of that
+            # count, not an addition to it: Codex reports 5152 input / 3072
+            # cached / 16 output as 5168 total. Adding them back inflated the
+            # water level by the cache hit rate, which on a long conversation is
+            # most of the prompt, so the policy compacted early — and compaction
+            # resets the conversation this backend exists to keep.
+            "context_tokens_peak": input_tokens,
+            # Stated by Codex per turn, and better than any table this side
+            # keeps: the compaction trigger is a fraction of it.
+            **(
+                {"model_context_window": safe_int(usage.get("model_context_window"))}
+                if safe_int(usage.get("model_context_window")) > 0
+                else {}
+            ),
             # Full conversation text for conversations.jsonl, handed up for
             # the caller to persist.
             "prompt": prompt,
@@ -368,6 +395,12 @@ class CodexBackend:
         The caller decides between a full push and a delta, but only this
         backend knows when the thread underneath was replaced — by a reset, by
         a re-scoped system prompt, or by a turn that never landed.
+
+        This is the question a backend can answer without knowing what the turn
+        will carry. The Coordinator reads it only from backends that cannot
+        answer :meth:`needs_seed_for`, so this backend's own answer is never the
+        one used; it stays because the attribute is the fallback half of that
+        protocol, and a backend implementing only this half must still work.
         """
         return not self._thread_seeded
 
@@ -413,8 +446,11 @@ class CodexBackend:
         """Return the held session, opening it (or re-scoping it) as needed.
 
         Raises:
-            BackendError: If the session's config or sandbox policy is unusable.
-            LLMCallFailed: If the SDK client could not be opened.
+            BackendError: If the session's config or sandbox policy is unusable,
+                which is the same on every attempt.
+            CodexSessionError: If the SDK client could not be opened. Raised as
+                it is, so the caller's retry wrapper treats a refused connection
+                the way it treats one that drops mid-turn.
         """
         instructions = self._instructions_for(system_prompt)
         if self._session is None:
@@ -431,13 +467,17 @@ class CodexBackend:
             try:
                 await self._session.start()
             except CodexSessionUnavailableError as exc:
+                # A config or sandbox fault, identical on every attempt.
                 self._session = None
                 raise BackendError(redact_secret_values(str(exc))) from exc
-            except CodexSessionError as exc:
+            except CodexSessionError:
+                # Left as it is so the retry wrapper around the attempt can see
+                # it. Opening the client is the first leg of the turn and fails
+                # for the same transient reasons the turn does; converting it
+                # here meant a gateway that refused one connection ended the
+                # turn, while the identical error from turn() was retried.
                 self._session = None
-                raise LLMCallFailed(
-                    f"Codex Agent SDK session failed to start: {redact_secret_values(str(exc))}"
-                ) from exc
+                raise
         elif instructions != self._thread_instructions:
             self._session.developer_instructions = instructions
             self._session.reset_thread()

@@ -720,6 +720,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._checkpoint_policy = _orch_mem.CheckpointPolicy(
             context_token_soft=int(_ctx_window * _soft_frac),
         )
+        # Kept so a provider that reports its own window per turn can replace the
+        # table's guess without re-deriving the operator's fraction.
+        self._checkpoint_soft_fraction = _soft_frac
         self._checkpoint_tracker = _orch_mem.CheckpointTracker(
             last_phase=str(getattr(self.shared_state, "phase", "") or ""),
         )
@@ -1899,6 +1902,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         if agent_name == "orchestration" and self._orchestration_conversational():
             try:
                 md = getattr(result, "metadata", None) or {}
+                self._checkpoint_policy.adopt_context_window(
+                    int(md.get("model_context_window") or 0),
+                    self._checkpoint_soft_fraction,
+                )
                 self._checkpoint_tracker.set_context_tokens(int(md.get("context_tokens_peak") or 0))
                 self._checkpoint_tracker.chars_add(len(prompt) + len(getattr(result, "raw_text", "") or ""))
             except Exception:  # noqa: BLE001 — accounting must never break routing
