@@ -6664,6 +6664,7 @@ def write_reports(
                         _h = int(getattr(args, "height", 0) or 0)
                         _w = int(getattr(args, "width", 0) or 0)
                         _cfg_batch = int(getattr(args, "cfg_batch", 0) or 0)
+                        _frames = int(getattr(args, "frames", 0) or 0)
                         _est = _dflops.analytic_ceiling(
                             _model_dir,
                             gpu_type=_gpu,
@@ -6672,6 +6673,7 @@ def write_reports(
                             width=_w or 1024,
                             num_steps=_num_steps or None,
                             cfg_batch=_cfg_batch or None,
+                            num_frames=_frames or None,
                         )
                         if _est:
                             _diff_report["analytic_ceiling"] = _est
@@ -6845,6 +6847,12 @@ def main() -> int:
         type=int,
         default=0,
         help="Diffusion image width for the analytic ceiling (0 = estimator default).",
+    )
+    parser.add_argument(
+        "--frames",
+        type=int,
+        default=0,
+        help="Diffusion output frames for the analytic ceiling (0 = estimator default).",
     )
     parser.add_argument(
         "--cfg-batch",

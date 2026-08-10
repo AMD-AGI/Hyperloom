@@ -119,7 +119,7 @@ class DenoiserGeometry:
     """Resolved denoiser architecture for the analytic FLOPs estimator."""
 
     model_class: str
-    family: str  # mmdit | flux | single | moe_single | unet | sana
+    family: str  # mmdit | flux | single | moe_single | unet | sana | wan
     hidden: int
     num_double_layers: int
     num_single_layers: int
@@ -136,6 +136,12 @@ class DenoiserGeometry:
     text_tokens: int = 256
     default_steps: int = 28
     default_cfg_batch: int = 2  # classifier-free guidance -> 2 forwards/step
+    # cross-attention context width; 0 falls back to ``hidden``
+    context_dim: int = 0
+    # video (3D) geometry; vae_temporal == 1 marks an image model
+    vae_temporal: int = 1  # causal latent downsample along frames
+    patch_t: int = 1  # transformer patch size on the temporal latent axis
+    default_frames: int = 1
     # UNet-only (SDXL)
     unet: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
@@ -157,6 +163,8 @@ _CLASS_FAMILY: dict[str, str] = {
     "UNet2DConditionModel": "unet",
     # FLUX.2 keeps FLUX.1's dual + single stream structure, only wider.
     "Flux2Transformer2DModel": "flux",
+    # Text-to-video; cross-attends to text rather than concatenating it.
+    "WanTransformer3DModel": "wan",
 }
 
 # Per-class overrides for constants the config does not expose (diffusers
@@ -166,6 +174,15 @@ _CLASS_DEFAULTS: dict[str, dict[str, Any]] = {
     "FluxTransformer2DModel": {"text_tokens": 512, "default_steps": 28, "default_cfg_batch": 1},
     # FLUX.2-dev is guidance-distilled like FLUX.1-dev, so one forward per step.
     "Flux2Transformer2DModel": {"text_tokens": 512, "default_steps": 50, "default_cfg_batch": 1},
+    # Wan 2.x T2V; WanPipeline defaults, VAE 8x spatial / 4x temporal.
+    "WanTransformer3DModel": {
+        "text_tokens": 512,
+        "default_steps": 40,
+        "default_cfg_batch": 2,
+        "vae_spatial": 8,
+        "vae_temporal": 4,
+        "default_frames": 81,
+    },
     "QwenImageTransformer2DModel": {"text_tokens": 256, "default_steps": 30, "default_cfg_batch": 2},
     "AuraFlowTransformer2DModel": {"text_tokens": 256, "default_steps": 50, "default_cfg_batch": 2},
     "HunyuanImageTransformer2DModel": {"text_tokens": 256, "default_steps": 50, "default_cfg_batch": 2},
@@ -222,7 +239,8 @@ def _resolve_head_dim(cfg: dict[str, Any], hidden: int) -> int:
 
 
 def _resolve_intermediate(cfg: dict[str, Any], hidden: int) -> int:
-    for k in ("intermediate_size", "ffn_hidden_size"):
+    # ``ffn_dim`` is the Wan spelling of the FFN width.
+    for k in ("intermediate_size", "ffn_hidden_size", "ffn_dim"):
         if cfg.get(k):
             return int(cfg[k])
     if cfg.get("mlp_ratio"):
@@ -375,9 +393,15 @@ def resolve_geometry(model_dir: str | Path) -> DenoiserGeometry | None:
             defaults.update(hint)
 
     patch = 2
+    patch_t = 1
     ps = cfg.get("patch_size") or cfg.get("all_patch_size")
     if isinstance(ps, list) and ps:
-        patch = int(ps[0])
+        # A 3-element patch is (temporal, height, width); Wan ships (1, 2, 2).
+        if len(ps) >= 3:
+            patch_t = int(ps[0])
+            patch = int(ps[-1])
+        else:
+            patch = int(ps[0])
     elif isinstance(ps, int):
         patch = int(ps)
     # FLUX / ERNIE / Sana declare patch_size=1 but pack 2x2; force patch=2 for
@@ -413,6 +437,10 @@ def resolve_geometry(model_dir: str | Path) -> DenoiserGeometry | None:
         text_tokens=int(defaults.get("text_tokens", 256)),
         default_steps=int(defaults.get("default_steps", 28)),
         default_cfg_batch=int(defaults.get("default_cfg_batch", 2)),
+        context_dim=int(cfg.get("text_dim") or cfg.get("joint_attention_dim") or cfg.get("cross_attention_dim") or 0),
+        vae_temporal=int(defaults.get("vae_temporal", 1)),
+        patch_t=patch_t,
+        default_frames=int(defaults.get("default_frames", 1)),
         unet=unet_geom,
         notes=basename,
     )
@@ -423,6 +451,22 @@ def _image_tokens(g: DenoiserGeometry, height: int, width: int) -> int:
     lat_h = max(height // g.vae_spatial // g.patch, 1)
     lat_w = max(width // g.vae_spatial // g.patch, 1)
     return int(lat_h * lat_w)
+
+
+def _latent_frames(g: DenoiserGeometry, frames: int) -> int:
+    """Latent frames after the causal VAE and temporal patch.
+
+    Causal: ``(frames - 1) // vae_temporal + 1``, so 81 frames at 4x gives 21.
+    """
+    if g.vae_temporal <= 1:
+        return 1
+    lat_t = (max(int(frames), 1) - 1) // g.vae_temporal + 1
+    return max(lat_t // max(g.patch_t, 1), 1)
+
+
+def _video_tokens(g: DenoiserGeometry, height: int, width: int, frames: int) -> int:
+    """Denoiser tokens for a video model: latent frames x spatial tokens."""
+    return int(_latent_frames(g, frames) * _image_tokens(g, height, width))
 
 
 def _ffn_per_token(g: DenoiserGeometry) -> float:
@@ -454,7 +498,7 @@ def _cross_attention_block_flops(g: DenoiserGeometry, q_tokens: int, tt: int) ->
     the text length.
     """
     qo = q_tokens * _linear_flops(1.0, g.hidden, g.hidden) * 2
-    kv = tt * _linear_flops(1.0, g.hidden, g.hidden) * 2
+    kv = tt * _linear_flops(1.0, g.context_dim or g.hidden, g.hidden) * 2
     return _cross_attention_flops(q_tokens, tt, g.hidden) + qo + kv
 
 
@@ -463,6 +507,16 @@ def _sana_layer(g: DenoiserGeometry, ti: int, tt: int, ffn_pt: float) -> float:
     lin = ti * _qkvo_flops(1.0, g.hidden) + ti * ffn_pt
     self_attn = _linear_attention_flops(ti, g.hidden, g.head_dim or 32)
     return lin + self_attn + _cross_attention_block_flops(g, ti, tt)
+
+
+def _wan_layer(g: DenoiserGeometry, tv: int, tt: int, ffn_pt: float) -> float:
+    """One Wan block: self-attention over video tokens, cross-attention to text.
+
+    The quadratic term is over video tokens alone; text is not concatenated.
+    """
+    lin = tv * _qkvo_flops(1.0, g.hidden) + tv * ffn_pt
+    self_attn = _full_attention_flops(tv, g.hidden)
+    return lin + self_attn + _cross_attention_block_flops(g, tv, tt)
 
 
 def _unet_forward_flops(g: DenoiserGeometry, height: int, width: int) -> float:
@@ -506,11 +560,32 @@ def _unet_forward_flops(g: DenoiserGeometry, height: int, width: int) -> float:
     return down_and_mid * 2.5  # down + mid(~small) + up(~1.5x down)
 
 
-def forward_flops(g: DenoiserGeometry, height: int, width: int) -> dict[str, float]:
-    """FLOPs for ONE denoiser forward pass (no CFG, no step scaling)."""
+def forward_flops(
+    g: DenoiserGeometry, height: int, width: int, frames: int | None = None
+) -> dict[str, float]:
+    """FLOPs for ONE denoiser forward pass (no CFG, no step scaling).
+
+    ``frames`` defaults to the family value, not a literal 1, so a video
+    denoiser is not silently undercounted. Image families ignore it.
+    """
+    frames = int(frames if frames is not None else g.default_frames)
     if g.family == "unet":
         total = _unet_forward_flops(g, height, width)
         return {"forward_flops": total, "image_tokens": 0, "text_tokens": g.text_tokens}
+
+    if g.family == "wan":
+        tv = _video_tokens(g, height, width, frames)
+        tt = g.text_tokens
+        ffn_pt = _ffn_per_token(g)
+        total = 0.0
+        for _ in range(g.num_double_layers + g.num_single_layers):
+            total += _wan_layer(g, tv, tt, ffn_pt)
+        return {
+            "forward_flops": total,
+            "image_tokens": tv,
+            "text_tokens": tt,
+            "latent_frames": _latent_frames(g, frames),
+        }
 
     ti = _image_tokens(g, height, width)
     tt = g.text_tokens
@@ -544,8 +619,11 @@ def estimate_image_flops(
     width: int = 1024,
     num_steps: int | None = None,
     cfg_batch: int | None = None,
+    num_frames: int | None = None,
 ) -> dict[str, Any] | None:
-    """Full per-image FLOPs = forward x steps x cfg_batch.
+    """Full per-sample FLOPs = forward x steps x cfg_batch.
+
+    A "sample" is one image for 2D families and one clip for video families.
 
     Args:
         model_dir: Local diffusers model directory.
@@ -562,10 +640,11 @@ def estimate_image_flops(
         return None
     steps = int(num_steps if num_steps is not None else g.default_steps)
     cfgb = int(cfg_batch if cfg_batch is not None else g.default_cfg_batch)
-    fwd = forward_flops(g, height, width)
+    frames = int(num_frames if num_frames is not None else g.default_frames)
+    fwd = forward_flops(g, height, width, frames)
     per_step = fwd["forward_flops"] * cfgb
     total = per_step * steps
-    return {
+    est = {
         "model_class": g.model_class,
         "family": g.family,
         "hidden": g.hidden,
@@ -582,6 +661,10 @@ def estimate_image_flops(
         "per_step_flops": per_step,
         "total_flops": total,
     }
+    if g.vae_temporal > 1:
+        est["num_frames"] = frames
+        est["latent_frames"] = fwd.get("latent_frames", 1)
+    return est
 
 
 def analytic_ceiling(
@@ -593,14 +676,22 @@ def analytic_ceiling(
     width: int = 1024,
     num_steps: int | None = None,
     cfg_batch: int | None = None,
+    num_frames: int | None = None,
 ) -> dict[str, Any] | None:
-    """Analytic compute-bound ceiling (ideal ms) for one image.
+    """Analytic compute-bound ceiling (ideal ms) for one image or video clip.
 
     Returns the FLOPs estimate plus ``peak_tflops`` and ``ideal_ms`` =
     total_flops / (peak * 1e12) * 1e3. ``ideal_ms`` is absent when the
     (gpu, precision) peak is unknown.
     """
-    est = estimate_image_flops(model_dir, height=height, width=width, num_steps=num_steps, cfg_batch=cfg_batch)
+    est = estimate_image_flops(
+        model_dir,
+        height=height,
+        width=width,
+        num_steps=num_steps,
+        cfg_batch=cfg_batch,
+        num_frames=num_frames,
+    )
     if est is None:
         return None
     pk = peak_tflops(gpu_type, precision)
@@ -615,12 +706,14 @@ def analytic_ceiling(
 
 def _fmt(est: dict[str, Any]) -> str:
     tf = est["total_flops"] / 1e12
+    frames = f"f={est['num_frames']}({est['latent_frames']}lat) " if "num_frames" in est else ""
     line = (
         f"{est['model_class']:<34} {est['family']:<10} "
         f"h={est['hidden']:<5} L={est['layers']:<3} "
-        f"tok={est['image_tokens']:<5}+{est['text_tokens']:<4} "
+        f"{frames}"
+        f"tok={est['image_tokens']:<6}+{est['text_tokens']:<4} "
         f"steps={est['num_steps']:<3}x{est['cfg_batch']} "
-        f"{tf:8.1f} TFLOP/img"
+        f"{tf:8.1f} TFLOP/{'clip' if 'num_frames' in est else 'img'}"
     )
     if "ideal_ms" in est:
         line += f"  ideal={est['ideal_ms']:8.1f} ms ({est['peak_tflops']:.0f} TFLOPS)"
@@ -636,6 +729,12 @@ def main() -> int:
     ap.add_argument("--width", type=int, default=1024)
     ap.add_argument("--steps", type=int, default=0, help="Override denoise steps (0 = family default).")
     ap.add_argument("--cfg-batch", type=int, default=0, help="Override forwards/step (0 = family default).")
+    ap.add_argument(
+        "--frames",
+        type=int,
+        default=0,
+        help="Output frames for video models (0 = family default). Ignored by image models.",
+    )
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
     est = analytic_ceiling(
@@ -646,6 +745,7 @@ def main() -> int:
         width=args.width,
         num_steps=args.steps or None,
         cfg_batch=args.cfg_batch or None,
+        num_frames=args.frames or None,
     )
     if est is None:
         print(f"could not resolve denoiser geometry for {args.model_dir}")

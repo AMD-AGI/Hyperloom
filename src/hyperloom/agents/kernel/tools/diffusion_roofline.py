@@ -524,6 +524,12 @@ def main() -> int:
     parser.add_argument("--height", type=int, default=1024, help="Output image height (px) for the analytic ceiling.")
     parser.add_argument("--width", type=int, default=1024, help="Output image width (px) for the analytic ceiling.")
     parser.add_argument(
+        "--frames",
+        type=int,
+        default=0,
+        help="Output frames for video denoisers (0 = model default). Ignored by image models.",
+    )
+    parser.add_argument(
         "--precision", default="bf16", help="Runtime precision for the peak-TFLOPS ceiling (bf16 / fp8 / mxfp4)."
     )
     parser.add_argument(
@@ -590,6 +596,7 @@ def main() -> int:
                 width=args.width,
                 num_steps=args.num_denoise_steps or None,
                 cfg_batch=args.cfg_batch or None,
+                num_frames=getattr(args, "frames", 0) or None,
             )
             if est:
                 report["analytic_ceiling"] = est
