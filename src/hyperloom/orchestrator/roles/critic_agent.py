@@ -26,7 +26,9 @@ from typing import Any, Callable, Literal
 
 from hyperloom.common.llm_config import (
     LLMConfigError,
+    aanthropic_completion,
     achat_completion,
+    anthropic_transport,
     apply_reasoning_effort,
     build_http_timeout,
     get_async_openai_client,
@@ -41,7 +43,7 @@ from hyperloom.inference_optimizer.session.session_paths import allocate_turn_wo
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from .base import BackendError, BackendTurnResult, LLMCallFailed, build_chat_messages, parse_call_timeout_env
-from .claude import ClaudeBackend, _input_side_total
+from .claude import _input_side_total
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
 
@@ -49,8 +51,8 @@ log = logging.getLogger(__name__)
 
 
 CRITIC_AGENT_RUNTIME_TIMEOUT_SEC = 30  # prepare-review / commit-review wall cap
-# OpenAI review path only: the Claude SDK exposes no output-token cap, so the
-# anthropic path relies on the CLI's own default.
+# Output-token cap for both review paths. The Anthropic side spends it as a
+# request field or through the CLI environment, depending on the transport.
 CRITIC_AGENT_MAX_COMPLETION_TOKENS = 2000
 # OpenAI HTTP client timeout defaults for critic review calls.
 CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC = 10.0
@@ -345,13 +347,11 @@ class CriticAgentBackend:
     action_verdict_policy: dict[str, str] = field(default_factory=dict)
     name: str = "critic-agent"
     # Review inference protocol. ``openai`` drives Codex chat.completions;
-    # ``anthropic`` drives the Claude CLI via ClaudeBackend.
+    # ``anthropic`` drives llm_config's single-shot Anthropic entry point.
     protocol: Literal["openai", "anthropic"] = "openai"
     # Claude model id used when ``protocol == "anthropic"`` (falls back to
     # ``codex_model`` when unset).
     claude_model: str | None = None
-    # Test seam for the protocol == "anthropic" review executor.
-    claude_backend_factory: Callable[[], Any] | None = None
 
     # ``_runtime_caller`` is assigned on the instance in __post_init__ (not as a
     # dataclass field) to avoid descriptor binding as a method.
@@ -384,9 +384,10 @@ class CriticAgentBackend:
 
         Normalises paths, verifies ``runtime/cli.py`` exists under
         ``critic_agent_root``, validates ``kb_mode``, selects the real or test
-        runtime caller, constructs the review client (Codex/OpenAI, or the native
-        Anthropic Messages client when ``protocol == "anthropic"``), and resolves
-        the per-session static context (explicit or from ``manifest.json``).
+        runtime caller, constructs the Codex/OpenAI review client (or checks the
+        Anthropic credential when ``protocol == "anthropic"``, where llm_config
+        owns the transport), and resolves the per-session static context
+        (explicit or from ``manifest.json``).
 
         Raises:
             BackendError: If ``runtime/cli.py`` is missing, ``kb_mode`` is
@@ -421,7 +422,7 @@ class CriticAgentBackend:
             (self.claude_model or self.codex_model) if self.protocol == "anthropic" else self.codex_model
         )
         if self.protocol == "anthropic":
-            self._init_review_backend()
+            self._require_anthropic_credential()
         elif self.codex_client_factory is not None:
             self._client = self.codex_client_factory()
         else:
@@ -453,8 +454,9 @@ class CriticAgentBackend:
     def _resolve_llm_timeouts() -> tuple[float, float]:
         """Return the ``(connect, read/write/pool)`` review-call timeouts in seconds.
 
-        The OpenAI-compatible transport spends both halves as HTTP timeouts; the
-        Claude CLI path reuses only the read/write value as its call budget.
+        The OpenAI-compatible transport spends both halves as HTTP timeouts, as
+        does the Anthropic Messages API; the Claude CLI transport reuses only
+        the read/write value as its wall-clock call budget.
         """
         return (
             parse_call_timeout_env(
@@ -467,37 +469,23 @@ class CriticAgentBackend:
             ),
         )
 
-    def _init_review_backend(self) -> None:
-        """Build the Claude CLI review executor (protocol='anthropic').
+    def _require_anthropic_credential(self) -> None:
+        """Fail fast when the Anthropic side cannot authenticate a review call.
 
-        Delegating to :class:`ClaudeBackend` hands credential resolution back to
-        the CLI, which is what lets a Max/Pro subscription token work here.
+        No client is built here: :func:`aanthropic_completion` owns transport
+        selection, so the only precondition is that some Anthropic-side
+        credential exists. Which channel it implies — Messages API or Claude
+        CLI — is llm_config's decision, not the critic's.
 
         Raises:
-            BackendError: If ``claude-agent-sdk`` is unavailable.
+            BackendError: If no Anthropic-side credential is configured.
         """
-        factory = self.claude_backend_factory or self._default_claude_backend
-        try:
-            self._client = factory()
-        except BackendError as exc:
-            raise BackendError(
-                f"CriticAgentBackend(protocol=anthropic) requires claude-agent-sdk "
-                f"for review reasoning: {exc}"
-            ) from exc
-
-    def _default_claude_backend(self) -> ClaudeBackend:
-        """Single-turn, tool-free Claude executor for review reasoning.
-
-        ``CRITIC_AGENT_LLM_RW_TIMEOUT_S`` is reused for the budget, but the
-        Claude SDK spends it as an idle gap between streamed messages rather
-        than as an HTTP read timeout, so a slow call can outlast it.
-        """
-        _, rw_timeout_s = self._resolve_llm_timeouts()
-        return ClaudeBackend(
-            model=self._review_model,
-            raw_completion=True,
-            conversational=False,
-            call_timeout_s=rw_timeout_s,
+        if anthropic_transport():
+            return
+        raise BackendError(
+            "CriticAgentBackend(protocol=anthropic) review reasoning requires an "
+            "Anthropic-side credential (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / "
+            "CLAUDE_CODE_OAUTH_TOKEN)"
         )
 
     # Public API — Backend.run
@@ -514,8 +502,8 @@ class CriticAgentBackend:
         Writes the ``coordinator_inbox`` request, runs ``prepare-review`` to get
         a judge bundle, enriches its ``review_constraints`` (action policy and
         cross-domain rules), drives the review inference call when proposals
-        exist (Codex chat-completions, or the native Anthropic Messages API
-        when ``protocol == 'anthropic'``), runs
+        exist (Codex chat-completions, or llm_config's single-shot Anthropic
+        entry point when ``protocol == 'anthropic'``), runs
         ``commit-review`` to produce the intent envelope, validates it, and
         records per-turn telemetry.
 
@@ -1028,62 +1016,56 @@ class CriticAgentBackend:
         system_prompt: str | None,
         user_prompt: str,
     ) -> tuple[str, str | None]:
-        """Issue one single-turn, tool-free Claude CLI call for the review.
+        """Issue one single-shot Anthropic completion for the review.
 
-        The CLI resolves its own credentials, so this path accepts an API key,
-        a gateway bearer token, or a Max/Pro subscription token alike. Token
-        counts arrive on the turn metadata and fold into the same trace row as
-        the OpenAI path. Unlike that path there is no output-token cap: the SDK
-        takes none, so the CLI's own default applies.
+        ``llm_config`` picks the transport from the configured credential, so
+        this path accepts an API key, a gateway bearer token, or a Max/Pro
+        subscription token alike. Token counts fold into the same trace row as
+        the OpenAI path, and both paths carry the same output-token cap.
 
         Args:
             system_prompt: The system instruction, or ``None``.
             user_prompt: The judge bundle plus output instructions.
 
         Returns:
-            A tuple of the reply text and the stop reason when the SDK reports
-            one, else ``None``; it is not guaranteed as on the OpenAI path.
+            A tuple of the reply text and the stop reason. The CLI transport
+            reports one only when the model supplies it, so unlike the OpenAI
+            path it is not guaranteed.
 
         Raises:
-            BackendError: If the Claude CLI call fails.
+            LLMCallFailed: If the completion fails.
         """
+        connect_timeout_s, rw_timeout_s = self._resolve_llm_timeouts()
         _t0 = time.perf_counter()
         try:
-            result = await self._client.run(
-                user_prompt,
-                system_prompt=system_prompt,
-                tools=[],
-                max_turns=1,
+            result = await aanthropic_completion(
+                model=self._review_model,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+                max_tokens=CRITIC_AGENT_MAX_COMPLETION_TOKENS,
+                timeout=build_http_timeout(connect=connect_timeout_s, read=rw_timeout_s),
+                timeout_s=rw_timeout_s,
             )
-        except BackendError as exc:
-            # Already a LLMCallFailed/BackendError the retry and error-streak
-            # handling upstream understands; trace it, then let it through.
-            self._trace_llm_failure(exc, latency_ms=int((time.perf_counter() - _t0) * 1000))
-            raise
         except Exception as exc:  # noqa: BLE001
             raise self._llm_call_failed(
-                f"Claude CLI call failed (critic-agent reasoning): {exc!r}",
+                f"Anthropic completion failed (critic-agent reasoning): {exc!r}",
                 latency_ms=int((time.perf_counter() - _t0) * 1000),
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
-        metadata = getattr(result, "metadata", None)
         usage_acc = {"input_tokens": 0, "output_tokens": 0}
-        self._accumulate_claude_usage(usage_acc, metadata)
+        self._accumulate_anthropic_usage(usage_acc, result.usage)
         self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms)
-        stop_reason = metadata.get("stop_reason") if isinstance(metadata, dict) else None
-        return (
-            getattr(result, "raw_text", "") or "",
-            stop_reason if isinstance(stop_reason, str) and stop_reason else None,
-        )
+        stop_reason = result.stop_reason
+        return (result.text or "", stop_reason if isinstance(stop_reason, str) and stop_reason else None)
 
     @staticmethod
-    def _accumulate_claude_usage(
+    def _accumulate_anthropic_usage(
         acc: dict[str, int],
-        metadata: Any,
+        usage: Any,
     ) -> None:
-        """Fold one ``BackendTurnResult.metadata`` block into the accumulator.
+        """Fold one Anthropic ``usage`` block into the running accumulator.
 
-        Missing / bad values contribute 0 so a malformed turn never corrupts
+        Missing / bad values contribute 0 so a malformed reply never corrupts
         the token sum.
 
         The input side sums fresh, cache-read and cache-creation tokens, the
@@ -1093,13 +1075,13 @@ class CriticAgentBackend:
         Args:
             acc: The running accumulator with ``input_tokens`` /
                 ``output_tokens`` keys, updated in place.
-            metadata: A turn metadata dict (or ``None``) to fold into ``acc``.
+            usage: An Anthropic usage dict (or ``None``) to fold into ``acc``.
         """
-        if not isinstance(metadata, dict):
+        if not isinstance(usage, dict):
             return
-        acc["input_tokens"] += _input_side_total(metadata)
+        acc["input_tokens"] += _input_side_total(usage)
         try:
-            acc["output_tokens"] += int(metadata.get("output_tokens", 0) or 0)
+            acc["output_tokens"] += int(usage.get("output_tokens", 0) or 0)
         except (TypeError, ValueError):
             pass
 

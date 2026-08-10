@@ -7,15 +7,15 @@
 * :class:`LlmRcaEngine` — OpenAI-compatible chat endpoint, cost-bounded by
   :class:`RcaThrottle`: severity gate (default high), per-dedup-key cooldown
   (default 60s), per-tick cap (default 1 call).
-* :class:`AnthropicRcaEngine` — :class:`LlmRcaEngine` subclass driving the
-  Claude CLI for a single tool-free completion; the factory selects it when the
-  discovered provider is ``anthropic``.
+* :class:`AnthropicRcaEngine` — :class:`LlmRcaEngine` subclass issuing a single
+  tool-free Anthropic completion; the factory selects it when the discovered
+  provider is ``anthropic``.
 
-Both LLM engines reach their provider through a shared transport owner —
-``hyperloom.common.llm_config`` for the OpenAI side, and
-``hyperloom.common.claude_oneshot`` for the Anthropic side, whose CLI accepts
-every credential form including a Max/Pro subscription token. This module
-therefore holds only the prompt, the throttle, and the usage ledger.
+Both LLM engines reach their provider through ``hyperloom.common.llm_config``,
+which owns credential resolution and, on the Anthropic side, the choice between
+the Messages API and the Claude CLI — the latter being the only channel that
+accepts a Max/Pro subscription token. This module therefore holds only the
+prompt, the throttle, and the usage ledger.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 
-from hyperloom.common import claude_oneshot, llm_config
+from hyperloom.common import llm_config
 
 from ..signals import Symptom, SymptomSeverity
 
@@ -411,34 +411,29 @@ class LlmRcaEngine:
 
 @dataclass
 class AnthropicRcaEngine(LlmRcaEngine):
-    """Anthropic-side RCA engine, driven by the Claude CLI.
+    """Anthropic-side RCA engine, issuing one single-shot completion.
 
     Only the transport differs from :class:`LlmRcaEngine`; the throttle, the
-    usage ledger, and the prompt are inherited unchanged.
+    usage ledger, and the prompt are inherited unchanged. It holds no client of
+    its own because :func:`llm_config.aanthropic_completion` owns transport
+    selection, which can resolve to a per-call Claude CLI session.
     """
 
     def _is_configured(self) -> bool:
-        """Always ready: the Claude CLI resolves its own credential.
+        """Always ready: llm_config resolves the credential and its transport.
 
         An empty base_url/api_key pair is the normal shape here, since a
         subscription token never reaches this process as a key.
         """
         return True
 
-    def _new_client(self) -> Any:
-        """Build the Claude one-shot client this engine calls through."""
-        return claude_oneshot.ClaudeOneShotClient(timeout_s=self.timeout_s)
-
-    async def _aclose_client(self) -> None:
-        """Close the Claude client; the SDK owns no transport state."""
-        await self.client.aclose()
-
     async def _call(self, symptom: Symptom) -> str:
-        """Issue one tool-free Claude completion and extract text content.
+        """Issue one tool-free Anthropic completion and extract text content.
 
         Degrades to an empty string on failure for the same reason as
-        :meth:`LlmRcaEngine._call`. ``temperature`` is not sent: the CLI exposes
-        no such knob, and the prompt already pins the output shape.
+        :meth:`LlmRcaEngine._call`. ``temperature`` is not sent: the CLI
+        transport exposes no such knob, and the prompt already pins the output
+        shape.
 
         Args:
             symptom (Symptom): The symptom whose evidence is sent to the LLM.
@@ -448,14 +443,16 @@ class AnthropicRcaEngine(LlmRcaEngine):
         """
         _t0 = time.perf_counter()
         try:
-            result = await self._ensure_client().amessages(
+            result = await llm_config.aanthropic_completion(
                 model=self.model,
                 system=load_rca_system_prompt(),
                 messages=[{"role": "user", "content": _build_user_prompt(symptom)}],
                 max_tokens=600,
+                timeout=_client_timeout(self.timeout_s),
+                timeout_s=self.timeout_s,
             )
         except Exception as exc:  # noqa: BLE001 - degrade-to-empty is this engine's contract
-            log.warning("AnthropicRcaEngine: messages call failed: %r", exc)
+            log.warning("AnthropicRcaEngine: completion failed: %r", exc)
             return ""
         self._accumulate_anthropic_usage(result.usage, latency_ms=int((time.perf_counter() - _t0) * 1000))
         return str(result.text or "").strip()
