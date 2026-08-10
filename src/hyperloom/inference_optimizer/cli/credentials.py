@@ -319,9 +319,15 @@ def _reject_cross_provider_pairing() -> None:
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
     openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    # Every credential form counts, a subscription token included: it validates
-    # against Anthropic itself, so it needs no ANTHROPIC_BASE_URL to be complete.
     anthropic_key = has_anthropic_credential()
+    # A subscription OAuth token only validates against Anthropic itself, so it
+    # implies the official endpoint and completes the side without a base URL.
+    if anthropic_url:
+        anthropic_endpoint = anthropic_url
+    elif _has_claude_oauth_token():
+        anthropic_endpoint = _OFFICIAL_ANTHROPIC_BASE_URL
+    else:
+        anthropic_endpoint = ""
     offender = ""
     if openai_url and not openai_key and anthropic_key:
         offender = (
@@ -333,7 +339,7 @@ def _reject_cross_provider_pairing() -> None:
             "ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an "
             "OPENAI_API_KEY is configured"
         )
-    elif openai_url and anthropic_key and not anthropic_url:
+    elif openai_url and anthropic_key and not anthropic_endpoint:
         offender = (
             "an Anthropic-side key is configured without ANTHROPIC_BASE_URL, "
             "while the OpenAI side points at OPENAI_BASE_URL"
