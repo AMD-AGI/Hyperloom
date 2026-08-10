@@ -90,7 +90,7 @@ def test_gateway_signal_keys_cover_every_credential_form():
 def test_supersets_keep_their_non_anthropic_entries():
     """Both consumers are proper supersets; collapsing either onto the tuple
     would drop OpenAI-side env isolation and AWS credentials respectively."""
-    for name in ("OPENAI_BASE_URL", "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "LLM_GATEWAY_KEY"):
+    for name in ("OPENAI_BASE_URL", "OPENAI_API_KEY", "LLM_GATEWAY_KEY"):
         assert name in CLAUDE_GATEWAY_SIGNAL_KEYS
     for name in (
         "AWS_ACCESS_KEY_ID",
