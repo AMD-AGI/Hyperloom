@@ -4978,6 +4978,26 @@ def _is_scriptable_framework(framework: str | None) -> bool:
         return str(framework or "").strip().lower() in {"xdit"}
 
 
+def _has_diffusion_ceiling(framework: str | None) -> bool:
+    """Return whether an analytic diffusion ceiling is meaningful for ``framework``.
+
+    Scriptable does not imply diffusion. ``custom`` runs an operator-supplied
+    entrypoint whose model Hyperloom never inspects, so the config-derived
+    denoiser geometry the ceiling needs cannot be resolved; emitting a guessed
+    one is worse than emitting none. Hence the exclusion is by name, not by
+    registry kind.
+
+    Args:
+        framework: Framework name (matched case-insensitively).
+
+    Returns:
+        bool: ``True`` for scriptable frameworks whose denoiser config is known.
+    """
+    if str(framework or "").strip().lower() == "custom":
+        return False
+    return _is_scriptable_framework(framework)
+
+
 def _run_deterministic_tracelens_steps(
     trace_path: Path,
     output_dir: Path,
@@ -6592,7 +6612,7 @@ def write_reports(
     # roofline into an end-to-end workload roofline. Best-effort sidecar; never
     # blocks the per-kernel report.
     diffusion_roofline_path = ""
-    if _is_scriptable_framework(getattr(args, "framework", "")):
+    if _has_diffusion_ceiling(getattr(args, "framework", "")):
         try:
             tools_dir = str(Path(__file__).resolve().parent)
             if tools_dir not in sys.path:

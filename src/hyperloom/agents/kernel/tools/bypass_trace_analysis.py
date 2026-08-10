@@ -475,6 +475,34 @@ def _should_enable_steady(*, steady_state_mode: str, framework: str, env_steady:
     return bool(env_steady) or (framework or "").lower() == "xdit" or mode not in _STEADY_OFF_VALUES
 
 
+#: Mirror of the ``framework_registry`` units, used only when that package is not
+#: importable (standalone invocation). Keep in sync when a framework is added.
+_STANDALONE_UNITS = {"xdit": "img/s", "hunyuan_image3": "img/s", "custom": "unit/s"}
+
+
+def _throughput_unit(framework: str | None) -> str:
+    """Return the throughput unit ``framework`` reports, per the registry.
+
+    The registry is the single source of truth here, so an operator's ``custom``
+    workload reports its own neutral ``unit/s`` instead of being mislabelled
+    ``tok/s``. Falls back to ``_STANDALONE_UNITS`` for standalone invocation,
+    where the ``hyperloom`` package may not be importable (see the provenance
+    import above).
+
+    Args:
+        framework: Framework name (matched case-insensitively).
+
+    Returns:
+        str: The unit string, e.g. ``"tok/s"``, ``"img/s"`` or ``"unit/s"``.
+    """
+    try:
+        from hyperloom.inference_optimizer.framework_registry import throughput_unit
+
+        return throughput_unit(framework)
+    except Exception:  # noqa: BLE001 — standalone invocation without the package installed.
+        return _STANDALONE_UNITS.get(str(framework or "").strip().lower(), "tok/s")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point: emit the minimal bypass artifact set and a result JSON.
 
@@ -694,7 +722,7 @@ def main(argv: list[str] | None = None) -> int:
     for cand in candidates.get("hot_kernels", []):
         cand["trace_report_path"] = str(analysis_md_path)
 
-    throughput_unit = "img/s" if (args.framework or "").lower() == "xdit" else "tok/s"
+    throughput_unit = _throughput_unit(args.framework)
     write_text(
         analysis_md_path,
         _report.render_analysis_md(

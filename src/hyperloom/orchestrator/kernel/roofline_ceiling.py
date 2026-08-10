@@ -1245,7 +1245,13 @@ def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0
         heads = int(cfg.get("num_attention_heads") or 0)
         head_dim = int(cfg.get("attention_head_dim") or cfg.get("head_dim") or 0)
         hidden = heads * head_dim
-    patch = int(cfg.get("patch_size") or 1) or 1
+    # ``patch_size`` may be a sequence; a 3-element one is (temporal, h, w) --
+    # e.g. Wan ships [1, 2, 2] -- so the spatial patch is the trailing entry.
+    _ps = cfg.get("patch_size")
+    if isinstance(_ps, (list, tuple)):
+        patch = (int(_ps[-1]) or 1) if _ps else 1
+    else:
+        patch = int(_ps or 1) or 1
     sample = int(cfg.get("sample_size") or 0)
     if num_layers <= 0 or hidden <= 0:
         return None
