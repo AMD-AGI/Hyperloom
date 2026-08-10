@@ -17,6 +17,7 @@ same two questions when the ``hyperloom`` package is not importable.
 from __future__ import annotations
 
 import builtins
+import json
 import sys
 from pathlib import Path
 
@@ -28,6 +29,19 @@ import bypass_trace_analysis as bta  # noqa: E402
 import tracelens_analysis as tl  # noqa: E402
 
 from hyperloom.inference_optimizer import framework_registry as fr  # noqa: E402
+
+
+#: A minimal two-kernel trace, enough for the bypass route to produce candidates.
+#: Kept local rather than imported from the neighbouring test module, so this file
+#: carries no cross-test import to break under parallel collection.
+_BYPASS_TRACE_EVENTS = [
+    {"cat": "cpu_op", "name": "aten::paged_attn", "args": {"External id": 100}},
+    {"cat": "cpu_op", "name": "aten::mm", "args": {"External id": 200}},
+    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 5, "External id": 100}},
+    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 7, "External id": 200}},
+    {"cat": "kernel", "ph": "X", "name": "paged_attention_v1", "ts": 1000, "dur": 300, "args": {"correlation": 5}},
+    {"cat": "kernel", "ph": "X", "name": "Cijk_Alik_Bljk_HHS", "ts": 1300, "dur": 200, "args": {"correlation": 7}},
+]
 
 
 def _without_hyperloom(monkeypatch):
@@ -96,24 +110,46 @@ def _write_reports_for(tmp_path, framework):
     )
 
 
+def _stub_trace_derived_report(monkeypatch):
+    """Stand in for the TraceLens aggregation, which needs real perf CSVs.
+
+    Returns only what the trace can produce on its own -- no denoiser config is
+    involved -- so what the gate does to the analytic half is observable.
+    """
+    import diffusion_roofline as dr
+
+    report = {"totals": {"sigma_ideal_roofline_us": 1234.0, "kernel_roofline_efficiency": 0.5}, "gpu_busy_ratio": 0.9}
+    monkeypatch.setattr(dr, "build_report", lambda *args, **kwargs: dict(report))
+    return report
+
+
 class TestTheGateIsWiredIn:
     """The helper above is only worth anything if ``write_reports`` consults it."""
 
-    def test_custom_gets_no_diffusion_roofline_artifact(self, tmp_path):
-        artifacts = _write_reports_for(tmp_path, "custom")
-        assert "diffusion_roofline" not in artifacts
-
-    def test_the_sidecar_gate_asks_has_diffusion_ceiling(self, tmp_path, monkeypatch):
+    def test_the_analytic_gate_asks_has_diffusion_ceiling(self, tmp_path, monkeypatch):
         """Pins the call site, not just the predicate: swapping the gate back to
         ``_is_scriptable_framework`` leaves this recorder untouched."""
+        _stub_trace_derived_report(monkeypatch)
         asked: list[str | None] = []
-        monkeypatch.setattr(
-            tl,
-            "_has_diffusion_ceiling",
-            lambda fw: asked.append(fw) or False,
-        )
+        monkeypatch.setattr(tl, "_has_diffusion_ceiling", lambda fw: asked.append(fw) or False)
         _write_reports_for(tmp_path, "custom")
         assert asked == ["custom"]
+
+    def test_custom_keeps_the_trace_derived_sidecar(self, tmp_path, monkeypatch):
+        """The totals are aggregated from the perf CSVs alone, so withholding the
+        analytic ceiling must not withhold them too -- `_scriptable_latency_roofline`
+        degrades to `totals.sigma_ideal_roofline_us` when the ceiling is absent."""
+        _stub_trace_derived_report(monkeypatch)
+        artifacts = _write_reports_for(tmp_path, "custom")
+        assert "diffusion_roofline" in artifacts
+        emitted = json.loads(Path(artifacts["diffusion_roofline"]).read_text(encoding="utf-8"))
+        assert emitted["totals"]["sigma_ideal_roofline_us"] == 1234.0
+        assert "analytic_ceiling" not in emitted
+        assert "analytic_ceiling_error" not in emitted
+
+    def test_a_serving_framework_gets_no_sidecar_at_all(self, tmp_path, monkeypatch):
+        _stub_trace_derived_report(monkeypatch)
+        assert "diffusion_roofline" not in _write_reports_for(tmp_path, "sglang")
 
 
 class TestThroughputUnit:
@@ -135,3 +171,59 @@ class TestThroughputUnit:
         expected = fr.throughput_unit(framework)
         _without_hyperloom(monkeypatch)
         assert bta._throughput_unit(framework) == expected
+
+
+class TestTheTwoRoutesAgree:
+    """bypass and TraceLens are two spellings of one feature (`request_handlers`
+    picks between them), so a framework must not be scriptable on one and not the
+    other -- the sidecar they each emit is the same artifact."""
+
+    @pytest.mark.parametrize("framework", sorted(fr.FRAMEWORKS))
+    def test_both_routes_read_scriptable_from_the_registry(self, framework):
+        expected = fr.is_scriptable(framework)
+        assert bta._is_scriptable_framework(framework) is expected
+        assert tl._is_scriptable_framework(framework) is expected
+
+    @pytest.mark.parametrize("framework", sorted(fr.FRAMEWORKS))
+    def test_both_standalone_fallbacks_agree_with_the_registry(self, monkeypatch, framework):
+        expected = fr.is_scriptable(framework)
+        _without_hyperloom(monkeypatch)
+        assert bta._is_scriptable_framework(framework) is expected
+        assert tl._is_scriptable_framework(framework) is expected
+
+    def _bypass_sidecar_for(self, tmp_path, capsys, framework):
+        """Run the bypass route end to end and report whether the sidecar landed."""
+        trace = tmp_path / "t.trace.json"
+        trace.write_bytes(json.dumps({"traceEvents": _BYPASS_TRACE_EVENTS}).encode("utf-8"))
+        argv = [
+            "--trace-input",
+            str(trace),
+            "--session-id",
+            f"utest-{framework}",
+            "--workspace-path",
+            str(tmp_path),
+            "--framework",
+            framework,
+            "--target-platform",
+            "MI300X",
+            "--model-name",
+            "utest",
+            "--top-k",
+            "8",
+        ]
+        assert bta.main(argv) == 0
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        assert lines, "no stdout produced"
+        result = json.loads(lines[-1])
+        return result["artifact_paths"].get("diffusion_roofline")
+
+    def test_the_bypass_route_emits_the_sidecar_for_custom(self, tmp_path, capsys, monkeypatch):
+        """Trace-derived on that route too, so a name check would wrongly skip it."""
+        monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+        path = self._bypass_sidecar_for(tmp_path, capsys, "custom")
+        assert path and Path(path).is_file()
+        assert "totals" in json.loads(Path(path).read_text(encoding="utf-8"))
+
+    def test_the_bypass_route_omits_the_sidecar_for_a_serving_framework(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+        assert self._bypass_sidecar_for(tmp_path, capsys, "sglang") is None

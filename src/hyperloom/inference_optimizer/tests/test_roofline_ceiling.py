@@ -1184,17 +1184,14 @@ class TestDiffusionComputeCeiling:
         )
         return _read_diffusion_dit_meta(str(tmp_path))
 
-    def test_read_dit_meta_accepts_a_3d_patch_size(self, tmp_path):
-        """A (t, h, w) patch must not reach ``int()`` as a list. Wan ships
-        [1, 2, 2]; before this the whole call raised TypeError."""
-        dit = self._write_dit_config(tmp_path, [1, 2, 2])
-        assert dit is not None
-        _dit_params, latent_tokens, _num_layers, _hidden = dit
-        # Spatial patch is the trailing entry (2), not the temporal one (1).
-        assert latent_tokens == (32 // 2) ** 2
+    def test_read_dit_meta_declines_a_3d_patch_size(self, tmp_path):
+        """A (t, h, w) patch marks a video denoiser, and nothing in this module
+        models frames -- so it must decline rather than return one frame's count."""
+        assert self._write_dit_config(tmp_path, [1, 2, 2]) is None
 
-    def test_read_dit_meta_reads_a_2d_patch_size_from_the_front(self, tmp_path):
-        dit = self._write_dit_config(tmp_path, [2, 2])
+    def test_read_dit_meta_reads_a_2d_patch_size_from_the_trailing_entry(self, tmp_path):
+        """Non-square so the entry chosen is observable: (h, w) -> w."""
+        dit = self._write_dit_config(tmp_path, [4, 2])
         assert dit is not None
         assert dit[1] == (32 // 2) ** 2
 
@@ -1202,6 +1199,20 @@ class TestDiffusionComputeCeiling:
         dit = self._write_dit_config(tmp_path, [])
         assert dit is not None
         assert dit[1] == 32**2
+
+    @pytest.mark.parametrize("patch_size", [["a"], {"h": 2}, "xx", [[2]]])
+    def test_read_dit_meta_declines_a_non_numeric_patch_size(self, tmp_path, patch_size):
+        """``Never raises`` is the documented contract of the public entry point."""
+        assert self._write_dit_config(tmp_path, patch_size) is None
+
+    def test_read_dit_meta_declines_a_non_numeric_layer_count(self, tmp_path):
+        """The sibling int() conversions carry the same exposure as patch_size."""
+        import json as _json
+
+        td = tmp_path / "transformer"
+        td.mkdir()
+        (td / "config.json").write_text(_json.dumps({"num_layers": ["nope"], "hidden_size": 64, "sample_size": 32}))
+        assert _read_diffusion_dit_meta(str(tmp_path)) is None
 
     def _rt(self):
         return RuntimeWorkload(
