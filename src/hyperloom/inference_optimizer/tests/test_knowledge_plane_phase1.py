@@ -123,7 +123,7 @@ def test_remote_config_uses_kb_store_backend_and_keeps_optional_gbrain() -> None
     assert config.gbrain_base_url == "https://gbrain.test"
 
 
-def test_a_remote_child_gets_both_knowledge_bases_it_still_uses() -> None:
+def test_a_remote_child_gets_only_kb_store_credentials() -> None:
     remote = KnowledgeConfig.from_env(
         {
             "KNOWLEDGE_STORE_MODE": "remote",
@@ -137,9 +137,9 @@ def test_a_remote_child_gets_both_knowledge_bases_it_still_uses() -> None:
     remote.apply_to_child_env(child)
     assert child["KB_STORE_URL"] == "https://kb.test"
     assert child["KB_STORE_TOKEN"] == "kb-token"
-    assert child["GBRAIN_BASE_URL"] == "https://gbrain.test"
-    assert child["GBRAIN_TOKEN"] == "gbrain-token"
-    assert child["KERNELFORGE_GBRAIN_ENABLED"] == "true"
+    assert "GBRAIN_BASE_URL" not in child
+    assert "GBRAIN_TOKEN" not in child
+    assert child["KERNELFORGE_GBRAIN_ENABLED"] == "false"
 
 
 def test_a_remote_child_without_gbrain_is_told_so_rather_than_left_guessing() -> None:
