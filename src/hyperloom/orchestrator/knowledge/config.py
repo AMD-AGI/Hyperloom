@@ -105,20 +105,12 @@ class KnowledgeConfig:
         else:
             env.pop("KB_STORE_URL", None)
             env.pop("KB_STORE_TOKEN", None)
-        # KernelForge is mid-migration: only its FlyDSL rewrite path reads KB
-        # Store, while forge-loop, gemm tuning and fusion still speak GBrain and
-        # refuse to start without credentials. Both sets travel until those
-        # three move, because withholding one silently costs the child a
-        # knowledge base it is still expected to use.
-        forwards_gbrain = self.mode is KnowledgeStoreMode.REMOTE and bool(self.gbrain_base_url and self.gbrain_token)
-        if forwards_gbrain:
-            env["GBRAIN_BASE_URL"] = self.gbrain_base_url
-            env["GBRAIN_TOKEN"] = self.gbrain_token
-        else:
-            env.pop("GBRAIN_BASE_URL", None)
-            env.pop("GBRAIN_TOKEN", None)
-        # Derived state, never an operator-provided value.
-        env["KERNELFORGE_GBRAIN_ENABLED"] = "true" if forwards_gbrain else "false"
+        # Rewrite knowledge is owned by KB Store. Legacy GBrain credentials
+        # remain available to Hyperloom's own KG/Framework integrations but
+        # never cross into the KernelForge child.
+        env.pop("GBRAIN_BASE_URL", None)
+        env.pop("GBRAIN_TOKEN", None)
+        env["KERNELFORGE_GBRAIN_ENABLED"] = "false"
         # The section draft belongs to this run's inference document. A
         # KernelForge child publishes its own ``kernel:`` record, so letting it
         # inherit these would stage its sections into the wrong document.
