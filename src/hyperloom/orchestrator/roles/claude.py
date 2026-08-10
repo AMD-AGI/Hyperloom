@@ -29,6 +29,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     NoIntentEmitted,
     validate_envelope,
 )
+from ..prompts.transport import TRANSPORT_TOOLS
 from .base import (
     BackendError,
     BackendTurnResult,
@@ -229,6 +230,9 @@ class ClaudeBackend:
     mcp_tool_factory: Callable[..., Any] | None = None
 
     name: str = "claude"
+    # Which prompt modules describe a surface this backend actually has. Read
+    # by the prompt builder, which cannot infer it from the role.
+    transport = TRANSPORT_TOOLS
     calls: list[dict[str, Any]] = field(default_factory=list)
     mcp_server_config: Any | None = field(default=None, init=False)
     mcp_tool_name: str | None = field(default=None, init=False)
@@ -553,6 +557,15 @@ class ClaudeBackend:
         except Exception as exc:  # noqa: BLE001
             self.calls.append({"warn": f"context tools MCP setup failed: {exc!r}"})
             self._context_server_config = None
+
+    @property
+    def context_tools_mounted(self) -> bool:
+        """Whether the read-only context-pull tools are live this turn.
+
+        ``set_context_provider`` degrades to a soft warning when the MCP build
+        fails, so a caller must not infer availability from having called it.
+        """
+        return self._context_server_config is not None
 
     def reset_conversation(self) -> None:
         """Drop the captured session so the next ``run`` starts fresh.

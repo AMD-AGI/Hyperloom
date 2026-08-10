@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable
 from hyperloom.orchestrator.actions.executors._grid_server_args import (
     tokenize_server_args_preserving_json,
 )
+from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
 
 # Recipe snapshot severity tags (schema has no fixed enum).
@@ -720,6 +721,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._checkpoint_policy = _orch_mem.CheckpointPolicy(
             context_token_soft=int(_ctx_window * _soft_frac),
         )
+        # Kept so a provider that reports its own window per turn can replace the
+        # table's guess without re-deriving the operator's fraction.
+        self._checkpoint_soft_fraction = _soft_frac
         self._checkpoint_tracker = _orch_mem.CheckpointTracker(
             last_phase=str(getattr(self.shared_state, "phase", "") or ""),
         )
@@ -1099,6 +1103,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_hold_for_framework_config_lane": "phase_framework",
         "_record_framework_config_exploration_result": "phase_framework",
         "_orchestration_conversational": "conversation",
+        "_orchestration_context_tools_mounted": "conversation",
+        "_orchestration_needs_seed": "conversation",
         "_reset_orchestration_conversation": "conversation",
         "_conversation_progress_signal": "conversation",
         "_attach_orchestration_context_tools": "conversation",
@@ -1408,16 +1414,24 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self.db.close()
 
     async def _recipe_kb_t4_hook(self) -> None:
-        """T4 — finalize recipe at session end. Safety net for crash/Ctrl-C where CLOSE sequencer didn't run; no-op when close_sequence_done."""
-        if self.recipe_kb is None:
+        """Finalize on graceful teardown/Ctrl-C when CLOSE did not finish.
+
+        This in-process hook cannot run after SIGKILL, container force-delete,
+        host loss, or interpreter failure.
+        """
+        if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
             return
         if getattr(self.shared_state, "close_sequence_done", False):
             return
-        sid = (self.shared_state.recipe_kb_session_id or "").strip()
-        if not sid:
-            return
         try:
-            self.finalize_recipe_and_journal()
+            config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
+            if config.mode is KnowledgeStoreMode.LOCAL:
+                if self.recipe_kb is None:
+                    return
+                sid = (self.shared_state.recipe_kb_session_id or "").strip()
+                if not sid:
+                    return
+            self.finalize_recipe_and_journal(source="t4_fallback")
         except Exception:  # noqa: BLE001 — defensive
             log.exception("recipe KB T4 fact_finalize fallback failed")
         try:
@@ -1744,7 +1758,25 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 except (NotImplementedError, RuntimeError):
                     # Teardown is best-effort; signal handlers may be unsupported.
                     pass
+            await self._close_backends()
         return self.shared_state.stop_reason
+
+    async def _close_backends(self) -> None:
+        """Release every backend holding a live agent session.
+
+        A session-scoped backend (Codex) keeps a child process and a private
+        state directory open for the whole run, and the loop is the only place
+        that knows the run is over. Failing to close one must not change the
+        stop reason, so each failure is logged and the rest still close.
+        """
+        for name, backend in list(self.backends.items()):
+            closer = getattr(backend, "aclose", None)
+            if not callable(closer):
+                continue
+            try:
+                await closer()
+            except Exception:  # noqa: BLE001 — teardown must not mask the stop reason
+                log.exception("Coordinator: closing the %s backend failed", name)
 
     # Reactor
     async def _reactor_pass(self, agent_name: str) -> None:
@@ -1760,10 +1792,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
             agent_name (str): The agent role to run this pass for.
         """
         backend = self.backends[agent_name]
-        prompt = await self._compose_prompt(agent_name)
-        # Conversation-growth accounting happens after the turn returns, from the
-        # backend's reported token usage.
+        # The system prompt is loaded first because the SEED/DELTA gate inside
+        # _compose_prompt has to know whether THIS prompt replaces the backend's
+        # conversation. A re-scoped prompt opens a new thread inside the turn, so
+        # a gate that only sees the thread as it stands would compose a delta for
+        # a conversation that is about to be emptied.
         sys_prompt = await self._load_system_prompt(agent_name)
+        prompt = await self._compose_prompt(agent_name, system_prompt=sys_prompt)
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
         # No-op for backends without the hook. Presence of the hook is also what
@@ -1878,6 +1913,18 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 md = getattr(result, "metadata", None) or {}
                 self._checkpoint_tracker.set_context_tokens(int(md.get("context_tokens_peak") or 0))
                 self._checkpoint_tracker.chars_add(len(prompt) + len(getattr(result, "raw_text", "") or ""))
+            except Exception:  # noqa: BLE001 — accounting must never break routing
+                pass
+        # Kept out of the ledger's try above: that one exists so a missing token
+        # figure still leaves the char ledger updating, and a throw from here
+        # would stop it too.
+        if agent_name == "orchestration" and self._orchestration_conversational():
+            try:
+                md = getattr(result, "metadata", None) or {}
+                self._checkpoint_policy.adopt_context_window(
+                    int(md.get("model_context_window") or 0),
+                    self._checkpoint_soft_fraction,
+                )
             except Exception:  # noqa: BLE001 — accounting must never break routing
                 pass
         # Completed orchestration turn means SEED delivered; later turns send DELTA.

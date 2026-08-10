@@ -37,9 +37,9 @@ In docker mode:
 
 Suggested Docker images:
 
-- `vllm`: `docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix`
-- `sglang` MI300X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix`
-- `sglang` MI355X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix`
+- `vllm`: `docker.io/rocm/hyperloom:vllm-v0.24.0-rocm7.2.0`
+- `sglang` MI300X: `docker.io/rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x`
+- `sglang` MI355X: `docker.io/rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi350x`
 
 In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
 (or the current host when it is unset) before running setup or optimize:

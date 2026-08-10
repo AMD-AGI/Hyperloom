@@ -20,11 +20,7 @@ We keep a small superset of arbor fields:
 * ``framework_name`` / ``framework_version`` / ``precision`` — the three
   identity dimensions arbor lacks (arbor is a 2-tuple model+hardware).
 * ``lessons`` / ``authority`` / ``confidence`` / ``evidence_refs`` /
-  ``provenance`` — v2-spec fields the central kb-service expects.
-
-Schema translation from the v2 wire shape to this arbor shape lives in
-:mod:`recipe_kb.dispatcher`, applied on read. Writes are local-only and
-never marshalled back to v2.
+  ``provenance`` — durable local knowledge and audit metadata.
 """
 
 from __future__ import annotations
@@ -32,34 +28,46 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-try:
-    from .gbrain_ingest import _best_config_split, _coerce_server_args
-except ImportError:  # pragma: no cover - defensive fallback
+def _coerce_server_args(value: Any) -> str:
+    """Normalize launch arguments into one command-line string."""
 
-    def _coerce_server_args(value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value
-        if isinstance(value, (list, tuple)):
-            return " ".join(str(v).strip() for v in value if str(v).strip())
-        return str(value)
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(v).strip() for v in value if str(v).strip())
+    return str(value)
 
-    def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, str]]:
-        args = _coerce_server_args(best_config.get("extra_server_args")).strip()
-        nested = best_config.get("extra_envs")
-        if not isinstance(nested, Mapping):
-            nested = best_config.get("envs")
-        if isinstance(nested, Mapping):
-            envs = {str(k): str(v) for k, v in nested.items()}
-        else:
-            non_env_keys = {"extra_server_args", "extra_envs", "envs", "args", "name", "tput", "accuracy"}
-            envs = {
-                str(k): str(v)
-                for k, v in best_config.items()
-                if k not in non_env_keys and not isinstance(v, (Mapping, list, tuple))
-            }
-        return args, envs
+
+def _best_config_split(
+    best_config: Mapping[str, Any],
+) -> tuple[str, dict[str, str]]:
+    """Split canonical launch arguments from environment variables."""
+
+    args = _coerce_server_args(best_config.get("extra_server_args")).strip()
+    nested = best_config.get("extra_envs")
+    if not isinstance(nested, Mapping):
+        nested = best_config.get("envs")
+    if isinstance(nested, Mapping):
+        envs = {str(k): str(v) for k, v in nested.items()}
+    else:
+        non_env_keys = {
+            "extra_server_args",
+            "extra_envs",
+            "envs",
+            "args",
+            "name",
+            "tput",
+            "accuracy",
+        }
+        envs = {
+            str(k): str(v)
+            for k, v in best_config.items()
+            if k not in non_env_keys
+            and not isinstance(v, (Mapping, list, tuple))
+        }
+    return args, envs
 
 
 def _normalize_best_config(best_config: Mapping[str, Any]) -> dict[str, Any]:
