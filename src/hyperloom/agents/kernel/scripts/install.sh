@@ -242,6 +242,10 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     _snap_anthropic_url="${ANTHROPIC_BASE_URL-}"
     _snap_anthropic_key="${ANTHROPIC_API_KEY-}"
     _snap_anthropic_token="${ANTHROPIC_AUTH_TOKEN-}"
+    # Snapshotted like the credentials above rather than via
+    # _DOTENV_PROTECTED_VARS, whose mismatch warning prints the value -- this one
+    # usually carries the gateway secret.
+    _snap_anthropic_headers="${ANTHROPIC_CUSTOM_HEADERS-}"
     for _v in $_DOTENV_PROTECTED_VARS; do
       eval "_snap_prot_${_v}=\"\${${_v}-}\""
     done
@@ -252,6 +256,7 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     [ -n "$_snap_anthropic_url" ] && export ANTHROPIC_BASE_URL="$_snap_anthropic_url"
     [ -n "$_snap_anthropic_key" ] && export ANTHROPIC_API_KEY="$_snap_anthropic_key"
     [ -n "$_snap_anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$_snap_anthropic_token"
+    [ -n "$_snap_anthropic_headers" ] && export ANTHROPIC_CUSTOM_HEADERS="$_snap_anthropic_headers"
     for _v in $_DOTENV_PROTECTED_VARS; do
       eval "_snap_val=\"\${_snap_prot_${_v}-}\""
       if [ -n "${_snap_val}" ]; then
@@ -264,7 +269,7 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
       unset "_snap_prot_${_v}"
     done
     unset _v _snap_val _cur_val
-    unset _snap_anthropic_url _snap_anthropic_key _snap_anthropic_token
+    unset _snap_anthropic_url _snap_anthropic_key _snap_anthropic_token _snap_anthropic_headers
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
@@ -313,6 +318,9 @@ esac
 # base URL/key. A dual-protocol gateway simply has both pointed at one host.
 _ANTHROPIC_BASE_URL_VAL="${ANTHROPIC_BASE_URL:-}"
 _ANTHROPIC_KEY_VAL="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
+# Part of the Anthropic-side credential for a header-authenticated gateway, and
+# not derivable from the key, so it is persisted alongside the URL and key.
+_ANTHROPIC_CUSTOM_HEADERS_VAL="${ANTHROPIC_CUSTOM_HEADERS:-}"
 # GEAK_BASE_URL / GEAK_API_KEY are neither derived nor written here: GEAKv4 runs
 # on the Anthropic side via GEAK_CLAUDE_MODEL + Claude Code auth, and an operator
 # value reaches it from the environment. write_env_file removes both from the
@@ -1060,6 +1068,7 @@ write_env_file() {
   # GEAK aliases are never written back to provider slots.
   local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-}"
   local _anthropic_key="${_ANTHROPIC_KEY_VAL:-}"
+  local _anthropic_headers="${_ANTHROPIC_CUSTOM_HEADERS_VAL:-}"
   # Warn loudly if the Anthropic endpoint is unresolved — kernel-agent env would
   # silently lack a base URL and CLIs would resort to whatever was in the
   # operator's shell rc, defeating the point of this file.
@@ -1090,9 +1099,13 @@ write_env_file() {
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
     # The kernel-agent drives Claude Code, so only the Anthropic side is
-    # exported here; gateway/OpenAI credentials are never persisted.
+    # exported here; gateway/OpenAI credentials are never persisted. The custom
+    # header goes with them: a header-authenticated gateway rejects the CLI
+    # without it, and single-quoting keeps any ${VAR} reference intact for
+    # parse_custom_headers to expand.
     [ -n "${_anthropic_url}" ] && echo "export ANTHROPIC_BASE_URL='${_anthropic_url}'"
     [ -n "${_anthropic_key}" ] && echo "export ANTHROPIC_API_KEY='${_anthropic_key}'"
+    [ -n "${_anthropic_headers}" ] && echo "export ANTHROPIC_CUSTOM_HEADERS='${_anthropic_headers}'"
     # Pin TRACELENS_ROOT and TRACELENS_INTERNAL_ROOT to the (possibly
     # mirrored) values resolved by ensure_tracelens(). This is what lets
     # setsid nohup python -m hyperloom.inference_optimizer.cli optimize →

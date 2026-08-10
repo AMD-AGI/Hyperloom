@@ -1252,6 +1252,7 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
                 "DRY_RUN=0",
                 "_ANTHROPIC_BASE_URL_VAL=https://api.anthropic.com",
                 "_ANTHROPIC_KEY_VAL=anthropic-real-key",
+                "_ANTHROPIC_CUSTOM_HEADERS_VAL='Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}'",
                 "_OPENAI_BASE_URL_VAL=",
                 "_OPENAI_KEY_VAL=",
                 "LLM_GATEWAY_KEY=",
@@ -1294,6 +1295,9 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
     # kernel-agent env mirrors the same Anthropic values and no OpenAI leak.
     assert "export ANTHROPIC_API_KEY='anthropic-real-key'" in kernel_text
     assert "export ANTHROPIC_BASE_URL='https://api.anthropic.com'" in kernel_text
+    # A header-authenticated gateway needs its header here too, and the single
+    # quotes must keep ${VAR} intact for parse_custom_headers to expand.
+    assert "export ANTHROPIC_CUSTOM_HEADERS='Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}'" in kernel_text
     assert "export OPENAI_API_KEY=" not in kernel_text
     assert "OPENAI_API_KEY=" not in dotenv_text
 
