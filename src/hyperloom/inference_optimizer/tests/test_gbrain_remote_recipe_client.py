@@ -378,3 +378,36 @@ def test_mcp_call_raises_on_tool_iserror(monkeypatch) -> None:
     mcp = grc._GbrainMcp("http://gbrain.test", "tok", 2.0)
     with pytest.raises(GbrainRemoteError):
         mcp.call("list_pages", {"type": "recipe"})
+
+
+class _MissingPageMcp:
+    """gbrain MCP stand-in whose ``get_page`` always reports ``page_not_found``."""
+
+    def call(self, tool: str, args: dict[str, Any]) -> Any:
+        raise GbrainRemoteError(
+            "gbrain get_page tool error: [{'type': 'text', 'text': '{\"error\": \"page_not_found\"}'}]"
+        )
+
+
+class _BrokenMcp:
+    """gbrain MCP stand-in that fails for a reason other than a missing page."""
+
+    def call(self, tool: str, args: dict[str, Any]) -> Any:
+        raise GbrainRemoteError("gbrain get_page transport error: ConnectionResetError()")
+
+
+def test_get_page_recipe_treats_page_not_found_as_miss() -> None:
+    # An absent page is a normal miss: put_recipe reads the canonical slug
+    # before writing it, so raising here would make the first write of any
+    # recipe fail instead of creating the page.
+    c = GbrainRemoteRecipeClient(base_url="http://gbrain.test", token="tok", enabled=True)
+    c._mcp = _MissingPageMcp()  # type: ignore[assignment]
+    assert c._get_page_recipe(_default_slug("inference/m/mi300x/sglang/x/y/0.4.5/fp8")) is None
+    assert c.get_recipe_exact(canonical_id="inference:m:mi300x:sglang:x:y:0.4.5:fp8") is None
+
+
+def test_get_page_recipe_propagates_non_missing_errors() -> None:
+    c = GbrainRemoteRecipeClient(base_url="http://gbrain.test", token="tok", enabled=True)
+    c._mcp = _BrokenMcp()  # type: ignore[assignment]
+    with pytest.raises(GbrainRemoteError):
+        c._get_page_recipe(_default_slug("inference/m/mi300x/sglang/x/y/0.4.5/fp8"))

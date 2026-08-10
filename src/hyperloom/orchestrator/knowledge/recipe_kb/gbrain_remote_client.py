@@ -63,6 +63,17 @@ _EXTRA_SERVER_ARGS_KEY = "extra_server_args"
 _RECIPE_SCAN_BUDGET_SEC = 20.0
 
 
+def _is_page_missing(exc: Exception) -> bool:
+    """Whether a gbrain tool error means "this page does not exist yet".
+
+    gbrain reports an absent slug as an in-band ``isError`` result carrying
+    ``page_not_found``, which :meth:`_GbrainMcp.call` surfaces as an exception.
+    Every recipe read path treats an absent page as a miss, so the caller must
+    be able to tell it apart from a transport / auth failure.
+    """
+    return "page_not_found" in str(exc)
+
+
 def _require_http_url(url: str) -> None:
     scheme = urllib.parse.urlparse(url).scheme
     if scheme not in {"http", "https"}:
@@ -714,7 +725,12 @@ class GbrainRemoteRecipeClient:
         """
         if not self.enabled or self._mcp is None:
             return None
-        page = self._mcp.call("get_page", {"slug": slug})
+        try:
+            page = self._mcp.call("get_page", {"slug": slug})
+        except GbrainRemoteError as exc:
+            if not _is_page_missing(exc):
+                raise
+            return None
         fm = page.get("frontmatter") if isinstance(page, dict) else None
         if not isinstance(fm, Mapping):
             return None
