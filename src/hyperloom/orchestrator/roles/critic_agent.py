@@ -43,7 +43,6 @@ from hyperloom.inference_optimizer.session.session_paths import allocate_turn_wo
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from .base import BackendError, BackendTurnResult, LLMCallFailed, build_chat_messages, parse_call_timeout_env
-from .claude import _input_side_total
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
 
@@ -54,6 +53,14 @@ CRITIC_AGENT_RUNTIME_TIMEOUT_SEC = 30  # prepare-review / commit-review wall cap
 # Output-token cap for both review paths. The Anthropic side spends it as a
 # request field or through the CLI environment, depending on the transport.
 CRITIC_AGENT_MAX_COMPLETION_TOKENS = 2000
+# Anthropic usage counters carried through to the trace row, each in its own
+# column so critic rows stay comparable with the orchestration ones.
+_ANTHROPIC_USAGE_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
 # OpenAI HTTP client timeout defaults for critic review calls.
 CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC = 10.0
 CRITIC_AGENT_LLM_RW_TIMEOUT_SEC = 120.0
@@ -1065,25 +1072,27 @@ class CriticAgentBackend:
     ) -> None:
         """Fold one Anthropic ``usage`` block into the running accumulator.
 
+        Cache counters keep their own keys instead of being folded into
+        ``input_tokens``. That matches the rows ``ClaudeBackend`` writes for
+        orchestration, so a reader can compare or sum the two components
+        without knowing which one produced a row. The judge bundle repeats
+        across turns and reliably hits the prompt cache, so the split is most
+        of the input side, not a rounding detail.
+
         Missing / bad values contribute 0 so a malformed reply never corrupts
         the token sum.
 
-        The input side sums fresh, cache-read and cache-creation tokens, the
-        same accounting ``ClaudeBackend`` uses: the judge bundle repeats across
-        turns, so most of a critic call's input arrives as cache reads.
-
         Args:
-            acc: The running accumulator with ``input_tokens`` /
-                ``output_tokens`` keys, updated in place.
+            acc: The running accumulator, updated in place.
             usage: An Anthropic usage dict (or ``None``) to fold into ``acc``.
         """
         if not isinstance(usage, dict):
             return
-        acc["input_tokens"] += _input_side_total(usage)
-        try:
-            acc["output_tokens"] += int(usage.get("output_tokens", 0) or 0)
-        except (TypeError, ValueError):
-            pass
+        for key in _ANTHROPIC_USAGE_KEYS:
+            try:
+                acc[key] = acc.get(key, 0) + int(usage.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                continue
 
     @staticmethod
     def _accumulate_usage(
@@ -1141,14 +1150,16 @@ class CriticAgentBackend:
 
         Records the accumulated review-model token spend (and summed wall-clock
         ``latency_ms``) under ``component=critic`` for whichever transport
-        :attr:`protocol` selected — OpenAI-compatible chat.completions or native
-        Anthropic Messages — using the tick/phase from :meth:`set_trace_context`.
-        The stamped ``model`` is :attr:`_review_model`. Best-effort: never raises
-        into the review path.
+        :attr:`protocol` selected, using the tick/phase from
+        :meth:`set_trace_context`. The stamped ``model`` is
+        :attr:`_review_model`. Best-effort: never raises into the review path.
+
+        Cache counters are absent on the OpenAI path, which has no prompt-cache
+        split, so they stay ``None`` there — the documented meaning of the
+        column — rather than being reported as zero.
 
         Args:
-            usage_acc: Accumulated token counts with ``input_tokens`` /
-                ``output_tokens`` keys for this reasoning loop.
+            usage_acc: Accumulated token counts for this reasoning loop.
             latency_ms: Summed wall-clock latency of the reasoning loop, when
                 measured.
         """
@@ -1162,6 +1173,8 @@ class CriticAgentBackend:
                 phase=self._trace_phase,
                 input_tokens=usage_acc.get("input_tokens"),
                 output_tokens=usage_acc.get("output_tokens"),
+                cache_read_input_tokens=usage_acc.get("cache_read_input_tokens"),
+                cache_creation_input_tokens=usage_acc.get("cache_creation_input_tokens"),
                 latency_ms=latency_ms,
                 reviewed_msg_ids=self._trace_reviewed_msg_ids,
             )
