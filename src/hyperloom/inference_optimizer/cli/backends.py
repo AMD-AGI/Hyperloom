@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import framework_registry
+from hyperloom.inference_optimizer.session.session_paths import agent_dir
 from hyperloom.orchestrator.roles import (
     ClaudeBackend,
     CodexBackend,
@@ -24,6 +25,7 @@ from hyperloom.orchestrator.roles import (
     MockRobustnessBackend,
     RobustnessAgentBackend,
 )
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
 
 
@@ -156,7 +158,15 @@ def _build_backends(
     if provider_openai_only:
         # Official OpenAI has no Claude endpoint; use the Codex backend for
         # Orchestration so an OpenAI-only config can drive the coordinator.
-        orchestration_backend: Any = CodexBackend(model=codex_model)
+        # The role record supplies the intent set, so the enforced Codex
+        # output schema and the Claude emit_intent tool describe one contract.
+        orchestration_backend: Any = CodexBackend(
+            allowed_intents=default_role_registry()["orchestration"].allowed_intents,
+            model=codex_model,
+            # Scratch only. The session directory itself stays outside the
+            # sandbox's writable roots so the agent cannot rewrite session state.
+            cwd=agent_dir(session_dir, "orchestration") / "codex_workspace",
+        )
     else:
         # Orchestration runs as a persistent ReAct conversation: the Claude
         # session is resumed across ticks so the plan persists.

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 from functools import partial
 from pathlib import Path
@@ -212,16 +213,30 @@ except Exception:
 # --- end HYPERLOOM_EVAL_PROBE -----------------------------------------------
 """
 
-# Anchored on the unique ``export PYTHONPATH`` line that closes
-# ``_patch_lm_eval``. The heredoc is quoted so nothing inside it is
-# shell-expanded, and its terminator must sit at column 0.
-_EVAL_PROBE_LEGACY = '    export PYTHONPATH="${patch_dir}:${PYTHONPATH:-}"'
-_EVAL_PROBE_PATCHED = (
-    "    cat >> \"$patch_dir/sitecustomize.py\" <<'HYPERLOOM_PY'\n"
-    + _EVAL_PROBE_PY.lstrip("\n")
-    + "HYPERLOOM_PY\n"
-    + _EVAL_PROBE_LEGACY
+# Anchored on the ``export PYTHONPATH`` line that closes ``_patch_lm_eval``.
+# The prefix is matched rather than the whole line: upstream rewrote the tail
+# from ``"${patch_dir}:${PYTHONPATH:-}"`` to
+# ``"${patch_dir}${PYTHONPATH:+:${PYTHONPATH}}"`` (same meaning, minus a
+# trailing colon that would have put the cwd on sys.path), and a line-literal
+# anchor silently stopped matching in every checkout. Only the assignment's
+# left side is Hyperloom's business, so only that is pinned. The heredoc is
+# quoted so nothing inside it is shell-expanded, and its terminator must sit at
+# column 0.
+_EVAL_PROBE_ANCHOR_RE = re.compile(
+    r'^(?:[ \t]*)export PYTHONPATH="\$\{patch_dir\}.*$',
+    re.MULTILINE,
 )
+
+
+def _eval_probe_replacement(anchor_line: str) -> str:
+    """Build the patched block that keeps ``anchor_line`` as its last line."""
+    indent = anchor_line[: len(anchor_line) - len(anchor_line.lstrip(" \t"))]
+    return (
+        f"{indent}cat >> \"$patch_dir/sitecustomize.py\" <<'HYPERLOOM_PY'\n"
+        + _EVAL_PROBE_PY.lstrip("\n")
+        + "HYPERLOOM_PY\n"
+        + anchor_line
+    )
 _EVAL_PROBE_SENTINEL = "HYPERLOOM_EVAL_PROBE"
 _EVAL_PROBE_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_eval_probe_patcher.lock")
 
@@ -704,6 +719,49 @@ def _is_eval_probe_patched(src: Path) -> bool:
     return file_contains_sentinel(src, _EVAL_PROBE_SENTINEL, log, "_inferencex_patcher")
 
 
+def _apply_eval_probe(src: Path) -> bool:
+    """Insert the eval probe above ``_patch_lm_eval``'s PYTHONPATH export.
+
+    Resolves the anchor against the file before delegating, so the shared
+    exact-line replacer still gets a literal while the anchor itself tolerates
+    upstream rewriting the export's right-hand side.
+
+    Args:
+        src: The ``benchmark_lib.sh`` to patch in place.
+
+    Returns:
+        bool: ``True`` when the patched bytes were written.
+    """
+    try:
+        original = src.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
+        return False
+    match = _EVAL_PROBE_ANCHOR_RE.search(original)
+    if match is None:
+        log.warning(
+            "_inferencex_patcher: no _patch_lm_eval PYTHONPATH export matching %r "
+            "in %s; upstream layout may have changed. A model that never emits EOS "
+            "will run the accuracy eval to the full max_tokens budget on every "
+            "sample instead of exiting early.",
+            _EVAL_PROBE_ANCHOR_RE.pattern,
+            src,
+        )
+        return False
+    anchor_line = match.group(0)
+    return _apply_line_replacement_atomic(
+        src,
+        legacy=anchor_line,
+        patched_line=_eval_probe_replacement(anchor_line),
+        tmp_prefix=".benchmark_lib.sh.eval_probe_",
+        missing_msg=(
+            "_inferencex_patcher: the _patch_lm_eval PYTHONPATH export vanished "
+            "from %s between the anchor match and the write."
+        ),
+        success_msg=("_inferencex_patcher: installed eval generation-pathology probe in %s"),
+    )
+
+
 def ensure_benchmark_lib_eval_probe_patched(
     inferencex_path: Path | str | None = None,
 ) -> bool:
@@ -729,19 +787,7 @@ def ensure_benchmark_lib_eval_probe_patched(
     return _ensure_patched(
         _resolve_benchmark_lib_paths(inferencex_path),
         _is_eval_probe_patched,
-        partial(
-            _apply_line_replacement_atomic,
-            legacy=_EVAL_PROBE_LEGACY,
-            patched_line=_EVAL_PROBE_PATCHED,
-            tmp_prefix=".benchmark_lib.sh.eval_probe_",
-            missing_msg=(
-                "_inferencex_patcher: expected _patch_lm_eval PYTHONPATH export "
-                "not found in %s; upstream layout may have changed. A model that "
-                "never emits EOS will run the accuracy eval to the full "
-                "max_tokens budget on every sample instead of exiting early."
-            ),
-            success_msg=("_inferencex_patcher: installed eval generation-pathology probe in %s"),
-        ),
+        _apply_eval_probe,
         _EVAL_PROBE_LOCK_PATH,
         empty_msg=(
             "_inferencex_patcher: no InferenceX root discovered "
