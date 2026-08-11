@@ -98,6 +98,23 @@ def _assert_staged_placeholder(driver: str, workspace: Path) -> None:
     assert "task-preparer placeholder" in path.read_text()
 
 
+def test_submit_names_the_card_alongside_the_target(monkeypatch, tmp_path):
+    """The card reaches the loop, resolved from the candidate.
+
+    KernelForge files a kernel's experience under the card and skips its KB
+    without one, carrying on as though nothing were wrong, so a submit that
+    resolved the target but forgot the card would optimize and remember nothing.
+    """
+    _result, captured = _submit_with_stubbed_loop(
+        monkeypatch,
+        tmp_path,
+        candidate={"operation": "op", "platform": "MI300X"},
+    )
+
+    assert captured["gpu_target"] == "gfx942"
+    assert captured["gpu_type"] == "mi300x"
+
+
 def test_missing_autogen_driver_reaches_forge_loop_task_preparer(monkeypatch, tmp_path):
     result, captured = _submit_with_stubbed_loop(monkeypatch, tmp_path)
 
