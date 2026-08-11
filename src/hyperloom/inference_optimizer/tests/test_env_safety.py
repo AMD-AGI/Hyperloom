@@ -67,12 +67,19 @@ def test_common_env_safety_filters_dotenv_and_kernel_agent_keys_only():
     assert common_env_safety.is_allowed_dotenv_key("HF_TOKEN")
     assert common_env_safety.is_allowed_dotenv_key("HTTPS_PROXY")
     assert common_env_safety.is_allowed_dotenv_key("HYPERLOOM_RUNTIME_DIR")
+    # hyperloom-setup writes the gateway auth headers into .env, so the .env
+    # loader must read them back instead of dropping them as unsupported.
+    assert common_env_safety.is_allowed_dotenv_key("ANTHROPIC_CUSTOM_HEADERS")
+    assert common_env_safety.is_allowed_dotenv_key("OPENAI_CUSTOM_HEADERS")
     assert not common_env_safety.is_allowed_dotenv_key("PYTHONPATH")
     assert not common_env_safety.is_allowed_dotenv_key("BAD-NAME")
 
     assert common_env_safety.is_allowed_kernel_agent_env_key("TRACELENS_ROOT")
     assert common_env_safety.is_allowed_kernel_agent_env_key("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV")
     assert common_env_safety.is_allowed_kernel_agent_env_key("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS")
+    # Dropped keys never reach the kernel-agent child, so an opt-in route switch
+    # is inert until it is listed here.
+    assert common_env_safety.is_allowed_kernel_agent_env_key("HYPERLOOM_FORGE_REWRITE_BY_FLYDSL")
     assert not common_env_safety.is_allowed_kernel_agent_env_key("TRACELENS_TOKEN")
 
     allowed, dropped = common_env_safety.filter_untrusted_env_mapping(

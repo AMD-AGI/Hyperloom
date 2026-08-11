@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.4
-FROM primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix
+FROM rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x
 
 
 #install AMD self-signed certificate

@@ -15,10 +15,48 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.codex_session import (
+    CODEX_EXTERNAL_SANDBOX_ENV,
+    CODEX_SANDBOX_MODE_ENV,
+    DEFAULT_CODEX_SANDBOX_MODE,
+)
 from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.kernel import _kernel_decisions as kd
 from hyperloom.orchestrator.kernel import request_handlers as krh
+from hyperloom.orchestrator.roles.agent_role import (
+    DEFAULT_CLAUDE_MODEL,
+    DEFAULT_CODEX_MODEL,
+)
 from hyperloom.orchestrator.state.shared_state import SharedState
+
+
+_FUSION_PROVIDER_ENV_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "CLAUDE_MODEL",
+    "CODEX_MODEL",
+    CODEX_SANDBOX_MODE_ENV,
+    CODEX_EXTERNAL_SANDBOX_ENV,
+)
+_OPENAI_ONLY_ENV = {
+    "OPENAI_BASE_URL": "https://gateway.invalid/Unified/v1",
+    "OPENAI_API_KEY": "openai-side-key",
+}
+_ANTHROPIC_ONLY_ENV = {
+    "ANTHROPIC_BASE_URL": "https://gateway.invalid/Anthropic",
+    "ANTHROPIC_API_KEY": "anthropic-side-key",
+}
+
+
+def _pin_fusion_provider_env(monkeypatch, shape):
+    """Set one exact provider shape without inheriting the developer's gateway."""
+    for key in _FUSION_PROVIDER_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    for key, value in shape.items():
+        monkeypatch.setenv(key, value)
 
 
 class TestForgeGemmHelperCoverage:
@@ -526,9 +564,7 @@ class TestForgeGemmHelperCoverage:
             )
         )
 
-        assert (
-            snapshot / "vllm" / "model_executor" / "models" / "qwen3.py"
-        ).read_text(encoding="utf-8") == "new = 2\n"
+        assert (snapshot / "vllm" / "model_executor" / "models" / "qwen3.py").read_text(encoding="utf-8") == "new = 2\n"
 
     def test_materialize_unified_patch_snapshot_nongit_new_file_timestamped(self, tmp_path):
         """A created file whose ``+++`` line carries a tab-suffixed timestamp
@@ -673,8 +709,146 @@ class TestForgeGemmHelperCoverage:
             "ZAYA_FUSED_CCA_GROUPED_QK_MEANS": "1",
         }
 
+    @pytest.mark.parametrize(
+        ("shape", "expected_backend", "expected_model"),
+        [
+            (
+                {**_OPENAI_ONLY_ENV, "CODEX_MODEL": "gpt-fusion"},
+                "codex",
+                "gpt-fusion",
+            ),
+            (
+                {**_ANTHROPIC_ONLY_ENV, "CLAUDE_MODEL": "claude-fusion"},
+                "claude",
+                "claude-fusion",
+            ),
+            (
+                {
+                    **_OPENAI_ONLY_ENV,
+                    **_ANTHROPIC_ONLY_ENV,
+                    "CODEX_MODEL": "gpt-fusion",
+                    "CLAUDE_MODEL": "claude-fusion",
+                },
+                "claude",
+                "claude-fusion",
+            ),
+        ],
+    )
+    def test_resolve_forge_fusion_agent_follows_provider_shape(
+        self,
+        monkeypatch,
+        shape,
+        expected_backend,
+        expected_model,
+    ):
+        """Provider shape selects one matching backend and its model variable."""
+        _pin_fusion_provider_env(monkeypatch, shape)
+
+        assert krh._resolve_forge_fusion_agent({}) == (
+            expected_backend,
+            expected_model,
+        )
+
+    @pytest.mark.parametrize(
+        ("shape", "expected"),
+        [
+            (_OPENAI_ONLY_ENV, ("codex", DEFAULT_CODEX_MODEL)),
+            (_ANTHROPIC_ONLY_ENV, ("claude", DEFAULT_CLAUDE_MODEL)),
+        ],
+    )
+    def test_resolve_forge_fusion_agent_uses_established_model_defaults(
+        self,
+        monkeypatch,
+        shape,
+        expected,
+    ):
+        _pin_fusion_provider_env(monkeypatch, shape)
+
+        assert krh._resolve_forge_fusion_agent({}) == expected
+
+    def test_resolve_forge_fusion_agent_honors_valid_explicit_override(self, monkeypatch):
+        _pin_fusion_provider_env(
+            monkeypatch,
+            {**_OPENAI_ONLY_ENV, **_ANTHROPIC_ONLY_ENV},
+        )
+
+        assert krh._resolve_forge_fusion_agent(
+            {
+                "agent_backend": "codex",
+                "llm_model": "gpt-explicit",
+            }
+        ) == ("codex", "gpt-explicit")
+
+    def test_resolve_forge_fusion_agent_rejects_invalid_explicit_backend(self, monkeypatch):
+        _pin_fusion_provider_env(
+            monkeypatch,
+            {**_OPENAI_ONLY_ENV, **_ANTHROPIC_ONLY_ENV},
+        )
+
+        with pytest.raises(ValueError, match="agent_backend"):
+            krh._resolve_forge_fusion_agent({"agent_backend": "anthropic"})
+
+    def test_resolve_forge_fusion_agent_rejects_unconfigured_provider(self, monkeypatch):
+        _pin_fusion_provider_env(monkeypatch, {})
+
+        with pytest.raises(RuntimeError, match="no .*provider.*configured"):
+            krh._resolve_forge_fusion_agent({})
+
+    def test_resolve_forge_fusion_codex_sandbox_defaults_to_workspace_write(self, monkeypatch):
+        _pin_fusion_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+
+        assert (
+            krh._resolve_forge_fusion_sandbox_mode(
+                {},
+                agent_backend="codex",
+            )
+            == DEFAULT_CODEX_SANDBOX_MODE
+        )
+
+    def test_resolve_forge_fusion_codex_sandbox_accepts_confirmed_bypass(self, monkeypatch):
+        _pin_fusion_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+        monkeypatch.setenv(CODEX_SANDBOX_MODE_ENV, "bypass")
+        monkeypatch.setenv(CODEX_EXTERNAL_SANDBOX_ENV, "1")
+
+        assert (
+            krh._resolve_forge_fusion_sandbox_mode(
+                {"agent_sandbox_mode": "bypass"},
+                agent_backend="codex",
+            )
+            == "bypass"
+        )
+
+    def test_resolve_forge_fusion_claude_sandbox_uses_audit_default_or_override(self, monkeypatch):
+        _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
+        # Claude's audit default is stable even if the Codex operator default is narrower.
+        monkeypatch.setenv(CODEX_SANDBOX_MODE_ENV, "read-only")
+
+        assert (
+            krh._resolve_forge_fusion_sandbox_mode(
+                {},
+                agent_backend="claude",
+            )
+            == DEFAULT_CODEX_SANDBOX_MODE
+        )
+        assert (
+            krh._resolve_forge_fusion_sandbox_mode(
+                {"agent_sandbox_mode": "read-only"},
+                agent_backend="claude",
+            )
+            == "read-only"
+        )
+
+    def test_resolve_forge_fusion_sandbox_rejects_invalid_mode(self, monkeypatch):
+        _pin_fusion_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+
+        with pytest.raises(RuntimeError, match="unknown Codex sandbox mode"):
+            krh._resolve_forge_fusion_sandbox_mode(
+                {"agent_sandbox_mode": "unconfined"},
+                agent_backend="codex",
+            )
+
     @pytest.mark.asyncio
-    async def test_run_forge_fusion_success_writes_input_and_defaults(self, tmp_path, monkeypatch):
+    async def test_run_forge_fusion_openai_only_writes_codex_input(self, tmp_path, monkeypatch):
         trace_dir = tmp_path / "trace"
         trace_dir.mkdir()
         trace_file = trace_dir / "decode.trace.json.gz"
@@ -685,6 +859,10 @@ class TestForgeGemmHelperCoverage:
             last_profile_trace=str(trace_dir),
         )
         state.save(tmp_path)
+        _pin_fusion_provider_env(
+            monkeypatch,
+            {**_OPENAI_ONLY_ENV, "CODEX_MODEL": "gpt-fusion"},
+        )
         monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
         monkeypatch.setattr(
             krh,
@@ -726,6 +904,9 @@ class TestForgeGemmHelperCoverage:
         assert input_payload["model_path"] == "/models/zaya"
         assert input_payload["max_turns"] == 7
         assert input_payload["timeout"] == 123
+        assert input_payload["agent_backend"] == "codex"
+        assert input_payload["llm_model"] == "gpt-fusion"
+        assert input_payload["agent_sandbox_mode"] == DEFAULT_CODEX_SANDBOX_MODE
 
     def test_forge_fusion_timeout_invalid_env_falls_back(self, monkeypatch):
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
@@ -749,6 +930,7 @@ class TestForgeGemmHelperCoverage:
             model_path="/models/zaya",
             last_profile_trace=str(trace),
         ).save(tmp_path)
+        _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
         monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
         monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path(name))
@@ -773,6 +955,68 @@ class TestForgeGemmHelperCoverage:
             (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(encoding="utf-8")
         )
         assert input_payload["timeout"] == 7200
+
+    @pytest.mark.asyncio
+    async def test_run_forge_fusion_unconfigured_provider_fails_before_subprocess(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        trace = tmp_path / "decode.trace.json.gz"
+        trace.write_text("{}", encoding="utf-8")
+        SharedState(
+            framework="sglang",
+            model_path="/models/zaya",
+            last_profile_trace=str(trace),
+        ).save(tmp_path)
+        _pin_fusion_provider_env(monkeypatch, {})
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+
+        async def _should_not_run(*_args, **_kwargs):
+            raise AssertionError("forge-fusion must not run without a provider")
+
+        monkeypatch.setattr(krh, "_run_subprocess", _should_not_run)
+
+        result = await krh._run_forge_fusion({}, session_dir=tmp_path)
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "llm_provider_unconfigured"
+        assert result["decision"] == "REVERT"
+        assert result["kept"] is False
+
+    @pytest.mark.asyncio
+    async def test_run_forge_fusion_rejects_unconfirmed_codex_bypass_before_subprocess(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        trace = tmp_path / "decode.trace.json.gz"
+        trace.write_text("{}", encoding="utf-8")
+        SharedState(
+            framework="sglang",
+            model_path="/models/zaya",
+            last_profile_trace=str(trace),
+        ).save(tmp_path)
+        _pin_fusion_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+        monkeypatch.setenv(CODEX_SANDBOX_MODE_ENV, "bypass")
+        monkeypatch.delenv(CODEX_EXTERNAL_SANDBOX_ENV, raising=False)
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+
+        async def _should_not_run(*_args, **_kwargs):
+            raise AssertionError("forge-fusion must not run with unconfirmed bypass")
+
+        monkeypatch.setattr(krh, "_run_subprocess", _should_not_run)
+
+        result = await krh._run_forge_fusion(
+            {"agent_sandbox_mode": "bypass"},
+            session_dir=tmp_path,
+        )
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "invalid_agent_sandbox_mode"
+        assert CODEX_EXTERNAL_SANDBOX_ENV in result["error"]
+        assert result["decision"] == "REVERT"
+        assert result["kept"] is False
 
     @pytest.mark.asyncio
     async def test_run_forge_fusion_failure_branches(self, tmp_path, monkeypatch):
@@ -804,6 +1048,7 @@ class TestForgeGemmHelperCoverage:
             model_path="/models/zaya",
             last_profile_trace=str(trace),
         ).save(tmp_path)
+        _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
         monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
         monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path(name))
 
@@ -861,9 +1106,7 @@ class TestForgeGemmHelperCoverage:
         assert result["backend"] == "forge"
 
     @pytest.mark.asyncio
-    async def test_vllm_block_fp8_prefers_traced_shapes_over_profile_capture(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_vllm_block_fp8_prefers_traced_shapes_over_profile_capture(self, tmp_path, monkeypatch):
         """vLLM block-FP8 must tune the device-side traced shapes.
 
         Decode steps replay inside a CUDA Graph, so they emit no Kineto op
@@ -922,9 +1165,7 @@ class TestForgeGemmHelperCoverage:
 
         assert captured["ran"] is False, "profile capture ran despite traced shapes"
         workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
-        written = json.loads(
-            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
-        )
+        written = json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
         shapes = json.loads(Path(written["shapes_json"]).read_text(encoding="utf-8"))
         assert shapes == [{"M": 64, "N": 10240, "K": 3072}]
 
@@ -957,7 +1198,6 @@ class TestForgeGemmHelperCoverage:
 
         assert result["engine"] == "forge"
 
-
     @pytest.mark.parametrize(
         "quant_type",
         [
@@ -977,15 +1217,11 @@ class TestForgeGemmHelperCoverage:
             "a8w8_blockscale_bpreshuffle_untuned_gemm.csv",
             "M,N,K\n16,1536,7168\n",
         )
-        assert (
-            krh._resolve_forge_untuned_csv(
-                tmp_path,
-                "fp8",
-                quant_type,
-            )
-            == str(expected)
-        )
-
+        assert krh._resolve_forge_untuned_csv(
+            tmp_path,
+            "fp8",
+            quant_type,
+        ) == str(expected)
 
     def test_resolve_forge_untuned_csv_rejects_unknown_fp8_quant(self, tmp_path):
         self._write_aiter_csv(
@@ -1003,7 +1239,6 @@ class TestForgeGemmHelperCoverage:
             )
             == ""
         )
-
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1028,9 +1263,7 @@ class TestForgeGemmHelperCoverage:
             )
         )
         profile_shapes = tmp_path / "profile_shapes.json"
-        profile_shapes.write_text(
-            json.dumps([{"M": 1024, "N": 34816, "K": 5120}])
-        )
+        profile_shapes.write_text(json.dumps([{"M": 1024, "N": 34816, "K": 5120}]))
         specialist_csv = tmp_path / "a8w8_blockscale_untuned_gemm.csv"
         specialist_csv.write_text("M,N,K\n4096,34816,5120\n")
         state = SharedState(
@@ -1068,11 +1301,7 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
 
-        payload = (
-            {"untuned_csv": str(specialist_csv)}
-            if source == "explicit_benchmark"
-            else {}
-        )
+        payload = {"untuned_csv": str(specialist_csv)} if source == "explicit_benchmark" else {}
         await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
 
         if source in {"explicit_benchmark", "stale_profile"}:
@@ -1440,8 +1669,7 @@ class TestRunGemmTuningHandler:
                 envs = ctx.task.params["extra_envs"]
                 base = Path(envs["PYTORCH_TUNABLEOP_UNTUNED_FILENAME"])
                 base.with_name(f"{base.stem}0{base.suffix}").write_text(
-                    "GemmTunableOp_BFloat16_NT,nt_5120_4149_17408_ld_5120_17408_5120\n"
-                    "not-a-native-row\n"
+                    "GemmTunableOp_BFloat16_NT,nt_5120_4149_17408_ld_5120_17408_5120\nnot-a-native-row\n"
                 )
                 base.with_name(f"{base.stem}1{base.suffix}").write_text(
                     "GemmTunableOp_BFloat16_NT,nt_5120_4149_17408_ld_5120_17408_5120\n"
@@ -1697,9 +1925,7 @@ class TestRunGemmTuningHandler:
         shapes_json, shape_count = krh._extract_vllm_block_fp8_profile_shapes(trace_root)
 
         assert shape_count == 1
-        assert json.loads(Path(shapes_json).read_text()) == [
-            {"K": 5120, "M": 4149, "N": 34816}
-        ]
+        assert json.loads(Path(shapes_json).read_text()) == [{"K": 5120, "M": 4149, "N": 34816}]
         assert krh._extract_vllm_block_fp8_profile_shapes(capture_trace) == ("", 0)
 
     def test_vllm_block_fp8_profile_capture_without_trace_is_explicit_failure(
@@ -1839,9 +2065,7 @@ class TestRunGemmTuningHandler:
         monkeypatch.setenv("HYPERLOOM_GEMM_SHAPE_CAPTURE", "0")
         model = tmp_path / "model"
         model.mkdir()
-        (model / "config.json").write_text(
-            json.dumps({"hidden_size": 5120, "intermediate_size": 17408})
-        )
+        (model / "config.json").write_text(json.dumps({"hidden_size": 5120, "intermediate_size": 17408}))
 
         assert (
             krh._vllm_dense_shape_capture_required(
@@ -1922,9 +2146,7 @@ class TestRunGemmTuningHandler:
     ):
         model = tmp_path / "model"
         model.mkdir()
-        (model / "config.json").write_text(
-            json.dumps({"hidden_size": 5120, "intermediate_size": 17408})
-        )
+        (model / "config.json").write_text(json.dumps({"hidden_size": 5120, "intermediate_size": 17408}))
         if shapes_json:
             path = tmp_path / "shapes.json"
             path.write_text(json.dumps([{"M": 1, "N": 2, "K": 3}]))
@@ -1946,9 +2168,7 @@ class TestRunGemmTuningHandler:
 
         model = tmp_path / "model"
         model.mkdir()
-        (model / "config.json").write_text(
-            json.dumps({"hidden_size": 5120, "intermediate_size": 17408})
-        )
+        (model / "config.json").write_text(json.dumps({"hidden_size": 5120, "intermediate_size": 17408}))
         monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
 
         assert (
@@ -1996,9 +2216,7 @@ class TestRunGemmTuningHandler:
 
         model = tmp_path / "model"
         model.mkdir()
-        (model / "config.json").write_text(
-            json.dumps({"hidden_size": 5120, "intermediate_size": 17408})
-        )
+        (model / "config.json").write_text(json.dumps({"hidden_size": 5120, "intermediate_size": 17408}))
         explicit_input = tmp_path / "operator-provided.csv"
         explicit_input.write_text("GemmTunableOp_BFloat16_NN,nn_5120_64_5120_ld_5120_5120_5120\n")
         SharedState(
@@ -2124,9 +2342,7 @@ class TestRunGemmTuningHandler:
 
         model = tmp_path / "model"
         model.mkdir()
-        (model / "config.json").write_text(
-            json.dumps({"hidden_size": 5120, "intermediate_size": 17408})
-        )
+        (model / "config.json").write_text(json.dumps({"hidden_size": 5120, "intermediate_size": 17408}))
         SharedState(
             precision="bf16",
             framework="vllm",
@@ -2274,9 +2490,7 @@ class TestRunGemmTuningHandler:
 
         assert captured_input["framework"] == "vllm-aiter"
         shapes_path = Path(captured_input["shapes_json"])
-        assert json.loads(shapes_path.read_text()) == [
-            {"K": 5120, "M": 4149, "N": 34816}
-        ]
+        assert json.loads(shapes_path.read_text()) == [{"K": 5120, "M": 4149, "N": 34816}]
         assert captured_input["untuned_csv"] == ""
         assert result["shape_capture"]["capture_mode"] == "roofline_profile_reuse"
         assert result["shape_capture"]["source_profile_trace"] == str(steady_trace)
@@ -2356,11 +2570,7 @@ class TestRunGemmTuningHandler:
             last_profile_status="succeeded",
             last_trace_analyze={
                 "trace_input": str(old_trace),
-                **(
-                    {"steady_state_trace": str(old_selected_trace)}
-                    if stale_reason == "legacy_metadata"
-                    else {}
-                ),
+                **({"steady_state_trace": str(old_selected_trace)} if stale_reason == "legacy_metadata" else {}),
             },
             current_best={
                 "extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
@@ -2408,9 +2618,7 @@ class TestRunGemmTuningHandler:
 
         assert roofline_calls == 1
         assert captured_input["framework"] == "vllm-aiter"
-        assert json.loads(Path(captured_input["shapes_json"]).read_text()) == [
-            {"K": 5120, "M": 64, "N": 34816}
-        ]
+        assert json.loads(Path(captured_input["shapes_json"]).read_text()) == [{"K": 5120, "M": 64, "N": 34816}]
         assert result["shape_capture"]["capture_mode"] == "block_fp8_profile"
         assert result["shape_capture"]["source_profile_trace"] == str(selected_trace)
 
@@ -2432,9 +2640,7 @@ class TestRunGemmTuningHandler:
             last_profile_trace=str(profile_trace),
             last_profile_status=profile_status or "succeeded",
             last_trace_analyze={
-                "trace_input": (
-                    str(profile_trace) if profile_status else str(stale_trace)
-                ),
+                "trace_input": (str(profile_trace) if profile_status else str(stale_trace)),
                 "steady_state_trace": str(steady_trace),
             },
         )
@@ -2579,9 +2785,7 @@ class TestRunGemmTuningHandler:
 
     def test_vllm_block_fp8_logs_when_roofline_has_no_shapes(self, tmp_path, caplog):
         roofline_trace = tmp_path / "mixed_steady_state.trace.json"
-        roofline_trace.write_text(
-            json.dumps({"traceEvents": [{"name": "vllm::unrelated_op", "args": {}}]})
-        )
+        roofline_trace.write_text(json.dumps({"traceEvents": [{"name": "vllm::unrelated_op", "args": {}}]}))
         state = SharedState(
             precision="fp8",
             framework="vllm",
@@ -2675,9 +2879,7 @@ class TestRunGemmTuningHandler:
             )
         )
         unrelated_trace = tmp_path / "roofline.trace.json"
-        unrelated_trace.write_text(
-            json.dumps({"traceEvents": [{"name": "vllm::unrelated_op", "args": {}}]})
-        )
+        unrelated_trace.write_text(json.dumps({"traceEvents": [{"name": "vllm::unrelated_op", "args": {}}]}))
         SharedState(
             precision="fp8",
             framework="vllm",
@@ -3097,7 +3299,6 @@ class TestRunGemmTuningHandler:
 
         assert krh._resolve_forge_shapes(state, session_dir) == str(shapes)
 
-
     @pytest.mark.parametrize(
         "quant_type",
         [
@@ -3109,7 +3310,6 @@ class TestRunGemmTuningHandler:
     )
     def test_vllm_block_fp8_rejects_sglang_bpreshuffle_types(self, quant_type):
         assert krh._is_vllm_block_fp8("fp8", quant_type) is False
-
 
     def test_resolve_forge_shapes_extracts_only_latest_trace(self, tmp_path):
         session_dir = tmp_path / "session"
@@ -3126,9 +3326,7 @@ class TestRunGemmTuningHandler:
                         "hot_kernels": [
                             {
                                 "name": "aiter::gemm_a8w8_blockscale",
-                                "input_shapes": [
-                                    {"shape": f"({m},5120) fp8<br>(34816,5120) fp8"}
-                                ],
+                                "input_shapes": [{"shape": f"({m},5120) fp8<br>(34816,5120) fp8"}],
                             }
                         ]
                     }
@@ -3138,16 +3336,11 @@ class TestRunGemmTuningHandler:
 
         _write_candidates(old_candidates, 16384)
         _write_candidates(latest_candidates, 4096)
-        state = SharedState(
-            last_trace_analyze={"candidates_path": str(latest_candidates)}
-        )
+        state = SharedState(last_trace_analyze={"candidates_path": str(latest_candidates)})
 
         shapes_path = krh._resolve_forge_shapes(state, session_dir)
 
-        assert json.loads(Path(shapes_path).read_text(encoding="utf-8")) == [
-            {"M": 4096, "N": 34816, "K": 5120}
-        ]
-
+        assert json.loads(Path(shapes_path).read_text(encoding="utf-8")) == [{"M": 4096, "N": 34816, "K": 5120}]
 
     def test_extract_gemm_shapes_tolerates_whitespace_after_comma(self, tmp_path):
         # TraceLens may render tuples with a space after the comma
@@ -3160,9 +3353,7 @@ class TestRunGemmTuningHandler:
                     "hot_kernels": [
                         {
                             "name": "aiter::gemm_a8w8_blockscale",
-                            "input_shapes": [
-                                {"shape": "(1024, 5120) fp8<br>(34816, 5120) fp8"}
-                            ],
+                            "input_shapes": [{"shape": "(1024, 5120) fp8<br>(34816, 5120) fp8"}],
                         }
                     ]
                 }
@@ -3172,9 +3363,7 @@ class TestRunGemmTuningHandler:
 
         out = krh._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
 
-        assert json.loads(Path(out).read_text(encoding="utf-8")) == [
-            {"M": 1024, "N": 34816, "K": 5120}
-        ]
+        assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 1024, "N": 34816, "K": 5120}]
 
     def test_extract_gemm_shapes_parses_per_tensor_input_shapes(self, tmp_path):
         # Current TraceLens emits one entry per tensor ({"call_num": .., "shape":
@@ -3262,25 +3451,17 @@ class TestRunGemmTuningHandler:
         candidates = tmp_path / "kernel_candidates.json"
         self._mixed_dtype_candidates(candidates)
 
-        out = krh._extract_gemm_shapes_from_candidates(
-            str(candidates), tmp_path, precision="fp8"
-        )
+        out = krh._extract_gemm_shapes_from_candidates(str(candidates), tmp_path, precision="fp8")
 
-        assert json.loads(Path(out).read_text(encoding="utf-8")) == [
-            {"M": 64, "N": 8704, "K": 3072}
-        ]
+        assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 64, "N": 8704, "K": 3072}]
 
     def test_extract_gemm_shapes_scopes_to_bf16_precision(self, tmp_path):
         candidates = tmp_path / "kernel_candidates.json"
         self._mixed_dtype_candidates(candidates)
 
-        out = krh._extract_gemm_shapes_from_candidates(
-            str(candidates), tmp_path, precision="bf16"
-        )
+        out = krh._extract_gemm_shapes_from_candidates(str(candidates), tmp_path, precision="bf16")
 
-        assert json.loads(Path(out).read_text(encoding="utf-8")) == [
-            {"M": 64, "N": 256, "K": 3072}
-        ]
+        assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 64, "N": 256, "K": 3072}]
 
     def test_extract_gemm_shapes_keeps_every_dtype_without_precision(self, tmp_path):
         candidates = tmp_path / "kernel_candidates.json"
@@ -3299,7 +3480,7 @@ class TestRunGemmTuningHandler:
             ("fp8", "fp8_e4m3"),
             ("fp8", "e4m3fnuz"),
             ("fp8", "torch.float8_e4m3fn"),
-            ("fp16", "f16"),          # what this repo's _TRACE_DTYPE_SUFFIX emits
+            ("fp16", "f16"),  # what this repo's _TRACE_DTYPE_SUFFIX emits
             ("bf16", "b16"),
             ("mxfp4", "fp4x2"),
             ("fp4", "mxfp4"),
@@ -3326,14 +3507,10 @@ class TestRunGemmTuningHandler:
             encoding="utf-8",
         )
 
-        out = krh._extract_gemm_shapes_from_candidates(
-            str(candidates), tmp_path, precision=precision
-        )
+        out = krh._extract_gemm_shapes_from_candidates(str(candidates), tmp_path, precision=precision)
 
         assert out, f"{precision!r} rejected the equivalent traced token {traced!r}"
-        assert json.loads(Path(out).read_text(encoding="utf-8")) == [
-            {"M": 64, "N": 8704, "K": 3072}
-        ]
+        assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 64, "N": 8704, "K": 3072}]
 
     def test_extract_gemm_shapes_keeps_the_highest_call_count(self, tmp_path):
         """The same (M,N,K) can be reported by several kernels; the hot sighting
@@ -3373,7 +3550,7 @@ class TestRunGemmTuningHandler:
         out = krh._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
 
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [
-            {"M": 64, "N": 8704, "K": 3072},   # 1000, not the first sighting's 10
+            {"M": 64, "N": 8704, "K": 3072},  # 1000, not the first sighting's 10
             {"M": 64, "N": 10240, "K": 3072},  # 100
         ]
 
@@ -3386,9 +3563,7 @@ class TestRunGemmTuningHandler:
                     "hot_kernels": [
                         {
                             "name": "aiter::gemm_a8w8_blockscale",
-                            "input_shapes": [
-                                {"shape": f"(1024, 5120) fp8{sep}(34816, 5120) fp8"}
-                            ],
+                            "input_shapes": [{"shape": f"(1024, 5120) fp8{sep}(34816, 5120) fp8"}],
                         }
                     ]
                 }
@@ -3399,21 +3574,15 @@ class TestRunGemmTuningHandler:
         out = krh._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
 
         assert out, f"separator {sep!r} was not recognised"
-        assert json.loads(Path(out).read_text(encoding="utf-8")) == [
-            {"M": 1024, "N": 34816, "K": 5120}
-        ]
+        assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 1024, "N": 34816, "K": 5120}]
 
-    def test_resolve_forge_shapes_prefers_scoped_candidates_over_untyped_artifact(
-        self, tmp_path
-    ):
+    def test_resolve_forge_shapes_prefers_scoped_candidates_over_untyped_artifact(self, tmp_path):
         """A pre-rendered shapes artifact carries no dtype, so it must not win
         over candidates that were actually scoped to the tuned precision."""
         session_dir = tmp_path / "session"
         session_dir.mkdir()
         artifact = tmp_path / "shapes.json"  # recorded from the BF16 head
-        artifact.write_text(
-            json.dumps([{"M": 64, "N": 256, "K": 3072}]), encoding="utf-8"
-        )
+        artifact.write_text(json.dumps([{"M": 64, "N": 256, "K": 3072}]), encoding="utf-8")
         candidates = tmp_path / "kernel_candidates.json"
         candidates.write_text(
             json.dumps(
@@ -3447,18 +3616,14 @@ class TestRunGemmTuningHandler:
 
         resolved = krh._resolve_forge_shapes(state, session_dir, precision="fp8")
 
-        assert json.loads(Path(resolved).read_text(encoding="utf-8")) == [
-            {"M": 64, "N": 8704, "K": 3072}
-        ]
+        assert json.loads(Path(resolved).read_text(encoding="utf-8")) == [{"M": 64, "N": 8704, "K": 3072}]
 
     def test_resolve_forge_shapes_still_uses_artifact_when_unscoped(self, tmp_path):
         """Without a precision to scope by, the explicit artifact keeps priority."""
         session_dir = tmp_path / "session"
         session_dir.mkdir()
         artifact = tmp_path / "shapes.json"
-        artifact.write_text(
-            json.dumps([{"M": 64, "N": 256, "K": 3072}]), encoding="utf-8"
-        )
+        artifact.write_text(json.dumps([{"M": 64, "N": 256, "K": 3072}]), encoding="utf-8")
         state = SharedState(last_trace_analyze={"shapes_json": str(artifact)})
 
         assert krh._resolve_forge_shapes(state, session_dir) == str(artifact)

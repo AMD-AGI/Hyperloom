@@ -23,8 +23,11 @@ from hyperloom.common.env_safety import (
     is_allowed_kernel_agent_env_key,
 )
 from hyperloom.common.llm_config import (
+    CLAUDE_OAUTH_TOKEN_ENV,
     LEGACY_DEEPSEEK_ENV_KEYS,
+    anthropic_synthesizable_key,
     deepseek_compat_env,
+    has_anthropic_credential,
     provider_model_defaults,
 )
 
@@ -95,12 +98,14 @@ def _provider_only_mode() -> str:
 
     Runs ahead of :func:`_normalize_legacy_deepseek_env`, so a retired
     ``DEEPSEEK_*`` shell export is still read here and counts as Anthropic-side
-    intent.
+    intent. The Anthropic side is read through the credential registry so a
+    subscription-token host is recognised as Anthropic-only too — without it,
+    such a host gets no provider-only mode and therefore no protection against
+    a stale OpenAI side arriving from the kernel-agent env file.
     """
     has_anthropic = bool(
         os.environ.get("ANTHROPIC_BASE_URL")
-        or os.environ.get("ANTHROPIC_API_KEY")
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        or has_anthropic_credential()
         or os.environ.get("DEEPSEEK_API_KEY")
         or os.environ.get("DEEPSEEK_BASE_URL")
     )
@@ -428,8 +433,13 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
         pip_extra (list[str]): Extra arguments threaded into the ``pip
             install`` invocation (e.g. index flags).
     """
+    # Both agent runtimes ship by default: Hyperloom routes every LLM interaction
+    # through one of them, and a deployment may be Anthropic-only, OpenAI-only, or
+    # both. Omitting openai_codex leaves the TraceLens skill runner and the forge
+    # fellow unable to start on an OpenAI-only gateway.
     candidates = (
         ("claude_agent_sdk", "claude-agent-sdk>=0.2.110"),
+        ("openai_codex", "openai-codex>=0.144"),
         ("openai", "openai>=1.50"),
         ("httpx", "httpx>=0.27"),
     )
@@ -1422,6 +1432,16 @@ def _preflight(
     # back to the other.
     resolved_urls: tuple[str, str] | None = None
     anthropic_url, openai_url = _resolve_llm_endpoints()
+    # A subscription token needs no endpoint: the Claude CLI knows where to go.
+    # All three installers keep this URL a local variable and never export one,
+    # so publishing a derived official URL here would diverge from them and hand
+    # every child process a gateway signal the operator never set. The value is
+    # still resolved, since downstream decisions read it.
+    skip_anthropic_export = (
+        not os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+        and not anthropic_synthesizable_key()
+        and bool(os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip())
+    )
     if anthropic_url or openai_url:
         for var, want in (
             ("ANTHROPIC_BASE_URL", anthropic_url),
@@ -1429,12 +1449,15 @@ def _preflight(
         ):
             if not want:
                 continue
+            if var == "ANTHROPIC_BASE_URL" and skip_anthropic_export:
+                continue
             prev = os.environ.get(var, "")
             if prev != want:
                 os.environ[var] = want
                 print(f"Preflight: {var} {prev or '<unset>'} -> {want} (resolved endpoint)")
-        # Claude CLI primary key: Anthropic-side credentials only.
-        claude_primary_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+        # Claude CLI primary key: Anthropic-side credentials only, and only the
+        # synthesizable subset so a subscription token never lands in config.json.
+        claude_primary_key = anthropic_synthesizable_key()
         _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
         if anthropic_url and not openai_url and not os.environ.get("GEAK_CLAUDE_MODEL"):
             geak_claude_model = os.environ.get("CLAUDE_MODEL", "").strip() or "claude-opus-5"

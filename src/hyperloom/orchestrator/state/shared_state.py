@@ -71,6 +71,7 @@ _DEFAULT_ATTEMPTS_HISTORY = _kernel_decision_settings._DEFAULT_ATTEMPTS_HISTORY
 _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = _kernel_decision_settings._DEFAULT_HOT_KERNEL_MIN_GPU_PCT
 _MAX_INTEGRATE_FAULT_ATTEMPTS = _kernel_decision_settings._MAX_INTEGRATE_FAULT_ATTEMPTS
 _now_iso = _kernel_decision_settings._now_iso
+resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_min_gpu_pct
 resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
 
@@ -547,8 +548,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # explore overtime kill apples-to-apples. Zero => fall back to the cold anchor.
     baseline_warm_runtime_sec: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
-    # Reference launch recipe (from --reference-script or auto-discovery):
-    # lowest-priority base server args/envs seeding every baseline. Persisted.
+    # Reference launch recipe from the operator's --reference-script: lowest-priority
+    # base server args/envs seeding every baseline. Persisted.
     reference_server_args: str = ""
     reference_envs: dict[str, str] = field(default_factory=dict)
     reference_model: str = ""

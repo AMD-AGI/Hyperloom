@@ -25,10 +25,18 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 
+from hyperloom.common import codex_session, llm_config
 from hyperloom.common.env import env_bool, is_truthy
 from hyperloom.common.io import append_jsonl
+from hyperloom.common.kernel_shape_contract import (
+    ALLOWED_SHAPE_PROVENANCE as _ALLOWED_SHAPE_PROVENANCE,
+)
+from hyperloom.orchestrator.roles.agent_role import (
+    DEFAULT_CLAUDE_MODEL,
+    DEFAULT_CODEX_MODEL,
+)
 
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from ..trace.parse_usage import (
@@ -66,6 +74,10 @@ log = logging.getLogger(__name__)
 _VALID_ANALYSIS_ROUTES = frozenset({"bypass", "deterministic", "agent"})
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
+# A patch whose correctness was only established against a reference kernel;
+# serving accuracy is what settles it.
+_FRAMEWORK_APPLYBACK_ARTIFACT_KIND = "framework_applyback"
+_INTEGRATE_ACCURACY_VALIDATION_TIER = "integrate_e2e_accuracy"
 
 
 def _vram_guarded_server_args(extra_args: str) -> str:
@@ -146,6 +158,43 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
     return None
 
 
+def _confirm_sources_imported(
+    source_files: list[str],
+    workspace: str | Path | None,
+) -> tuple[bool | None, dict[str, bool | None]]:
+    """Confirm every file a patch wrote was exercised by the served process.
+
+    A patch can span several files -- a new module, the dispatcher that routes
+    to it, the original source it replaces -- so each is graded on its own with
+    :func:`_confirm_source_imported` and the verdicts are combined:
+
+    * ``True``  — every file shows import evidence.
+    * ``False`` — no file appears in the log at all, which is the unambiguous
+      "the served process never ran any of this" case.
+    * ``None``  — anything mixed. A module can be imported lazily or folded
+      into another, so partial evidence is recorded for audit rather than held
+      against the patch.
+
+    Args:
+        source_files: Paths the patch wrote; duplicates and blanks are ignored.
+        workspace: Re-baseline workspace dir (holds ``server.log``).
+
+    Returns:
+        tuple[bool | None, dict[str, bool | None]]: The aggregate tri-state and
+            the per-file verdicts kept for audit.
+    """
+    ordered = list(dict.fromkeys(path for path in source_files if str(path or "").strip()))
+    if not ordered:
+        return None, {}
+    per_file = {path: _confirm_source_imported(path, workspace) for path in ordered}
+    verdicts = list(per_file.values())
+    if all(verdict is True for verdict in verdicts):
+        return True, per_file
+    if all(verdict is False for verdict in verdicts):
+        return False, per_file
+    return None, per_file
+
+
 # Backends whose stdout log we mine for token usage.
 _TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"forge"})
 
@@ -187,8 +236,6 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
-from hyperloom.common.env import is_truthy
-from hyperloom.common.kernel_shape_contract import ALLOWED_SHAPE_PROVENANCE as _ALLOWED_SHAPE_PROVENANCE
 
 
 def _reusable_source_roots() -> tuple[str, ...]:
@@ -210,18 +257,6 @@ def _reusable_source_roots() -> tuple[str, ...]:
             if variant and variant not in seen:
                 seen.add(variant)
                 out.append(variant)
-    # FlyDSL kernel checkout roots for moe_flydsl_* candidates.
-    for env_key in ("DSL2_ROOT", "FLYDSL_ROOT"):
-        val = (os.environ.get(env_key, "") or "").strip()
-        if val:
-            cand = (val.rstrip("/") + "/").lower()
-            if cand not in seen:
-                seen.add(cand)
-                out.append(cand)
-    for default in ("/opt/flydsl/", "/sgl-workspace/flydsl/"):
-        if default not in seen:
-            seen.add(default)
-            out.append(default)
     return tuple(out)
 
 
@@ -1050,9 +1085,7 @@ def _maybe_apply_kernel_patch(
         dry_run=bool(payload.get("dry_run_patch", False)),
         snapshot_dir=snapshot_dir,
         repo_root=repo_root,
-        producer_manifest=(
-            str(payload.get("producer_manifest") or "").strip() or None
-        ),
+        producer_manifest=(str(payload.get("producer_manifest") or "").strip() or None),
     )
 
 
@@ -1088,9 +1121,7 @@ def materialize_unified_patch_snapshot(
     # normalization and the create/modify disposition), which avoids a second,
     # drift-prone parse of the raw patch text.
     _new_file_paths = {
-        str(desc.get("path") or "")
-        for desc in descriptors
-        if desc.get("op") == "write" and desc.get("is_new")
+        str(desc.get("path") or "") for desc in descriptors if desc.get("op") == "write" and desc.get("is_new")
     }
 
     snap = Path(snapshot_dir) if snapshot_dir is not None else patch.parent / "fusion_snapshot"
@@ -1126,8 +1157,7 @@ def materialize_unified_patch_snapshot(
                 # a precise error here instead of the opaque ``git apply`` "No
                 # such file or directory" that would otherwise follow.
                 raise FileNotFoundError(
-                    f"patch base missing for {rel.as_posix()}: not in git HEAD "
-                    f"and not on disk under {root}"
+                    f"patch base missing for {rel.as_posix()}: not in git HEAD and not on disk under {root}"
                 )
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(src.read_bytes())
@@ -1171,14 +1201,9 @@ def _maybe_finalize_kernel_patch(
     apply_result: HandlerResult,
 ) -> HandlerResult:
     """Delete backups once a KEEP becomes the accepted baseline."""
-    if (
-        apply_result.get("status") != "ok"
-        or not apply_result.get("manifest_path")
-    ):
+    if apply_result.get("status") != "ok" or not apply_result.get("manifest_path"):
         return {"status": "skipped", "reason": "no applied patch manifest"}
-    return _load_apply_tool().finalize_kernel_patch(
-        apply_result["manifest_path"]
-    )
+    return _load_apply_tool().finalize_kernel_patch(apply_result["manifest_path"])
 
 
 def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
@@ -1234,11 +1259,7 @@ def _fill_integrate_defaults_from_state(
     integration_id = str(resolved.get("integration_id") or "")
     pending_records = state.pending_kernel_integration_records()
     pending_record = next(
-        (
-            record
-            for record in pending_records
-            if str(record.get("integration_id") or "") == integration_id
-        ),
+        (record for record in pending_records if str(record.get("integration_id") or "") == integration_id),
         None,
     )
     if pending_record is None and resolved.get("kernel_id"):
@@ -1249,11 +1270,7 @@ def _fill_integrate_defaults_from_state(
                 record
                 for record in pending_records
                 if str(record.get("kernel_id") or "") == requested_kernel_id
-                and (
-                    not requested_task_key
-                    or str(record.get("task_group_key") or "")
-                    == requested_task_key
-                )
+                and (not requested_task_key or str(record.get("task_group_key") or "") == requested_task_key)
             ),
             None,
         )
@@ -1273,6 +1290,14 @@ def _fill_integrate_defaults_from_state(
         resolved.setdefault(
             "identity_route",
             str(pending_record.get("identity_route") or ""),
+        )
+        resolved.setdefault(
+            "artifact_kind",
+            str(pending_record.get("artifact_kind") or ""),
+        )
+        resolved.setdefault(
+            "integration_validation_status",
+            str(pending_record.get("integration_validation_status") or ""),
         )
 
     current_best = getattr(state, "current_best", None) or {}
@@ -1295,17 +1320,9 @@ def _fill_integrate_defaults_from_state(
             resolved["extra_server_args"] = cb_args
     if isinstance(current_best, dict):
         current_envs = current_best.get("extra_envs")
-        current_envs = (
-            dict(current_envs)
-            if isinstance(current_envs, dict)
-            else {}
-        )
+        current_envs = dict(current_envs) if isinstance(current_envs, dict) else {}
         requested_envs = resolved.get("extra_envs")
-        requested_envs = (
-            dict(requested_envs)
-            if isinstance(requested_envs, dict)
-            else {}
-        )
+        requested_envs = dict(requested_envs) if isinstance(requested_envs, dict) else {}
         if current_envs or requested_envs:
             # The candidate stacks onto current_best. Candidate-specific
             # overrides win, but omitting an env must not silently drop the
@@ -1335,13 +1352,34 @@ def _fill_integrate_snapshot_from_bundle(resolved: dict, bundle: Any) -> None:
         resolved["patch_path"] = str(bundle["patch_path"])
     if not resolved.get("kernel_repo") and bundle.get("repo_root"):
         resolved["kernel_repo"] = str(bundle["repo_root"])
-    if (
-        not resolved.get("producer_manifest")
-        and bundle.get("producer_manifest")
-    ):
-        resolved["producer_manifest"] = str(
-            bundle["producer_manifest"]
-        )
+    if not resolved.get("producer_manifest") and bundle.get("producer_manifest"):
+        resolved["producer_manifest"] = str(bundle["producer_manifest"])
+    if not resolved.get("patch_write_paths"):
+        write_paths = [str(path) for path in (bundle.get("write_paths") or []) if str(path or "").strip()]
+        if write_paths:
+            resolved["patch_write_paths"] = write_paths
+
+
+def _fill_integrate_provenance(
+    resolved: dict,
+    *,
+    framework_applyback: Any,
+    integration_validation_status: Any,
+) -> None:
+    """Backfill artifact provenance for an integrate resolved from a ledger entry.
+
+    These two fields arm the strict accuracy gate. A KEEP the ``source_file`` dedup
+    drops from the pending queue resolves through a fallback instead, and without
+    them a reference-only apply-back reads as an ordinary kernel patch.
+    """
+    if not resolved.get("artifact_kind") and isinstance(framework_applyback, dict):
+        kind = str(framework_applyback.get("artifact_kind") or "")
+        if kind:
+            resolved["artifact_kind"] = kind
+    if not resolved.get("integration_validation_status"):
+        status = str(integration_validation_status or "")
+        if status:
+            resolved["integration_validation_status"] = status
 
 
 def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dict, HandlerResult | None]:
@@ -1374,9 +1412,7 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     if pending_record is not None:
         kernel_id = str(pending_record.get("kernel_id") or kernel_id)
         resolved["kernel_id"] = kernel_id
-        resolved["integration_id"] = str(
-            pending_record.get("integration_id") or integration_id
-        )
+        resolved["integration_id"] = str(pending_record.get("integration_id") or integration_id)
         resolved.setdefault(
             "task_group_key",
             str(pending_record.get("task_group_key") or ""),
@@ -1384,6 +1420,16 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
         resolved.setdefault(
             "identity_route",
             str(pending_record.get("identity_route") or ""),
+        )
+        # Provenance travels with the artifact so the serving verdict can tell a
+        # reference-only apply-back from one already proven in place.
+        resolved.setdefault(
+            "artifact_kind",
+            str(pending_record.get("artifact_kind") or ""),
+        )
+        resolved.setdefault(
+            "integration_validation_status",
+            str(pending_record.get("integration_validation_status") or ""),
         )
         _fill_integrate_snapshot_from_bundle(
             resolved,
@@ -1393,13 +1439,9 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
             resolved["snapshot_dir"] = str(pending_record["snapshot_dir"])
         if not resolved.get("patch_path"):
             resolved["patch_path"] = str(
-                pending_record.get("deploy_patch_path")
-                or pending_record.get("artifact_path")
-                or ""
+                pending_record.get("deploy_patch_path") or pending_record.get("artifact_path") or ""
             )
-        if not resolved.get("kernel_repo") and pending_record.get(
-            "deploy_repo_root"
-        ):
+        if not resolved.get("kernel_repo") and pending_record.get("deploy_repo_root"):
             resolved["kernel_repo"] = str(pending_record["deploy_repo_root"])
         if not resolved.get("source_file") and pending_record.get("source_file"):
             resolved["source_file"] = str(pending_record["source_file"])
@@ -1424,6 +1466,11 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
                 resolved["patch_path"] = str(artifact)
         if not resolved.get("source_file") and last_kernel.get("source_file"):
             resolved["source_file"] = str(last_kernel["source_file"])
+        _fill_integrate_provenance(
+            resolved,
+            framework_applyback=last_kernel.get("framework_applyback"),
+            integration_validation_status=last_kernel.get("integration_validation_status"),
+        )
 
     # Multi-KEEP queue fallback: pull patch_path/source_file from the per-kernel
     # ledger for KEEPs other than the strongest pending one.
@@ -1440,6 +1487,11 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
             resolved["patch_path"] = str(attempt["last_artifact_path"])
         if not resolved.get("source_file") and attempt.get("last_source_file"):
             resolved["source_file"] = str(attempt["last_source_file"])
+        _fill_integrate_provenance(
+            resolved,
+            framework_applyback=attempt.get("last_framework_applyback"),
+            integration_validation_status=attempt.get("last_integration_validation_status"),
+        )
 
     if kernel_id and not (resolved.get("target_file") or resolved.get("source_file")):
         source = _find_selected_kernel_source(state, kernel_id)
@@ -1836,6 +1888,7 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
     check sibling ``warmup_round/`` dirs and walk up to the parent run
     directory.
     """
+
     def _find_server_log_near(workspace_str: str) -> str | None:
         if not workspace_str:
             return None
@@ -2035,9 +2088,7 @@ def _canonical_dtype(raw: str) -> str:
     return ""
 
 
-def _extract_gemm_shapes_from_candidates(
-    candidates_path_str: str, session_dir: Path, *, precision: str = ""
-) -> str:
+def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: Path, *, precision: str = "") -> str:
     """Extract M,N,K from kernel_candidates.json hot_kernels input_shapes.
 
     Derives the GEMM dimensions actually observed during serving and writes a
@@ -2335,7 +2386,11 @@ def _is_gfx950_rocminfo() -> bool:
     """Cached rocminfo probe for gfx950 arch."""
     try:
         out = subprocess.run(
-            ["rocminfo"], capture_output=True, text=True, timeout=15, check=False,
+            ["rocminfo"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
         ).stdout
         return "gfx950" in out.lower()
     except (OSError, subprocess.SubprocessError):
@@ -2381,8 +2436,7 @@ def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: st
     fname = _FORGE_UNTUNED_CSV_BY_QUANT.get(quant_type)
     if fname is None:
         log.warning(
-            "Forge GEMM shapes: unknown quant_type=%r for precision=%r; "
-            "not guessing an untuned CSV",
+            "Forge GEMM shapes: unknown quant_type=%r for precision=%r; not guessing an untuned CSV",
             quant_type,
             precision,
         )
@@ -2685,8 +2739,7 @@ def _reuse_vllm_block_fp8_roofline_shapes(
             if recorded_workload.get(key) != expected_workload.get(key)
         )
         log.info(
-            "vLLM block-FP8 shape capture: Roofline workload mismatch (%s); "
-            "running a standard Roofline fallback",
+            "vLLM block-FP8 shape capture: Roofline workload mismatch (%s); running a standard Roofline fallback",
             ", ".join(mismatches) or "missing profile workload metadata",
         )
         return None
@@ -2862,8 +2915,7 @@ async def _capture_vllm_tunableop_shapes(
     capture_envs = {
         str(key): str(value)
         for key, value in inherited_envs.items()
-        if profile_mode
-        or not str(key).startswith(("PYTORCH_TUNABLEOP_", "HL_TUNABLEOP_"))
+        if profile_mode or not str(key).startswith(("PYTORCH_TUNABLEOP_", "HL_TUNABLEOP_"))
     }
     if not profile_mode:
         try:
@@ -3213,13 +3265,16 @@ async def _run_forge_gemm_tuning(
             shapes_json = str(shape_capture["shapes_json"])
             untuned_csv = ""
             block_fp8_profile_capture = False
-    tunableop_capture = _vllm_dense_shape_capture_required(
-        framework=framework,
-        model_path=model_path,
-        shapes_json=shapes_json,
-        tunableop_input=tunableop_input,
-        dry_run=bool(payload.get("dry_run")),
-    ) and not block_fp8_profile_capture
+    tunableop_capture = (
+        _vllm_dense_shape_capture_required(
+            framework=framework,
+            model_path=model_path,
+            shapes_json=shapes_json,
+            tunableop_input=tunableop_input,
+            dry_run=bool(payload.get("dry_run")),
+        )
+        and not block_fp8_profile_capture
+    )
     if block_fp8_profile_capture or tunableop_capture:
         capture_payload = dict(payload)
         if block_fp8_profile_capture:
@@ -3367,9 +3422,7 @@ async def _run_forge_gemm_tuning(
     return result
 
 
-def _persist_forge_gemm_csv_durably(
-    extra_envs: dict, *, model_path: str, session_dir: Path
-) -> tuple[dict, str]:
+def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, session_dir: Path) -> tuple[dict, str]:
     """Make a forge GEMM tuned CSV durable + recipe-portable.
 
     The forge KEEP references the tuned CSV by its ephemeral tuner-workspace path,
@@ -3403,9 +3456,7 @@ def _persist_forge_gemm_csv_durably(
             return extra_envs, ""
         aiter_pkg = Path(spec.origin).resolve().parent
         slug = (
-            "".join(c if (c.isalnum() or c in "._-") else "_" for c in Path(model_path).name)
-            .strip("_")
-            .lower()
+            "".join(c if (c.isalnum() or c in "._-") else "_" for c in Path(model_path).name).strip("_").lower()
             or "model"
         )
         rel = f"configs/model_configs/a8w8_blockscale_tuned_gemm_{slug}.csv"
@@ -3696,13 +3747,107 @@ def _active_forge_fusion_env_flags(state: Any) -> dict[str, str]:
     return active
 
 
+def _resolve_forge_fusion_agent(
+    payload: Mapping[str, Any],
+    *,
+    env: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
+    """Resolve the forge-fusion agent backend and model as one decision.
+
+    The canonical provider-shape predicates decide the default backend:
+    OpenAI-only uses Codex, while Anthropic-only and dual-configured deployments
+    use Claude, the established default for this agentic role. A valid explicit
+    ``agent_backend`` or ``llm_model`` in the request wins. With no configured
+    provider, the request fails instead of silently spawning an unauthenticated
+    Claude process.
+
+    Args:
+        payload: Kernel request payload.
+        env: Provider environment to inspect; defaults to ``os.environ``.
+
+    Returns:
+        The canonical ``(agent_backend, llm_model)`` pair.
+
+    Raises:
+        RuntimeError: If neither provider side is configured.
+        ValueError: If ``agent_backend`` is not ``"claude"`` or ``"codex"``.
+    """
+    source = env if env is not None else os.environ
+    openai_only = llm_config.is_openai_only(source)
+    anthropic_only = llm_config.is_anthropic_only(source)
+    has_openai = llm_config.has_openai_side(source)
+    has_anthropic = llm_config.has_anthropic_side(source)
+    if not has_openai and not has_anthropic:
+        raise RuntimeError("no LLM provider is configured for forge-fusion")
+
+    explicit_backend = str(payload.get("agent_backend") or "").strip().lower()
+    if explicit_backend and explicit_backend not in {"claude", "codex"}:
+        raise ValueError(f"agent_backend={payload.get('agent_backend')!r} is invalid; choose 'claude' or 'codex'")
+
+    if explicit_backend:
+        agent_backend = explicit_backend
+    elif openai_only:
+        agent_backend = "codex"
+    elif anthropic_only:
+        agent_backend = "claude"
+    else:
+        # Dual-configured deployments retain this agentic role's Claude default.
+        agent_backend = "claude"
+
+    explicit_model = str(payload.get("llm_model") or "").strip()
+    if explicit_model:
+        llm_model = explicit_model
+    elif agent_backend == "codex":
+        llm_model = str(source.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
+    else:
+        llm_model = str(source.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
+    return agent_backend, llm_model
+
+
+def _resolve_forge_fusion_sandbox_mode(
+    payload: Mapping[str, Any],
+    *,
+    agent_backend: str,
+    env: Mapping[str, str] | None = None,
+) -> str:
+    """Resolve and validate the sandbox policy recorded for forge-fusion.
+
+    Codex delegates both defaults and validation to the canonical Hyperloom
+    resolver, including its double opt-in for ``bypass``. Claude records
+    ``workspace-write`` as the stable audit default; an explicit override is
+    validated by that same resolver so both backends share one policy vocabulary
+    and unsafe bypass cannot reach the subprocess.
+
+    Args:
+        payload: Kernel request payload.
+        agent_backend: The already-resolved ``"claude"`` or ``"codex"`` backend.
+        env: Environment overlay for the canonical resolver; defaults to the
+            process environment.
+
+    Returns:
+        A validated KernelForge sandbox mode.
+
+    Raises:
+        CodexSessionUnavailableError: If the mode is unknown or bypass lacks
+            either operator confirmation.
+    """
+    explicit = str(payload.get("agent_sandbox_mode") or "").strip()
+    if agent_backend == "claude" and not explicit:
+        return codex_session.DEFAULT_CODEX_SANDBOX_MODE
+    return codex_session.resolve_codex_sandbox_mode(
+        sandbox_mode=explicit,
+        env=dict(env) if env is not None else None,
+    )
+
+
 async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResult:
     """Autonomous kernel fusion via the forge-fusion CLI.
 
-    Builds an input-json, shells out to the ``forge_fusion.py`` wrapper, and parses
-    the result sentinel. A KEPT fusion carries a source patch + env flags and
-    ``requires_e2e_validation`` so the integrate gate confirms the end-to-end gain.
-    Reuses the PRELUDE decode trace (no re-profiling).
+    Builds an input-json with one provider-compatible agent backend, model, and
+    validated sandbox policy, shells out to the ``forge_fusion.py`` wrapper, and
+    parses the result sentinel. A KEPT fusion carries a source patch + env flags
+    and ``requires_e2e_validation`` so the integrate gate confirms the
+    end-to-end gain. Reuses the PRELUDE decode trace (no re-profiling).
     """
     from ..state.shared_state import SharedState
 
@@ -3766,7 +3911,33 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
 
     framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
     gpu = str(payload.get("gpu") or "0").strip()
-    llm_model = str(payload.get("llm_model") or os.environ.get("CLAUDE_MODEL") or "claude-opus-5").strip()
+    try:
+        agent_backend, llm_model = _resolve_forge_fusion_agent(payload)
+    except (RuntimeError, ValueError) as exc:
+        return {
+            "status": "failed",
+            "backend": "forge",
+            "engine": "forge_fusion",
+            "error_class": ("llm_provider_unconfigured" if isinstance(exc, RuntimeError) else "invalid_agent_backend"),
+            "error": str(exc),
+            "decision": "REVERT",
+            "kept": False,
+        }
+    try:
+        agent_sandbox_mode = _resolve_forge_fusion_sandbox_mode(
+            payload,
+            agent_backend=agent_backend,
+        )
+    except RuntimeError as exc:
+        return {
+            "status": "failed",
+            "backend": "forge",
+            "engine": "forge_fusion",
+            "error_class": "invalid_agent_sandbox_mode",
+            "error": str(exc),
+            "decision": "REVERT",
+            "kept": False,
+        }
     max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
     timeout = _forge_fusion_timeout_sec(payload)
 
@@ -3779,7 +3950,9 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         "framework": framework,
         "output_dir": str(workspace),
         "discover_mode": str(payload.get("discover_mode") or "llm"),
+        "agent_backend": agent_backend,
         "llm_model": llm_model,
+        "agent_sandbox_mode": agent_sandbox_mode,
         "max_turns": max_turns,
         "gpu": gpu,
         "timeout": timeout,
@@ -3814,6 +3987,9 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
     result.setdefault("workspace", str(workspace))
     result.setdefault("framework", framework)
     result.setdefault("model_path", model_path)
+    result.setdefault("agent_backend", agent_backend)
+    result.setdefault("llm_model", llm_model)
+    result.setdefault("agent_sandbox_mode", agent_sandbox_mode)
     result.setdefault("source", "forge_fusion")
     return result
 
@@ -3932,26 +4108,16 @@ def _build_trace_analyze_cmd(
     # precedence so ordinary sglang/vLLM production requests carry config.json
     # selectors into the bounded model context.
     model_path = str(
-        payload.get("model_path")
-        or getattr(state, "model_path", "")
-        or os.environ.get("MODEL_PATH")
-        or ""
+        payload.get("model_path") or getattr(state, "model_path", "") or os.environ.get("MODEL_PATH") or ""
     ).strip()
     if model_path:
         cmd += ["--model-path", model_path]
     precision = str(
-        payload.get("precision")
-        or getattr(state, "precision", "")
-        or workload.get("precision")
-        or ""
+        payload.get("precision") or getattr(state, "precision", "") or workload.get("precision") or ""
     ).strip()
     if precision:
         cmd += ["--precision", precision]
-    runtime_config = str(
-        payload.get("runtime_config")
-        or getattr(state, "baseline_config_path", "")
-        or ""
-    ).strip()
+    runtime_config = str(payload.get("runtime_config") or getattr(state, "baseline_config_path", "") or "").strip()
     if runtime_config and not is_bypass:
         cmd += ["--runtime-config", runtime_config]
 
@@ -4780,11 +4946,7 @@ def _batch_kernel_candidates(
     # front so both the grouped and legacy passes agree: they resolve a source
     # yet fail the kernel-opt gate on untrusted shape provenance. Absent field
     # (TraceLens path) stays dispatchable to avoid regressing it.
-    kernels = [
-        k
-        for k in kernels
-        if not (isinstance(k, dict) and k.get("shape_dispatchable") is False)
-    ]
+    kernels = [k for k in kernels if not (isinstance(k, dict) and k.get("shape_dispatchable") is False)]
     reusable_ids = data.get("reusable_native_kernel_ids") or []
     reusable_id_set = {str(item) for item in reusable_ids if item}
 
@@ -4794,21 +4956,12 @@ def _batch_kernel_candidates(
     attempts_by_task: dict[str, dict] = {}
     in_flight: set[str] = set()
     from ..state.shared_state import (
-        _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
+        resolve_hot_kernel_min_gpu_pct,
         resolve_kernel_opt_max_failures,
     )
 
     max_failures = resolve_kernel_opt_max_failures()
-    # min_gpu_pct mirrors SharedState.untried_hot_reusable_kernels' default.
-    try:
-        min_gpu_pct = float(
-            os.environ.get(
-                "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT",
-                _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
-            )
-        )
-    except (TypeError, ValueError):
-        min_gpu_pct = _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
+    min_gpu_pct = resolve_hot_kernel_min_gpu_pct()
     if session_dir is not None:
         try:
             from ..state.shared_state import SharedState
@@ -4864,23 +5017,11 @@ def _batch_kernel_candidates(
             return False
         entry = attempts_by_kid.get(kid) or {}
         recorded_group_key = str(entry.get("task_group_key") or "")
-        if (
-            current_task_group_key
-            and recorded_group_key
-            and recorded_group_key != current_task_group_key
-        ):
+        if current_task_group_key and recorded_group_key and recorded_group_key != current_task_group_key:
             return True
         recorded_source = str(entry.get("last_source_file") or "")
-        same_source = (
-            not current_source
-            or not recorded_source
-            or recorded_source == current_source
-        )
-        if (
-            kid in rejected_kernel_ids
-            and same_source
-            and not (current_task_group_key and not recorded_group_key)
-        ):
+        same_source = not current_source or not recorded_source or recorded_source == current_source
+        if kid in rejected_kernel_ids and same_source and not (current_task_group_key and not recorded_group_key):
             return False
         if not _entry_allows_dispatch(entry, current_source):
             return False
@@ -4909,11 +5050,7 @@ def _batch_kernel_candidates(
         group_key = str(group.get("task_group_key") or "")
         group_key_aliases = {
             group_key,
-            *[
-                str(alias)
-                for alias in (group.get("legacy_task_group_keys") or [])
-                if str(alias)
-            ],
+            *[str(alias) for alias in (group.get("legacy_task_group_keys") or []) if str(alias)],
         }
         group_key_aliases.discard("")
         primary = str(group.get("primary_kernel_id") or "")
@@ -4936,14 +5073,10 @@ def _batch_kernel_candidates(
                     (
                         group_key
                         and (
-                            str(entry.get("stable_task_key") or "")
-                            == group_key
-                            or str(entry.get("task_group_key") or "")
-                            == group_key
-                            or str(entry.get("stable_task_key") or "")
-                            in group_key_aliases
-                            or str(entry.get("task_group_key") or "")
-                            in group_key_aliases
+                            str(entry.get("stable_task_key") or "") == group_key
+                            or str(entry.get("task_group_key") or "") == group_key
+                            or str(entry.get("stable_task_key") or "") in group_key_aliases
+                            or str(entry.get("task_group_key") or "") in group_key_aliases
                         )
                     )
                     or (
@@ -4963,8 +5096,7 @@ def _batch_kernel_candidates(
                     kernel_by_id[member_id]
                     for member_id in member_ids
                     if member_id in kernel_by_id
-                    and kernel_by_id[member_id].get("reusable_native_kernel")
-                    is True
+                    and kernel_by_id[member_id].get("reusable_native_kernel") is True
                     and kernel_by_id[member_id].get("source_file")
                 ),
                 None,
@@ -5238,11 +5370,7 @@ def _stamp_task_group_result(
     )
     stamped.setdefault(
         "legacy_task_group_keys",
-        [
-            str(item)
-            for item in (task_group.get("legacy_task_group_keys") or [])
-            if str(item)
-        ],
+        [str(item) for item in (task_group.get("legacy_task_group_keys") or []) if str(item)],
     )
     stamped.setdefault(
         "task_group_kernel_ids",
@@ -5526,11 +5654,7 @@ async def _run_optimization_single(
     candidate_payload = payload.get("candidate")
     if isinstance(candidate_payload, dict):
         task_group = candidate_payload.get("task_group")
-        group_id = (
-            str(task_group.get("task_group_id") or "")
-            if isinstance(task_group, dict)
-            else ""
-        )
+        group_id = str(task_group.get("task_group_id") or "") if isinstance(task_group, dict) else ""
         identity = group_id or str(candidate_payload.get("kernel_id") or kernel_id)
         safe_identity = re.sub(r"[^A-Za-z0-9._-]+", "_", identity).strip("._-") or "candidate"
         candidate_json_path = (
@@ -5544,8 +5668,7 @@ async def _run_optimization_single(
         try:
             candidate_json_path.parent.mkdir(parents=True, exist_ok=True)
             candidate_json_path.write_text(
-                json.dumps(candidate_payload, indent=2, sort_keys=True, ensure_ascii=False)
-                + "\n",
+                json.dumps(candidate_payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
             cmd += ["--candidate-json", str(candidate_json_path)]
@@ -5985,9 +6108,7 @@ async def _run_integrate_rebaseline_with_lock_retry(
     # unknown, a fresh skipped lock is also not safe to remove. Retry only after
     # at least one deletion or after confirming the lock disappeared.
     cleanup_safe = not cleanup.get("skipped_live") and not cleanup.get("errors")
-    lock_removed = bool(cleanup.get("deleted")) or (
-        cleanup.get("scanned", 0) == 0 and not cleanup.get("skipped_fresh")
-    )
+    lock_removed = bool(cleanup.get("deleted")) or (cleanup.get("scanned", 0) == 0 and not cleanup.get("skipped_fresh"))
     if not (cleanup_safe and lock_removed):
         return result
 
@@ -6024,6 +6145,7 @@ def _grade_integrate_accuracy(
     *,
     session_dir: Path,
     workspace: Path,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Grade a kernel re-baseline's accuracy against the session baseline.
 
@@ -6042,6 +6164,10 @@ def _grade_integrate_accuracy(
         bench_result: The re-baseline result dict from ``BaselineExecutor``.
         session_dir: Session directory used to resolve ``baseline_accuracy``.
         workspace: The integrate task workspace holding both round slots.
+        strict: Grade an artifact whose correctness has only ever been proven
+            against a reference. This serving run is its first and only
+            end-to-end evidence, so the operator opt-out does not apply and a
+            gate that produced no verdict blocks instead of degrading.
 
     Returns:
         ``{"blocked": bool, "accuracy_pass": bool | None, "reason": str,
@@ -6086,9 +6212,15 @@ def _grade_integrate_accuracy(
 
     blocked, reason, degraded = accuracy_keep_block(
         accuracy_pass,
-        required=require_kernel_accuracy_default(),
+        required=True if strict else require_kernel_accuracy_default(),
         baseline_accuracy=baseline_accuracy,
     )
+    if strict and degraded:
+        blocked = True
+        reason = (
+            "accuracy gate produced no eval result and this artifact has no "
+            "other end-to-end correctness evidence"
+        )
     log.info(
         "integrate_handler: accuracy gate pass=%s blocked=%s degraded=%s new=%s baseline=%.4f source=%s",
         accuracy_pass,
@@ -6143,12 +6275,7 @@ def _integrate_rebaseline_timeout_sec(
         try:
             import yaml  # type: ignore[import-untyped]
 
-            config = (
-                yaml.safe_load(
-                    Path(config_path).read_text(encoding="utf-8")
-                )
-                or {}
-            )
+            config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
             benchmark = config.get("benchmark")
             if isinstance(benchmark, dict):
                 value = int(benchmark.get("timeout_seconds") or 0)
@@ -6248,8 +6375,7 @@ async def integrate_handler(
             "apply_result": apply_result,
             "kernel_id": kernel_id,
             "patch_path": patch_path,
-            "target_file": payload.get("target_file")
-            or payload.get("source_file"),
+            "target_file": payload.get("target_file") or payload.get("source_file"),
         }
     if apply_result.get("status") != "ok":
         return {
@@ -6291,9 +6417,14 @@ async def integrate_handler(
             "timeout_sec": rebaseline_timeout_sec,
             "extra_server_args": extra_args,
             "extra_envs": dict(payload.get("extra_envs") or {}),
+            # The only artifact that patches FlyDSL sources, so the only run that
+            # needs the JIT cache key widened.
+            "flydsl_source_dirs": (
+                str(payload.get("artifact_kind") or "")
+                == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
+            ),
             "defer_accuracy_until_after_measure": True,
-            "post_measure_accuracy_min_tput": base_tput
-            * (1.0 + keep_threshold_pct / 100.0),
+            "post_measure_accuracy_min_tput": base_tput * (1.0 + keep_threshold_pct / 100.0),
             "accuracy_timeout_sec": rebaseline_timeout_sec,
             # Synthetic kind="baseline": candidate A/B validation against the
             # already-anchored reference. It runs eval for the kernel accuracy
@@ -6380,8 +6511,7 @@ async def integrate_handler(
             "error": repr(exc),
             "kernel_id": kernel_id,
             "patch_path": patch_path,
-            "target_file": payload.get("target_file")
-            or payload.get("source_file"),
+            "target_file": payload.get("target_file") or payload.get("source_file"),
             "apply_result": apply_result,
             "revert_result": revert_result,
         }
@@ -6407,8 +6537,7 @@ async def integrate_handler(
             "rebaseline_detail": bench_result,
             "kernel_id": kernel_id,
             "patch_path": patch_path,
-            "target_file": payload.get("target_file")
-            or payload.get("source_file"),
+            "target_file": payload.get("target_file") or payload.get("source_file"),
             "apply_result": apply_result,
             "revert_result": revert_result,
         }
@@ -6477,12 +6606,21 @@ async def integrate_handler(
     # re-baseline's own eval output, so the verdict costs no extra GPU time.
     # Placed ahead of the optional source-import / paired-A/B passes so a patch
     # that loses accuracy short-circuits before they run.
+    # An apply-back carries only reference correctness, so this run is the sole
+    # end-to-end evidence it will ever get.
+    # Anything other than a recorded pass still owes the verdict, so an absent or
+    # unrecognised status keeps the gate armed rather than disarming it.
+    applyback_pending = (
+        str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
+        and str(payload.get("integration_validation_status") or "") != "passed"
+    )
     accuracy_gate: dict[str, Any] | None = None
     if decision == "KEEP":
         accuracy_gate = _grade_integrate_accuracy(
             bench_result,
             session_dir=session_dir,
             workspace=workspace,
+            strict=applyback_pending,
         )
         if accuracy_gate["blocked"]:
             # A measured regression is hard negative evidence -> REVERT. A
@@ -6495,10 +6633,18 @@ async def integrate_handler(
     # Only the strict sub-flag enforces it, and only on positive non-import
     # evidence (confirmed is False); an "unknown" (None) never penalizes.
     source_import_confirmed: bool | None = None
+    source_import_evidence: dict[str, bool | None] = {}
     source_not_imported_downgrade = False
     if _honest_flag("HL_CONFIRM_SOURCE_IMPORTED"):
-        _src = str(payload.get("target_file") or payload.get("source_file") or "")
-        source_import_confirmed = _confirm_source_imported(_src, bench_result.get("workspace"))
+        # Grade the whole write set; the single target is the fallback for a
+        # patch whose bundle declared none.
+        _written = [str(path) for path in (payload.get("patch_write_paths") or []) if str(path or "").strip()]
+        if not _written:
+            _written = [str(payload.get("target_file") or payload.get("source_file") or "")]
+        source_import_confirmed, source_import_evidence = _confirm_sources_imported(
+            _written,
+            bench_result.get("workspace"),
+        )
         if (
             decision == "KEEP"
             and source_import_confirmed is False
@@ -6634,6 +6780,8 @@ async def integrate_handler(
         result["stack_incremental_keep_threshold_pct"] = STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
     if source_import_confirmed is not None:
         result["source_import_confirmed"] = source_import_confirmed
+    if len(source_import_evidence) > 1:
+        result["source_import_evidence"] = source_import_evidence
     if source_not_imported_downgrade:
         result["decision_reason"] = "source_not_confirmed_imported"
     if paired_ab is not None:
@@ -6652,6 +6800,14 @@ async def integrate_handler(
             result["decision_reason"] = (
                 "accuracy_regression" if accuracy_gate["accuracy_pass"] is False else "accuracy_evidence_missing"
             )
+    if applyback_pending:
+        result["artifact_kind"] = _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
+        # Only a KEEP settles the outstanding verdict. A non-KEEP is left
+        # unstamped: the attempt ledger already distinguishes a rejection from a
+        # retryable fault, and this field must not blur the two.
+        if decision == "KEEP":
+            result["integration_validation_status"] = "passed"
+            result["validation_tier"] = _INTEGRATE_ACCURACY_VALIDATION_TIER
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -6666,7 +6822,7 @@ async def integrate_handler(
             target_file=str(payload.get("target_file") or payload.get("source_file") or "") or None,
             extra_server_args=extra_args,
             result=result,
-            validation_tier="integrate_e2e",
+            validation_tier=str(result.get("validation_tier") or "integrate_e2e"),
         )
     except Exception:  # noqa: BLE001
         log.debug("kernel integrate v4 result recording failed", exc_info=True)

@@ -3,6 +3,10 @@
 
 """The kernel agent's own columns of this run's knowledge document.
 
+This module defines the handoff surface only. GEMM, fusion and rewrite
+production call sites are intentionally owned by their agent implementations
+and are not wired by the Remote Recipe migration itself.
+
 The document keeps one column per producer, and the kernel column keeps one
 sub-column per kernel backend::
 
@@ -21,9 +25,11 @@ the refs folded into the payload. A caller that does not can ignore the return
 value, because the same refs are recorded under the column's ``files`` key.
 
 The write replaces the sub-column: what an agent hands over is the whole
-picture of that sub-column, not a patch against the last call. Sibling
-sub-columns and every other column in the document are left untouched, so a
-section-aware backend and a not-yet-migrated one publish into one record.
+picture of that sub-column, not a patch against the last call. Files already
+staged for that sub-column remain referenced when a later write supplies no new
+files. Sibling sub-columns and every other column in the document are left
+untouched, so a section-aware backend and a not-yet-migrated one publish into
+one record.
 
 Wiring is unconditional. A run with no draft directory -- local knowledge
 mode, or a run that never publishes -- leaves the facade inactive and turns
@@ -155,10 +161,22 @@ class KernelAgentKB:
             return []
         refs = [ref for source in files if (ref := self._stage(column, source))]
         payload = dict(knowledge)
-        if refs:
-            payload["files"] = refs
         try:
             staged = self._sections.staged(KERNEL_SECTION)
+            prefix = f"{KERNEL_SECTION}/{column}/"
+            column_refs = (
+                sorted(
+                    path.relative_to(self._sections.files_dir).as_posix()
+                    for path in staged.files
+                    if path.relative_to(self._sections.files_dir)
+                    .as_posix()
+                    .startswith(prefix)
+                )
+                if staged is not None
+                else []
+            )
+            if column_refs:
+                payload["files"] = column_refs
             document = dict(staged.knowledge) if staged is not None else {}
             document[column] = payload
             self._sections.write(KERNEL_SECTION, document, mode="replace")

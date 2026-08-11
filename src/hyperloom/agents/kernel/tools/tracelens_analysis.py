@@ -37,6 +37,13 @@ except ImportError:
     _resolve_patch_target_roots = None
 
 try:
+    from hyperloom.orchestrator.framework.paths import (
+        resolve_flydsl_source_roots as _resolve_flydsl_source_roots,
+    )
+except ImportError:
+    _resolve_flydsl_source_roots = None
+
+try:
     from apply_kernel_patch import known_target_roots as _known_target_roots
 except ImportError:
     _known_target_roots = None
@@ -1601,10 +1608,13 @@ def _flydsl_reusable_roots() -> tuple[str, ...]:
     """Resolve FlyDSL checkout root(s) for moe_flydsl pseudo-ops.
 
     ``$DSL2_ROOT`` / ``$FLYDSL_ROOT`` take precedence over the WekaFS default.
+    Uncached, so an env override applies without a process restart.
 
     Returns:
         The lower-cased FlyDSL checkout roots.
     """
+    if _resolve_flydsl_source_roots is not None:
+        return tuple(dict.fromkeys(r.lower() for r in _resolve_flydsl_source_roots()))
     out: list[str] = []
     for env_key in ("DSL2_ROOT", "FLYDSL_ROOT"):
         val = (os.environ.get(env_key, "") or "").strip()
@@ -4945,6 +4955,13 @@ def _raise_on_failed_deterministic_pipeline(
     )
 
 
+#: Mirrors of the registry, used only when that package is not importable
+#: (standalone invocation). Kept identical to the bypass route's copies; tests
+#: assert every one of them against the registry.
+_STANDALONE_SCRIPTABLE = frozenset({"xdit", "custom"})
+_STANDALONE_DENOISER_CONFIG = frozenset({"xdit"})
+
+
 def _is_scriptable_framework(framework: str | None) -> bool:
     """Return whether ``framework`` is a server-less scriptable image framework.
 
@@ -4964,8 +4981,32 @@ def _is_scriptable_framework(framework: str | None) -> bool:
         from hyperloom.inference_optimizer.framework_registry import is_scriptable
 
         return is_scriptable(framework)
-    except Exception:
-        return str(framework or "").strip().lower() in {"xdit"}
+    except ImportError:  # standalone invocation without the package installed.
+        return str(framework or "").strip().lower() in _STANDALONE_SCRIPTABLE
+
+
+def _has_diffusion_ceiling(framework: str | None) -> bool:
+    """Return whether an analytic diffusion ceiling is meaningful for ``framework``.
+
+    Scriptable does not imply diffusion: ``custom`` runs an operator-supplied
+    entrypoint whose model Hyperloom never inspects, so the config-derived
+    geometry the ceiling needs cannot be resolved, and a guessed one is worse
+    than none. Read from the registry rather than matched against a name, so the
+    next framework is classified when it is added rather than when someone
+    remembers this call site.
+
+    Args:
+        framework: Framework name (matched case-insensitively).
+
+    Returns:
+        bool: ``True`` for frameworks shipping a readable denoiser config.
+    """
+    try:
+        from hyperloom.inference_optimizer.framework_registry import has_denoiser_config
+
+        return has_denoiser_config(framework)
+    except ImportError:  # standalone invocation without the package installed.
+        return str(framework or "").strip().lower() in _STANDALONE_DENOISER_CONFIG
 
 
 def _run_deterministic_tracelens_steps(
@@ -6602,42 +6643,47 @@ def write_reports(
                 int(getattr(args, "top_k", 10) or 10),
             )
             # A-priori analytic compute ceiling (config/safetensors derived),
-            # giving the workload roofline an absolute ideal-ms floor. Best-effort.
-            try:
-                _model_dir = str(getattr(args, "model_path", "") or "").strip()
-                if not _model_dir:
-                    _mn = str(getattr(args, "model_name", "") or "").strip()
-                    if _mn:
-                        for _cfg in _candidate_model_config_paths(_mn):
-                            if Path(_cfg).is_file():
-                                _model_dir = str(Path(_cfg).parent)
-                                break
-                if _model_dir and Path(_model_dir).is_dir():
-                    import diffusion_flops as _dflops  # noqa: WPS433
+            # giving the workload roofline an absolute ideal-ms floor. Best-effort,
+            # and only for frameworks whose denoiser config Hyperloom can read --
+            # the trace-derived totals above need no such config and always ship.
+            if _has_diffusion_ceiling(getattr(args, "framework", "")):
+                try:
+                    _model_dir = str(getattr(args, "model_path", "") or "").strip()
+                    if not _model_dir:
+                        _mn = str(getattr(args, "model_name", "") or "").strip()
+                        if _mn:
+                            for _cfg in _candidate_model_config_paths(_mn):
+                                if Path(_cfg).is_file():
+                                    _model_dir = str(Path(_cfg).parent)
+                                    break
+                    if _model_dir and Path(_model_dir).is_dir():
+                        import diffusion_flops as _dflops  # noqa: WPS433
 
-                    _gpu = str(getattr(args, "target_platform", "") or "mi355x").strip() or "mi355x"
-                    _prec = str(getattr(args, "precision", "") or "bf16").strip() or "bf16"
-                    _h = int(getattr(args, "height", 0) or 0)
-                    _w = int(getattr(args, "width", 0) or 0)
-                    _cfg_batch = int(getattr(args, "cfg_batch", 0) or 0)
-                    _est = _dflops.analytic_ceiling(
-                        _model_dir,
-                        gpu_type=_gpu,
-                        precision=_prec,
-                        height=_h or 1024,
-                        width=_w or 1024,
-                        num_steps=_num_steps or None,
-                        cfg_batch=_cfg_batch or None,
-                    )
-                    if _est:
-                        _diff_report["analytic_ceiling"] = _est
-                        _actual_us = float(_diff_report.get("totals", {}).get("sigma_actual_kernel_us", 0.0) or 0.0)
-                        if _est.get("ideal_ms") and _actual_us > 0:
-                            _diff_report["analytic_within_pct"] = round(
-                                _est["ideal_ms"] / (_actual_us / 1e3) * 100.0, 2
+                        _gpu = str(getattr(args, "target_platform", "") or "mi355x").strip() or "mi355x"
+                        _prec = str(getattr(args, "precision", "") or "bf16").strip() or "bf16"
+                        _h = int(getattr(args, "height", 0) or 0)
+                        _w = int(getattr(args, "width", 0) or 0)
+                        _cfg_batch = int(getattr(args, "cfg_batch", 0) or 0)
+                        _est = _dflops.analytic_ceiling(
+                            _model_dir,
+                            gpu_type=_gpu,
+                            precision=_prec,
+                            height=_h or 1024,
+                            width=_w or 1024,
+                            num_steps=_num_steps or None,
+                            cfg_batch=_cfg_batch or None,
+                        )
+                        if _est:
+                            _diff_report["analytic_ceiling"] = _est
+                            _actual_us = float(
+                                _diff_report.get("totals", {}).get("sigma_actual_kernel_us", 0.0) or 0.0
                             )
-            except Exception as _exc:  # noqa: BLE001 — analytic ceiling is best-effort
-                _diff_report["analytic_ceiling_error"] = f"{type(_exc).__name__}: {_exc}"
+                            if _est.get("ideal_ms") and _actual_us > 0:
+                                _diff_report["analytic_within_pct"] = round(
+                                    _est["ideal_ms"] / (_actual_us / 1e3) * 100.0, 2
+                                )
+                except Exception as _exc:  # noqa: BLE001 — analytic ceiling is best-effort
+                    _diff_report["analytic_ceiling_error"] = f"{type(_exc).__name__}: {_exc}"
             out = run_dir / "diffusion_roofline.json"
             atomic_write_json(out, _diff_report)
             diffusion_roofline_path = str(out)
@@ -7494,7 +7540,7 @@ def main() -> int:
                     )
                     artifacts.update(skill_result.artifact_paths)
                     agent_report_path = skill_result.report_path
-                    orchestrator_mode = "claude_agent_sdk"
+                    orchestrator_mode = skill_result.runner
 
                     raw_agent_candidates = []
                     report_source = ""

@@ -28,8 +28,11 @@ Security = "https://github.com/AMD-AGI/Hyperloom/security/policy"
 
 [project.optional-dependencies]
 # LLM backend SDKs, lazy-imported by the Claude/Codex/critic/scorer roles.
+# ``openai-codex`` is the agent runtime for the OpenAI side: Hyperloom makes no
+# bare LLM API calls, so an OpenAI-only deployment needs it to run at all.
 llm = [
     "claude-agent-sdk>=0.2.110",
+    "openai-codex>=0.144",
     "openai>=1.50",
     "httpx>=0.27",
 ]

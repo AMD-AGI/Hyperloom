@@ -3,14 +3,13 @@
 
 """Idempotent, backward-compatible patchers for the InferenceX checkout.
 
-Each ``ensure_*`` function rewrites one upstream line in place: ``$NUM_PROMPTS``
+Each ``ensure_*`` function rewrites one upstream file in place: ``$NUM_PROMPTS``
 support and ``PROFILE_EXTRA_BODY`` consumption for profiling, the eval-artifact
 redirect to ``$RESULT_DIR``, the ``HYPERLOOM_EVAL_START`` phase marker, and the
-generation-pathology probe injected into lm-eval's ``sitecustomize.py``.
+generation-pathology probe appended to lm-eval's ``lm_eval_sitecustomize.py``.
 
 Applied in place, once: idempotent via a sentinel substring, serialized across
-processes via ``fcntl.flock``, written atomically. Returns ``False``
-(non-fatal) when the legacy line is missing.
+processes via ``fcntl.flock``, written atomically.
 """
 
 from __future__ import annotations
@@ -78,8 +77,8 @@ _EVAL_START_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_l
 # Early-exit probe for a model that never emits EOS. InferenceX runs lm-eval
 # with ``--gen_kwargs max_tokens=min(16384, ctx-4096)``, so a degenerate model
 # burns that budget on every one of GSM8K's 1319 docs and takes the whole
-# baseline timeout with it. Injected as source rather than imported: the
-# lm-eval subprocess shares an interpreter with Hyperloom only by accident.
+# baseline timeout with it. Appended to ``lm_eval_sitecustomize.py``, so it lands
+# after InferenceX's own patches and needs no anchor line.
 _EVAL_PROBE_PY = """
 # --- HYPERLOOM_EVAL_PROBE ---------------------------------------------------
 import json as _hl_json
@@ -191,7 +190,7 @@ def _hl_eval_probe_install():
         loop = _hl_asyncio.get_running_loop()
         if gate["loop"] is not loop:
             gate["loop"] = loop
-            gate["sem"] = _hl_asyncio.Semaphore(max(1, int(self._concurrent or 1)))
+            gate["sem"] = _hl_asyncio.Semaphore(max(1, getattr(self, "_concurrent", 1) or 1))
         async with gate["sem"]:
             if not (state["tripped"] and kwargs.get("generate", True)):
                 return await _hl_prev_amodel_call(self, session, sem, messages, **kwargs)
@@ -203,27 +202,12 @@ def _hl_eval_probe_install():
     _hl_api.TemplateAPI.amodel_call = _hl_probe_amodel_call
 
 
-# sitecustomize runs at interpreter startup: raising here would break every
-# python3 the benchmark shells out to, not just lm-eval.
-try:
-    _hl_eval_probe_install()
-except Exception:
-    pass
+_hl_eval_probe_install()
 # --- end HYPERLOOM_EVAL_PROBE -----------------------------------------------
 """
 
-# Anchored on the unique ``export PYTHONPATH`` line that closes
-# ``_patch_lm_eval``. The heredoc is quoted so nothing inside it is
-# shell-expanded, and its terminator must sit at column 0.
-_EVAL_PROBE_LEGACY = '    export PYTHONPATH="${patch_dir}:${PYTHONPATH:-}"'
-_EVAL_PROBE_PATCHED = (
-    "    cat >> \"$patch_dir/sitecustomize.py\" <<'HYPERLOOM_PY'\n"
-    + _EVAL_PROBE_PY.lstrip("\n")
-    + "HYPERLOOM_PY\n"
-    + _EVAL_PROBE_LEGACY
-)
 _EVAL_PROBE_SENTINEL = "HYPERLOOM_EVAL_PROBE"
-_EVAL_PROBE_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_eval_probe_patcher.lock")
+_EVAL_PROBE_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_eval_probe_patcher.lock")
 
 
 def _discover_inferencex_roots(
@@ -691,66 +675,76 @@ def ensure_benchmark_lib_eval_start_patched(
     )
 
 
-def _is_eval_probe_patched(src: Path) -> bool:
-    """Return whether ``benchmark_lib.sh`` already injects the eval probe.
+def _resolve_eval_sitecustomize_paths(
+    inferencex_path: Path | str | None,
+) -> list[Path]:
+    """Return every existing ``<root>/utils/evals/patches/lm_eval_sitecustomize.py``."""
+    return _resolve_inferencex_files(inferencex_path, "utils", "evals", "patches", "lm_eval_sitecustomize.py")
 
-    Args:
-        src (Path): The ``benchmark_lib.sh`` file to inspect.
 
-    Returns:
-        bool: ``True`` if the eval-probe sentinel is present; ``False`` on a
-        miss or read error.
+def eval_probe_targets_exist(inferencex_path: Path | str | None = None) -> bool:
+    """Whether any discovered InferenceX root carries the probe target file.
+
+    Separates "present and unpatchable" from "laid out somewhere we do not look".
     """
+    return bool(_resolve_eval_sitecustomize_paths(inferencex_path))
+
+
+def _is_eval_probe_patched(src: Path) -> bool:
+    """Return whether ``lm_eval_sitecustomize.py`` already carries the eval probe."""
     return file_contains_sentinel(src, _EVAL_PROBE_SENTINEL, log, "_inferencex_patcher")
 
 
-def ensure_benchmark_lib_eval_probe_patched(
+def _apply_eval_probe_atomic(src: Path) -> bool:
+    """Append the eval probe to ``src`` via temp-file + atomic rename."""
+    try:
+        original = src.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
+        return False
+    patched = original + _EVAL_PROBE_PY
+    if not atomic_write_text(
+        src,
+        patched,
+        tmp_prefix=".lm_eval_sitecustomize.eval_probe_",
+        log_prefix="_inferencex_patcher",
+    ):
+        return False
+    log.info("_inferencex_patcher: appended eval generation-pathology probe to %s", src)
+    return True
+
+
+def ensure_eval_probe_patched(
     inferencex_path: Path | str | None = None,
 ) -> bool:
-    """Ensure ``_patch_lm_eval`` also installs Hyperloom's early-exit probe.
+    """Ensure the early-exit probe is appended to ``lm_eval_sitecustomize.py``.
 
-    The probe watches ``finish_reason`` on completed responses; once the sample
-    is decisive it answers the remaining requests with an empty string, so
-    lm-eval still finishes normally and writes a ``results*.json`` scoring ~0 --
-    the verdict a non-terminating model would have earned hours later anyway.
-    Returns ``True`` when patched at exit, ``False`` (non-fatal) when the file
-    is missing or the anchor line is absent — the eval then runs unbounded as
-    before. Concurrency-safe; independent lock so it does not serialize with
-    the other patches on the same file.
+    The probe watches ``finish_reason`` on completed responses; once the pattern
+    says the model never terminates it short-circuits the remaining requests, so
+    lm-eval finishes in seconds with a ~0 score instead of burning the budget.
 
     Args:
         inferencex_path: Caller-provided override root; defaults to env-based
             discovery when ``None``.
 
     Returns:
-        True when at least one discovered ``benchmark_lib.sh`` is patched (or
-        already patched), False when none could be patched.
+        True when at least one target is patched (or already patched); False when
+        none were found or none could be patched. :func:`eval_probe_targets_exist`
+        tells the two apart.
     """
     return _ensure_patched(
-        _resolve_benchmark_lib_paths(inferencex_path),
+        _resolve_eval_sitecustomize_paths(inferencex_path),
         _is_eval_probe_patched,
-        partial(
-            _apply_line_replacement_atomic,
-            legacy=_EVAL_PROBE_LEGACY,
-            patched_line=_EVAL_PROBE_PATCHED,
-            tmp_prefix=".benchmark_lib.sh.eval_probe_",
-            missing_msg=(
-                "_inferencex_patcher: expected _patch_lm_eval PYTHONPATH export "
-                "not found in %s; upstream layout may have changed. A model that "
-                "never emits EOS will run the accuracy eval to the full "
-                "max_tokens budget on every sample instead of exiting early."
-            ),
-            success_msg=("_inferencex_patcher: installed eval generation-pathology probe in %s"),
-        ),
+        _apply_eval_probe_atomic,
         _EVAL_PROBE_LOCK_PATH,
         empty_msg=(
             "_inferencex_patcher: no InferenceX root discovered "
             "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
-            "benchmark_lib.sh missing — skipping eval-probe patch (fine for "
-            "tests and dry-runs without a real InferenceX tree)"
+            "utils/evals/patches/lm_eval_sitecustomize.py missing — "
+            "skipping eval-probe patch"
         ),
         failure_msg=(
-            "_inferencex_patcher: failed to eval-probe-patch %s; other discovered roots will still be attempted"
+            "_inferencex_patcher: failed to append eval-probe to %s; other discovered roots will still be attempted"
         ),
     )
 
@@ -758,7 +752,7 @@ def ensure_benchmark_lib_eval_probe_patched(
 __all__ = [
     "ensure_benchmark_lib_patched",
     "ensure_benchmark_lib_eval_dest_patched",
-    "ensure_benchmark_lib_eval_probe_patched",
     "ensure_benchmark_lib_eval_start_patched",
     "ensure_benchmark_serving_patched",
+    "ensure_eval_probe_patched",
 ]

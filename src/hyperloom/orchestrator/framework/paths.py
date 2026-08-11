@@ -61,6 +61,62 @@ def resolve_rocm_hip_source_roots() -> tuple[str, ...]:
     return _ROCM_HIP_SOURCE_ROOTS
 
 
+# FlyDSL checkout roots. Env overrides come first, then the image defaults.
+_FLYDSL_ROOT_ENV_KEYS: tuple[str, ...] = ("DSL2_ROOT", "FLYDSL_ROOT")
+_FLYDSL_DEFAULT_ROOTS: tuple[str, ...] = ("/opt/flydsl/", "/sgl-workspace/flydsl/")
+
+
+def resolve_flydsl_source_roots() -> tuple[str, ...]:
+    """Return the FlyDSL checkout roots for patch-target matching.
+
+    Included in :func:`resolve_patch_target_roots` but deliberately not in
+    :func:`resolve_source_file_allowlist`: FlyDSL is a rewrite target for the
+    kernel agent, not a framework the specialist may edit.
+
+    An env-supplied root is emitted both case-preserved and lower-cased,
+    because the patchability and apply gates match a lower-cased path against
+    these roots verbatim while path-resolving consumers need the real case.
+
+    Returns:
+        tuple[str, ...]: The de-duplicated FlyDSL roots.
+    """
+    out: list[str] = []
+    for key in _FLYDSL_ROOT_ENV_KEYS:
+        root = _normalize_root(os.environ.get(key, ""))
+        if root:
+            out.extend((root, root.lower()))
+    out.extend(_FLYDSL_DEFAULT_ROOTS)
+    return _merge_roots(tuple(out))
+
+
+#: FlyDSL hashes every ``.py`` under these dirs into its JIT cache key.
+ENV_FLYDSL_EXTRA_SOURCE_DIRS = "FLYDSL_EXTRA_SOURCE_DIRS"
+
+
+def flydsl_extra_source_dirs() -> str:
+    """Value for ``$FLYDSL_EXTRA_SOURCE_DIRS``: the FlyDSL roots that exist.
+
+    FlyDSL's cache key covers the traced function and same-directory helpers
+    only, so an edited helper in a sibling directory does not invalidate it and
+    the stale binary is reused. Listing the roots here folds their sources into
+    the key, re-compiling only the kernels that actually changed.
+
+    Any operator-supplied value is preserved and comes first.
+
+    Returns:
+        str: Existing roots joined by ``:`` (empty when none exist).
+    """
+    found: list[str] = []
+    preset = os.environ.get(ENV_FLYDSL_EXTRA_SOURCE_DIRS, "").strip()
+    if preset:
+        found.extend(p for p in preset.split(":") if p.strip())
+    for root in resolve_flydsl_source_roots():
+        path = Path(root.rstrip("/"))
+        if path.is_dir() and str(path) not in found:
+            found.append(str(path))
+    return ":".join(found)
+
+
 # Minimal static fallbacks when importlib/glob find nothing (image defaults).
 _STATIC_PATCH_FALLBACK_ROOTS: tuple[str, ...] = (
     "/opt/venv/lib/python3.10/site-packages/aiter/",
@@ -438,15 +494,17 @@ def resolve_patch_target_roots() -> tuple[str, ...]:
     """Roots for substring matching in patch apply + kernel classifiers.
 
     Same as :func:`resolve_source_file_allowlist` plus static fallbacks for
-    layouts that are not importable until first use (e.g. ``aiter_meta/csrc``).
+    layouts that are not importable until first use (e.g. ``aiter_meta/csrc``)
+    and the FlyDSL checkout roots.
 
     Returns:
         tuple[str, ...]: The allowlist roots merged with the static patch
-            fallback roots.
+            fallback roots and the FlyDSL roots.
     """
     return _merge_roots(
         resolve_source_file_allowlist(),
         _STATIC_PATCH_FALLBACK_ROOTS,
+        resolve_flydsl_source_roots(),
     )
 
 

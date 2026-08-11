@@ -1,13 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for :class:`LlmRcaEngine` and :class:`RcaThrottle`."""
+"""Unit tests for :class:`LlmRcaEngine` and :class:`RcaThrottle`.
+
+The engines call through ``hyperloom.common.llm_config``. Those entry points are
+patched by name, and deliberately with ``raising=True``: they are this repo's
+own symbols, so a rename should fail the patch here rather than leave the suite
+silently stubbing nothing and passing against the real transport.
+"""
 
 from __future__ import annotations
 
-import json
+from dataclasses import dataclass
+from typing import Any
 
-import httpx
 import pytest
 
 from hyperloom.agents.robustness.decision.rca_engine import (
@@ -19,6 +25,69 @@ from hyperloom.agents.robustness.decision.rca_engine import (
     load_rca_system_prompt,
 )
 from hyperloom.agents.robustness.signals import Symptom, SymptomSeverity
+from hyperloom.common import llm_config
+
+_LLM_CONFIG = "hyperloom.common.llm_config"
+
+
+@dataclass
+class _Reply:
+    """Stand-in for the ``llm_config`` result objects the engines consume."""
+
+    text: str
+    usage: Any = None
+
+
+class _OpenAIUsage:
+    """OpenAI reports usage as SDK object attributes, not mapping keys."""
+
+    def __init__(self, prompt_tokens: int, completion_tokens: int) -> None:
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+
+
+class _StubClient:
+    """Injected provider client; the patched contract never talks to it."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _StubAnthropicCompletion:
+    """Stands in for ``llm_config.aanthropic_completion`` and records its params.
+
+    The Anthropic engine holds no client of its own now: llm_config owns
+    transport selection, so the seam is the entry point rather than an object.
+    """
+
+    def __init__(self, *, reply: _Reply | None = None, error: Exception | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._reply = reply
+        self._error = error
+
+    async def __call__(self, **params: Any) -> _Reply:
+        self.calls.append(params)
+        if self._error is not None:
+            raise self._error
+        return self._reply if self._reply is not None else _Reply("ok")
+
+
+def _install_anthropic_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reply: _Reply | None = None,
+    error: Exception | None = None,
+) -> _StubAnthropicCompletion:
+    """Route the Anthropic engine's single-shot entry point to a recorder."""
+    stub = _StubAnthropicCompletion(reply=reply, error=error)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.aanthropic_completion", stub)
+    return stub
 
 
 def _sym(
@@ -39,18 +108,52 @@ def _sym(
     )
 
 
-def _engine(handler, *, throttle: RcaThrottle | None = None, **overrides) -> LlmRcaEngine:
-    transport = httpx.MockTransport(handler)
-    client = httpx.AsyncClient(
-        base_url="http://chat.test",
-        transport=transport,
-        timeout=httpx.Timeout(2.0),
-        headers={"Authorization": "Bearer secret", "Content-Type": "application/json"},
-    )
+def _open_throttle() -> RcaThrottle:
+    """Throttle that never blocks, so a test can focus on the transport."""
+    return RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0))
+
+
+def _install_chat(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reply: _Reply | None = None,
+    error: Exception | None = None,
+) -> list[dict[str, Any]]:
+    """Patch the async chat-completion entry point; return the recorded calls."""
+    calls: list[dict[str, Any]] = []
+
+    async def _fake(client: Any, **params: Any) -> _Reply:
+        calls.append({"client": client, **params})
+        if error is not None:
+            raise error
+        return reply if reply is not None else _Reply("ok")
+
+    monkeypatch.setattr(f"{_LLM_CONFIG}.achat_completion", _fake)
+    return calls
+
+
+def _install_client_factories(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[dict[str, Any]]]:
+    """Patch the OpenAI client factory; return its construction kwargs.
+
+    Only the OpenAI engine builds a client. The Anthropic engine calls
+    llm_config's single-shot entry point, which owns its own transport.
+    """
+    built: dict[str, list[dict[str, Any]]] = {"openai": []}
+
+    def _openai(**kwargs: Any) -> _StubClient:
+        built["openai"].append(kwargs)
+        return _StubClient()
+
+    monkeypatch.setattr(f"{_LLM_CONFIG}.get_async_openai_client", _openai)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.build_http_timeout", lambda **kwargs: kwargs)
+    return built
+
+
+def _engine(*, throttle: RcaThrottle | None = None, **overrides: Any) -> LlmRcaEngine:
     return LlmRcaEngine(
-        base_url="http://chat.test",
+        base_url="http://chat.test/v1",
         api_key="secret",
-        client=client,
+        client=_StubClient(),
         throttle=throttle,
         **overrides,
     )
@@ -69,130 +172,65 @@ async def test_noop_engine_returns_empty():
 
 
 @pytest.mark.asyncio
-async def test_llm_engine_calls_chat_server_and_returns_text():
-    captured = {}
+async def test_llm_engine_calls_chat_completion_and_returns_text(monkeypatch: pytest.MonkeyPatch):
+    calls = _install_chat(monkeypatch, reply=_Reply("Likely OOM. Reduce batch_size."))
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["body"] = request.read().decode()
-        captured["auth"] = request.headers.get("Authorization")
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": "Likely OOM. Reduce batch_size."}}]},
-        )
+    engine = _engine()
+    engine.set_tick(1)
+    text = await engine.summarize(_sym())
 
-    engine = _engine(handler)
-    try:
-        engine.set_tick(1)
-        text = await engine.summarize(_sym())
-    finally:
-        await engine.aclose()
     assert "Likely OOM" in text
-    assert "/chat/completions" in captured["url"]
-    assert captured["auth"] == "Bearer secret"
-    assert "crash_count=5" in captured["body"]
-    assert "claude-opus-5" in captured["body"]
+    assert len(calls) == 1
+    assert calls[0]["model"] == "claude-opus-5"
+    assert calls[0]["messages"][0]["content"] == load_rca_system_prompt()
+    assert "crash_count=5" in calls[0]["messages"][1]["content"]
+    assert calls[0]["max_tokens"] == 600
+    assert calls[0]["temperature"] == 0.2
 
 
 @pytest.mark.asyncio
-async def test_llm_engine_uses_max_completion_tokens_for_gpt5_models():
-    captured: dict[str, object] = {}
+async def test_llm_engine_uses_max_completion_tokens_for_gpt5_models(monkeypatch: pytest.MonkeyPatch):
+    calls = _install_chat(monkeypatch, reply=_Reply("root cause"))
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content.decode())
-        captured["body"] = body
-        return httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": "root cause"}}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-            },
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.openai.com/v1")
-    engine = LlmRcaEngine(
-        base_url="https://api.openai.com/v1",
-        api_key="openai-token",
-        model="gpt-5.5",
-        client=client,
-        throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0)),
-    )
-    try:
-        engine.set_tick(1)
-        text = await engine.summarize(_sym())
-    finally:
-        await client.aclose()
+    engine = _engine(model="gpt-5.5", throttle=_open_throttle())
+    engine.set_tick(1)
+    text = await engine.summarize(_sym())
 
     assert text == "root cause"
-    assert captured["body"]["max_completion_tokens"] == 600
-    assert "max_tokens" not in captured["body"]
-    assert "temperature" not in captured["body"]
-
-
-def test_llm_engine_injected_client_uses_openai_bearer_headers():
-    client = httpx.AsyncClient(base_url="https://gateway.example/v1")
-
-    try:
-        engine = LlmRcaEngine(
-            base_url="https://gateway.example/v1",
-            api_key="openai-token",
-            model="gpt-5.5",
-            client=client,
-            throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0)),
-        )
-
-        assert engine.client is client
-        assert client.headers["Authorization"] == "Bearer openai-token"
-        assert "x-api-key" not in client.headers
-        assert "anthropic-version" not in client.headers
-    finally:
-        import anyio
-
-        anyio.run(client.aclose)
+    assert calls[0]["max_completion_tokens"] == 600
+    assert "max_tokens" not in calls[0]
+    assert "temperature" not in calls[0]
 
 
 @pytest.mark.asyncio
-async def test_anthropic_rca_engine_calls_messages_endpoint_and_returns_text():
-    seen: dict[str, object] = {}
+async def test_anthropic_rca_engine_calls_messages_contract_and_returns_text(monkeypatch: pytest.MonkeyPatch):
+    stub = _install_anthropic_completion(
+        monkeypatch,
+        reply=_Reply("anthropic root cause", usage={"input_tokens": 11, "output_tokens": 7}),
+    )
+    calls = stub.calls
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["path"] = request.url.path
-        seen["headers"] = {k.lower(): v for k, v in request.headers.items()}
-        seen["json"] = json.loads(request.content.decode())
-        return httpx.Response(
-            200,
-            json={
-                "content": [{"type": "text", "text": "anthropic root cause"}],
-                "usage": {"input_tokens": 11, "output_tokens": 7},
-            },
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.deepseek.com/anthropic")
     engine = AnthropicRcaEngine(
         base_url="https://api.deepseek.com/anthropic",
         api_key="deepseek-token",
         model="deepseek-v4-pro",
-        client=client,
-        throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0)),
+        throttle=_open_throttle(),
     )
-    try:
-        engine.set_tick(1)
-        text = await engine.summarize(
-            _sym(
-                name="gateway_auth_outage",
-                summary="gateway returned 401",
-                evidence={"status_code": 401},
-            )
+    engine.set_tick(1)
+    text = await engine.summarize(
+        _sym(
+            name="gateway_auth_outage",
+            summary="gateway returned 401",
+            evidence={"status_code": 401},
         )
-    finally:
-        await client.aclose()
+    )
     usage = engine.drain_usage()
 
     assert text == "anthropic root cause"
-    assert seen["path"] == "/anthropic/v1/messages"
-    assert seen["headers"]["x-api-key"] == "deepseek-token"
-    assert seen["headers"]["anthropic-version"] == "2023-06-01"
-    assert seen["json"]["model"] == "deepseek-v4-pro"
+    assert calls[0]["model"] == "deepseek-v4-pro"
+    assert calls[0]["system"] == load_rca_system_prompt()
+    assert "gateway returned 401" in calls[0]["messages"][0]["content"]
+    assert calls[0]["max_tokens"] == 600
     assert usage is not None
     assert usage["input_tokens"] == 11
     assert usage["output_tokens"] == 7
@@ -200,27 +238,211 @@ async def test_anthropic_rca_engine_calls_messages_endpoint_and_returns_text():
     assert usage["model"] == "deepseek-v4-pro"
 
 
-@pytest.mark.asyncio
-async def test_drain_usage_accumulates_and_resets():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": "ok"}}],
-                "usage": {"prompt_tokens": 11, "completion_tokens": 4},
-            },
-        )
+# Client construction
 
-    engine = _engine(
-        handler,
-        throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0)),
+
+@pytest.mark.asyncio
+async def test_llm_engine_builds_its_client_from_the_openai_factory(monkeypatch: pytest.MonkeyPatch):
+    built = _install_client_factories(monkeypatch)
+    calls = _install_chat(monkeypatch, reply=_Reply("ok"))
+    anthropic = _install_anthropic_completion(monkeypatch)
+
+    engine = LlmRcaEngine(
+        base_url="https://gateway.example/v1",
+        api_key="openai-token",
+        timeout_s=3.0,
+        throttle=_open_throttle(),
     )
-    try:
-        engine.set_tick(1)
-        await engine.summarize(_sym())
-        await engine.summarize(_sym(name="other_symptom"))
-    finally:
-        await engine.aclose()
+    engine.set_tick(1)
+    await engine.summarize(_sym(name="a", subject={"k": "1"}))
+    await engine.summarize(_sym(name="b", subject={"k": "2"}))
+
+    # Built lazily, exactly once, and never through the Anthropic entry point.
+    assert len(built["openai"]) == 1
+    assert anthropic.calls == []
+    assert built["openai"][0]["env"]["OPENAI_API_KEY"] == "openai-token"
+    assert built["openai"][0]["env"]["OPENAI_BASE_URL"] == "https://gateway.example/v1"
+    assert built["openai"][0]["timeout"] == {"connect": 3.0, "read": 3.0, "write": 3.0, "pool": 3.0}
+    assert calls[0]["client"] is calls[1]["client"] is engine.client
+
+
+@pytest.mark.asyncio
+async def test_anthropic_engine_calls_the_entry_point_without_in_process_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """llm_config resolves the credential, so only the budgets cross over.
+
+    Passing no base_url/api_key is the normal shape for a subscription-token
+    host, and the call must still be issued.
+    """
+    built = _install_client_factories(monkeypatch)
+    stub = _install_anthropic_completion(monkeypatch)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: True)
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", timeout_s=7.0, throttle=_open_throttle())
+    engine.set_tick(1)
+    await engine.summarize(_sym())
+
+    assert len(stub.calls) == 1
+    assert built["openai"] == [], "the Anthropic engine must not build an OpenAI client"
+    assert engine.client is None, "the Anthropic engine owns no client to leak"
+    # The CLI spends part of its budget spawning a process, so the HTTP-sized
+    # timeout is floored rather than forwarded.
+    assert stub.calls[0]["timeout_s"] >= 60.0
+
+
+@pytest.mark.asyncio
+async def test_anthropic_engine_hands_the_discovered_credentials_to_the_transport(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Config.discover may resolve the pair from provider-specific variables,
+    so the canonical names have to be overlaid before the transport reads
+    them — otherwise the CLI re-reads whatever the ambient environment holds."""
+    stub = _install_anthropic_completion(monkeypatch)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: True)
+
+    engine = AnthropicRcaEngine(
+        base_url="https://gw.example/anthropic",
+        api_key="discovered-key",
+        throttle=_open_throttle(),
+    )
+    engine.set_tick(1)
+    await engine.summarize(_sym())
+
+    env = stub.calls[0]["env"]
+    assert env["ANTHROPIC_API_KEY"] == "discovered-key"
+    assert env["ANTHROPIC_BASE_URL"] == "https://gw.example/anthropic"
+
+
+@pytest.mark.asyncio
+async def test_engine_disables_itself_after_a_missing_credential(monkeypatch: pytest.MonkeyPatch):
+    """A missing credential fails identically on every later tick, so it costs
+    one ERROR and stops the engine rather than a warning per symptom."""
+    calls: list[int] = []
+
+    async def _raise(**_kw: Any) -> Any:
+        calls.append(1)
+        raise llm_config.LLMConfigError("no Anthropic credential configured")
+
+    monkeypatch.setattr(f"{_LLM_CONFIG}.aanthropic_completion", _raise)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: True)
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", throttle=_open_throttle())
+    engine.set_tick(1)
+
+    assert await engine.summarize(_sym()) == ""
+    assert await engine.summarize(_sym()) == ""
+    assert len(calls) == 1, "the second tick must not retry a call that cannot succeed"
+
+
+@pytest.mark.asyncio
+async def test_engine_keeps_retrying_after_a_transient_failure(monkeypatch: pytest.MonkeyPatch):
+    """A provider-side error may well not recur, so it must not be latched."""
+    calls: list[int] = []
+
+    async def _raise(**_kw: Any) -> Any:
+        calls.append(1)
+        raise RuntimeError("anthropic messages failed: HTTP 503")
+
+    monkeypatch.setattr(f"{_LLM_CONFIG}.aanthropic_completion", _raise)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: True)
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", throttle=_open_throttle())
+    engine.set_tick(1)
+
+    await engine.summarize(_sym())
+    await engine.summarize(_sym())
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_engine_disables_itself_when_the_transport_disappears(monkeypatch: pytest.MonkeyPatch):
+    """The claude CLI going missing mid-run is permanent for this process, and
+    is recognised by re-probing rather than by matching the error text."""
+    ready = {"value": True}
+
+    async def _raise(**_kw: Any) -> Any:
+        ready["value"] = False
+        raise RuntimeError("the claude CLI is not available")
+
+    monkeypatch.setattr(f"{_LLM_CONFIG}.aanthropic_completion", _raise)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: ready["value"])
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", throttle=_open_throttle())
+    engine.set_tick(1)
+    await engine.summarize(_sym())
+
+    assert engine._disabled is True
+
+
+@pytest.mark.asyncio
+async def test_anthropic_engine_skips_when_no_transport_is_available(monkeypatch: pytest.MonkeyPatch):
+    """A host with no Anthropic credential — or a subscription token but no
+    claude CLI — must not retry a doomed call on every tick."""
+    stub = _install_anthropic_completion(monkeypatch)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: False)
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", throttle=_open_throttle())
+    engine.set_tick(1)
+
+    assert await engine.summarize(_sym()) == ""
+    assert stub.calls == []
+
+
+@pytest.mark.asyncio
+async def test_no_client_is_built_before_the_first_call(monkeypatch: pytest.MonkeyPatch):
+    built = _install_client_factories(monkeypatch)
+
+    engine = LlmRcaEngine(base_url="https://gateway.example/v1", api_key="openai-token")
+
+    assert engine.client is None
+    assert built["openai"] == []
+    await engine.aclose()
+
+
+@pytest.mark.asyncio
+async def test_aclose_closes_only_engine_owned_clients(monkeypatch: pytest.MonkeyPatch):
+    _install_client_factories(monkeypatch)
+    _install_chat(monkeypatch, reply=_Reply("ok"))
+
+    owned = LlmRcaEngine(base_url="https://gateway.example/v1", api_key="token", throttle=_open_throttle())
+    owned.set_tick(1)
+    await owned.summarize(_sym())
+    await owned.aclose()
+    assert owned.client.closed is True
+
+    injected = _StubClient()
+    borrowed = LlmRcaEngine(base_url="https://gateway.example/v1", api_key="token", client=injected)
+    await borrowed.aclose()
+    assert injected.closed is False
+
+
+@pytest.mark.asyncio
+async def test_anthropic_engine_aclose_is_a_noop_without_a_client(monkeypatch: pytest.MonkeyPatch):
+    """Nothing to close: the entry point owns any transport a call needs."""
+    _install_client_factories(monkeypatch)
+    _install_anthropic_completion(monkeypatch)
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", throttle=_open_throttle())
+    engine.set_tick(1)
+    await engine.summarize(_sym())
+    await engine.aclose()
+
+    assert engine.client is None
+
+
+# Usage ledger
+
+
+@pytest.mark.asyncio
+async def test_drain_usage_accumulates_and_resets(monkeypatch: pytest.MonkeyPatch):
+    _install_chat(monkeypatch, reply=_Reply("ok", usage=_OpenAIUsage(prompt_tokens=11, completion_tokens=4)))
+
+    engine = _engine(throttle=_open_throttle())
+    engine.set_tick(1)
+    await engine.summarize(_sym())
+    await engine.summarize(_sym(name="other_symptom"))
+
     usage = engine.drain_usage()
     assert usage is not None
     assert usage["calls"] == 2
@@ -233,11 +455,7 @@ async def test_drain_usage_accumulates_and_resets():
 
 @pytest.mark.asyncio
 async def test_drain_usage_none_without_calls():
-    engine = _engine(lambda r: httpx.Response(200, json={"choices": []}))
-    try:
-        assert engine.drain_usage() is None
-    finally:
-        await engine.aclose()
+    assert _engine().drain_usage() is None
 
 
 def test_noop_engine_drain_usage_is_none():
@@ -245,16 +463,14 @@ def test_noop_engine_drain_usage_is_none():
 
 
 @pytest.mark.asyncio
-async def test_drain_usage_counts_call_even_without_usage_block():
+async def test_drain_usage_counts_call_even_without_usage_block(monkeypatch: pytest.MonkeyPatch):
     # Provider omits a usage block: the call is still counted so the trace reflects it happened.
-    engine = _engine(
-        lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]}),
-    )
-    try:
-        engine.set_tick(1)
-        await engine.summarize(_sym())
-    finally:
-        await engine.aclose()
+    _install_chat(monkeypatch, reply=_Reply("ok"))
+
+    engine = _engine()
+    engine.set_tick(1)
+    await engine.summarize(_sym())
+
     usage = engine.drain_usage()
     assert usage is not None
     assert usage["calls"] == 1
@@ -262,185 +478,118 @@ async def test_drain_usage_counts_call_even_without_usage_block():
 
 
 @pytest.mark.asyncio
-async def test_llm_engine_truncates_to_max_chars():
-    long_text = "abcd" * 1000
+async def test_failed_call_is_not_counted_in_the_usage_ledger(monkeypatch: pytest.MonkeyPatch):
+    _install_chat(monkeypatch, error=RuntimeError("gateway down"))
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": long_text}}]},
-        )
+    engine = _engine()
+    engine.set_tick(1)
+    await engine.summarize(_sym())
 
-    engine = _engine(handler, max_chars=50)
-    try:
-        engine.set_tick(1)
-        text = await engine.summarize(_sym())
-    finally:
-        await engine.aclose()
-    assert len(text) == 50
-    assert text.endswith("...")
+    assert engine.drain_usage() is None
 
 
 @pytest.mark.asyncio
-async def test_llm_engine_handles_list_content_parts():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": [
-                                {"type": "text", "text": "Hello "},
-                                {"type": "text", "text": "World"},
-                            ]
-                        }
-                    }
-                ]
-            },
-        )
+async def test_llm_engine_truncates_to_max_chars(monkeypatch: pytest.MonkeyPatch):
+    _install_chat(monkeypatch, reply=_Reply("abcd" * 1000))
 
-    engine = _engine(handler)
-    try:
-        engine.set_tick(1)
-        text = await engine.summarize(_sym())
-    finally:
-        await engine.aclose()
-    assert text == "Hello World"
+    engine = _engine(max_chars=50)
+    engine.set_tick(1)
+    text = await engine.summarize(_sym())
+
+    assert len(text) == 50
+    assert text.endswith("...")
 
 
 # Throttle
 
 
 @pytest.mark.asyncio
-async def test_throttle_skips_low_severity_symptoms():
-    calls = 0
+async def test_throttle_skips_low_severity_symptoms(monkeypatch: pytest.MonkeyPatch):
+    calls = _install_chat(monkeypatch)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+    engine = _engine(throttle=RcaThrottle(RcaThrottleConfig(severity_min=SymptomSeverity.HIGH)))
+    engine.set_tick(1)
+    result = await engine.summarize(_sym(severity=SymptomSeverity.MEDIUM))
 
-    engine = _engine(handler, throttle=RcaThrottle(RcaThrottleConfig(severity_min=SymptomSeverity.HIGH)))
-    try:
-        engine.set_tick(1)
-        result = await engine.summarize(_sym(severity=SymptomSeverity.MEDIUM))
-    finally:
-        await engine.aclose()
     assert result == ""
-    assert calls == 0
+    assert calls == []
 
 
 @pytest.mark.asyncio
-async def test_throttle_caps_calls_per_tick():
-    calls = 0
+async def test_throttle_caps_calls_per_tick(monkeypatch: pytest.MonkeyPatch):
+    calls = _install_chat(monkeypatch)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+    engine = _engine(throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=1)))
+    engine.set_tick(1)
+    first = await engine.summarize(_sym(name="a", subject={"k": "1"}))
+    second = await engine.summarize(_sym(name="b", subject={"k": "2"}))
 
-    engine = _engine(handler, throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=1)))
-    try:
-        engine.set_tick(1)
-        first = await engine.summarize(_sym(name="a", subject={"k": "1"}))
-        second = await engine.summarize(_sym(name="b", subject={"k": "2"}))
-    finally:
-        await engine.aclose()
     assert first
     assert second == ""
-    assert calls == 1
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_throttle_resets_per_tick():
-    calls = 0
+async def test_throttle_resets_per_tick(monkeypatch: pytest.MonkeyPatch):
+    calls = _install_chat(monkeypatch)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+    engine = _engine(throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=1, cooldown_seconds=0.0)))
+    engine.set_tick(1)
+    await engine.summarize(_sym(name="a", subject={"k": "1"}))
+    engine.set_tick(2)
+    await engine.summarize(_sym(name="b", subject={"k": "2"}))
 
-    engine = _engine(handler, throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=1, cooldown_seconds=0.0)))
-    try:
-        engine.set_tick(1)
-        await engine.summarize(_sym(name="a", subject={"k": "1"}))
-        engine.set_tick(2)
-        await engine.summarize(_sym(name="b", subject={"k": "2"}))
-    finally:
-        await engine.aclose()
-    assert calls == 2
+    assert len(calls) == 2
 
 
 @pytest.mark.asyncio
-async def test_throttle_enforces_per_key_cooldown():
+async def test_throttle_enforces_per_key_cooldown(monkeypatch: pytest.MonkeyPatch):
     """Same dedup_key within cooldown window should not call again."""
-    calls = 0
+    calls = _install_chat(monkeypatch)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+    engine = _engine(throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=600.0)))
+    engine.set_tick(1)
+    first = await engine.summarize(_sym(name="x", subject={"k": "1"}))
+    engine.set_tick(2)
+    second = await engine.summarize(_sym(name="x", subject={"k": "1"}))
 
-    throttle = RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=600.0))
-    engine = _engine(handler, throttle=throttle)
-    try:
-        engine.set_tick(1)
-        first = await engine.summarize(_sym(name="x", subject={"k": "1"}))
-        engine.set_tick(2)
-        second = await engine.summarize(_sym(name="x", subject={"k": "1"}))
-    finally:
-        await engine.aclose()
     assert first
     assert second == ""
-    assert calls == 1
+    assert len(calls) == 1
 
 
 # Error paths
 
 
 @pytest.mark.asyncio
-async def test_llm_engine_returns_empty_on_500():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(503, json={"detail": "boom"})
+async def test_llm_engine_returns_empty_when_the_provider_call_fails(monkeypatch: pytest.MonkeyPatch):
+    _install_chat(monkeypatch, error=RuntimeError("503 Service Unavailable"))
 
-    engine = _engine(handler)
-    try:
-        engine.set_tick(1)
-        result = await engine.summarize(_sym())
-    finally:
-        await engine.aclose()
-    assert result == ""
+    engine = _engine()
+    engine.set_tick(1)
+
+    assert await engine.summarize(_sym()) == ""
 
 
 @pytest.mark.asyncio
-async def test_llm_engine_returns_empty_on_timeout():
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.TimeoutException("slow", request=request)
+async def test_anthropic_engine_returns_empty_when_the_provider_call_fails(monkeypatch: pytest.MonkeyPatch):
+    stub = _install_anthropic_completion(monkeypatch, error=TimeoutError("slow"))
+    engine = AnthropicRcaEngine(base_url="https://api.anthropic.com", api_key="key")
+    engine.set_tick(1)
 
-    engine = _engine(handler)
-    try:
-        engine.set_tick(1)
-        result = await engine.summarize(_sym())
-    finally:
-        await engine.aclose()
-    assert result == ""
+    assert await engine.summarize(_sym()) == ""
+    assert len(stub.calls) == 1, "the call must be attempted, not skipped"
 
 
 @pytest.mark.asyncio
-async def test_llm_engine_skips_when_credentials_missing():
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("should not be called")
+async def test_llm_engine_skips_when_credentials_missing(monkeypatch: pytest.MonkeyPatch):
+    calls = _install_chat(monkeypatch)
 
-    transport = httpx.MockTransport(handler)
-    client = httpx.AsyncClient(transport=transport, base_url="http://chat.test")
-    engine = LlmRcaEngine(base_url="", api_key="", client=client)
-    try:
-        engine.set_tick(1)
-        text = await engine.summarize(_sym())
-    finally:
-        await client.aclose()
-    assert text == ""
+    engine = LlmRcaEngine(base_url="", api_key="", client=_StubClient())
+    engine.set_tick(1)
+
+    assert await engine.summarize(_sym()) == ""
+    assert calls == []
 
 
 # System prompt asset
@@ -453,42 +602,15 @@ def test_load_rca_system_prompt_reads_package_asset():
 
 
 @pytest.mark.asyncio
-async def test_llm_engine_sends_asset_as_system_message():
-    captured: dict[str, object] = {}
+async def test_anthropic_engine_sends_asset_as_system_field(monkeypatch: pytest.MonkeyPatch):
+    stub = _install_anthropic_completion(monkeypatch)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content.decode())
-        captured["system_msg"] = body["messages"][0]["content"]
-        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
-
-    engine = _engine(handler)
-    try:
-        engine.set_tick(1)
-        await engine.summarize(_sym())
-    finally:
-        await engine.aclose()
-    assert captured["system_msg"] == load_rca_system_prompt()
-
-
-@pytest.mark.asyncio
-async def test_anthropic_engine_sends_asset_as_system_field():
-    captured: dict[str, object] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content.decode())
-        captured["system"] = body.get("system")
-        return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}]})
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com")
     engine = AnthropicRcaEngine(
         base_url="https://api.anthropic.com",
         api_key="key",
-        client=client,
-        throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0)),
+        throttle=_open_throttle(),
     )
-    try:
-        engine.set_tick(1)
-        await engine.summarize(_sym())
-    finally:
-        await client.aclose()
-    assert captured["system"] == load_rca_system_prompt()
+    engine.set_tick(1)
+    await engine.summarize(_sym())
+
+    assert stub.calls[0]["system"] == load_rca_system_prompt()

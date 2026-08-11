@@ -59,8 +59,8 @@ shell-exported value (if any) is kept.
 If neither source supplies a usable LLM endpoint (at least one of
 `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` and at least one of
 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` /
-`DEEPSEEK_API_KEY`), the CLI fails fast at startup with a message
-naming the missing pieces.
+`DEEPSEEK_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`), the CLI fails fast at startup
+with a message naming the missing pieces.
 
 Preflight also rejects a *mispaired* configuration: a base URL whose only key
 belongs to the other provider, or a key whose only endpoint would come from the
@@ -98,7 +98,8 @@ Downstream tooling reads the side it belongs to:
   (`LLM_API_KEY` / `AMD_LLM_API_KEY`).
 * Orchestration Claude uses the Anthropic-side base URL + key, including the
   generated `~/.claude/config.json` primary key.
-* Robustness-agent uses the OpenAI side for the optional LLM RCA engine.
+* Robustness-agent uses whichever side it discovers for the optional LLM RCA
+  engine, preferring the OpenAI side and falling back to the Anthropic one.
 * Critic-agent uses the OpenAI side for KB summary / synthesis calls.
 
 You *never* need to copy a key into the internal LLM slots in `.env`;
@@ -152,6 +153,26 @@ export CLAUDE_MODEL=orchestration-model-id-on-the-anthropic-side
 export CODEX_MODEL=model-id-on-the-openai-side
 ```
 
+### Anthropic-side credential forms
+
+The Anthropic side accepts three credentials. When more than one is set, the
+Claude CLI picks the first of these it finds, so a lower one is simply unused:
+
+| Variable                  | Billing                        | Obtained from        |
+|---------------------------|--------------------------------|----------------------|
+| `ANTHROPIC_API_KEY`       | API credits                    | Anthropic console / your gateway |
+| `ANTHROPIC_AUTH_TOKEN`    | API credits (gateway bearer)   | Your gateway         |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Max/Pro subscription    | `claude setup-token` |
+
+A subscription token alone is a complete Anthropic side: it implies
+`https://api.anthropic.com`, so `ANTHROPIC_BASE_URL` may stay unset. Hyperloom
+passes it through verbatim and never copies it into either API-key variable or
+into the `~/.claude/config.json` `primaryApiKey` field, because the CLI would
+then bill API credits instead of the subscription. For the same reason preflight
+warns when a token and an API key are set together. A subscription token is also
+not accepted by the gateway model-catalog probe, so preflight skips that probe
+and trusts the model id you passed.
+
 ### Non-AMD / self-hosted gateway
 
 Point `OPENAI_BASE_URL` and `OPENAI_API_KEY` (or the split keys above) at
@@ -169,6 +190,45 @@ stricter AMD Claude allowlist (`claude-opus-5` preferred, `claude-opus-4-8` /
 `claude-opus-4-7` / `claude-opus-4-6` fallback), set
 `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`.
 
+A gateway that exposes no `/models` route cannot be probed; preflight warns and
+proceeds instead of refusing to start, so no opt-in is needed for that case.
+
+### Gateways that require extra headers
+
+Some enterprise gateways authenticate on a header of their own — Azure API
+Management's `Ocp-Apim-Subscription-Key`, a corporate proxy's tenant header — in
+addition to, or instead of, the bearer key. AMD's own `llm-api.amd.com` gateway
+is one of them: it requires the API key to also travel as an
+`Ocp-Apim-Subscription-Key` header, which the guided setup writes for you when
+you pick that gateway. Supply it per side with `ANTHROPIC_CUSTOM_HEADERS` or
+`OPENAI_CUSTOM_HEADERS`. Both accept the Anthropic SDK's newline-delimited
+`Name: value` form, and a JSON object as a convenience for launchers that already
+store structured values.
+
+`${VAR}` references are expanded by Hyperloom from the same environment, so a
+single copy of the secret is enough. Quote the value so the space and the colon
+survive: use single quotes when exporting in a shell, and double quotes in
+`.env`, which setup and the launch scripts may load with `source`.
+
+```bash
+export ANTHROPIC_BASE_URL=https://<your-gateway-host>/api/v1/llm-proxy
+export ANTHROPIC_API_KEY=ak-your-gateway-apikey
+export ANTHROPIC_CUSTOM_HEADERS='Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}'
+```
+
+The Anthropic side reads only `ANTHROPIC_CUSTOM_HEADERS`. The OpenAI side reads
+`OPENAI_CUSTOM_HEADERS` whenever you set `OPENAI_BASE_URL` explicitly — that
+endpoint may be a different host, whose headers Hyperloom will not guess at. Only
+when the OpenAI base URL was *derived* from `ANTHROPIC_BASE_URL` (one gateway, no
+explicit OpenAI endpoint) does the OpenAI client fall back to
+`ANTHROPIC_CUSTOM_HEADERS`, because then both protocols are the same host and the
+subscription header was only ever written to the Anthropic variable. Headers are
+operator-supplied either way and are never synthesized from the configured keys.
+
+Both survive in `.env` across setup runs. An Anthropic-only deployment is the one
+exception: setup scrubs the whole OpenAI side there, header included, because that
+side is a second provider rather than part of the same gateway credential.
+
 ---
 
 ## Optional credentials
@@ -177,8 +237,13 @@ The following credentials are optional and only needed for specific backends.
 
 ### LLM RCA in robustness-agent
 
-`robustness-agent`'s LLM root-cause-analysis engine activates when an
-LLM base URL and API key are available (normally through the aliases above).
+`robustness-agent`'s LLM root-cause-analysis engine activates when the
+discovered provider can actually authenticate a call. For the OpenAI side that
+is a base URL and API key (normally through the aliases above). For the
+Anthropic side it is a usable transport, so a `CLAUDE_CODE_OAUTH_TOKEN` host
+qualifies with neither a base URL nor a key — the Claude CLI spends the token
+itself — provided that CLI is installed.
+
 Set `ROBUSTNESS_LLM_RCA_DISABLED=1` to force-disable it even when
 credentials are present.
 
@@ -236,7 +301,7 @@ At preflight, the inference optimizer CLI:
 - Writes `~/.claude/config.json`: `customApiUrl` is set to the resolved
   Anthropic-side base URL, and `primaryApiKey` to the Anthropic-side key
   (explicit `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` wins, else
-  `OPENAI_API_KEY`).
+  `OPENAI_API_KEY`). A `CLAUDE_CODE_OAUTH_TOKEN` is never written here.
 - Fills the internal LLM aliases from the OpenAI-side key for child processes;
   the per-provider primary keys and the GEAK aliases are not filled.
 

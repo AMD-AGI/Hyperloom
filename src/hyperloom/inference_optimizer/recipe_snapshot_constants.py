@@ -58,7 +58,7 @@ ORDER_BY_UPDATED_AT_ASC: Final[str] = "updated_at ASC"
 ORDER_BY_CREATED_AT_ASC: Final[str] = "created_at ASC"
 
 
-# Foreground GBrain reads use one fail-fast attempt on the Coordinator loop.
+# Foreground Recipe KB reads use one fail-fast attempt on the Coordinator loop.
 FOREGROUND_HTTP_TIMEOUT_SEC: Final[float] = 2.0  # Coordinator main loop
 
 # Default confidence when caller doesn't override (spec [0.0, 1.0]).

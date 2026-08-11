@@ -43,13 +43,13 @@ INSTALL_FRAMEWORK="none"
 _FRAMEWORK_ENV_WAS_SET="${FRAMEWORK_ENV+x}"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
-# Framework versions track docs/compatibility.rst (SGLang v0.5.12, ROCm 7.2).
-# vLLM installs 0.21.0+rocm722 from the wheels.vllm.ai pip index, matching the
-# v0.21.0 Docker image version. The pip index only publishes the rocm722
-# variant (no rocm720 wheel exists there), so the ROCm layer is 7.2.2. AITER_REF
+# Framework versions track docs/compatibility.rst (SGLang v0.5.16, ROCm 7.2).
+# vLLM installs 0.24.0+rocm723 from the wheels.vllm.ai pip index, matching the
+# v0.24.0 Docker image version. The pip index publishes 0.24.0 only as the
+# rocm723 variant (ROCm 7.2.3), so the ROCm layer is 7.2.3. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
-SGLANG_REF="${SGLANG_REF:-v0.5.12}"
+SGLANG_REF="${SGLANG_REF:-v0.5.16}"
 _SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
 _AITER_REF_WAS_SET="${AITER_REF+x}"
 SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-rocm720}"
@@ -62,8 +62,8 @@ fi
 SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-7.2.0}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
-VLLM_VERSION="${VLLM_VERSION:-0.21.0}"
-VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm722}"
+VLLM_VERSION="${VLLM_VERSION:-0.24.0}"
+VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm723}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
 VLLM_VENV_ROOT="${VLLM_VENV_ROOT:-/opt/hyperloom/vllm-venv}"
 REQUIRE_FRAMEWORKS=0
@@ -103,10 +103,11 @@ Options:
 
 Credential resolution (highest precedence first): env > .env > interactive
 prompt (TTY + not --yes). Configure Anthropic
-(ANTHROPIC_BASE_URL+ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN), matching runtime
-credential rules. A dual-protocol gateway such as DeepSeek additionally sets
-OPENAI_BASE_URL+OPENAI_API_KEY on the same host; retired DEEPSEEK_* values are
-migrated automatically.
+(ANTHROPIC_BASE_URL+ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN) or a Claude
+subscription token (CLAUDE_CODE_OAUTH_TOKEN, from "claude setup-token"),
+matching runtime credential rules. A dual-protocol gateway such as DeepSeek
+additionally sets OPENAI_BASE_URL+OPENAI_API_KEY on the same host; retired
+DEEPSEEK_* values are migrated automatically.
 Env overrides honored: REPO_ROOT,
 USER_DATA_PATH, HYPERLOOM_DEPS_ROOT / HYPERLOOM_CACHE_DIR,
 PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON,
@@ -158,7 +159,7 @@ warn() { echo "[install-baremetal WARN] $*" >&2; }
 die() { echo "[install-baremetal ERROR] $*" >&2; exit 1; }
 
 IMAGE_HINT="Provision the ROCm framework base first (run inside an AMD ROCm \
-SGLang/vLLM image such as primussafe/sglang:*-rocm*-mi30x|mi35x-profilerfix, or \
+SGLang/vLLM image such as rocm/hyperloom:sglang-*-rocm7.2.0-mi300x|mi350x, or \
 install an equivalent ROCm torch + framework stack), then re-run."
 
 is_interactive() { [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; }
@@ -774,16 +775,22 @@ PY
     # +git<sha>) that PyPI lacks, so an exact pin forces the ROCm build; vLLM then
     # reuses the already-satisfied torch.
     rocm_torch_ver="$("$py" - "$VLLM_ROCM_INDEX" <<'PY'
-import re, sys, urllib.request
+import re, sys, urllib.request, urllib.error
 
 base = sys.argv[1].rstrip("/") + "/torch/"
 try:
     html = urllib.request.urlopen(base, timeout=30).read().decode()
-except Exception:
+except urllib.error.HTTPError as e:
+    print("index unreachable: HTTP %s at %s" % (e.code, base), file=sys.stderr)
+    raise SystemExit(0)
+except Exception as e:
+    print("index unreachable: %s at %s" % (e, base), file=sys.stderr)
     raise SystemExit(0)
 # Match the plain "+local" form (e.g. 2.10.0+git8514f05); URL-encoded %2B
 # anchors are skipped so the pinned spec stays pip-usable.
 matches = re.findall(r"torch-([0-9][0-9A-Za-z.]*\+[0-9A-Za-z.]+)-cp", html)
+if not matches:
+    print("index reachable but no torch wheel matched at %s" % base, file=sys.stderr)
 print(matches[-1] if matches else "")
 PY
 )"
@@ -1105,7 +1112,8 @@ migrate_legacy_deepseek_env() {
   # would send an explicit Anthropic credential to DeepSeek's host.
   if [ -n "${ANTHROPIC_BASE_URL:-$(read_dotenv_var ANTHROPIC_BASE_URL || true)}" ] \
      || [ -n "${ANTHROPIC_API_KEY:-$(read_dotenv_var ANTHROPIC_API_KEY || true)}" ] \
-     || [ -n "${ANTHROPIC_AUTH_TOKEN:-$(read_dotenv_var ANTHROPIC_AUTH_TOKEN || true)}" ]; then
+     || [ -n "${ANTHROPIC_AUTH_TOKEN:-$(read_dotenv_var ANTHROPIC_AUTH_TOKEN || true)}" ] \
+     || [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-$(read_dotenv_var CLAUDE_CODE_OAUTH_TOKEN || true)}" ]; then
     warn "DEEPSEEK_* is retired and ignored here: the Anthropic side is already configured"
     return 0
   fi
@@ -1150,6 +1158,7 @@ migrate_legacy_deepseek_env() {
 resolve_credentials() {
   log "Phase 4: credentials"
   local anthropic_key anthropic_token anthropic_url
+  local oauth_token dv_oauth_token
   local dv_anthropic_key dv_anthropic_token dv_anthropic_url
   local has_url=0 has_key=0 setup_env_authoritative=0 setup_llm_mode=""
 
@@ -1169,6 +1178,7 @@ resolve_credentials() {
   # .env fallbacks (used only for values missing from process env).
   dv_anthropic_key="$(read_dotenv_var ANTHROPIC_API_KEY || true)"
   dv_anthropic_token="$(read_dotenv_var ANTHROPIC_AUTH_TOKEN || true)"
+  dv_oauth_token="$(read_dotenv_var CLAUDE_CODE_OAUTH_TOKEN || true)"
   dv_anthropic_url="$(read_dotenv_var ANTHROPIC_BASE_URL || true)"
   setup_llm_mode="$(read_dotenv_var HYPERLOOM_LLM_MODE || true)"
   setup_llm_mode="$(echo "$setup_llm_mode" | tr '[:upper:]' '[:lower:]')"
@@ -1178,7 +1188,7 @@ resolve_credentials() {
     setup_env_authoritative=1
   fi
   if [ "$setup_env_authoritative" -eq 1 ] && [ -z "$setup_llm_mode" ]; then
-    if [ -n "$dv_anthropic_key" ] || [ -n "$dv_anthropic_token" ] || [ -n "$dv_anthropic_url" ]; then
+    if [ -n "$dv_anthropic_key" ] || [ -n "$dv_anthropic_token" ] || [ -n "$dv_oauth_token" ] || [ -n "$dv_anthropic_url" ]; then
       setup_llm_mode="anthropic"
     fi
   fi
@@ -1189,6 +1199,7 @@ resolve_credentials() {
   # Precedence: process env > .env.
   anthropic_key="${ANTHROPIC_API_KEY:-$dv_anthropic_key}"
   anthropic_token="${ANTHROPIC_AUTH_TOKEN:-$dv_anthropic_token}"
+  oauth_token="${CLAUDE_CODE_OAUTH_TOKEN:-$dv_oauth_token}"
   anthropic_url="${ANTHROPIC_BASE_URL:-$dv_anthropic_url}"
 
   # A dual-protocol gateway serves both protocols from ONE host, so its OpenAI
@@ -1227,22 +1238,29 @@ resolve_credentials() {
     fi
   fi
 
-  if [ -z "$anthropic_key" ] && [ -z "$anthropic_token" ] && is_interactive; then
+  if [ -z "$anthropic_key" ] && [ -z "$anthropic_token" ] && [ -z "$oauth_token" ] && is_interactive; then
     read -rsp "[install-baremetal] Enter Anthropic API key (or leave blank if already configured): " anthropic_key; echo >&2
   fi
 
   # Reject one provider's base URL paired with only the other provider's key,
   # matching the CLI preflight.
   local _x_akey _x_aend _x_conflict=""
-  _x_akey="${anthropic_key:-${anthropic_token:-}}"
+  _x_akey="${anthropic_key:-${anthropic_token:-${oauth_token:-}}}"
   _x_aend="${anthropic_url:-}"
+  # A subscription token only validates against Anthropic itself, so it implies
+  # the official endpoint and needs no ANTHROPIC_BASE_URL.
+  if [ -z "$_x_aend" ] && [ -n "$oauth_token" ]; then
+    _x_aend="https://api.anthropic.com"
+  fi
   if [ -n "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -n "$_x_akey" ]; then
     _x_conflict="OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an Anthropic-side key is configured"
   elif [ -n "$anthropic_url" ] && [ -z "$_x_akey" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
     _x_conflict="ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an OPENAI_API_KEY is configured"
   elif [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "$_x_akey" ] && [ -z "$_x_aend" ]; then
     _x_conflict="an Anthropic-side key is configured without ANTHROPIC_BASE_URL, while the OpenAI side points at OPENAI_BASE_URL"
-  elif [ -n "$_x_aend" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
+  # Only an explicit ANTHROPIC_BASE_URL signals a gateway-shaped deploy whose
+  # OPENAI_API_KEY is likely a gateway key missing its own URL.
+  elif [ -n "$anthropic_url" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
     _x_conflict="OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the Anthropic side points at ANTHROPIC_BASE_URL"
   fi
   if [ -n "$_x_conflict" ]; then
@@ -1253,13 +1271,13 @@ resolve_credentials() {
     fi
   fi
 
-  [ -n "$anthropic_url" ] && has_url=1
-  { [ -n "$anthropic_key" ] || [ -n "$anthropic_token" ]; } && has_key=1
+  { [ -n "$anthropic_url" ] || [ -n "$oauth_token" ]; } && has_url=1
+  { [ -n "$anthropic_key" ] || [ -n "$anthropic_token" ] || [ -n "$oauth_token" ]; } && has_key=1
   if [ "$has_url" -eq 0 ] || [ "$has_key" -eq 0 ]; then
     if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
       warn "LLM credentials not fully resolved (continuing: --check-only / --dry-run)"
     else
-      die "no usable LLM endpoint: configure ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN. A dual-protocol gateway such as DeepSeek also sets OPENAI_BASE_URL + OPENAI_API_KEY."
+      die "no usable LLM endpoint: configure ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN, or a Claude subscription token (CLAUDE_CODE_OAUTH_TOKEN). A dual-protocol gateway such as DeepSeek also sets OPENAI_BASE_URL + OPENAI_API_KEY."
     fi
   fi
 
@@ -1267,6 +1285,9 @@ resolve_credentials() {
   # inference_optimizer skill install and CLI preflight.
   [ -n "$anthropic_key" ] && export ANTHROPIC_API_KEY="$anthropic_key"
   [ -n "$anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$anthropic_token"
+  # Subscription token stays in its own variable; mirroring it into an API-key
+  # slot would move the run onto API billing.
+  [ -n "$oauth_token" ] && export CLAUDE_CODE_OAUTH_TOKEN="$oauth_token"
   [ -n "$anthropic_url" ] && export ANTHROPIC_BASE_URL="$anthropic_url"
 
   # Persist resolved values to .env (skip on check-only / dry-run).
@@ -1282,15 +1303,25 @@ resolve_credentials() {
     else
       remove_dotenv_var ANTHROPIC_BASE_URL
     fi
+    # Persisted under its own key, never folded into an API-key slot.
+    if [ -n "$oauth_token" ]; then
+      upsert_dotenv_var CLAUDE_CODE_OAUTH_TOKEN "$oauth_token"
+    else
+      remove_dotenv_var CLAUDE_CODE_OAUTH_TOKEN
+    fi
     if [ "$DUAL_PROTOCOL_GATEWAY" -eq 1 ]; then
       [ -n "${OPENAI_BASE_URL:-}" ] && upsert_dotenv_var OPENAI_BASE_URL "$OPENAI_BASE_URL"
       [ -n "${OPENAI_API_KEY:-}" ] && upsert_dotenv_var OPENAI_API_KEY "$OPENAI_API_KEY"
       [ -n "${CLAUDE_MODEL:-}" ] && upsert_dotenv_var CLAUDE_MODEL "$CLAUDE_MODEL"
       [ -n "${CODEX_MODEL:-}" ] && upsert_dotenv_var CODEX_MODEL "$CODEX_MODEL"
     elif [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
-      # Anthropic-only deployment: scrub the other provider's entries.
+      # Anthropic-only deployment: scrub the other provider's entries. The
+      # custom header belongs to that side, so it leaves with its URL and key --
+      # a dual-protocol gateway takes the branch above and keeps all three,
+      # which is the only place a header-authenticated OpenAI route is stored.
       remove_dotenv_var OPENAI_API_KEY
       remove_dotenv_var OPENAI_BASE_URL
+      remove_dotenv_var OPENAI_CUSTOM_HEADERS
     fi
     # Drop the retired keys only now: dropping them inside the migration would
     # discard the operator's only copy if validation above had bailed out.
@@ -1301,7 +1332,6 @@ resolve_credentials() {
     fi
     remove_dotenv_var LLM_GATEWAY_KEY
     remove_dotenv_var ANTHROPIC_AUTH_TOKEN
-    remove_dotenv_var OPENAI_CUSTOM_HEADERS
     # Legacy gateway key: not read, purged if present.
     remove_dotenv_var SAFE_API_KEY
     log "credentials written to ${DOTENV}"

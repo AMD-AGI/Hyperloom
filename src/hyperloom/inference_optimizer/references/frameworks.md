@@ -2,9 +2,8 @@
 
 ## Framework Selection
 
-A session is single-framework. Pick `sglang` (default), `vllm`, `atom`, `xdit`,
-`hunyuan_image3`, or `custom` via `--framework` or
-`$FRAMEWORK`:
+A session is single-framework. Pick `sglang` (default), `vllm`, `atom`, `xdit`
+or `custom` via `--framework` or `$FRAMEWORK`:
 
 ```bash
 python3 -m hyperloom.inference_optimizer.cli optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
@@ -18,8 +17,8 @@ Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
 
 What this controls:
 - Which Magpie YAML the executors default to —
-  `baseline_{sglang,vllm,atom,xdit,hunyuan_image3}.yaml`
-  and `profile_{sglang,vllm,atom,xdit,hunyuan_image3}.yaml`. The per-framework resolver
+  `baseline_{sglang,vllm,atom,xdit,custom}.yaml` and
+  `profile_{sglang,vllm,atom,xdit,custom}.yaml`. The per-framework resolver
   `_default_profile_config()` in `src/hyperloom/orchestrator/actions/executors/profile.py` picks the right
   file from `$FRAMEWORK`.
 - Which framework-specific seed grid the `explore` action falls back to when no
@@ -32,7 +31,7 @@ What this controls:
   `error_class="empty_grid"` on a cold-start with no LLM input.
 - Which extra-args env name `_grid_runner` writes (`EXTRA_VLLM_ARGS` /
   `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS` / `EXTRA_XDIT_ARGS` /
-  `EXTRA_HUNYUAN_IMAGE3_ARGS` / `EXTRA_CUSTOM_ARGS`).
+  `EXTRA_CUSTOM_ARGS`).
 - Which KB partition orchestration reads for hints.
 
 Mixing frameworks in a single session is not supported; the CLI locks

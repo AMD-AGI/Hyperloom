@@ -22,12 +22,14 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from tracelens_analysis import (  # noqa: E402
     _flydsl_kernel_params,
+    _flydsl_reusable_roots,
     _looks_like_flydsl_source,
     classify_patchability,
     derive_kernel_category,
     enrich_candidates_with_runtime_metadata,
     source_type_for,
 )
+import apply_kernel_patch  # noqa: E402
 import kernel_optimization  # noqa: E402
 
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "flydsl_naive_gemm.py"
@@ -97,6 +99,52 @@ class TestFlyDSLNaiveGemmEndToEnd(unittest.TestCase):
             kernel_optimization._GEAK_KERNEL_TYPE["flydsl"],
             "flydsl",
         )
+
+
+class TestFlyDSLReachesTheApplyGate(unittest.TestCase):
+    """A source the discovery gate admits must also survive the apply gate."""
+
+    def setUp(self) -> None:
+        apply_kernel_patch._CACHED_KNOWN_TARGET_ROOTS = None
+        self.addCleanup(
+            setattr,
+            apply_kernel_patch,
+            "_CACHED_KNOWN_TARGET_ROOTS",
+            None,
+        )
+
+    def test_apply_roots_include_flydsl(self) -> None:
+        with mock.patch.dict(os.environ, {"FLYDSL_ROOT": FIXTURE_DIR}):
+            roots = apply_kernel_patch.known_target_roots()
+        self.assertTrue(any("flydsl" in r.lower() for r in roots), roots)
+
+    def test_detect_strategy_admits_a_flydsl_target(self) -> None:
+        with mock.patch.dict(os.environ, {"FLYDSL_ROOT": FIXTURE_DIR}):
+            strategy = apply_kernel_patch._detect_strategy(
+                FIXTURE_PATH,
+                allow_unknown_target=False,
+            )
+        self.assertEqual(strategy["root"], FIXTURE_DIR.rstrip("/"))
+        # FlyDSL compiles at import time, so nothing is rebuilt.
+        self.assertEqual(strategy["rebuild_command"], [])
+        self.assertEqual(strategy["artifact_roots"], [])
+        self.assertFalse(strategy["compiled"])
+
+    def test_root_keeps_the_on_disk_spelling(self) -> None:
+        # The root list carries a lower-cased variant of every env root, and
+        # snapshot mode resolves the patch destination under the returned root,
+        # so a spelling that does not exist on disk would fabricate a tree.
+        with mock.patch.dict(os.environ, {"FLYDSL_ROOT": FIXTURE_DIR.lower()}):
+            root = apply_kernel_patch._flydsl_root_for(FIXTURE_PATH)
+        self.assertIsNotNone(root)
+        self.assertTrue(root.is_dir(), root)
+        self.assertTrue(str(FIXTURE_PATH).startswith(f"{root}/"), root)
+
+    def test_discovery_and_apply_agree_on_the_flydsl_roots(self) -> None:
+        with mock.patch.dict(os.environ, {"DSL2_ROOT": FIXTURE_DIR}):
+            discovery = set(_flydsl_reusable_roots())
+            apply_roots = {r.lower() for r in apply_kernel_patch.known_target_roots()}
+        self.assertTrue(discovery <= apply_roots, discovery - apply_roots)
 
 
 if __name__ == "__main__":

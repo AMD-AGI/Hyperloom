@@ -43,6 +43,41 @@ class ConversationCollaborator:
         backend = self.backends.get("orchestration")
         return bool(getattr(backend, "conversational", False))
 
+    def _orchestration_context_tools_mounted(self) -> bool:
+        """True when the orchestration backend really exposes the pull tools.
+
+        Returns:
+            ``True`` when the backend reports the read-only context tools live;
+            backends without them (and a failed MCP build) report ``False``.
+        """
+        return bool(getattr(self.backends.get("orchestration"), "context_tools_mounted", False))
+
+    def _orchestration_needs_seed(self, system_prompt: str | None = None) -> bool:
+        """True when the orchestration backend lost the history a delta assumes.
+
+        Only the backend knows when the conversation underneath it was
+        replaced — a session-scoped provider re-opens its thread on a re-scoped
+        system prompt or after a turn that never landed. Backends that keep no
+        conversation report nothing and the seeded flag alone decides.
+
+        The answer has to describe the turn that is *about* to run: a re-scoped
+        system prompt replaces the thread inside the turn, so a backend asked
+        only about the thread as it stands would report history that this turn is
+        going to discard. ``needs_seed_for`` answers for the pending prompt;
+        ``needs_seed`` is the fallback for backends that cannot.
+
+        Args:
+            system_prompt: The system prompt this turn will carry, when known.
+
+        Returns:
+            ``True`` when the backend reports a conversation with no history.
+        """
+        backend = self.backends.get("orchestration")
+        ask = getattr(backend, "needs_seed_for", None)
+        if callable(ask):
+            return bool(ask(system_prompt))
+        return bool(getattr(backend, "needs_seed", False))
+
     def _reset_orchestration_conversation(self) -> None:
         """Force the next orchestration turn to re-seed a fresh conversation."""
         backend = self.backends.get("orchestration")
@@ -383,12 +418,15 @@ class ConversationCollaborator:
                 exc_info=True,
             )
 
-    async def _compose_prompt(self, agent_name: str) -> str:
+    async def _compose_prompt(self, agent_name: str, *, system_prompt: str | None = None) -> str:
         """Compose the orchestration prompt: SharedState summary + inbox tail (with canonical msg_id per inbox row).
 
         Args:
             agent_name: The agent role to compose the per-tick prompt for;
                 selects which advisory/telemetry sections are included.
+            system_prompt: The system prompt the turn will carry. The SEED/DELTA
+                gate needs it because a re-scoped prompt empties the backend's
+                conversation inside the turn this prompt is being built for.
 
         Returns:
             The assembled prompt string for this agent's reactor turn.
@@ -413,7 +451,11 @@ class ConversationCollaborator:
         # Conversational delta gating: first turn gets full SEED, later turns thin DELTA.
         push_full = True
         if agent_name == "orchestration":
-            push_full = not self._orchestration_conversational() or not self._orchestration_seeded
+            push_full = (
+                not self._orchestration_conversational()
+                or not self._orchestration_seeded
+                or self._orchestration_needs_seed(system_prompt)
+            )
             if self._orchestration_conversational():
                 log.info(
                     "orchestration prompt mode=%s seeded=%s tick=%s",
@@ -603,19 +645,33 @@ class ConversationCollaborator:
                 sections.append("=== Acceptance threshold (advisory) ===")
                 sections.append(accept_block)
 
-        # Conversational DELTA turn: tell the agent verbose state was not re-pushed + how to pull it.
+        # Conversational DELTA turn: tell the agent verbose state was not
+        # re-pushed. Where to find it depends on what the backend mounted —
+        # pointing a tool-less session at the context tools is an instruction
+        # it cannot follow, and the state is still in its conversation anyway.
         if agent_name == "orchestration" and not push_full:
-            tool_list = ", ".join(_CONTEXT_TOOL_NAMES)
-            sections.append("=== Context (pull on demand) ===")
-            sections.append(
+            preamble = (
                 "This is a continuation of our ongoing conversation; the "
                 "full session state was NOT re-pasted. The Phase, Mission "
                 "progress, Time budget, and new inbox events above are the "
-                "delta since your last turn. Pull anything else you need "
-                f"with the read-only context tools: {tool_list} "
-                "(and `Read` for sandboxed files). Reason "
-                "from your own running plan; do not re-derive it from scratch."
+                "delta since your last turn. "
             )
+            if self._orchestration_context_tools_mounted():
+                tool_list = ", ".join(_CONTEXT_TOOL_NAMES)
+                sections.append("=== Context (pull on demand) ===")
+                sections.append(
+                    preamble + "Pull anything else you need "
+                    f"with the read-only context tools: {tool_list} "
+                    "(and `Read` for sandboxed files). Reason "
+                    "from your own running plan; do not re-derive it from scratch."
+                )
+            else:
+                sections.append("=== Context (delta turn) ===")
+                sections.append(
+                    preamble + "Everything omitted was pushed earlier in this "
+                    "same conversation; re-read it above. Reason from your own "
+                    "running plan; do not re-derive it from scratch."
+                )
 
         # NOTE: there is deliberately no "=== Specialist health ===" block.
         # This prompt renders only on an agent's own turn, and a turn only
