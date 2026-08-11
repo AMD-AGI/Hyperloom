@@ -250,15 +250,26 @@ def test_reset_claude_config_leaves_file_alone_for_oauth_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """primaryApiKey is API-credits billing; with only a subscription token there
-    is no key to write, so the installers' no-op behaviour applies here too."""
+    is no key to write, so the installers' no-op behaviour applies here too.
+
+    Path.home() is patched rather than HOME: the function returns before ever
+    resolving a home directory here, so an assertion that the file is absent
+    would hold even if the environment override had done nothing at all.
+    """
     from hyperloom.inference_optimizer.cli import credentials
 
     oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
     monkeypatch.setenv(oauth_env, "sk-ant-oat01-fake")
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    # Pre-seeded so "left alone" is observable rather than indistinguishable
+    # from "was never going to be written".
+    cfg_path = tmp_path / ".claude" / "config.json"
+    cfg_path.parent.mkdir(parents=True)
+    cfg_path.write_text('{"customApiUrl": "https://operator.example"}\n', encoding="utf-8")
+
     credentials._reset_claude_config_to_upstream("sk-ant-oat01-fake", "https://api.anthropic.com")
 
-    assert not (tmp_path / ".claude" / "config.json").exists()
+    assert json.loads(cfg_path.read_text(encoding="utf-8")) == {"customApiUrl": "https://operator.example"}
 
 
 def test_reset_claude_config_preserves_existing_file_for_oauth_only(
@@ -269,7 +280,7 @@ def test_reset_claude_config_preserves_existing_file_for_oauth_only(
 
     oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
     monkeypatch.setenv(oauth_env, "sk-ant-oat01-fake")
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
     cfg_path = tmp_path / ".claude" / "config.json"
     cfg_path.parent.mkdir(parents=True)
     cfg_path.write_text('{"theme": "light", "oauthAccount": {"emailAddress": "a@b.c"}}\n', encoding="utf-8")
