@@ -54,9 +54,12 @@ def _official_openai_only() -> bool:
 def _resolve_critic_protocol(requested: str, *, provider_anthropic_only: bool) -> str:
     """Pick the critic's review protocol and verify that side is configured.
 
-    ``auto`` reproduces the historical derivation. An explicit choice is a hard
-    contract: a missing credential fails at startup instead of silently routing
-    the review somewhere the operator did not ask for.
+    ``auto`` reproduces the historical derivation, with one widening: a
+    subscription token now counts as a configured Anthropic side, so an
+    oauth-only host resolves to ``anthropic`` instead of falling through to an
+    OpenAI side it does not have. An explicit choice is a hard contract: a
+    missing credential fails at startup instead of silently routing the review
+    somewhere the operator did not ask for.
 
     Args:
         requested: One of :data:`CRITIC_PROTOCOL_CHOICES`.

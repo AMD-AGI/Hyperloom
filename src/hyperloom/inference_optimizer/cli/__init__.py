@@ -2342,13 +2342,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     kernel_str = "DISABLED" if no_kernel else "programmatic"
     if critic_choice == "mock":
         critic_str = "mock"
-    elif _backend_kind("critic") == "Claude":
-        critic_str = f"Claude({args.claude_model})"
     else:  # "agent"
-        # Provider-only (Anthropic / DeepSeek) drives the review over the Claude
-        # model; an OpenAI-compatible gateway drives it over Codex.
-        _review_model = args.claude_model if _codex_model_should_follow_claude() else args.codex_model
-        critic_str = f"critic-agent(kb={critic_kb_mode}, model={_review_model}, root={critic_agent_root})"
+        # Read off the backend rather than re-derived from the environment:
+        # --critic-protocol can override that derivation, and the banner would
+        # then report the model of a transport this run is not using.
+        _review_protocol = str(getattr(backends.get("critic"), "protocol", "") or "openai")
+        _review_model = args.claude_model if _review_protocol == "anthropic" else args.codex_model
+        critic_str = (
+            f"critic-agent(kb={critic_kb_mode}, protocol={_review_protocol}, "
+            f"model={_review_model}, root={critic_agent_root})"
+        )
     if robustness_choice == "mock":
         robustness_str = "mock"
     else:

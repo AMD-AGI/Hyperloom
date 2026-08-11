@@ -20,8 +20,8 @@ missing fails at startup rather than silently changing the review quality.
 | Value | Behaviour |
 |---|---|
 | `auto` (default) | Anthropic-only config picks `anthropic`; everything else picks `openai`. |
-| `openai` | `AsyncOpenAI.chat.completions`. Needs `OPENAI_API_KEY`, `LLM_GATEWAY_KEY` or `DEEPSEEK_API_KEY`. |
-| `anthropic` | `ClaudeBackend(raw_completion=True)`, i.e. the `claude` CLI. Needs an Anthropic-side credential, including `CLAUDE_CODE_OAUTH_TOKEN`. |
+| `openai` | `achat_completion`, i.e. `AsyncOpenAI.chat.completions`. Needs whatever `resolve_openai_client_config` accepts: `OPENAI_API_KEY`, `LLM_GATEWAY_KEY`, or an Anthropic gateway bearer whose base URL can be derived. A gateway key with no resolvable base URL is rejected, since it would be sent to official OpenAI. |
+| `anthropic` | `aanthropic_completion`, which picks the transport: the Messages API for an API key or gateway bearer, the `claude` CLI only when `CLAUDE_CODE_OAUTH_TOKEN` is the sole credential. |
 
 Force `anthropic` when both sides are configured but the Critic should run on a
 Claude subscription; `auto` would otherwise choose the OpenAI transport.

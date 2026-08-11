@@ -769,14 +769,15 @@ Both transports run the full critic-agent runtime; only the review reasoning
 call differs. There is no degraded critic, so a transport whose credentials are
 missing fails at startup rather than silently changing the review quality.
 
-| Value | Behaviour |
-|---|---|
-| `auto` (default) | Anthropic-only config picks `anthropic`; everything else picks `openai`. |
-| `openai` | `AsyncOpenAI.chat.completions`. Needs `OPENAI_API_KEY`, `LLM_GATEWAY_KEY` or `DEEPSEEK_API_KEY`. |
-| `anthropic` | `ClaudeBackend(raw_completion=True)`, i.e. the `claude` CLI. Needs an Anthropic-side credential, including `CLAUDE_CODE_OAUTH_TOKEN`. |
+`auto` (the default) picks `anthropic` for an Anthropic-only config and `openai`
+otherwise. Force `anthropic` when both sides are configured but the Critic
+should run on a Claude subscription; `auto` would otherwise choose the OpenAI
+transport.
 
-Force `anthropic` when both sides are configured but the Critic should run on a
-Claude subscription; `auto` would otherwise choose the OpenAI transport.
+Per-value behaviour and the exact credential each one accepts are in
+[references/critic.md](references/critic.md#review-transport---critic-protocol-autoopenaianthropic).
+That table lived here in duplicate and had already drifted from the code once,
+so it is kept in one place.
 
 ### Required env when `--critic-agent` is active
 
