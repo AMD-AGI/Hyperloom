@@ -246,6 +246,78 @@ def test_credentials_validate_and_reset_claude_config(tmp_path: Path, monkeypatc
     credentials._reset_claude_config_to_upstream("ignored", "https://anthropic.example")
 
 
+def test_reset_claude_config_leaves_file_alone_for_oauth_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """primaryApiKey is API-credits billing; with only a subscription token there
+    is no key to write, so the installers' no-op behaviour applies here too.
+
+    Path.home() is patched rather than HOME: the function returns before ever
+    resolving a home directory here, so an assertion that the file is absent
+    would hold even if the environment override had done nothing at all.
+    """
+    from hyperloom.inference_optimizer.cli import credentials
+
+    oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
+    monkeypatch.setenv(oauth_env, "sk-ant-oat01-fake")
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    # Pre-seeded so "left alone" is observable rather than indistinguishable
+    # from "was never going to be written".
+    cfg_path = tmp_path / ".claude" / "config.json"
+    cfg_path.parent.mkdir(parents=True)
+    cfg_path.write_text('{"customApiUrl": "https://operator.example"}\n', encoding="utf-8")
+
+    credentials._reset_claude_config_to_upstream("sk-ant-oat01-fake", "https://api.anthropic.com")
+
+    assert json.loads(cfg_path.read_text(encoding="utf-8")) == {"customApiUrl": "https://operator.example"}
+
+
+def test_reset_claude_config_refuses_a_token_that_also_sits_in_the_key_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one shape where this guard is the only thing standing in the way.
+
+    An operator who exports the same subscription token into both variables
+    makes anthropic_synthesizable_key() return it, so preflight hands it in as
+    the primary key and the subscription-mode check below sees a synthesizable
+    key and declines to fire. Without this guard the token is persisted into
+    ~/.claude/config.json, which both leaks it to disk and moves the run onto
+    API billing.
+    """
+    from hyperloom.inference_optimizer.cli import credentials
+
+    token = "sk-ant-oat01-same"
+    monkeypatch.setenv("_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")), token)
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), token)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+
+    credentials._reset_claude_config_to_upstream(token, "https://api.anthropic.com")
+
+    payload = json.loads((tmp_path / ".claude" / "config.json").read_text(encoding="utf-8"))
+    assert payload["primaryApiKey"] == "", "the subscription token must never be persisted"
+    assert payload["customApiUrl"] == "https://api.anthropic.com"
+
+
+def test_reset_claude_config_preserves_existing_file_for_oauth_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator's logged-in Claude config survives an oauth-only preflight."""
+    from hyperloom.inference_optimizer.cli import credentials
+
+    oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
+    monkeypatch.setenv(oauth_env, "sk-ant-oat01-fake")
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    cfg_path = tmp_path / ".claude" / "config.json"
+    cfg_path.parent.mkdir(parents=True)
+    cfg_path.write_text('{"theme": "light", "oauthAccount": {"emailAddress": "a@b.c"}}\n', encoding="utf-8")
+
+    credentials._reset_claude_config_to_upstream("", "https://api.anthropic.com")
+
+    payload = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert payload == {"theme": "light", "oauthAccount": {"emailAddress": "a@b.c"}}
+
+
 # ---------------------------------------------------------------------------
 # inference_optimizer.cli.recover
 # ---------------------------------------------------------------------------

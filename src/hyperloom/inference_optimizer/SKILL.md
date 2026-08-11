@@ -763,6 +763,22 @@ flag needed).
 Default is overridable per pod via
 `INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` (one of `mock` / `agent`).
 
+### Review transport: `--critic-protocol {auto,openai,anthropic}`
+
+Both transports run the full critic-agent runtime; only the review reasoning
+call differs. There is no degraded critic, so a transport whose credentials are
+missing fails at startup rather than silently changing the review quality.
+
+`auto` (the default) picks `anthropic` for an Anthropic-only config and `openai`
+otherwise. Force `anthropic` when both sides are configured but the Critic
+should run on a Claude subscription; `auto` would otherwise choose the OpenAI
+transport.
+
+Per-value behaviour and the exact credential each one accepts are in
+[references/critic.md](references/critic.md#review-transport---critic-protocol-autoopenaianthropic).
+That table lived here in duplicate and had already drifted from the code once,
+so it is kept in one place.
+
 ### Required env when `--critic-agent` is active
 
 | Var | Purpose | Default |

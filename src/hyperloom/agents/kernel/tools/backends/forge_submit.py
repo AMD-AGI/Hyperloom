@@ -2199,9 +2199,13 @@ def _apply_fellow_env(env: dict) -> None:
 
     # Auth fallback: seed ANTHROPIC_API_KEY from the claude CLI's config.json
     # primaryApiKey when it is not already exported. Skipped on the OpenAI-only
-    # side, where the codex provider authenticates from OPENAI_API_KEY and an
-    # Anthropic key would only re-enable the claude fellow it cannot drive.
-    if claude_fellow and not env.get("ANTHROPIC_API_KEY", "").strip():
+    # side, where the codex provider authenticates from OPENAI_API_KEY, and under
+    # a subscription token, which any API key would silently override.
+    if (
+        claude_fellow
+        and not env.get("ANTHROPIC_API_KEY", "").strip()
+        and not env.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+    ):
         try:
             import json as _json
 
