@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.env_safety import GPU_MASK_ENV_NAMES
 from hyperloom.orchestrator.actions.executors import _framework_switch_manifest as manifest
 
 
@@ -97,6 +98,21 @@ def test_a_reserved_benchmark_variable_is_dropped(reserved):
     switches, problems = manifest.parse_manifest([_entry(reserved)])
     assert switches == []
     assert any("reserved benchmark variable" in p for p in problems)
+
+
+@pytest.mark.parametrize("mask", sorted(GPU_MASK_ENV_NAMES))
+def test_a_gpu_mask_switch_is_dropped(mask):
+    """Claiming a visibility mask would select the hardware, not toggle a path."""
+    switches, problems = manifest.parse_manifest([_entry(mask)])
+    assert switches == []
+    assert any("reserved benchmark variable" in p for p in problems)
+
+
+def test_a_credential_shaped_switch_is_dropped():
+    """A manifest is held to the same boundary as a reference recipe."""
+    switches, problems = manifest.parse_manifest([_entry("MY_TOKEN")])
+    assert switches == []
+    assert any("credential-shaped name" in p for p in problems)
 
 
 def test_a_switch_colliding_with_benchmark_config_is_dropped():

@@ -541,8 +541,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # explore overtime kill apples-to-apples. Zero => fall back to the cold anchor.
     baseline_warm_runtime_sec: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
-    # Reference launch recipe (from --reference-script or auto-discovery):
-    # lowest-priority base server args/envs seeding every baseline. Persisted.
+    # Reference launch recipe from the operator's --reference-script: lowest-priority
+    # base server args/envs seeding every baseline. Persisted.
     reference_server_args: str = ""
     reference_envs: dict[str, str] = field(default_factory=dict)
     reference_model: str = ""
