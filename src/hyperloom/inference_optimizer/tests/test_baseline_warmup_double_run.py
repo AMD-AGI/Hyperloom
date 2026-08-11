@@ -926,7 +926,21 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
 
     ix_src = tmp_path / "wekafs_InferenceX"
     (ix_src / "benchmarks").mkdir(parents=True)
-    (ix_src / "benchmarks" / "benchmark_lib.sh").write_text("# patched")
+    # This test is about which InferenceX dir Magpie cd-s into, but the launch
+    # path runs the real patcher, which refuses to start an eval whose patches
+    # cannot be applied. So the stub has to carry the anchors a checkout carries.
+    (ix_src / "benchmarks" / "benchmark_lib.sh").write_text(
+        "# patched\n"
+        "run_eval() {\n"
+        '    export EVAL_RESULT_DIR="$results_dir"\n'
+        "}\n"
+        "_patch_lm_eval() {\n"
+        '    export PYTHONPATH="${patch_dir}${PYTHONPATH:+:${PYTHONPATH}}"\n'
+        "}\n"
+        "append_lm_eval_summary() {\n"
+        '    mv -f "$jf" ./ || echo "WARN: failed to move ${jf}" >&2\n'
+        "}\n"
+    )
     local_root = tmp_path / "local_cache"
     monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
     monkeypatch.setenv("INFERENCEX_PATH", str(ix_src))

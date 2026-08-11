@@ -11,6 +11,12 @@ generation-pathology probe injected into lm-eval's ``sitecustomize.py``.
 Applied in place, once: idempotent via a sentinel substring, serialized across
 processes via ``fcntl.flock``, written atomically. Returns ``False``
 (non-fatal) when the legacy line is missing.
+
+Because every patch is gated on locating exact upstream text, a ``False`` return
+is ambiguous on its own -- it reads the same whether there was nothing to patch
+or the anchor rotted. :func:`verify_patch_anchors` reports that distinction
+without touching the checkout, so callers can assert the contract instead of
+inferring it.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ import logging
 import os
 import re
 import tempfile
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Callable
@@ -204,10 +211,132 @@ def _hl_eval_probe_install():
     _hl_api.TemplateAPI.amodel_call = _hl_probe_amodel_call
 
 
+def _hl_eval_bounds_install():
+    # Bound each accuracy-gate request. Distinct from the probe above: the probe
+    # answers a model that NEVER terminates, and short-circuits the whole eval
+    # to a ~0 score. A healthy model whose few hardest reasoning samples do not
+    # converge must not be scored that way -- those samples have to be truncated
+    # individually so the rest of the measurement survives. InferenceX derives
+    # max_tokens from the eval context (16384-4096=12288 by default) and allows
+    # 1800s per request, so a handful of outliers alone can add a ~30min tail.
+    #
+    # The default lives here rather than in the caller's environment on purpose.
+    # The gate is differential (baseline_accuracy - new_accuracy <= 0.05), so the
+    # ceiling is only sound if every arm shares it; defaulting inside the shim
+    # makes that structural instead of a plumbing invariant two call sites have
+    # to remember. HYPERLOOM_EVAL_MAX_TOKENS overrides it; 0 disables the clamp.
+    default_cap = 4096
+    raw_cap = (_hl_os.environ.get("HYPERLOOM_EVAL_MAX_TOKENS") or "").strip()
+    if not raw_cap:
+        cap = default_cap
+    else:
+        try:
+            cap = int(raw_cap)
+        except (TypeError, ValueError):
+            cap = default_cap
+        else:
+            if cap < 0:
+                cap = default_cap
+    raw_stop = (_hl_os.environ.get("HYPERLOOM_EVAL_STOP_STRINGS") or "").strip()
+    extra_stop = [s for s in raw_stop.split("\\x1f") if s]
+    if cap <= 0 and not extra_stop:
+        return
+
+    import atexit as _hl_atexit
+
+    from lm_eval.models.openai_completions import LocalChatCompletion as _hl_lcc
+
+    # Truncation is only defensible while it stays rare, so the run has to say
+    # how rare it actually was. Without this the ceiling is an unfalsifiable
+    # guess: too low silently depresses both arms' scores, too high leaves the
+    # tail in place, and neither shows up anywhere.
+    counts = {"generations": 0, "truncated": 0}
+
+    def _hl_emit_bounds_summary():
+        if counts["generations"] <= 0:
+            return
+        record = {
+            "max_tokens": cap,
+            "stop_prefix": extra_stop,
+            "generations": counts["generations"],
+            "truncated": counts["truncated"],
+        }
+        blob = _hl_json.dumps(record, sort_keys=True)
+        print("HYPERLOOM_EVAL_BOUNDS_SUMMARY " + blob, file=_hl_sys.stderr, flush=True)
+        out_dir = (_hl_os.environ.get("RESULT_DIR") or "").strip()
+        if not out_dir:
+            return
+        # Must not match results*.json -- that glob is how parse_eval_results
+        # finds the accuracy score.
+        _hl_os.makedirs(out_dir, exist_ok=True)
+        with open(_hl_os.path.join(out_dir, "hyperloom_eval_bounds.json"), "w", encoding="utf-8") as fh:
+            fh.write(blob)
+
+    _hl_prev_parse = _hl_lcc.parse_generations
+
+    def _hl_bounds_parse_generations(outputs, **kwargs):
+        try:
+            for out in outputs if isinstance(outputs, list) else [outputs]:
+                for choice in out.get("choices") or []:
+                    counts["generations"] += 1
+                    if choice.get("finish_reason") == "length":
+                        counts["truncated"] += 1
+        except Exception:
+            pass
+        return _hl_prev_parse(outputs, **kwargs)
+
+    _hl_lcc.parse_generations = staticmethod(_hl_bounds_parse_generations)
+    _hl_atexit.register(_hl_emit_bounds_summary)
+
+    _hl_prev_create_payload = _hl_lcc._create_payload
+    announced = {"done": False}
+
+    def _hl_bounded_create_payload(self, messages, **kwargs):
+        payload = _hl_prev_create_payload(self, messages, **kwargs)
+        # Only generation carries max_tokens/stop; loglikelihood scoring shares
+        # this seam and must pass through untouched.
+        if not kwargs.get("generate", False):
+            return payload
+        try:
+            if cap > 0:
+                current = int(payload.get("max_tokens") or 0)
+                if current <= 0 or current > cap:
+                    payload["max_tokens"] = cap
+            if extra_stop:
+                # The upstream eos_string is a single hardcoded value, is wrong
+                # for several model families, and is not even passed on the
+                # concurrent path -- so the caller-supplied terminators go
+                # first: the API accepts at most 4 stop strings and the tail is
+                # what gets dropped.
+                merged = list(extra_stop)
+                for item in payload.get("stop") or []:
+                    if item not in merged:
+                        merged.append(item)
+                payload["stop"] = merged[:4]
+            if not announced["done"]:
+                announced["done"] = True
+                print(
+                    "HYPERLOOM_EVAL_BOUNDS max_tokens=%s stop=%s"
+                    % (payload.get("max_tokens"), _hl_json.dumps(payload.get("stop"))),
+                    file=_hl_sys.stderr,
+                    flush=True,
+                )
+        except Exception:
+            # Bounding must never break the eval it is protecting.
+            return payload
+        return payload
+
+    _hl_lcc._create_payload = _hl_bounded_create_payload
+
+
 # sitecustomize runs at interpreter startup: raising here would break every
 # python3 the benchmark shells out to, not just lm-eval.
 try:
     _hl_eval_probe_install()
+except Exception:
+    pass
+try:
+    _hl_eval_bounds_install()
 except Exception:
     pass
 # --- end HYPERLOOM_EVAL_PROBE -----------------------------------------------
@@ -801,10 +930,142 @@ def ensure_benchmark_lib_eval_probe_patched(
     )
 
 
+# =====================================================================
+# Anchor contract
+# =====================================================================
+# Every patch above is gated on locating exact upstream text. That makes a
+# cosmetic upstream edit indistinguishable from "nothing to patch": the
+# ``ensure_*`` call returns False, the caller logs nothing, and the run proceeds
+# with the patch silently absent. That is how an eval-probe anchor stayed broken
+# across every checkout while the runs still looked healthy. Verification is
+# therefore separate from patching, so a caller can assert the contract instead
+# of inferring it from a boolean nobody reads.
+
+
+@dataclass(frozen=True)
+class AnchorStatus:
+    """Whether one patch can still find its place in one resolved file."""
+
+    name: str
+    path: Path
+    patched: bool
+    hits: int
+
+    @property
+    def ok(self) -> bool:
+        """True when the patch is applied, or applicable exactly once.
+
+        Two or more hits is a failure, not a success: every patch here rewrites
+        a single site, so an ambiguous anchor means the file drifted into a
+        shape the patcher was never written for.
+        """
+        return self.patched or self.hits == 1
+
+    def describe(self) -> str:
+        """Return a one-line human summary for logs and preflight output."""
+        if self.patched:
+            state = "already patched"
+        elif self.hits == 1:
+            state = "anchor found"
+        elif self.hits == 0:
+            state = "ANCHOR MISSING — upstream text changed"
+        else:
+            state = f"ANCHOR AMBIGUOUS — matched {self.hits} sites, expected 1"
+        return f"{self.name}: {state} ({self.path})"
+
+
+# name -> (relative path parts, sentinel, anchor)
+_ANCHOR_CONTRACT: tuple[tuple[str, tuple[str, ...], str, str | re.Pattern[str]], ...] = (
+    ("num_prompts", ("benchmarks", "benchmark_lib.sh"), _PATCH_SENTINEL, _LEGACY_LINE),
+    ("eval_dest", ("benchmarks", "benchmark_lib.sh"), _EVAL_DEST_SENTINEL, _EVAL_DEST_LEGACY),
+    ("eval_start", ("benchmarks", "benchmark_lib.sh"), _EVAL_START_SENTINEL, _EVAL_START_LEGACY),
+    ("eval_probe", ("benchmarks", "benchmark_lib.sh"), _EVAL_PROBE_SENTINEL, _EVAL_PROBE_ANCHOR_RE),
+    (
+        "profile_extra_body",
+        ("utils", "bench_serving", "benchmark_serving.py"),
+        _BENCH_SERVING_SENTINEL,
+        _BENCH_SERVING_LEGACY,
+    ),
+)
+
+
+def count_anchor_hits(text: str, anchor: str | re.Pattern[str]) -> int:
+    """Return how many sites in ``text`` the given anchor would rewrite.
+
+    Args:
+        text: Full contents of the file the patch targets.
+        anchor: Literal upstream text, or a compiled pattern for the anchors
+            whose surrounding line upstream is free to reformat.
+
+    Returns:
+        The number of matching sites.
+    """
+    if isinstance(anchor, re.Pattern):
+        return len(anchor.findall(text))
+    return text.count(anchor)
+
+
+def verify_patch_anchors(
+    inferencex_path: Path | str | None = None,
+) -> list[AnchorStatus]:
+    """Report, per patch and per discovered file, whether the anchor still holds.
+
+    Read-only: this never writes to the checkout, so it is safe to call before
+    patching, after patching, or from preflight. Files that do not exist are
+    omitted rather than reported as failures -- a tree without
+    ``benchmark_serving.py`` has nothing to patch, which the ``ensure_*``
+    functions already treat as a skip.
+
+    Args:
+        inferencex_path: Caller-provided override root; defaults to env-based
+            discovery when ``None``.
+
+    Returns:
+        One :class:`AnchorStatus` per (patch, existing file) pair, in
+        ``_ANCHOR_CONTRACT`` order. Empty when no InferenceX tree resolves.
+    """
+    out: list[AnchorStatus] = []
+    for name, rel_parts, sentinel, anchor in _ANCHOR_CONTRACT:
+        for path in _resolve_inferencex_files(inferencex_path, *rel_parts):
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                log.warning("_inferencex_patcher: cannot read %s for anchor check: %s", path, exc)
+                continue
+            out.append(
+                AnchorStatus(
+                    name=name,
+                    path=path,
+                    patched=sentinel in text,
+                    hits=count_anchor_hits(text, anchor),
+                )
+            )
+    return out
+
+
+def failed_patch_anchors(
+    inferencex_path: Path | str | None = None,
+) -> list[AnchorStatus]:
+    """Return only the anchors that no longer hold. Empty means the contract is intact.
+
+    Args:
+        inferencex_path: Caller-provided override root; defaults to env-based
+            discovery when ``None``.
+
+    Returns:
+        The failing subset of :func:`verify_patch_anchors`.
+    """
+    return [status for status in verify_patch_anchors(inferencex_path) if not status.ok]
+
+
 __all__ = [
+    "AnchorStatus",
+    "count_anchor_hits",
     "ensure_benchmark_lib_patched",
     "ensure_benchmark_lib_eval_dest_patched",
     "ensure_benchmark_lib_eval_probe_patched",
     "ensure_benchmark_lib_eval_start_patched",
     "ensure_benchmark_serving_patched",
+    "failed_patch_anchors",
+    "verify_patch_anchors",
 ]
