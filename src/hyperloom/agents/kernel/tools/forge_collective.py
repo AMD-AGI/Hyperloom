@@ -23,6 +23,11 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _invocation_spec import (  # noqa: E402
+    build_invocation_spec,
+    invocation_spec_filename,
+    write_invocation_spec,
+)
 from collective_driver_generator import (  # noqa: E402
     SNR_FLOOR_DB,
     generate_collective_driver,
@@ -58,6 +63,12 @@ DEFAULT_TIMEOUT_SEC = 14400  # 4h: a collective iterates over N ranks per bench.
 DEFAULT_SNR_THRESHOLD = SNR_FLOOR_DB
 DEFAULT_FINALIZE_GRACE_SEC = 300
 MIN_CAMPAIGN_TIMEOUT_SEC = 60
+#: Caller-owned campaign id. Pinning it makes forge-loop's checkpoint filename
+#: predictable, which is what external recovery reads after a hard kill.
+EXPERIMENT_ID = "hyperloom_collective"
+#: aiter owns every custom all-reduce this lane can reach, so its fellow (and
+#: the matching knowledge base) is the correct specialist.
+COLLECTIVE_FELLOW = "aiter"
 FORGE_SHUTDOWN_GRACE_SEC = 30
 
 
@@ -95,6 +106,41 @@ def _add_opt(cmd: list[str], value: Any, flag: str) -> None:
         cmd.extend([flag, str(value)])
 
 
+def _write_invocation_evidence(candidate: dict[str, Any], output_dir: Path) -> str:
+    """Record how the traced collective is called, for forge-loop task prep.
+
+    The trace pins the launch site and the shapes but not the callee's
+    parameter order, which is what ``run_candidate`` needs. forge-loop's task
+    preparer treats this document as authoritative evidence when it authors the
+    driver, so a failure to write it degrades driver authoring rather than
+    failing the campaign.
+    """
+    try:
+        path = output_dir / invocation_spec_filename(candidate)
+        write_invocation_spec(
+            path,
+            build_invocation_spec(
+                candidate,
+                source_file=str(candidate.get("source_file") or ""),
+            ),
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        log.warning("collective invocation spec unavailable: %s", exc)
+        return ""
+    return str(path)
+
+
+def _campaign_is_resumable(workspace: str) -> bool:
+    """Return whether the workspace holds a forge-loop campaign to continue.
+
+    The lane optimizes an editable install in place, so ``forge_experiments``
+    outlives a hard kill. forge-loop refuses to start a fresh campaign over
+    those artifacts and requires ``run_state.json`` before it accepts
+    ``--resume``, so that file is the only safe trigger.
+    """
+    return (Path(workspace) / "forge_experiments" / "run_state.json").is_file()
+
+
 def _build_cmd(
     args: dict[str, Any],
     rig: dict[str, str],
@@ -110,12 +156,19 @@ def _build_cmd(
     if not workspace:
         raise ValueError("kernel_repo is required")
 
+    resuming = _campaign_is_resumable(workspace)
     cli = args.get("cli")
     cmd = [str(cli), "forge-loop"] if cli else [sys.executable, "-m", "kernel_agents.cli", "forge-loop"]
     _add_opt(cmd, workspace, "--workspace")
-    _add_opt(cmd, source_file, "--kernel")
-    _add_opt(cmd, rig["driver"], "--driver")
-    _add_opt(cmd, rig["program"], "--program-md-file")
+    if resuming:
+        # forge-loop owns the campaign's immutable configuration once it has
+        # been saved, and rejects any of --kernel / --driver / --program-md-file
+        # / --source-files / --operator-name alongside --resume.
+        cmd.append("--resume")
+    else:
+        _add_opt(cmd, source_file, "--kernel")
+        _add_opt(cmd, rig["driver"], "--driver")
+        _add_opt(cmd, rig["program"], "--program-md-file")
     _add_opt(cmd, "repository", "--task-type")
     _add_opt(cmd, args.get("git_branch"), "--git-branch")
     _add_opt(cmd, rig["world_size"], "--nproc-per-node")
@@ -130,7 +183,7 @@ def _build_cmd(
         raise ValueError("snr_threshold must be finite")
     _add_opt(cmd, snr_threshold, "--snr-threshold")
     _add_opt(cmd, args.get("gpu_target"), "--gpu-target")
-    _add_opt(cmd, args.get("max_iters"), "--max-iters")
+    _add_opt(cmd, COLLECTIVE_FELLOW, "--fellow")
     _add_opt(cmd, args.get("max_hours"), "--max-hours")
     if (
         isinstance(deadline_unix, bool)
@@ -143,6 +196,8 @@ def _build_cmd(
     _add_opt(cmd, args.get("llm_model"), "--model")
     _add_opt(cmd, str(output_dir / "forge_result.json"), "--result-json")
     _add_opt(cmd, str(output_dir / "experiments"), "--experiments-dir")
+    _add_opt(cmd, EXPERIMENT_ID, "--experiment-id")
+    _add_opt(cmd, args.get("experience_id") or output_dir.name, "--experience-id")
     bench_repeat = args.get("bench_repeat")
     if bench_repeat in (None, ""):
         bench_repeat = 3
@@ -179,7 +234,30 @@ def _build_cmd(
         ",".join(item.strip() for item in target_functions),
         "--target-functions",
     )
-    _add_opt(cmd, args.get("workload_key"), "--workload-key")
+    if not resuming:
+        source_files = args.get("source_files")
+        if isinstance(source_files, list):
+            joined = ",".join(
+                item.strip()
+                for item in source_files
+                if isinstance(item, str) and item.strip()
+            )
+            _add_opt(cmd, joined, "--source-files")
+        _add_opt(cmd, args.get("operator_name"), "--operator-name")
+    _add_opt(cmd, args.get("framework"), "--framework")
+    e2e_pct = args.get("e2e_pct")
+    if e2e_pct is not None:
+        if (
+            isinstance(e2e_pct, bool)
+            or not isinstance(e2e_pct, (int, float))
+            or not math.isfinite(float(e2e_pct))
+            or float(e2e_pct) <= 0
+        ):
+            raise ValueError(f"e2e_pct must be a positive finite share: {e2e_pct!r}")
+        _add_opt(cmd, float(e2e_pct), "--e2e-pct")
+    spec_file = str(args.get("invocation_spec_file") or "").strip()
+    if spec_file and Path(spec_file).is_file():
+        _add_opt(cmd, str(Path(spec_file).resolve()), "--invocation-spec-file")
     return cmd
 
 
@@ -1082,6 +1160,10 @@ def main(argv: list[str] | None = None) -> int:
                 candidate,
                 output_dir,
                 tp=payload.get("tp"),
+            )
+            prepared_payload["invocation_spec_file"] = _write_invocation_evidence(
+                candidate,
+                Path(output_dir),
             )
             timeout_sec = _campaign_timeout_sec(
                 prepared_payload,

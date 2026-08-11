@@ -1751,7 +1751,23 @@ def collective_integration_pending(state: Any) -> bool:
 
 
 def kernel_work_pending(state: Any) -> bool:
-    """Return whether KERNEL still has work that can change validated gain."""
+    """Return True while KERNEL has work that can still affect validated gain.
+
+    This guards the non-terminal ``skip_to_sweep`` handoff: a plateau hint should
+    not end KERNEL while a KEEP still needs integrate, or while a kernel-agent
+    attempt is only partially recorded, or while trace analysis still exposes
+    hot reusable kernels that have not received a kernel_opt attempt. Hard
+    time/budget exits are still handled by :func:`exit_normal_kernel`.
+
+    Short-circuits in order: a pending collective integration keeps the phase
+    open; ``collective_only_mode`` then answers False because no other lane may
+    run; a terminal GEAK phase answers on its own (True only while an ``ok``
+    result has an ``awaiting_rebench`` pending with a revalidation task, else
+    False); then the optional ``has_keep_pending_integrate`` and
+    ``untried_hot_reusable_kernels`` capability probes, whose failures are
+    treated as 'not available'; then the kernel_opt attempt ledger, filtered by
+    task group, source file, integration status and rejected kernel ids.
+    """
     if collective_integration_pending(state):
         return True
     if bool(getattr(state, "collective_only_mode", False)):

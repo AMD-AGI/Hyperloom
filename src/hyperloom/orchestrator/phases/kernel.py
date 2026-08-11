@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from . import machine_state as _phase_state
+from ..kernel import collective_recovery as _collective_recovery
 from ..state.optimization_journal import (
     KIND_GEMM_TUNING,
     OUTCOME_KEEP,
@@ -51,33 +52,8 @@ _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
 _GEAK_REVALIDATE_IDEMPOTENCY_KEY = "geak-revalidate"
 
 
-def _load_collective_apply_checkpoint(
-    checkpoint: Path,
-    backup_root: Path,
-) -> tuple[dict[str, Any], str]:
-    """Load a trusted collective apply checkpoint and manifest state."""
-    recovered = json.loads(checkpoint.read_text(encoding="utf-8"))
-    if not isinstance(recovered, dict):
-        raise ValueError("Collective apply checkpoint must be a mapping")
-    manifest_path = Path(str(recovered.get("manifest_path") or ""))
-    if not manifest_path.is_file():
-        raise ValueError("Collective apply manifest does not exist")
-    manifest_path.resolve().relative_to(backup_root.resolve())
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not isinstance(manifest, dict):
-        raise ValueError("Collective apply manifest must be a mapping")
-    return (
-        {**recovered, "manifest_path": str(manifest_path)},
-        str(manifest.get("status") or ""),
-    )
-
-
-def _patch_lifecycle_complete(result: Any) -> bool:
-    """Return whether patch cleanup reached a terminal state."""
-    return (
-        isinstance(result, dict)
-        and result.get("status") in {"ok", "partial"}
-    )
+_load_collective_apply_checkpoint = _collective_recovery.load_apply_checkpoint
+_patch_lifecycle_complete = _collective_recovery.patch_lifecycle_complete
 
 
 def _collective_attempt_identity(result: dict[str, Any]) -> str:
@@ -2794,47 +2770,15 @@ class KernelPhase(PhaseHandler):
         )
         from hyperloom.inference_optimizer.session.session_paths import patches_dir
 
-        if not isinstance(result, dict):
-            raise TypeError("Collective integration input must be a mapping")
-        patch_raw = result.get("patch")
-        target_raw = result.get("source_file") or result.get("target_file")
-        kernel_repo_raw = result.get("kernel_repo")
-        integration_id_raw = result.get("integration_id")
-        for field, value in (
-            ("patch", patch_raw),
-            ("target_file", target_raw),
-            ("kernel_repo", kernel_repo_raw),
-            ("integration_id", integration_id_raw),
-        ):
-            if value is not None and not isinstance(value, str):
-                raise ValueError(
-                    f"Collective integration {field} must be a string"
-                )
-        patch = (patch_raw or "").strip()
-        target_file = (target_raw or "").strip()
-        kernel_repo = (kernel_repo_raw or "").strip()
-        integration_id = (integration_id_raw or "").strip()
-        if not integration_id:
-            raise ValueError("Collective integration is missing integration_id")
-        if not isinstance(self.shared_state.optimization_stack, list):
-            raise ValueError("optimization_stack must be a list")
-        if not isinstance(self.shared_state.gain_per_stack_entry, list):
-            raise ValueError("gain_per_stack_entry must be a list")
-        if not isinstance(self.shared_state.current_best, dict):
-            raise ValueError("current_best must be a mapping")
-        current_envs: dict[str, str] = {}
-        raw_envs = self.shared_state.current_best.get("extra_envs")
-        if raw_envs is not None:
-            if not isinstance(raw_envs, Mapping):
-                raise ValueError("current_best.extra_envs must be a mapping")
-            if any(
-                not isinstance(key, str) or not isinstance(value, str)
-                for key, value in raw_envs.items()
-            ):
-                raise ValueError(
-                    "current_best.extra_envs must contain strings"
-                )
-            current_envs = dict(raw_envs)
+        inputs = _collective_recovery.validate_integration_inputs(
+            result,
+            self.shared_state,
+        )
+        patch = inputs.patch
+        target_file = inputs.target_file
+        kernel_repo = inputs.kernel_repo
+        integration_id = inputs.integration_id
+        current_envs = inputs.extra_envs
         patch_root = patches_dir(
             self.session_dir,
             "forge_collective_"
@@ -2842,203 +2786,17 @@ class KernelPhase(PhaseHandler):
         )
         backup_root = patch_root / "backup"
         apply_checkpoint = patch_root / "apply_checkpoint.json"
-        preapplied: dict[str, Any] | None = None
-        integ: dict[str, Any] | None = None
-        recovery_uncertain = False
-        recovered_apply: dict[str, Any] | None = None
-        manifest_status = ""
-
-        if apply_checkpoint.is_file():
-            try:
-                recovered_apply, manifest_status = (
-                    _load_collective_apply_checkpoint(
-                        apply_checkpoint,
-                        backup_root,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001
-                recovery_uncertain = True
-                integ = {
-                    "status": "failed",
-                    "decision": "NEEDS_REVIEW",
-                    "error_class": "collective_apply_checkpoint_invalid",
-                    "error": repr(exc),
-                    "patch_path": patch,
-                    "target_file": target_file,
-                }
-        elif backup_root.is_dir():
-            manifests = sorted(backup_root.glob("**/manifest.json"))
-            if len(manifests) == 1:
-                try:
-                    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
-                    if not isinstance(manifest, dict):
-                        raise ValueError(
-                            "Collective apply manifest must be a mapping"
-                        )
-                    manifest_status = str(manifest.get("status") or "")
-                    recovered_apply = {
-                        **manifest,
-                        "status": "ok",
-                        "manifest_path": str(manifests[0]),
-                    }
-                except Exception as exc:  # noqa: BLE001
-                    recovery_uncertain = True
-                    integ = {
-                        "status": "failed",
-                        "decision": "NEEDS_REVIEW",
-                        "error_class": "collective_apply_checkpoint_invalid",
-                        "error": repr(exc),
-                        "patch_path": patch,
-                        "target_file": target_file,
-                    }
-            elif len(manifests) > 1:
-                recovery_uncertain = True
-                integ = {
-                    "status": "failed",
-                    "decision": "NEEDS_REVIEW",
-                    "error_class": "collective_apply_manifest_ambiguous",
-                    "error": (
-                        "Collective recovery found multiple apply manifests "
-                        f"under {backup_root}"
-                    ),
-                    "patch_path": patch,
-                    "target_file": target_file,
-                }
-
-        recovery_action = str(
-            result.get("integration_recovery_action") or ""
-        ).strip()
-        if recovered_apply is not None and integ is None:
-            if (
-                recovery_action == "revert"
-            ):
-                if manifest_status in {"reverted", "reverted_partial"}:
-                    revert_result = {
-                        "status": (
-                            "ok"
-                            if manifest_status == "reverted"
-                            else "partial"
-                        ),
-                        "reason": "manifest already reverted",
-                    }
-                else:
-                    revert_result = await asyncio.to_thread(
-                        _maybe_revert_kernel_patch,
-                        recovered_apply,
-                    )
-                integ = {
-                    "status": "failed",
-                    "decision": "REVERT",
-                    "error_class": "collective_recovery_revert",
-                    "error": "Collective integration resumed pending revert",
-                    "patch_path": patch,
-                    "target_file": target_file,
-                    "apply_result": recovered_apply,
-                    "revert_result": revert_result,
-                }
-            elif (
-                recovery_action == "finalize"
-                and str(result.get("integration_decision") or "").upper()
-                == "KEEP"
-                and manifest_status
-                in {"applied", "finalized", "finalized_partial"}
-            ):
-                if manifest_status in {"finalized", "finalized_partial"}:
-                    finalize_result = {
-                        "status": (
-                            "ok"
-                            if manifest_status == "finalized"
-                            else "partial"
-                        ),
-                        "reason": "manifest already finalized",
-                    }
-                else:
-                    finalize_result = await asyncio.to_thread(
-                        _maybe_finalize_kernel_patch,
-                        recovered_apply,
-                    )
-                finalize_complete = _patch_lifecycle_complete(
-                    finalize_result
-                )
-                integ = {
-                    "status": str(
-                        result.get("integration_result_status") or "ok"
-                    ),
-                    "decision": "KEEP",
-                    "gain_pct": result.get("integration_gain_pct"),
-                    "base_tput": result.get("integration_base_tput"),
-                    "new_tput": result.get("integration_new_tput"),
-                    "workspace": result.get("integration_workspace"),
-                    "report_path": result.get("integration_report_path"),
-                    "patch_path": patch,
-                    "target_file": target_file,
-                    "apply_result": recovered_apply,
-                    "finalize_result": finalize_result,
-                    "integration_status": (
-                        "complete"
-                        if finalize_complete
-                        else "recovery_required"
-                    ),
-                    "integration_recovery_action": (
-                        "" if finalize_complete else "finalize"
-                    ),
-                }
-            elif (
-                manifest_status == "applied"
-                and recovered_apply.get("status") == "ok"
-            ):
-                preapplied = recovered_apply
-            elif manifest_status == "reverted":
-                integ = {
-                    "status": "failed",
-                    "decision": "REVERT",
-                    "error_class": "collective_apply_already_reverted",
-                    "error": "Collective apply manifest was already reverted",
-                    "patch_path": patch,
-                    "target_file": target_file,
-                    "apply_result": recovered_apply,
-                    "revert_result": {
-                        "status": "ok",
-                        "reason": "manifest already reverted",
-                    },
-                }
-            elif manifest_status in {
-                "applied",
-                "failed",
-                "prepared",
-                "reverted_partial",
-            }:
-                revert_result = await asyncio.to_thread(
-                    _maybe_revert_kernel_patch,
-                    recovered_apply,
-                )
-                integ = {
-                    "status": "failed",
-                    "decision": "REVERT",
-                    "error_class": "collective_apply_not_resumable",
-                    "error": (
-                        "Collective apply manifest is not resumable: "
-                        f"{manifest_status or 'unknown'}"
-                    ),
-                    "patch_path": patch,
-                    "target_file": target_file,
-                    "apply_result": recovered_apply,
-                    "revert_result": revert_result,
-                }
-            else:
-                recovery_uncertain = True
-                integ = {
-                    "status": "failed",
-                    "decision": "NEEDS_REVIEW",
-                    "error_class": "collective_apply_not_resumable",
-                    "error": (
-                        "Collective apply manifest has unsupported state: "
-                        f"{manifest_status or 'unknown'}"
-                    ),
-                    "patch_path": patch,
-                    "target_file": target_file,
-                    "apply_result": recovered_apply,
-                }
+        backup_root.parent.mkdir(parents=True, exist_ok=True)
+        recovered = await _collective_recovery.recover_apply_state(
+            result,
+            checkpoint=apply_checkpoint,
+            backup_root=backup_root,
+            patch=patch,
+            target_file=target_file,
+        )
+        preapplied = recovered.preapplied
+        integ = recovered.integ
+        recovery_uncertain = recovered.uncertain
 
         if integ is None and (not patch or not target_file):
             integ = {

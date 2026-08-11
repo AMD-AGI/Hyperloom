@@ -1,11 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Summarize dense-kernel and collective optimization attempts."""
+"""Aggregate kernel-optimization attempts into a single forensic report.
+
+Combines the per-kernel ledger (:attr:`SharedState.kernel_opt_attempts`) and
+the collective campaign history (:attr:`SharedState.collective_attempts`) with
+the kernel-agent run results to explain why the kernel-agent did not produce an
+optimized kernel. All public helpers are pure functions over ``SharedState`` +
+``session_dir`` returning JSON-ready dicts; never raise on missing files.
+"""
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -14,6 +22,8 @@ from typing import Any, NamedTuple
 from hyperloom.common.coerce import to_float
 
 from ..state.kernel_decision_settings import resolve_hot_kernel_min_gpu_pct
+
+log = logging.getLogger(__name__)
 
 
 # Per-kernel outcome bucket (closed set).
@@ -183,6 +193,25 @@ FIELD_GLOSSARY: dict[str, str] = {
         "Per-backend outcome of the kernel-agent dispatch. "
         "``produced_artifact=false`` across all rows is the dominant "
         "signal that the entire ladder failed for this kernel."
+    ),
+    "lane": (
+        "Which optimization lane produced the row. ``collective`` rows come "
+        "from the multi-GPU comm lane and carry no roofline geometry, so "
+        "efficiency_pct / bound_type / arithmetic_intensity stay null."
+    ),
+    "collective_op": ("The collective primitive that was optimized (currently always ``all_reduce``)."),
+    "world_size": ("Rank count the collective was measured across; the lane requires it to match the run's TP width."),
+    "collective_attempt_id": (
+        "Stable identity for one collective campaign, used to deduplicate "
+        "resumed or salvaged attempts across a session."
+    ),
+    "salvaged": (
+        "True when the validated best was recovered from the campaign sidecar "
+        "after the wrapper timed out, rather than returned by a clean exit."
+    ),
+    "e2e_gain_pct": (
+        "End-to-end throughput delta measured by the integrate gate. This, not "
+        "micro_speedup, decides whether a collective KEEP is adopted."
     ),
 }
 
@@ -590,26 +619,47 @@ def _summary_one_line(
 
 
 def _collective_attempt_identity(record: dict[str, Any]) -> str:
-    """Return the required stable identity for a collective campaign."""
-    identity = str(record.get("collective_attempt_id") or "").strip()
-    if not identity:
-        raise ValueError("Collective campaign is missing collective_attempt_id")
-    return identity
+    """Return the stable identity for a collective campaign (``""`` if absent)."""
+    return str(record.get("collective_attempt_id") or "").strip()
 
 
 def _collective_attempt_records(state: Any) -> list[dict[str, Any]]:
-    """Return validated collective campaign history."""
+    """Return collective campaign history, dropping unusable records.
+
+    The forensics for every dense kernel share this report, so one malformed
+    collective row is logged and skipped rather than raised: raising here would
+    delete the whole ``kernel_optimization_summary.json`` because both callers
+    swallow the exception.
+    """
     raw_history = getattr(state, "collective_attempts", None)
     if raw_history is None:
         return []
-    if not isinstance(raw_history, list) or any(
-        not isinstance(item, dict) for item in raw_history
-    ):
-        raise ValueError("collective_attempts must contain mappings")
-    records = [dict(item) for item in raw_history]
-    identities = [_collective_attempt_identity(record) for record in records]
-    if len(set(identities)) != len(identities):
-        raise ValueError("collective_attempts contains duplicate identities")
+    if not isinstance(raw_history, list):
+        log.warning(
+            "kernel summary: ignoring collective_attempts of type %s (expected list)",
+            type(raw_history).__name__,
+        )
+        return []
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw_history:
+        if not isinstance(item, dict):
+            log.warning("kernel summary: dropping non-mapping collective campaign")
+            continue
+        identity = _collective_attempt_identity(item)
+        if not identity:
+            log.warning(
+                "kernel summary: dropping collective campaign with no collective_attempt_id",
+            )
+            continue
+        if identity in seen:
+            log.warning(
+                "kernel summary: dropping duplicate collective campaign %s",
+                identity,
+            )
+            continue
+        seen.add(identity)
+        records.append(dict(item))
     return records
 
 

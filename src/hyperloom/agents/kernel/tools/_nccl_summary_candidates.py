@@ -202,8 +202,11 @@ def extract_collective_candidates(
                 "bound_type": "communication",
                 "tracelens_category": "collective",
                 "tracelens_pitem_rank": 0,
-                "kernel_path": "",
-                "tracelens_launcher_path": "",
+                # Both feed the invocation spec that forge-loop's task preparer
+                # reads to author run_candidate; the device source is the only
+                # launcher a summary row can attribute.
+                "kernel_path": source_file,
+                "tracelens_launcher_path": source_file,
                 "source_file": source_file,
                 "source_line": source_line,
                 "source_function": source_function,
@@ -215,7 +218,7 @@ def extract_collective_candidates(
                 "candidate_source": "nccl_summary",
                 "collective_stream": stream,
                 "nccl_summary_total_ms": round(total_time_ms, 3),
-                # Prorated duration is an upper bound over summary time.
+                # Prorated by each row's sampled duration share of summary time.
                 "duration_provenance": "nccl_summary_prorated_from_top_ops_sample",
             }
         )

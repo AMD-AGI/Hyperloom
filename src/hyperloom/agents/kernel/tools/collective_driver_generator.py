@@ -16,7 +16,32 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
-_REFERENCE_CALL = "dist.all_reduce(out, op=dist.ReduceOp.SUM, group=ctx.group)"
+#: Per-op reference body for ``run_reference``. Each must be an independent
+#: ``torch.distributed`` implementation of the same contract -- it is the only
+#: parity reference that is itself distributed. ``reduce_scatter`` and
+#: ``all_gather`` change the output extent along dim 0, so each op allocates its
+#: own output rather than cloning the input.
+_REFERENCE_BODIES: dict[str, str] = {
+    "all_reduce": """    out = inputs["x"].clone()
+    dist.all_reduce(out, op=dist.ReduceOp.SUM, group=ctx.group)
+    return out""",
+    "reduce_scatter": """    src = inputs["x"].contiguous()
+    out = torch.empty(
+        (src.shape[0] // ctx.world_size, *src.shape[1:]),
+        dtype=src.dtype,
+        device=src.device,
+    )
+    dist.reduce_scatter_tensor(out, src, op=dist.ReduceOp.SUM, group=ctx.group)
+    return out""",
+    "all_gather": """    src = inputs["x"].contiguous()
+    out = torch.empty(
+        (src.shape[0] * ctx.world_size, *src.shape[1:]),
+        dtype=src.dtype,
+        device=src.device,
+    )
+    dist.all_gather_into_tensor(out, src, group=ctx.group)
+    return out""",
+}
 SNR_FLOOR_DB = 30.0
 
 _SHAPE_RE = re.compile(r"(\d+)")
@@ -72,7 +97,7 @@ def _collective_op(candidate: dict[str, Any]) -> str:
     if not isinstance(contract, dict) or contract.get("kind") != "collective":
         raise ValueError("candidate kernel_contract.kind must be 'collective'")
     op = str(contract.get("collective_op") or "").strip().lower()
-    if op != "all_reduce":
+    if op not in _REFERENCE_BODIES:
         raise ValueError(f"unsupported collective operation: {op or '<missing>'}")
     return op
 
@@ -217,9 +242,7 @@ def run_candidate(inputs: dict, ctx: WorkerCtx):
 
 def run_reference(inputs: dict, ctx: WorkerCtx):
     """Independent reference via torch.distributed."""
-    out = inputs["x"].clone()
-    $reference_call
-    return out
+$reference_body
 
 
 def check_case(
@@ -228,12 +251,22 @@ def check_case(
     snr_threshold: float = SNR_FLOOR_DB,
     seed: int = 0,
 ) -> dict:
-    """Parity of candidate vs reference for one shape."""
-    ref = run_reference(make_inputs(shape, ctx, seed), ctx)
-    got = run_candidate(make_inputs(shape, ctx, seed), ctx)
-    if not isinstance(got, torch.Tensor):
-        raise TypeError("run_candidate must return a torch.Tensor")
-    value = snr_db(ref, got)
+    """Parity of candidate vs reference for one shape.
+
+    Two candidate calls are issued back to back and validated only afterwards.
+    Scratch reused between consecutive collectives races exactly when the next
+    call lands before the previous output is read, so a single validated call
+    can never expose it -- and dropping a barrier is the change most likely to
+    introduce that race.
+    """
+    seeds = (seed, seed + 1)
+    refs = [run_reference(make_inputs(shape, ctx, item), ctx) for item in seeds]
+    pending = [make_inputs(shape, ctx, item) for item in seeds]
+    got = [run_candidate(inputs, ctx) for inputs in pending]
+    for produced in got:
+        if not isinstance(produced, torch.Tensor):
+            raise TypeError("run_candidate must return a torch.Tensor")
+    value = min(snr_db(ref, produced) for ref, produced in zip(refs, got))
     score = torch.tensor([value], dtype=torch.float32, device=ctx.device)
     dist.all_reduce(score, op=dist.ReduceOp.MIN, group=ctx.group)
     value = float(score.item())
@@ -261,33 +294,35 @@ def bench_case(
     iters: int = 100,
     repeat: int = 1,
 ) -> float:
-    """Return graph-replay latency, maximised across ranks."""
+    """Return graph-replay latency, maximised across ranks.
+
+    Every iteration is captured into one graph and replayed as a unit, with a
+    single barrier before the timed region. Re-synchronising the ranks before
+    each call would hide the arrival skew a collective actually pays, and it
+    systematically flatters any change that removes an internal barrier.
+    """
     inputs = make_inputs(shape, ctx)
     for _ in range(warmup):
         run_candidate(inputs, ctx)
     torch.cuda.synchronize()
 
-    chain = 1
+    chain = max(1, iters)
     graph = capture_chain(inputs, ctx, chain)
     start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     rounds = []
 
-    for _ in range(max(1, warmup)):
-        graph.replay()
+    graph.replay()
     torch.cuda.synchronize()
     for _ in range(max(1, repeat)):
-        samples = []
-        for _ in range(iters):
-            dist.barrier(group=ctx.group)
-            start.record()
-            graph.replay()
-            end.record()
-            end.synchronize()
-            latency_ms = start.elapsed_time(end) / chain
-            if not math.isfinite(latency_ms) or latency_ms <= 0.0:
-                raise RuntimeError("graph replay produced invalid latency")
-            samples.append(latency_ms)
-        rounds.append(statistics.median(samples))
+        dist.barrier(group=ctx.group)
+        start.record()
+        graph.replay()
+        end.record()
+        end.synchronize()
+        latency_ms = start.elapsed_time(end) / chain
+        if not math.isfinite(latency_ms) or latency_ms <= 0.0:
+            raise RuntimeError("graph replay produced invalid latency")
+        rounds.append(latency_ms)
     del graph
 
     median = torch.tensor([statistics.median(rounds)], device=ctx.device)
@@ -448,7 +483,10 @@ _PROGRAM_TEMPLATE = Template('''# Optimize `$kernel_name`
   `torch.distributed.$collective_op`.
 - SNR permits expected bf16 differences from fp32 reduction accumulation.
 - Inputs remain rank-distinct.
-- Latency uses graph replay and the slowest rank.
+- Parity issues two calls back to back before validating either, so scratch
+  reused across consecutive collectives is exercised.
+- Latency replays every iteration as one captured chain behind a single
+  barrier, and takes the slowest rank.
 
 ## Shapes under test
 
@@ -458,6 +496,7 @@ $cases_md
 
 - Every rank runs the same code path; do not branch on rank in the fast path.
 - Do not weaken or bypass the parity gate.
+- Do not add a barrier inside the timed region to stabilise the measurement.
 - Keep graph replay and `--nproc-per-node=$world_size`.
 ''')
 
@@ -467,19 +506,24 @@ def generate_collective_driver(
     out_dir: Path | str,
     *,
     tp: int,
-    overwrite_driver: bool = False,
 ) -> dict[str, str]:
     """Write a strict all-reduce driver and Forge task brief."""
     if not isinstance(candidate, dict):
         raise TypeError("collective candidate must be a mapping")
-    if not isinstance(overwrite_driver, bool):
-        raise TypeError("overwrite_driver must be boolean")
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
     op = _collective_op(candidate)
     world_size = _world_size(tp)
     shapes = _parse_shapes(candidate)
+    if op == "reduce_scatter":
+        # The reference scatters dim 0 across ranks, so an indivisible extent
+        # would compare against a truncated output rather than fail loudly.
+        ragged = [s for s in shapes if s[0] % world_size]
+        if ragged:
+            raise ValueError(
+                f"reduce_scatter shapes must divide across {world_size} ranks: {ragged}"
+            )
     dtype = _dtype_of(candidate)
     kernel_name_raw = candidate.get("device_kernel_name") or candidate.get("name")
     source_file_raw = candidate.get("source_file")
@@ -526,7 +570,7 @@ def generate_collective_driver(
         dtype=dtype,
         launcher_hint_literal=repr(launcher_hint),
         kernel_name_literal=repr(kernel_name),
-        reference_call=_REFERENCE_CALL,
+        reference_body=_REFERENCE_BODIES[op],
     )
     program_src = _PROGRAM_TEMPLATE.substitute(
         kernel_name=kernel_name,
@@ -541,7 +585,10 @@ def generate_collective_driver(
 
     driver_path = out_path / "driver.py"
     program_path = out_path / "program.md"
-    if overwrite_driver or not driver_path.exists():
+    # A resumed campaign reuses its attempt directory, and by then forge-loop's
+    # task preparer may have authored or repaired the driver. Only the brief is
+    # regenerated; re-seeding the driver would discard that work.
+    if not driver_path.exists():
         driver_path.write_text(driver_src, encoding="utf-8")
     program_path.write_text(program_src, encoding="utf-8")
 

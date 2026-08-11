@@ -138,12 +138,41 @@ def test_driver_preserves_prefill_and_decode_shapes(tmp_path):
 
 @pytest.mark.parametrize(
     "op",
-    ["all_gather", "reduce_scatter", "all_to_all", "broadcast", "exotic_op"],
+    ["all_to_all", "broadcast", "gather", "exotic_op"],
 )
 def test_rejects_unsupported_collective_ops(tmp_path, op):
     contract = {"kind": "collective", "collective_op": op, "world_size": 4}
     with pytest.raises(ValueError, match="unsupported collective operation"):
         _gen(tmp_path, kernel_contract=contract)
+
+
+@pytest.mark.parametrize(
+    "op, reference",
+    [
+        ("all_reduce", "dist.all_reduce(out, op=dist.ReduceOp.SUM, group=ctx.group)"),
+        ("reduce_scatter", "dist.reduce_scatter_tensor(out, src, op=dist.ReduceOp.SUM, group=ctx.group)"),
+        ("all_gather", "dist.all_gather_into_tensor(out, src, group=ctx.group)"),
+    ],
+)
+def test_each_supported_op_gets_its_own_distributed_reference(tmp_path, op, reference):
+    """Parity is only meaningful against a reference that is itself distributed."""
+    contract = {"kind": "collective", "collective_op": op, "world_size": 4}
+    driver, program = _gen(tmp_path, kernel_contract=contract)
+    body = driver.split("def run_reference(")[1].split("def check_case(")[0]
+    assert reference in body
+    assert f"torch.distributed.{op}" in program
+
+
+def test_reduce_scatter_requires_a_divisible_leading_extent(tmp_path):
+    """An indivisible extent would compare against a truncated reference."""
+    contract = {"kind": "collective", "collective_op": "reduce_scatter", "world_size": 8}
+    with pytest.raises(ValueError, match="must divide across 8 ranks"):
+        _gen(
+            tmp_path,
+            kernel_contract=contract,
+            input_shapes=[{"shape": "(1023, 5120)", "call_num": 40}],
+            input_dtypes=["bf16"],
+        )
 
 
 def test_caller_tp_overrides_the_contract(tmp_path):
@@ -188,12 +217,38 @@ def test_bench_times_a_captured_graph(tmp_path):
     assert "torch.cuda.graph(graph, stream=capture_stream)" in driver
     assert "aiter.dist.parallel_state" not in driver
     bench = driver.split("def bench_case(")[1].split("def profile_case(")[0]
-    assert "chain = 1" in bench
+    assert "chain = max(1, iters)" in bench
     assert "capture_chain(inputs, ctx, chain)" in bench
-    assert "for _ in range(iters):" in bench
     assert "graph.replay()" in bench
     assert "start.elapsed_time(end) / chain" in driver
-    assert "Latency uses graph replay" in program
+    assert "Latency replays every iteration as one captured chain" in program
+
+
+def test_bench_does_not_resynchronise_between_samples(tmp_path):
+    """One barrier per sample would hide arrival skew and reward its removal.
+
+    A barrier immediately before each replay resets the ranks to a fully
+    synchronised state, which is the condition under which deleting an internal
+    barrier looks free. The timed region must hold at most the single entry
+    barrier.
+    """
+    driver, program = _gen(tmp_path)
+    bench = driver.split("def bench_case(")[1].split("def profile_case(")[0]
+    assert bench.count("dist.barrier(group=ctx.group)") == 1
+    barrier_at = bench.index("dist.barrier(group=ctx.group)")
+    assert barrier_at < bench.index("start.record()")
+    assert "Do not add a barrier inside the timed region" in program
+
+
+def test_parity_validates_two_back_to_back_calls(tmp_path):
+    """Scratch reused across consecutive collectives needs two live calls."""
+    driver, program = _gen(tmp_path)
+    check = driver.split("def check_case(")[1].split("def capture_chain(")[0]
+    assert "seeds = (seed, seed + 1)" in check
+    assert "got = [run_candidate(inputs, ctx) for inputs in pending]" in check
+    # Both results are compared only after both calls have been issued.
+    assert check.index("got = [run_candidate") < check.index("min(snr_db(")
+    assert "Parity issues two calls back to back" in program
 
 
 def test_capture_has_no_eager_timing_path(tmp_path):

@@ -191,6 +191,25 @@ The following variables control the kernel optimization backend ladder.
 | `HYPERLOOM_GEMM_SHAPE_CAPTURE` | `1`                           | Enables automatic runtime GEMM-shape capture for eligible single-node dense vLLM Forge tuning when no explicit shape input is available. Block-FP8 first reuses shapes from the TraceLens-selected steady-state trace of a successful Roofline with exactly matching model, workload, server arguments, environment, and backend controls. Missing or stale evidence triggers the same standard Roofline/ProfileExecutor/TraceLens steady-state pipeline as a fallback. Set to `0` to preserve the no-capture path. |
 | `HYPERLOOM_GEMM_SHAPE_CAPTURE_TIMEOUT_SEC` | `1800`          | Timeout in seconds for the dense vLLM TunableOp recording benchmark. Block-FP8 fallback uses the standard Roofline/ProfileExecutor timeout. Values below `60` are clamped to `60`. |
 | `INFERENCE_OPTIMIZER`<br>`_KERNEL_OPT_MAX_PARTIAL` | Unset           | Cap on how many `PARTIAL` kernel-opt verdicts an action can yield before it short-circuits to `NEEDS_REVIEW`. Useful for keeping budget contained when GEAK is consistently timing out.            |
+| `KERNEL_OPT_BACKEND_BUDGET_MIN` | `60`                         | Wall-clock budget in minutes for one optimization, mirrored by the `kernel_optimization.py` wrapper. The env deliberately wins over the payload `budget_minutes`, which is LLM-authored from a prompt template, so an operator raising the budget is not silently overridden. forge-loop reserves half the window for finalize, so `60` leaves roughly 30 minutes of real iteration. |
+
+---
+
+## Collective (all-reduce) optimization lane
+
+The collective lane is Coordinator-owned: it is dispatched directly at KERNEL
+entry, never as an agent request. It requires `TP > 1`, a latest-snapshot
+`Exposed Communication %` of at least 1% as parsed from the TraceLens executive
+summary, a `trace_analyze` snapshot, and a source-resolved custom `all_reduce`
+candidate — vendor RCCL/NCCL symbols are opaque binaries and never qualify.
+
+| Variable                       | Default                       | Description                                                                                                                                                                                       |
+|--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `HYPERLOOM_SKIP_COLLECTIVE`    | Unset (lane enabled)          | Truthy (`1` / `true` / `yes` / `on`) disables the collective lane outright, before any gate is evaluated.                                                                                          |
+| `HYPERLOOM_COLLECTIVE_ONLY`    | Unset                         | Truthy runs ONLY the collective lane at KERNEL entry — GEAK, fusion and per-kernel `kernel_opt` are all skipped — and hints `skip_to_sweep` once the lane settles. Also the way to reach the lane while `KERNEL_OPT_BACKEND_ORDER` selects `geak`, which otherwise owns the whole phase. Mirrored into the `collective_only_mode` SharedState field. |
+| `HYPERLOOM_COLLECTIVE_KEEP_PCT` | `1.0`                        | E2E `KEEP` threshold in percent for the collective integrate. Must parse as a finite, non-negative float, otherwise the integrate fails loudly rather than defaulting.                             |
+| `FORGE_COLLECTIVE_TIMEOUT`     | `14400` (4h)                  | Wrapper timeout in seconds for one forge-collective campaign; a collective iterates over N ranks per benchmark, hence the wide default. A payload `timeout` takes precedence over the env.          |
+| `FORGE_COLLECTIVE_AGENT_TIMEOUT` | Unset (wrapper default)     | Per-agent timeout in seconds, forwarded to forge-collective as `--agent-timeout-sec`. A payload `agent_timeout_sec` takes precedence.                                                              |
 
 ---
 

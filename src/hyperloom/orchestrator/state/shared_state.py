@@ -3127,7 +3127,15 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         kernel_roofline_path: str,
     ) -> "tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]":
         """Build ``(summary, kernel_roofline, reusable_ids)`` from the top-N hot
-        kernels, merging the optional per-kernel rocprof roofline sidecar."""
+        kernels, merging the optional per-kernel rocprof roofline sidecar.
+
+        ``reusable_ids`` drives the kernel_opt target list offered to the LLM,
+        so collective candidates are withheld: they are owned by the dedicated
+        collective lane and ``_batch_kernel_candidates`` drops them, which would
+        otherwise dispatch an empty batch for every id picked from this list.
+        """
+        from ..kernel import _kernel_decisions as _m
+
         hot = result.get("hot_kernels") or []
         summary: list[dict[str, Any]] = []
         kernel_roofline: list[dict[str, Any]] = []
@@ -3195,7 +3203,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 )
             ):
                 kernel_roofline.append(dict(summary_entry))
-            if reusable and kid:
+            if reusable and kid and not _m.is_collective_candidate(summary_entry):
                 reusable_ids.append(str(kid))
         return summary, kernel_roofline, reusable_ids
 

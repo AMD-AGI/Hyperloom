@@ -26,7 +26,7 @@ objective progress.
 The CLI starts a Python Coordinator that coordinates:
 
 - Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`, Kernel requests, `report`).
-- Kernel (programmatic, not LLM): the Coordinator dispatches `trace_analyze`, `run_optimization`, `integrate`, and related request kinds directly to Python handlers without an LLM turn.
+- Kernel (programmatic, not LLM): the Coordinator dispatches `trace_analyze`, `run_gemm_tuning`, `run_optimization`, `integrate`, and related request kinds directly to Python handlers without an LLM turn. The `run_fusion` and `run_collective` lanes share that handler table but are Coordinator-owned: they run at KERNEL entry behind their own gate and PolicyGate rejects an agent request for either.
 - Critic: proposal review (default `--critic-agent`; see
   [Critic Backend Selection](#critic-backend-selection) for modes).
 - Robustness: default `--robustness-agent` — drives the

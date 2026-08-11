@@ -1526,9 +1526,9 @@ class TestForgeCollectiveCoverage:
 
     @pytest.mark.asyncio
     async def test_run_forge_collective_rejects_unsupported_contract(self, tmp_path):
-        """Reject candidates outside the supported all-reduce contract."""
+        """Reject collectives with no distributed reference in the driver."""
         candidate = _collective_candidate(
-            kernel_contract={"kind": "collective", "collective_op": "all_gather"}
+            kernel_contract={"kind": "collective", "collective_op": "all_to_all"}
         )
 
         result = await krh._run_forge_collective(
@@ -1710,7 +1710,7 @@ class TestForgeCollectiveCoverage:
                         _collective_candidate(
                             kernel_contract={
                                 "kind": "collective",
-                                "collective_op": "all_gather",
+                                "collective_op": "all_to_all",
                             }
                         ),
                         fallback,
@@ -1765,8 +1765,6 @@ class TestForgeCollectiveCoverage:
                 "tp": "4",
                 "timeout": 10000,
                 "max_hours": 1,
-                "max_iters": 7,
-                "workload_key": "decode",
             },
             session_dir=tmp_path,
         )
@@ -1788,18 +1786,21 @@ class TestForgeCollectiveCoverage:
         assert captured["input"] == {
             "agent_timeout_sec": "900",
             "candidate": selected,
+            "e2e_pct": selected["gpu_pct"],
+            "experience_id": "attempt-123",
             "finalize_grace_sec": 300,
+            "framework": "",
             "gpu_target": "MI300X",
             "kernel_repo": str(tmp_path),
             "llm_model": "claude-test",
             "max_hours": 1.0,
-            "max_iters": 7,
+            "operator_name": "all_reduce",
             "output_dir": str(workspace),
             "source_file": selected["source_file"],
+            "source_files": [selected["source_file"]],
             "target_functions": ["all_reduce"],
             "timeout": 7500,
             "tp": 4,
-            "workload_key": "decode",
         }
         assert result["backend"] == "forge"
         assert result["workspace"] == str(workspace)

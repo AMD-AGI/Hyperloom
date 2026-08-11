@@ -1009,7 +1009,24 @@ def _prepare_inplace(
     *,
     lock_fd: _RepoLock | None = None,
 ) -> tuple[str, str, dict] | None:
-    """Prepare a locked live repository and its restoration state."""
+    """In-place mode (Option 1): edit the LIVE repo so an editable-finder import
+    sees the changes. Snapshots the original branch/HEAD + source bytes for a
+    per-file restore in finally. Returns (workspace=repo, kernel_file=source_file,
+    restore_info) or None when the repo is not a usable git checkout.
+
+    Safety:
+      - if HEAD is already on a forge/ temp branch (a prior crashed/SIGKILL'd
+        run that never restored), AUTO-RECOVER: force-checkout the repo's
+        default branch and delete the stale temp branch, then proceed from a
+        pristine baseline (falls back to skip only if the default branch can't
+        be resolved),
+      - hold a per-repo lock so concurrent forge runs never interleave,
+      - dirty working trees are allowed and preserved: the caller may record a
+        tracked-baseline patch and the untracked inventory, which
+        ``_restore_inplace`` replays so uncommitted work survives the campaign.
+        Files the campaign itself created are removed on restore; there is
+        still no ``reset --hard``.
+    """
     repo = kernel_repo or _git_toplevel(source_file)
     if not repo or not (Path(repo) / ".git").exists():
         _release_repo_lock(lock_fd)

@@ -214,6 +214,9 @@ def test_trace_projection_preserves_collective_queue_isolation(tmp_path):
     assert projected["kernel_contract"]["kind"] == "collective"
     assert projected["is_multigpu"] is True
     assert untried_hot_reusable_kernels(state) == []
+    # The prompt offers this list as the kernel_opt target set, so a collective
+    # left in it would dispatch an empty batch on every pick.
+    assert state.last_trace_analyze["reusable_native_kernel_ids"] == []
 
 
 def test_multigpu_hint_without_collective_contract_stays_routable(tmp_path):
@@ -238,6 +241,7 @@ def test_multigpu_hint_without_collective_contract_stays_routable(tmp_path):
         min_gpu_pct=0.0,
         top_n=10,
     ) == ["k007"]
+    assert state.last_trace_analyze["reusable_native_kernel_ids"] == ["k007"]
 
 
 def test_collective_replay_preserves_completed_integration(tmp_path):
@@ -437,3 +441,26 @@ def test_lane_is_not_exposed_to_the_llm():
     assert "run_collective" not in KERNEL_AGENT_OWNED_ACTIONS
     assert "run_collective" not in FULL_ENABLED_ACTIONS
     assert "run_collective" not in PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGENT]
+
+
+def test_policy_gate_rejects_an_llm_issued_lane_request():
+    """Absence from the allowlists is not a gate; PolicyGate must deny outright.
+
+    A registered handler with no owning action set would otherwise skip every
+    phase check, letting the LLM bypass the comm_pct gate, ``record_collective``
+    accounting, and ``_integrate_collective``.
+    """
+    from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
+    from hyperloom.orchestrator.roles.agent_role import default_role_registry
+
+    registry = default_role_registry()
+    gate = PolicyGate(role_registry=registry, session_dir=None)
+
+    for kind in ("run_collective", "run_fusion"):
+        with pytest.raises(PolicyDenied) as exc:
+            gate._validate_request(
+                registry["orchestration"],
+                {"target_agent": "kernel_agent", "kind": kind},
+            )
+        assert exc.value.rule == "phase_incompatible"
+        assert kind in str(exc.value)

@@ -1178,7 +1178,7 @@ def _normalize_optimization_stack_entry(
 
     Returns:
         dict[str, Any]: The coerced stack entry with optional evidence fields
-        included only when present in ``raw``.
+        (gemm-tuning and collective) included only when present in ``raw``.
     """
     # Known fields — coerced types
     out: dict[str, Any] = {
@@ -1216,6 +1216,16 @@ def _normalize_optimization_stack_entry(
         out["operation_kind"] = str(raw.get("operation_kind") or "")
     if "scope" in raw:
         out["scope"] = str(raw.get("scope") or "")
+    # collective-specific evidence (optional); ``integration_id`` /
+    # ``collective_attempt_id`` join the entry back to its campaign record.
+    if "collective_op" in raw:
+        out["collective_op"] = str(raw.get("collective_op") or "")
+    if "world_size" in raw:
+        out["world_size"] = raw.get("world_size")
+    if "collective_attempt_id" in raw:
+        out["collective_attempt_id"] = str(raw.get("collective_attempt_id") or "")
+    if "integration_id" in raw:
+        out["integration_id"] = str(raw.get("integration_id") or "")
     return out
 
 

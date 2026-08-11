@@ -20,6 +20,7 @@ from ..bus.gpu_pool import (
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
+    COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
     INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_AGENT_OWNED_ACTIONS,
     KERNEL_REQUEST_KIND_ALIASES,
@@ -1148,6 +1149,21 @@ class PolicyGate:
         # resolve a request-kind alias (e.g. apply_patch -> integrate) to its
         # canonical owned action so the phase-action gate applies identically.
         gated_kind = KERNEL_REQUEST_KIND_ALIASES.get(kind, kind)
+        if gated_kind in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS:
+            raise PolicyDenied(
+                f"request kind {gated_kind!r} is a Coordinator-owned kernel lane "
+                f"and not LLM-requestable ({role.name})",
+                rule="phase_incompatible",
+                hint=(
+                    "run_fusion / run_collective are dispatched by the "
+                    "Coordinator at KERNEL entry once their deterministic gate "
+                    "passes; their outcomes arrive as run_fusion_done / "
+                    "run_collective_done responses. Requesting one directly "
+                    "skips that gate, the lane's SharedState accounting, and "
+                    "its integrate step. Propose ``kernel_opt`` for a "
+                    "source-level kernel instead."
+                ),
+            )
         # R1 phase_incompatible: treat REQUEST kind as the action name for kernel_agent-owned + coordinator-internal kinds.
         if (
             target == "kernel_agent" and gated_kind in KERNEL_AGENT_OWNED_ACTIONS

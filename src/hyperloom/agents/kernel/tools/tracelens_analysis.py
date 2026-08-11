@@ -2782,7 +2782,16 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
 
 
 def is_multigpu_kernel(name: str, source_file: str) -> bool:
-    """Return whether a kernel name or source identifies a collective."""
+    """Heuristic: kernel is a multi-GPU collective if name/source hints it.
+
+    Args:
+        name (str): Kernel symbol/name.
+        source_file (str): Resolved source-file path (may be empty).
+
+    Returns:
+        bool: ``True`` when the name/source contains a collective /
+            distributed marker.
+    """
     blob = f"{name} {source_file}".lower()
     return any(
         tag in blob

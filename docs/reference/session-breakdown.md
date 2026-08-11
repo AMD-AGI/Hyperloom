@@ -205,6 +205,18 @@ gain; the latter groups the same entries by `optimization_kind`. These
 summaries are alternate views of the same gains and must not be added
 together.
 
+A `kernel_agent` entry's `optimization_kind` records which lane produced it:
+`gemm_tuning`, `kernel_fusion`, `kernel_collective`, or `kernel_patch` for a
+generic source-level rewrite. A `kernel_collective` entry comes from the
+Coordinator-owned collective lane, so it carries `action=collective` with
+`variant_name=forge_collective` and `backend=forge`, and retains
+`collective_op`, `world_size`, `collective_attempt_id`, and `integration_id` as
+optional evidence joining the entry back to its campaign record. Collective
+gain is bucketed into its own `collective` attribution family
+(`collective_pct_of_total`) so multi-rank communication wins get a dedicated
+row instead of falling through to `other`; its phase attribution still
+resolves to `kernel_agent`.
+
 `backend_attempts` retains adopted and non-adopted GEAK/Forge attempts,
 including KEEP, PARTIAL, REVERT, and FAILED outcomes. `sequence` is ordered
 within each kernel. Adopted kernel entries link back through

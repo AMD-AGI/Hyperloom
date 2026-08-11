@@ -190,6 +190,80 @@ def test_target_functions_list_is_joined(tmp_path):
     assert cmd[cmd.index("--target-functions") + 1] == "a::b,c"
 
 
+def test_cmd_carries_kb_identity_and_amdahl_share(tmp_path):
+    """forge-loop needs these to pick the fellow and project an E2E ceiling."""
+    payload = _payload(
+        tmp_path,
+        source_files=["/repo/custom_all_reduce.cuh"],
+        operator_name="cross_device_reduce_1stage",
+        framework="sglang",
+        e2e_pct=6.881,
+        experience_id="attempt-7",
+    )
+    cmd = fc._build_cmd(
+        payload,
+        _rig(tmp_path),
+        tmp_path,
+        deadline_unix=9_999_999_999,
+    )
+    assert cmd[cmd.index("--fellow") + 1] == fc.COLLECTIVE_FELLOW
+    assert cmd[cmd.index("--framework") + 1] == "sglang"
+    assert cmd[cmd.index("--operator-name") + 1] == "cross_device_reduce_1stage"
+    assert cmd[cmd.index("--source-files") + 1] == "/repo/custom_all_reduce.cuh"
+    assert cmd[cmd.index("--e2e-pct") + 1] == "6.881"
+    assert cmd[cmd.index("--experiment-id") + 1] == fc.EXPERIMENT_ID
+    assert cmd[cmd.index("--experience-id") + 1] == "attempt-7"
+    # Both were rejected upstream: one is a hidden legacy alias, the other a
+    # documented no-op.
+    assert "--workload-key" not in cmd
+    assert "--max-iters" not in cmd
+
+
+def test_cmd_resumes_an_interrupted_campaign(tmp_path):
+    """A surviving run_state.json is the only state forge-loop resumes from."""
+    repo = tmp_path / "repo"
+    (repo / "forge_experiments").mkdir(parents=True)
+    (repo / "forge_experiments" / "run_state.json").write_text("{}", encoding="utf-8")
+    payload = _payload(tmp_path, kernel_repo=str(repo))
+
+    cmd = fc._build_cmd(
+        payload,
+        _rig(tmp_path),
+        tmp_path,
+        deadline_unix=9_999_999_999,
+    )
+
+    assert "--resume" in cmd
+    # forge-loop owns the campaign configuration once saved and rejects these
+    # alongside --resume.
+    for rejected in (
+        "--kernel",
+        "--driver",
+        "--program-md-file",
+        "--source-files",
+        "--operator-name",
+    ):
+        assert rejected not in cmd
+    assert cmd[cmd.index("--workspace") + 1] == str(repo)
+
+
+def test_cmd_starts_fresh_without_campaign_state(tmp_path):
+    """Campaign artifacts without run_state.json must not trigger --resume."""
+    repo = tmp_path / "repo"
+    (repo / "forge_experiments").mkdir(parents=True)
+    payload = _payload(tmp_path, kernel_repo=str(repo))
+
+    cmd = fc._build_cmd(
+        payload,
+        _rig(tmp_path),
+        tmp_path,
+        deadline_unix=9_999_999_999,
+    )
+
+    assert "--resume" not in cmd
+    assert "--kernel" in cmd
+
+
 @pytest.mark.parametrize(
     "value",
     [

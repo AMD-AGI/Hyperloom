@@ -1276,7 +1276,13 @@ def is_collective_candidate(candidate: dict[str, Any]) -> bool:
 
 
 def _kernel_ids_in_optimization_stack(state) -> set[str]:
-    """Return kernel ids already integrated by a kernel lane."""
+    """kernel_ids already absorbed into optimization_stack by a kernel lane.
+
+    Returns:
+        set[str]: The set of ``kernel_id`` values that appear on an
+            ``integrate`` or ``collective`` entry of
+            :attr:`optimization_stack`.
+    """
     return {
         str(e.get("kernel_id"))
         for e in (state.optimization_stack or [])
@@ -1287,7 +1293,13 @@ def _kernel_ids_in_optimization_stack(state) -> set[str]:
 
 
 def _source_files_in_optimization_stack(state) -> set[str]:
-    """Return source paths already integrated by a kernel lane."""
+    """source_file paths already touched by an integrating kernel lane; enforces "same source_file, only strongest KEEP integrated" (apply_kernel_patch is a whole-file overwrite).
+
+    Returns:
+        set[str]: The set of ``target_file`` / ``source_file`` paths
+            referenced by ``integrate`` or ``collective`` entries of
+            :attr:`optimization_stack`.
+    """
     sources: set[str] = set()
     for e in state.optimization_stack or []:
         if (

@@ -405,8 +405,8 @@ def test_session_kernel_opt_outcome_rollup():
     )
 
 
-def test_collective_attempt_identity_requires_nonblank_value():
-    """Validate normalized and required Collective attempt identities."""
+def test_collective_attempt_identity_normalizes_and_tolerates_absence():
+    """A blank identity degrades to ``""`` instead of aborting the report."""
     assert (
         kas._collective_attempt_identity(
             {"collective_attempt_id": " collective-attempt-1 "}
@@ -415,25 +415,27 @@ def test_collective_attempt_identity_requires_nonblank_value():
     )
 
     for record in ({}, {"collective_attempt_id": "   "}):
-        with pytest.raises(
-            ValueError,
-            match="missing collective_attempt_id",
-        ):
-            kas._collective_attempt_identity(record)
+        assert kas._collective_attempt_identity(record) == ""
 
 
-def test_collective_attempt_records_validates_and_copies_history():
-    """Validate Collective history shape, uniqueness, and defensive copying."""
+def test_collective_attempt_records_drops_unusable_history():
+    """Unusable Collective rows are skipped, never raised."""
     assert kas._collective_attempt_records(SimpleNamespace()) == []
-
-    with pytest.raises(ValueError, match="must contain mappings"):
+    assert (
         kas._collective_attempt_records(
             SimpleNamespace(collective_attempts={"not": "a list"})
         )
-    with pytest.raises(ValueError, match="must contain mappings"):
+        == []
+    )
+    assert kas._collective_attempt_records(
+        SimpleNamespace(collective_attempts=[{"collective_attempt_id": "a"}, 1])
+    ) == [{"collective_attempt_id": "a"}]
+    assert (
         kas._collective_attempt_records(
-            SimpleNamespace(collective_attempts=[{"collective_attempt_id": "a"}, 1])
+            SimpleNamespace(collective_attempts=[{"status": "complete"}])
         )
+        == []
+    )
 
     original = [
         {"collective_attempt_id": "a", "status": "complete"},
@@ -447,15 +449,14 @@ def test_collective_attempt_records_validates_and_copies_history():
     records[0]["status"] = "changed"
     assert original[0]["status"] == "complete"
 
-    with pytest.raises(ValueError, match="duplicate identities"):
-        kas._collective_attempt_records(
-            SimpleNamespace(
-                collective_attempts=[
-                    {"collective_attempt_id": "duplicate"},
-                    {"collective_attempt_id": " duplicate "},
-                ]
-            )
+    assert kas._collective_attempt_records(
+        SimpleNamespace(
+            collective_attempts=[
+                {"collective_attempt_id": "duplicate", "status": "kept"},
+                {"collective_attempt_id": " duplicate ", "status": "stale"},
+            ]
         )
+    ) == [{"collective_attempt_id": "duplicate", "status": "kept"}]
 
 
 @pytest.mark.parametrize(

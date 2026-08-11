@@ -1586,7 +1586,20 @@ async def _run_subprocess(
     ):
         raise ValueError("timeout_sec must be finite and positive")
     def _run() -> tuple[int, str, str]:
-        """Run the command with multi-node environment and tree cleanup."""
+        """Run the command synchronously in a worker thread.
+
+        Copies the environment, injects the Ray GCS address in multi-node mode,
+        and prepends the venv ``bin`` to ``PATH``. Launches the child in its own
+        POSIX session and, on timeout, reaps the whole process group so a hung
+        grandchild dies with the wrapper. Mirrors ``subprocess.run``: captures
+        stdout/stderr and re-raises ``TimeoutExpired``.
+
+        Returns:
+            tuple[int, str, str]: ``(returncode, stdout, stderr)``.
+
+        Raises:
+            subprocess.TimeoutExpired: When the command exceeds ``timeout_sec``.
+        """
         env = os.environ.copy()
         from ..actions.executors._multi_node_env import (
             is_multi_node,
@@ -4352,7 +4365,7 @@ def _validate_collective_candidate(
 
 
 def select_collective_candidate(state: Any) -> dict[str, Any] | None:
-    """Pick the hottest source-resolved traced all-reduce."""
+    """Pick the hottest source-resolved traced collective."""
     eligible: list[dict[str, Any]] = []
     for index, entry in enumerate(_enriched_kernel_candidates(state)):
         if entry.get("reusable_native_kernel") is not True:
@@ -4360,7 +4373,7 @@ def select_collective_candidate(state: Any) -> dict[str, Any] | None:
         contract = entry.get("kernel_contract")
         if not isinstance(contract, dict) or str(contract.get("kind") or "") != "collective":
             continue
-        if str(contract.get("collective_op") or "") != "all_reduce":
+        if str(contract.get("collective_op") or "") not in SUPPORTED_COLLECTIVE_OPS:
             continue
         try:
             _validate_collective_candidate(entry, index=index)
@@ -4383,6 +4396,11 @@ def select_collective_candidate(state: Any) -> dict[str, Any] | None:
 
     return max(pool, key=_gpu_pct)
 
+
+#: Collective primitives the lane can measure. Each needs an independent
+#: ``torch.distributed`` reference in the generated driver, so widening this set
+#: means adding one there first.
+SUPPORTED_COLLECTIVE_OPS = frozenset({"all_reduce", "reduce_scatter", "all_gather"})
 
 _COLLECTIVE_BUDGET_RESERVE_MIN = 45.0
 _COLLECTIVE_PREP_GRACE_SEC = 3600
@@ -4473,7 +4491,9 @@ def _collective_budget(state: Any, requested_hours: Any, timeout_sec: int) -> tu
         )
     if campaign_sec < _COLLECTIVE_MIN_CAMPAIGN_SEC:
         return None, 0
-    hours = int(campaign_sec / 36) / 100.0
+    # Truncate to two decimals so the hours we hand forge-loop never round up
+    # past the budget they were derived from.
+    hours = math.floor(campaign_sec / 3600 * 100) / 100.0
     required = (
         _COLLECTIVE_PREP_GRACE_SEC
         + int(hours * 3600)
@@ -4524,11 +4544,12 @@ async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerR
     if (
         not isinstance(contract, dict)
         or contract.get("kind") != "collective"
-        or contract.get("collective_op") != "all_reduce"
+        or contract.get("collective_op") not in SUPPORTED_COLLECTIVE_OPS
     ):
         return _collective_revert_result(
             "unsupported_collective_contract",
-            "collective Forge currently supports only all_reduce",
+            "collective Forge supports "
+            + ", ".join(sorted(SUPPORTED_COLLECTIVE_OPS)),
         )
     try:
         _validate_collective_candidate(candidate)
@@ -4613,11 +4634,16 @@ async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerR
         "agent_timeout_sec": payload.get("agent_timeout_sec")
         or os.environ.get("FORGE_COLLECTIVE_AGENT_TIMEOUT"),
         "gpu_target": str(payload.get("gpu_target") or getattr(state, "gpu_type", "") or ""),
-        "max_iters": payload.get("max_iters"),
         "max_hours": max_hours,
         "llm_model": payload.get("llm_model") or os.environ.get("CLAUDE_MODEL"),
-        "workload_key": payload.get("workload_key"),
         "target_functions": [source_function],
+        "source_files": [source_file],
+        "operator_name": source_function,
+        "framework": str(getattr(state, "framework", "") or ""),
+        # forge-loop projects an Amdahl E2E ceiling from this share, so a
+        # campaign that cannot pay for itself is visible before it starts.
+        "e2e_pct": candidate.get("gpu_pct"),
+        "experience_id": workspace.name,
     }
     input_json = workspace / "forge_collective_input.json"
     input_json.write_text(
