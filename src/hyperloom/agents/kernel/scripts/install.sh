@@ -237,11 +237,14 @@ MAGPIE_PATH INFERENCEX_PATH TRACELENS_ROOT TRACELENS_INTERNAL_ROOT
 GEAK_ROOT GEAK_E2E_RUNNER PYTHONPATH'
 
 if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
-   || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+   || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
   if [ -f "$REPO_ROOT/.env" ]; then
     _snap_anthropic_url="${ANTHROPIC_BASE_URL-}"
     _snap_anthropic_key="${ANTHROPIC_API_KEY-}"
     _snap_anthropic_token="${ANTHROPIC_AUTH_TOKEN-}"
+    # The subscription token is snapshotted like the other three: without it a
+    # stale token in .env silently replaces the one the caller exported.
+    _snap_claude_oauth="${CLAUDE_CODE_OAUTH_TOKEN-}"
     for _v in $_DOTENV_PROTECTED_VARS; do
       eval "_snap_prot_${_v}=\"\${${_v}-}\""
     done
@@ -252,6 +255,7 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     [ -n "$_snap_anthropic_url" ] && export ANTHROPIC_BASE_URL="$_snap_anthropic_url"
     [ -n "$_snap_anthropic_key" ] && export ANTHROPIC_API_KEY="$_snap_anthropic_key"
     [ -n "$_snap_anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$_snap_anthropic_token"
+    [ -n "$_snap_claude_oauth" ] && export CLAUDE_CODE_OAUTH_TOKEN="$_snap_claude_oauth"
     for _v in $_DOTENV_PROTECTED_VARS; do
       eval "_snap_val=\"\${_snap_prot_${_v}-}\""
       if [ -n "${_snap_val}" ]; then
@@ -1173,6 +1177,13 @@ write_env_file() {
     upsert_dotenv_var ANTHROPIC_API_KEY "$_anthropic_key"
   else
     remove_dotenv_var ANTHROPIC_API_KEY
+  fi
+  # The subscription token is a credential form of its own, not another
+  # spelling of the API key, so it is persisted beside the slot above rather
+  # than folded into it. Write-only: an unset token means the operator
+  # authenticates some other way this run, not that a stored one should go.
+  if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    upsert_dotenv_var CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"
   fi
   # Only the Anthropic side is persisted here. The OpenAI-side entries in the
   # shared .env are owned elsewhere and left untouched -- which is also what
