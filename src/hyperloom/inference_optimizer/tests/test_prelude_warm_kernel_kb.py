@@ -28,6 +28,8 @@ class _StubPrelude:
     _parse_diff_target = staticmethod(PreludePhase._parse_diff_target)
     _resolve_kernel_target_path = PreludePhase._resolve_kernel_target_path
     _integrate_warm_kernel = PreludePhase._integrate_warm_kernel
+    _warm_gemm_extra_envs = staticmethod(PreludePhase._warm_gemm_extra_envs)
+    _integrate_warm_gemm = PreludePhase._integrate_warm_gemm
     _maybe_apply_warm_kernel_kb = PreludePhase._maybe_apply_warm_kernel_kb
 
     def __init__(self, session_dir: Path, reader: object | None = None) -> None:
@@ -197,13 +199,84 @@ async def test_revert_decision_is_counted(tmp_path: Path) -> None:
     assert outcome["reverted"] == 1 and outcome["kept"] == 0
 
 
+def test_warm_gemm_envs_point_the_recorded_var_at_the_local_tuned_file() -> None:
+    entry = {
+        "column": "gemm",
+        "source_paths": ["/local/dl/tunableop_results.csv"],
+        "meta": {
+            "recommended_env": {"HL_TUNABLEOP_MODE": "candidate"},
+            "e2e_results": {
+                "kept": [
+                    {
+                        "env_var": "PYTORCH_TUNABLEOP_FILENAME",
+                        "envs": {"HL_TUNABLEOP_MODE": "candidate"},
+                    }
+                ]
+            },
+        },
+    }
+
+    envs = PreludePhase._warm_gemm_extra_envs(entry)
+
+    assert envs["PYTORCH_TUNABLEOP_FILENAME"] == "/local/dl/tunableop_results.csv"
+    assert envs["HL_TUNABLEOP_MODE"] == "candidate"
+
+
+def test_warm_gemm_envs_empty_without_a_recorded_env_var() -> None:
+    entry = {"column": "gemm", "source_paths": ["/local/dl/t.csv"], "meta": {}}
+
+    assert PreludePhase._warm_gemm_extra_envs(entry) == {}
+
+
 @pytest.mark.asyncio
-async def test_gemm_only_record_is_read_and_deferred(tmp_path: Path) -> None:
-    # A GEMM-only kernel: record is READ into the plan and deferred to the
-    # kernel phase (parameter-shaped, not a source patch).
+async def test_gemm_record_is_applied_through_its_env_bundle(tmp_path: Path) -> None:
+    # A GEMM champion is parameter-shaped: it is applied by re-pointing its
+    # recorded env var at the downloaded tuned table, then validated.
     record = _kernel_record(
         tmp_path,
-        {"gemm": {"optimizations": [{"kernel_name": "g1", "tuned_file": "kernel/gemm/t.csv", "e2e_gain_pct": 10.1}]}},
+        {
+            "gemm": {
+                "optimizations": [
+                    {
+                        "variant_name": "forge_vllm_dense_tunableop",
+                        "tuned_file": "kernel/gemm/t.csv",
+                        "e2e_gain_pct": 10.1,
+                        "recommended_env": {"HL_TUNABLEOP_MODE": "candidate"},
+                        "e2e_results": {
+                            "kept": [{"env_var": "PYTORCH_TUNABLEOP_FILENAME"}]
+                        },
+                    }
+                ]
+            }
+        },
+        {"kernel/gemm/t.csv": "M,N,K\n16,512,7168\n"},
+    )
+    stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
+
+    applied: list[dict] = []
+
+    async def _fake_integrate_gemm(entry: dict) -> dict:
+        applied.append(entry)
+        return {"status": "ok", "decision": "KEEP", "gain_pct": 10.1}
+
+    stub._integrate_warm_gemm = _fake_integrate_gemm  # type: ignore[method-assign]
+
+    outcome = await stub._maybe_apply_warm_kernel_kb()
+
+    assert outcome["status"] == "kept"
+    assert outcome["kept"] == 1 and outcome["deferred"] == 0
+    envs = applied[0]["extra_envs"]
+    assert envs["PYTORCH_TUNABLEOP_FILENAME"].endswith("kernel/gemm/t.csv")
+    assert envs["HL_TUNABLEOP_MODE"] == "candidate"
+
+
+@pytest.mark.asyncio
+async def test_gemm_without_env_var_is_deferred(tmp_path: Path) -> None:
+    # Nothing names the env var that should carry the tuned table, so there is
+    # no safe way to re-apply it: defer rather than guess.
+    record = _kernel_record(
+        tmp_path,
+        {"gemm": {"optimizations": [{"tuned_file": "kernel/gemm/t.csv"}]}},
         {"kernel/gemm/t.csv": "M,N,K\n16,512,7168\n"},
     )
     stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
@@ -211,9 +284,7 @@ async def test_gemm_only_record_is_read_and_deferred(tmp_path: Path) -> None:
     outcome = await stub._maybe_apply_warm_kernel_kb()
 
     assert outcome["status"] == "loaded"
-    assert outcome["deferred"] == 1 and outcome["total"] == 1
-    assert outcome["columns"] == ["gemm"]
-    assert stub.shared_state.warm_kernel_kb_plan[0]["column"] == "gemm"
+    assert outcome["deferred"] == 1 and outcome["kept"] == 0
 
 
 @pytest.mark.asyncio

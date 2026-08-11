@@ -384,6 +384,75 @@ class PreludePhase(PhaseHandler):
             payload["config_path"] = config_path
         return await integrate_handler(payload, session_dir=self.session_dir)
 
+    @staticmethod
+    def _warm_gemm_extra_envs(entry: dict[str, Any]) -> dict[str, str]:
+        """Rebuild a champion GEMM's env bundle against the downloaded tuned file.
+
+        A GEMM champion is parameter-shaped: the tuned table travels as a file
+        ref and the env var that points at it is recorded per accepted tuner in
+        ``e2e_results.kept[].env_var``. The producing session's absolute path is
+        scrubbed before publish, so replay re-points that env var at this run's
+        local copy and merges the recorded path-free envs on top.
+        """
+        meta = entry.get("meta") or {}
+        tuned = next((str(p) for p in (entry.get("source_paths") or []) if p), "")
+        if not tuned:
+            return {}
+        envs: dict[str, str] = {}
+        for source in (meta.get("recommended_env"), meta.get("extra_envs")):
+            if isinstance(source, dict):
+                envs.update({str(k): str(v) for k, v in source.items() if str(k).strip()})
+        kept = ((meta.get("e2e_results") or {}).get("kept") or []) if isinstance(meta.get("e2e_results"), dict) else []
+        for tuner in kept:
+            if not isinstance(tuner, dict):
+                continue
+            tuner_envs = tuner.get("envs")
+            if isinstance(tuner_envs, dict):
+                envs.update({str(k): str(v) for k, v in tuner_envs.items() if str(k).strip()})
+            env_var = str(tuner.get("env_var") or "").strip()
+            if env_var:
+                envs[env_var] = tuned
+        return envs
+
+    async def _integrate_warm_gemm(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """Apply one champion GEMM's tuned config and validate it by re-baseline.
+
+        The env-only analogue of :meth:`_integrate_warm_kernel`: no source patch,
+        just the tuned table's env bundle handed to :func:`integrate_handler`,
+        which re-runs the baseline and KEEPs only on a win.
+        """
+        import os
+
+        from ..kernel.request_handlers import integrate_handler
+
+        ss = self.shared_state
+        base_tput = float(getattr(ss, "baseline_tput", 0.0) or 0.0)
+        current_best = getattr(ss, "current_best", {}) or {}
+        if isinstance(current_best, dict):
+            try:
+                cb_tput = float(current_best.get("tput") or 0.0)
+            except (TypeError, ValueError):
+                cb_tput = 0.0
+            if cb_tput > 0:
+                base_tput = cb_tput
+        meta = entry.get("meta") or {}
+        payload: dict[str, Any] = {
+            "kernel_id": str(meta.get("variant_name") or "warm_gemm"),
+            "source": "warm_kernel_kb",
+            "extra_envs": entry.get("extra_envs") or {},
+            "base_tput": base_tput,
+            "keep_threshold_pct": float(
+                os.environ.get("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "1.0") or 1.0
+            ),
+        }
+        server_args = str(meta.get("extra_server_args") or "").strip()
+        if server_args:
+            payload["extra_server_args"] = server_args
+        config_path = str(getattr(ss, "baseline_config_path", "") or "").strip()
+        if config_path:
+            payload["config_path"] = config_path
+        return await integrate_handler(payload, session_dir=self.session_dir)
+
     def _open_warm_kernel_record(self) -> Any:
         """Download this run's independent kernel-agent KB record and open a reader.
 
@@ -443,25 +512,39 @@ class PreludePhase(PhaseHandler):
         reverted = 0
         deferred = 0
         for entry in plan:
-            # GEMM is a tuned-parameter deliverable, not a source patch; its
-            # validated re-application belongs to the kernel phase tuning path.
-            if entry.get("column") == "gemm":
-                entry["decision"] = "DEFERRED"
-                deferred += 1
-                continue
             if not (entry.get("source_paths") or entry.get("patch_path")):
                 deferred += 1
                 continue
-            target = self._resolve_kernel_target_path(entry)
-            if not target:
-                entry["decision"] = "DEFERRED"
-                deferred += 1
-                continue
-            entry["target_file"] = target
+            # GEMM is parameter-shaped: the tuned table is re-applied through its
+            # env bundle rather than a source patch, but it is validated by the
+            # same re-baseline gate.
+            is_gemm = entry.get("column") == "gemm"
+            target = ""
+            if is_gemm:
+                envs = self._warm_gemm_extra_envs(entry)
+                if not envs:
+                    entry["decision"] = "DEFERRED"
+                    deferred += 1
+                    continue
+                entry["extra_envs"] = envs
+            else:
+                target = self._resolve_kernel_target_path(entry)
+                if not target:
+                    entry["decision"] = "DEFERRED"
+                    deferred += 1
+                    continue
+                entry["target_file"] = target
             try:
-                result = await self._integrate_warm_kernel(entry, target)
+                if is_gemm:
+                    result = await self._integrate_warm_gemm(entry)
+                else:
+                    result = await self._integrate_warm_kernel(entry, target)
             except Exception as exc:  # noqa: BLE001 — one bad integrate must not abort the rest
-                log.warning("warm-kernel KB: integrate failed for %s", target, exc_info=True)
+                log.warning(
+                    "warm-kernel KB: integrate failed for %s",
+                    target or entry.get("column"),
+                    exc_info=True,
+                )
                 entry["decision"] = "ERROR"
                 entry["integrate_result"] = {"exception": f"{type(exc).__name__}: {exc}"[:300]}
                 deferred += 1
