@@ -274,9 +274,13 @@ def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: s
             "~/.claude/config.json primaryApiKey (subscription credential)"
         )
         primary_api_key = ""
-    if oauth_token and not primary_api_key.strip():
-        # Matches the installers: with no API key to write there is nothing this
-        # file can add, so leave the operator's Claude config untouched.
+    if oauth_token and not anthropic_synthesizable_key():
+        # Subscription mode: the token is only valid against Anthropic itself,
+        # so writing customApiUrl would point the CLI away from the endpoint
+        # that accepts it. The test is "is this run on the subscription", not
+        # "is primary_api_key empty" -- the caller passes ANTHROPIC_API_KEY, so
+        # a host authenticating through ANTHROPIC_AUTH_TOKEN also arrives with
+        # an empty key while genuinely needing the gateway URL written.
         print("Preflight: subscription token in use; ~/.claude/config.json left alone")
         return
     claude_config_path = Path.home() / ".claude" / "config.json"
@@ -395,6 +399,30 @@ def _warn_on_shadowed_oauth_token() -> None:
     )
 
 
+def _warn_on_oauth_against_a_foreign_endpoint() -> None:
+    """Warn when a subscription token is pointed at a non-Anthropic endpoint.
+
+    The token authenticates against Anthropic itself and nothing else, so this
+    pairing cannot succeed. It is worth its own message because the failure is
+    not the operator's first concern here: reaching a third-party gateway means
+    the subscription credential is put on the wire to a host that was never
+    meant to see it.
+    """
+    if not _has_claude_oauth_token() or anthropic_synthesizable_key():
+        return
+    base_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+    if not base_url or base_url.rstrip("/") == _OFFICIAL_ANTHROPIC_BASE_URL:
+        return
+    print(
+        "Preflight: WARNING — CLAUDE_CODE_OAUTH_TOKEN is set with "
+        f"ANTHROPIC_BASE_URL={base_url}. A subscription token is only valid against "
+        f"{_OFFICIAL_ANTHROPIC_BASE_URL}, so this run cannot authenticate, and the "
+        "token would be sent to that endpoint. Unset ANTHROPIC_BASE_URL to use the "
+        "subscription, or supply an API key that endpoint accepts.",
+        file=sys.stderr,
+    )
+
+
 def _warn_on_oauth_widened_provider_shape() -> None:
     """Warn when a subscription token turns an OpenAI-only deploy dual-sided.
 
@@ -431,6 +459,7 @@ def _validate_credentials() -> None:
     """
     _reject_cross_provider_pairing()
     _warn_on_shadowed_oauth_token()
+    _warn_on_oauth_against_a_foreign_endpoint()
     _warn_on_oauth_widened_provider_shape()
     anthropic_url, openai_url = _resolve_llm_endpoints()
     has_anthropic_side = has_anthropic_credential()

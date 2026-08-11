@@ -26,6 +26,7 @@ from hyperloom.common.llm_config import (
     LEGACY_DEEPSEEK_ENV_KEYS,
     anthropic_synthesizable_key,
     deepseek_compat_env,
+    has_anthropic_credential,
     provider_model_defaults,
 )
 
@@ -96,12 +97,14 @@ def _provider_only_mode() -> str:
 
     Runs ahead of :func:`_normalize_legacy_deepseek_env`, so a retired
     ``DEEPSEEK_*`` shell export is still read here and counts as Anthropic-side
-    intent.
+    intent. The Anthropic side is read through the credential registry so a
+    subscription-token host is recognised as Anthropic-only too — without it,
+    such a host gets no provider-only mode and therefore no protection against
+    a stale OpenAI side arriving from the kernel-agent env file.
     """
     has_anthropic = bool(
         os.environ.get("ANTHROPIC_BASE_URL")
-        or os.environ.get("ANTHROPIC_API_KEY")
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        or has_anthropic_credential()
         or os.environ.get("DEEPSEEK_API_KEY")
         or os.environ.get("DEEPSEEK_BASE_URL")
     )
