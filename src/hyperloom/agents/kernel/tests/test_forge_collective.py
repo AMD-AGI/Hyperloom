@@ -392,6 +392,53 @@ def test_main_exports_patch_then_restores_live_repo(tmp_path, monkeypatch):
     assert not (repo / ".git" / "hyperloom_collective_restore.json").exists()
 
 
+def test_inplace_workspace_preserves_dirty_tracked_baseline(
+    tmp_path,
+    monkeypatch,
+):
+    """Profiler patches present before Forge must survive exact restoration."""
+    repo, source = _make_repo(tmp_path)
+    profiler = repo / "profiler.py"
+    removed = repo / "legacy.py"
+    profiler.write_text("enabled = False\n", encoding="utf-8")
+    removed.write_text("legacy = True\n", encoding="utf-8")
+    _git(repo, "add", "profiler.py", "legacy.py")
+    _git(repo, "commit", "-m", "add profiler files")
+
+    profiler.write_text("enabled = True\n", encoding="utf-8")
+    removed.unlink()
+    user_cache = repo / "user-cache.txt"
+    user_cache.write_text("keep\n", encoding="utf-8")
+    baseline_status = _git(repo, "status", "--porcelain")
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    payload = _payload(
+        output_dir,
+        source_file=str(source),
+        kernel_repo=str(repo),
+    )
+    monkeypatch.setattr(fc, "_needs_inplace", lambda _repo: True)
+
+    context = fc._prepare_collective_workspace(payload, output_dir)
+
+    assert context is not None
+    source.write_text("__global__ void kernel() { int x = 4; }\n", encoding="utf-8")
+    (repo / "generated.tmp").write_text("remove\n", encoding="utf-8")
+    _git(repo, "add", "kernel.cuh")
+    _git(repo, "commit", "-m", "forge edit")
+    fc._restore_collective_workspace(context)
+
+    assert source.read_text(encoding="utf-8") == "__global__ void kernel() { int x = 0; }\n"
+    assert profiler.read_text(encoding="utf-8") == "enabled = True\n"
+    assert not removed.exists()
+    assert user_cache.read_text(encoding="utf-8") == "keep\n"
+    assert not (repo / "generated.tmp").exists()
+    assert _git(repo, "status", "--porcelain") == baseline_status
+    assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert not (repo / ".git" / "hyperloom_collective_restore.json").exists()
+
+
 def test_stale_inplace_branch_recovers_from_durable_journal(tmp_path, monkeypatch):
     """A hard-crashed temporary branch must recover its exact clean baseline."""
     repo, source = _make_repo(tmp_path)
@@ -421,6 +468,51 @@ def test_stale_inplace_branch_recovers_from_durable_journal(tmp_path, monkeypatc
     assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"
     assert _git(repo, "status", "--porcelain") == ""
     assert _git(repo, "config", "--local", "--get", "user.name") == "test"
+    assert not (repo / ".git" / "hyperloom_collective_restore.json").exists()
+
+
+def test_precommit_crash_replays_dirty_tracked_baseline(tmp_path):
+    """A crash before the baseline commit must not discard profiler patches."""
+    repo, source = _make_repo(tmp_path)
+    profiler = repo / "profiler.py"
+    removed = repo / "legacy.py"
+    profiler.write_text("enabled = False\n", encoding="utf-8")
+    removed.write_text("legacy = True\n", encoding="utf-8")
+    _git(repo, "add", "profiler.py", "legacy.py")
+    _git(repo, "commit", "-m", "add profiler files")
+
+    profiler.write_text("enabled = True\n", encoding="utf-8")
+    removed.unlink()
+    baseline_status = _git(repo, "status", "--porcelain")
+    original_head = _git(repo, "rev-parse", "HEAD")
+    branch = "forge/collective-precommit"
+    fc._write_restore_journal(
+        str(repo),
+        {
+            "repo": str(repo),
+            "orig_branch": "main",
+            "orig_head": original_head,
+            "branch": branch,
+            "source_file": str(source),
+            "backup": source.read_bytes(),
+            "relpath": "kernel.cuh",
+            "base_commit": original_head,
+            "config_snapshot": fc._config_snapshot(str(repo)),
+            "baseline_untracked": [],
+            "baseline_tracked_patch": fc._tracked_baseline_patch(str(repo)),
+            "baseline_in_base_commit": False,
+        },
+    )
+    _git(repo, "checkout", "-b", branch)
+    source.write_text("__global__ void kernel() { int x = 9; }\n", encoding="utf-8")
+
+    assert fc._recover_stale_inplace(str(repo)) is True
+
+    assert source.read_text(encoding="utf-8") == "__global__ void kernel() { int x = 0; }\n"
+    assert profiler.read_text(encoding="utf-8") == "enabled = True\n"
+    assert not removed.exists()
+    assert _git(repo, "status", "--porcelain") == baseline_status
+    assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"
     assert not (repo / ".git" / "hyperloom_collective_restore.json").exists()
 
 

@@ -1147,6 +1147,34 @@ def _remove_new_untracked(repo: str, baseline: set[str]) -> None:
             parent = parent.parent
 
 
+def _apply_tracked_baseline(repo: str, patch: bytes) -> None:
+    """Restore a journaled tracked baseline patch to the working tree."""
+    if not patch:
+        return
+    proc = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo,
+            "apply",
+            "--binary",
+            "--whitespace=nowarn",
+            "-",
+        ],
+        input=patch,
+        capture_output=True,
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or b"").decode(
+            "utf-8",
+            errors="replace",
+        ).strip()
+        raise RuntimeError(
+            f"could not restore tracked repository baseline: {detail}"
+        )
+
+
 def _restore_inplace(restore: dict) -> None:
     """Restore the live repo after in-place editing: revert EVERY file the agent
     changed back to its pre-forge content, return to the original branch/HEAD,
@@ -1188,6 +1216,27 @@ def _restore_inplace(restore: dict) -> None:
     # Reset the index to match orig_head (without touching working tree).
     if orig_head:
         _run(["git", "-C", repo, "reset", orig_head, "--", "."], timeout=30)
+    baseline_patch = restore.get("baseline_tracked_patch")
+    if baseline_patch is not None:
+        if not isinstance(baseline_patch, bytes):
+            _release_repo_lock(restore.get("lock_fd"))
+            restore["lock_fd"] = None
+            raise RuntimeError("invalid tracked repository baseline")
+        baseline_in_base_commit = restore.get(
+            "baseline_in_base_commit",
+            False,
+        )
+        if not isinstance(baseline_in_base_commit, bool):
+            _release_repo_lock(restore.get("lock_fd"))
+            restore["lock_fd"] = None
+            raise RuntimeError("invalid tracked baseline commit marker")
+        if baseline_patch and not baseline_in_base_commit:
+            try:
+                _apply_tracked_baseline(repo, baseline_patch)
+            except Exception:
+                _release_repo_lock(restore.get("lock_fd"))
+                restore["lock_fd"] = None
+                raise
     # Ensure the primary source_file is exactly the pre-forge bytes even if the
     # git restore above raced or partially applied.
     try:

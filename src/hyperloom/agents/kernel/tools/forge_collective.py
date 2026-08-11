@@ -10,6 +10,7 @@ import argparse
 import base64
 import binascii
 import fcntl
+import hashlib
 import json
 import logging
 import math
@@ -321,9 +322,30 @@ def _restore_journal_path(repo: str) -> Path:
     return Path(repo) / ".git" / "hyperloom_collective_restore.json"
 
 
+def _tracked_baseline_patch(repo: str) -> bytes:
+    """Capture all tracked working-tree changes relative to HEAD."""
+    proc = _git(
+        repo,
+        "diff",
+        "--binary",
+        "--no-ext-diff",
+        "--no-textconv",
+        "HEAD",
+        "--",
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"cannot capture tracked repository baseline: {repo}")
+    return proc.stdout.encode("utf-8")
+
+
 def _write_restore_journal(repo: str, restore: dict[str, Any]) -> None:
-    """Persist enough clean-baseline metadata to recover after a hard crash."""
+    """Persist enough repository baseline metadata to recover after a hard crash."""
     backup = restore.get("backup")
+    tracked_patch = restore.get("baseline_tracked_patch")
+    if tracked_patch is None:
+        tracked_patch = b""
+    if not isinstance(tracked_patch, bytes):
+        raise RuntimeError("collective tracked baseline patch must be bytes")
     payload = {
         key: restore.get(key)
         for key in (
@@ -336,11 +358,18 @@ def _write_restore_journal(repo: str, restore: dict[str, Any]) -> None:
             "base_commit",
             "config_snapshot",
             "baseline_untracked",
+            "baseline_in_base_commit",
         )
     }
     payload["backup_b64"] = (
         base64.b64encode(backup).decode("ascii") if isinstance(backup, bytes) else ""
     )
+    payload["baseline_tracked_patch_b64"] = base64.b64encode(
+        tracked_patch
+    ).decode("ascii")
+    payload["baseline_tracked_sha256"] = hashlib.sha256(
+        tracked_patch
+    ).hexdigest()
     path = _restore_journal_path(repo)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -352,6 +381,10 @@ def _recorded_tree_matches(repo: str, payload: dict[str, Any]) -> bool:
     expected_branch = str(payload.get("orig_branch") or "")
     expected_head = str(payload.get("orig_head") or "")
     expected_untracked = payload.get("baseline_untracked")
+    expected_tracked_sha = str(payload.get("baseline_tracked_sha256") or "")
+    in_memory_patch = payload.get("baseline_tracked_patch")
+    if not expected_tracked_sha and isinstance(in_memory_patch, bytes):
+        expected_tracked_sha = hashlib.sha256(in_memory_patch).hexdigest()
     if not isinstance(expected_untracked, list) or any(
         not isinstance(path, str) or not path
         for path in expected_untracked
@@ -359,22 +392,28 @@ def _recorded_tree_matches(repo: str, payload: dict[str, Any]) -> bool:
         raise RuntimeError("collective restore journal has invalid untracked baseline")
     actual_branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     actual_head = _git(repo, "rev-parse", "HEAD").stdout.strip()
-    tracked = _git(repo, "status", "--porcelain", "--untracked-files=no")
+    if expected_tracked_sha:
+        actual_tracked_sha = hashlib.sha256(
+            _tracked_baseline_patch(repo)
+        ).hexdigest()
+        tracked_matches = actual_tracked_sha == expected_tracked_sha
+    else:
+        tracked = _git(repo, "status", "--porcelain", "--untracked-files=no")
+        tracked_matches = tracked.returncode == 0 and not tracked.stdout.strip()
     return not (
         not expected_branch
         or not expected_head
         or actual_branch != expected_branch
         or actual_head != expected_head
-        or tracked.returncode != 0
-        or tracked.stdout.strip()
+        or not tracked_matches
         or _untracked_paths(repo) != set(expected_untracked)
     )
 
 
 def _verify_restored_repo(repo: str, payload: dict[str, Any]) -> None:
-    """Verify that repository recovery restored its recorded clean baseline."""
+    """Verify that repository recovery restored its recorded baseline."""
     if not _recorded_tree_matches(repo, payload):
-        raise RuntimeError("collective campaign did not restore its clean baseline")
+        raise RuntimeError("collective campaign did not restore its recorded baseline")
 
 
 def _recover_stale_inplace(repo: str) -> bool:
@@ -412,8 +451,30 @@ def _recover_stale_inplace(repo: str) -> bool:
             backup = base64.b64decode(backup_encoded, validate=True)
         except (ValueError, binascii.Error) as exc:
             raise RuntimeError(f"invalid source backup in {journal}") from exc
+        tracked_patch_encoded = payload.get("baseline_tracked_patch_b64", "")
+        if not isinstance(tracked_patch_encoded, str):
+            raise RuntimeError(f"restore journal has invalid tracked baseline: {journal}")
+        try:
+            tracked_patch = base64.b64decode(
+                tracked_patch_encoded,
+                validate=True,
+            )
+        except (ValueError, binascii.Error) as exc:
+            raise RuntimeError(
+                f"invalid tracked baseline in {journal}"
+            ) from exc
+        expected_tracked_sha = str(
+            payload.get("baseline_tracked_sha256") or ""
+        )
+        if expected_tracked_sha and hashlib.sha256(
+            tracked_patch
+        ).hexdigest() != expected_tracked_sha:
+            raise RuntimeError(
+                f"tracked baseline checksum mismatch in {journal}"
+            )
         restore = dict(payload)
         restore["backup"] = backup
+        restore["baseline_tracked_patch"] = tracked_patch
         if not stale:
             if not _recorded_tree_matches(repo, payload):
                 log.warning(
@@ -516,11 +577,7 @@ def _prepare_collective_workspace(
                 output_dir,
                 "prior_forge_experiments",
             )
-            tracked = _git(kernel_repo, "status", "--porcelain", "--untracked-files=no")
-            if tracked.returncode != 0:
-                raise RuntimeError(f"cannot inspect repository state: {kernel_repo}")
-            if tracked.stdout.strip():
-                return None
+            baseline_tracked_patch = _tracked_baseline_patch(kernel_repo)
             baseline_untracked = sorted(_untracked_paths(kernel_repo))
             orig_branch_proc = _git(
                 kernel_repo,
@@ -549,6 +606,8 @@ def _prepare_collective_workspace(
                 "base_commit": orig_head,
                 "config_snapshot": config_snapshot,
                 "baseline_untracked": baseline_untracked,
+                "baseline_tracked_patch": baseline_tracked_patch,
+                "baseline_in_base_commit": False,
             }
             _write_restore_journal(kernel_repo, provisional)
             held_lock = lock
@@ -570,7 +629,23 @@ def _prepare_collective_workspace(
         workspace, prepared_source, restore = prepared
         restore["config_snapshot"] = config_snapshot
         restore["baseline_untracked"] = baseline_untracked
+        restore["baseline_tracked_patch"] = baseline_tracked_patch
+        restore["baseline_in_base_commit"] = False
         try:
+            base_commit = str(restore.get("base_commit") or "")
+            if baseline_tracked_patch:
+                baseline_check = _git(
+                    kernel_repo,
+                    "diff",
+                    "--quiet",
+                    base_commit,
+                    "--",
+                )
+                if baseline_check.returncode != 0:
+                    raise RuntimeError(
+                        "in-place preparation did not snapshot the tracked baseline"
+                    )
+            restore["baseline_in_base_commit"] = True
             _write_restore_journal(kernel_repo, restore)
             _restore_config(kernel_repo, config_snapshot)
         except Exception:
@@ -578,7 +653,6 @@ def _prepare_collective_workspace(
             _restore_config(kernel_repo, config_snapshot)
             _restore_journal_path(kernel_repo).unlink(missing_ok=True)
             raise
-        base_commit = str(restore.get("base_commit") or "")
     else:
         config_snapshot = _config_snapshot(kernel_repo)
         prepared = None
