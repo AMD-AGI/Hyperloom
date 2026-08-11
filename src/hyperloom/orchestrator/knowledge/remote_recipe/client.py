@@ -39,6 +39,7 @@ def _champion(
     rollup: dict[str, Any] | None,
     *,
     validate_metric: bool = False,
+    expected_metric: str = "optimized_throughput",
 ) -> tuple[str, float, dict[str, Any]]:
     """Extract one incumbent, failing closed on an unrecognized rollup."""
     if rollup is None:
@@ -59,10 +60,10 @@ def _champion(
         raise RemoteRecipeValidationError("candidate rollup champion must be an object")
     champion = dict(raw_champion)
     metric = str(champion.get("metric") or "").strip()
-    if validate_metric and metric != "optimized_throughput":
+    if validate_metric and metric != expected_metric:
         raise RemoteRecipeValidationError(
             "cannot compare or replace champion metric "
-            f"{metric!r}; expected 'optimized_throughput'"
+            f"{metric!r}; expected {expected_metric!r}"
         )
     session_id = str(champion.get("session_id") or "").strip()
     if not session_id:
@@ -376,8 +377,14 @@ class RemoteRecipeClient:
         *,
         optimized_throughput: float,
         files_dir: Path,
+        metric: str = "optimized_throughput",
     ) -> RemoteWriteResult:
-        """Write files, replace knowledge, then promote when throughput wins."""
+        """Write files, replace knowledge, then promote when the score wins.
+
+        ``metric`` names what the score means. An identity whose records are not
+        graded on serving throughput passes its own name so the incumbent is
+        only ever compared against a like-for-like reading.
+        """
         if not math.isfinite(optimized_throughput):
             raise RemoteRecipeValidationError(
                 f"optimized_throughput must be finite, got {optimized_throughput!r}"
@@ -388,7 +395,7 @@ class RemoteRecipeClient:
         bundle.knowledge = sanitize_shared_knowledge(bundle.knowledge)
         bundle.validate()
         rollup = self.store.get_rollup(canonical_id)
-        _, prior, _ = _champion(rollup, validate_metric=True)
+        _, prior, _ = _champion(rollup, validate_metric=True, expected_metric=metric)
         if optimized_throughput <= prior:
             return RemoteWriteResult(
                 "skipped",
@@ -417,7 +424,7 @@ class RemoteRecipeClient:
             self.store.set_champion(
                 canonical_id,
                 session_id,
-                metric="optimized_throughput",
+                metric=metric,
                 value=optimized_throughput,
             )
         except KBStoreError as exc:
@@ -426,12 +433,13 @@ class RemoteRecipeClient:
             _, winner, _ = _champion(
                 self.store.get_rollup(canonical_id),
                 validate_metric=True,
+                expected_metric=metric,
             )
             if winner < optimized_throughput:
                 self.store.set_champion(
                     canonical_id,
                     session_id,
-                    metric="optimized_throughput",
+                    metric=metric,
                     value=optimized_throughput,
                 )
         return RemoteWriteResult(

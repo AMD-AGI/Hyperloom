@@ -6,7 +6,9 @@ the initial baseline/roofline internal-analysis task enqueue."""
 
 from __future__ import annotations
 import logging as _logging
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from . import machine_state as _phase_state
 from ..state.optimization_journal import (
@@ -20,6 +22,26 @@ from ..loop.coordinator import (
 from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
+
+
+def _warm_kernel_keep_threshold_pct(default: float = 1.0) -> float:
+    """Gain a replayed champion set must clear, from the environment.
+
+    Parsed in one place with a fallback: a typo in the override used to turn
+    every champion into an ERROR instead of just being ignored.
+    """
+    raw = str(os.environ.get("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning(
+            "warm-kernel KB: HYPERLOOM_WARM_KERNEL_KEEP_PCT=%r is not a number; using %.2f",
+            raw,
+            default,
+        )
+        return default
 
 
 class PreludePhase(PhaseHandler):
@@ -206,6 +228,544 @@ class PreludePhase(PhaseHandler):
         except Exception as exc:  # noqa: BLE001 - filtering is advisory only
             log.warning("warm-replay KG patch filtering degraded: %s", exc)
             return patches
+
+    def _collect_warm_kernel_plan(self, kb: Any) -> list[dict[str, Any]]:
+        """Resolve the prior-champion kernel columns into a local apply plan.
+
+        Reads the ``gemm``/``fusion``/``rewrite`` sub-columns the warm-start
+        download provided, resolves every recorded file ref to its downloaded
+        copy via ``KernelAgentKB.prior_file``, and returns one plan entry per
+        item carrying the local ``patch_path`` / ``source_paths`` plus the
+        item's non-file metadata. Refs that do not resolve are dropped.
+        """
+        readers = (
+            ("gemm", kb.read_gemm, "optimizations"),
+            ("fusion", kb.read_fusion, "items"),
+            ("rewrite", kb.read_rewrite, "items"),
+        )
+        plan: list[dict[str, Any]] = []
+        for column, reader, list_key in readers:
+            try:
+                data = reader() or {}
+            except Exception:  # noqa: BLE001 — a bad column must not block others
+                log.warning("warm-kernel KB: reading %s column failed", column, exc_info=True)
+                continue
+            rows = data.get(list_key) if isinstance(data, dict) else None
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                meta = {
+                    k: v
+                    for k, v in row.items()
+                    if k not in ("patch", "source_file", "source_files", "tuned_file", "files")
+                }
+                if column == "rewrite":
+                    source_refs = [str(r) for r in (row.get("source_files") or []) if str(r or "").strip()]
+                elif column == "fusion":
+                    source_refs = [str(row.get("source_file"))] if row.get("source_file") else []
+                else:  # gemm
+                    source_refs = [str(row.get("tuned_file"))] if row.get("tuned_file") else []
+                source_paths: list[str] = []
+                for ref in source_refs:
+                    resolved = kb.prior_file(ref)
+                    if resolved is not None:
+                        source_paths.append(str(resolved))
+                entry: dict[str, Any] = {"column": column, "meta": meta}
+                patch_ref = str(row.get("patch") or "").strip()
+                if patch_ref:
+                    patch_local = kb.prior_file(patch_ref)
+                    if patch_local is not None:
+                        entry["patch_path"] = str(patch_local)
+                if source_paths:
+                    entry["source_paths"] = source_paths
+                # A portable target path is only honoured when it exists on this
+                # host; cross-session records usually omit it, so most entries
+                # are loaded/recorded and their apply is left to the kernel phase.
+                target = str(row.get("target_path") or meta.get("target_path") or "").strip()
+                if target and Path(target).is_file():
+                    entry["target_file"] = target
+                if entry.get("patch_path") or entry.get("source_paths"):
+                    plan.append(entry)
+        return plan
+
+    @staticmethod
+    def _parse_diff_target(patch_path: str | None) -> str:
+        """Extract the patched file's repo-relative path from a unified diff.
+
+        Reads the ``+++ b/<path>`` header (falling back to ``diff --git a/x
+        b/y``) so a champion patch can be located in this session's source tree
+        even when the KB record did not persist an absolute target path.
+        """
+        raw = str(patch_path or "").strip()
+        if not raw:
+            return ""
+        try:
+            text = Path(raw).read_text(errors="replace")
+        except OSError:
+            return ""
+        git_target = ""
+        for line in text.splitlines():
+            if line.startswith("+++ "):
+                candidate = line[4:].split("\t", 1)[0].strip()
+                if candidate.startswith("b/"):
+                    candidate = candidate[2:]
+                if candidate and candidate != "/dev/null":
+                    return candidate
+            elif line.startswith("diff --git ") and not git_target:
+                parts = line.split()
+                if len(parts) >= 4:
+                    candidate = parts[3]
+                    if candidate.startswith("b/"):
+                        candidate = candidate[2:]
+                    git_target = candidate
+        return git_target
+
+    def _resolve_kernel_target_path(self, entry: dict[str, Any]) -> str:
+        """Locate the champion patch's target file in this session's source tree.
+
+        Aggressive resolution: an absolute target that exists is used as-is;
+        otherwise the repo-relative path parsed from the diff header is joined
+        against every trusted source root (:func:`resolve_patch_target_roots`)
+        and the first existing file wins. Returns '' when nothing resolves.
+        """
+        target = str(entry.get("target_file") or "").strip()
+        if target and Path(target).is_file():
+            return target
+        rel = self._parse_diff_target(entry.get("patch_path"))
+        if not rel:
+            return ""
+        rel = rel.lstrip("/")
+        try:
+            from ..framework.paths import resolve_patch_target_roots
+
+            roots = resolve_patch_target_roots()
+        except Exception:  # noqa: BLE001 — resolution must never raise
+            roots = ()
+        for root in roots:
+            candidate = Path(root) / rel
+            if candidate.is_file():
+                return str(candidate)
+        # Suffix fallback: the diff path may carry a package prefix the root
+        # already includes (e.g. ``sglang/foo`` under ``.../sglang/``). Only
+        # drop leading components while a package path remains — matching on a
+        # bare filename would happily point a whole-file replacement at an
+        # unrelated same-named module.
+        tail = Path(rel)
+        for root in roots:
+            base = Path(root.rstrip("/"))
+            if not base.is_dir():
+                continue
+            for depth in range(1, max(1, len(tail.parts) - 1)):
+                candidate = base / Path(*tail.parts[depth:])
+                if candidate.is_file():
+                    return str(candidate)
+        return ""
+
+    @staticmethod
+    def _warm_kernel_extra_envs(entry: dict[str, Any]) -> dict[str, str]:
+        """Rebuild a champion's env bundle against this run's downloaded files.
+
+        A champion's deliverable is not always a source file. GEMM is purely
+        parameter-shaped — the tuned table travels as a file ref and the env var
+        that carries it is recorded per accepted tuner in
+        ``e2e_results.kept[].env_var`` — and a fusion carries the env switches
+        (``extra_envs``/``env_flags``) that turn the fused path on. Applying the
+        patch without them re-measures the unoptimized path and reverts a good
+        champion, so replay merges every recorded env and re-points any
+        file-valued one at this run's local copy (the producing session's
+        absolute paths are scrubbed before publish).
+        """
+        meta = entry.get("meta") or {}
+        local = [str(p) for p in (entry.get("source_paths") or []) if p]
+        envs: dict[str, str] = {}
+
+        def _merge(source: Any) -> None:
+            if isinstance(source, dict):
+                envs.update(
+                    {str(k): str(v) for k, v in source.items() if str(k).strip()}
+                )
+
+        for key in ("extra_envs", "env_flags", "recommended_env"):
+            _merge(meta.get(key))
+        e2e = meta.get("e2e")
+        if isinstance(e2e, dict):
+            _merge(e2e.get("extra_envs"))
+        by_name = {Path(path).name: path for path in local}
+        results = meta.get("e2e_results")
+        kept = (results.get("kept") or []) if isinstance(results, dict) else []
+        for tuner in kept:
+            if not isinstance(tuner, dict):
+                continue
+            _merge(tuner.get("envs"))
+            env_var = str(tuner.get("env_var") or "").strip()
+            if not env_var:
+                continue
+            # Each accepted tuner owns its own table, so match by the recorded
+            # value's filename. Pointing every tuner at the first download would
+            # feed a dense tuner the MoE table (or vice versa) whenever a record
+            # carries more than one.
+            recorded = str(tuner.get("env_value") or envs.get(env_var) or "").strip()
+            local_copy = by_name.get(Path(recorded).name) if recorded else None
+            if local_copy is None and len(local) == 1:
+                local_copy = local[0]
+            if local_copy:
+                envs[env_var] = local_copy
+        # Re-point any other var that still names a file we downloaded. Only
+        # path-shaped values qualify, so a flag like "1" or "candidate" whose
+        # text happens to match a filename is left alone.
+        for name, value in list(envs.items()):
+            if not value or "/" not in value:
+                continue
+            replacement = by_name.get(Path(value).name)
+            if replacement and replacement != value:
+                envs[name] = replacement
+        return envs
+
+    def _apply_warm_kernel_patch(
+        self, entry: dict[str, Any], target: str
+    ) -> dict[str, Any]:
+        """Land one champion's file on disk without measuring it.
+
+        The measurement is deliberately not here: a champion set is applied as a
+        batch and graded by a single re-baseline, so this only stages the file
+        (with a backup manifest that :meth:`_revert_warm_kernel_patches` uses to
+        roll the whole set back when the set does not win).
+        """
+        from ..kernel.request_handlers import _maybe_apply_kernel_patch
+
+        replacement = (entry.get("source_paths") or [entry.get("patch_path")])[0]
+        kernel_id = str((entry.get("meta") or {}).get("kernel_name") or "warm_kernel")
+        return _maybe_apply_kernel_patch(
+            {
+                "patch_path": replacement,
+                "target_file": target,
+                "source_file": target,
+                "kernel_id": kernel_id,
+                # Champion targets live in the installed framework tree, which is
+                # not a known patch repo root.
+                "allow_unknown_target": True,
+            },
+            session_dir=self.session_dir,
+            kernel_id=kernel_id,
+        )
+
+    @staticmethod
+    def _revert_warm_kernel_patches(applied: list[dict[str, Any]]) -> None:
+        """Roll the whole champion set back after a losing measurement."""
+        from ..kernel.request_handlers import _maybe_revert_kernel_patch
+
+        for apply_result in reversed(applied):
+            try:
+                _maybe_revert_kernel_patch(apply_result)
+            except Exception:  # noqa: BLE001 — one bad revert must not stop the rest
+                log.warning("warm-kernel KB: revert failed", exc_info=True)
+
+    async def _record_warm_kernel_keep(
+        self,
+        result: dict[str, Any],
+        pending: list[dict[str, Any]],
+        extra_envs: dict[str, str],
+        extra_server_args: str,
+        applied: list[dict[str, Any]],
+    ) -> None:
+        """Promote a winning champion set the same way a kernel integrate is.
+
+        Routes through the shared integrate-KEEP bookkeeping so the replayed set
+        lands on ``optimization_stack``, advances ``current_best`` (carrying the
+        env bundle forward so later server launches keep the switches), and
+        counts toward the validated cumulative gain.
+        """
+        kernels = [
+            str((entry.get("meta") or {}).get("kernel_name") or entry.get("column") or "")
+            for entry in pending
+        ]
+        keep = {
+            "decision": "KEEP",
+            "kernel_id": "warm_kernel_set",
+            "integration_id": "warm_kernel_set",
+            "new_tput": result.get("new_tput"),
+            "gain_pct": result.get("gain_pct"),
+            "workspace": result.get("workspace"),
+            "source": "warm_kernel_kb",
+            "stack_kernel_ids": [k for k in kernels if k],
+            "apply_result": {"stack_apply_results": applied},
+        }
+        if extra_envs:
+            keep["extra_envs"] = dict(extra_envs)
+        if extra_server_args:
+            keep["extra_server_args"] = extra_server_args
+        try:
+            await self._record_integrate_keep(keep)
+        except Exception:  # noqa: BLE001 — bookkeeping must not fail PRELUDE
+            log.warning("warm-kernel KB: recording the KEEP failed", exc_info=True)
+
+    async def _validate_warm_kernel_set(
+        self, extra_envs: dict[str, str], extra_server_args: str
+    ) -> dict[str, Any]:
+        """Grade the whole applied champion set with a single re-baseline.
+
+        The patches are already on disk, so this measures the env bundle plus
+        those files in one shot rather than re-benchmarking once per champion.
+        """
+        from ..kernel.request_handlers import integrate_handler
+
+        ss = self.shared_state
+        base_tput = float(getattr(ss, "baseline_tput", 0.0) or 0.0)
+        current_best = getattr(ss, "current_best", {}) or {}
+        if isinstance(current_best, dict):
+            try:
+                cb_tput = float(current_best.get("tput") or 0.0)
+            except (TypeError, ValueError):
+                cb_tput = 0.0
+            if cb_tput > 0:
+                base_tput = cb_tput
+        payload: dict[str, Any] = {
+            "kernel_id": "warm_kernel_set",
+            "source": "warm_kernel_kb",
+            "extra_envs": dict(extra_envs or {}),
+            "base_tput": base_tput,
+            "keep_threshold_pct": _warm_kernel_keep_threshold_pct(),
+        }
+        if extra_server_args:
+            payload["extra_server_args"] = extra_server_args
+        config_path = str(getattr(ss, "baseline_config_path", "") or "").strip()
+        if config_path:
+            payload["config_path"] = config_path
+        return await integrate_handler(payload, session_dir=self.session_dir)
+
+    def _open_warm_kernel_record(self) -> Any:
+        """Download this run's independent kernel-agent KB record and open a reader.
+
+        The kernel-agent KB is a standalone ``kernel:`` KB Store record (a
+        sibling of the recipe's ``inference:`` record), so PRELUDE reads it
+        directly instead of from the recipe warm-start. Returns ``None`` when
+        remote KB is not configured or the record does not exist yet.
+        """
+        from ..knowledge.agent_kb import KernelRecordReader
+        from ..knowledge.remote_recipe import (
+            kernel_agent_canonical_id,
+            read_remote_recipe,
+        )
+
+        recipe_cid = str(self._workload_canonical_id() or "").strip()
+        if not recipe_cid:
+            return None
+        kernel_cid = kernel_agent_canonical_id(recipe_cid)
+        record_dir = Path(self.session_dir) / "runtime" / "kernel_agent_kb"
+        record_dir.mkdir(parents=True, exist_ok=True)
+        document = read_remote_recipe(kernel_cid, record_dir)
+        if document is None:
+            return None
+        return KernelRecordReader(record_dir)
+
+    def _warm_kernel_gate_reason(self) -> str:
+        """Why this run must not replay kernel champions, or '' when allowed.
+
+        Mirrors the gates the recipe warm-replay honours: an operator opt-out,
+        an explicitly disabled KB, and local knowledge mode — which must never
+        consult ambient ``KB_STORE_*`` credentials.
+        """
+        if not getattr(self, "_warm_replay_enabled", True):
+            return "warm_replay_disabled"
+        if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
+            return "kb_degraded"
+        from ..knowledge.config import KnowledgeConfig, KnowledgeStoreMode
+
+        config = (
+            getattr(getattr(self, "knowledge_plane", None), "config", None)
+            or KnowledgeConfig.from_env()
+        )
+        if config.mode is not KnowledgeStoreMode.REMOTE:
+            return "local_knowledge_mode"
+        return ""
+
+    async def _maybe_apply_warm_kernel_kb(self) -> dict[str, Any]:
+        """Replay this workload's champion kernel set and validate it at PRELUDE.
+
+        The kernel-side mirror of :meth:`_maybe_enqueue_warm_replay`: downloads
+        the independent ``kernel:`` KB Store record, reads its
+        ``gemm``/``fusion``/``rewrite`` columns, resolves each champion patch's
+        target in the live source tree (parsing the diff header when no absolute
+        path was stored), stages the whole set — patches on disk, env bundles
+        merged — and grades it with a single re-baseline, rolling the set back
+        when it does not win. Remote mode only, and skipped when warm replay is
+        off or the KB is degraded. One-shot per session (resume-safe) and never
+        raises.
+        """
+        state = self.shared_state
+        if getattr(state, "warm_kernel_kb_attempted", False):
+            return {"status": "skipped", "reason": "already_attempted"}
+        gated = self._warm_kernel_gate_reason()
+        if gated:
+            state.warm_kernel_kb_outcome = {"status": "skipped", "reason": gated}
+            return state.warm_kernel_kb_outcome
+        state.warm_kernel_kb_attempted = True
+        # Persist the one-shot flag now: a crash mid-replay must not re-run the
+        # whole (potentially hour-long) set on resume.
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — best-effort persistence
+            log.debug("warm-kernel KB: state save failed", exc_info=True)
+        try:
+            kb = self._open_warm_kernel_record()
+        except Exception as exc:  # noqa: BLE001 — advisory; never block PRELUDE
+            log.warning("warm-kernel KB: opening the record failed", exc_info=True)
+            state.warm_kernel_kb_outcome = {
+                "status": "skipped",
+                "reason": f"record_unavailable:{type(exc).__name__}",
+            }
+            return state.warm_kernel_kb_outcome
+        if kb is None or not kb.active:
+            state.warm_kernel_kb_outcome = {"status": "skipped", "reason": "no_kernel_record"}
+            return state.warm_kernel_kb_outcome
+        plan = self._collect_warm_kernel_plan(kb)
+        state.warm_kernel_kb_plan = plan
+        if not plan:
+            state.warm_kernel_kb_outcome = {"status": "empty"}
+            return state.warm_kernel_kb_outcome
+        kept = 0
+        reverted = 0
+        deferred = 0
+        errors = 0
+        # Stage the whole champion set first: every patch lands on disk and every
+        # env bundle is merged, so the set costs one re-baseline instead of one
+        # per champion. The trade is all-or-nothing — the set is graded together.
+        applied: list[dict[str, Any]] = []
+        merged_envs: dict[str, str] = {}
+        server_args = ""
+        for entry in plan:
+            if not (entry.get("source_paths") or entry.get("patch_path")):
+                entry["decision"] = "DEFERRED"
+                deferred += 1
+                continue
+            # Every column carries its env bundle: a fusion needs its switches to
+            # activate the patched path, and a GEMM is nothing but its bundle.
+            envs = self._warm_kernel_extra_envs(entry)
+            if envs:
+                entry["extra_envs"] = envs
+                merged_envs.update(envs)
+            candidate_args = str((entry.get("meta") or {}).get("extra_server_args") or "").strip()
+            if candidate_args and not server_args:
+                server_args = candidate_args
+            # GEMM is parameter-shaped: its env bundle is the whole deliverable,
+            # so there is nothing to stage on disk.
+            if entry.get("column") == "gemm":
+                if not envs:
+                    entry["decision"] = "DEFERRED"
+                    deferred += 1
+                    continue
+                entry["decision"] = "PENDING"
+                continue
+            target = self._resolve_kernel_target_path(entry)
+            if not target:
+                entry["decision"] = "DEFERRED"
+                deferred += 1
+                continue
+            entry["target_file"] = target
+            try:
+                apply_result = self._apply_warm_kernel_patch(entry, target)
+            except Exception as exc:  # noqa: BLE001 — one bad apply must not abort the rest
+                log.warning("warm-kernel KB: apply failed for %s", target, exc_info=True)
+                entry["decision"] = "ERROR"
+                entry["apply_result"] = {"exception": f"{type(exc).__name__}: {exc}"[:300]}
+                errors += 1
+                continue
+            entry["apply_result"] = {
+                k: apply_result.get(k)
+                for k in ("status", "reason", "error", "manifest_path")
+                if k in apply_result
+            }
+            if apply_result.get("status") != "ok":
+                entry["decision"] = "ERROR"
+                errors += 1
+                continue
+            applied.append(apply_result)
+            entry["decision"] = "PENDING"
+
+        pending = [entry for entry in plan if entry.get("decision") == "PENDING"]
+        if pending:
+            # One measurement grades the whole set.
+            try:
+                result = await self._validate_warm_kernel_set(merged_envs, server_args)
+            except Exception as exc:  # noqa: BLE001 — a failed grade must not abort PRELUDE
+                log.warning("warm-kernel KB: set validation failed", exc_info=True)
+                result = {
+                    "status": "failed",
+                    "decision": "REVERT",
+                    "error": f"{type(exc).__name__}: {exc}"[:300],
+                }
+            result_dict = result if isinstance(result, dict) else {}
+            # Record the verdict verbatim so a REVERT is diagnosable (was it a
+            # relaunch failure vs. a measured below-threshold gain).
+            verdict = {
+                k: result_dict.get(k)
+                for k in (
+                    "status", "decision", "error_class", "error", "reason",
+                    "base_tput", "new_tput", "gain_pct", "accuracy_pass", "workspace",
+                )
+                if k in result_dict
+            }
+            decision = str(result_dict.get("decision") or "").strip().upper() or "REVERT"
+            if decision != "KEEP":
+                self._revert_warm_kernel_patches(applied)
+            for entry in pending:
+                entry["decision"] = decision
+                entry["integrate_result"] = verdict
+                entry["gain_pct"] = result_dict.get("gain_pct")
+            if decision == "KEEP":
+                kept = len(pending)
+                # Book the win. Without this the env switches live only inside
+                # that one measurement (the next server launch drops them) and
+                # CLOSE's scrape never sees the replayed champions, so neither
+                # current_best nor cumulative_gain counts them.
+                await self._record_warm_kernel_keep(
+                    result_dict, pending, merged_envs, server_args, applied
+                )
+            else:
+                reverted = len(pending)
+            log.info(
+                "warm-kernel KB set: champions=%d decision=%s status=%s "
+                "base_tput=%s new_tput=%s gain_pct=%s error_class=%s",
+                len(pending), decision, result_dict.get("status"),
+                result_dict.get("base_tput"), result_dict.get("new_tput"),
+                result_dict.get("gain_pct"), result_dict.get("error_class"),
+            )
+        columns = sorted({str(e.get("column")) for e in plan})
+        if kept:
+            status = "kept"
+        elif reverted:
+            status = "reverted"
+        elif errors:
+            status = "error"
+        else:
+            status = "loaded"
+        outcome = {
+            "status": status,
+            "columns": columns,
+            "total": len(plan),
+            "kept": kept,
+            "reverted": reverted,
+            "deferred": deferred,
+            "errors": errors,
+        }
+        state.warm_kernel_kb_outcome = outcome
+        log.info(
+            "PRELUDE warm-kernel KB: columns=%s total=%d kept=%d reverted=%d "
+            "deferred=%d errors=%d",
+            columns,
+            len(plan),
+            kept,
+            reverted,
+            deferred,
+            errors,
+        )
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — best-effort persistence
+            log.debug("warm-kernel KB: state save failed", exc_info=True)
+        return outcome
 
     async def _maybe_enqueue_warm_replay(
         self,
