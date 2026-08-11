@@ -7,11 +7,16 @@
 Reads only what the operating system exposes -- ``/sys``, ``/proc`` and, when
 run as root, the HWCR MSR.
 
-Judges Core Performance Boost and the cpufreq governor, which have an
-unambiguous right answer here. Records determinism, SMT and nodes-per-socket
-without a verdict, because AMD's own tuning guide varies them by workload and
-this tool should not invent a recommendation for LLM inference that AMD does
-not publish. See ``SOURCE`` below for the citation and the per-knob reasoning.
+Judges Core Performance Boost, the cpufreq governor, and determinism control.
+Records SMT and nodes-per-socket without a verdict, because AMD's own tuning
+guide varies those by workload and this tool should not invent a recommendation
+for LLM inference that AMD does not publish. See ``SOURCE`` below for the
+citation and the per-knob reasoning.
+
+Determinism is targeted at Power, which maximizes what a given platform can do
+at the cost of making platforms differ from each other. That cost is paid by
+recording the setting rather than by avoiding it: a system-to-system delta stays
+explicable because the report says which mode each run was in.
 
 Why check at all, given a session's A/B is same-machine: host tuning applies to
 baseline and candidates alike, so it cancels out of the *delta*. It does not
@@ -56,6 +61,7 @@ import re
 import struct
 import subprocess  # nosec B404 - fixed argv, no shell, load generation only.
 import sys
+import textwrap
 import time
 
 # --------------------------------------------------------------------------
@@ -99,26 +105,33 @@ CHECKED: dict[str, dict] = {
             "ones. This is the knob most often wrong on a freshly imaged node."
         ),
     },
+    "determinism": {
+        "label": "Determinism control",
+        "target": ("power",),
+        "basis": (
+            "58011 §4.2.2 offers Power -- 'maximum performance of any individual "
+            "system by leveraging the capabilities of a given CPU to the maximum' "
+            "-- against Performance, which buys uniformity across a fleet at the "
+            "cost of leaving headroom unused on the better parts. Hyperloom's job "
+            "is to find the best a given platform can do, so Power is the target. "
+            "The usual objection, that Power makes systems differ, is answered by "
+            "recording the setting rather than by constraining it: a system-to-"
+            "system delta stays explicable because the report says which mode "
+            "each run was in."
+        ),
+        "inferred": True,
+    },
 }
 
 #: Recorded for comparability, never judged.
 #:
-#: ``determinism``: 58011 §4.2.2 frames this as a deployment choice, not a
-#: correctness one. Performance determinism gives "uniform performance across
-#: identically configured systems"; Power determinism gives "maximum performance
-#: of any individual system ... resulting in a varying performance range across
-#: the datacenter". Chapter 5 leaves it at default for general-purpose and most
-#: HPC columns and selects Power only for the database profile. Hyperloom wants
-#: both properties at once -- the highest number on this node, and comparability
-#: across nodes -- so asserting either value would contradict one of its own
-#: goals. It is measured and recorded; the operator picks.
 #: ``smt``: on by default across the EPYC fleet, and chapter 5 leaves SMT Control
 #: at default in every general-purpose column. Judging it would fail nearly every
 #: node from day one, which is why the preflight check stopped warning on it too.
 #: ``nps``: NPS1 and NPS4 are opposite, both defensible tradeoffs -- NPS1
 #: interleaves for bandwidth, NPS4 favours locality -- and chapter 5's own NUMA
 #: rows differ per workload.
-RECORDED = ("determinism", "smt", "nps")
+RECORDED = ("smt", "nps")
 
 #: Frequency spread, in MHz, above which cores are judged to be running to their
 #: own limits rather than a common one. Chosen as a threshold comfortably above
@@ -435,28 +448,35 @@ def verdict(key: str, value: object) -> str:
 EXIT_OK, EXIT_FAIL, EXIT_UNKNOWN = 0, 1, 2
 
 
-_RECORD_LABELS = {"determinism": "Determinism control", "smt": "SMT", "nps": "NPS"}
+_RECORD_LABELS = {"smt": "SMT", "nps": "NPS"}
+
+#: Knobs resolved by generating load rather than by reading a file, so
+#: ``--quick`` cannot judge them.
+MEASURED = ("determinism",)
 
 
 def build_rows(osl: dict) -> list[dict]:
     """One row per checked knob, plus the recorded-only entries.
 
-    Only the two knobs with an unambiguous right answer are judged, and neither
-    needs load generation -- so ``--quick`` can reach every verdict this tool
-    offers and a fast run is a usable gate. Determinism is still measured and
-    reported when the run is not quick; it simply does not carry a verdict.
+    In ``--quick`` a measurement-dependent knob is reported SKIPPED rather than
+    UNKNOWN. That is the difference between "we did not look" and "we looked and
+    could not tell", and it is what keeps ``--quick`` usable as a gate: reporting
+    it as unresolved made a fast run exit non-zero every time.
     """
+    quick = bool(osl.get("quick"))
     rows = []
     for key, spec in CHECKED.items():
         value = osl.get(key, "unknown")
+        skipped = quick and key in MEASURED
         rows.append(
             {
                 "knob": spec["label"],
                 "key": key,
                 "value": str(value),
                 "target": "/".join(spec["target"]),
-                "verdict": verdict(key, value),
+                "verdict": "SKIPPED" if skipped else verdict(key, value),
                 "note": osl.get(f"{key}_note", ""),
+                "inferred": bool(spec.get("inferred")),
             }
         )
     for key in RECORDED:
@@ -510,7 +530,18 @@ def render(osl: dict, rows: list[dict]) -> None:
     if fails:
         print("Off target:")
         for r in fails:
-            print(f"    {r['knob']}: {r['value']} (want {r['target']}) — {CHECKED[r['key']]['basis']}")
+            print(f"    {r['knob']}: {r['value']} (want {r['target']})")
+            print(textwrap.fill(CHECKED[r["key"]]["basis"], width=76,
+                                initial_indent="        ", subsequent_indent="        "))
+            if r.get("inferred"):
+                # This verdict rests on a frequency measurement, not a BIOS read.
+                # Say so, so nobody changes a BIOS setting on the strength of a
+                # heuristic that a uniformly binned part can also produce.
+                print(textwrap.fill(
+                    "Inferred from per-core frequency spread, not read from BIOS. "
+                    "Confirm in BIOS (or with platform_audit_bmc.py) before changing it.",
+                    width=76, initial_indent="        -> ", subsequent_indent="           ",
+                ))
     if unknown:
         print("Unresolved (not a pass):")
         for r in unknown:

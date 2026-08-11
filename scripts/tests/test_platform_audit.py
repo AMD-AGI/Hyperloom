@@ -33,25 +33,44 @@ pa = _load()
 
 # -------------------------------------------------------------- verdicts
 
-def test_determinism_is_recorded_not_judged():
-    """58011 §4.2.2 makes determinism a deployment choice, not a correctness one.
+def test_determinism_targets_power():
+    """Power is the target: it maximizes what a given platform can deliver.
 
-    Performance determinism buys "uniform performance across identically
-    configured systems"; Power determinism buys "maximum performance of any
-    individual system ... resulting in a varying performance range across the
-    datacenter". Hyperloom wants both the highest number on this node and
-    comparability across nodes, so asserting either value would contradict one
-    of its own goals.
-
-    This also retires the substring bug at the source: the prose form used to be
-    matched against a "power" target and returned PASS, silently approving the
-    one configuration the check existed to catch.
+    58011 §4.2.2 offers Power -- "maximum performance of any individual system"
+    -- against Performance, which buys fleet uniformity by leaving headroom
+    unused on the better parts. Power's cost is that platforms then differ from
+    each other; that cost is paid by recording the setting rather than by
+    avoiding it, since the report says which mode each run was in.
     """
-    assert "determinism" in pa.RECORDED
-    assert "determinism" not in pa.CHECKED
+    assert pa.CHECKED["determinism"]["target"] == ("power",)
+    assert pa.verdict("determinism", "power") == "PASS"
+    assert pa.verdict("determinism", "performance") == "FAIL"
+
+
+def test_determinism_prose_cannot_pass_as_power():
+    """Regression: the explanatory string must never satisfy the "power" target.
+
+    The inference for Performance determinism used to be returned as the prose
+    "Performance (or Power at a uniform bin)". Substring matching found "power"
+    inside it and returned PASS -- so the one configuration this check exists to
+    catch was the one it silently approved.
+    """
+    assert pa.verdict("determinism", "Performance (or Power at a uniform bin)") == "FAIL"
+
+
+def test_determinism_verdict_is_marked_as_inferred():
+    """A FAIL here rests on a frequency heuristic, not a BIOS read, and says so.
+
+    A uniformly binned part running Power determinism produces the same low
+    spread as a part running Performance determinism, so this verdict must not
+    read as a definitive statement about BIOS.
+    """
+    assert pa.CHECKED["determinism"].get("inferred") is True
     row = {r["key"]: r for r in pa.build_rows({"determinism": "performance"})}["determinism"]
-    assert row["verdict"] == "RECORD"
-    assert row["value"] == "performance"
+    assert row["verdict"] == "FAIL" and row["inferred"] is True
+    # A knob read straight from sysfs/MSR carries no such caveat.
+    boost = {r["key"]: r for r in pa.build_rows({"core_performance_boost": "enabled"})}
+    assert boost["core_performance_boost"]["inferred"] is False
 
 
 def test_verdict_is_exact_not_substring():
@@ -111,9 +130,9 @@ def test_recorded_knobs_never_affect_the_exit_code():
 def test_quick_mode_can_still_pass():
     """--quick exists to be fast; it must not guarantee a non-zero exit.
 
-    Reporting the unmeasured knob as unresolved made every fast run exit 2,
-    which made the flag useless as a gate. No judged knob needs load generation
-    now, so quick mode can reach every verdict the tool offers.
+    Determinism needs load generation, so quick mode cannot judge it. Reporting
+    it as unresolved made every fast run exit 2, which made the flag useless as
+    a gate; it is now SKIPPED, which is excluded from the exit code.
     """
     osl = {
         "core_performance_boost": "enabled",
@@ -125,8 +144,8 @@ def test_quick_mode_can_still_pass():
         "quick": True,
     }
     rows = pa.build_rows(osl)
+    assert {r["key"]: r["verdict"] for r in rows}["determinism"] == "SKIPPED"
     assert pa.exit_code(rows) == pa.EXIT_OK
-    assert not any(r["key"] in pa.CHECKED for r in rows if r["verdict"] == "UNKNOWN")
 
 
 def test_quick_mode_still_fails_on_a_knob_it_can_read():
@@ -155,7 +174,7 @@ def test_build_rows_marks_recorded_knobs_and_judges_the_rest():
     by_key = {r["key"]: r for r in pa.build_rows(osl)}
     assert by_key["core_performance_boost"]["verdict"] == "PASS"
     assert by_key["cpufreq_governor"]["verdict"] == "FAIL"
-    assert by_key["determinism"]["verdict"] == "RECORD"
+    assert by_key["determinism"]["verdict"] == "PASS"
     assert by_key["smt"]["verdict"] == "RECORD"
     assert by_key["nps"]["verdict"] == "RECORD"
 
