@@ -11,15 +11,25 @@ JSON. These parsers fold those counts into the same ledger.
 All parsers are **tolerant**: a missing file, truncated JSON, or an absent
 ``usage`` block returns an empty / ``None`` result instead of raising.
 
+Two agent CLIs are parsed, one per credential shape: the Claude CLI's
+``--output-format stream-json`` and the Codex CLI's ``codex exec --json``. Each
+has the same four recovery jobs (session usage, reply text, per-turn usage, tool
+calls), so the parsers come in twins named after the log format they read.
+Codex also emits structured failure events; :func:`parse_codex_jsonl_error`
+recovers their actionable message without serializing request/config payloads.
+
 Output shape: the token parsers (:func:`normalize_usage`,
-:func:`parse_claude_stream_json_usage`, :func:`parse_forge_usage`) return the
-canonical four-key token dict, or ``None`` when nothing could be recovered:
+:func:`parse_claude_stream_json_usage`, :func:`parse_codex_jsonl_usage`,
+:func:`parse_forge_usage`) return the canonical four-key token dict, or ``None``
+when nothing could be recovered:
 
     {"input_tokens", "output_tokens",
      "cache_creation_input_tokens", "cache_read_input_tokens"}
 
 Backends with no prompt-cache concept (OpenAI / GEAK) leave the two ``cache_*``
 values ``None`` so the collector can tell "no cache" from "zero cache hits".
+The Codex parser adds one key beyond the canonical four,
+``reasoning_output_tokens`` — see :data:`_CODEX_REASONING_TOKENS_KEY`.
 The remaining parsers recover other shapes — reply text, per-turn usage lists,
 tool-call lists, and the forge step timeline — see each parser's docstring.
 """
@@ -30,6 +40,8 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.env_safety import redact_secret_values
 
 from ._row_utils import coerce_optional_int
 
@@ -299,6 +311,377 @@ def _summarize_tool_input(value: Any, *, limit: int = 240) -> str:
     return s if len(s) <= limit else (s[:limit] + "…")
 
 
+# ---------------------------------------------------------------------------
+# Codex CLI (``codex exec --json``)
+# ---------------------------------------------------------------------------
+
+# Codex spells its prompt-cache counter ``cached_input_tokens``. There is no
+# cache-*write* counter, so ``cache_creation_input_tokens`` stays ``None`` and
+# the collector still tells "no cache concept" from "zero cache hits".
+_CODEX_TOKEN_ALIASES: dict[str, str] = {"cached_input_tokens": "cache_read_input_tokens"}
+
+# Carried next to the canonical four rather than folded into ``output_tokens``:
+# on a reasoning model these dominate the output budget while being invisible in
+# the reply text, so summing them into the visible count would misreport both.
+# ``LLMCallRecord.from_metadata`` reads named keys, so the extra one is inert
+# there and survives only where the whole usage dict is kept (the specialist
+# transcript). Mirrors ``common.codex_session.normalize_codex_usage``.
+_CODEX_REASONING_TOKENS_KEY = "reasoning_output_tokens"
+
+# ``item.type`` values that carry no tool call. Listed so an item type this
+# parser has never seen can be reported without also warning about every
+# message, reasoning summary and to-do update.
+_CODEX_NON_TOOL_ITEM_TYPES: frozenset[str] = frozenset({"agent_message", "reasoning", "todo_list", "error"})
+
+# Codex ``item.type`` -> the Claude tool name the intel ledger already uses, so
+# ``specialist_intel.jsonl`` stays comparable across the two runtimes.
+# ``mcp_tool_call`` keeps its Codex name: naming the server and tool would mean
+# guessing field spellings no captured Codex stream has pinned yet.
+_CODEX_TOOL_NAMES: dict[str, str] = {
+    "command_execution": "Bash",
+    "file_change": "Edit",
+    "mcp_tool_call": "mcp_tool_call",
+    "web_search": "WebSearch",
+}
+
+# The two events that carry a thread item. Both are read so a run killed
+# mid-command still reports the call that was in flight; the item ``id``
+# de-duplicates the pair.
+_CODEX_ITEM_EVENTS: frozenset[str] = frozenset({"item.started", "item.completed"})
+
+# Error items are non-fatal warnings in the Codex schema, top-level ``error``
+# events are fatal stream errors, and ``turn.failed`` is the terminal outcome.
+# A later event replaces an earlier event only at the same or higher authority.
+_CODEX_ERROR_AUTHORITY: dict[str, int] = {
+    "item_error": 1,
+    "error": 2,
+    "turn.failed": 3,
+}
+
+# Adapters around the canonical exec schema sometimes preserve the app-server
+# wrapper (``error.message``) or its additional-details spelling. Restrict
+# traversal to message-bearing keys: request/config mappings must never be
+# stringified into a specialist result.
+_CODEX_ERROR_MESSAGE_KEYS: tuple[str, ...] = (
+    "message",
+    "error",
+    "reason",
+    "detail",
+    "details",
+    "additional_details",
+    "additionalDetails",
+    "description",
+    "text",
+)
+_CODEX_ERROR_MESSAGE_LIMIT = 2000
+
+
+def _iter_codex_events(log_path: str | Path) -> "Any":
+    """Yield each JSON object of a ``codex exec --json`` log, in stream order.
+
+    Tolerant by contract (module docstring): a missing file yields nothing and
+    an unparseable line is skipped, so a truncated log still reports the events
+    it does hold.
+
+    Args:
+        log_path: Path to the Codex CLI JSONL log.
+
+    Yields:
+        Each decoded top-level JSON object that is a mapping.
+    """
+    path = Path(log_path)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    obj = json.loads(stripped)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(obj, dict):
+                    yield obj
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        log.warning("parse_usage: failed reading codex jsonl log %s: %r", path, exc)
+
+
+def _codex_error_message(value: Any, *, depth: int = 0) -> str | None:
+    """Extract and sanitize a scalar message from a known error payload.
+
+    Mappings are traversed only through explicit message-bearing keys. In
+    particular, this helper never falls back to ``str``/``json.dumps`` for an
+    arbitrary error object, because those objects can also carry full provider
+    requests, headers, and configuration.
+    """
+    if isinstance(value, str):
+        message = value.strip()
+        if not message:
+            return None
+        redacted = redact_secret_values(message)
+        if len(redacted) > _CODEX_ERROR_MESSAGE_LIMIT:
+            return redacted[: _CODEX_ERROR_MESSAGE_LIMIT - 1] + "…"
+        return redacted
+    if not isinstance(value, dict) or depth >= 6:
+        return None
+    for key in _CODEX_ERROR_MESSAGE_KEYS:
+        if key not in value:
+            continue
+        message = _codex_error_message(value[key], depth=depth + 1)
+        if message is not None:
+            return message
+    return None
+
+
+def parse_codex_jsonl_error(log_path: str | Path) -> str | None:
+    """Recover the most authoritative actionable Codex failure message.
+
+    Reads the three structured error shapes emitted by ``codex exec --json``:
+
+    * terminal ``turn.failed.error.message``;
+    * fatal top-level ``error.message``;
+    * non-fatal ``item.*.item`` payloads whose item ``type`` is ``error``.
+
+    Authority is terminal turn failure, then top-level stream error, then error
+    item. The last message at the highest authority wins, which preserves the
+    final reason across retries without allowing a later warning to replace a
+    terminal model/auth/gateway failure.
+
+    Only scalar message fields are returned. Recognizable credentials are
+    redacted with :func:`hyperloom.common.env_safety.redact_secret_values`;
+    sibling request/config/header payloads are never serialized. Missing files,
+    malformed/truncated lines, and logs without a structured error return
+    ``None``.
+
+    Args:
+        log_path: Path to the Codex CLI JSONL log.
+
+    Returns:
+        The redacted actionable error message, or ``None`` when none was found.
+    """
+    best_authority = 0
+    best_message: str | None = None
+    for event in _iter_codex_events(log_path):
+        event_type = event.get("type")
+        authority = 0
+        payload: Any = None
+        if event_type == "turn.failed":
+            authority = _CODEX_ERROR_AUTHORITY["turn.failed"]
+            payload = event.get("error")
+        elif event_type == "error":
+            authority = _CODEX_ERROR_AUTHORITY["error"]
+            payload = event
+        elif event_type in {"item.started", "item.updated", "item.completed"}:
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "error":
+                authority = _CODEX_ERROR_AUTHORITY["item_error"]
+                payload = item
+        if authority < best_authority:
+            continue
+        message = _codex_error_message(payload)
+        if message is not None:
+            best_authority = authority
+            best_message = message
+    return best_message
+
+
+def _codex_usage_to_canonical(usage: Any) -> dict[str, int | None] | None:
+    """Project one Codex ``usage`` block onto the canonical counters.
+
+    Renames Codex's counters onto the canonical spellings and runs them through
+    :func:`normalize_usage`, so there is exactly one token-dict shape in the
+    ledger, then re-attaches :data:`_CODEX_REASONING_TOKENS_KEY`.
+
+    Args:
+        usage: A ``turn.completed`` usage mapping, or ``None``.
+
+    Returns:
+        The canonical token dict plus ``reasoning_output_tokens`` when reported,
+        or ``None`` when nothing usable was present.
+    """
+    if not isinstance(usage, dict) or not usage:
+        return None
+    renamed = {_CODEX_TOKEN_ALIASES.get(key, key): value for key, value in usage.items()}
+    normalized = normalize_usage(renamed)
+    if normalized is None:
+        return None
+    reasoning = coerce_optional_int(usage.get(_CODEX_REASONING_TOKENS_KEY))
+    if reasoning is not None:
+        normalized[_CODEX_REASONING_TOKENS_KEY] = reasoning
+    return normalized
+
+
+def parse_codex_jsonl_usage(
+    log_path: str | Path,
+) -> dict[str, int | None] | None:
+    """Extract the session token usage from a ``codex exec --json`` log.
+
+    The Codex twin of :func:`parse_claude_stream_json_usage`. ``codex exec
+    --json`` writes one JSON event per line and reports token counts on
+    ``{"type": "turn.completed", "usage": {...}}``. Unlike the Claude CLI's
+    terminal ``result`` row, that usage covers only the turn that just ended, so
+    the turns are summed here to give the caller the same session total its
+    Claude counterpart returns.
+
+    Args:
+        log_path: Path to the Codex CLI JSONL log.
+
+    Returns:
+        The canonical token dict (plus ``reasoning_output_tokens``), or ``None``
+        when the file is missing or reported no usage.
+    """
+    totals: dict[str, int] = {}
+    for event in _iter_codex_events(log_path):
+        if event.get("type") != "turn.completed":
+            continue
+        usage = event.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        for key, value in usage.items():
+            count = coerce_optional_int(value)
+            if count is not None:
+                totals[key] = totals.get(key, 0) + count
+    return _codex_usage_to_canonical(totals)
+
+
+def parse_codex_jsonl_response(
+    log_path: str | Path,
+) -> str | None:
+    """Recover the agent's reply text from a ``codex exec --json`` log.
+
+    The Codex twin of :func:`parse_claude_stream_json_response`, feeding the
+    same ``conversations.jsonl`` row; only the response is recovered because the
+    caller already holds the prompt.
+
+    Codex has no consolidated final-answer row, so every
+    ``{"type": "item.completed", "item": {"type": "agent_message"}}`` text is
+    joined in order — the same reconstruction the Claude parser falls back to.
+    For the common single-message turn that is just that message.
+
+    Args:
+        log_path: Path to the Codex CLI JSONL log.
+
+    Returns:
+        The recovered reply text, or ``None`` when none could be read.
+    """
+    chunks: list[str] = []
+    for event in _iter_codex_events(log_path):
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "agent_message":
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text.strip():
+            chunks.append(text)
+    return "\n".join(chunks) if chunks else None
+
+
+def parse_codex_jsonl_turn_usages(
+    log_path: str | Path,
+) -> list[dict[str, int | None]]:
+    """Recover per-turn usage from a ``codex exec --json`` log.
+
+    The Codex twin of :func:`parse_claude_stream_json_turn_usages`. Each
+    ``turn.completed`` event already carries its own turn's (non-cumulative)
+    counts, so the rows sum to the total :func:`parse_codex_jsonl_usage`
+    returns and can be traced as one ledger row per turn.
+
+    Args:
+        log_path: Path to the Codex CLI JSONL log.
+
+    Returns:
+        The normalized token dicts in stream order, or ``[]`` when the file is
+        missing / truncated / carries no usage.
+    """
+    usages: list[dict[str, int | None]] = []
+    for event in _iter_codex_events(log_path):
+        if event.get("type") != "turn.completed":
+            continue
+        normalized = _codex_usage_to_canonical(event.get("usage"))
+        if normalized is not None:
+            usages.append(normalized)
+    return usages
+
+
+def _summarize_codex_item(kind: str, item: dict[str, Any]) -> str:
+    """Summarize one Codex tool item as the intel ledger's ``query`` field.
+
+    Args:
+        kind: The item's ``type``.
+        item: The item mapping.
+
+    Returns:
+        A compact, clipped one-line summary.
+    """
+    if kind == "file_change":
+        changes = item.get("changes")
+        paths = [
+            change["path"]
+            for change in (changes if isinstance(changes, (list, tuple)) else ())
+            if isinstance(change, dict) and isinstance(change.get("path"), str)
+        ]
+        return _summarize_tool_input(", ".join(paths))
+    # The shared summarizer already prefers the query-ish keys Codex items use
+    # (``command`` for a shell call, ``query`` for a web search).
+    return _summarize_tool_input(item)
+
+
+def parse_codex_jsonl_tool_calls(
+    log_path: str | Path,
+) -> list[dict[str, Any]]:
+    """Recover the tool calls a specialist made from its ``codex exec --json`` log.
+
+    The Codex twin of :func:`parse_claude_stream_json_tool_calls`, producing the
+    same ``{"tool", "query"}`` entries in call order that back the per-call
+    ``intel:<tool>`` spans. Item types are mapped onto the Claude tool names via
+    :data:`_CODEX_TOOL_NAMES` so the ledger reads the same on both runtimes.
+
+    ``item.type`` is an open set. A type this parser does not know is still
+    recorded, under its raw Codex name, and every such type is reported once in
+    a warning — an unmodelled tool must not vanish from the trace, and must not
+    crash the parse either.
+
+    Args:
+        log_path: Path to the Codex CLI JSONL log.
+
+    Returns:
+        One ``{"tool", "query"}`` entry per call, or ``[]`` when there were none.
+    """
+    calls: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    unknown_types: set[str] = set()
+    for event in _iter_codex_events(log_path):
+        if event.get("type") not in _CODEX_ITEM_EVENTS:
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("type") or "").strip()
+        if not kind or kind in _CODEX_NON_TOOL_ITEM_TYPES:
+            continue
+        # ``item.started`` and ``item.completed`` describe one call; count it once.
+        item_id = str(item.get("id") or "")
+        if item_id:
+            if item_id in seen_ids:
+                continue
+            seen_ids.add(item_id)
+        tool = _CODEX_TOOL_NAMES.get(kind)
+        if tool is None:
+            unknown_types.add(kind)
+            tool = kind
+        calls.append({"tool": tool, "query": _summarize_codex_item(kind, item)})
+    if unknown_types:
+        log.warning(
+            "parse_usage: codex log %s carried unmodelled item types %s; recorded under their raw names",
+            log_path,
+            sorted(unknown_types),
+        )
+    return calls
+
+
 def parse_forge_usage(stdout: str) -> dict[str, int | None] | None:
     """Extract the run's LLM usage from a Kernel-Forge backend's stdout log.
 
@@ -367,6 +750,11 @@ __all__ = [
     "parse_claude_stream_json_tool_calls",
     "parse_claude_stream_json_turn_usages",
     "parse_claude_stream_json_usage",
+    "parse_codex_jsonl_error",
+    "parse_codex_jsonl_response",
+    "parse_codex_jsonl_tool_calls",
+    "parse_codex_jsonl_turn_usages",
+    "parse_codex_jsonl_usage",
     "parse_forge_steps",
     "parse_forge_usage",
 ]

@@ -31,10 +31,10 @@ from hyperloom.common.env import env_bool
 from ..state.kernel_decision_settings import (
     _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_HOT_KERNEL_GATE_TOP_N,
-    _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
     _DEFAULT_KERNEL_OPT_MAX_PARTIAL,
     _MAX_INTEGRATE_FAULT_ATTEMPTS,
     _now_iso,
+    resolve_hot_kernel_min_gpu_pct,
     resolve_kernel_opt_max_failures,
 )
 from ..trace.trace_env import env_flag
@@ -197,6 +197,14 @@ def _queue_kernel_keep(
             "trace_gpu_pct": entry.get("last_gpu_pct", 0.0),
             "created_at": str(entry.get("last_ts") or _now_iso()),
             "status": "pending",
+            "correctness_source": str(entry.get("last_correctness_source") or ""),
+            "artifact_kind": str(
+                (entry.get("last_framework_applyback") or {}).get("artifact_kind") or ""
+            ),
+            "integration_validation_status": str(
+                entry.get("last_integration_validation_status") or ""
+            ),
+            "framework_applyback": dict(entry.get("last_framework_applyback") or {}),
         }
     else:
         # The patch snapshot is immutable, but trace-local routing metadata must
@@ -477,6 +485,30 @@ def find_rejected_kernel_patch(
     return None
 
 
+def _stamp_integration_validation(
+    state,
+    *,
+    kernel_id: str,
+    task_key: str,
+    integration_status: str,
+    validation_tier: str,
+) -> None:
+    """Settle an artifact's outstanding integration verdict in the ledgers."""
+    entries = []
+    if task_key:
+        entries.append((state.kernel_opt_task_attempts or {}).get(task_key))
+    if kernel_id:
+        entries.append((state.kernel_opt_attempts or {}).get(kernel_id))
+    for attempt in entries:
+        if not isinstance(attempt, dict):
+            continue
+        attempt["integration_status"] = "integrated"
+        if integration_status:
+            attempt["last_integration_validation_status"] = integration_status
+        if validation_tier:
+            attempt["validation_tier"] = validation_tier
+
+
 def record_kernel_integrate_result(
     state,
     result: dict[str, Any],
@@ -584,6 +616,8 @@ def record_kernel_integrate_result(
         "accuracy": result.get("accuracy"),
         "accuracy_pass": result.get("accuracy_pass"),
         "decision_reason": result.get("decision_reason"),
+        "artifact_kind": str(result.get("artifact_kind") or ""),
+        "validation_tier": str(result.get("validation_tier") or ""),
         "workspace": result.get("workspace"),
         "report_path": result.get("report_path"),
         "ts": _now_iso(),
@@ -646,15 +680,41 @@ def record_kernel_integrate_result(
                 target_file=target_file,
                 extra_server_args=extra_args,
                 result=result,
-                validation_tier="integrate_e2e" if _dec == "KEEP" else "",
+                validation_tier=(
+                    str(result.get("validation_tier") or "integrate_e2e")
+                    if _dec == "KEEP"
+                    else ""
+                ),
             )
     except Exception:  # noqa: BLE001
         pass
 
     if result.get("decision") == "KEEP":
+        validation_tier = str(result.get("validation_tier") or "")
+        integration_status = str(result.get("integration_validation_status") or "")
         if isinstance(pending_record, dict):
             pending_record["status"] = "integrated"
             pending_record["integrated_at"] = _now_iso()
+            if integration_status:
+                pending_record["integration_validation_status"] = integration_status
+            if validation_tier:
+                pending_record["validation_tier"] = validation_tier
+        if integration_status or validation_tier:
+            _stamp_integration_validation(
+                state,
+                kernel_id=kernel_id,
+                task_key=str(
+                    (
+                        pending_record.get("task_key")
+                        if isinstance(pending_record, dict)
+                        else ""
+                    )
+                    or task_group_key
+                    or ""
+                ),
+                integration_status=integration_status,
+                validation_tier=validation_tier,
+            )
         return entry
 
     # Integration fault: never measured fairly. Retry on its own budget instead
@@ -1052,6 +1112,15 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     # when HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW is enabled).
     entry["last_backend"] = str(verification.get("best_backend") or "")
     entry["last_correctness_passed"] = verification.get("correctness_passed")
+    # Provenance for how correctness was established and whether the artifact
+    # still owes a framework integration verdict.
+    entry["last_correctness_source"] = str(verification.get("correctness_source") or "")
+    entry["last_integration_validation_status"] = str(
+        verification.get("integration_validation_status") or ""
+    )
+    entry["last_framework_applyback"] = dict(
+        verification.get("framework_applyback") or {}
+    )
     entry["last_ts"] = ts
     entry["history"] = history
     if test_command:
@@ -1077,6 +1146,11 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             "micro_speedup": micro_float,
             "compile_passed": verification.get("compile_passed"),
             "correctness_passed": verification.get("correctness_passed"),
+            "correctness_source": str(verification.get("correctness_source") or ""),
+            "integration_validation_status": str(
+                verification.get("integration_validation_status") or ""
+            ),
+            "framework_applyback": dict(verification.get("framework_applyback") or {}),
             "best_artifact_path": best_artifact_path,
             "best_artifact_bundle": best_artifact_bundle,
             "deploy_snapshot_dir": deploy_snapshot_dir,
@@ -1445,15 +1519,7 @@ def untried_hot_reusable_kernels(
         return []
 
     if min_gpu_pct is None:
-        try:
-            min_gpu_pct = float(
-                os.environ.get(
-                    "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT",
-                    _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
-                )
-            )
-        except (TypeError, ValueError):
-            min_gpu_pct = _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
+        min_gpu_pct = resolve_hot_kernel_min_gpu_pct()
     if top_n is None:
         try:
             top_n = int(

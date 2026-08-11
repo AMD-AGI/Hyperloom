@@ -1455,7 +1455,7 @@ class KBProvenance(TypedDict, total=False):
         warm_start_recipe_seen (bool): Whether a warm recipe was seen.
         warm_start_recipe_tier (str): Tier of the seen warm recipe.
         warm_start_recipe_source (str): KB path that supplied the applied
-            warm recipe (e.g. ``gbrain`` / ``recipe KB``); empty when none.
+            warm recipe (e.g. ``kb-store`` / ``recipe_kb``); empty when none.
         warm_start_pitfall_count (int): Number of pitfalls injected at warm start.
         warm_start_lesson_count (int): Number of lessons injected at warm start.
         warm_replay (WarmReplayOutcome): Operator-visible warm-replay summary.
@@ -1476,7 +1476,7 @@ class KBProvenance(TypedDict, total=False):
     warm_start_ts: str
     warm_start_recipe_seen: bool
     warm_start_recipe_tier: str
-    # Which KB path (e.g. "gbrain" / "recipe_kb") supplied the applied warm recipe.
+    # Which KB path (e.g. "kb-store" / "recipe_kb") supplied the applied warm recipe.
     warm_start_recipe_source: str
     warm_start_pitfall_count: int
     warm_start_lesson_count: int
@@ -2359,8 +2359,10 @@ class EnablementBreakdown(TypedDict, total=False):
         observed_task: Eval task name observed at the trigger.
         observed_metric: Eval metric observed at the trigger.
         probe_config_path: Materialized config re-run to reproduce the contract.
-        accepted_config_path: Effective config from the KEEP'd candidate bench
-            used as the revalidation baseline config.
+        accepted_config_path: Base YAML from the KEEP'd candidate bench, used as
+            the revalidation baseline config.
+        accepted_config: Server args / envs that bench also launched with, which
+            the YAML does not carry; the revalidation replays them on top.
         eval_contract_fingerprint: Fingerprint of the captured eval contract.
     """
 
@@ -2400,6 +2402,7 @@ class EnablementBreakdown(TypedDict, total=False):
     observed_metric: str
     probe_config_path: str
     accepted_config_path: str
+    accepted_config: dict[str, Any]
     eval_contract_fingerprint: str
 
 

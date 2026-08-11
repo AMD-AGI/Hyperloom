@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from .. import framework_registry
+from .backends import CRITIC_PROTOCOL_CHOICES
 from hyperloom.common.llm_config import provider_model_defaults
 from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CLAUDE_MODEL,
@@ -532,13 +533,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Reference launch recipe (.sh path or http(s) URL). Its serve "
-            "flags + whitelisted exports seed the baseline server args at "
-            "lowest priority (EXPLORE can override). Model-gated: ignored if "
-            "the run's model differs from the recipe's. If the given path is "
-            "unreadable / yields no flags, a matching InferenceX single-node "
-            "recipe is auto-discovered (exact filename match only; fuzzy "
-            "matches are logged, not used). When this flag is omitted, no "
-            "discovery runs and the baseline is unchanged."
+            "flags plus the exports the denylist allows seed the baseline "
+            "server args at lowest priority (EXPLORE can override); shell-unsafe, "
+            "credential-shaped and optimizer-owned workload variables are "
+            "dropped. The recipe is applied as given — there is no model gate "
+            "and no auto-discovery — so a path that cannot be read, or that "
+            "yields neither a flag nor an export, exits 2 instead of falling "
+            "back. Omit the flag to leave the baseline unchanged."
         ),
     )
     opt.add_argument("--precision", type=str, default=None, help=f"Model precision (default {DEFAULT_PRECISION})")
@@ -804,6 +805,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Force the critic-agent runtime backend (KB + session memory + "
         "review_constraints). Requires CRITIC_AGENT_ROOT or a sibling "
         "$REPO_ROOT/critic-agent/ directory.",
+    )
+    opt.add_argument(
+        "--critic-protocol",
+        dest="critic_protocol",
+        choices=CRITIC_PROTOCOL_CHOICES,
+        default="auto",
+        help="Protocol for the Critic's review inference. 'openai' uses the "
+        "OpenAI SDK; 'anthropic' uses the Messages API, or the Claude CLI when a "
+        "CLAUDE_CODE_OAUTH_TOKEN subscription is the only credential. "
+        "'auto' (default) derives it from the configured credentials; an "
+        "explicit value fails at startup when that side has no credential. "
+        "Ignored (with a warning) under --critic-mock, which runs no review "
+        "inference.",
     )
     # Robustness backend selection (mirrors critic)
     opt.add_argument(
@@ -1091,14 +1105,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "(OpenAI-compatible only) or when the model list is empty. "
         "Advisory only; never gates.",
     )
-    # specialist sub-agent backend selection: Claude (default), inherits orchestration model.
+    # Specialist model override; provider shape selects Claude or Codex.
     opt.add_argument(
         "--specialist-model",
         dest="specialist_model",
         type=str,
         default=None,
-        help="Claude model used for specialist sub-agents (defaults to "
-        "the orchestration --claude-model). KB_design §3.5 §6.",
+        help="Generic model override for the selected specialist backend. "
+        "When omitted, Codex specialists use --codex-model and Claude "
+        "specialists use --claude-model. KB_design §3.5 §6.",
     )
     opt.add_argument(
         "--specialist-max-turns",
@@ -1126,19 +1141,18 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("subprocess", "inprocess"),
         default="subprocess",
         help="Specialist execution shape. 'subprocess' (default) spawns "
-        "a fresh `claude` CLI per task inside a per-task git worktree "
-        "for isolation (PR-A2). 'inprocess' keeps the legacy M5 path "
-        "(claude-agent-sdk in the orchestrator process) for tests / "
-        "environments without the claude binary.",
+        "a fresh selected-provider agent CLI per task. 'inprocess' uses "
+        "the matching Claude or Codex Agent SDK backend in the orchestrator "
+        "process.",
     )
     opt.add_argument(
         "--specialist-mcp-config",
         dest="specialist_mcp_config",
         type=str,
         default=None,
-        help="Optional path to an MCP config JSON forwarded to the "
-        "subprocess claude (`--mcp-config`). Used to wire PR Monitor "
-        "MCP servers into specialists. Default: None.",
+        help="Optional MCP config JSON for specialist subprocesses. Claude "
+        "receives it via --mcp-config; Codex translates supported HTTP/stdio "
+        "servers into private task-local config. Default: None.",
     )
 
     # Integration toggles. Roofline refresh is unconditional (fires at PRELUDE

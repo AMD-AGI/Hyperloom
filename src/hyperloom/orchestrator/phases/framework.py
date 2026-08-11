@@ -1765,11 +1765,12 @@ class FrameworkPhase(PhaseHandler):
             _reset_baseline_failure_backstop()
             _stack_setup_commands()
             _stack_kept_runtime()
-            # Persist the actual materialized config used for the KEEP'd bench so
-            # the revalidation baseline re-runs the identical effective config.
             accepted_cfg = str(res.get("enablement_accepted_config_path") or "").strip()
             if accepted_cfg:
                 state.enablement.accepted_config_path = accepted_cfg
+            effective = res.get("enablement_effective_config")
+            if isinstance(effective, dict) and effective:
+                state.enablement.accepted_config = dict(effective)
             if str(state.enablement.origin or "") == "eval":
                 # eval-origin: the patch boots and re-passed accuracy in the gate,
                 # but tput/accuracy only become official once a GENUINE baseline
@@ -2784,8 +2785,10 @@ class FrameworkPhase(PhaseHandler):
 
         Reuses the ProposalScorer's client when present (same gateway/auth),
         then the orchestration backend's own client (so the LLM ranker is on by
-        default whenever orchestration has LLM credentials); otherwise builds one
-        from ``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``. Returns ``None`` when the
+        default whenever orchestration has LLM credentials); otherwise asks
+        :func:`hyperloom.common.llm_config.get_async_openai_client` -- the only
+        sanctioned owner of provider client construction -- for one built from
+        ``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``. Returns ``None`` when the
         OpenAI side is unconfigured, which leaves the LLM ranker disabled.
         Cached on first successful build.
         """
@@ -2805,32 +2808,28 @@ class FrameworkPhase(PhaseHandler):
             except Exception:  # noqa: BLE001 — fall through to direct build
                 log.debug("FRAMEWORK: scorer client unavailable for ranker", exc_info=True)
         # Reuse the orchestration backend's own OpenAI-compatible client when it
-        # exposes one (e.g. CodexBackend): same gateway + auth as the running
-        # session, so the ranker is default-on without extra configuration.
+        # exposes one: same gateway + auth as the running session, so the ranker
+        # is default-on without extra configuration. Agent-runtime backends own
+        # no client of their own, so those fall through to the build below.
         backend = self.backends.get("orchestration")
         backend_client = getattr(backend, "_client", None)
         if backend_client is not None and hasattr(backend_client, "chat"):
             self._coord._fa_ranker_client = backend_client
             return backend_client
-        try:
-            from openai import AsyncOpenAI  # type: ignore[import-not-found]
-        except ImportError:
-            return None
+        from hyperloom.common import llm_config as _llm_cfg
+
         # This client speaks the OpenAI protocol, so it authenticates from the
         # OpenAI side only. The orchestration backend's own ``api_key_env`` is not
         # consulted: the orchestration role is Claude, so it names the Anthropic
-        # key, which must never reach an OpenAI-protocol endpoint.
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
+        # key, which must never reach an OpenAI-protocol endpoint. The explicit
+        # gate keeps ``llm_config``'s ``LLM_GATEWAY_KEY`` fallback out of play.
+        if not os.environ.get("OPENAI_API_KEY"):
             log.debug("FRAMEWORK: LLM ranker disabled (OPENAI_API_KEY not set; ranker needs the OpenAI side)")
             return None
-        base_url = os.environ.get("OPENAI_BASE_URL")
-        kwargs: dict[str, Any] = {"api_key": api_key}
-        if base_url:
-            kwargs["base_url"] = base_url.strip()
         try:
-            client = AsyncOpenAI(**kwargs)
-        except Exception:  # noqa: BLE001
+            client = _llm_cfg.get_async_openai_client()
+        except Exception:  # noqa: BLE001 — the ranker is optional, so it degrades to off
+            log.debug("FRAMEWORK: LLM ranker disabled (async OpenAI client unavailable)", exc_info=True)
             return None
         self._coord._fa_ranker_client = client
         return client
@@ -4575,9 +4574,11 @@ class FrameworkPhase(PhaseHandler):
         """Enqueue one genuine baseline to revalidate a KEEP'd eval-origin patch.
 
         Uses the accepted config from the KEEP'd candidate bench (preferred) or
-        falls back to the original probe config.  The frozen eval controls from
-        the carrier params ensure RUN_EVAL and eval task/limit match the trigger
-        contract. Idempotent and one-at-a-time.
+        falls back to the original probe config, plus that bench's env/arg layers,
+        which the YAML does not carry and without which a different configuration
+        would be graded. The frozen eval controls from the carrier params ensure
+        RUN_EVAL and eval task/limit match the trigger contract. Idempotent and
+        one-at-a-time.
         """
         state = self.shared_state
         if not bool(state.enablement.validation_pending):
@@ -4598,14 +4599,15 @@ class FrameworkPhase(PhaseHandler):
             "disable_run_eval": False,
             **_enablement_carrier_params(state),
         }
-        # Prefer the accepted (post-fix) config so revalidation uses the same
-        # effective config the KEEP'd candidate ran; fall back to the trigger
-        # probe config only when no accepted config was recorded.
         accepted_cfg = str(state.enablement.accepted_config_path or "").strip()
         probe_cfg = str(state.enablement.probe_config_path or "").strip()
         cfg = accepted_cfg or probe_cfg
         if cfg:
             params["config_path"] = cfg
+        effective = state.enablement.accepted_config
+        for key in ("extra_envs", "extra_server_args", "remove_args", "unset_envs", "args_mode"):
+            if effective.get(key):
+                params[key] = effective[key]
         # Carry the active runtime override so the revalidation baseline runs
         # under the same framework runtime as the KEEP'd candidate.
         active_rt = state.enablement.active_runtime or {}

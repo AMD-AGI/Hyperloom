@@ -87,6 +87,23 @@ class CheckpointPolicy:
     # Always checkpoint on a phase boundary.
     on_phase_boundary: bool = True
 
+    def adopt_context_window(self, window: int, fraction: float) -> None:
+        """Recompute the soft budget from a window the provider itself reported.
+
+        :data:`MODEL_CONTEXT_WINDOWS` covers the models this project pins, and
+        everything else falls back to a conservative default. A provider that
+        states its own window per turn knows better than that fallback, and
+        compacting against a window smaller than the real one fires early --
+        which costs the conversation, because compaction resets it.
+
+        Args:
+            window: Window size the provider reported; 0 or less leaves the
+                current budget untouched.
+            fraction: Share of the window at which to compact.
+        """
+        if window > 0:
+            self.context_token_soft = int(window * fraction)
+
     def should_checkpoint(
         self,
         *,

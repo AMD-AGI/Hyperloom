@@ -80,7 +80,7 @@ def test_remote_child_env_forwards_kb_store_alone_when_gbrain_is_absent(
     assert env["KERNELFORGE_GBRAIN_ENABLED"] == "false"
 
 
-def test_remote_child_env_forwards_gbrain_for_the_paths_still_using_it(
+def test_remote_child_env_strips_parent_gbrain_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _avoid_unrelated_fellow_setup(monkeypatch)
@@ -100,9 +100,9 @@ def test_remote_child_env_forwards_gbrain_for_the_paths_still_using_it(
     }
     forge_submit._apply_fellow_env(env)
     assert env["KB_STORE_URL"] == "https://kb.test"
-    assert env["GBRAIN_BASE_URL"] == "https://gbrain.test"
-    assert env["GBRAIN_TOKEN"] == "gbrain-token"
-    assert env["KERNELFORGE_GBRAIN_ENABLED"] == "true"
+    assert "GBRAIN_BASE_URL" not in env
+    assert "GBRAIN_TOKEN" not in env
+    assert env["KERNELFORGE_GBRAIN_ENABLED"] == "false"
 
 
 def test_remote_child_env_missing_kb_store_credentials_degrades_once(

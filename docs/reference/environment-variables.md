@@ -31,6 +31,9 @@ These variables configure LLM gateway access and optional backend credentials.
 | `ANTHROPIC_BASE_URL`   | Conditional | —    | Anthropic-side endpoint. Required together with `ANTHROPIC_API_KEY` to enable Claude. Never derived from `OPENAI_BASE_URL`.                                                                                                        |
 | `ANTHROPIC_API_KEY`    | Conditional | —    | Anthropic-side key. Pairs with `ANTHROPIC_BASE_URL`; may omit it only when the OpenAI side has no base URL either, in which case the official Anthropic endpoint is implied. Never derived from `OPENAI_API_KEY`; setting it alongside an `OPENAI_BASE_URL` but without its own base URL fails preflight.                                                                                                                                |
 | `ANTHROPIC_AUTH_TOKEN` | No       | —    | Claude CLI auth token alias, accepted in place of `ANTHROPIC_API_KEY`. Preflight never fills it; the Ray / e2e / forge-fusion env builders default it from the Anthropic-side key when they hand credentials to a subprocess.                                                                        |
+| `ANTHROPIC`<br>`_CUSTOM_HEADERS` | No | —    | Extra request headers for the Anthropic side, for gateways that authenticate on a header of their own (for example Azure API Management). Newline-delimited `Name: value` as in the Anthropic SDK; a JSON object is accepted too. `${VAR}` references are expanded from the same environment, so a gateway header can reuse `ANTHROPIC_API_KEY` instead of duplicating the secret. |
+| `OPENAI`<br>`_CUSTOM_HEADERS` | No  | —    | OpenAI-side equivalent, passed to the SDK client as `default_headers`. Used whenever `OPENAI_BASE_URL` is set explicitly; when the OpenAI base URL is instead derived from `ANTHROPIC_BASE_URL` (one gateway, no explicit OpenAI endpoint) the client falls back to `ANTHROPIC_CUSTOM_HEADERS`. Setup keeps it in `.env` unless the deployment is Anthropic-only, where the whole OpenAI side is scrubbed. |
+| `CLAUDE_CODE`<br>`_OAUTH_TOKEN` | No | — | Claude Max/Pro subscription token from `claude setup-token`. Lowest-priority Anthropic credential: either API-key variable outranks it. On its own it implies `https://api.anthropic.com`. Passed to subprocesses verbatim and never copied into `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `~/.claude/config.json`, which would switch the run to API-credits billing. |
 | `GEAK_API_KEY`         | No       | —    | Internal alias, never derived from either side. GEAK runs on the Anthropic side (`ANTHROPIC_*` + `GEAK_CLAUDE_MODEL`); set this only to point GEAK elsewhere.                                                                                                                              |
 | `GEAK_BASE_URL`        | No       | —    | Internal alias, never derived from either side. Set it only to point GEAK at a different endpoint than the Anthropic side.                                                                                                                          |
 | `GEAK_CLAUDE_MODEL`   | No       | Inherits `CLAUDE_MODEL` | GEAKv4 Claude Code workflow model id.                                                                                                                                                           |
@@ -51,6 +54,7 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `TRACELENS_ROOT`                          | No (installer auto-clones) | `${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}/Tr`<br>`aceLens@<resolved-sha>` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `src/hyperloom/agents/kernel/scripts/install.sh` clones the public repo into the repo-local cache root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
 | `GEAK_CLAUDE_BIN`                          | No (installer auto-resolves) | First of `$HOME/.local/bin/claude`, `/usr/local/bin/claude`, `$(command -v claude)`; written to `kernel-agent.env.sh` | Pins the Claude Code binary the GEAK SDK path uses, so `claude_agent_sdk` doesn't fall back to its older bundled CLI. Export to force a specific build. |
 | `USER_DATA_PATH`                          | No                   | `/workspace/hyperloom`                                             | Session directory root (logs, runs, mirrors, breakdown). Replaces the retired `INFERENCE_OPTIMIZER_SESSION_DIR` and `WORKSPACE_PATH`.                                                |
+| `HYPERLOOM_`<br>`RUNTIME_DIR`             | No                   | `$USER_DATA_PATH/runtime` (installer)                               | Private writable runtime state. Codex SDK turns create a unique mode-`0700` `CODEX_HOME` here and remove it after the SDK client closes. When unset, Codex uses the first safe declared output root, then a run-local working directory; it never falls back to `/tmp` or a source checkout. |
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_CU`<br>`RRENT_S`<br>`ESSION_DIR` | No (set by CLI) | Set at session boot | Absolute path to the active session directory. Written by the CLI when a session starts and inherited by every benchmark subprocess; session-path resolution prefers it over scanning `USER_DATA_PATH`. Do not set by hand. |
 | `HYPERLOOM_ROOT`                          | No                   | `$HYPER`<br>`LOOM_R`<br>`UNTIME_`<br>`DIR/sou`<br>`rce-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the repo-local cache root (`${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}`), not this path. |
 | `HYPERLOOM`<br>`_CACHE_`<br>`DIR`                          | No                   | `$REPO_ROOT`<br>`/.cache`                      | Writable, repo-local base for auto-cloned open-source deps (TraceLens, Magpie, etc.), cloned per revision as `<name>@<sha>`. Not under `$TMPDIR` so a reaper cannot wipe it mid-run. |
@@ -319,19 +323,31 @@ same way under `trace_resolver_error: ...`, and both are logged at `WARNING`.
 
 ---
 
-## Codex (OpenAI) backend web search
+## Codex (OpenAI) agent sandbox
 
-The following variables enable OpenAI's built-in server-side web search for the
-Codex (GPT-style) backend. When enabled, every Codex turn is issued through the
-OpenAI **Responses API** with the built-in `web_search` tool instead of
-`chat.completions`; the search resolves server-side in one call and the model's
-reply still carries the intent envelope. Only affects deployments whose Codex
-endpoint is OpenAI-compatible and supports the Responses API `web_search` tool.
+Selects how a Codex agent session (TraceLens analysis and every future
+Codex-based agent) is contained. The secure default is `workspace-write`.
+Codex implements both contained presets with bubblewrap, so Hyperloom executes
+a real namespace-and-mount capability probe before starting the SDK. Merely
+finding a `bwrap` executable is insufficient: if the current kernel or
+container prevents it from establishing the sandbox, `workspace-write` and
+`read-only` fail closed before the app-server starts. There is no automatic
+fallback to `bypass`.
+
+`bypass` is a deliberate double opt-in. Set both
+`HYPERLOOM_CODEX_SANDBOX_MODE=bypass` and
+`HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1`; the second variable confirms that an
+external container or sandbox already enforces the required isolation. It does
+not create that boundary. A confirmed bypass maps to Codex full access even
+when no writable roots are declared, because the external sandbox is
+authoritative. Under the contained modes, no writable roots remains
+`read-only`. Unknown modes and incomplete bypass configuration fail
+immediately.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_CODEX_WEB_SEARCH` | Unset (off) | Set to `1`/`true` to route every Codex turn through the OpenAI Responses API with the built-in `web_search` tool. Default keeps the existing `chat.completions` path unchanged. |
-| `HYPERLOOM_`<br>`CODEX_WEB_SEARCH`<br>`_CONTEXT_SIZE` | `medium` | Passed through as the `web_search` tool's `search_context_size` (`low` / `medium` / `high`). Ignored unless `HYPERLOOM_CODEX_WEB_SEARCH` is on. |
+| `HYPERLOOM_`<br>`CODEX_SANDBOX_MODE` | `workspace-write` | `workspace-write` restricts writes to the session directory plus declared output roots; `read-only` forbids writes; `bypass` selects Codex full access only when the external-sandbox confirmation below is also set. |
+| `HYPERLOOM_`<br>`CODEX_EXTERNAL_`<br>`SANDBOX` | Unset | Set exactly to `1` only when an external isolation boundary is already active and `HYPERLOOM_CODEX_SANDBOX_MODE=bypass`. Setting this alone has no effect and never weakens the default sandbox. |
 
 ---
 
@@ -469,7 +485,7 @@ deployments.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Bash-enabled specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
+| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Bash-enabled specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `OPENAI_CUSTOM_HEADERS`, `LLM_GATEWAY_KEY`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ---
@@ -486,6 +502,8 @@ The following variables configure the Critic, Robustness, and knowledge base com
 | `INFERENCE_OPTIMIZER_`<br>`FA_KB_PATH` | `$USER_DATA_PATH/framework-kb`, otherwise `/workspace/hyperloom/framework-kb` | Framework-agent KB root, holding the lessons ledger the FRAMEWORK phase reads and writes. The only supported override: the `fa` reader and the orchestrator's writeback both resolve through it, so it moves both halves at once. The withdrawn `FRAMEWORK_AGENT_KB_DIR` is ignored with a warning naming the resolved root. On first start-up an existing partition under the legacy `$USER_DATA_PATH/kb` is copied across once; a copy that fails warns and leaves the phase to cold-start. |
 | `KB_STORE_URL`                        | Unset                  | KB Store endpoint. Required when `KNOWLEDGE_STORE_MODE=remote`; remote Recipe mode reads the direct best-session record, currently replays only its Explore args/env at T0, and writes one final session at CLOSE. |
 | `KB_STORE_TOKEN`                      | Unset                  | KB Store bearer token. Required when `KNOWLEDGE_STORE_MODE=remote`; transport failures during the final write are non-fatal. |
+| `KB_DRAFT_DIR`                        | Runtime-generated      | Internal remote-mode handoff where out-of-process agents stage their section knowledge and files. Hyperloom creates and exports it; operators must not set it. The facade is inactive when it is absent. |
+| `KB_WARM_START_DIR`                   | Runtime-generated      | Internal remote-mode handoff pointing agents at the downloaded `recipe.json + files/` best record. Hyperloom creates and exports it; operators must not set it. |
 | `GBRAIN_BASE_URL`                     | Unset                  | Optional GBrain endpoint for non-Recipe KG and Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
 | `GBRAIN_TOKEN`                        | Unset                  | Optional GBrain bearer token for non-Recipe KG and Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
 | `CRITIC_AGENT_ROOT`                   | Derived from `REPO_ROOT` | Override location of the critic-agent runtime.                                                                                    |

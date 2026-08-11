@@ -36,7 +36,9 @@ from hyperloom.common.env_safety import (
     valid_env_key,
 )
 from hyperloom.inference_optimizer.session.paths import asset_root, deps_cache_root
+from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
 from hyperloom.orchestrator.framework.paths import GENERIC_FRAMEWORK_ROOT_ENV
+from hyperloom.orchestrator.framework.paths import flydsl_extra_source_dirs
 from ._grid_runner import (
     compact_json_server_args,
     dedup_vllm_server_args,
@@ -547,7 +549,6 @@ _BASELINE_CONFIG_BY_FRAMEWORK: dict[str, Path] = {
     "atom": Path("assets/configs/baseline_atom.yaml"),
     "vllm": Path("assets/configs/baseline_vllm.yaml"),
     "xdit": Path("assets/configs/baseline_xdit.yaml"),
-    "hunyuan_image3": Path("assets/configs/baseline_hunyuan_image3.yaml"),
     "custom": Path("assets/configs/baseline_custom.yaml"),
 }
 _DEFAULT_BASELINE_CONFIG = Path("assets/configs/baseline_sglang.yaml")
@@ -718,6 +719,7 @@ def materialize_config_with_envs(
     out_name: str = "baseline_config.with_envs.yaml",
     establish_quality_ref: bool = False,
     drop_moe_runner_backend: bool = False,
+    flydsl_source_dirs: bool = False,
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
 
@@ -759,6 +761,9 @@ def materialize_config_with_envs(
             ``--moe-runner-backend`` injection and strip the flag from the
             merged args whatever source it came from (the one-shot fallback
             after a launch failure blamed on that backend).
+        flydsl_source_dirs: When True, name the FlyDSL source roots in
+            ``$FLYDSL_EXTRA_SOURCE_DIRS`` so a patched helper invalidates the JIT
+            cache key. Off by default: only a run that applied such a patch needs it.
 
     Returns:
         The materialized YAML path (stable file name across calls).
@@ -1468,6 +1473,15 @@ def materialize_config_with_envs(
                 "SGLANG_FP8_BLOCKSCALE_CK_MAX_M will no-op on the unpatched "
                 "sglang fp8_utils.py (serving run continues unaffected)."
             )
+    # FlyDSL folds only same-directory helpers into its JIT cache key, so a patched
+    # helper one directory over is served from a stale binary. Naming the roots
+    # folds their sources into the key. Only the run that applied such a patch has
+    # that hazard; setdefault so an operator-set value (YAML / extra_envs) wins.
+    if flydsl_source_dirs:
+        _flydsl_dirs = flydsl_extra_source_dirs()
+        if _flydsl_dirs:
+            envs.setdefault(ENV_FLYDSL_EXTRA_SOURCE_DIRS, _flydsl_dirs)
+
     # sglang FP8 per-channel/per-token CK fast path: a dense FP8 checkpoint
     # with per-channel weight + per-token (dynamic) activation falls into the
     # slow unfused _apply_fallback_scaled_mm in sglang's apply_fp8_linear

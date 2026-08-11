@@ -61,6 +61,23 @@ def test_build_specialist_env_inherits_provider_secrets_by_default(monkeypatch):
     assert "LD_PRELOAD" not in env
 
 
+def test_build_specialist_env_forwards_oauth_token_without_mirroring_it(monkeypatch):
+    """A subscription-only parent must hand the token down untouched.
+
+    Mirroring it into either API-key var would drop the child out of
+    subscription mode and 401 it.
+    """
+    oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv(oauth_env, "sk-ant-oat01-fake")
+    env = _build_specialist_env()
+    assert env[oauth_env] == "sk-ant-oat01-fake"
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+
+
 def test_build_specialist_env_secret_inheritance_can_be_disabled(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", "0")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-api-value")
@@ -377,6 +394,44 @@ async def test_subprocess_path_harvests_done_file(
     assert (workspace / "specialist_done.json").exists()
     assert (workspace / "process.log").exists()
     assert (workspace / "worktree").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_local_specialist_spawn_uses_devnull_stdin(
+    tmp_path: Path,
+    fake_framework_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The local specialist path must never inherit Coordinator stdin."""
+    bin_dir = tmp_path / "bin"
+    fake_claude = _make_fake_claude(bin_dir, behavior="done_only")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    seen_stdin: list[Any] = []
+    real_popen = subprocess.Popen
+
+    def _recording_popen(cmd, *args, **kwargs):
+        if cmd and str(cmd[0]) == str(fake_claude):
+            seen_stdin.append(kwargs.get("stdin"))
+        return real_popen(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess_.subprocess, "Popen", _recording_popen)
+    runner = SpecialistRunner(
+        subprocess_config=SpecialistSubprocessConfig(
+            claude_executable=str(fake_claude),
+            model="",
+            framework_source_roots=(str(fake_framework_repo),),
+            per_turn_max_seconds=30.0,
+            poll_interval_seconds=0.2,
+        ),
+        session_dir=session_dir,
+        default_max_turns=2,
+    )
+
+    result = await runner.run(_make_runner_ctx("t-spec-devnull"))
+
+    assert result.status == "succeeded"
+    assert seen_stdin == [subprocess.DEVNULL]
 
 
 @pytest.mark.asyncio
@@ -920,10 +975,25 @@ class _FakeGpuSpecialistLease:
         self.alive = True
         self.stopped = False
 
-    def start_async(self, cmd, *, env=None, cwd=None, log_path=None) -> None:
+    def start_async(
+        self,
+        cmd,
+        *,
+        env=None,
+        cwd=None,
+        log_path=None,
+        env_mode="merge",
+        stdin_path=None,
+    ) -> None:
         # §3.3 non-blocking start: record + stage the done file, mark the pid
         # ready so poll_started() returns immediately on the next tick.
-        self.started = {"cmd": cmd, "cwd": cwd, "log_path": log_path}
+        self.started = {
+            "cmd": cmd,
+            "cwd": cwd,
+            "log_path": log_path,
+            "env_mode": env_mode,
+            "stdin_path": stdin_path,
+        }
         self.env = dict(env or {})
         Path(log_path).write_text("stream-json log line\n", encoding="utf-8")
         # Graceful done — the reaper harvests this and exits.

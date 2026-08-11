@@ -20,6 +20,8 @@ from typing import Any, NamedTuple
 
 from hyperloom.common.coerce import to_float
 
+from ..state.kernel_decision_settings import resolve_hot_kernel_min_gpu_pct
+
 
 # Per-kernel outcome bucket (closed set).
 CATEGORY_INTEGRATED = "INTEGRATED"
@@ -40,7 +42,15 @@ OUTCOME_SKIP = "skip"
 UNATTEMPTED_NO_SOURCE = "no_source_file"
 UNATTEMPTED_NOT_REUSABLE = "not_reusable_native_kernel"
 UNATTEMPTED_NO_BACKEND = "no_recommended_backend"
-UNATTEMPTED_BELOW_CUTOFF = "below_priority_cutoff"
+#: The dispatcher's own gate. Named for the skip reason the batch filter logs
+#: (``below_min_gpu_pct=<threshold>``) so a report row and a run log describe the
+#: same event.
+UNATTEMPTED_BELOW_MIN_GPU_PCT = "below_min_gpu_pct"
+#: Cleared every gate and still never ran. This is the residual bucket, and it
+#: must stay narrow: an 8h run reported five of these while the real cause was a
+#: Coordinator that could not emit the kernel REQUEST at all, and the label sent
+#: the investigation after a priority cutoff that had never fired.
+UNATTEMPTED_NEVER_DISPATCHED = "never_dispatched"
 UNATTEMPTED_UNKNOWN = "unknown"
 
 #: ``kernel_opt_attempts`` rejection reasons we surface verbatim into
@@ -409,14 +419,22 @@ def _session_kernel_opt_outcome(by_kernel: list[dict[str, Any]]) -> str:
     return OUTCOME_FAIL
 
 
-def _unattempted_reason(top_entry: dict[str, Any]) -> tuple[str, str]:
+def _unattempted_reason(
+    top_entry: dict[str, Any],
+    *,
+    min_gpu_pct: float,
+) -> tuple[str, str]:
     """Pick ``(reason_code, human_detail)`` for an UNATTEMPTED kernel.
 
-    Order matters: ``no_source_file`` first since source-file resolve is the
-    dispatcher's first gate.
+    Order mirrors the dispatcher's own gates, cheapest first: source-file
+    resolve, patchability, backend recommendation, then the GPU-share threshold.
+    Only a kernel that cleared all four lands in the residual bucket, so that
+    bucket names the absence of a dispatch rather than inventing a gate.
 
     Args:
         top_entry: The kernel's top-list/roofline entry.
+        min_gpu_pct: The threshold the dispatcher applied, from
+            :func:`resolve_hot_kernel_min_gpu_pct`.
 
     Returns:
         A ``(reason_code, human_detail)`` tuple.
@@ -444,10 +462,24 @@ def _unattempted_reason(top_entry: dict[str, Any]) -> tuple[str, str]:
             UNATTEMPTED_NO_BACKEND,
             "Reusable kernel but no recommended backend in the top-15 row; kernel-agent will not auto-dispatch.",
         )
+    try:
+        gpu_pct = float(top_entry.get("gpu_pct") or 0.0)
+    except (TypeError, ValueError):
+        gpu_pct = 0.0
+    if gpu_pct < min_gpu_pct:
+        return (
+            UNATTEMPTED_BELOW_MIN_GPU_PCT,
+            f"Eligible but {gpu_pct:.3g}% of GPU time is under the "
+            f"{min_gpu_pct:.3g}% dispatch threshold "
+            "(HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT), so the batch filter skipped it.",
+        )
     return (
-        UNATTEMPTED_BELOW_CUTOFF,
-        "Eligible candidate that was not dispatched within this "
-        "session's budget (e.g. session ended before its turn came up).",
+        UNATTEMPTED_NEVER_DISPATCHED,
+        f"Eligible and at {gpu_pct:.3g}% of GPU time it cleared the "
+        f"{min_gpu_pct:.3g}% threshold, yet no attempt was recorded: the "
+        "Coordinator never issued the kernel REQUEST, or the session ended "
+        "before its turn came up. Check the run log for PolicyGate denials "
+        "and for 'batch candidates filtered'.",
     )
 
 
@@ -634,9 +666,11 @@ def build_kernel_optimization_summary(
         UNATTEMPTED_NO_SOURCE: 0,
         UNATTEMPTED_NOT_REUSABLE: 0,
         UNATTEMPTED_NO_BACKEND: 0,
-        UNATTEMPTED_BELOW_CUTOFF: 0,
+        UNATTEMPTED_BELOW_MIN_GPU_PCT: 0,
+        UNATTEMPTED_NEVER_DISPATCHED: 0,
         UNATTEMPTED_UNKNOWN: 0,
     }
+    min_gpu_pct = resolve_hot_kernel_min_gpu_pct()
     counts = {
         "top_candidates": len(top15),
         "attempted": 0,
@@ -658,7 +692,10 @@ def build_kernel_optimization_summary(
         processed_kids.add(kid)
         attempt = attempts_map.get(kid)
         if attempt is None:
-            reason_code, reason_detail = _unattempted_reason(top_entry)
+            reason_code, reason_detail = _unattempted_reason(
+                top_entry,
+                min_gpu_pct=min_gpu_pct,
+            )
             counts["unattempted"] += 1
             unattempted_breakdown[reason_code] = unattempted_breakdown.get(reason_code, 0) + 1
             by_kernel.append(_render_unattempted_row(top_entry, reason_code, reason_detail))
@@ -1093,7 +1130,8 @@ __all__ = [
     "UNATTEMPTED_NO_SOURCE",
     "UNATTEMPTED_NOT_REUSABLE",
     "UNATTEMPTED_NO_BACKEND",
-    "UNATTEMPTED_BELOW_CUTOFF",
+    "UNATTEMPTED_BELOW_MIN_GPU_PCT",
+    "UNATTEMPTED_NEVER_DISPATCHED",
     "UNATTEMPTED_UNKNOWN",
     "FIELD_GLOSSARY",
 ]

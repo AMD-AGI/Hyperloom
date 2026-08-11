@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import tempfile
 from pathlib import Path
@@ -26,6 +27,8 @@ from .values import (
     has_new_keep,
     kernel_agent_canonical_id,
 )
+
+log = logging.getLogger(__name__)
 
 
 def read_remote_recipe(
@@ -194,6 +197,7 @@ class RemoteWarmRecipeAdapter:
         self._remote_kb = remote_kb
         self._destination = Path(destination)
         self._cache: dict[str, dict[str, Any] | None] = {}
+        self._search_notice_emitted = False
 
     def _read(self, canonical_id: str) -> dict[str, Any] | None:
         if canonical_id not in self._cache:
@@ -226,10 +230,17 @@ class RemoteWarmRecipeAdapter:
 
     def search(self, **_kwargs: Any) -> list[dict[str, Any]]:
         """Return no cross-identity donors in the config-only migration phase."""
+        if not self._search_notice_emitted:
+            log.info(
+                "Remote Recipe KB cross-identity search is unsupported; "
+                "warm start is limited to the direct identity best record"
+            )
+            self._search_notice_emitted = True
         return []
 
     def put_recipe(self, **kwargs: Any) -> dict[str, Any]:
         """No-op the legacy T0 anchor write; CLOSE owns remote publication."""
+        log.debug("Remote Recipe KB T0 put_recipe is a no-op; CLOSE owns publication")
         return dict(kwargs)
 
     def close(self) -> None:

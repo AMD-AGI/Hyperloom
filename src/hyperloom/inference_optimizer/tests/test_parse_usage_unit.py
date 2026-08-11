@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from hyperloom.orchestrator.trace import parse_usage as pu
 
 
@@ -243,3 +245,139 @@ def test_parse_claude_response_no_text(tmp_path):
     log = tmp_path / "p.log"
     log.write_text('{"type": "system"}\n', encoding="utf-8")
     assert pu.parse_claude_stream_json_response(log) is None
+
+
+# ---- parse_codex_jsonl_error ----
+
+
+@pytest.mark.parametrize(
+    ("event", "expected"),
+    [
+        (
+            {"type": "turn.failed", "error": {"message": "The requested model is not supported"}},
+            "The requested model is not supported",
+        ),
+        (
+            {"type": "error", "message": "401 Unauthorized: invalid API key"},
+            "401 Unauthorized: invalid API key",
+        ),
+        (
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_7",
+                    "type": "error",
+                    "message": "Your account has reached its usage limit",
+                },
+            },
+            "Your account has reached its usage limit",
+        ),
+    ],
+)
+def test_parse_codex_error_reads_official_exec_event_shapes(tmp_path, event, expected):
+    """Pin all three error shapes from the installed Codex 0.144.4 schema."""
+    log = tmp_path / "codex.jsonl"
+    log.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+    assert pu.parse_codex_jsonl_error(log) == expected
+
+
+def test_parse_codex_error_is_separate_from_existing_parsers(tmp_path):
+    log = tmp_path / "codex.jsonl"
+    log.write_text(
+        '{"type":"turn.failed","error":{"message":"gateway authentication failed"}}\n',
+        encoding="utf-8",
+    )
+
+    assert pu.parse_codex_jsonl_usage(log) is None
+    assert pu.parse_codex_jsonl_response(log) is None
+    assert pu.parse_codex_jsonl_tool_calls(log) == []
+    assert pu.parse_codex_jsonl_error(log) == "gateway authentication failed"
+
+
+def test_parse_codex_error_prefers_turn_failure_over_later_lower_authority_events(tmp_path):
+    log = tmp_path / "codex.jsonl"
+    events = [
+        {
+            "type": "item.completed",
+            "item": {"id": "item_1", "type": "error", "message": "retrying gateway request"},
+        },
+        {"type": "error", "message": "gateway request failed"},
+        {"type": "turn.failed", "error": {"message": "model access is not permitted"}},
+        {"type": "error", "message": "late transport shutdown"},
+    ]
+    log.write_text("\n".join(json.dumps(event) for event in events), encoding="utf-8")
+
+    assert pu.parse_codex_jsonl_error(log) == "model access is not permitted"
+
+
+def test_parse_codex_error_uses_last_failure_at_same_authority(tmp_path):
+    log = tmp_path / "codex.jsonl"
+    log.write_text(
+        '{"type":"turn.failed","error":{"message":"first turn failed"}}\n'
+        '{"type":"turn.failed","error":{"message":"second turn failed"}}\n',
+        encoding="utf-8",
+    )
+
+    assert pu.parse_codex_jsonl_error(log) == "second turn failed"
+
+
+def test_parse_codex_error_tolerates_sdk_error_wrapper(tmp_path):
+    log = tmp_path / "codex.jsonl"
+    log.write_text(
+        '{"type":"error","error":{"message":"nested gateway timeout"}}\n',
+        encoding="utf-8",
+    )
+
+    assert pu.parse_codex_jsonl_error(log) == "nested gateway timeout"
+
+
+def test_parse_codex_error_skips_malformed_lines_and_ordinary_messages(tmp_path):
+    log = tmp_path / "codex.jsonl"
+    log.write_text(
+        '{"type":"item.completed","item":{"id":"item_1","type":"reasoning","text":"Could be an auth error"}}\n'
+        '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Error: try another model"}}\n'
+        '{"type":"error","message":"gateway unavailable"}\n'
+        '{"type":"turn.failed","error":\n'
+        "not-json\n",
+        encoding="utf-8",
+    )
+
+    assert pu.parse_codex_jsonl_error(log) == "gateway unavailable"
+
+
+def test_parse_codex_error_returns_none_for_missing_file(tmp_path):
+    assert pu.parse_codex_jsonl_error(tmp_path / "missing.jsonl") is None
+
+
+def test_parse_codex_error_redacts_credentials_and_ignores_request_payload(tmp_path):
+    message_secret = "sk-proj-messageSecret123456"
+    payload_secret = "sk-proj-requestSecret987654"
+    bearer_secret = "gatewayBearerSecret123456"
+    event = {
+        "type": "turn.failed",
+        "error": {
+            "message": (f"Gateway rejected OPENAI_API_KEY={message_secret}; Authorization: Bearer {bearer_secret}"),
+            "request": {
+                "headers": {"Authorization": f"Bearer {payload_secret}"},
+                "config": {"api_key": payload_secret},
+            },
+        },
+    }
+    log = tmp_path / "codex.jsonl"
+    log.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+    parsed = pu.parse_codex_jsonl_error(log)
+
+    assert parsed is not None
+    assert "[REDACTED]" in parsed
+    assert message_secret not in parsed
+    assert bearer_secret not in parsed
+    assert payload_secret not in parsed
+    assert "request" not in parsed
+
+
+def test_parse_codex_error_is_exported_from_trace_package(tmp_path):
+    from hyperloom.orchestrator.trace import parse_codex_jsonl_error
+
+    assert parse_codex_jsonl_error(tmp_path / "missing.jsonl") is None

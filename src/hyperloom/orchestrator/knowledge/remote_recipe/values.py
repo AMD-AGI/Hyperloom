@@ -6,18 +6,27 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from .models import MAX_FILE_BYTES, Artifact, KnowledgeBundle, RemoteRecipeValidationError
+from .models import (
+    MAX_FILE_BYTES,
+    Artifact,
+    KnowledgeBundle,
+    RemoteRecipeValidationError,
+    extract_knowledge_artifact_refs,
+)
 from .sanitize import (
     sanitize_publish_env_mapping,
     sanitize_publish_server_args,
     sanitize_shared_knowledge,
 )
+
+log = logging.getLogger(__name__)
 
 _PATH_KEYS = {
     "artifact_path",
@@ -128,14 +137,31 @@ class _Files:
             refs.append(rel)
         return refs
 
-    def adopt(self, source: Path, rel: str) -> str:
-        """Take a file that already carries its final ``category/kind/name``."""
+    def validate_adoption(self, source: Path, rel: str) -> None:
+        """Fail before merge when a staged file cannot safely own ``rel``."""
         if source.is_symlink():
             raise RemoteRecipeValidationError(f"artifact source must not be a symlink: {source}")
         if source.stat().st_size > MAX_FILE_BYTES:
             raise RemoteRecipeValidationError(
                 f"artifact {source} exceeds the {MAX_FILE_BYTES}-byte KB Store limit"
             )
+        if rel in self.refs:
+            existing = next(
+                (artifact.source for artifact in self.artifacts if artifact.path == rel),
+                None,
+            )
+            if (
+                existing is None
+                or existing.stat().st_size != source.stat().st_size
+                or existing.read_bytes() != source.read_bytes()
+            ):
+                raise RemoteRecipeValidationError(
+                    f"conflicting artifact content for shared ref: {rel}"
+                )
+
+    def adopt(self, source: Path, rel: str) -> str:
+        """Take a file that already carries its final ``category/kind/name``."""
+        self.validate_adoption(source, rel)
         if rel in self.refs:
             return rel
         destination = self.root / rel
@@ -144,7 +170,12 @@ class _Files:
         category = rel.split("/", 1)[0]
         kind = rel.split("/")[1] if rel.count("/") >= 2 else "artifacts"
         self.artifacts.append(
-            Artifact(path=rel, source=destination, kind=kind, meta={"origin": category})
+            Artifact(
+                path=rel,
+                source=destination,
+                kind=kind,
+                meta={"origin": category, "staged": True},
+            )
         )
         self.refs.add(rel)
         return rel
@@ -156,6 +187,30 @@ class _Files:
         self.artifacts.append(Artifact(path=rel, source=destination, kind=kind))
         self.refs.add(rel)
         return rel
+
+    def prune_superseded(self, knowledge: Mapping[str, Any]) -> None:
+        """Drop scraped files superseded by staged columns; reject staged orphans."""
+        paths = {artifact.path for artifact in self.artifacts}
+        referenced = extract_knowledge_artifact_refs(knowledge, paths)
+        unreferenced = paths - referenced
+        staged_orphans = sorted(
+            artifact.path
+            for artifact in self.artifacts
+            if artifact.path in unreferenced and artifact.meta.get("staged")
+        )
+        if staged_orphans:
+            raise RemoteRecipeValidationError(
+                "staged artifacts absent from final knowledge: "
+                f"{staged_orphans!r}"
+            )
+        retained: list[Artifact] = []
+        for artifact in self.artifacts:
+            if artifact.path in unreferenced:
+                artifact.source.unlink(missing_ok=True)
+                self.refs.discard(artifact.path)
+                continue
+            retained.append(artifact)
+        self.artifacts = retained
 
 
 def _entry_origin(entry: Mapping[str, Any]) -> str:
@@ -516,7 +571,11 @@ def _worked_from_stack(stack: list[dict[str, Any]], gains: list[Any]) -> list[di
 
 
 def has_new_keep(state: Any) -> bool:
-    """True only when the final stack contains a non-replay, meaningful KEEP."""
+    """True when the promoted KEEP-only stack has a non-replay entry.
+
+    ``optimization_stack`` is the accepted stack, not the attempt ledger;
+    individual rows therefore do not carry a redundant KEEP decision.
+    """
     for raw in getattr(state, "optimization_stack", []) or []:
         if not isinstance(raw, Mapping):
             continue
@@ -539,17 +598,47 @@ def merge_staged_sections(
     """
     merged: list[str] = []
     for name in sections.sections():
-        staged = sections.staged(name)
-        if staged is None or not staged.knowledge:
-            continue
-        current = value.get(name)
-        value[name] = {**(current if isinstance(current, Mapping) else {}), **staged.knowledge}
-        merged.append(name)
-    staged_root = Path(sections.files_dir)
-    if staged_root.is_dir():
-        for source in sorted(staged_root.rglob("*")):
-            if source.is_file():
-                files.adopt(source, source.relative_to(staged_root).as_posix())
+        try:
+            staged = sections.staged(name)
+            if staged is None or not staged.knowledge:
+                continue
+            staged_files = [
+                (
+                    source,
+                    source.relative_to(sections.files_dir).as_posix(),
+                )
+                for source in staged.files
+                if source.is_file()
+            ]
+            staged_paths = {rel for _, rel in staged_files}
+            staged_refs = extract_knowledge_artifact_refs(
+                staged.knowledge,
+                staged_paths,
+            )
+            missing = staged_refs - staged_paths
+            orphaned = staged_paths - staged_refs
+            if missing or orphaned:
+                raise RemoteRecipeValidationError(
+                    f"staged section {name!r} file mismatch: "
+                    f"missing={sorted(missing)!r} orphaned={sorted(orphaned)!r}"
+                )
+            for source, rel in staged_files:
+                files.validate_adoption(source, rel)
+            for source, rel in staged_files:
+                files.adopt(source, rel)
+            current = value.get(name)
+            value[name] = {
+                **(current if isinstance(current, Mapping) else {}),
+                **staged.knowledge,
+            }
+            merged.append(name)
+        except Exception as exc:  # noqa: BLE001 - one bad column falls back
+            log.warning(
+                "remote recipe: ignoring invalid staged section %s; "
+                "falling back to CLOSE scrape: %s",
+                name,
+                exc,
+            )
     return merged
 
 
@@ -610,8 +699,9 @@ def build_remote_knowledge(
             },
         }
     )
+    files.prune_superseded(knowledge)
     bundle = KnowledgeBundle(knowledge=knowledge, artifacts=files.artifacts)
-    bundle.validate(files.refs)
+    bundle.validate()
     return bundle
 
 
@@ -706,7 +796,11 @@ def build_kernel_agent_knowledge(
 
 
 def convert_v1_recipe_to_knowledge(recipe: Mapping[str, Any]) -> dict[str, Any]:
-    """Wrap one legacy RecipeKB row for lossless storage in KB Store."""
+    """Wrap one legacy RecipeKB row for migration/backfill tooling.
+
+    Runtime reads use :func:`envelope_to_v1_recipe`; the production CLOSE
+    writer always emits knowledge schema v2.
+    """
     legacy = dict(recipe)
     best_config = _mapping(legacy.get("best_config"))
     if best_config:
@@ -738,9 +832,9 @@ def convert_v1_recipe_to_knowledge(recipe: Mapping[str, Any]) -> dict[str, Any]:
     )
 
 
-def envelope_to_v1_recipe(envelope: Mapping[str, Any]) -> dict[str, Any]:
-    """Project remote knowledge into the stable config-only warm Recipe shape."""
-    knowledge = _mapping(envelope.get("knowledge")) or dict(envelope)
+def envelope_to_v1_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a service envelope or flattened record into the warm Recipe shape."""
+    knowledge = _mapping(document.get("knowledge")) or dict(document)
     value = _mapping(knowledge.get("value"))
     raw_version = knowledge.get("knowledge_schema_version")
     if raw_version is None:
@@ -764,12 +858,12 @@ def envelope_to_v1_recipe(envelope: Mapping[str, Any]) -> dict[str, Any]:
             ),
         }
         row["canonical_id"] = str(
-            envelope.get("canonical_id") or row.get("canonical_id") or ""
+            document.get("canonical_id") or row.get("canonical_id") or ""
         )
         # Remote warm replay is intentionally config/env-only in phase 1.
         row["prs_tested"] = []
-        row["remote_session_id"] = str(envelope.get("session_id") or "")
-        row["remote_schema_version"] = int(envelope.get("schema_version") or 2)
+        row["remote_session_id"] = str(document.get("session_id") or "")
+        row["remote_schema_version"] = int(document.get("schema_version") or 2)
         row["knowledge_schema_version"] = 1
         return row
     if knowledge_version != 2:
@@ -782,10 +876,10 @@ def envelope_to_v1_recipe(envelope: Mapping[str, Any]) -> dict[str, Any]:
         str(key): str(value)
         for key, value in _mapping(explore.get("extra_envs")).items()
     }
-    session_id = str(envelope.get("session_id") or "")
+    session_id = str(document.get("session_id") or "")
     validated_gain = _number(knowledge.get("validated_e2e_gain"))
     return {
-        "canonical_id": str(envelope.get("canonical_id") or ""),
+        "canonical_id": str(document.get("canonical_id") or ""),
         "best_config": {
             "extra_server_args": explore_args,
             "extra_envs": explore_envs,
@@ -807,7 +901,7 @@ def envelope_to_v1_recipe(envelope: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "provenance": _mapping(knowledge.get("provenance")),
         "remote_session_id": session_id,
-        "remote_schema_version": int(envelope.get("schema_version") or 2),
+        "remote_schema_version": int(document.get("schema_version") or 2),
         "knowledge_schema_version": 2,
     }
 

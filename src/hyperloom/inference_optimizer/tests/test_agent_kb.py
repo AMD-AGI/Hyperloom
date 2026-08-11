@@ -119,9 +119,26 @@ def test_a_ref_can_be_folded_into_the_payload_by_writing_twice(tmp_path: Path) -
     kb.write_rewrite({"items": [{"patch": refs[0], "outcome": "KEEP"}]})
 
     assert _staged(kb)["rewrite"] == {
-        "items": [{"patch": "kernel/rewrite/fix.diff", "outcome": "KEEP"}]
+        "items": [{"patch": "kernel/rewrite/fix.diff", "outcome": "KEEP"}],
+        "files": ["kernel/rewrite/fix.diff"],
     }
     assert (kb._sections.files_dir / refs[0]).is_file()
+
+
+def test_replacing_knowledge_without_new_files_preserves_existing_refs(
+    tmp_path: Path,
+) -> None:
+    patch = tmp_path / "a.patch"
+    patch.write_text("patch", encoding="utf-8")
+    kb = _kb(tmp_path)
+
+    kb.write_gemm({"optimizations": [{"id": "g1"}]}, files=[patch])
+    kb.write_gemm({"optimizations": [{"id": "g1"}, {"id": "g2"}]})
+
+    assert _staged(kb)["gemm"] == {
+        "optimizations": [{"id": "g1"}, {"id": "g2"}],
+        "files": ["kernel/gemm/a.patch"],
+    }
 
 
 def test_restaging_the_same_artifact_keeps_one_ref(tmp_path: Path) -> None:
