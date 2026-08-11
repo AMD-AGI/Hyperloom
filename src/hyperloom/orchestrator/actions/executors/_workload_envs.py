@@ -1061,13 +1061,10 @@ def materialize_config_with_envs(
                 ("max_iterations", f"--profiler-config.max_iterations {max_iters}"),
             ]
             if tracelens_patch_ok:
-                # TraceLens-patched vLLM exposes capture_torch_profiler_dir +
-                # detailed_trace_annotation; unpatched vLLM rejects them.
-                capture_dir = output_dir / "capture_traces"
                 profiler_flags.append(
                     (
-                        "capture_torch_profiler_dir",
-                        f"--profiler-config.capture_torch_profiler_dir {capture_dir}",
+                        "capture_torch_profiler",
+                        "--profiler-config.capture_torch_profiler True",
                     )
                 )
                 profiler_flags.append(("detailed_trace_annotation", "--profiler-config.detailed_trace_annotation True"))
@@ -1138,7 +1135,7 @@ def materialize_config_with_envs(
                             _model,
                         )
             extra_body["shape_discovery"] = _shape_disc
-            extra_body.setdefault("roofline_annotations", True)
+            extra_body.setdefault("detailed_annotations", True)
             # NOTE: this write happens before the per-task ``extra_envs`` merge, so
             # an ``extra_envs`` entry for PROFILE_EXTRA_BODY can still drop
             # start_step/num_steps the way ``args_mode="replace"`` used to drop

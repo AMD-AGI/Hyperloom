@@ -527,14 +527,14 @@ def ensure_benchmark_serving_patched(
                 "_inferencex_patcher: expected legacy `extra_body=` line not "
                 "found in %s; InferenceX layout may have changed and Hyperloom "
                 "needs an updated patch. PROFILE_EXTRA_BODY env var will be "
-                "ignored — TraceLens shape_discovery / roofline_annotations / "
+                "ignored — TraceLens shape_discovery / detailed_annotations / "
                 "steady-state start_step won't reach the server. Manual review "
                 "needed."
             ),
             success_msg=(
                 "_inferencex_patcher: patched %s to consume PROFILE_EXTRA_BODY env "
                 "var (PR-D §2: fixes silently-ignored shape_discovery / "
-                "roofline_annotations / steady-state start_step from "
+                "detailed_annotations / steady-state start_step from "
                 "_workload_envs.py)"
             ),
         ),
