@@ -1348,6 +1348,53 @@ def test_anthropic_completion_posts_to_the_messages_api_when_a_key_is_configured
     assert client.closed, "the HTTP client must be closed once the completion returns"
 
 
+def test_anthropic_completion_sends_temperature_on_the_http_path(monkeypatch):
+    """The Messages API accepts it, and callers that ask for a low temperature
+    to pin an output shape must keep getting one."""
+    client = _ClosingAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
+    monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
+
+    llm_config.anthropic_completion(
+        model="claude-opus-5",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=8,
+        temperature=0.2,
+        env={_ANTHROPIC_KEY: "sk-ant-key"},
+    )
+
+    assert client.calls[0]["json"]["temperature"] == 0.2
+
+
+def test_anthropic_completion_omits_temperature_when_unset(monkeypatch):
+    """Absent means absent: sending an explicit default would change the
+    sampling behaviour of every caller that never asked for one."""
+    client = _ClosingAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
+    monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
+
+    llm_config.anthropic_completion(
+        model="claude-opus-5",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=8,
+        env={_ANTHROPIC_KEY: "sk-ant-key"},
+    )
+
+    assert "temperature" not in client.calls[0]["json"]
+
+
+def test_anthropic_completion_drops_temperature_on_the_cli_path(fake_one_shot):
+    """The CLI has no temperature knob, so the argument is accepted and ignored
+    rather than raising -- one entry point, two transports, same signature."""
+    llm_config.anthropic_completion(
+        model="claude-opus-5",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=8,
+        temperature=0.2,
+        env={_OAUTH_ENV: _OAUTH_VALUE},
+    )
+
+    assert "temperature" not in fake_one_shot.instances[0].calls[0]
+
+
 def test_anthropic_completion_omits_an_absent_system_prompt(monkeypatch):
     client = _ClosingAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
     monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
