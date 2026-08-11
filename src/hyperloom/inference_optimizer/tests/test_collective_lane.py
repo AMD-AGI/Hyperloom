@@ -30,8 +30,8 @@ class TestCollectiveBudget:
 
     def test_budget_follows_the_session_minus_a_reserve(self):
         hours, timeout = _collective_budget(_state_with_remaining(600.0), None, 0)
-        assert hours == 8.16
-        assert timeout == 33276
+        assert hours == 8.33
+        assert timeout == 33288
 
     def test_short_session_skips_when_one_hour_cannot_fit(self):
         """KernelForge rejects a campaign shorter than one hour."""
@@ -42,20 +42,21 @@ class TestCollectiveBudget:
     def test_explicit_request_wins(self):
         hours, timeout = _collective_budget(_state_with_remaining(600.0), 2.0, 14400)
         assert hours == 2.0
-        assert timeout == 11100
+        assert timeout == 10500
 
     def test_explicit_request_is_clamped_by_remaining_session(self):
         hours, timeout = _collective_budget(_state_with_remaining(180.0), 3.0, 0)
-        assert hours == 1.16
-        assert timeout == 8076
+        assert hours == 1.33
+        assert timeout == 8088
 
     def test_explicit_timeout_skips_when_minimum_campaign_cannot_fit(self):
-        hours, timeout = _collective_budget(_state_with_remaining(600.0), 2.0, 7200)
+        """Preparation plus finalization leave under an hour of campaign."""
+        hours, timeout = _collective_budget(_state_with_remaining(600.0), 2.0, 6600)
         assert hours is None
         assert timeout == 0
 
     def test_unbounded_session_uses_an_explicit_wall_window(self):
-        assert _collective_budget(_state_with_remaining(None), None, 14400) == (2.91, 14376)
+        assert _collective_budget(_state_with_remaining(None), None, 14400) == (3.08, 14388)
 
     def test_unbounded_session_without_limits_defers_to_forge(self):
         assert _collective_budget(_state_with_remaining(None), None, 0) == (None, 14400)
@@ -64,7 +65,7 @@ class TestCollectiveBudget:
         assert _collective_budget(_state_with_remaining(30.0), None, 14400) == (None, 0)
 
     def test_state_without_the_hook_is_tolerated(self):
-        assert _collective_budget(SimpleNamespace(), None, 14400) == (2.91, 14376)
+        assert _collective_budget(SimpleNamespace(), None, 14400) == (3.08, 14388)
 from hyperloom.orchestrator.phases.kernel import KernelPhase
 
 
@@ -330,6 +331,49 @@ def test_gate_closed_when_comm_is_overlapped():
 
 
 def test_gate_closed_without_a_roofline_snapshot():
+    """No roofline comm bucket and no resolvable candidate to fall back on."""
+    assert _gate(comm_pct=None) is False
+
+
+def test_gate_falls_back_to_the_candidate_share_without_a_roofline(monkeypatch):
+    """The roofline comm bucket needs a TraceLens extension a public checkout lacks.
+
+    Without a fallback the whole lane would disappear behind a log line on any
+    such checkout, so the hottest resolved collective's own GPU share stands in.
+    """
+    import hyperloom.orchestrator.kernel.request_handlers as krh
+
+    monkeypatch.setattr(
+        krh,
+        "select_collective_candidate",
+        lambda _state: {"kernel_id": "k007", "gpu_pct": 6.881},
+    )
+
+    assert _gate(comm_pct=None) is True
+
+
+def test_candidate_fallback_still_respects_the_floor(monkeypatch):
+    """The fallback substitutes the share, it does not bypass the gate."""
+    import hyperloom.orchestrator.kernel.request_handlers as krh
+
+    monkeypatch.setattr(
+        krh,
+        "select_collective_candidate",
+        lambda _state: {"kernel_id": "k007", "gpu_pct": 0.2},
+    )
+
+    assert _gate(comm_pct=None) is False
+
+
+def test_candidate_fallback_survives_an_unreadable_artifact(monkeypatch):
+    """A broken candidates artifact closes the gate instead of raising."""
+    import hyperloom.orchestrator.kernel.request_handlers as krh
+
+    def _raise(_state):
+        raise ValueError("candidate artifact has no valid hot_kernels list")
+
+    monkeypatch.setattr(krh, "select_collective_candidate", _raise)
+
     assert _gate(comm_pct=None) is False
 
 

@@ -56,6 +56,32 @@ _load_collective_apply_checkpoint = _collective_recovery.load_apply_checkpoint
 _patch_lifecycle_complete = _collective_recovery.patch_lifecycle_complete
 
 
+def _collective_comm_share(state: Any) -> tuple[float | None, str]:
+    """Return the communication share gating the lane, and its provenance.
+
+    ``current_comm_pct`` reads the roofline snapshot, whose exposed-comm bucket
+    comes from the TraceLens internal extension (``TRACELENS_INTERNAL_ROOT``).
+    A checkout without it has no such value, which would disable the whole lane
+    behind nothing but a log line, so fall back to the hottest source-resolved
+    collective's own GPU-time share. That share is the weaker signal -- it
+    counts one kernel rather than all exposed communication -- but the trace
+    always carries it.
+    """
+    comm_pct = state.current_comm_pct()
+    if comm_pct is not None:
+        return float(comm_pct), "roofline"
+    from ..kernel.request_handlers import select_collective_candidate
+
+    try:
+        candidate = select_collective_candidate(state)
+    except (OSError, TypeError, ValueError) as exc:
+        log.info("KERNEL entry: collective fallback share unavailable: %s", exc)
+        return None, "unavailable"
+    if not candidate:
+        return None, "unavailable"
+    return float(candidate["gpu_pct"]), "candidate_gpu_pct"
+
+
 def _collective_attempt_identity(result: dict[str, Any]) -> str:
     """Return a stable identity for one logical Collective campaign."""
     identity = {
@@ -2633,23 +2659,27 @@ class KernelPhase(PhaseHandler):
             raise ValueError("Collective TP must be an integer")
         if tp <= 1:
             return False
-        comm_pct = self.shared_state.current_comm_pct()
-        if comm_pct is None:
-            log.info("KERNEL entry: skip collective (no roofline snapshot with comm_pct yet)")
-            return False
-        if comm_pct < self.COLLECTIVE_COMM_PCT_FLOOR:
-            log.info(
-                "KERNEL entry: skip collective (exposed comm %.2f%% < %.2f%% floor)",
-                comm_pct,
-                self.COLLECTIVE_COMM_PCT_FLOOR,
-            )
-            return False
         analysis = getattr(self.shared_state, "last_trace_analyze", None)
         if analysis in (None, {}):
             log.info("KERNEL entry: skip collective (no trace analysis yet)")
             return False
         if not isinstance(analysis, dict):
             raise ValueError("last_trace_analyze must be a mapping")
+        comm_pct, comm_source = _collective_comm_share(self.shared_state)
+        if comm_pct is None:
+            log.info(
+                "KERNEL entry: skip collective (no roofline comm share, and no "
+                "source-resolved collective candidate to fall back on)",
+            )
+            return False
+        if comm_pct < self.COLLECTIVE_COMM_PCT_FLOOR:
+            log.info(
+                "KERNEL entry: skip collective (comm share %.2f%% from %s < %.2f%% floor)",
+                comm_pct,
+                comm_source,
+                self.COLLECTIVE_COMM_PCT_FLOOR,
+            )
+            return False
         last = getattr(self.shared_state, "last_collective", None)
         if last is not None and not isinstance(last, dict):
             raise ValueError("last_collective must be a mapping")

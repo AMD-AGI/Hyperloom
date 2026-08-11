@@ -4402,9 +4402,21 @@ def select_collective_candidate(state: Any) -> dict[str, Any] | None:
 #: means adding one there first.
 SUPPORTED_COLLECTIVE_OPS = frozenset({"all_reduce", "reduce_scatter", "all_gather"})
 
+# Session time held back for the work that follows the campaign: the E2E
+# integrate round plus reporting. Distinct from forge-loop's own
+# ``IterationConfig.budget_reserve_sec`` (1800s), which only stops it admitting
+# another agent session near its deadline and buys no downstream time.
 _COLLECTIVE_BUDGET_RESERVE_MIN = 45.0
-_COLLECTIVE_PREP_GRACE_SEC = 3600
+# Mirrors kernel_agents.loop.task_preparer.PREPARE_MAX_WALL_SEC (3000s), the
+# hard ceiling on driver preparation. Reserving more than preparation can spend
+# only shortens the campaign.
+_COLLECTIVE_PREP_GRACE_SEC = 3000
+# Wrapper-side grace after forge-loop returns: export the patch and restore the
+# repository. Distinct from forge-loop's ``finalize_reserve_sec`` (120s), which
+# covers its own KB publication inside the campaign.
 _COLLECTIVE_FINALIZE_GRACE_SEC = 300
+# Mirrors kernel_agents.cli.MIN_MAX_HOURS (1.0h); forge-loop rejects a shorter
+# --max-hours with a click error that leaves no checkpoint to salvage.
 _COLLECTIVE_MIN_CAMPAIGN_SEC = 3600
 
 
@@ -4712,14 +4724,16 @@ def _find_repo_root_for_source(source_file: str) -> str:
 
 
 async def run_collective_handler(payload: dict, *, session_dir: Path) -> HandlerResult:
-    """Run the coordinator-owned collective optimization lane."""
+    """Run the coordinator-owned collective optimization lane.
+
+    The attempt identity is deliberately left unset: the KERNEL phase derives it
+    from the result's content so a replayed or salvaged campaign deduplicates
+    against its earlier record. Stamping a wall-clock id here would make every
+    replay look like a new campaign.
+    """
     result = await _run_forge_collective(payload, session_dir=session_dir)
     if not isinstance(result, dict):
         raise TypeError("Collective handler result must be a mapping")
-    result.setdefault(
-        "collective_attempt_id",
-        f"collective-{time.time_ns()}",
-    )
     result.setdefault("requires_e2e_validation", False)
     return result
 

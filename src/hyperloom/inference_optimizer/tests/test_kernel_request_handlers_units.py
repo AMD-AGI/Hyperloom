@@ -1782,7 +1782,7 @@ class TestForgeCollectiveCoverage:
             "--input-json",
             str(workspace / "forge_collective_input.json"),
         ]
-        assert captured["timeout_sec"] == 7800
+        assert captured["timeout_sec"] == 7200
         assert captured["input"] == {
             "agent_timeout_sec": "900",
             "candidate": selected,
@@ -1799,7 +1799,7 @@ class TestForgeCollectiveCoverage:
             "source_file": selected["source_file"],
             "source_files": [selected["source_file"]],
             "target_functions": ["all_reduce"],
-            "timeout": 7500,
+            "timeout": 6900,
             "tp": 4,
         }
         assert result["backend"] == "forge"
@@ -1881,7 +1881,7 @@ class TestForgeCollectiveCoverage:
 
         assert result["status"] == "failed"
         assert result["error_class"] == "subprocess_timeout"
-        assert "TimeoutExpired after 7800s" in result["error"]
+        assert "TimeoutExpired after 7200s" in result["error"]
         assert "collective-worker" in result["error"]
         assert result["engine"] == "forge_collective"
         assert result["requires_e2e_validation"] is False

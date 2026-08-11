@@ -1996,8 +1996,16 @@ def _inject_collective_candidates(
     *,
     source_roots: list[str] | None = None,
     log_path: Path | None = None,
+    health_warnings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Merge source-resolved NCCL rows with traced all-reduce workloads."""
+    """Merge source-resolved NCCL rows with traced all-reduce workloads.
+
+    Injection is best-effort: a malformed ``nccl_summary`` must not fail the
+    whole analysis. It does, however, remove the only path a collective has into
+    the candidate pool, so every skip is recorded in ``health_warnings`` where
+    the report surfaces it -- a log line alone leaves the lane looking as if the
+    workload simply had no collective.
+    """
     if not isinstance(candidates, list) or any(
         not isinstance(item, dict) for item in candidates
     ):
@@ -2008,10 +2016,30 @@ def _inject_collective_candidates(
         aiter_csrc = _aiter_csrc_root().rstrip("/")
         if aiter_csrc and Path(aiter_csrc).is_dir():
             roots.append(aiter_csrc)
-    if not roots:
+    def _skip(code: str, detail: str) -> list[dict[str, Any]]:
+        """Record a visible reason the collective lane got no candidate."""
+        message = f"nccl_summary: {detail}; skipping injection"
+        log.warning(message)
         if log_path is not None:
-            append_log(log_path, "nccl_summary: no bounded collective source root; skipping injection")
+            append_log(log_path, message)
+        if health_warnings is not None:
+            health_warnings.append(
+                {
+                    "code": code,
+                    "severity": "warning",
+                    "message": (
+                        "No collective candidate was injected, so the collective "
+                        f"optimization lane cannot run: {detail}"
+                    ),
+                }
+            )
         return existing
+
+    if not roots:
+        return _skip(
+            "collective_source_root_missing",
+            "no bounded collective source root",
+        )
 
     messages: list[str] = []
     try:
@@ -2021,11 +2049,16 @@ def _inject_collective_candidates(
             log_fn=messages.append,
         )
     except ValueError as exc:
-        message = f"nccl_summary: {exc}; skipping injection"
-        log.warning(message)
-        if log_path is not None:
-            append_log(log_path, message)
-        return existing
+        return _skip("collective_summary_unusable", str(exc))
+    if not extracted:
+        # Every summary row failed device-symbol resolution. Individually those
+        # are debug detail, but together they mean the trace saw collectives and
+        # the lane still got nothing.
+        return _skip(
+            "collective_symbols_unresolved",
+            "no summary row resolved to a device source under "
+            + ", ".join(roots),
+        )
 
     def _name(item: dict[str, Any]) -> str:
         """Return the normalized trace name for one candidate."""
@@ -7397,6 +7430,7 @@ def main() -> int:
                         tracelens_dir,
                         raw_det_candidates,
                         log_path=log_path,
+                        health_warnings=trace_health_warnings,
                     )
                     if raw_det_candidates:
                         total_dur = _extract_total_time_us_from_gpu_timeline(tracelens_dir) or sum(
@@ -7533,6 +7567,7 @@ def main() -> int:
                             skill_result.output_dir,
                             report_cands,
                             log_path=log_path,
+                            health_warnings=trace_health_warnings,
                         )
                         collective_injected = len(raw_agent_candidates) > len(report_cands)
                         if raw_agent_candidates:

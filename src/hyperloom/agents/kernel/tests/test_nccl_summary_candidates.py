@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -281,6 +282,49 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             source_roots=[str(self.src_root)],
         )
         self.assertEqual(out, existing)
+
+    def test_a_skipped_injection_is_reported_as_a_trace_health_warning(self) -> None:
+        """A dirty summary must not look like a workload with no collective.
+
+        Injection is the only path a collective has into the candidate pool, so
+        a skip silently disables the entire lane unless it reaches the report.
+        """
+        from tracelens_analysis import _inject_collective_candidates
+
+        self._write_metrics(self._summary(total_time_ms="not-a-number"))
+        warnings: list[dict] = []
+
+        out = _inject_collective_candidates(
+            self.tl,
+            [{"name": "compute_kernel", "duration_us": 1000.0}],
+            source_roots=[str(self.src_root)],
+            health_warnings=warnings,
+        )
+
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0]["code"], "collective_summary_unusable")
+        self.assertIn("collective optimization lane cannot run", warnings[0]["message"])
+
+    def test_injection_without_a_source_root_is_also_reported(self) -> None:
+        """The other skip path needs the same visibility."""
+        import tracelens_analysis as tla
+
+        self._write_metrics(self._summary())
+        warnings: list[dict] = []
+
+        with mock.patch.object(tla, "_aiter_csrc_root", return_value=""):
+            tla._inject_collective_candidates(
+                self.tl,
+                [],
+                source_roots=[],
+                health_warnings=warnings,
+            )
+
+        self.assertEqual(
+            [w["code"] for w in warnings],
+            ["collective_source_root_missing"],
+        )
 
     def test_main_flow_injection_attaches_unique_all_reduce_workload(self) -> None:
         """A source-resolved row inherits a unique traced all-reduce workload."""

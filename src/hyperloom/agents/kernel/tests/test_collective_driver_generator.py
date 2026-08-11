@@ -163,6 +163,27 @@ def test_each_supported_op_gets_its_own_distributed_reference(tmp_path, op, refe
     assert f"torch.distributed.{op}" in program
 
 
+@pytest.mark.parametrize(
+    "op, numerator, gathered",
+    [
+        ("all_reduce", "2", "False"),
+        ("reduce_scatter", "1", "False"),
+        ("all_gather", "1", "True"),
+    ],
+)
+def test_bench_reports_bytes_and_bus_bandwidth(tmp_path, op, numerator, gathered):
+    """Latency alone cannot separate a faster transfer from a cheaper barrier."""
+    contract = {"kind": "collective", "collective_op": op, "world_size": 4}
+    driver, _ = _gen(tmp_path, kernel_contract=contract)
+
+    assert f"BUSBW_NUMERATOR = {numerator}" in driver
+    assert f"GATHERED_OUTPUT = {gathered}" in driver
+    assert "def case_bandwidth(" in driver
+    assert 'result["bandwidth"]' in driver
+    assert "algbw_gbps" in driver and "busbw_gbps" in driver
+    assert "case_bw:" in driver
+
+
 def test_reduce_scatter_requires_a_divisible_leading_extent(tmp_path):
     """An indivisible extent would compare against a truncated reference."""
     contract = {"kind": "collective", "collective_op": "reduce_scatter", "world_size": 8}

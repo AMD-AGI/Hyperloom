@@ -213,6 +213,12 @@ FIELD_GLOSSARY: dict[str, str] = {
         "End-to-end throughput delta measured by the integrate gate. This, not "
         "micro_speedup, decides whether a collective KEEP is adopted."
     ),
+    "speedup_basis": (
+        "Whether the row's headline number was validated end to end (``e2e``) "
+        "or is a microbenchmark ratio only. A collective's microbenchmark "
+        "routinely overstates its end-to-end worth, so treat "
+        "``microbenchmark`` rows as unproven."
+    ),
 }
 
 
@@ -773,10 +779,16 @@ def _render_collective_attempt_row(
         summary = "collective campaign failed"
     else:
         summary = f"collective {final_decision or 'campaign'} did not integrate"
+    # A collective's microbenchmark routinely overstates its end-to-end worth
+    # (a 27.8%-of-GPU-time kernel at 1.11x micro landed at +0.39% E2E), so a row
+    # that has no E2E number must not read as a measured gain.
+    speedup_basis = "e2e" if e2e_gain_pct is not None else "microbenchmark"
     if micro_speedup > 0:
         summary += f"; micro_speedup={micro_speedup:.3f}x"
     if e2e_gain_pct is not None:
         summary += f"; e2e_gain={e2e_gain_pct:.3f}%"
+    elif micro_speedup > 0:
+        summary += " (microbenchmark only, not E2E validated)"
 
     rejected_reason = ""
     if category == CATEGORY_ATTEMPTED_REJECTED:
@@ -851,6 +863,7 @@ def _render_collective_attempt_row(
         ),
         "patch_path": patch_path,
         "e2e_gain_pct": e2e_gain_pct,
+        "speedup_basis": speedup_basis,
     }
 
 

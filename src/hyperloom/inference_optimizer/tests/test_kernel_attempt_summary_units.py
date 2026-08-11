@@ -526,6 +526,29 @@ def test_classify_collective_attempt_return_paths(record, expected):
     assert kas._classify_collective_attempt(record) == expected
 
 
+def test_collective_row_marks_a_microbenchmark_only_speedup():
+    """A micro ratio with no E2E number must not read as a measured gain.
+
+    The 8-GPU run landed 1.108x micro on a kernel holding 27.8% of GPU time and
+    still only moved E2E by 0.39%, so an unvalidated row needs to say so.
+    """
+    row = kas._render_collective_attempt_row(
+        {
+            "collective_attempt_id": "collective-1",
+            "kernel_id": "kernel-1",
+            "kept": True,
+            "status": "succeeded",
+            "kernel_speedup": 1.1189,
+        },
+        kas.CATEGORY_KEEP_PENDING,
+    )
+
+    assert row["speedup_basis"] == "microbenchmark"
+    assert row["e2e_gain_pct"] is None
+    assert "micro_speedup=1.119x" in row["summary"]
+    assert "not E2E validated" in row["summary"]
+
+
 def test_render_collective_attempt_row_integrated_fields():
     """Render an integrated Collective row with metrics and provenance."""
     record = {
@@ -559,6 +582,7 @@ def test_render_collective_attempt_row_integrated_fields():
     assert row["kernel_category"] == "collective"
     assert row["lane"] == "collective"
     assert row["engine"] == "forge_collective_v2"
+    assert row["speedup_basis"] == "e2e"
     assert row["category"] == kas.CATEGORY_INTEGRATED
     assert row["outcome_class"] == kas.OUTCOME_SUCCESS
     assert row["summary"] == (

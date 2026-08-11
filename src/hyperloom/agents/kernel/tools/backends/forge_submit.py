@@ -1202,8 +1202,13 @@ def _restore_inplace(restore: dict) -> None:
     loop's ``git add -u`` commits mean those edits live on the temp branch.
     ``base_commit`` holds the exact pre-forge tree (including any pre-existing
     dirty content snapshotted at prepare time), so checking files out of it
-    restores precisely what was there before forge ran. Untracked files (build
-    artifacts) are never touched (no ``reset --hard``).
+    restores precisely what was there before forge ran.
+
+    Untracked files are handled by inventory, not by ``reset --hard``: when the
+    caller recorded ``baseline_untracked`` at prepare time, untracked paths that
+    did NOT exist then are deleted, because a campaign's leftover artifacts
+    (notably ``forge_experiments/``) otherwise make the next run refuse to
+    start. Untracked files present in the baseline are preserved.
     """
     if not restore:
         return

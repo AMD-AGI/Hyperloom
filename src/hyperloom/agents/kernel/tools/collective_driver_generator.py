@@ -5,7 +5,17 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Generate the torchrun rig used to optimize a traced all-reduce kernel."""
+"""Generate the torchrun rig used to optimize a traced collective kernel.
+
+The parity gate (``run_reference`` / ``snr_db`` / ``make_inputs``) ships in the
+same file as ``run_candidate``, which the optimizing agent implements. Nothing
+on the Hyperloom side re-checks the gate afterwards, so its integrity rests on
+two forge-loop guarantees: task preparation pins the driver's
+``canonical_driver_sha256`` for the rest of the campaign, and the fellow is
+barred from editing gate files. Both hold only while ``--prepare-task`` is
+active, which ``forge_collective`` asserts before launching. If that upstream
+behaviour changes, this rig loses its protection silently.
+"""
 
 from __future__ import annotations
 
@@ -41,6 +51,13 @@ _REFERENCE_BODIES: dict[str, str] = {
     )
     dist.all_gather_into_tensor(out, src, group=ctx.group)
     return out""",
+}
+#: Bus-bandwidth correction numerator per op, matching the nccl-tests
+#: convention: an all-reduce crosses the link twice, a scatter or gather once.
+_BUSBW_NUMERATORS: dict[str, int] = {
+    "all_reduce": 2,
+    "reduce_scatter": 1,
+    "all_gather": 1,
 }
 SNR_FLOOR_DB = 30.0
 
@@ -138,6 +155,11 @@ DIST_TIMEOUT_SEC = 120
 DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 CASES = $cases
 DTYPE = "$dtype"
+#: Bus-bandwidth correction numerator for this op: an all-reduce crosses the
+#: link twice (reduce then broadcast), a scatter or gather once.
+BUSBW_NUMERATOR = $busbw_numerator
+#: True when the measured payload is the gathered output rather than the input.
+GATHERED_OUTPUT = $gathered_output
 _DIST_ENV = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
 
 
@@ -333,6 +355,30 @@ def bench_case(
     return value
 
 
+def case_bandwidth(shape: tuple[int, ...], ctx: WorkerCtx, latency_ms: float) -> dict:
+    """Return payload bytes plus algorithm and bus bandwidth for one case.
+
+    Latency alone cannot distinguish a faster transfer from a cheaper barrier.
+    ``busbw`` applies the standard per-op correction so the number stays
+    comparable across rank counts: a collective moving the same payload over
+    more ranks does strictly more link work for the same wall time.
+    """
+    elements = 1
+    for dim in shape:
+        elements *= dim
+    if GATHERED_OUTPUT:
+        elements *= ctx.world_size
+    payload_bytes = elements * torch.empty((), dtype=DTYPES[DTYPE]).element_size()
+    algbw_gbps = payload_bytes / (latency_ms * 1.0e6)
+    ranks = max(1, ctx.world_size)
+    correction = BUSBW_NUMERATOR * (ranks - 1) / ranks
+    return {
+        "bytes": payload_bytes,
+        "algbw_gbps": algbw_gbps,
+        "busbw_gbps": algbw_gbps * correction,
+    }
+
+
 def profile_case(ctx: WorkerCtx) -> None:
     """Dispatch the first case for hardware profiling."""
     inputs = make_inputs(tuple(CASES[0]), ctx)
@@ -403,10 +449,23 @@ def main(argv: list[str]) -> int:
             result["mean_ms"] = statistics.fmean(timings.values())
             if not math.isfinite(result["mean_ms"]) or result["mean_ms"] <= 0.0:
                 raise RuntimeError("benchmark mean latency is invalid")
+            result["bandwidth"] = {
+                case_id(tuple(s)): case_bandwidth(
+                    tuple(s), ctx, timings[case_id(tuple(s))]
+                )
+                for s in CASES
+            }
             result["status"] = "ok"
             if ctx.rank == 0:
                 for name, latency_ms in timings.items():
+                    band = result["bandwidth"][name]
                     print(f"case_ms: {name} {latency_ms:.9f}", flush=True)
+                    print(
+                        f"case_bw: {name} bytes={band['bytes']} "
+                        f"algbw={band['algbw_gbps']:.3f}GB/s "
+                        f"busbw={band['busbw_gbps']:.3f}GB/s",
+                        flush=True,
+                    )
                 print(f"mean_ms: {result['mean_ms']:.9f}", flush=True)
         else:
             checks = [check_case(tuple(s), ctx, args.snr_threshold, args.seed) for s in CASES]
@@ -571,6 +630,8 @@ def generate_collective_driver(
         launcher_hint_literal=repr(launcher_hint),
         kernel_name_literal=repr(kernel_name),
         reference_body=_REFERENCE_BODIES[op],
+        busbw_numerator=_BUSBW_NUMERATORS[op],
+        gathered_output=(op == "all_gather"),
     )
     program_src = _PROGRAM_TEMPLATE.substitute(
         kernel_name=kernel_name,

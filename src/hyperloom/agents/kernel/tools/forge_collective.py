@@ -258,6 +258,14 @@ def _build_cmd(
     spec_file = str(args.get("invocation_spec_file") or "").strip()
     if spec_file and Path(spec_file).is_file():
         _add_opt(cmd, str(Path(spec_file).resolve()), "--invocation-spec-file")
+    # The generated rig keeps its parity gate in the same file the agent edits,
+    # so gate integrity depends entirely on forge-loop pinning the driver digest
+    # during task preparation. Disabling preparation would remove that guarantee
+    # without any local symptom.
+    if "--no-prepare-task" in cmd:
+        raise ValueError(
+            "collective driver integrity requires forge-loop task preparation"
+        )
     return cmd
 
 
@@ -1203,9 +1211,21 @@ def main(argv: list[str] | None = None) -> int:
                     raise
                 forge_payload = {}
             if published_best:
+                # A validated published best supersedes a wrapper-level failure
+                # (the campaign committed it before dying), but the failure is
+                # the reason this run ended, so keep it as provenance instead of
+                # erasing it -- an operator reading a KEEP still needs to see
+                # that the campaign did not exit cleanly.
+                superseded = {
+                    key: forge_payload[key]
+                    for key in ("error", "detail")
+                    if forge_payload.get(key) not in (None, "")
+                }
                 forge_payload = {**forge_payload, **published_best}
                 forge_payload.pop("error", None)
                 forge_payload.pop("detail", None)
+                if superseded:
+                    forge_payload["superseded_error"] = superseded
             patch_path = ""
             changed_files: list[str] = []
             best_commit = ""
