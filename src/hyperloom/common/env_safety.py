@@ -93,7 +93,11 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
+        # ANTHROPIC_AUTH_TOKEN is deliberately absent: no installer ever writes
+        # it (they persist the API-key spelling and actively remove this one),
+        # so anything read back here is a hand-written leftover -- and since it
+        # outranks a subscription token, reading it would silently move the run
+        # onto API billing.
         "ANTHROPIC_BASE_URL",
         # Gateway auth header. Setup writes this one into .env (the AMD APIM
         # subscription key), so the loader has to read it back or a
