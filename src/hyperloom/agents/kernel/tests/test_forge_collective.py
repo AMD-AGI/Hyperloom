@@ -1507,6 +1507,44 @@ def test_obsolete_precheckout_journal_does_not_block_repo(tmp_path):
     assert not (repo / ".git" / "hyperloom_collective_restore.json").exists()
 
 
+def test_interrupted_restore_is_replayed_from_an_ordinary_branch(tmp_path):
+    """A half-finished restore looks like an ordinary branch and must still recover.
+
+    ``_restore_inplace`` returns HEAD to the original branch and drops the temp
+    branch in a ``finally`` that runs even when the baseline replay raised, so a
+    crash there leaves the agent's edits in the tree under a normal branch name.
+    Judging staleness by branch name alone would discard the only record that
+    can put the user's repository back.
+    """
+    repo, source = _make_repo(tmp_path)
+    original_head = _git(repo, "rev-parse", "HEAD")
+    baseline = source.read_bytes()
+    fc._write_restore_journal(
+        str(repo),
+        {
+            "repo": str(repo),
+            "orig_branch": "main",
+            "orig_head": original_head,
+            "branch": "forge/collective-interrupted",
+            "source_file": str(source),
+            "backup": baseline,
+            "relpath": "kernel.cuh",
+            "base_commit": original_head,
+            "config_snapshot": fc._config_snapshot(str(repo)),
+            "baseline_untracked": [],
+            "baseline_in_base_commit": True,
+        },
+    )
+    # The agent's edit survives in the working tree; HEAD never moved.
+    source.write_text("__global__ void kernel() { int agent = 1; }\n", encoding="utf-8")
+
+    assert fc._recover_stale_inplace(str(repo)) is True
+
+    assert source.read_bytes() == baseline
+    assert _git(repo, "rev-parse", "HEAD") == original_head
+    assert not (repo / ".git" / "hyperloom_collective_restore.json").exists()
+
+
 # --- Recovery validation -----------------------------------------------------
 
 

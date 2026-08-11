@@ -458,8 +458,19 @@ def _write_restore_journal(repo: str, restore: dict[str, Any]) -> None:
     ).hexdigest()
     path = _restore_journal_path(repo)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    # The journal is the only record that can undo an in-place campaign, so it
+    # has to survive a power loss, not just a process crash: fsync the contents
+    # before the rename and the directory after it.
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, indent=2, sort_keys=True))
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(tmp, path)
+    dir_fd = os.open(str(path.parent), os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def _recorded_tree_matches(repo: str, payload: dict[str, Any]) -> bool:
@@ -503,7 +514,18 @@ def _verify_restored_repo(repo: str, payload: dict[str, Any]) -> None:
 
 
 def _recover_stale_inplace(repo: str) -> bool:
-    """Recover a journaled in-place campaign under the repository lock."""
+    """Recover a journaled in-place campaign under the repository lock.
+
+    The journal, not the branch name, decides whether recovery is owed. A
+    campaign unlinks its journal only after the working tree is verified back
+    at the recorded baseline, while ``_restore_inplace`` returns HEAD to the
+    original branch and drops the temp branch in a ``finally`` that runs even
+    when the baseline replay raised. A surviving journal whose tree no longer
+    matches therefore means the previous restore did not finish, and it can
+    look exactly like an ordinary branch. Replaying it puts back the user's
+    pre-campaign content -- including their uncommitted work -- and discards
+    only the agent's edits.
+    """
     journal = _restore_journal_path(repo)
     lock = _acquire_repo_lock(repo)
     if lock is None:
@@ -513,10 +535,12 @@ def _recover_stale_inplace(repo: str) -> bool:
         _release_repo_lock(lock)
         raise RuntimeError(f"cannot read current branch for {repo}")
     branch = branch_proc.stdout.strip()
-    stale = branch.startswith("forge/") or branch == "forge-collective-opt"
+    parked_on_forge_branch = (
+        branch.startswith("forge/") or branch == "forge-collective-opt"
+    )
     try:
         if not journal.is_file():
-            if stale:
+            if parked_on_forge_branch:
                 raise RuntimeError(f"stale Forge branch has no restore journal: {branch}")
             return True
         try:
@@ -526,7 +550,7 @@ def _recover_stale_inplace(repo: str) -> bool:
         if not isinstance(payload, dict):
             raise RuntimeError(f"collective restore journal must be an object: {journal}")
         journal_branch = str(payload.get("branch") or "")
-        if stale and journal_branch != branch:
+        if parked_on_forge_branch and journal_branch != branch:
             raise RuntimeError(
                 f"restore journal branch {journal_branch!r} does not match {branch!r}"
             )
@@ -561,18 +585,37 @@ def _recover_stale_inplace(repo: str) -> bool:
         restore = dict(payload)
         restore["backup"] = backup
         restore["baseline_tracked_patch"] = tracked_patch
-        if not stale:
-            if not _recorded_tree_matches(repo, payload):
+        if not parked_on_forge_branch:
+            head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+            if (
+                branch != str(payload.get("orig_branch") or "")
+                or head != str(payload.get("orig_head") or "")
+            ):
+                # The repository advanced past the recorded baseline, so the
+                # user has replaced the state this journal describes. Restoring
+                # would roll their commits back.
                 log.warning(
-                    "Discarding obsolete collective restore journal: %s",
+                    "Discarding a superseded collective restore journal: %s",
                     journal,
                 )
                 journal.unlink()
                 return True
-            _restore_config(repo, dict(payload.get("config_snapshot") or {}))
-            _verify_restored_repo(repo, payload)
-            journal.unlink()
-            return True
+            if _recorded_tree_matches(repo, payload):
+                # Still at the baseline, so the previous restore completed and
+                # only the journal outlived it.
+                _restore_config(repo, dict(payload.get("config_snapshot") or {}))
+                _verify_restored_repo(repo, payload)
+                journal.unlink()
+                return True
+            # HEAD never moved but the tree diverges: the previous restore was
+            # interrupted after it reset HEAD and before it replayed the
+            # baseline. This is indistinguishable from an ordinary branch by
+            # name alone, which is why the journal decides.
+        log.warning(
+            "Replaying an unfinished collective restore for %s (branch=%s)",
+            repo,
+            branch,
+        )
         restore["lock_fd"] = lock
         lock = None
         _restore_inplace(restore)

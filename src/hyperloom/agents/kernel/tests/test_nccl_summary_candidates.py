@@ -282,6 +282,30 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         )
         self.assertEqual(out, existing)
 
+    def test_borrowed_shapes_are_marked_and_require_a_matching_op(self) -> None:
+        """Shapes taken from another row are an inference, not a measurement."""
+        from tracelens_analysis import _inject_collective_candidates
+
+        self._write_metrics(self._summary())
+        donor = {
+            "name": "sgl_kernel::qr_all_reduce",
+            "duration_us": 1000.0,
+            "input_shapes": [{"shape": "(4096, 7168)"}],
+            "input_dtypes": ["bf16"],
+        }
+
+        out = _inject_collective_candidates(
+            self.tl,
+            [donor],
+            source_roots=[str(self.src_root)],
+        )
+
+        self.assertEqual(len(out), 2)
+        self.assertEqual(
+            out[1]["shape_provenance"],
+            "borrowed_sole_all_reduce_family",
+        )
+
     def test_a_skipped_injection_is_reported_as_a_trace_health_warning(self) -> None:
         """A dirty summary must not look like a workload with no collective.
 

@@ -4893,15 +4893,26 @@ class WritebackCollaborator:
             return
         kernel_enabled = self._kernel_enabled()
         collective_only = bool(getattr(state, "collective_only_mode", False))
-        if kernel_enabled:
+        # Mirror _on_enter_kernel's precedence: GEAK owns the phase unless
+        # collective-only mode turned it off, and the collective lane is only
+        # reachable when GEAK does not own it. Checking collective state ahead
+        # of an owning GEAK would re-run its whole e2e instead of re-arming the
+        # wind-down hint.
+        geak_enabled = kernel_enabled and not collective_only and self._geak_enabled()
+        if kernel_enabled and not geak_enabled:
             try:
                 collective_required = bool(
                     collective_integration_pending(state)
                     or self._collective_required_before_kernel_opt()
                 )
             except Exception:  # noqa: BLE001
-                log.exception("resume: Collective state check failed")
-                return
+                # A malformed collective record must not strand the GEAK
+                # crash-recovery below: without it the session idles to its
+                # phase budget and hands SWEEP an empty result.
+                log.exception(
+                    "resume: Collective state check failed; continuing without it",
+                )
+                collective_required = False
             if collective_required:
                 log.info("resume: re-entering unfinished Collective work")
                 try:
@@ -4913,7 +4924,7 @@ class WritebackCollaborator:
                 state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
                 state.save(self.session_dir)
                 return
-        if not (kernel_enabled and self._geak_enabled()):
+        if not geak_enabled:
             return
         history = state.phase_history or []
         row = history[-1] if history else {}

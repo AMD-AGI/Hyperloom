@@ -935,7 +935,16 @@ def _is_patched(plan: _PatchPlan) -> bool:
             return False
         for path, markers in plan.extra_sentinels:
             if not path.exists():
-                return False
+                # The sentinel set names the current SGLang layout. An older
+                # layout that the allowed-minors gate still admits simply has no
+                # such file, and the patch set never creates one, so an absent
+                # file means "not applicable" -- reading it as "not patched"
+                # would roll back a good apply and silently disable profiling.
+                log.info(
+                    "_server_patcher: sentinel %s absent in this SGLang layout; skipping marker check",
+                    path,
+                )
+                continue
             extra = path.read_text(encoding="utf-8", errors="replace")
             if not all(marker in extra for marker in markers):
                 return False

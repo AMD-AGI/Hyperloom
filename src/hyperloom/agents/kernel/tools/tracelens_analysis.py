@@ -2192,13 +2192,20 @@ def _inject_collective_candidates(
             "duration_provenance",
         ):
             target[key] = item[key]
-        donors = (
-            [exact]
-            if exact is not None and _has_workload(exact)
-            else next(iter(workload_families.values()))
-            if len(workload_families) == 1
-            else []
-        )
+        if exact is not None and _has_workload(exact):
+            donors = [exact]
+            borrowed = False
+        elif len(workload_families) == 1 and _is_all_reduce_workload(item):
+            # Borrowing shapes from the trace's only all-reduce family is an
+            # inference, not a measurement: it is sound only because the symbol
+            # is itself an all-reduce and no other family could have produced
+            # it. Feeding a driver shapes the traced kernel never ran would
+            # yield confident SNR and latency for a workload that never existed.
+            donors = next(iter(workload_families.values()))
+            borrowed = True
+        else:
+            donors = []
+            borrowed = False
         if len(donors) == 1:
             donor = donors[0]
             for key in ("input_shapes", "shapes", "input_dtypes", "dtypes", "shape_provenance"):
@@ -2209,6 +2216,14 @@ def _inject_collective_candidates(
             target["workload_source_kernel"] = str(donor.get("name") or "")
         elif donors:
             _merge_workloads(target, donors)
+        if borrowed:
+            # Downstream needs to know the shapes were attributed rather than
+            # observed on this symbol.
+            target["shape_provenance"] = "borrowed_sole_all_reduce_family"
+            messages.append(
+                "nccl_summary: attributing the trace's only all-reduce workload "
+                f"to {item.get('source_function')!r}; shapes are inferred"
+            )
         if exact is None:
             if not donors:
                 messages.append(

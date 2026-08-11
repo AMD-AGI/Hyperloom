@@ -1201,6 +1201,13 @@ def materialize_unified_patch_snapshot(
 def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
     """Revert a kernel patch using its apply manifest.
 
+    A manifest is enough; the apply's own ``status`` is deliberately not
+    required. ``revert_kernel_patch`` restores strictly from the backups the
+    apply recorded and skips any whose source is missing, so a ``partial`` or
+    ``failed`` apply reverts exactly the files it managed to touch. Those are
+    the cases that most need reverting, and gating on ``status == "ok"`` used to
+    leave them applied.
+
     Args:
         apply_result: Apply metadata carrying ``manifest_path``.
 
@@ -4418,6 +4425,10 @@ _COLLECTIVE_FINALIZE_GRACE_SEC = 300
 # Mirrors kernel_agents.cli.MIN_MAX_HOURS (1.0h); forge-loop rejects a shorter
 # --max-hours with a click error that leaves no checkpoint to salvage.
 _COLLECTIVE_MIN_CAMPAIGN_SEC = 3600
+# Wrapper window for a session that declares no deadline at all. Mirrors
+# forge_collective.DEFAULT_TIMEOUT_SEC so both sides bound an unbounded session
+# the same way.
+_COLLECTIVE_UNBOUNDED_WRAPPER_SEC = 14400
 
 
 def _collective_revert_result(
@@ -4475,7 +4486,15 @@ def _collective_budget(state: Any, requested_hours: Any, timeout_sec: int) -> tu
     if timeout_sec > 0:
         wall_limits.append(timeout_sec)
     if requested_hours is None and not wall_limits:
-        return None, 14400
+        # No session deadline, no requested hours, no wall override: there is no
+        # budget to divide, so hand the wrapper its own default window and let
+        # forge-loop pick the campaign length. Logged because the reserve and
+        # minimum-campaign contracts below cannot apply to an unbounded session.
+        log.info(
+            "collective budget: unbounded session, defaulting the wrapper to %ds",
+            _COLLECTIVE_UNBOUNDED_WRAPPER_SEC,
+        )
+        return None, _COLLECTIVE_UNBOUNDED_WRAPPER_SEC
 
     wall_limit = min(wall_limits) if wall_limits else 0
     campaign_capacity = (
@@ -7595,6 +7614,11 @@ async def integrate_handler(
     )
 
     result: dict[str, Any] = {
+        # ``status`` reports whether the integration itself ran to a clean
+        # finish, including any revert it owed; the keep/revert verdict lives in
+        # ``decision``. Every in-tree consumer reads ``decision`` for the
+        # verdict, so a REVERT that reverted cleanly still reports ``ok`` and a
+        # stranded patch is the only thing that surfaces as ``failed``.
         "status": "ok" if revert_complete else "failed",
         "decision": decision,
         "kernel_id": kernel_id,

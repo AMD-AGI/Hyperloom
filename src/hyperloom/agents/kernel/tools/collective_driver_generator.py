@@ -109,13 +109,23 @@ def _dtype_of(candidate: dict[str, Any]) -> str:
 
 
 def _collective_op(candidate: dict[str, Any]) -> str:
-    """Validate and return the supported collective operation."""
+    """Validate and return the supported collective operation.
+
+    The generated references reduce with ``SUM``, which is what tensor-parallel
+    partial sums need. Nothing populates a reduction field today, so an explicit
+    non-SUM value is refused rather than silently compared against SUM.
+    """
     contract = candidate.get("kernel_contract")
     if not isinstance(contract, dict) or contract.get("kind") != "collective":
         raise ValueError("candidate kernel_contract.kind must be 'collective'")
     op = str(contract.get("collective_op") or "").strip().lower()
     if op not in _REFERENCE_BODIES:
         raise ValueError(f"unsupported collective operation: {op or '<missing>'}")
+    reduce_op = str(contract.get("reduce_op") or "sum").strip().lower()
+    if op != "all_gather" and reduce_op != "sum":
+        raise ValueError(
+            f"unsupported collective reduction: {reduce_op} (references reduce with sum)"
+        )
     return op
 
 
