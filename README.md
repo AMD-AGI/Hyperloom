@@ -76,6 +76,16 @@ feedback on how to improve Hyperloom by completing the
 - Main agent instructions: [`src/hyperloom/inference_optimizer/SKILL.md`](src/hyperloom/inference_optimizer/SKILL.md)
 - CLI entry point: `python -m hyperloom.inference_optimizer.cli optimize`
 - Operator tools: `python -m hyperloom.inference_optimizer.tools.*`
+- Platform tuning audit: `python3 scripts/platform_audit.py` — checks the host CPU
+  tuning that silently changes benchmark results. Judges Core Performance Boost,
+  determinism and the cpufreq governor; records SMT and NPS without judging them,
+  since the fleet-wide default (SMT on) and the NPS1-vs-NPS4 tradeoff are not
+  settled for this workload. Reads only `/sys`, `/proc` and — as root — the HWCR
+  MSR; no credentials, nothing written. Exit codes are distinct: `0` all checked
+  knobs on target, `1` a knob is wrong, `2` a knob could not be resolved. CI
+  should treat `2` as missing coverage rather than as a failure. The BIOS-only
+  knobs (APBDIS, DF C-states, High Performance profile) are not reachable this
+  way and are deliberately not covered here.
 - Documentation source: `docs/`
 
 For contribution workflow, testing, and linting, see
