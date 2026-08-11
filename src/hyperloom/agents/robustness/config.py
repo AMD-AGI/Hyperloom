@@ -24,7 +24,11 @@ from typing import Optional
 import httpx
 
 from hyperloom.common.env import env_bool, env_int
-from hyperloom.common.llm_config import deepseek_compat_env
+from hyperloom.common.llm_config import (
+    CLAUDE_OAUTH_TOKEN_ENV,
+    anthropic_synthesizable_key,
+    deepseek_compat_env,
+)
 
 log = logging.getLogger(__name__)
 
@@ -340,7 +344,10 @@ class Config:
             "enable_cluster_pod_metrics=%s",
             config.session_dir,
             config.robustness_server_url or "(local-only)",
-            "(configured)" if config.llm_base_url else "(not available)",
+            # A subscription-token host resolves no base_url at all, so the URL
+            # alone would report "(not available)" for an RCA engine that is
+            # about to start issuing calls.
+            "(configured)" if (config.llm_base_url or config.llm_provider == "anthropic") else "(not available)",
             config.nodes,
             config.workload_uid or "(unset)",
             config.disable_local_probe,
@@ -438,7 +445,10 @@ def _discover_llm_credentials() -> tuple[str, str, str]:
     if gateway_key and openai_base:
         return openai_base, gateway_key, "openai"
 
-    anthropic_key = env.get("ANTHROPIC_API_KEY", "").strip() or env.get("ANTHROPIC_AUTH_TOKEN", "").strip()
+    # The synthesizable subset, which is exactly the set that may be handed on
+    # as an api_key: a subscription token is spent by the CLI and never travels
+    # as a key, so it is excluded here by construction rather than by omission.
+    anthropic_key = anthropic_synthesizable_key(env)
     if anthropic_key:
         return (
             env.get("ANTHROPIC_BASE_URL", "").strip() or "https://api.anthropic.com",
@@ -447,7 +457,7 @@ def _discover_llm_credentials() -> tuple[str, str, str]:
         )
     # A Claude Max/Pro subscription token is resolved by the CLI itself, so it is
     # deliberately not returned as an api_key; the provider alone selects it.
-    if env.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
+    if env.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip():
         return env.get("ANTHROPIC_BASE_URL", "").strip(), "", "anthropic"
 
     return "", "", "openai"

@@ -10,6 +10,7 @@ and secrets that may cross into a subprocess) must not follow it silently."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -84,13 +85,24 @@ def test_oauth_only_probe_skips_only_for_the_token_itself(registered_fake_creden
     assert cli._catalog_probe_has_no_credential() is True
 
 
-def test_materializing_subsets_ignore_a_newly_registered_form(registered_fake_credential):
+def test_materializing_subsets_ignore_a_newly_registered_form(registered_fake_credential, monkeypatch):
     """The billing-sensitive subsets are reviewed lists, not tuple followers."""
     assert registered_fake_credential not in ANTHROPIC_SYNTHESIZABLE_KEY_ENVS
     assert lc.anthropic_synthesizable_key() == ""
+    # Registered as a gateway signal as well, so claude_sdk_env_options actually
+    # builds an env: without a signal it returns {} and the assertion below
+    # would pass on an empty mapping, never reaching the synthesis branch it is
+    # meant to pin.
+    monkeypatch.setattr(
+        lc,
+        "CLAUDE_GATEWAY_SIGNAL_KEYS",
+        CLAUDE_GATEWAY_SIGNAL_KEYS + (_FAKE_CREDENTIAL_ENV,),
+    )
+    options = lc.claude_sdk_env_options()
+    assert options.get("env"), "the fake signal must produce an env for this to test anything"
     # claude_primary_key (~/.claude/config.json) and fallback_key (request-level
     # credential synthesis) both resolve to nothing for an unreviewed form.
-    assert lc.claude_sdk_env_options().get("env", {}).get("ANTHROPIC_API_KEY") is None
+    assert options["env"].get("ANTHROPIC_API_KEY") is None
 
 
 def test_specialist_allowlist_registers_every_credential_form():
@@ -136,15 +148,41 @@ def _install_scripts() -> list[Path]:
     ]
 
 
+_HEREDOC_START = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
 def _executable_lines(script: Path) -> list[str]:
-    """Script lines with comments and blank lines dropped, so a name mentioned
-    only in prose cannot satisfy a reference check."""
-    lines = []
+    """Script lines with comments, blank lines and heredoc bodies dropped.
+
+    Heredocs matter as much as comments here: every installer prints usage text
+    containing ``export CLAUDE_CODE_OAUTH_TOKEN=...``, which would satisfy a
+    textual reference check on its own and let a form count as handled while no
+    credential logic reads it.
+    """
+    lines: list[str] = []
+    terminator: str | None = None
     for raw in script.read_text(encoding="utf-8").splitlines():
         stripped = raw.strip()
-        if stripped and not stripped.startswith("#"):
-            lines.append(stripped)
+        if terminator is not None:
+            if stripped == terminator:
+                terminator = None
+            continue
+        if not stripped or stripped.startswith("#"):
+            continue
+        lines.append(stripped)
+        match = _HEREDOC_START.search(stripped)
+        if match:
+            terminator = match.group(2)
     return lines
+
+
+def test_heredoc_bodies_are_excluded_from_the_shell_scan():
+    """Guards the exclusion above: the usage text this filter must drop is real,
+    so a regression in the filter is not silently harmless."""
+    script = _install_scripts()[0]
+    raw = script.read_text(encoding="utf-8")
+    assert f"export {CLAUDE_OAUTH_TOKEN_ENV}=sk-ant-oat01" in raw, "usage text moved; update this guard"
+    assert not any(line.startswith(f"export {CLAUDE_OAUTH_TOKEN_ENV}=sk-ant-oat01") for line in _executable_lines(script))
 
 
 @pytest.mark.parametrize("script", _install_scripts(), ids=lambda p: f"{p.parent.name}/{p.name}")

@@ -86,22 +86,24 @@ def _resolve_critic_protocol(requested: str, *, provider_anthropic_only: bool) -
             )
         return requested
 
-    # Mirror resolve_openai_client_config's key chain, LLM_GATEWAY_KEY included:
-    # rejecting a gateway-only host here would fail a config that does run.
+    # Ask the resolver the review client will actually use, rather than
+    # re-deriving its key chain here. The local copy listed only OPENAI_API_KEY
+    # and LLM_GATEWAY_KEY, so it rejected an Anthropic-only host whose gateway
+    # token and derived base URL do configure this client -- a config that runs.
     if requested == "openai":
-        if not _any_env_set(("OPENAI_API_KEY", "LLM_GATEWAY_KEY")):
-            raise ValueError("--critic-protocol=openai requires OPENAI_API_KEY or LLM_GATEWAY_KEY")
-        # A gateway key is scoped to that gateway; without OPENAI_BASE_URL the
-        # client would send it to the official OpenAI endpoint instead.
-        gateway_only = (
-            _any_env_set(("LLM_GATEWAY_KEY",))
-            and not _any_env_set(("OPENAI_API_KEY",))
-            and not _any_env_set(("OPENAI_BASE_URL",))
-        )
-        if gateway_only:
+        try:
+            resolved = llm_config.resolve_openai_client_config()
+        except llm_config.LLMConfigError as exc:
+            raise ValueError(f"--critic-protocol=openai requires an OpenAI-capable credential: {exc}") from exc
+        # A gateway key is scoped to its gateway. Judged on the resolved base
+        # URL, not on OPENAI_BASE_URL alone, so a URL derived from the Anthropic
+        # side counts; with none the client would fall back to official OpenAI
+        # and send the gateway key there.
+        if resolved.base_url is None and not _any_env_set(("OPENAI_API_KEY",)):
             raise ValueError(
-                "--critic-protocol=openai with only LLM_GATEWAY_KEY requires OPENAI_BASE_URL; "
-                "otherwise the gateway key is sent to the official OpenAI endpoint"
+                "--critic-protocol=openai with only a gateway key requires a base URL "
+                "(OPENAI_BASE_URL, or ANTHROPIC_BASE_URL to derive it from); otherwise "
+                "the gateway key is sent to the official OpenAI endpoint"
             )
     return requested
 

@@ -3,9 +3,10 @@
 
 """Unit tests for :class:`LlmRcaEngine` and :class:`RcaThrottle`.
 
-The engines call through ``hyperloom.common.llm_config``. Those entry points
-are patched with ``raising=False`` so this suite is independent of whether the
-provider contract has landed in the module yet.
+The engines call through ``hyperloom.common.llm_config``. Those entry points are
+patched by name, and deliberately with ``raising=True``: they are this repo's
+own symbols, so a rename should fail the patch here rather than leave the suite
+silently stubbing nothing and passing against the real transport.
 """
 
 from __future__ import annotations
@@ -84,7 +85,7 @@ def _install_anthropic_completion(
 ) -> _StubAnthropicCompletion:
     """Route the Anthropic engine's single-shot entry point to a recorder."""
     stub = _StubAnthropicCompletion(reply=reply, error=error)
-    monkeypatch.setattr(f"{_LLM_CONFIG}.aanthropic_completion", stub, raising=False)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.aanthropic_completion", stub)
     return stub
 
 
@@ -126,7 +127,7 @@ def _install_chat(
             raise error
         return reply if reply is not None else _Reply("ok")
 
-    monkeypatch.setattr(f"{_LLM_CONFIG}.achat_completion", _fake, raising=False)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.achat_completion", _fake)
     return calls
 
 
@@ -142,8 +143,8 @@ def _install_client_factories(monkeypatch: pytest.MonkeyPatch) -> dict[str, list
         built["openai"].append(kwargs)
         return _StubClient()
 
-    monkeypatch.setattr(f"{_LLM_CONFIG}.get_async_openai_client", _openai, raising=False)
-    monkeypatch.setattr(f"{_LLM_CONFIG}.build_http_timeout", lambda **kwargs: kwargs, raising=False)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.get_async_openai_client", _openai)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.build_http_timeout", lambda **kwargs: kwargs)
     return built
 
 

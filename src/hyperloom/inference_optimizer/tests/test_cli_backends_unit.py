@@ -15,6 +15,21 @@ import pytest
 from hyperloom.inference_optimizer.cli import backends as clib
 
 
+def _clear_provider_env(monkeypatch) -> None:
+    for key in (
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")),
+        "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_API_KEY",
+        "LLM_GATEWAY_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
 @pytest.fixture(autouse=True)
 def _stub_backends(monkeypatch):
     """Replace heavy backend classes with lightweight stubs (no SDK / network)."""
@@ -45,6 +60,14 @@ def _build(**over):
     return clib._build_backends(**kwargs)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_provider_env(monkeypatch):
+    """Every case in this module resolves backends from the environment, so the
+    machine running the suite must not be able to change the answer. Applied to
+    all of them, including the ones that assert a default."""
+    _clear_provider_env(monkeypatch)
+
+
 def test_build_backends_mock_defaults() -> None:
     b = _build()
     assert b["orchestration"][0] == "claude"
@@ -66,21 +89,6 @@ def test_build_backends_critic_agent_requires_root() -> None:
 def test_build_backends_critic_agent_with_root() -> None:
     b = _build(critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
     assert b["critic"][0] == "critic_agent"
-
-
-def _clear_provider_env(monkeypatch) -> None:
-    for key in (
-        "OPENAI_BASE_URL",
-        "OPENAI_API_KEY",
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")),
-        "DEEPSEEK_BASE_URL",
-        "DEEPSEEK_API_KEY",
-        "LLM_GATEWAY_KEY",
-    ):
-        monkeypatch.delenv(key, raising=False)
 
 
 def test_build_backends_anthropic_only_uses_native_critic_agent(monkeypatch) -> None:
@@ -158,6 +166,20 @@ def test_build_backends_forced_openai_protocol_accepts_gateway_key(monkeypatch) 
     assert b["critic"][1]["protocol"] == "openai"
 
 
+def test_build_backends_forced_openai_protocol_accepts_an_anthropic_gateway(monkeypatch) -> None:
+    """resolve_openai_client_config derives an OpenAI side from an Anthropic
+    gateway -- one host, two protocols, one token. The gate must ask it rather
+    than re-deriving a shorter key chain, which rejected this working config."""
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gw.example.com/anthropic")
+    monkeypatch.setenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), "gateway-bearer")
+    b = _build(
+        critic_choice="agent",
+        critic_agent_root=Path("/tmp/critic"),
+        critic_protocol="openai",
+    )
+    assert b["critic"][1]["protocol"] == "openai"
+
+
 def test_build_backends_forced_openai_protocol_without_any_key_fails(monkeypatch) -> None:
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")), "sk-ant-oat01-fake")
@@ -221,14 +243,24 @@ def test_build_backends_dual_protocol_gateway_uses_standard_critic_agent(monkeyp
         critic_agent_root=Path("/tmp/critic"),
     )
     assert b["critic"][0] == "critic_agent"
+    # Both sides configured means auto lands on openai; the point of the test is
+    # that the gateway takes that ordinary path, so the protocol is the assertion.
+    assert b["critic"][1]["protocol"] == "openai"
     assert b["critic"][1]["codex_model"] == "codex-y"
     assert "codex_client_factory" not in b["critic"][1]
 
 
-def test_backends_have_no_provider_specific_branch(monkeypatch) -> None:
-    """The retired DeepSeek branch and its hardcoded client factory are gone."""
-    assert not hasattr(clib, "_deepseek_only")
-    assert not hasattr(clib, "_deepseek_openai_client_factory")
+def test_backends_have_no_provider_specific_branch() -> None:
+    """The retired DeepSeek branch and its hardcoded client factory are gone.
+
+    Names are read off the module rather than asserted absent blindly: a typo
+    in either string would make the old form of this test pass forever.
+    """
+    exported = set(vars(clib))
+    assert "_deepseek_only" not in exported
+    assert "_deepseek_openai_client_factory" not in exported
+    # The guard against that typo: the symbol the branch was replaced by exists.
+    assert "_resolve_critic_protocol" in exported
 
 
 def test_build_backends_openai_only_uses_codex_for_orchestration(monkeypatch) -> None:
