@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.env_safety import GPU_MASK_ENV_NAMES
 from hyperloom.orchestrator.actions.executors import _framework_switch_manifest as manifest
 
 
@@ -95,6 +96,14 @@ def test_an_invalid_env_name_is_dropped():
 def test_a_reserved_benchmark_variable_is_dropped(reserved):
     """Claiming e.g. PATH or TP would retarget the benchmark, not toggle a path."""
     switches, problems = manifest.parse_manifest([_entry(reserved)])
+    assert switches == []
+    assert any("reserved benchmark variable" in p for p in problems)
+
+
+@pytest.mark.parametrize("mask", sorted(GPU_MASK_ENV_NAMES))
+def test_a_gpu_mask_switch_is_dropped(mask):
+    """Claiming a visibility mask would select the hardware, not toggle a path."""
+    switches, problems = manifest.parse_manifest([_entry(mask)])
     assert switches == []
     assert any("reserved benchmark variable" in p for p in problems)
 

@@ -9,6 +9,7 @@ import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
+from hyperloom.common.env_safety import GPU_MASK_ENV_NAMES
 from hyperloom.inference_optimizer.reference_script import (
     parse_reference_script,
     render_reference_script,
@@ -123,6 +124,24 @@ vllm serve $MODEL --trust-remote-code
         "REQUESTS_CA_BUNDLE",
         "TMPDIR",
     ):
+        assert blocked not in r.envs, f"{blocked} should be blocked"
+    assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
+
+
+def test_parse_env_gpu_masks_blocked(tmp_path):
+    """A recipe selects how the run is tuned, never which devices it sees."""
+    text = """\
+export CUDA_VISIBLE_DEVICES=0
+export GPU_DEVICE_ORDINAL=1
+export HSA_VISIBLE_DEVICES=2
+export HIP_VISIBLE_DEVICES=3
+export ROCR_VISIBLE_DEVICES=4
+export VLLM_ROCM_USE_AITER=1
+vllm serve $MODEL --trust-remote-code
+"""
+    src = _write(tmp_path, text)
+    r = parse_reference_script(src, framework="vllm")
+    for blocked in sorted(GPU_MASK_ENV_NAMES):
         assert blocked not in r.envs, f"{blocked} should be blocked"
     assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
 

@@ -194,46 +194,62 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     }
 )
 
+# GPU visibility masks, in the order the runtime resolves them. Machine-specific
+# and never portable: setting one changes which devices a run sees, so it selects
+# the hardware rather than tuning it.
+GPU_MASK_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "CUDA_VISIBLE_DEVICES",
+        "GPU_DEVICE_ORDINAL",
+        "HIP_VISIBLE_DEVICES",
+        "HSA_VISIBLE_DEVICES",
+        "ROCR_VISIBLE_DEVICES",
+    }
+)
+
 # Env names an untrusted external source (reference recipe, framework-switch
 # manifest) may never set: shell-unsafe vars plus the workload/benchmark keys the
 # optimizer's CLI flags own — setting one retargets the benchmark instead of
 # toggling a knob.
-BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = BLOCKED_UNTRUSTED_ENV_NAMES | BENCHMARK_SECRET_ENV_NAMES | frozenset(
-    {
-        "HOME",
-        "MODEL",
-        "MODEL_PATH",
-        "TP",
-        "EP",
-        "CONC",
-        "ISL",
-        "OSL",
-        "MAX_MODEL_LEN",
-        "PRECISION",
-        "PORT",
-        "ROCR_VISIBLE_DEVICES",
-        "HIP_VISIBLE_DEVICES",
-        "NUM_PROMPTS",
-        "NUM_WARMUPS",
-        "RANDOM_RANGE_RATIO",
-        "RUN_EVAL",
-        "PROFILE",
-        "RESULT_DIR",
-        "RESULT_FILENAME",
-        # Redirect what the run talks to or trusts: an external recipe has no
-        # business rerouting traffic, model downloads, TLS trust or scratch space.
-        # Kept out of BLOCKED_UNTRUSTED_ENV_NAMES because a local .env may set
-        # the proxies legitimately.
-        "CURL_CA_BUNDLE",
-        "HF_ENDPOINT",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-        "REQUESTS_CA_BUNDLE",
-        "SSL_CERT_DIR",
-        "SSL_CERT_FILE",
-        "TMPDIR",
-    }
+BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
+    BLOCKED_UNTRUSTED_ENV_NAMES
+    | BENCHMARK_SECRET_ENV_NAMES
+    | GPU_MASK_ENV_NAMES
+    | frozenset(
+        {
+            "HOME",
+            "MODEL",
+            "MODEL_PATH",
+            "TP",
+            "EP",
+            "CONC",
+            "ISL",
+            "OSL",
+            "MAX_MODEL_LEN",
+            "PRECISION",
+            "PORT",
+            "NUM_PROMPTS",
+            "NUM_WARMUPS",
+            "RANDOM_RANGE_RATIO",
+            "RUN_EVAL",
+            "PROFILE",
+            "RESULT_DIR",
+            "RESULT_FILENAME",
+            # Redirect what the run talks to or trusts: an external recipe has no
+            # business rerouting traffic, model downloads, TLS trust or scratch
+            # space. Kept out of BLOCKED_UNTRUSTED_ENV_NAMES because a local .env
+            # may set the proxies legitimately.
+            "CURL_CA_BUNDLE",
+            "HF_ENDPOINT",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "REQUESTS_CA_BUNDLE",
+            "SSL_CERT_DIR",
+            "SSL_CERT_FILE",
+            "TMPDIR",
+        }
+    )
 )
 
 # Credential-shaped name fragments, so an unlisted secret cannot be persisted
@@ -357,6 +373,7 @@ __all__ = [
     "BLOCKED_CHILD_ENV_NAMES",
     "BLOCKED_EXTERNAL_ENV_NAMES",
     "BLOCKED_UNTRUSTED_ENV_NAMES",
+    "GPU_MASK_ENV_NAMES",
     "filter_benchmark_env_mapping",
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",

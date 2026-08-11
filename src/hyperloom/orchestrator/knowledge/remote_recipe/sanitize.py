@@ -13,6 +13,7 @@ from typing import Any
 
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
+    GPU_MASK_ENV_NAMES,
     redact_secret_values,
     valid_env_key,
 )
@@ -60,15 +61,7 @@ PUBLISH_ENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
     "TRITON_",
     "VLLM_",
 )
-_NONPORTABLE_ENV_NAMES: frozenset[str] = frozenset(
-    {
-        "CUDA_VISIBLE_DEVICES",
-        "GPU_DEVICE_ORDINAL",
-        "HIP_VISIBLE_DEVICES",
-        "HSA_VISIBLE_DEVICES",
-        "ROCR_VISIBLE_DEVICES",
-    }
-)
+_NONPORTABLE_ENV_NAMES: frozenset[str] = GPU_MASK_ENV_NAMES
 
 
 def _key_parts(value: str) -> tuple[list[str], str]:
