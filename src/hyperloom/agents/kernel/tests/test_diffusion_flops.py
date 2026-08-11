@@ -47,6 +47,7 @@ def test_family_routing_for_each_class(tmp_path):
         "ZImageTransformer2DModel": "single",
         "SanaTransformer2DModel": "sana",
         "UNet2DConditionModel": "unet",
+        "Flux2Transformer2DModel": "flux",
     }
     for cls, fam in cases.items():
         d = _write_denoiser(
@@ -349,3 +350,160 @@ def test_main_text_and_json_and_failure(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["diffusion_flops", "--model-dir", str(bad)])
     assert df.main() == 1
     assert "could not resolve" in capsys.readouterr().out
+
+
+# ---- FLUX.2 --------------------------------------------------------------
+# Verbatim from the shipped black-forest-labs/FLUX.2-dev transformer config, so
+# the test protects the production path (notably mlp_ratio=3.0, not the 4.0 default).
+_FLUX2_CFG = {
+    "_class_name": "Flux2Transformer2DModel",
+    "num_layers": 8,
+    "num_single_layers": 48,
+    "num_attention_heads": 48,
+    "attention_head_dim": 128,
+    "in_channels": 128,
+    "out_channels": None,
+    "patch_size": 1,
+    "joint_attention_dim": 15360,
+    "mlp_ratio": 3.0,
+    "axes_dims_rope": [32, 32, 32, 32],
+    "rope_theta": 2000,
+    "eps": 1e-06,
+    "timestep_guidance_channels": 256,
+}
+
+
+def test_flux2_geometry_and_defaults(tmp_path):
+    """Real geometry from the shipped black-forest-labs/FLUX.2-dev config."""
+    g = df.resolve_geometry(_write_denoiser(tmp_path / "flux2", _FLUX2_CFG))
+    assert g is not None
+    assert (g.family, g.model_class) == ("flux", "Flux2Transformer2DModel")
+    assert g.hidden == 6144  # 48 heads x 128
+    assert (g.num_double_layers, g.num_single_layers) == (8, 48)
+    # patch_size=1 in the config, but FLUX packs 2x2 for the token count.
+    assert g.patch == 2
+    # FLUX.2-dev is guidance-distilled: one forward per step.
+    assert (g.default_cfg_batch, g.default_steps) == (1, 50)
+
+    # mlp_ratio 3.0 from the config, not the 4*hidden default.
+    assert g.intermediate == 18432
+    # FLUX.2 uses SwiGLU but exposes no gating flag; counting it as a 2-matrix
+    # FFN understates the forward by 20.7%.
+    assert g.gated_ffn is True
+
+    est = df.estimate_image_flops(_write_denoiser(tmp_path / "flux2b", _FLUX2_CFG))
+    assert est["image_tokens"] == 4096  # (1024/8/2)^2
+    assert est["layers"] == 56
+    assert est["forward_flops"] / 1e12 == pytest.approx(282.5, abs=0.5)
+
+
+def test_flux2_swiglu_is_counted(tmp_path):
+    """A 3-matrix SwiGLU FFN, not the 2-matrix default."""
+    g = df.resolve_geometry(_write_denoiser(tmp_path / "flux2", _FLUX2_CFG))
+    assert df._ffn_per_token(g) == pytest.approx(3 * df._linear_flops(1.0, g.hidden, g.intermediate))
+
+    ungated = df.DenoiserGeometry(**{**g.__dict__, "gated_ffn": False})
+    forward_gated = df.forward_flops(g, 1024, 1024)["forward_flops"]
+    forward_ungated = df.forward_flops(ungated, 1024, 1024)["forward_flops"]
+    assert forward_ungated / 1e12 == pytest.approx(224.0, abs=0.5)
+    # Counting SwiGLU raises the forward 1.261x; equivalently the 2-matrix
+    # count was 20.7% below the correct value.
+    assert forward_gated / forward_ungated == pytest.approx(1.261, abs=0.005)
+    assert (forward_gated - forward_ungated) / forward_gated == pytest.approx(0.207, abs=0.005)
+
+
+def test_flux1_ffn_stays_ungated(tmp_path):
+    """The SwiGLU set must not catch FLUX.1."""
+    cfg = {
+        "_class_name": "FluxTransformer2DModel",
+        "num_layers": 19,
+        "num_single_layers": 38,
+        "num_attention_heads": 24,
+        "attention_head_dim": 128,
+    }
+    g = df.resolve_geometry(_write_denoiser(tmp_path / "flux1g", cfg))
+    assert g.gated_ffn is False
+    assert g.intermediate == 4 * g.hidden
+
+
+def test_flux1_is_unaffected_by_the_flux2_entry(tmp_path):
+    cfg = {
+        "_class_name": "FluxTransformer2DModel",
+        "num_layers": 19,
+        "num_single_layers": 38,
+        "num_attention_heads": 24,
+        "attention_head_dim": 128,
+    }
+    g = df.resolve_geometry(_write_denoiser(tmp_path / "flux1", cfg))
+    assert g.hidden == 3072
+    assert (g.num_double_layers, g.num_single_layers) == (19, 38)
+    assert (g.default_cfg_batch, g.default_steps) == (1, 28)
+
+
+# ---- cross-attention completeness ----------------------------------------
+def _cross_geom(**kw):
+    base = dict(
+        model_class="x",
+        family="sana",
+        hidden=5120,
+        num_double_layers=1,
+        num_single_layers=0,
+        head_dim=128,
+        intermediate=13824,
+        gated_ffn=False,
+    )
+    base.update(kw)
+    return df.DenoiserGeometry(**base)
+
+
+def test_cross_attention_counts_q_and_o_projections():
+    """All four projections, not just K and V.
+
+    The query stream needs its own Q and O matmuls, charged to the query token
+    count. They were previously omitted, understating a cross-attending block.
+    """
+    g = _cross_geom()
+    q_tokens, tt = 75_600, 512
+    total = df._cross_attention_block_flops(g, q_tokens, tt)
+
+    attn = df._cross_attention_flops(q_tokens, tt, g.hidden)
+    kv = tt * df._linear_flops(1.0, g.hidden, g.hidden) * 2
+    qo = q_tokens * df._linear_flops(1.0, g.hidden, g.hidden) * 2
+    assert total == pytest.approx(attn + kv + qo)
+    # Q/O scale with the query tokens, so they dominate the K/V term here.
+    assert qo > kv * 100
+
+
+def test_cross_attention_qo_scales_with_query_tokens():
+    """Q/O scale with the queries; K/V does not, so growth is sub-linear."""
+    g, tt = _cross_geom(), 512
+    small = df._cross_attention_block_flops(g, 1_000, tt)
+    large = df._cross_attention_block_flops(g, 2_000, tt)
+
+    # The K/V projection is charged to the text length and is invariant in q,
+    # so the delta is exactly the q-proportional attention + Q/O terms.
+    attn_delta = df._cross_attention_flops(2_000, tt, g.hidden) - df._cross_attention_flops(1_000, tt, g.hidden)
+    qo_delta = 1_000 * df._linear_flops(1.0, g.hidden, g.hidden) * 2
+    assert large - small == pytest.approx(attn_delta + qo_delta)
+    # Sub-linear overall precisely because K/V stays put.
+    assert 1.0 < large / small < 2.0
+
+
+def test_sana_layer_includes_cross_attention_projections(tmp_path):
+    cfg = {
+        "_class_name": "SanaTransformer2DModel",
+        "num_layers": 2,
+        "num_attention_heads": 8,
+        "attention_head_dim": 32,
+    }
+    g = df.resolve_geometry(_write_denoiser(tmp_path / "sana", cfg))
+    ffn_pt = df._ffn_per_token(g)
+    ti, tt = 1024, g.text_tokens
+    layer = df._sana_layer(g, ti, tt, ffn_pt)
+    # The layer must contain the full cross-attention block, Q/O included.
+    assert layer == pytest.approx(
+        ti * df._qkvo_flops(1.0, g.hidden)
+        + ti * ffn_pt
+        + df._linear_attention_flops(ti, g.hidden, g.head_dim or 32)
+        + df._cross_attention_block_flops(g, ti, tt)
+    )
