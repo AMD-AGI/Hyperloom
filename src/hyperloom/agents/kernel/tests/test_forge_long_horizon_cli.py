@@ -749,6 +749,7 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         "--max-hours": "1.0",
         "--git-branch": "forge/session/kernel",
         "--gpu-target": "gfx950",
+        "--gpu-type": "mi355x",
         "--fellow": "triton-fellow",
         "--experiments-dir": str(experiments),
         "--experiment-id": "hyperloom",
@@ -766,6 +767,10 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     assert "--kernel-kind" not in command
 
     assert captured["env"]["GPU_TARGET"] == "gfx950"
+    # The card, alongside the target it builds for: KernelForge addresses a
+    # kernel's experience by the former, and declines to read or write without
+    # it, so a run that carried only the target would accumulate nothing.
+    assert captured["env"]["GPU_TYPE"] == "mi355x"
     assert captured["env"]["PYTHONPATH"].startswith("/forge/src")
     # Isolated process group -- the timeout kill signals the group, not just pid.
     assert captured["popen_kwargs"]["start_new_session"] is True
@@ -3193,6 +3198,7 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         "--invocation-spec-file": str(invocation_spec),
         "--snr-threshold": "30.0",
         "--gpu-target": "gfx950",
+        "--gpu-type": "mi355x",
         "--max-iters": "8",
         "--framework": "vllm",
         "--git-branch": "forge/session/fused-gemm",
@@ -3203,6 +3209,9 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         assert command[command.index(flag) + 1] == value, flag
     # A boolean switch carries no value, so it is checked apart from the pairs.
     assert "--prepare-driver" in command
+    # The rewrite producer files its port under the same identity scheme, so it
+    # needs the card as much as the loop does.
+    assert captured["popen_kwargs"]["env"]["GPU_TYPE"] == "mi355x"
     # The producer is aimed one reserve short of this process's hard kill, so it
     # publishes the apply-back inside its own budget instead of racing the kill.
     producer_deadline = float(command[command.index("--deadline-unix") + 1])

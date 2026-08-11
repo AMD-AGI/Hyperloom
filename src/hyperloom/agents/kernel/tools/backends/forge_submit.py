@@ -271,8 +271,17 @@ def _apply_gpu_type_env(env: dict, gpu_type: str) -> None:
     model = str(gpu_type or "").strip().lower()
     if model in _PLATFORM_TO_GFX:
         env["GPU_TYPE"] = model
-    else:
-        env.pop("GPU_TYPE", None)
+        return
+    inherited = str(env.get("GPU_TYPE") or "").strip()
+    env.pop("GPU_TYPE", None)
+    # KernelForge skips its KB and carries on, so nothing downstream fails and
+    # the run simply accumulates nothing. Say so here, where the reason is known.
+    log.warning(
+        "forge: no known hardware model%s; KernelForge will skip its experience "
+        "KB for this run. Set GPU_TYPE to a card such as %s.",
+        f" (dropped inherited GPU_TYPE={inherited!r})" if inherited else "",
+        ", ".join(sorted(_PLATFORM_TO_GFX)),
+    )
 
 
 def _normalize_gpu_target(value: str) -> str:
@@ -3436,6 +3445,12 @@ def _run_loop_via_cli(
         "--result-json",
         str(result_json),
     ]
+    # Named on the command line as well as in the environment: KernelForge
+    # skips its KB and reports ``missing_gpu_type`` rather than stopping, so an
+    # identity that arrived only by inheritance could be lost without the run
+    # ever failing.
+    if gpu_type:
+        cmd += ["--gpu-type", gpu_type]
     # Provider selection. KernelForge defaults agent_backend to "auto", which
     # resolves to its claude provider; an OpenAI-only deployment has no Anthropic
     # credential and no Claude CLI login, so every attempt would REVERT on "Not
@@ -3708,6 +3723,8 @@ def _run_rewrite_via_cli(
         "--result-json",
         str(result_json),
     ]
+    if gpu_type:
+        cmd += ["--gpu-type", gpu_type]
     if source_entry:
         cmd += ["--source-entry", source_entry]
     if source_language:
