@@ -187,26 +187,31 @@ def account_status(slot: int) -> tuple[str | None, str]:
     return m.group(1).lower(), ""
 
 
-def set_bmc_password(slot: int, password: str) -> tuple[bool, str]:
+def set_bmc_password(slot: int, password: str) -> tuple[bool, bool]:
     """Set a BMC account password without exposing it in the process table.
 
     Passing the password in argv would make it readable through
     ``/proc/<pid>/cmdline`` to any local user. Omitting it makes ipmitool prompt
     on stdin instead (twice, for confirmation), keeping it out of argv entirely.
 
-    The return code is the primary signal. The "successful" string is only
-    corroboration: its exact wording varies across ipmitool versions and is not
+    Returns ``(ok, confirmed)``. The return code is ``ok`` and the primary
+    signal; ``confirmed`` adds whether ipmitool printed its success string,
+    which is corroboration only -- the wording varies across versions and is not
     stable under a non-English locale, so it is never the sole criterion.
+
+    Deliberately returns no text. The secret is on this command's stdin and
+    ipmitool echoes its input on some failures, while callers print their
+    failures to the console and store them in ``CREDENTIAL_FAILURES`` -- so
+    handing back stderr from here could publish a live BMC password. Callers
+    own the wording. Diagnosing a genuinely broken BMC means running ipmitool by
+    hand, which is a fair price for keeping the secret inside the one function
+    that handles it.
     """
     ok, out, err = sudo_run(
         ["ipmitool", "user", "set", "password", str(slot)],
         stdin=f"{password}\n{password}\n",
     )
-    if not ok:
-        return False, err.strip() or "command failed"
-    if "successful" not in (out + err).lower():
-        return True, "return code says success but the confirmation string was absent"
-    return True, ""
+    return ok, ok and "successful" in (out + err).lower()
 
 
 class TempBmcAccount:
@@ -279,13 +284,16 @@ class TempBmcAccount:
             if not ok:
                 self.mint_errors.append(f"{what}: {err.strip() or 'command failed'}")
 
-        ok, detail = set_bmc_password(slot, pw)
+        ok, confirmed = set_bmc_password(slot, pw)
         if not ok:
-            self.mint_errors.append(f"set password: {detail}")
+            self.mint_errors.append("set password: ipmitool rejected the password set")
             self.note = "; ".join(self.mint_errors)
             return self
-        if detail:
-            self.mint_errors.append(f"set password: {detail}")
+        if not confirmed:
+            self.mint_errors.append(
+                "set password: return code reported success but ipmitool printed "
+                "no confirmation"
+            )
 
         # Every remaining step grants access, so each is checked. A silent
         # failure here previously produced a 401 from Redfish, pointing the
@@ -338,9 +346,9 @@ class TempBmcAccount:
             failures.append(f"disable account: {err.strip() or 'command failed'}")
 
         # Leave the password unguessable rather than merely disabled.
-        ok, detail = set_bmc_password(self.slot, secrets.token_urlsafe(24)[: self._secret_len])
+        ok, _ = set_bmc_password(self.slot, secrets.token_urlsafe(24)[: self._secret_len])
         if not ok:
-            failures.append(f"randomize password: {detail}")
+            failures.append("randomize password: ipmitool rejected the new password")
         self.password = ""
 
         status, detail = account_status(self.slot)

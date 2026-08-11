@@ -93,6 +93,46 @@ def test_revocation_runs_even_when_the_password_step_fails(bmc, monkeypatch):
     assert fake.ran("user disable 3")
 
 
+def test_the_password_never_reaches_the_diagnostics(bmc, monkeypatch, capsys):
+    """ipmitool echoes its stdin on some failures; that must not be republished.
+
+    The revoke path prints every failure to the console and stores it in
+    CREDENTIAL_FAILURES, so returning the command's stderr from the one function
+    that handles the secret put a live BMC password on that path.
+    """
+
+    class EchoingIpmi(FakeIpmi):
+        def __init__(self):
+            super().__init__(initially_enabled=True)
+            self.secrets: list[str] = []
+
+        def __call__(self, cmd, **kw):
+            if "user set password" in " ".join(cmd):
+                self.calls.append(cmd)
+                secret = (kw.get("stdin") or "").split("\n")[0]
+                self.secrets.append(secret)
+                return False, "", f"ipmitool: cannot set password '{secret}'"
+            return super().__call__(cmd, **kw)
+
+    fake = EchoingIpmi()
+    monkeypatch.setattr(bmc, "sudo_run", fake)
+
+    with bmc.TempBmcAccount():
+        pass
+
+    assert fake.secrets, "the fake never saw a password, so it proved nothing"
+    published = "\n".join(bmc.CREDENTIAL_FAILURES) + capsys.readouterr().err
+    assert published, "the failure was meant to be reported"
+    for secret in fake.secrets:
+        assert secret, "a blank password would make this test vacuous"
+        assert secret not in published
+
+    # The contract, not just the current wording: text returned from the one
+    # function that holds the secret is what put a password on the print path.
+    ok, confirmed = bmc.set_bmc_password(3, "a-secret-that-must-not-escape")
+    assert isinstance(ok, bool) and isinstance(confirmed, bool)
+
+
 def test_stale_enabled_sentinel_is_recorded_not_just_printed(bmc, monkeypatch):
     """A sentinel found enabled is evidence of a previous leak, so it must exit 3."""
     monkeypatch.setattr(bmc, "sudo_run", FakeIpmi(initially_enabled=True))
