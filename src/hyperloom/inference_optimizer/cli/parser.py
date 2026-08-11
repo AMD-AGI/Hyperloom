@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from .. import framework_registry
+from .backends import CRITIC_PROTOCOL_CHOICES
 from hyperloom.common.llm_config import provider_model_defaults
 from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CLAUDE_MODEL,
@@ -804,6 +805,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Force the critic-agent runtime backend (KB + session memory + "
         "review_constraints). Requires CRITIC_AGENT_ROOT or a sibling "
         "$REPO_ROOT/critic-agent/ directory.",
+    )
+    opt.add_argument(
+        "--critic-protocol",
+        dest="critic_protocol",
+        choices=CRITIC_PROTOCOL_CHOICES,
+        default="auto",
+        help="Protocol for the Critic's review inference. 'openai' uses the "
+        "OpenAI SDK; 'anthropic' uses the Messages API, or the Claude CLI when a "
+        "CLAUDE_CODE_OAUTH_TOKEN subscription is the only credential. "
+        "'auto' (default) derives it from the configured credentials; an "
+        "explicit value fails at startup when that side has no credential. "
+        "Ignored (with a warning) under --critic-mock, which runs no review "
+        "inference.",
     )
     # Robustness backend selection (mirrors critic)
     opt.add_argument(

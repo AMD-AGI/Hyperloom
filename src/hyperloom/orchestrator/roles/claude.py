@@ -405,6 +405,7 @@ class ClaudeBackend:
                 tool_block_count,
                 usage,
                 session_id,
+                stop_reason,
             ) = await retry_with_backoff(
                 _one_attempt,
                 policy=self.retry_policy,
@@ -500,6 +501,9 @@ class ClaudeBackend:
             metadata={
                 "tool_blocks": tool_block_count,
                 "model": self.model,
+                # Why the model stopped ("end_turn" / "max_tokens" / ...).
+                # Without it a truncated reply looks like a malformed one.
+                "stop_reason": stop_reason,
                 "cache_creation_input_tokens": cache_creation,
                 "cache_read_input_tokens": cache_read,
                 "input_tokens": input_tokens,
@@ -816,9 +820,10 @@ class ClaudeBackend:
 
     async def _invoke_and_collect(
         self, prompt: str, options: Any, *, idle_timeout_s: float | None = None
-    ) -> tuple[list[Intent], str, int, dict[str, Any], str | None]:
+    ) -> tuple[list[Intent], str, int, dict[str, Any], str | None, str | None]:
         """Stream SDK messages, collecting intents, raw text, tool counts,
-        the latest `ResultMessage.usage` dict, and the SDK ``session_id``.
+        the latest `ResultMessage.usage` dict, the SDK ``session_id`` and the
+        model's ``stop_reason``.
 
         Args:
             prompt: The composed prompt to stream to the SDK.
@@ -829,10 +834,11 @@ class ClaudeBackend:
                 slow-but-live reasoning model is never killed (issue #679).
 
         Returns:
-            A tuple ``(intents, raw_text, tool_block_count, usage, session_id)``
-            where ``usage`` is the latest cumulative usage dict plus a
-            per-request ``context_tokens_peak``, and ``session_id`` is the SDK
-            session token (or ``None``).
+            A tuple ``(intents, raw_text, tool_block_count, usage, session_id,
+            stop_reason)`` where ``usage`` is the latest cumulative usage dict
+            plus a per-request ``context_tokens_peak``, ``session_id`` is the
+            SDK session token (or ``None``), and ``stop_reason`` is the last
+            reason the model reported (or ``None``).
         """
         intents: list[Intent] = []
         text_chunks: list[str] = []
@@ -843,6 +849,7 @@ class ClaudeBackend:
         usages: list[dict[str, Any]] = []
         num_turns = 0
         session_id: str | None = None
+        stop_reason: str | None = None
         stream = self.sdk_query_factory(prompt=prompt, options=options)
         try:
             stream_iter = stream.__aiter__()
@@ -880,6 +887,11 @@ class ClaudeBackend:
                 msg_turns = getattr(message, "num_turns", None)
                 if isinstance(msg_turns, int) and msg_turns > 0:
                     num_turns = msg_turns
+                # Both AssistantMessage and the terminal ResultMessage carry it;
+                # last seen wins, so the call's own reason ends up reported.
+                msg_stop = getattr(message, "stop_reason", None)
+                if isinstance(msg_stop, str) and msg_stop:
+                    stop_reason = msg_stop
                 msg_usage = getattr(message, "usage", None)
                 if isinstance(msg_usage, dict) and msg_usage:
                     usages.append(dict(msg_usage))
@@ -931,7 +943,7 @@ class ClaudeBackend:
                 last_usage,
                 num_turns=num_turns,
             )
-        return intents, raw_text, tool_block_count, last_usage, session_id
+        return intents, raw_text, tool_block_count, last_usage, session_id, stop_reason
 
     @staticmethod
     def _iter_blocks(message: Any):
