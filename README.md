@@ -83,7 +83,20 @@ feedback on how to improve Hyperloom by completing the
   by workload or the OS layer can only infer them. Reads `/sys`, `/proc` and — as
   root — the HWCR MSR; no credentials, nothing written. Exit `0` on target, `1` a
   knob is wrong, `2` unresolved, which CI should treat as missing coverage rather
-  than as a failure.
+  than as a failure. The BIOS-only knobs are not reachable this way; see below.
+- BIOS audit over the BMC: `sudo python3 scripts/platform_audit_bmc.py` — covers the
+  three BIOS-only knobs (High Performance profile, APBDIS, DF C-states), each
+  targeted per [58011][58011] §4.2.1, §4.4.3 and §4.4.4 respectively.
+  **This creates a temporary ADMINISTRATOR account on the BMC** unless you pass
+  `--bmc-user` with an existing account: with no credentials on file it mints a
+  sentinel account over the in-band KCS channel, uses it for a few HTTPS GETs,
+  then revokes it and verifies the revocation. Root on the host already holds
+  full BMC authority through KCS, so this is not an escalation — but many sites
+  prohibit creating service-processor accounts, so it must be a deliberate
+  choice. TLS verification is on by default; most BMCs ship a self-signed
+  certificate, so expect to pass `--ca-cert` or an explicit `--insecure`. Exit
+  `3` means an account was left enabled or its state could not be confirmed, and
+  should page someone rather than scroll past as a generic failure.
 - Documentation source: `docs/`
 
 [58011]: https://docs.amd.com/v/u/en-US/58011-epyc-9004-tg-bios-and-workload
