@@ -272,6 +272,33 @@ def test_reset_claude_config_leaves_file_alone_for_oauth_only(
     assert json.loads(cfg_path.read_text(encoding="utf-8")) == {"customApiUrl": "https://operator.example"}
 
 
+def test_reset_claude_config_refuses_a_token_that_also_sits_in_the_key_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one shape where this guard is the only thing standing in the way.
+
+    An operator who exports the same subscription token into both variables
+    makes anthropic_synthesizable_key() return it, so preflight hands it in as
+    the primary key and the subscription-mode check below sees a synthesizable
+    key and declines to fire. Without this guard the token is persisted into
+    ~/.claude/config.json, which both leaks it to disk and moves the run onto
+    API billing.
+    """
+    from hyperloom.inference_optimizer.cli import credentials
+
+    token = "sk-ant-oat01-same"
+    monkeypatch.setenv("_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")), token)
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), token)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+
+    credentials._reset_claude_config_to_upstream(token, "https://api.anthropic.com")
+
+    payload = json.loads((tmp_path / ".claude" / "config.json").read_text(encoding="utf-8"))
+    assert payload["primaryApiKey"] == "", "the subscription token must never be persisted"
+    assert payload["customApiUrl"] == "https://api.anthropic.com"
+
+
 def test_reset_claude_config_preserves_existing_file_for_oauth_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
