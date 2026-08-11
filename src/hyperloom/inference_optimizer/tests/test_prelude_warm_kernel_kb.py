@@ -28,7 +28,7 @@ class _StubPrelude:
     _parse_diff_target = staticmethod(PreludePhase._parse_diff_target)
     _resolve_kernel_target_path = PreludePhase._resolve_kernel_target_path
     _integrate_warm_kernel = PreludePhase._integrate_warm_kernel
-    _warm_gemm_extra_envs = staticmethod(PreludePhase._warm_gemm_extra_envs)
+    _warm_kernel_extra_envs = staticmethod(PreludePhase._warm_kernel_extra_envs)
     _integrate_warm_gemm = PreludePhase._integrate_warm_gemm
     _maybe_apply_warm_kernel_kb = PreludePhase._maybe_apply_warm_kernel_kb
 
@@ -216,7 +216,7 @@ def test_warm_gemm_envs_point_the_recorded_var_at_the_local_tuned_file() -> None
         },
     }
 
-    envs = PreludePhase._warm_gemm_extra_envs(entry)
+    envs = PreludePhase._warm_kernel_extra_envs(entry)
 
     assert envs["PYTORCH_TUNABLEOP_FILENAME"] == "/local/dl/tunableop_results.csv"
     assert envs["HL_TUNABLEOP_MODE"] == "candidate"
@@ -225,7 +225,7 @@ def test_warm_gemm_envs_point_the_recorded_var_at_the_local_tuned_file() -> None
 def test_warm_gemm_envs_empty_without_a_recorded_env_var() -> None:
     entry = {"column": "gemm", "source_paths": ["/local/dl/t.csv"], "meta": {}}
 
-    assert PreludePhase._warm_gemm_extra_envs(entry) == {}
+    assert PreludePhase._warm_kernel_extra_envs(entry) == {}
 
 
 @pytest.mark.asyncio
@@ -268,6 +268,50 @@ async def test_gemm_record_is_applied_through_its_env_bundle(tmp_path: Path) -> 
     envs = applied[0]["extra_envs"]
     assert envs["PYTORCH_TUNABLEOP_FILENAME"].endswith("kernel/gemm/t.csv")
     assert envs["HL_TUNABLEOP_MODE"] == "candidate"
+
+
+@pytest.mark.asyncio
+async def test_fusion_env_switches_reach_the_integrate_payload(tmp_path: Path) -> None:
+    # A fusion patch only takes effect with its recorded env switches; applying
+    # the file alone re-measures the unfused path and reverts a good champion.
+    target = tmp_path / "serving" / "model.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("old", encoding="utf-8")
+    record = _kernel_record(
+        tmp_path,
+        {
+            "fusion": {
+                "items": [
+                    {
+                        "kernel_name": "f1",
+                        "patch": "kernel/fusion/f.py",
+                        "source_file": "kernel/fusion/f.py",
+                        "target_path": str(target),
+                        "extra_envs": {"SGLANG_USE_AITER": "1"},
+                        "env_flags": {"ZAYA_FUSED_HYBRID_RESIDUAL": "1"},
+                    }
+                ]
+            }
+        },
+        {"kernel/fusion/f.py": "print('fused')"},
+    )
+    stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
+
+    seen: list[dict] = []
+
+    async def _fake_integrate(entry: dict, resolved: str) -> dict:
+        seen.append(entry)
+        return {"status": "ok", "decision": "KEEP", "gain_pct": 4.0}
+
+    stub._integrate_warm_kernel = _fake_integrate  # type: ignore[method-assign]
+
+    outcome = await stub._maybe_apply_warm_kernel_kb()
+
+    assert outcome["kept"] == 1
+    assert seen[0]["extra_envs"] == {
+        "SGLANG_USE_AITER": "1",
+        "ZAYA_FUSED_HYBRID_RESIDUAL": "1",
+    }
 
 
 @pytest.mark.asyncio
