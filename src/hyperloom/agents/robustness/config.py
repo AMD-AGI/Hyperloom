@@ -63,8 +63,11 @@ class Config:
             empty means skip the server and use only the local probe.
         llm_model (str): Model name used for LLM-driven root-cause
             analysis.
-        llm_base_url (str): LLM API base URL discovered from the sandbox.
-        llm_api_key (str): LLM API key discovered from the sandbox.
+        llm_base_url (str): LLM API base URL discovered from the sandbox. Empty
+            for a Claude subscription host, which has no endpoint to resolve.
+        llm_api_key (str): LLM API key discovered from the sandbox. Empty when
+            the credential is a subscription token, which the Claude CLI spends
+            without ever handing it to this process.
         llm_rca_enabled (Optional[bool]): Tri-state RCA activation flag;
             ``None`` auto-enables when credentials are present.
         metrics_window_s (int): Rolling window, in seconds, over which
@@ -101,8 +104,9 @@ class Config:
     llm_provider: str = "openai"
 
     # -- LLM RCA throttle / activation --
-    # ``None`` = auto-enable when llm_base_url + llm_api_key are both set;
-    # ``False`` = force-disable.
+    # ``None`` = auto-enable when the discovered provider can authenticate a
+    # call, which for the Anthropic side is a usable transport rather than a
+    # base_url + api_key pair; ``False`` = force-disable.
     llm_rca_enabled: Optional[bool] = None
     llm_rca_severity_min: str = "high"  # one of low/medium/high
     llm_rca_cooldown_s: float = 60.0

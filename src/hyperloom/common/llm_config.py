@@ -1314,10 +1314,13 @@ async def astream_chat_completion_text(
 
 
 __all__ = [
+    "ANTHROPIC_CREDENTIAL_ENV_ORDER",
+    "ANTHROPIC_SYNTHESIZABLE_KEY_ENVS",
     "ANTHROPIC_TRANSPORT_HTTP",
     "ANTHROPIC_TRANSPORT_SDK",
     "AnthropicMessageResult",
     "CLAUDE_GATEWAY_SIGNAL_KEYS",
+    "CLAUDE_OAUTH_TOKEN_ENV",
     "ChatCompletionResult",
     "DEFAULT_ANTHROPIC_BASE_URL",
     "DEFAULT_ANTHROPIC_VERSION",
@@ -1330,6 +1333,7 @@ __all__ = [
     "achat_completion",
     "anthropic_completion",
     "anthropic_messages",
+    "anthropic_synthesizable_key",
     "anthropic_transport",
     "anthropic_transport_ready",
     "apply_reasoning_effort",
@@ -1346,6 +1350,7 @@ __all__ = [
     "get_async_anthropic_client",
     "get_async_openai_client",
     "get_openai_client",
+    "has_anthropic_credential",
     "has_anthropic_side",
     "has_openai_side",
     "is_anthropic_only",

@@ -317,7 +317,3 @@ class ClaudeOneShotClient:
                 self.amessages(model=model, messages=messages, system=system, max_tokens=max_tokens)
             )
         raise RuntimeError("ClaudeOneShotClient.messages cannot run inside an active event loop")
-
-    async def aclose(self) -> None:
-        """Release transport state; the SDK owns none, so this is a no-op."""
-        return None
