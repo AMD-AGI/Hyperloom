@@ -64,6 +64,7 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_lib_eval_start_patched,
     ensure_eval_probe_patched,
+    eval_probe_targets_exist,
 )
 from ._magpie_patcher import ensure_eval_concurrency_compat
 from .benchmark_result import (
@@ -1147,7 +1148,40 @@ class BaselineExecutor:
             ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
             ensure_benchmark_lib_eval_start_patched(Path(ix_root))
         if not _materialized_run_eval_disabled(config_path):
-            ensure_eval_probe_patched(Path(ix_root) if ix_root else None)
+            # The probe is what bounds a non-terminating model's eval: without it
+            # lm-eval runs to the full max_tokens budget on every sample and takes
+            # the whole baseline timeout with it. A checkout that carries the
+            # target file and still cannot be patched is a hard stop; one that
+            # never had it is a layout we do not recognize, which warns instead of
+            # failing every eval run on an unproven path assumption.
+            probe_root = Path(ix_root) if ix_root else None
+            try:
+                probe_ok = ensure_eval_probe_patched(probe_root)
+            except Exception as exc:  # noqa: BLE001 — never mask as a silent skip
+                log.error(
+                    "baseline_executor: eval-probe patch raised for %s: %s",
+                    ix_root,
+                    exc,
+                )
+                probe_ok = False
+            if not probe_ok:
+                msg = (
+                    "the generation-pathology probe is not installed "
+                    "(utils/evals/patches/lm_eval_sitecustomize.py, inferencex="
+                    f"{ix_root or '<unset>'}, INFERENCEX_PATH="
+                    f"{os.environ.get('INFERENCEX_PATH', '') or '<unset>'}). "
+                    "A model that never emits EOS will run the accuracy eval to "
+                    "the full max_tokens budget on every sample and consume the "
+                    "entire baseline timeout."
+                )
+                if eval_probe_targets_exist(probe_root):
+                    log.error("baseline_executor: %s", msg)
+                    return {
+                        "status": "failed",
+                        "error_class": "eval_probe_unpatchable",
+                        "error": msg,
+                    }
+                log.warning("baseline_executor: %s", msg)
             # Fail LOUDLY (never warn-and-continue) when the fatal eval flag cannot
             # be removed AND this run is meant to execute lm-eval: the benchmark is
             # guaranteed to abort in run_lm_eval, and the accuracy gate then stops

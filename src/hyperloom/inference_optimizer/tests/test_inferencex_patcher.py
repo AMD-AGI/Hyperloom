@@ -744,6 +744,87 @@ def test_eval_probe_returns_false_when_target_missing(tmp_path, monkeypatch):
     assert ensure_eval_probe_patched(tmp_path) is False
 
 
+def test_eval_probe_unreadable_target_returns_false(tmp_path, monkeypatch):
+    """An unreadable target degrades to False rather than raising into the caller."""
+    from hyperloom.orchestrator.actions.executors import _inferencex_patcher as patcher
+
+    target = _write_eval_probe_target(tmp_path)
+    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("read-only mount")
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    assert patcher.ensure_eval_probe_patched(tmp_path) is False
+    assert target.exists()
+
+
+def test_baseline_fails_loud_when_probe_target_present_but_unpatchable(tmp_path, monkeypatch):
+    """A checkout that HAS the target and still cannot be patched is a hard stop."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    ix_root = tmp_path / "InferenceX@deadbeef"
+    _write_eval_dest_lib(ix_root)
+    _write_eval_probe_target(ix_root)
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"benchmark": {"inferencex_path": str(ix_root)}}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.setattr(
+        _inferencex_patcher,
+        "_apply_eval_probe_atomic",
+        lambda _src: False,
+    )
+
+    out = BaselineExecutor()._after_materialize_config(config_path, tmp_path / "out")
+
+    assert isinstance(out, dict)
+    assert out["error_class"] == "eval_probe_unpatchable"
+
+
+def test_baseline_warns_when_probe_target_absent(tmp_path, monkeypatch):
+    """An unrecognized layout warns; it must not fail every eval run on a guess."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    ix_root = tmp_path / "InferenceX@deadbeef"
+    _write_eval_dest_lib(ix_root)
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"benchmark": {"inferencex_path": str(ix_root)}}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+
+    assert BaselineExecutor()._after_materialize_config(config_path, tmp_path / "out") is None
+
+
+def test_baseline_skips_probe_gate_when_eval_disabled(tmp_path, monkeypatch):
+    """RUN_EVAL off: a missing probe target is irrelevant and must not block."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    ix_root = tmp_path / "InferenceX@deadbeef"
+    _write_eval_dest_lib(ix_root)
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {"benchmark": {"inferencex_path": str(ix_root), "envs": {"RUN_EVAL": "false"}}}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+
+    assert BaselineExecutor()._after_materialize_config(config_path, tmp_path / "out") is None
+
+
 def test_eval_probe_is_concurrency_safe(tmp_path, monkeypatch):
     """Several executors can patch one shared checkout at once."""
     from hyperloom.orchestrator.actions.executors._inferencex_patcher import (

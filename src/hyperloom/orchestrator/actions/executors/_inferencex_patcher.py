@@ -682,6 +682,16 @@ def _resolve_eval_sitecustomize_paths(
     return _resolve_inferencex_files(inferencex_path, "utils", "evals", "patches", "lm_eval_sitecustomize.py")
 
 
+def eval_probe_targets_exist(inferencex_path: Path | str | None = None) -> bool:
+    """Whether any discovered InferenceX root carries the probe target file.
+
+    Lets a caller tell "this checkout has the file and we failed to patch it"
+    from "this checkout does not lay the file out where we look", which are very
+    different verdicts about whether an accuracy eval is safe to start.
+    """
+    return bool(_resolve_eval_sitecustomize_paths(inferencex_path))
+
+
 def _is_eval_probe_patched(src: Path) -> bool:
     """Return whether ``lm_eval_sitecustomize.py`` already carries the eval probe."""
     return file_contains_sentinel(src, _EVAL_PROBE_SENTINEL, log, "_inferencex_patcher")
@@ -689,7 +699,12 @@ def _is_eval_probe_patched(src: Path) -> bool:
 
 def _apply_eval_probe_atomic(src: Path) -> bool:
     """Append the eval probe to ``src`` via temp-file + atomic rename."""
-    patched = src.read_text(encoding="utf-8") + _EVAL_PROBE_PY
+    try:
+        original = src.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
+        return False
+    patched = original + _EVAL_PROBE_PY
     if not atomic_write_text(
         src,
         patched,
@@ -726,7 +741,8 @@ def ensure_eval_probe_patched(
         empty_msg=(
             "_inferencex_patcher: no InferenceX root discovered "
             "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
-            "lm_eval_sitecustomize.py missing — skipping eval-probe patch"
+            "utils/evals/patches/lm_eval_sitecustomize.py missing — "
+            "skipping eval-probe patch"
         ),
         failure_msg=(
             "_inferencex_patcher: failed to append eval-probe to %s; other discovered roots will still be attempted"
