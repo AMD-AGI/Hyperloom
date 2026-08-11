@@ -6339,7 +6339,13 @@ async def integrate_handler(
             "error": "integrate_handler requires base_tput > 0 to compute KEEP/REVERT",
         }
 
-    env_only_validation = str(payload.get("source") or "").strip() in {"forge_gemm_tuning", "gemm_tuning"} and (
+    # ``warm_kernel_kb`` replays a champion set whose patches are applied by the
+    # caller in one batch, so this call measures the env bundle alone.
+    env_only_validation = str(payload.get("source") or "").strip() in {
+        "forge_gemm_tuning",
+        "gemm_tuning",
+        "warm_kernel_kb",
+    } and (
         bool(payload.get("extra_envs")) or bool(str(payload.get("extra_server_args") or "").strip())
     )
     if not env_only_validation:

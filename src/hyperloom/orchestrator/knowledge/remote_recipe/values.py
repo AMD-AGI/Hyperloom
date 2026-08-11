@@ -728,7 +728,9 @@ def _kernel_agent_score(value: Mapping[str, Any]) -> float:
 
     Used as the kernel-agent KB's own keep-if-better metric so a kernel
     optimization is stored whenever it beats what the kernel-agent KB already
-    holds — independent of recipe serving throughput.
+    holds — independent of recipe serving throughput. Only end-to-end gain
+    percentages are compared: a micro-benchmark speedup is a different unit and
+    would always outrank a real E2E gain.
     """
     best = 0.0
     gemm = value.get("gemm") if isinstance(value, Mapping) else {}
@@ -739,7 +741,6 @@ def _kernel_agent_score(value: Mapping[str, Any]) -> float:
                 best,
                 _number(opt.get("e2e_gain_pct")),
                 _number(opt.get("gain_pct")),
-                (_number(opt.get("best_speedup")) - 1.0) * 100.0,
             )
     for col in ("fusion", "rewrite"):
         node = value.get(col) if isinstance(value, Mapping) else {}
@@ -791,7 +792,7 @@ def build_kernel_agent_knowledge(
         }
     )
     bundle = KnowledgeBundle(knowledge=knowledge, artifacts=files.artifacts)
-    bundle.validate(files.refs)
+    bundle.validate()
     return bundle, score
 
 
