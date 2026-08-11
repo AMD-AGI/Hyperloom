@@ -1224,6 +1224,89 @@ def test_validate_claude_model_skips_probe_for_oauth_only(monkeypatch, capsys):
     assert "catalog probe skipped: oauth-only credential" in out
 
 
+def _oauth_only_env(monkeypatch, *, base_url: str) -> None:
+    """An oauth-only shell pointed at ``base_url``."""
+    for var in (
+        "_".join(("ANTHROPIC", "API", "KEY")),
+        "_".join(("ANTHROPIC", "AUTH", "TOKEN")),
+        "_".join(("DEEPSEEK", "API", "KEY")),
+        "_".join(("OPENAI", "API", "KEY")),
+        "OPENAI_BASE_URL",
+        "LLM_GATEWAY_KEY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")), "sk-ant-oat01-fake")
+    if base_url:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
+    else:
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+
+def test_preflight_warns_when_a_subscription_token_targets_a_foreign_endpoint(monkeypatch, capsys):
+    """A subscription token only authenticates against Anthropic itself, so a
+    third-party gateway both fails and puts the credential on the wire to a
+    host that was never meant to see it. Every other gate reads this shape as
+    a valid Anthropic side and stays silent."""
+    _oauth_only_env(monkeypatch, base_url="https://gateway.internal.example/anthropic")
+
+    cli_credentials._validate_credentials()
+
+    err = capsys.readouterr().err
+    assert "https://gateway.internal.example/anthropic" in err
+    assert "only valid against https://api.anthropic.com" in err
+
+
+@pytest.mark.parametrize("base_url", ["", "https://api.anthropic.com", "https://api.anthropic.com/"])
+def test_preflight_accepts_a_subscription_token_on_the_official_endpoint(monkeypatch, capsys, base_url):
+    """The supported shape, with or without an explicit official URL."""
+    _oauth_only_env(monkeypatch, base_url=base_url)
+
+    cli_credentials._validate_credentials()
+
+    assert "only valid against" not in capsys.readouterr().err
+
+
+def test_provider_only_mode_reads_a_subscription_token_as_anthropic_only(monkeypatch):
+    """Without this the token yields no provider-only mode, so a stale OpenAI
+    side from the kernel-agent env file is never suppressed."""
+    _oauth_only_env(monkeypatch, base_url="")
+
+    assert cli_preflight._provider_only_mode() == "anthropic"
+    # Nothing else in this shell carries the verdict: drop the token and the
+    # mode collapses, which is what the pre-registry code returned all along.
+    monkeypatch.delenv("_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")))
+    assert cli_preflight._provider_only_mode() == ""
+
+
+def test_claude_config_json_is_left_alone_in_subscription_mode(monkeypatch, tmp_path, capsys):
+    """customApiUrl would point the CLI away from the only endpoint that accepts
+    the token, so subscription mode must not touch the operator's config."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _oauth_only_env(monkeypatch, base_url="")
+    config_path = tmp_path / ".claude" / "config.json"
+
+    cli_credentials._reset_claude_config_to_upstream("", "https://gateway.internal.example/anthropic")
+
+    assert not config_path.exists()
+    assert "config.json left alone" in capsys.readouterr().out
+
+
+def test_claude_config_json_still_written_for_a_gateway_bearer_token(monkeypatch, tmp_path):
+    """The skip must key off "is this run on the subscription", not off an empty
+    primaryApiKey: this host authenticates through ANTHROPIC_AUTH_TOKEN, so it
+    arrives with no ANTHROPIC_API_KEY while genuinely needing the gateway URL."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _oauth_only_env(monkeypatch, base_url="https://gateway.internal.example/anthropic")
+    monkeypatch.setenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), "gateway-bearer")
+    config_path = tmp_path / ".claude" / "config.json"
+
+    cli_credentials._reset_claude_config_to_upstream("", "https://gateway.internal.example/anthropic")
+
+    written = json.loads(config_path.read_text(encoding="utf-8"))
+    assert written["customApiUrl"] == "https://gateway.internal.example/anthropic"
+    assert written["primaryApiKey"] == "", "the subscription token must never reach primaryApiKey"
+
+
 def test_validate_claude_model_still_probes_when_oauth_accompanies_an_api_key(monkeypatch):
     """An API key alongside the token can authenticate the probe, so it still runs."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
