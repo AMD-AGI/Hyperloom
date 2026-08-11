@@ -1875,6 +1875,15 @@ class KernelPhase(PhaseHandler):
             await self._validate_forge_gemm_tuning_e2e(result)
         else:
             self._promote_gemm_tuning_keep(result)
+        # Per-round write: promotion/validation is what appends the
+        # ``gemm_tuning`` row to ``optimization_stack``, and ``build_gemm`` keys
+        # off that row. The staging done inside ``record_gemm_tuning`` above ran
+        # before the row existed, so re-stage now that the accepted GEMM is on
+        # the stack (mirrors the fusion-integrate hook).
+        try:
+            self.shared_state._stage_kernel_kb_columns()
+        except Exception:  # noqa: BLE001 — knowledge write must not fail a round
+            log.debug("kernel kb: gemm per-round staging failed", exc_info=True)
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -2569,6 +2578,9 @@ class KernelPhase(PhaseHandler):
         self._promote_fusion_integrate_keep(result, integ, extra_envs=merged_envs)
         try:
             self.shared_state.last_fusion_integrate = integ
+            # Per-round write: a fusion integrate just completed, so re-stage the
+            # kernel KB columns (fusion integrate bypasses record_kernel_integrate_result).
+            self.shared_state._stage_kernel_kb_columns()
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001
             pass

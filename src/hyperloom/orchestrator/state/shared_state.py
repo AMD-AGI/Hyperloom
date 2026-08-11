@@ -533,6 +533,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     warm_history_injected: bool = False
     # Structured warm-replay outcome for reports/prompts (status reproduced|drift|failed|skipped, etc.).
     warm_replay_outcome: dict = field(default_factory=dict)
+    # One-shot guard for PRELUDE warm-kernel KB read/apply (resume can't re-fire).
+    warm_kernel_kb_attempted: bool = False
+    # Resolved prior-champion kernel columns (gemm/fusion/rewrite) loaded from the
+    # KB Store warm-start record at PRELUDE, with local file paths resolved.
+    warm_kernel_kb_plan: list = field(default_factory=list)
+    # Structured warm-kernel KB outcome for reports/prompts.
+    warm_kernel_kb_outcome: dict = field(default_factory=dict)
     # Baseline COLD (warmup-round) full boot+bench wall-clock; the hard-cap
     # anchor from which ExploreExecutor derives the overtime-kill deadline.
     baseline_runtime_sec: float = 0.0
@@ -2091,13 +2098,17 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
 
-        return _m.record_kernel_integrate_result(
+        outcome = _m.record_kernel_integrate_result(
             self,
             result,
             max_attempts=max_attempts,
             keep_threshold_pct=keep_threshold_pct,
             max_fault_attempts=max_fault_attempts,
         )
+        # An integrate result is a rewrite/fusion round completion; re-stage the
+        # kernel KB columns so the run owns them with their per-patch verdicts.
+        self._stage_kernel_kb_columns()
+        return outcome
 
     def record_kernel_opt(self, result: dict[str, Any]) -> None:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
@@ -2109,7 +2120,23 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
 
-        return _m.record_gemm_tuning(self, result)
+        _m.record_gemm_tuning(self, result)
+        # A GEMM tuning round just completed; re-stage the kernel KB columns.
+        self._stage_kernel_kb_columns()
+
+    def _stage_kernel_kb_columns(self) -> None:
+        """Best-effort per-round stage of the kernel KB sub-columns.
+
+        No-op when no KB draft directory is configured (local mode / tests):
+        :meth:`KernelAgentKB.open` returns an inactive facade. Never raises into
+        the caller — knowledge is advisory.
+        """
+        try:
+            from ..knowledge.kernel_kb_columns import stage_kernel_columns
+
+            stage_kernel_columns(self)
+        except Exception:  # noqa: BLE001 — knowledge write must not fail a round
+            log.debug("kernel kb: per-round staging failed", exc_info=True)
 
     # Multi-KEEP integrate queue helpers.
     def _kernel_ids_in_optimization_stack(self) -> set[str]:
