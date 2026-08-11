@@ -7,6 +7,7 @@ the initial baseline/roofline internal-analysis task enqueue."""
 from __future__ import annotations
 import logging as _logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from . import machine_state as _phase_state
 from ..state.optimization_journal import (
@@ -206,6 +207,315 @@ class PreludePhase(PhaseHandler):
         except Exception as exc:  # noqa: BLE001 - filtering is advisory only
             log.warning("warm-replay KG patch filtering degraded: %s", exc)
             return patches
+
+    def _collect_warm_kernel_plan(self, kb: Any) -> list[dict[str, Any]]:
+        """Resolve the prior-champion kernel columns into a local apply plan.
+
+        Reads the ``gemm``/``fusion``/``rewrite`` sub-columns the warm-start
+        download provided, resolves every recorded file ref to its downloaded
+        copy via ``KernelAgentKB.prior_file``, and returns one plan entry per
+        item carrying the local ``patch_path`` / ``source_paths`` plus the
+        item's non-file metadata. Refs that do not resolve are dropped.
+        """
+        readers = (
+            ("gemm", kb.read_gemm, "optimizations"),
+            ("fusion", kb.read_fusion, "items"),
+            ("rewrite", kb.read_rewrite, "items"),
+        )
+        plan: list[dict[str, Any]] = []
+        for column, reader, list_key in readers:
+            try:
+                data = reader() or {}
+            except Exception:  # noqa: BLE001 — a bad column must not block others
+                log.warning("warm-kernel KB: reading %s column failed", column, exc_info=True)
+                continue
+            rows = data.get(list_key) if isinstance(data, dict) else None
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                meta = {
+                    k: v
+                    for k, v in row.items()
+                    if k not in ("patch", "source_file", "source_files", "tuned_file", "files")
+                }
+                if column == "rewrite":
+                    source_refs = [str(r) for r in (row.get("source_files") or []) if str(r or "").strip()]
+                elif column == "fusion":
+                    source_refs = [str(row.get("source_file"))] if row.get("source_file") else []
+                else:  # gemm
+                    source_refs = [str(row.get("tuned_file"))] if row.get("tuned_file") else []
+                source_paths: list[str] = []
+                for ref in source_refs:
+                    resolved = kb.prior_file(ref)
+                    if resolved is not None:
+                        source_paths.append(str(resolved))
+                entry: dict[str, Any] = {"column": column, "meta": meta}
+                patch_ref = str(row.get("patch") or "").strip()
+                if patch_ref:
+                    patch_local = kb.prior_file(patch_ref)
+                    if patch_local is not None:
+                        entry["patch_path"] = str(patch_local)
+                if source_paths:
+                    entry["source_paths"] = source_paths
+                # A portable target path is only honoured when it exists on this
+                # host; cross-session records usually omit it, so most entries
+                # are loaded/recorded and their apply is left to the kernel phase.
+                target = str(row.get("target_path") or meta.get("target_path") or "").strip()
+                if target and Path(target).is_file():
+                    entry["target_file"] = target
+                if entry.get("patch_path") or entry.get("source_paths"):
+                    plan.append(entry)
+        return plan
+
+    @staticmethod
+    def _parse_diff_target(patch_path: str | None) -> str:
+        """Extract the patched file's repo-relative path from a unified diff.
+
+        Reads the ``+++ b/<path>`` header (falling back to ``diff --git a/x
+        b/y``) so a champion patch can be located in this session's source tree
+        even when the KB record did not persist an absolute target path.
+        """
+        raw = str(patch_path or "").strip()
+        if not raw:
+            return ""
+        try:
+            text = Path(raw).read_text(errors="replace")
+        except OSError:
+            return ""
+        git_target = ""
+        for line in text.splitlines():
+            if line.startswith("+++ "):
+                candidate = line[4:].split("\t", 1)[0].strip()
+                if candidate.startswith("b/"):
+                    candidate = candidate[2:]
+                if candidate and candidate != "/dev/null":
+                    return candidate
+            elif line.startswith("diff --git ") and not git_target:
+                parts = line.split()
+                if len(parts) >= 4:
+                    candidate = parts[3]
+                    if candidate.startswith("b/"):
+                        candidate = candidate[2:]
+                    git_target = candidate
+        return git_target
+
+    def _resolve_kernel_target_path(self, entry: dict[str, Any]) -> str:
+        """Locate the champion patch's target file in this session's source tree.
+
+        Aggressive resolution: an absolute target that exists is used as-is;
+        otherwise the repo-relative path parsed from the diff header is joined
+        against every trusted source root (:func:`resolve_patch_target_roots`)
+        and the first existing file wins. Returns '' when nothing resolves.
+        """
+        target = str(entry.get("target_file") or "").strip()
+        if target and Path(target).is_file():
+            return target
+        rel = self._parse_diff_target(entry.get("patch_path"))
+        if not rel:
+            return ""
+        rel = rel.lstrip("/")
+        try:
+            from ..framework.paths import resolve_patch_target_roots
+
+            roots = resolve_patch_target_roots()
+        except Exception:  # noqa: BLE001 — resolution must never raise
+            roots = ()
+        for root in roots:
+            candidate = Path(root) / rel
+            if candidate.is_file():
+                return str(candidate)
+        # Suffix fallback: the diff path may carry a package prefix the root
+        # already includes (e.g. ``sglang/foo`` under ``.../sglang/``).
+        tail = Path(rel)
+        for root in roots:
+            base = Path(root.rstrip("/"))
+            if not base.is_dir():
+                continue
+            for depth in range(len(tail.parts)):
+                candidate = base / Path(*tail.parts[depth + 1 :]) if depth + 1 < len(tail.parts) else None
+                if candidate is not None and candidate.is_file():
+                    return str(candidate)
+        return ""
+
+    async def _integrate_warm_kernel(self, entry: dict[str, Any], target: str) -> dict[str, Any]:
+        """Apply one champion kernel and validate it by re-baseline (KEEP/REVERT).
+
+        Reuses :func:`integrate_handler`, which backs up the source, applies the
+        whole-file replacement, re-runs the baseline, and KEEPs only on a
+        throughput (and accuracy) win, auto-reverting otherwise. This is the
+        kernel analogue of explore's measured warm-replay.
+        """
+        import os
+
+        from ..kernel.request_handlers import integrate_handler
+
+        replacement = (entry.get("source_paths") or [entry.get("patch_path")])[0]
+        kernel_id = str((entry.get("meta") or {}).get("kernel_name") or "warm_kernel")
+        # integrate_handler resolves defaults from the on-disk SharedState, which
+        # may lag the in-memory baseline when PRELUDE apply fires right after the
+        # baseline lands. Pass the grading anchor (current_best, else baseline)
+        # and the baseline workload contract explicitly so it never bails with
+        # ``base_tput <= 0`` and re-baselines against the right recipe.
+        ss = self.shared_state
+        base_tput = float(getattr(ss, "baseline_tput", 0.0) or 0.0)
+        current_best = getattr(ss, "current_best", {}) or {}
+        if isinstance(current_best, dict):
+            try:
+                cb_tput = float(current_best.get("tput") or 0.0)
+            except (TypeError, ValueError):
+                cb_tput = 0.0
+            if cb_tput > 0:
+                base_tput = cb_tput
+        payload: dict[str, Any] = {
+            "patch_path": replacement,
+            "target_file": target,
+            "source_file": target,
+            "kernel_id": kernel_id,
+            "source": "warm_kernel_kb",
+            "base_tput": base_tput,
+            "keep_threshold_pct": float(
+                os.environ.get("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "1.0") or 1.0
+            ),
+        }
+        config_path = str(getattr(ss, "baseline_config_path", "") or "").strip()
+        if config_path:
+            payload["config_path"] = config_path
+        return await integrate_handler(payload, session_dir=self.session_dir)
+
+    def _open_warm_kernel_record(self) -> Any:
+        """Download this run's independent kernel-agent KB record and open a reader.
+
+        The kernel-agent KB is a standalone ``kernel:`` KB Store record (a
+        sibling of the recipe's ``inference:`` record), so PRELUDE reads it
+        directly instead of from the recipe warm-start. Returns ``None`` when
+        remote KB is not configured or the record does not exist yet.
+        """
+        from ..knowledge.agent_kb import KernelRecordReader
+        from ..knowledge.remote_recipe import (
+            kernel_agent_canonical_id,
+            read_remote_recipe,
+        )
+
+        recipe_cid = str(self._workload_canonical_id() or "").strip()
+        if not recipe_cid:
+            return None
+        kernel_cid = kernel_agent_canonical_id(recipe_cid)
+        record_dir = Path(self.session_dir) / "runtime" / "kernel_agent_kb"
+        record_dir.mkdir(parents=True, exist_ok=True)
+        document = read_remote_recipe(kernel_cid, record_dir)
+        if document is None:
+            return None
+        return KernelRecordReader(record_dir)
+
+    async def _maybe_apply_warm_kernel_kb(self) -> dict[str, Any]:
+        """Load prior-champion kernel patches from KB Store and validate at PRELUDE.
+
+        The kernel-side mirror of :meth:`_maybe_enqueue_warm_replay`: reads the
+        ``gemm``/``fusion``/``rewrite`` columns from this run's KB Store
+        warm-start record, resolves each champion patch's target in the live
+        source tree (parsing the diff header when no absolute path was stored),
+        then applies it through :func:`integrate_handler` which measures the
+        re-baseline and KEEPs only on a win (auto-reverting otherwise). GEMM is
+        parameter-shaped and left to the kernel phase's tuning path. Remote mode
+        only; a run without a KB draft/warm-start directory is a no-op. One-shot
+        per session (resume-safe) and never raises.
+        """
+        state = self.shared_state
+        if getattr(state, "warm_kernel_kb_attempted", False):
+            return {"status": "skipped", "reason": "already_attempted"}
+        state.warm_kernel_kb_attempted = True
+        try:
+            kb = self._open_warm_kernel_record()
+        except Exception:  # noqa: BLE001 — advisory; never block PRELUDE
+            state.warm_kernel_kb_outcome = {"status": "skipped", "reason": "import_failed"}
+            return state.warm_kernel_kb_outcome
+        if kb is None or not kb.active:
+            state.warm_kernel_kb_outcome = {"status": "skipped", "reason": "kb_inactive"}
+            return state.warm_kernel_kb_outcome
+        plan = self._collect_warm_kernel_plan(kb)
+        state.warm_kernel_kb_plan = plan
+        if not plan:
+            state.warm_kernel_kb_outcome = {"status": "empty"}
+            return state.warm_kernel_kb_outcome
+        kept = 0
+        reverted = 0
+        deferred = 0
+        for entry in plan:
+            # GEMM is a tuned-parameter deliverable, not a source patch; its
+            # validated re-application belongs to the kernel phase tuning path.
+            if entry.get("column") == "gemm":
+                entry["decision"] = "DEFERRED"
+                deferred += 1
+                continue
+            if not (entry.get("source_paths") or entry.get("patch_path")):
+                deferred += 1
+                continue
+            target = self._resolve_kernel_target_path(entry)
+            if not target:
+                entry["decision"] = "DEFERRED"
+                deferred += 1
+                continue
+            entry["target_file"] = target
+            try:
+                result = await self._integrate_warm_kernel(entry, target)
+            except Exception as exc:  # noqa: BLE001 — one bad integrate must not abort the rest
+                log.warning("warm-kernel KB: integrate failed for %s", target, exc_info=True)
+                entry["decision"] = "ERROR"
+                entry["integrate_result"] = {"exception": f"{type(exc).__name__}: {exc}"[:300]}
+                deferred += 1
+                continue
+            # Record the integrate verdict verbatim so a REVERT is diagnosable
+            # (was it apply/relaunch failure vs. a measured below-threshold gain).
+            result_dict = result if isinstance(result, dict) else {}
+            entry["integrate_result"] = {
+                k: result_dict.get(k)
+                for k in (
+                    "status", "decision", "error_class", "error", "reason",
+                    "base_tput", "new_tput", "gain_pct", "accuracy_pass", "workspace",
+                )
+                if k in result_dict
+            }
+            decision = str(result_dict.get("decision") or "").strip().upper()
+            entry["decision"] = decision or "REVERT"
+            entry["gain_pct"] = result_dict.get("gain_pct")
+            log.info(
+                "warm-kernel KB integrate: kernel=%s decision=%s status=%s "
+                "base_tput=%s new_tput=%s gain_pct=%s error_class=%s",
+                (entry.get("meta") or {}).get("kernel_name"),
+                entry["decision"], result_dict.get("status"),
+                result_dict.get("base_tput"), result_dict.get("new_tput"),
+                result_dict.get("gain_pct"), result_dict.get("error_class"),
+            )
+            if decision == "KEEP":
+                kept += 1
+            else:
+                reverted += 1
+        columns = sorted({str(e.get("column")) for e in plan})
+        status = "kept" if kept else ("reverted" if reverted else "loaded")
+        outcome = {
+            "status": status,
+            "columns": columns,
+            "total": len(plan),
+            "kept": kept,
+            "reverted": reverted,
+            "deferred": deferred,
+        }
+        state.warm_kernel_kb_outcome = outcome
+        log.info(
+            "PRELUDE warm-kernel KB: columns=%s total=%d kept=%d reverted=%d deferred=%d",
+            columns,
+            len(plan),
+            kept,
+            reverted,
+            deferred,
+        )
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — best-effort persistence
+            log.debug("warm-kernel KB: state save failed", exc_info=True)
+        return outcome
 
     async def _maybe_enqueue_warm_replay(
         self,
