@@ -6631,11 +6631,11 @@ def write_reports(
             from diffusion_roofline import build_report as _build_diffusion_roofline  # noqa: WPS433
             from _denoise_steps import count_profiler_steps, resolve_perstep_divisor  # noqa: WPS433
 
-            # Per-step divisor = denoise steps actually in the trace, preferred
-            # over the requested full sampler schedule.
+            # Per-step divisor: an operator-declared count wins over the one
+            # inferred from the trace, matching the bypass route.
             _num_steps = resolve_perstep_divisor(
-                count_profiler_steps(getattr(args, "trace_input", "") or ""),
-                int(getattr(args, "num_denoise_steps", 0) or 0),
+                requested_steps=int(getattr(args, "num_denoise_steps", 0) or 0),
+                inferred_steps=count_profiler_steps(getattr(args, "trace_input", "") or ""),
             )
             _diff_report = _build_diffusion_roofline(
                 tracelens_dir / "perf_report_csvs",
