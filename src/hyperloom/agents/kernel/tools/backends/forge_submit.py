@@ -236,6 +236,45 @@ def _resolve_gpu_target(candidate: dict) -> str:
     )
 
 
+def _resolve_gpu_type(candidate: dict) -> str:
+    """Resolve the hardware model: env GPU_TYPE -> candidate platform.
+
+    KernelForge files a kernel's experience under the card it was measured on,
+    not under the architecture it was compiled for. The two are not
+    interchangeable: mi300x, mi308x and mi325x all build for gfx942 while
+    differing in bandwidth and cache, so a recipe tuned on one is not a
+    recommendation for the others, and the target cannot be reversed into a
+    model. Returns "" when the model is unknown; KernelForge then declines to
+    read or write rather than filing under an address nothing resolves to.
+    """
+    for raw in (
+        os.environ.get("GPU_TYPE"),
+        candidate.get("platform"),
+        candidate.get("arch"),
+    ):
+        model = str(raw or "").strip().lower()
+        if model in _PLATFORM_TO_GFX:
+            return model
+    return ""
+
+
+def _apply_gpu_type_env(env: dict, gpu_type: str) -> None:
+    """Hand the child a hardware model, or none at all.
+
+    The child inherits this process's environment, where ``GPU_TYPE`` is also
+    accepted as a way to name a gfx target. Passing that through would file the
+    run's experience under ``gfx950`` as though it were a card, so an
+    unresolved model is removed rather than forwarded: KernelForge then declines
+    to read or write, which is visible in its result, instead of addressing a
+    record by a value that means something else.
+    """
+    model = str(gpu_type or "").strip().lower()
+    if model in _PLATFORM_TO_GFX:
+        env["GPU_TYPE"] = model
+    else:
+        env.pop("GPU_TYPE", None)
+
+
 def _normalize_gpu_target(value: str) -> str:
     """Return a canonical lowercase gfx architecture or an empty string."""
     normalized = str(value or "").strip().lower()
@@ -3301,6 +3340,7 @@ def _run_loop_via_cli(
     max_hours: float,
     branch: str,
     gpu_target: str,
+    gpu_type: str,
     fellow: str,
     program_md_file: str,
     invocation_spec_file: str,
@@ -3349,6 +3389,7 @@ def _run_loop_via_cli(
     if forge_root:
         env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
     env["GPU_TARGET"] = gpu_target
+    _apply_gpu_type_env(env, gpu_type)
     # Fellow stability defaults scoped to this child env only.
     _apply_fellow_env(env)
     # KernelForge owns content-addressed AITER cache invalidation. Do not set
@@ -3565,6 +3606,7 @@ def _run_rewrite_via_cli(
     driver_preparation: bool,
     snr_threshold: float,
     gpu_target: str,
+    gpu_type: str,
     max_iters: int,
     max_hours: float,
     branch: str,
@@ -3621,6 +3663,7 @@ def _run_rewrite_via_cli(
     if forge_root:
         env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
     env["GPU_TARGET"] = gpu_target
+    _apply_gpu_type_env(env, gpu_type)
     _apply_fellow_env(env)
     # Same provider pin the generic loop applies through argv, which this command
     # has no options for: it takes no --agent-backend, so its Config reads these.
@@ -3810,6 +3853,7 @@ def _run_rewrite_attempt(
     forge_log: Path,
     invocation_spec_file: str,
     snr_threshold: float,
+    gpu_type: str,
     max_iters: int,
     max_hours: float,
     deadline_unix: float,
@@ -3839,6 +3883,7 @@ def _run_rewrite_attempt(
         driver_preparation=bool(route.capabilities and route.capabilities.driver_preparation),
         snr_threshold=snr_threshold,
         gpu_target=spec.gpu_target,
+        gpu_type=gpu_type,
         max_iters=max_iters,
         max_hours=max_hours,
         branch=spec.branch,
@@ -4291,6 +4336,7 @@ def submit(
         )
         source_framework = _resolve_framework(candidate, source_file)
         gpu_target = _resolve_gpu_target(candidate)
+        gpu_type = _resolve_gpu_type(candidate)
         # Decided before any driver exists, because the rewrite route brings its
         # own dual-mode driver rather than the generic harness.
         rewrite_route = _flydsl_rewrite.evaluate_rewrite_route(
@@ -4497,6 +4543,7 @@ def submit(
                 forge_log=forge_log,
                 invocation_spec_file=invocation_spec_file,
                 snr_threshold=snr_threshold,
+                gpu_type=gpu_type,
                 max_iters=max_iters,
                 max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),
                 deadline_unix=max(time.time() + 1.0, started + timeout_s),
@@ -4516,6 +4563,7 @@ def submit(
             max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),
             branch=branch,
             gpu_target=gpu_target,
+            gpu_type=gpu_type,
             fellow=fellow,
             program_md_file=str(prompt_file),
             invocation_spec_file=invocation_spec_file,
