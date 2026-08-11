@@ -2115,7 +2115,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
     # Resolve critic backend + runtime root before _build_backends; abort rc=2 if --critic-agent runtime unreachable.
     critic_choice = _resolve_critic_choice(args)
-    if critic_choice == "mock" and getattr(args, "critic_protocol", "auto") != "auto":
+    if critic_choice == "mock" and args.critic_protocol != "auto":
         # The mock critic issues no review inference, so there is no transport
         # for the flag to select. Warned rather than rejected: the pairing is
         # harmless, and failing here would break scripts that pass a protocol
@@ -2188,7 +2188,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         robustness_agent_root=robustness_agent_root,
         robustness_options=robustness_options,
         codex_follows_claude=codex_follows_claude,
-        critic_protocol=getattr(args, "critic_protocol", "auto"),
+        critic_protocol=args.critic_protocol,
     )
     # Expose active session_dir to in-process executors via the canonical pin
     # env var; reinforced here for --resume paths. Do NOT overwrite
