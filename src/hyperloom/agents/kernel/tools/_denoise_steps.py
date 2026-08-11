@@ -1,11 +1,16 @@
 """Shared helpers for the diffusion per-denoise-step roofline divisor.
 
 The workload-level ``diffusion_roofline.json`` reports per-denoise-step timings
-as ``workload_totals / num_denoise_steps``. The divisor MUST be the number of
-denoise steps ACTUALLY IN the analyzed data (the steady-state window for bypass,
-or the profiled iterations in the trace for the TraceLens route), NOT the
-requested full sampler schedule -- otherwise the per-step figure is off by the
-ratio of scheduled-to-profiled steps and is not comparable across routes.
+as ``workload_totals / num_denoise_steps``. An operator-declared
+``--num-denoise-steps`` is authoritative for that divisor: Hyperloom cannot know
+what a user's ``prof.step()`` brackets, so a count inferred from the trace is
+only a fallback for when nothing was declared. Both the bypass and TraceLens
+routes apply that same precedence, so the per-step figure depends on the
+workload rather than on which route ran.
+
+Note the fallbacks themselves still differ -- bypass uses its steady-state
+window's step count, TraceLens the deduplicated ``ProfilerStep#N`` count -- so
+route independence holds only while a count was requested.
 
 Kept dependency-free (stdlib only) so both routes can import it freely.
 """

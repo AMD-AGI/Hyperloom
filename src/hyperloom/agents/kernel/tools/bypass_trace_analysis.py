@@ -442,8 +442,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "(mixed / decode_only / prefilldecode); off values: '', 0, false, off, none.",
     )
     p.add_argument("--roofline-output-name", default="kernel_roofline.json")
-    # Denoise-step count for scriptable/diffusion workloads; 0 = infer.
-    p.add_argument("--num-denoise-steps", type=int, default=0)
+    # Denoise-step count for scriptable/diffusion workloads; 0 = infer. The env
+    # fallback matches the TraceLens CLI, so the divisor cannot differ by route.
+    p.add_argument(
+        "--num-denoise-steps",
+        type=int,
+        default=int(os.environ.get("HYPERLOOM_NUM_DENOISE_STEPS", "0") or 0),
+    )
     # Diffusion analytic-ceiling inputs shared with the TraceLens CLI surface;
     # parsed but unused on this route.
     p.add_argument("--model-path", default=os.environ.get("MODEL_PATH", ""))
