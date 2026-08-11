@@ -921,3 +921,51 @@ def test_review_runs_without_any_opt_in(tmp_path):
         model="m",
     )
     assert out["entries"][0]["source_file"] == str(real)
+
+
+# --- degrade, don't abort, against an older installed contract module -------
+#
+# tracelens_analysis.py runs as a standalone subprocess and imports the
+# *installed* hyperloom, which need not match this checkout (cf.
+# runtime/source-mirrors/). A contract module that predates the method-name
+# constants this script reads must degrade to a fallback method name rather
+# than raise AttributeError and kill the run.
+
+
+def test_active_finder_method_falls_back_without_the_constant(monkeypatch):
+    """A contract module missing METHOD_ACTIVE_FINDER must not crash the reader."""
+
+    class _OldContract:
+        """Stands in for a too-old kernel_source_contract (no new constants)."""
+
+    monkeypatch.setattr(tl, "_KSC", _OldContract())
+    # The module-level literal is the source of truth for the fallback string.
+    assert tl._ACTIVE_FINDER_METHOD == "active_finder"
+    authoritative_item = {
+        "source_resolution_method": "active_finder",
+        "op_to_source_status": tl._ROUTABLE_STATUS,
+    }
+    # _is_curated_resolution reads METHOD_ACTIVE_FINDER/SYMBOL_INDEX/CURATED; it
+    # must resolve them via fallback rather than AttributeError.
+    assert tl._is_curated_resolution(authoritative_item) is True
+
+
+def test_candidate_method_falls_back_without_the_constants(monkeypatch):
+    """_candidate_resolution_method degrades to grep/unresolved with no contract."""
+    monkeypatch.setattr(tl, "_KSC", None)
+    assert tl._candidate_resolution_method({"source_file": "/repo/k.cu"}) == "name_grep"
+    assert tl._candidate_resolution_method({}) == "unresolved"
+
+
+def test_stamped_method_survives_a_missing_known_methods(monkeypatch):
+    """A stamped method is echoed back even if KNOWN_METHODS is unavailable."""
+
+    class _OldContract:
+        # Newer constant present, but the KNOWN_METHODS set is absent.
+        METHOD_ACTIVE_FINDER = "active_finder"
+
+    monkeypatch.setattr(tl, "_KSC", _OldContract())
+    item = {"source_resolution_method": "active_finder", "source_file": "/repo/k.cu"}
+    # KNOWN_METHODS is missing -> the stamp is not recognized and falls to the
+    # path-present grep verdict rather than raising.
+    assert tl._candidate_resolution_method(item) == "name_grep"
