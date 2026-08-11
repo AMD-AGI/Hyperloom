@@ -815,7 +815,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "OpenAI SDK; 'anthropic' uses the Messages API, or the Claude CLI when a "
         "CLAUDE_CODE_OAUTH_TOKEN subscription is the only credential. "
         "'auto' (default) derives it from the configured credentials; an "
-        "explicit value fails at startup when that side has no credential.",
+        "explicit value fails at startup when that side has no credential. "
+        "Ignored (with a warning) under --critic-mock, which runs no review "
+        "inference.",
     )
     # Robustness backend selection (mirrors critic)
     opt.add_argument(

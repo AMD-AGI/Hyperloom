@@ -196,6 +196,41 @@ def test_dotenv_fallback_loads_gateway_custom_headers(tmp_path, monkeypatch):
     assert parse_custom_headers(os.environ["OPENAI_CUSTOM_HEADERS"]) == {"X-Tenant": "acme"}
 
 
+def test_preflight_does_not_export_a_derived_url_for_a_subscription_token(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """The Claude CLI resolves its own endpoint, and all three installers keep
+    this URL a local variable. Exporting a derived one would diverge from them
+    and hand every child a gateway signal the operator never set."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _oauth_only_env(monkeypatch, base_url="")
+
+    resolved = cli_preflight._preflight()
+
+    # Still resolved for the decisions downstream of it...
+    assert resolved[0] == "https://api.anthropic.com"
+    # ...but never published into the environment.
+    assert "ANTHROPIC_BASE_URL" not in cli.os.environ
+
+
+def test_preflight_still_exports_an_explicit_url_for_a_subscription_token(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """Only a *derived* URL is withheld; an operator who set one keeps it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _oauth_only_env(monkeypatch, base_url="https://gw.example/anthropic")
+
+    cli_preflight._preflight()
+
+    assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://gw.example/anthropic"
+
+
 def test_preflight_resolves_urls_and_fans_out_auth_aliases(
     monkeypatch,
     tmp_path,

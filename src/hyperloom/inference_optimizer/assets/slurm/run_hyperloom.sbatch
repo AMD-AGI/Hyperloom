@@ -106,9 +106,14 @@ case "$RUNTIME" in
     # Private registry image needs `docker login <registry>` first (or a
     # locally-cached image, in which case no login/pull is needed).
     DOCKER_ENV=()
+    # All three Anthropic credential forms are forwarded, plus each side's
+    # gateway headers: a header-authenticated gateway rejects the call without
+    # them, and forwarding only some forms silently downgrades the container to
+    # a credential the operator did not choose.
     for v in CLAW_SESSION_ID USER_DATA_PATH HL_SHARED_MOUNT \
-             OPENAI_BASE_URL OPENAI_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
-             CLAUDE_CODE_OAUTH_TOKEN \
+             OPENAI_BASE_URL OPENAI_API_KEY OPENAI_CUSTOM_HEADERS \
+             ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN \
+             ANTHROPIC_CUSTOM_HEADERS CLAUDE_CODE_OAUTH_TOKEN \
              REQUESTS_CA_BUNDLE SSL_CERT_FILE HF_TOKEN HYPERLOOM_SOURCE_DIR \
              HYPERLOOM_SOURCE_REPO HYPERLOOM_SOURCE_REF \
              KEY REPO_ID MODEL_PATH FRAMEWORK GPU_TYPE TP PREC ISL OSL CONC MODEL_CLASS \

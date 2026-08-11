@@ -18,6 +18,7 @@ unchanged from the HTTP path.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 from contextlib import aclosing
@@ -63,6 +64,8 @@ DISALLOWED_TOOLS: tuple[str, ...] = (
 # ClaudeAgentOptions has no max_tokens field; the CLI reads the cap from its own
 # environment instead, which is the only way to keep an output budget here.
 OUTPUT_TOKEN_CAP_ENV = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+
+log = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT_SEC = 60.0
 
@@ -235,6 +238,11 @@ async def _drive(sdk: Any, prompt: str, options: Any) -> AnthropicMessageResult:
             message_usage = getattr(message, "usage", None)
             if isinstance(message_usage, Mapping):
                 usage = dict(message_usage)
+            elif message_usage is not None:
+                # Reported rather than dropped: every consumer folds a missing
+                # usage into zero tokens, so an SDK shape change would quietly
+                # under-count spend instead of failing.
+                log.warning("claude_oneshot: ignoring usage of unexpected type %s", type(message_usage).__name__)
             reason = getattr(message, "stop_reason", None)
             if isinstance(reason, str) and reason:
                 stop_reason = reason

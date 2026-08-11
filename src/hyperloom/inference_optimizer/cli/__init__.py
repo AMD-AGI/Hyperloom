@@ -2115,6 +2115,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
     # Resolve critic backend + runtime root before _build_backends; abort rc=2 if --critic-agent runtime unreachable.
     critic_choice = _resolve_critic_choice(args)
+    if critic_choice == "mock" and getattr(args, "critic_protocol", "auto") != "auto":
+        # The mock critic issues no review inference, so there is no transport
+        # for the flag to select. Warned rather than rejected: the pairing is
+        # harmless, and failing here would break scripts that pass a protocol
+        # unconditionally and toggle the mock per run.
+        print(
+            f"WARNING: --critic-protocol={args.critic_protocol} is ignored with the mock critic, "
+            "which performs no review inference.",
+            file=sys.stderr,
+        )
     critic_agent_root: Path | None = None
     critic_kb_mode = os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower()
     if critic_kb_mode not in ("inmemory", "live"):
