@@ -1216,46 +1216,42 @@ def _restore_inplace(restore: dict) -> None:
     # Reset the index to match orig_head (without touching working tree).
     if orig_head:
         _run(["git", "-C", repo, "reset", orig_head, "--", "."], timeout=30)
-    baseline_patch = restore.get("baseline_tracked_patch")
-    if baseline_patch is not None:
-        if not isinstance(baseline_patch, bytes):
-            _release_repo_lock(restore.get("lock_fd"))
-            restore["lock_fd"] = None
-            raise RuntimeError("invalid tracked repository baseline")
-        baseline_in_base_commit = restore.get(
-            "baseline_in_base_commit",
-            False,
-        )
-        if not isinstance(baseline_in_base_commit, bool):
-            _release_repo_lock(restore.get("lock_fd"))
-            restore["lock_fd"] = None
-            raise RuntimeError("invalid tracked baseline commit marker")
-        if baseline_patch and not baseline_in_base_commit:
-            try:
-                _apply_tracked_baseline(repo, baseline_patch)
-            except Exception:
-                _release_repo_lock(restore.get("lock_fd"))
-                restore["lock_fd"] = None
-                raise
-    # Ensure the primary source_file is exactly the pre-forge bytes even if the
-    # git restore above raced or partially applied.
+    # Any baseline failure below must still drop the temp branch and release the
+    # per-repo lock, otherwise the next in-place session cannot run.
     try:
-        Path(restore["source_file"]).write_bytes(restore["backup"])
-    except OSError:
-        pass
-    baseline_untracked = restore.get("baseline_untracked")
-    if baseline_untracked is not None:
-        if not isinstance(baseline_untracked, list) or any(
-            not isinstance(path, str) or not path
-            for path in baseline_untracked
-        ):
-            raise RuntimeError("invalid in-place untracked baseline")
-        _remove_new_untracked(repo, set(baseline_untracked))
-    # Delete the temp branch (safe now that HEAD points elsewhere).
-    if restore.get("branch"):
-        _run(["git", "-C", repo, "branch", "-D", restore["branch"]], timeout=30)
-    # Release the per-repo in-place lock last, after full restore.
-    _release_repo_lock(restore.get("lock_fd"))
+        baseline_patch = restore.get("baseline_tracked_patch")
+        if baseline_patch is not None:
+            if not isinstance(baseline_patch, bytes):
+                raise RuntimeError("invalid tracked repository baseline")
+            baseline_in_base_commit = restore.get(
+                "baseline_in_base_commit",
+                False,
+            )
+            if not isinstance(baseline_in_base_commit, bool):
+                raise RuntimeError("invalid tracked baseline commit marker")
+            if baseline_patch and not baseline_in_base_commit:
+                _apply_tracked_baseline(repo, baseline_patch)
+        # Ensure the primary source_file is exactly the pre-forge bytes even if
+        # the git restore above raced or partially applied.
+        try:
+            Path(restore["source_file"]).write_bytes(restore["backup"])
+        except OSError:
+            pass
+        baseline_untracked = restore.get("baseline_untracked")
+        if baseline_untracked is not None:
+            if not isinstance(baseline_untracked, list) or any(
+                not isinstance(path, str) or not path
+                for path in baseline_untracked
+            ):
+                raise RuntimeError("invalid in-place untracked baseline")
+            _remove_new_untracked(repo, set(baseline_untracked))
+    finally:
+        # Delete the temp branch (safe now that HEAD points elsewhere).
+        if restore.get("branch"):
+            _run(["git", "-C", repo, "branch", "-D", restore["branch"]], timeout=30)
+        # Release the per-repo in-place lock last, after full restore.
+        _release_repo_lock(restore.get("lock_fd"))
+        restore["lock_fd"] = None
 
 
 def _remove_worktree(kernel_repo: str, source_file: str, wt: str, branch: str) -> None:
