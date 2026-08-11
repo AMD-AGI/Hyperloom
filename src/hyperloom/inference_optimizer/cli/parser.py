@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from .. import framework_registry
+from .backends import CRITIC_PROTOCOL_CHOICES
 from hyperloom.common.llm_config import provider_model_defaults
 from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CLAUDE_MODEL,
@@ -808,11 +809,11 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--critic-protocol",
         dest="critic_protocol",
-        choices=("auto", "openai", "anthropic"),
+        choices=CRITIC_PROTOCOL_CHOICES,
         default="auto",
-        help="Transport for the Critic's review inference. 'openai' uses the "
-        "OpenAI SDK, 'anthropic' uses the Claude CLI (which accepts an API key, "
-        "a gateway bearer token, or a CLAUDE_CODE_OAUTH_TOKEN subscription). "
+        help="Protocol for the Critic's review inference. 'openai' uses the "
+        "OpenAI SDK; 'anthropic' uses the Messages API, or the Claude CLI when a "
+        "CLAUDE_CODE_OAUTH_TOKEN subscription is the only credential. "
         "'auto' (default) derives it from the configured credentials; an "
         "explicit value fails at startup when that side has no credential.",
     )
