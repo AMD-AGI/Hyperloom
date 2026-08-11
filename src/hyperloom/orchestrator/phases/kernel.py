@@ -1876,14 +1876,10 @@ class KernelPhase(PhaseHandler):
         else:
             self._promote_gemm_tuning_keep(result)
         # Per-round write: promotion/validation is what appends the
-        # ``gemm_tuning`` row to ``optimization_stack``, and ``build_gemm`` keys
-        # off that row. The staging done inside ``record_gemm_tuning`` above ran
-        # before the row existed, so re-stage now that the accepted GEMM is on
-        # the stack (mirrors the fusion-integrate hook).
-        try:
-            self.shared_state._stage_kernel_kb_columns()
-        except Exception:  # noqa: BLE001 — knowledge write must not fail a round
-            log.debug("kernel kb: gemm per-round staging failed", exc_info=True)
+        # ``gemm_tuning`` row to ``optimization_stack``, and the column is built
+        # from that row, so this is the first point where there is anything to
+        # stage. Staging never raises.
+        self.shared_state._stage_kernel_kb_columns()
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 

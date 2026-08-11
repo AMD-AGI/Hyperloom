@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .agent_kb import KernelAgentKB
-from .remote_recipe.values import _match_rewrite_attempt
+from .remote_recipe.values import match_rewrite_attempt
 
 log = logging.getLogger(__name__)
 
@@ -123,7 +123,9 @@ def build_gemm(state: Any) -> _Built | None:
         for slot, record in zip(slots, records):
             if slot is not None and slot < len(refs):
                 record["tuned_file"] = refs[slot]
-        return {"optimizations": records, "files": refs}
+                if not refs[slot]:
+                    record.pop("tuned_file", None)
+        return {"optimizations": records, "files": [ref for ref in refs if ref]}
 
     return ({"optimizations": records}, sources, fold)
 
@@ -147,9 +149,13 @@ def build_fusion(state: Any) -> _Built | None:
     }
 
     def fold(refs: list[str]) -> dict[str, Any]:
-        record["patch"] = refs[0] if refs else ""
-        record["source_file"] = refs[1] if len(refs) > 1 else ""
-        return {"items": [record], "files": refs}
+        patch_ref = refs[0] if refs else ""
+        source_ref = refs[1] if len(refs) > 1 else ""
+        if not patch_ref or not source_ref:
+            return {"items": [], "files": []}
+        record["patch"] = patch_ref
+        record["source_file"] = source_ref
+        return {"items": [record], "files": [patch_ref, source_ref]}
 
     return ({"items": [record]}, [patch, target], fold)
 
@@ -168,7 +174,7 @@ def build_rewrite(state: Any) -> _Built | None:
     sources: list[str] = []
     slots: list[tuple[int, int]] = []
     for entry in integrated:
-        raw = _match_rewrite_attempt(entry, attempts)
+        raw = match_rewrite_attempt(entry, attempts)
         patch = _readable_file(
             entry.get("patch_path") or raw.get("last_artifact_path") or raw.get("artifact_path")
         )
@@ -206,10 +212,19 @@ def build_rewrite(state: Any) -> _Built | None:
         return None
 
     def fold(refs: list[str]) -> dict[str, Any]:
+        # refs is positional over ``sources`` — an empty slot means that artifact
+        # never staged, so the item it belongs to is dropped rather than
+        # published pointing at a neighbour's file.
+        folded: list[dict[str, Any]] = []
         for item, (patch_slot, source_slot) in zip(items, slots):
-            item["patch"] = refs[patch_slot] if patch_slot < len(refs) else ""
-            item["source_files"] = [refs[source_slot]] if source_slot < len(refs) else []
-        return {"items": items, "files": refs}
+            patch = refs[patch_slot] if patch_slot < len(refs) else ""
+            source = refs[source_slot] if source_slot < len(refs) else ""
+            if not patch or not source:
+                continue
+            item["patch"] = patch
+            item["source_files"] = [source]
+            folded.append(item)
+        return {"items": folded, "files": [ref for ref in refs if ref]}
 
     return ({"items": items}, sources, fold)
 
@@ -226,7 +241,9 @@ def stage_kernel_columns(state: Any, *, kb: KernelAgentKB | None = None) -> dict
 
     Best-effort and idempotent: a write replaces its own sub-column, so
     re-staging after each round keeps the draft in step with the live state.
-    Returns a small summary for logging/tests; never raises.
+    Returns a small summary for logging/tests; never raises — a staging failure
+    is logged at warning level rather than surfaced, because knowledge is
+    advisory and must not fail the optimization round that produced it.
     """
     facade = kb or KernelAgentKB.open()
     if not facade.active:

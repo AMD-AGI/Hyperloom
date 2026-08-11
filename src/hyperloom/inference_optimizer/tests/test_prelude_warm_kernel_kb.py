@@ -31,6 +31,10 @@ class _StubPrelude:
     _revert_warm_kernel_patches = staticmethod(PreludePhase._revert_warm_kernel_patches)
     _maybe_apply_warm_kernel_kb = PreludePhase._maybe_apply_warm_kernel_kb
 
+    def _warm_kernel_gate_reason(self) -> str:
+        """Stubbed gate: these tests exercise the replay itself."""
+        return self.gate_reason
+
     def __init__(self, session_dir: Path, reader: object | None = None) -> None:
         self.session_dir = session_dir
         self.shared_state = SimpleNamespace(
@@ -40,13 +44,20 @@ class _StubPrelude:
             save=lambda *_a, **_k: None,
         )
         self._reader = reader
+        self.gate_reason = ""
         self.applied: list[str] = []
+        self.booked: list[dict] = []
         self.validations: list[dict] = []
         self.reverted: list[dict] = []
 
     def _open_warm_kernel_record(self) -> object | None:
         """Stubbed record open: return a preloaded reader (or None = cold)."""
         return self._reader
+
+    async def _record_warm_kernel_keep(self, result, pending, envs, args, applied) -> None:
+        self.booked.append(
+            {"result": result, "pending": pending, "envs": envs, "args": args}
+        )
 
     def _apply_warm_kernel_patch(self, entry: dict, target: str) -> dict:
         self.applied.append(target)
@@ -139,7 +150,7 @@ async def test_inactive_without_record(tmp_path: Path) -> None:
 
     outcome = await stub._maybe_apply_warm_kernel_kb()
 
-    assert outcome == {"status": "skipped", "reason": "kb_inactive"}
+    assert outcome == {"status": "skipped", "reason": "no_kernel_record"}
 
 
 @pytest.mark.asyncio
@@ -215,6 +226,9 @@ async def test_set_is_staged_then_graded_by_a_single_rebaseline(tmp_path: Path) 
     assert sorted(stub.applied) == sorted(targets)
     assert len(stub.validations) == 1
     assert outcome["kept"] == 3 and outcome["reverted"] == 0
+    # A win must be booked, or the env switches die with the measurement.
+    assert len(stub.booked) == 1
+    assert stub.booked[0]["envs"] == stub.validations[0]["extra_envs"]
     # The one measurement carries the merged bundle of the whole set.
     assert stub.validations[0]["extra_envs"]["AITER_CONFIG"].endswith("kernel/gemm/t.csv")
 

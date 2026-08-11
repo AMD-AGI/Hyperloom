@@ -2122,8 +2122,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         from ..kernel import _kernel_decisions as _m
 
         _m.record_gemm_tuning(self, result)
-        # A GEMM tuning round just completed; re-stage the kernel KB columns.
-        self._stage_kernel_kb_columns()
+        # Staging deliberately does NOT happen here: the ``gemm_tuning`` row the
+        # column is built from is appended later by promote/validate, so a stage
+        # at record time would see nothing. The GEMM handler stages once that row
+        # exists.
 
     def _stage_kernel_kb_columns(self) -> None:
         """Best-effort per-round stage of the kernel KB sub-columns.

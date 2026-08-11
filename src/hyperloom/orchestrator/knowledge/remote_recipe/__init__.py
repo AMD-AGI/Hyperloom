@@ -20,6 +20,7 @@ from .client import (
 )
 from .models import RemoteRecipeValidationError, RemoteWriteResult
 from .values import (
+    KERNEL_AGENT_METRIC,
     build_kernel_agent_knowledge,
     build_remote_knowledge,
     convert_v1_recipe_to_knowledge,
@@ -68,7 +69,9 @@ def write_kernel_agent_kb(
         return RemoteWriteResult("disabled", "KB_STORE_URL/TOKEN not configured")
     with tempfile.TemporaryDirectory(prefix="hyperloom-kernel-agent-") as temporary:
         files_dir = Path(temporary) / "files"
-        bundle, score = build_kernel_agent_knowledge(state, files_dir)
+        bundle, score = build_kernel_agent_knowledge(
+            state, files_dir, sections=KnowledgeSections.from_env()
+        )
         value = bundle.knowledge.get("value") or {}
         has_opt = bool(
             (value.get("gemm") or {}).get("optimizations")
@@ -81,13 +84,14 @@ def write_kernel_agent_kb(
             )
         # Ensure a first kernel optimization always lands even if its gain field
         # is missing; real KEEPs carry a positive gain that drives keep-if-better.
-        metric = score if score > 0 else 1e-6
+        score_value = score if score > 0 else 1e-6
         return resolved.write_if_better(
             kernel_canonical_id,
             session_id,
             bundle,
-            optimized_throughput=metric,
+            optimized_throughput=score_value,
             files_dir=files_dir,
+            metric=KERNEL_AGENT_METRIC,
         )
 
 
@@ -256,6 +260,7 @@ __all__ = [
     "RemoteRecipeConfigurationError",
     "RemoteWarmRecipeAdapter",
     "SectionContent",
+    "KERNEL_AGENT_METRIC",
     "build_kernel_agent_knowledge",
     "build_remote_knowledge",
     "convert_v1_recipe_to_knowledge",

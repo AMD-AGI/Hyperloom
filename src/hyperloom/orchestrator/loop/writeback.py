@@ -1669,6 +1669,10 @@ class WritebackCollaborator:
             )
 
             kernel_cid = kernel_agent_canonical_id(remote_cid)
+            if not kernel_cid:
+                # The recipe write failed before resolving the workload identity.
+                log.info("Kernel-agent KB finalize skipped: no workload identity")
+                return
             kernel_result = write_kernel_agent_kb(
                 self.shared_state, kernel_cid, remote_sid
             )
@@ -2810,8 +2814,9 @@ class WritebackCollaborator:
                     "PRELUDE: failed to enqueue warm-replay task: %r",
                     exc,
                 )
-            # Warm-kernel KB: load prior-champion kernel patches/params (remote
-            # mode only; no-op without a KB draft/warm-start directory).
+            # Warm-kernel KB: replay this workload's champion kernel set from
+            # the independent kernel: record (remote mode only; skipped when
+            # warm replay is off, the KB is degraded, or none is published).
             try:
                 await self._maybe_apply_warm_kernel_kb()
             except Exception as exc:  # noqa: BLE001 — advisory; never block PRELUDE

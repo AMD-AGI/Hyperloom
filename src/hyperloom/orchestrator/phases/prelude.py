@@ -6,6 +6,7 @@ the initial baseline/roofline internal-analysis task enqueue."""
 
 from __future__ import annotations
 import logging as _logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,26 @@ from ..loop.coordinator import (
 from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
+
+
+def _warm_kernel_keep_threshold_pct(default: float = 1.0) -> float:
+    """Gain a replayed champion set must clear, from the environment.
+
+    Parsed in one place with a fallback: a typo in the override used to turn
+    every champion into an ERROR instead of just being ignored.
+    """
+    raw = str(os.environ.get("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning(
+            "warm-kernel KB: HYPERLOOM_WARM_KERNEL_KEEP_PCT=%r is not a number; using %.2f",
+            raw,
+            default,
+        )
+        return default
 
 
 class PreludePhase(PhaseHandler):
@@ -327,15 +348,18 @@ class PreludePhase(PhaseHandler):
             if candidate.is_file():
                 return str(candidate)
         # Suffix fallback: the diff path may carry a package prefix the root
-        # already includes (e.g. ``sglang/foo`` under ``.../sglang/``).
+        # already includes (e.g. ``sglang/foo`` under ``.../sglang/``). Only
+        # drop leading components while a package path remains — matching on a
+        # bare filename would happily point a whole-file replacement at an
+        # unrelated same-named module.
         tail = Path(rel)
         for root in roots:
             base = Path(root.rstrip("/"))
             if not base.is_dir():
                 continue
-            for depth in range(len(tail.parts)):
-                candidate = base / Path(*tail.parts[depth + 1 :]) if depth + 1 < len(tail.parts) else None
-                if candidate is not None and candidate.is_file():
+            for depth in range(1, max(1, len(tail.parts) - 1)):
+                candidate = base / Path(*tail.parts[depth:])
+                if candidate.is_file():
                     return str(candidate)
         return ""
 
@@ -368,6 +392,7 @@ class PreludePhase(PhaseHandler):
         e2e = meta.get("e2e")
         if isinstance(e2e, dict):
             _merge(e2e.get("extra_envs"))
+        by_name = {Path(path).name: path for path in local}
         results = meta.get("e2e_results")
         kept = (results.get("kept") or []) if isinstance(results, dict) else []
         for tuner in kept:
@@ -375,11 +400,25 @@ class PreludePhase(PhaseHandler):
                 continue
             _merge(tuner.get("envs"))
             env_var = str(tuner.get("env_var") or "").strip()
-            if env_var and local:
-                envs[env_var] = local[0]
-        by_name = {Path(path).name: path for path in local}
+            if not env_var:
+                continue
+            # Each accepted tuner owns its own table, so match by the recorded
+            # value's filename. Pointing every tuner at the first download would
+            # feed a dense tuner the MoE table (or vice versa) whenever a record
+            # carries more than one.
+            recorded = str(tuner.get("env_value") or envs.get(env_var) or "").strip()
+            local_copy = by_name.get(Path(recorded).name) if recorded else None
+            if local_copy is None and len(local) == 1:
+                local_copy = local[0]
+            if local_copy:
+                envs[env_var] = local_copy
+        # Re-point any other var that still names a file we downloaded. Only
+        # path-shaped values qualify, so a flag like "1" or "candidate" whose
+        # text happens to match a filename is left alone.
         for name, value in list(envs.items()):
-            replacement = by_name.get(Path(value).name) if value else None
+            if not value or "/" not in value:
+                continue
+            replacement = by_name.get(Path(value).name)
             if replacement and replacement != value:
                 envs[name] = replacement
         return envs
@@ -423,6 +462,45 @@ class PreludePhase(PhaseHandler):
             except Exception:  # noqa: BLE001 — one bad revert must not stop the rest
                 log.warning("warm-kernel KB: revert failed", exc_info=True)
 
+    async def _record_warm_kernel_keep(
+        self,
+        result: dict[str, Any],
+        pending: list[dict[str, Any]],
+        extra_envs: dict[str, str],
+        extra_server_args: str,
+        applied: list[dict[str, Any]],
+    ) -> None:
+        """Promote a winning champion set the same way a kernel integrate is.
+
+        Routes through the shared integrate-KEEP bookkeeping so the replayed set
+        lands on ``optimization_stack``, advances ``current_best`` (carrying the
+        env bundle forward so later server launches keep the switches), and
+        counts toward the validated cumulative gain.
+        """
+        kernels = [
+            str((entry.get("meta") or {}).get("kernel_name") or entry.get("column") or "")
+            for entry in pending
+        ]
+        keep = {
+            "decision": "KEEP",
+            "kernel_id": "warm_kernel_set",
+            "integration_id": "warm_kernel_set",
+            "new_tput": result.get("new_tput"),
+            "gain_pct": result.get("gain_pct"),
+            "workspace": result.get("workspace"),
+            "source": "warm_kernel_kb",
+            "stack_kernel_ids": [k for k in kernels if k],
+            "apply_result": {"stack_apply_results": applied},
+        }
+        if extra_envs:
+            keep["extra_envs"] = dict(extra_envs)
+        if extra_server_args:
+            keep["extra_server_args"] = extra_server_args
+        try:
+            await self._record_integrate_keep(keep)
+        except Exception:  # noqa: BLE001 — bookkeeping must not fail PRELUDE
+            log.warning("warm-kernel KB: recording the KEEP failed", exc_info=True)
+
     async def _validate_warm_kernel_set(
         self, extra_envs: dict[str, str], extra_server_args: str
     ) -> dict[str, Any]:
@@ -431,8 +509,6 @@ class PreludePhase(PhaseHandler):
         The patches are already on disk, so this measures the env bundle plus
         those files in one shot rather than re-benchmarking once per champion.
         """
-        import os
-
         from ..kernel.request_handlers import integrate_handler
 
         ss = self.shared_state
@@ -450,9 +526,7 @@ class PreludePhase(PhaseHandler):
             "source": "warm_kernel_kb",
             "extra_envs": dict(extra_envs or {}),
             "base_tput": base_tput,
-            "keep_threshold_pct": float(
-                os.environ.get("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "1.0") or 1.0
-            ),
+            "keep_threshold_pct": _warm_kernel_keep_threshold_pct(),
         }
         if extra_server_args:
             payload["extra_server_args"] = extra_server_args
@@ -486,30 +560,65 @@ class PreludePhase(PhaseHandler):
             return None
         return KernelRecordReader(record_dir)
 
-    async def _maybe_apply_warm_kernel_kb(self) -> dict[str, Any]:
-        """Load prior-champion kernel patches from KB Store and validate at PRELUDE.
+    def _warm_kernel_gate_reason(self) -> str:
+        """Why this run must not replay kernel champions, or '' when allowed.
 
-        The kernel-side mirror of :meth:`_maybe_enqueue_warm_replay`: reads the
-        ``gemm``/``fusion``/``rewrite`` columns from this run's KB Store
-        warm-start record, resolves each champion patch's target in the live
-        source tree (parsing the diff header when no absolute path was stored),
-        then applies it through :func:`integrate_handler` which measures the
-        re-baseline and KEEPs only on a win (auto-reverting otherwise). GEMM is
-        parameter-shaped and left to the kernel phase's tuning path. Remote mode
-        only; a run without a KB draft/warm-start directory is a no-op. One-shot
-        per session (resume-safe) and never raises.
+        Mirrors the gates the recipe warm-replay honours: an operator opt-out,
+        an explicitly disabled KB, and local knowledge mode — which must never
+        consult ambient ``KB_STORE_*`` credentials.
+        """
+        if not getattr(self, "_warm_replay_enabled", True):
+            return "warm_replay_disabled"
+        if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
+            return "kb_degraded"
+        from ..knowledge.config import KnowledgeConfig, KnowledgeStoreMode
+
+        config = (
+            getattr(getattr(self, "knowledge_plane", None), "config", None)
+            or KnowledgeConfig.from_env()
+        )
+        if config.mode is not KnowledgeStoreMode.REMOTE:
+            return "local_knowledge_mode"
+        return ""
+
+    async def _maybe_apply_warm_kernel_kb(self) -> dict[str, Any]:
+        """Replay this workload's champion kernel set and validate it at PRELUDE.
+
+        The kernel-side mirror of :meth:`_maybe_enqueue_warm_replay`: downloads
+        the independent ``kernel:`` KB Store record, reads its
+        ``gemm``/``fusion``/``rewrite`` columns, resolves each champion patch's
+        target in the live source tree (parsing the diff header when no absolute
+        path was stored), stages the whole set — patches on disk, env bundles
+        merged — and grades it with a single re-baseline, rolling the set back
+        when it does not win. Remote mode only, and skipped when warm replay is
+        off or the KB is degraded. One-shot per session (resume-safe) and never
+        raises.
         """
         state = self.shared_state
         if getattr(state, "warm_kernel_kb_attempted", False):
             return {"status": "skipped", "reason": "already_attempted"}
+        gated = self._warm_kernel_gate_reason()
+        if gated:
+            state.warm_kernel_kb_outcome = {"status": "skipped", "reason": gated}
+            return state.warm_kernel_kb_outcome
         state.warm_kernel_kb_attempted = True
+        # Persist the one-shot flag now: a crash mid-replay must not re-run the
+        # whole (potentially hour-long) set on resume.
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — best-effort persistence
+            log.debug("warm-kernel KB: state save failed", exc_info=True)
         try:
             kb = self._open_warm_kernel_record()
-        except Exception:  # noqa: BLE001 — advisory; never block PRELUDE
-            state.warm_kernel_kb_outcome = {"status": "skipped", "reason": "import_failed"}
+        except Exception as exc:  # noqa: BLE001 — advisory; never block PRELUDE
+            log.warning("warm-kernel KB: opening the record failed", exc_info=True)
+            state.warm_kernel_kb_outcome = {
+                "status": "skipped",
+                "reason": f"record_unavailable:{type(exc).__name__}",
+            }
             return state.warm_kernel_kb_outcome
         if kb is None or not kb.active:
-            state.warm_kernel_kb_outcome = {"status": "skipped", "reason": "kb_inactive"}
+            state.warm_kernel_kb_outcome = {"status": "skipped", "reason": "no_kernel_record"}
             return state.warm_kernel_kb_outcome
         plan = self._collect_warm_kernel_plan(kb)
         state.warm_kernel_kb_plan = plan
@@ -519,6 +628,7 @@ class PreludePhase(PhaseHandler):
         kept = 0
         reverted = 0
         deferred = 0
+        errors = 0
         # Stage the whole champion set first: every patch lands on disk and every
         # env bundle is merged, so the set costs one re-baseline instead of one
         # per champion. The trade is all-or-nothing — the set is graded together.
@@ -560,7 +670,7 @@ class PreludePhase(PhaseHandler):
                 log.warning("warm-kernel KB: apply failed for %s", target, exc_info=True)
                 entry["decision"] = "ERROR"
                 entry["apply_result"] = {"exception": f"{type(exc).__name__}: {exc}"[:300]}
-                deferred += 1
+                errors += 1
                 continue
             entry["apply_result"] = {
                 k: apply_result.get(k)
@@ -569,7 +679,7 @@ class PreludePhase(PhaseHandler):
             }
             if apply_result.get("status") != "ok":
                 entry["decision"] = "ERROR"
-                deferred += 1
+                errors += 1
                 continue
             applied.append(apply_result)
             entry["decision"] = "PENDING"
@@ -606,6 +716,13 @@ class PreludePhase(PhaseHandler):
                 entry["gain_pct"] = result_dict.get("gain_pct")
             if decision == "KEEP":
                 kept = len(pending)
+                # Book the win. Without this the env switches live only inside
+                # that one measurement (the next server launch drops them) and
+                # CLOSE's scrape never sees the replayed champions, so neither
+                # current_best nor cumulative_gain counts them.
+                await self._record_warm_kernel_keep(
+                    result_dict, pending, merged_envs, server_args, applied
+                )
             else:
                 reverted = len(pending)
             log.info(
@@ -616,7 +733,14 @@ class PreludePhase(PhaseHandler):
                 result_dict.get("gain_pct"), result_dict.get("error_class"),
             )
         columns = sorted({str(e.get("column")) for e in plan})
-        status = "kept" if kept else ("reverted" if reverted else "loaded")
+        if kept:
+            status = "kept"
+        elif reverted:
+            status = "reverted"
+        elif errors:
+            status = "error"
+        else:
+            status = "loaded"
         outcome = {
             "status": status,
             "columns": columns,
@@ -624,15 +748,18 @@ class PreludePhase(PhaseHandler):
             "kept": kept,
             "reverted": reverted,
             "deferred": deferred,
+            "errors": errors,
         }
         state.warm_kernel_kb_outcome = outcome
         log.info(
-            "PRELUDE warm-kernel KB: columns=%s total=%d kept=%d reverted=%d deferred=%d",
+            "PRELUDE warm-kernel KB: columns=%s total=%d kept=%d reverted=%d "
+            "deferred=%d errors=%d",
             columns,
             len(plan),
             kept,
             reverted,
             deferred,
+            errors,
         )
         try:
             state.save(self.session_dir)
