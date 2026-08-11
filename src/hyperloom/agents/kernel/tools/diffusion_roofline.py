@@ -132,7 +132,8 @@ def dit_analytic_flops(
         hidden_size: Transformer hidden dimension ``h``.
         num_layers: Number of transformer blocks.
         num_tokens: Sequence length (latent patches) per forward.
-        num_denoise_steps: Denoise steps in the profiled window.
+        num_denoise_steps: Per-step divisor: the requested count when one was
+            given, else the count inferred from the trace.
         ffn_ratio: FFN expansion factor (``intermediate / hidden``).
 
     Returns:
@@ -218,7 +219,8 @@ def build_report(
 
     Args:
         csv_dir: ``--output_csvs_dir`` from generate_perf_report_pytorch.
-        num_denoise_steps: Denoise steps in the profiled window (enables per-step).
+        num_denoise_steps: Per-step divisor: the requested count when one was
+            given, else the count inferred from the trace (enables per-step).
         top_k: How many hottest kernels to include.
 
     Returns:
@@ -267,7 +269,8 @@ def assemble_report(
     Args:
         totals: Workload totals (see ``aggregate_unified`` for the key contract).
         timeline: GPU timeline percentages keyed by type (``busy_time`` etc.).
-        num_denoise_steps: Denoise steps in the profiled window (enables per-step).
+        num_denoise_steps: Per-step divisor: the requested count when one was
+            given, else the count inferred from the trace (enables per-step).
         top_kernels_list: Pre-ranked hottest-kernel summary entries.
         dit_geometry: Optional DiT geometry enabling the analytic compute ceiling.
         achievable_tflops: Optional achievable peak enabling the analytic ceiling.
@@ -511,7 +514,7 @@ def main() -> int:
         "--num-denoise-steps",
         type=int,
         default=0,
-        help="Denoise steps in the profiled window; enables per-step timings.",
+        help="Per-step divisor; enables per-step timings. Wins over the trace-inferred count.",
     )
     parser.add_argument("--top-k", type=int, default=10, help="Hottest kernels to list.")
     parser.add_argument("--output", default="", help="Optional path to write the report JSON.")
