@@ -339,56 +339,6 @@ class PreludePhase(PhaseHandler):
                     return str(candidate)
         return ""
 
-    async def _integrate_warm_kernel(self, entry: dict[str, Any], target: str) -> dict[str, Any]:
-        """Apply one champion kernel and validate it by re-baseline (KEEP/REVERT).
-
-        Reuses :func:`integrate_handler`, which backs up the source, applies the
-        whole-file replacement, re-runs the baseline, and KEEPs only on a
-        throughput (and accuracy) win, auto-reverting otherwise. This is the
-        kernel analogue of explore's measured warm-replay.
-        """
-        import os
-
-        from ..kernel.request_handlers import integrate_handler
-
-        replacement = (entry.get("source_paths") or [entry.get("patch_path")])[0]
-        kernel_id = str((entry.get("meta") or {}).get("kernel_name") or "warm_kernel")
-        # integrate_handler resolves defaults from the on-disk SharedState, which
-        # may lag the in-memory baseline when PRELUDE apply fires right after the
-        # baseline lands. Pass the grading anchor (current_best, else baseline)
-        # and the baseline workload contract explicitly so it never bails with
-        # ``base_tput <= 0`` and re-baselines against the right recipe.
-        ss = self.shared_state
-        base_tput = float(getattr(ss, "baseline_tput", 0.0) or 0.0)
-        current_best = getattr(ss, "current_best", {}) or {}
-        if isinstance(current_best, dict):
-            try:
-                cb_tput = float(current_best.get("tput") or 0.0)
-            except (TypeError, ValueError):
-                cb_tput = 0.0
-            if cb_tput > 0:
-                base_tput = cb_tput
-        payload: dict[str, Any] = {
-            "patch_path": replacement,
-            "target_file": target,
-            "source_file": target,
-            "kernel_id": kernel_id,
-            "source": "warm_kernel_kb",
-            "base_tput": base_tput,
-            "keep_threshold_pct": float(
-                os.environ.get("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "1.0") or 1.0
-            ),
-        }
-        # A fusion's patch only takes effect with the env switches recorded
-        # alongside it; applying the file alone re-measures the unfused path.
-        extra_envs = entry.get("extra_envs") or {}
-        if extra_envs:
-            payload["extra_envs"] = extra_envs
-        config_path = str(getattr(ss, "baseline_config_path", "") or "").strip()
-        if config_path:
-            payload["config_path"] = config_path
-        return await integrate_handler(payload, session_dir=self.session_dir)
-
     @staticmethod
     def _warm_kernel_extra_envs(entry: dict[str, Any]) -> dict[str, str]:
         """Rebuild a champion's env bundle against this run's downloaded files.
@@ -434,12 +384,52 @@ class PreludePhase(PhaseHandler):
                 envs[name] = replacement
         return envs
 
-    async def _integrate_warm_gemm(self, entry: dict[str, Any]) -> dict[str, Any]:
-        """Apply one champion GEMM's tuned config and validate it by re-baseline.
+    def _apply_warm_kernel_patch(
+        self, entry: dict[str, Any], target: str
+    ) -> dict[str, Any]:
+        """Land one champion's file on disk without measuring it.
 
-        The env-only analogue of :meth:`_integrate_warm_kernel`: no source patch,
-        just the tuned table's env bundle handed to :func:`integrate_handler`,
-        which re-runs the baseline and KEEPs only on a win.
+        The measurement is deliberately not here: a champion set is applied as a
+        batch and graded by a single re-baseline, so this only stages the file
+        (with a backup manifest that :meth:`_revert_warm_kernel_patches` uses to
+        roll the whole set back when the set does not win).
+        """
+        from ..kernel.request_handlers import _maybe_apply_kernel_patch
+
+        replacement = (entry.get("source_paths") or [entry.get("patch_path")])[0]
+        kernel_id = str((entry.get("meta") or {}).get("kernel_name") or "warm_kernel")
+        return _maybe_apply_kernel_patch(
+            {
+                "patch_path": replacement,
+                "target_file": target,
+                "source_file": target,
+                "kernel_id": kernel_id,
+                # Champion targets live in the installed framework tree, which is
+                # not a known patch repo root.
+                "allow_unknown_target": True,
+            },
+            session_dir=self.session_dir,
+            kernel_id=kernel_id,
+        )
+
+    @staticmethod
+    def _revert_warm_kernel_patches(applied: list[dict[str, Any]]) -> None:
+        """Roll the whole champion set back after a losing measurement."""
+        from ..kernel.request_handlers import _maybe_revert_kernel_patch
+
+        for apply_result in reversed(applied):
+            try:
+                _maybe_revert_kernel_patch(apply_result)
+            except Exception:  # noqa: BLE001 — one bad revert must not stop the rest
+                log.warning("warm-kernel KB: revert failed", exc_info=True)
+
+    async def _validate_warm_kernel_set(
+        self, extra_envs: dict[str, str], extra_server_args: str
+    ) -> dict[str, Any]:
+        """Grade the whole applied champion set with a single re-baseline.
+
+        The patches are already on disk, so this measures the env bundle plus
+        those files in one shot rather than re-benchmarking once per champion.
         """
         import os
 
@@ -455,19 +445,17 @@ class PreludePhase(PhaseHandler):
                 cb_tput = 0.0
             if cb_tput > 0:
                 base_tput = cb_tput
-        meta = entry.get("meta") or {}
         payload: dict[str, Any] = {
-            "kernel_id": str(meta.get("variant_name") or "warm_gemm"),
+            "kernel_id": "warm_kernel_set",
             "source": "warm_kernel_kb",
-            "extra_envs": entry.get("extra_envs") or {},
+            "extra_envs": dict(extra_envs or {}),
             "base_tput": base_tput,
             "keep_threshold_pct": float(
                 os.environ.get("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "1.0") or 1.0
             ),
         }
-        server_args = str(meta.get("extra_server_args") or "").strip()
-        if server_args:
-            payload["extra_server_args"] = server_args
+        if extra_server_args:
+            payload["extra_server_args"] = extra_server_args
         config_path = str(getattr(ss, "baseline_config_path", "") or "").strip()
         if config_path:
             payload["config_path"] = config_path
@@ -531,8 +519,15 @@ class PreludePhase(PhaseHandler):
         kept = 0
         reverted = 0
         deferred = 0
+        # Stage the whole champion set first: every patch lands on disk and every
+        # env bundle is merged, so the set costs one re-baseline instead of one
+        # per champion. The trade is all-or-nothing — the set is graded together.
+        applied: list[dict[str, Any]] = []
+        merged_envs: dict[str, str] = {}
+        server_args = ""
         for entry in plan:
             if not (entry.get("source_paths") or entry.get("patch_path")):
+                entry["decision"] = "DEFERRED"
                 deferred += 1
                 continue
             # Every column carries its env bundle: a fusion needs its switches to
@@ -540,42 +535,61 @@ class PreludePhase(PhaseHandler):
             envs = self._warm_kernel_extra_envs(entry)
             if envs:
                 entry["extra_envs"] = envs
-            # GEMM is parameter-shaped: the tuned table is re-applied through its
-            # env bundle rather than a source patch, but it is validated by the
-            # same re-baseline gate.
-            is_gemm = entry.get("column") == "gemm"
-            target = ""
-            if is_gemm:
+                merged_envs.update(envs)
+            candidate_args = str((entry.get("meta") or {}).get("extra_server_args") or "").strip()
+            if candidate_args and not server_args:
+                server_args = candidate_args
+            # GEMM is parameter-shaped: its env bundle is the whole deliverable,
+            # so there is nothing to stage on disk.
+            if entry.get("column") == "gemm":
                 if not envs:
                     entry["decision"] = "DEFERRED"
                     deferred += 1
                     continue
-            else:
-                target = self._resolve_kernel_target_path(entry)
-                if not target:
-                    entry["decision"] = "DEFERRED"
-                    deferred += 1
-                    continue
-                entry["target_file"] = target
-            try:
-                if is_gemm:
-                    result = await self._integrate_warm_gemm(entry)
-                else:
-                    result = await self._integrate_warm_kernel(entry, target)
-            except Exception as exc:  # noqa: BLE001 — one bad integrate must not abort the rest
-                log.warning(
-                    "warm-kernel KB: integrate failed for %s",
-                    target or entry.get("column"),
-                    exc_info=True,
-                )
-                entry["decision"] = "ERROR"
-                entry["integrate_result"] = {"exception": f"{type(exc).__name__}: {exc}"[:300]}
+                entry["decision"] = "PENDING"
+                continue
+            target = self._resolve_kernel_target_path(entry)
+            if not target:
+                entry["decision"] = "DEFERRED"
                 deferred += 1
                 continue
-            # Record the integrate verdict verbatim so a REVERT is diagnosable
-            # (was it apply/relaunch failure vs. a measured below-threshold gain).
+            entry["target_file"] = target
+            try:
+                apply_result = self._apply_warm_kernel_patch(entry, target)
+            except Exception as exc:  # noqa: BLE001 — one bad apply must not abort the rest
+                log.warning("warm-kernel KB: apply failed for %s", target, exc_info=True)
+                entry["decision"] = "ERROR"
+                entry["apply_result"] = {"exception": f"{type(exc).__name__}: {exc}"[:300]}
+                deferred += 1
+                continue
+            entry["apply_result"] = {
+                k: apply_result.get(k)
+                for k in ("status", "reason", "error", "manifest_path")
+                if k in apply_result
+            }
+            if apply_result.get("status") != "ok":
+                entry["decision"] = "ERROR"
+                deferred += 1
+                continue
+            applied.append(apply_result)
+            entry["decision"] = "PENDING"
+
+        pending = [entry for entry in plan if entry.get("decision") == "PENDING"]
+        if pending:
+            # One measurement grades the whole set.
+            try:
+                result = await self._validate_warm_kernel_set(merged_envs, server_args)
+            except Exception as exc:  # noqa: BLE001 — a failed grade must not abort PRELUDE
+                log.warning("warm-kernel KB: set validation failed", exc_info=True)
+                result = {
+                    "status": "failed",
+                    "decision": "REVERT",
+                    "error": f"{type(exc).__name__}: {exc}"[:300],
+                }
             result_dict = result if isinstance(result, dict) else {}
-            entry["integrate_result"] = {
+            # Record the verdict verbatim so a REVERT is diagnosable (was it a
+            # relaunch failure vs. a measured below-threshold gain).
+            verdict = {
                 k: result_dict.get(k)
                 for k in (
                     "status", "decision", "error_class", "error", "reason",
@@ -583,21 +597,24 @@ class PreludePhase(PhaseHandler):
                 )
                 if k in result_dict
             }
-            decision = str(result_dict.get("decision") or "").strip().upper()
-            entry["decision"] = decision or "REVERT"
-            entry["gain_pct"] = result_dict.get("gain_pct")
+            decision = str(result_dict.get("decision") or "").strip().upper() or "REVERT"
+            if decision != "KEEP":
+                self._revert_warm_kernel_patches(applied)
+            for entry in pending:
+                entry["decision"] = decision
+                entry["integrate_result"] = verdict
+                entry["gain_pct"] = result_dict.get("gain_pct")
+            if decision == "KEEP":
+                kept = len(pending)
+            else:
+                reverted = len(pending)
             log.info(
-                "warm-kernel KB integrate: kernel=%s decision=%s status=%s "
+                "warm-kernel KB set: champions=%d decision=%s status=%s "
                 "base_tput=%s new_tput=%s gain_pct=%s error_class=%s",
-                (entry.get("meta") or {}).get("kernel_name"),
-                entry["decision"], result_dict.get("status"),
+                len(pending), decision, result_dict.get("status"),
                 result_dict.get("base_tput"), result_dict.get("new_tput"),
                 result_dict.get("gain_pct"), result_dict.get("error_class"),
             )
-            if decision == "KEEP":
-                kept += 1
-            else:
-                reverted += 1
         columns = sorted({str(e.get("column")) for e in plan})
         status = "kept" if kept else ("reverted" if reverted else "loaded")
         outcome = {

@@ -8,6 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from hyperloom.orchestrator.knowledge.agent_kb import KernelAgentKB
+from hyperloom.orchestrator.knowledge.remote_recipe.values import (
+    build_kernel_agent_knowledge,
+    kernel_agent_canonical_id,
+)
 from hyperloom.orchestrator.knowledge.kernel_kb_columns import stage_kernel_columns
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
     KnowledgeSections,
@@ -162,3 +166,51 @@ def test_staged_columns_overlay_into_close_document(tmp_path: Path) -> None:
     assert rewrite["patch"] == "kernel/rewrite/k.diff"
     assert bundle.knowledge["provenance"]["staged_sections"] == ["kernel"]
     assert "kernel/rewrite/k.diff" in {artifact.path for artifact in bundle.artifacts}
+
+
+def test_kernel_agent_canonical_id_swaps_the_scheme() -> None:
+    assert (
+        kernel_agent_canonical_id("inference:m:h:vllm:mt:a:0.1:fp8")
+        == "kernel:m:h:vllm:mt:a:0.1:fp8"
+    )
+    # Idempotent, and a bare slug still lands under the kernel scheme.
+    assert kernel_agent_canonical_id("kernel:m:h") == "kernel:m:h"
+    assert kernel_agent_canonical_id("m:h") == "kernel:m:h"
+
+
+def test_build_kernel_agent_knowledge_carries_gemm_and_scores_it(tmp_path):
+    """The standalone record holds the kernel columns and a kernel-gain score."""
+    tuned = tmp_path / "tuned.csv"
+    tuned.write_text("M,N,K\n16,512,7168\n", encoding="utf-8")
+    state = SimpleNamespace(
+        optimization_stack=[
+            {
+                "action": "gemm_tuning",
+                "tuned_file": str(tuned),
+                "gain_pct": 15.2,
+                "tput": 6638.7,
+                "variant_name": "forge_a8w8_blockscale",
+            }
+        ],
+        last_gemm_tuning={"decision": "KEEP", "e2e_gain_pct": 15.2},
+        kernel_opt_task_attempts={},
+        current_best={"tput": 6638.7},
+        cumulative_gain_validated=84.9,
+        session_id="s1",
+        recipe_kb_session_id="s1",
+    )
+
+    bundle, score = build_kernel_agent_knowledge(state, tmp_path / "ka_files")
+
+    value = bundle.knowledge["value"]
+    # Columns sit flat on value (not nested under a "kernel" key) so the record
+    # is self-describing on its own identity.
+    assert set(value) == {"gemm", "fusion", "rewrite"}
+    assert len(value["gemm"]["optimizations"]) == 1
+    # Scored by kernel gain, not by serving throughput.
+    assert score == 15.2
+    assert bundle.knowledge["optimized_throughput"] == 15.2
+    assert bundle.knowledge["provenance"]["producer"] == "hyperloom-kernel-agent"
+    assert {artifact.path for artifact in bundle.artifacts} == {
+        "kernel/gemm/artifacts/tuned.csv"
+    }
