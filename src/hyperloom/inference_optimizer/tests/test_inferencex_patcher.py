@@ -325,13 +325,13 @@ def test_benchmark_serving_patched_line_is_executable_python(
         "merge_profiles": True,
         "profile_by_stage": True,
     }, f"unexpected default extra_body: {result!r}"
-    os.environ["PROFILE_EXTRA_BODY"] = '{"num_steps": 10, "shape_discovery": true, "roofline_annotations": true}'
+    os.environ["PROFILE_EXTRA_BODY"] = '{"num_steps": 10, "shape_discovery": true, "detailed_annotations": true}'
     try:
         result_env = eval(expr, {"__builtins__": __builtins__})  # noqa: PGH001
         assert result_env == {
             "num_steps": 10,
             "shape_discovery": True,
-            "roofline_annotations": True,
+            "detailed_annotations": True,
         }
     finally:
         os.environ.pop("PROFILE_EXTRA_BODY", None)
