@@ -331,6 +331,9 @@ def _baremetal_credential_functions() -> str:
 _CLEAN_PROVIDER_ENV = [
     "unset OPENAI_BASE_URL OPENAI_API_KEY OPENAI_CUSTOM_HEADERS",
     "unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN",
+    # Now that the shell reads the subscription token too, a developer machine
+    # exporting one would otherwise change what these runs resolve.
+    "unset CLAUDE_CODE_OAUTH_TOKEN",
     "unset CLAUDE_MODEL CODEX_MODEL GEAK_CLAUDE_MODEL",
     "unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL",
 ]
@@ -509,6 +512,14 @@ _SHIM_CASES = {
     "bare deepseek host": {
         "_".join(("DEEPSEEK", "API", "KEY")): "sk-ds",
         "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+    },
+    # A subscription token is a configured Anthropic side, so a stale DEEPSEEK_*
+    # leftover must be ignored whole rather than pointing the run at DeepSeek's
+    # host -- where the migrated API key would also outrank the token and move
+    # the run onto API billing.
+    "subscription token already configured": {
+        "_".join(("DEEPSEEK", "API", "KEY")): "sk-ds",
+        "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")): "sk-ant-oat01-fake",
     },
 }
 

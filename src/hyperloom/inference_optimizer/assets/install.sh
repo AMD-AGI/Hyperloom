@@ -402,7 +402,8 @@ normalize_legacy_deepseek_env() {
   # Adopt the gateway whole or not at all. Anything already on the Anthropic
   # side means the retired variables are stale leftovers: half-adopting them
   # would send an explicit Anthropic credential to DeepSeek's host.
-  if [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+  if [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] \
+     || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     warn "DEEPSEEK_* is retired and ignored here: the Anthropic side is already configured"
     return 0
   fi

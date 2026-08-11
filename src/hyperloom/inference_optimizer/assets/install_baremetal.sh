@@ -1112,7 +1112,8 @@ migrate_legacy_deepseek_env() {
   # would send an explicit Anthropic credential to DeepSeek's host.
   if [ -n "${ANTHROPIC_BASE_URL:-$(read_dotenv_var ANTHROPIC_BASE_URL || true)}" ] \
      || [ -n "${ANTHROPIC_API_KEY:-$(read_dotenv_var ANTHROPIC_API_KEY || true)}" ] \
-     || [ -n "${ANTHROPIC_AUTH_TOKEN:-$(read_dotenv_var ANTHROPIC_AUTH_TOKEN || true)}" ]; then
+     || [ -n "${ANTHROPIC_AUTH_TOKEN:-$(read_dotenv_var ANTHROPIC_AUTH_TOKEN || true)}" ] \
+     || [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-$(read_dotenv_var CLAUDE_CODE_OAUTH_TOKEN || true)}" ]; then
     warn "DEEPSEEK_* is retired and ignored here: the Anthropic side is already configured"
     return 0
   fi
