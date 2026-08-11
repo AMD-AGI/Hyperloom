@@ -194,9 +194,7 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     }
 )
 
-# GPU visibility masks, in the order the runtime resolves them. Machine-specific
-# and never portable: setting one changes which devices a run sees, so it selects
-# the hardware rather than tuning it.
+# GPU visibility masks: setting one selects the hardware rather than tuning it.
 GPU_MASK_ENV_NAMES: frozenset[str] = frozenset(
     {
         "CUDA_VISIBLE_DEVICES",
@@ -235,10 +233,8 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
             "PROFILE",
             "RESULT_DIR",
             "RESULT_FILENAME",
-            # Redirect what the run talks to or trusts: an external recipe has no
-            # business rerouting traffic, model downloads, TLS trust or scratch
-            # space. Kept out of BLOCKED_UNTRUSTED_ENV_NAMES because a local .env
-            # may set the proxies legitimately.
+            # Reroute traffic, model downloads or TLS trust. Kept out of
+            # BLOCKED_UNTRUSTED_ENV_NAMES because a local .env may set the proxies.
             "CURL_CA_BUNDLE",
             "HF_ENDPOINT",
             "HTTP_PROXY",
@@ -256,9 +252,8 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
 # into a session YAML by name alone.
 _SECRET_NAME_FRAGMENTS: tuple[str, ...] = ("APIKEY", "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
-# Substrings that only accidentally spell a fragment: TOKENIZERS_PARALLELISM is a
-# common recipe knob. Masked out before matching rather than exempting the whole
-# name, so TOKENIZER_API_KEY still reads as a credential.
+# Masked out before matching, not exempted whole, so TOKENIZER_API_KEY still reads
+# as a credential while TOKENIZERS_PARALLELISM does not.
 _SECRET_FRAGMENT_EXEMPTIONS: tuple[str, ...] = ("TOKENIZER",)
 
 

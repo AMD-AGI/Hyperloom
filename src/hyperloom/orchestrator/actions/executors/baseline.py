@@ -1148,9 +1148,8 @@ class BaselineExecutor:
             ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
             ensure_benchmark_lib_eval_start_patched(Path(ix_root))
         if not _materialized_run_eval_disabled(config_path):
-            # A checkout that carries the probe target and still cannot be patched
-            # is a hard stop; one that never had it is a layout we do not
-            # recognize, which warns rather than failing every eval run.
+            # Target present but unpatchable is a hard stop; target absent is an
+            # unrecognized layout, which warns rather than failing every eval run.
             probe_root = Path(ix_root) if ix_root else None
             if not ensure_eval_probe_patched(probe_root):
                 msg = (

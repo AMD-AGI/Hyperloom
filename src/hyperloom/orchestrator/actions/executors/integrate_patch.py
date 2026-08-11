@@ -3989,9 +3989,8 @@ class IntegratePatchExecutor:
                 "nonfatal_warnings": list(getattr(r, "nonfatal_warnings", []) or []),
                 # Materialized config used for this bench; needed by revalidation.
                 "materialized_config": str(config_path),
-                # What this leg actually launched, read off the variant rather than
-                # re-derived, so a replay cannot drift from the graded run. RUN_EVAL
-                # is dropped: the replay owns its own eval contract.
+                # Read off the variant so a replay cannot drift from the graded run.
+                # RUN_EVAL is dropped: the replay owns its own eval contract.
                 "effective_config": {
                     "extra_envs": {k: v for k, v in variant.extra_envs.items() if k != "RUN_EVAL"},
                     "extra_server_args": compose_server_args(
