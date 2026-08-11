@@ -1228,8 +1228,9 @@ class _FakeOneShotClient:
 
     instances: list["_FakeOneShotClient"] = []
 
-    def __init__(self, timeout_s: float = 60.0) -> None:
+    def __init__(self, timeout_s: float = 60.0, env: Any = None) -> None:
         self.timeout_s = timeout_s
+        self.env = env
         self.calls: list[dict[str, Any]] = []
         _FakeOneShotClient.instances.append(self)
 
@@ -1285,6 +1286,28 @@ def test_anthropic_transport_ready_skips_the_sdk_probe_on_the_http_transport(mon
 
     monkeypatch.setattr(claude_oneshot, "ensure_available", _missing)
     assert llm_config.anthropic_transport_ready({_ANTHROPIC_KEY: "sk-ant-key"}) is True
+
+
+def test_ensure_available_rejects_a_missing_cli_binary(monkeypatch):
+    """The SDK only spawns `claude`; an importable package with no reachable
+    binary still cannot serve a call, and failing here beats failing at the
+    first review."""
+    from hyperloom.common import claude_oneshot
+
+    monkeypatch.setattr(claude_oneshot, "_load_sdk", lambda: types.SimpleNamespace(__file__=None))
+    monkeypatch.setattr(claude_oneshot.shutil, "which", lambda _name: None)
+
+    with pytest.raises(RuntimeError, match="claude CLI is not available"):
+        claude_oneshot.ensure_available()
+
+
+def test_ensure_available_accepts_a_cli_on_path(monkeypatch):
+    from hyperloom.common import claude_oneshot
+
+    monkeypatch.setattr(claude_oneshot, "_load_sdk", lambda: types.SimpleNamespace(__file__=None))
+    monkeypatch.setattr(claude_oneshot.shutil, "which", lambda _name: "/usr/bin/claude")
+
+    claude_oneshot.ensure_available()
 
 
 @pytest.mark.parametrize(
@@ -1364,6 +1387,37 @@ def test_anthropic_completion_drives_the_claude_cli_for_a_subscription_token(mon
         "system": "sys",
         "max_tokens": 64,
     }
+
+
+def test_anthropic_completion_hands_the_cli_the_caller_env(fake_one_shot):
+    """The CLI resolves its own credential from the environment it is given, so
+    an explicit mapping must reach it instead of being dropped for the ambient
+    one — otherwise a caller that resolved credentials from provider-specific
+    variables silently authenticates as something else."""
+    caller_env = {_OAUTH_ENV: _OAUTH_VALUE, "ANTHROPIC_BASE_URL": "https://gw.example"}
+
+    llm_config.anthropic_completion(
+        model="claude-opus-5",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=8,
+        env=caller_env,
+    )
+
+    assert fake_one_shot.instances[0].env == caller_env
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_completion_hands_the_cli_the_caller_env(fake_one_shot):
+    caller_env = {_OAUTH_ENV: _OAUTH_VALUE}
+
+    await llm_config.aanthropic_completion(
+        model="claude-opus-5",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=8,
+        env=caller_env,
+    )
+
+    assert fake_one_shot.instances[0].env == caller_env
 
 
 def test_anthropic_completion_keeps_the_cli_default_budget_when_unset(fake_one_shot):

@@ -275,6 +275,7 @@ async def test_anthropic_engine_calls_the_entry_point_without_in_process_credent
     """
     built = _install_client_factories(monkeypatch)
     stub = _install_anthropic_completion(monkeypatch)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: True)
 
     engine = AnthropicRcaEngine(base_url="", api_key="", timeout_s=7.0, throttle=_open_throttle())
     engine.set_tick(1)
@@ -282,8 +283,47 @@ async def test_anthropic_engine_calls_the_entry_point_without_in_process_credent
 
     assert len(stub.calls) == 1
     assert built["openai"] == [], "the Anthropic engine must not build an OpenAI client"
-    assert stub.calls[0]["timeout_s"] == 7.0
     assert engine.client is None, "the Anthropic engine owns no client to leak"
+    # The CLI spends part of its budget spawning a process, so the HTTP-sized
+    # timeout is floored rather than forwarded.
+    assert stub.calls[0]["timeout_s"] >= 60.0
+
+
+@pytest.mark.asyncio
+async def test_anthropic_engine_hands_the_discovered_credentials_to_the_transport(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Config.discover may resolve the pair from provider-specific variables,
+    so the canonical names have to be overlaid before the transport reads
+    them — otherwise the CLI re-reads whatever the ambient environment holds."""
+    stub = _install_anthropic_completion(monkeypatch)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: True)
+
+    engine = AnthropicRcaEngine(
+        base_url="https://gw.example/anthropic",
+        api_key="discovered-key",
+        throttle=_open_throttle(),
+    )
+    engine.set_tick(1)
+    await engine.summarize(_sym())
+
+    env = stub.calls[0]["env"]
+    assert env["ANTHROPIC_API_KEY"] == "discovered-key"
+    assert env["ANTHROPIC_BASE_URL"] == "https://gw.example/anthropic"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_engine_skips_when_no_transport_is_available(monkeypatch: pytest.MonkeyPatch):
+    """A host with no Anthropic credential — or a subscription token but no
+    claude CLI — must not retry a doomed call on every tick."""
+    stub = _install_anthropic_completion(monkeypatch)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: False)
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", throttle=_open_throttle())
+    engine.set_tick(1)
+
+    assert await engine.summarize(_sym()) == ""
+    assert stub.calls == []
 
 
 @pytest.mark.asyncio

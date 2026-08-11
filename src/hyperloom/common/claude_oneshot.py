@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+from contextlib import aclosing
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from .llm_config import AnthropicMessageResult, claude_sdk_env_options
@@ -83,13 +86,40 @@ def _load_sdk() -> Any:
     return sdk
 
 
+def _locate_cli(sdk: Any) -> str:
+    """Path to the ``claude`` binary the SDK would drive, or "" when absent.
+
+    Mirrors the SDK's own lookup order: an explicit ``claude`` on PATH wins,
+    otherwise the copy bundled inside the installed package.
+    """
+    found = shutil.which("claude")
+    if found:
+        return found
+    package_dir = getattr(sdk, "__file__", None)
+    if not package_dir:
+        return ""
+    bundled = Path(package_dir).resolve().parent / "_bundled" / "claude"
+    return str(bundled) if bundled.exists() else ""
+
+
 def ensure_available() -> None:
-    """Fail now if the SDK is missing, so callers can degrade at build time.
+    """Fail now if the transport is unusable, so callers can degrade early.
+
+    Checks the binary as well as the package: the SDK is only a wrapper that
+    spawns ``claude``, so an importable SDK with no reachable CLI still fails —
+    and it fails at the first real call, far from the cause.
 
     Raises:
-        RuntimeError: If ``claude_agent_sdk`` cannot be used.
+        RuntimeError: If ``claude_agent_sdk`` or the ``claude`` binary it drives
+            cannot be used.
     """
-    _load_sdk()
+    sdk = _load_sdk()
+    if not _locate_cli(sdk):
+        raise RuntimeError(
+            "the claude CLI is not available (not on PATH and not bundled with "
+            "claude_agent_sdk); install it with "
+            "`npm install -g @anthropic-ai/claude-code`"
+        )
 
 
 def message_text(message: Any) -> list[str]:
@@ -153,15 +183,23 @@ def _build_options(
     model: str,
     system: str | None,
     max_tokens: int | None,
+    env: Mapping[str, str] | None = None,
 ) -> Any:
-    """Assemble the tool-free, single-turn options for one completion."""
-    kwargs: dict[str, Any] = dict(claude_sdk_env_options(model=model))
+    """Assemble the tool-free, single-turn options for one completion.
+
+    ``env`` is the caller's view of the environment, not a set of overrides on
+    top of the process one: a caller that resolved credentials from
+    provider-specific variables has to be able to hand the CLI what it
+    resolved, or the child would re-read the ambient values instead.
+    """
+    kwargs: dict[str, Any] = dict(claude_sdk_env_options(model=model, env=env))
     if max_tokens:
         # claude_sdk_env_options returns {} when no provider signal is set; fall
-        # back to the ambient environment so the cap is the only addition.
-        env = dict(kwargs.get("env") or os.environ)
-        env[OUTPUT_TOKEN_CAP_ENV] = str(int(max_tokens))
-        kwargs["env"] = env
+        # back to the caller's environment so the cap is the only addition.
+        base = kwargs.get("env") or (env if env is not None else os.environ)
+        child_env = dict(base)
+        child_env[OUTPUT_TOKEN_CAP_ENV] = str(int(max_tokens))
+        kwargs["env"] = child_env
     kwargs.update(
         {
             "model": model or None,
@@ -181,23 +219,30 @@ def _build_options(
 
 
 async def _drive(sdk: Any, prompt: str, options: Any) -> AnthropicMessageResult:
-    """Consume one ``query`` stream and flatten it onto the shared result type."""
+    """Consume one ``query`` stream and flatten it onto the shared result type.
+
+    The stream is closed explicitly: a timeout cancels this coroutine mid-
+    iteration, and without an ``aclose()`` the SDK's generator — and the
+    ``claude`` process behind it — is left to whatever the garbage collector
+    does next.
+    """
     final = ""
     chunks: list[str] = []
     usage: Any = None
     stop_reason: str | None = None
-    async for message in sdk.query(prompt=prompt, options=options):
-        message_usage = getattr(message, "usage", None)
-        if isinstance(message_usage, Mapping):
-            usage = dict(message_usage)
-        reason = getattr(message, "stop_reason", None)
-        if isinstance(reason, str) and reason:
-            stop_reason = reason
-        result = getattr(message, "result", None)
-        if isinstance(result, str) and result.strip():
-            final = result
-            continue
-        chunks.extend(message_text(message))
+    async with aclosing(sdk.query(prompt=prompt, options=options)) as stream:
+        async for message in stream:
+            message_usage = getattr(message, "usage", None)
+            if isinstance(message_usage, Mapping):
+                usage = dict(message_usage)
+            reason = getattr(message, "stop_reason", None)
+            if isinstance(reason, str) and reason:
+                stop_reason = reason
+            result = getattr(message, "result", None)
+            if isinstance(result, str) and result.strip():
+                final = result
+                continue
+            chunks.extend(message_text(message))
     return AnthropicMessageResult(
         text=final.strip() or "".join(chunks).strip(),
         stop_reason=stop_reason,
@@ -211,9 +256,15 @@ class ClaudeOneShotClient:
 
     Attributes:
         timeout_s: Wall-clock budget for one completion, CLI startup included.
+            The CLI spawns a process before it reaches the model, so a budget
+            sized for an HTTP round trip will expire during startup.
+        env: Environment the CLI child sees. ``None`` reads the process
+            environment; a caller that resolved credentials from
+            provider-specific variables passes its own view instead.
     """
 
     timeout_s: float = _DEFAULT_TIMEOUT_SEC
+    env: Mapping[str, str] | None = None
 
     async def amessages(
         self,
@@ -235,11 +286,11 @@ class ClaudeOneShotClient:
             The flattened :class:`AnthropicMessageResult`.
 
         Raises:
-            RuntimeError: If the SDK is unavailable.
+            RuntimeError: If the SDK or the ``claude`` binary is unavailable.
             asyncio.TimeoutError: If the completion outruns :attr:`timeout_s`.
         """
         sdk = _load_sdk()
-        options = _build_options(sdk, model=model, system=system, max_tokens=max_tokens)
+        options = _build_options(sdk, model=model, system=system, max_tokens=max_tokens, env=self.env)
         return await asyncio.wait_for(
             _drive(sdk, _prompt_from_messages(messages), options),
             timeout=max(0.1, float(self.timeout_s)),

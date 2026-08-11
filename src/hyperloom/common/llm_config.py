@@ -1152,13 +1152,18 @@ def _anthropic_http_params(
     return params
 
 
-def _one_shot_client(timeout_s: float | None) -> object:
-    """Build the Claude CLI one-shot client, imported late to avoid a cycle."""
+def _one_shot_client(timeout_s: float | None, env: Mapping[str, str] | None) -> object:
+    """Build the Claude CLI one-shot client, imported late to avoid a cycle.
+
+    ``env`` is forwarded rather than dropped: the CLI resolves its own
+    credential from the environment it is handed, so a caller that passed an
+    explicit mapping would otherwise silently get the ambient one.
+    """
     from .claude_oneshot import ClaudeOneShotClient
 
     if timeout_s is None:
-        return ClaudeOneShotClient()
-    return ClaudeOneShotClient(timeout_s=float(timeout_s))
+        return ClaudeOneShotClient(env=env)
+    return ClaudeOneShotClient(timeout_s=float(timeout_s), env=env)
 
 
 def anthropic_completion(
@@ -1203,7 +1208,7 @@ def anthropic_completion(
     """
     transport = anthropic_transport(env)
     if transport == ANTHROPIC_TRANSPORT_SDK:
-        client = _one_shot_client(timeout_s)
+        client = _one_shot_client(timeout_s, env)
         return client.messages(  # type: ignore[attr-defined]
             model=model,
             messages=messages,
@@ -1251,7 +1256,7 @@ async def aanthropic_completion(
     """
     transport = anthropic_transport(env)
     if transport == ANTHROPIC_TRANSPORT_SDK:
-        client = _one_shot_client(timeout_s)
+        client = _one_shot_client(timeout_s, env)
         return await client.amessages(  # type: ignore[attr-defined]
             model=model,
             messages=messages,

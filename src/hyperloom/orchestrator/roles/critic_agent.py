@@ -28,7 +28,7 @@ from hyperloom.common.llm_config import (
     LLMConfigError,
     aanthropic_completion,
     achat_completion,
-    anthropic_transport,
+    anthropic_transport_ready,
     apply_reasoning_effort,
     build_http_timeout,
     get_async_openai_client,
@@ -429,7 +429,7 @@ class CriticAgentBackend:
             (self.claude_model or self.codex_model) if self.protocol == "anthropic" else self.codex_model
         )
         if self.protocol == "anthropic":
-            self._require_anthropic_credential()
+            self._require_anthropic_transport()
         elif self.codex_client_factory is not None:
             self._client = self.codex_client_factory()
         else:
@@ -476,23 +476,27 @@ class CriticAgentBackend:
             ),
         )
 
-    def _require_anthropic_credential(self) -> None:
-        """Fail fast when the Anthropic side cannot authenticate a review call.
+    def _require_anthropic_transport(self) -> None:
+        """Fail fast when the Anthropic side cannot serve a review call.
 
         No client is built here: :func:`aanthropic_completion` owns transport
-        selection, so the only precondition is that some Anthropic-side
-        credential exists. Which channel it implies — Messages API or Claude
-        CLI — is llm_config's decision, not the critic's.
+        selection. The check covers the transport and not just the credential,
+        because a subscription token resolves to the Claude CLI — a host with
+        the token but without the CLI would pass a credential-only check and
+        then fail at the first review, which is what this backend promises not
+        to do.
 
         Raises:
-            BackendError: If no Anthropic-side credential is configured.
+            BackendError: If no Anthropic-side credential is configured, or the
+                transport it implies is unavailable.
         """
-        if anthropic_transport():
+        if anthropic_transport_ready():
             return
         raise BackendError(
-            "CriticAgentBackend(protocol=anthropic) review reasoning requires an "
-            "Anthropic-side credential (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / "
-            "CLAUDE_CODE_OAUTH_TOKEN)"
+            "CriticAgentBackend(protocol=anthropic) review reasoning requires a usable "
+            "Anthropic transport: an Anthropic-side credential (ANTHROPIC_API_KEY / "
+            "ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN), plus the claude CLI when "
+            "that credential is a subscription token"
         )
 
     # Public API — Backend.run

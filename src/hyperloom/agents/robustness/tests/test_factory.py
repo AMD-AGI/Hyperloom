@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.agents.robustness import config as config_module
 from hyperloom.agents.robustness.config import Config
 from hyperloom.agents.robustness.factory import build_reactor_components
 from hyperloom.agents.robustness.role.envelope import IntentType
@@ -239,9 +240,10 @@ async def test_factory_uses_llm_engine_when_credentials_present(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_factory_uses_anthropic_engine_for_provider(tmp_path: Path):
+async def test_factory_uses_anthropic_engine_for_provider(tmp_path: Path, monkeypatch):
     from hyperloom.agents.robustness.decision.rca_engine import AnthropicRcaEngine
 
+    monkeypatch.setattr("hyperloom.common.llm_config.anthropic_transport_ready", lambda *_a, **_kw: True)
     config = Config(
         session_dir=tmp_path,
         robustness_server_url="",
@@ -261,14 +263,48 @@ async def test_factory_uses_anthropic_engine_for_provider(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_factory_uses_anthropic_engine_for_a_subscription_token_host(tmp_path: Path):
+async def test_factory_uses_anthropic_engine_for_a_subscription_token_host(tmp_path: Path, monkeypatch):
     """An oauth-only host resolves no key in-process, and must still get RCA.
 
-    The Claude CLI reads CLAUDE_CODE_OAUTH_TOKEN itself, so the empty
-    base_url/api_key pair is a working configuration, not a missing one.
+    Driven through Config.discover so the empty base_url/api_key pair is the
+    one the token actually produces, rather than a hand-written stand-in.
     """
     from hyperloom.agents.robustness.decision.rca_engine import AnthropicRcaEngine
 
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "OPENAI_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-fake")
+    monkeypatch.setattr("hyperloom.common.llm_config.anthropic_transport_ready", lambda *_a, **_kw: True)
+
+    base_url, api_key, provider = config_module._discover_llm_credentials()
+    assert (base_url, api_key, provider) == ("", "", "anthropic")
+
+    config = Config(
+        session_dir=tmp_path,
+        robustness_server_url="",
+        llm_base_url=base_url,
+        llm_api_key=api_key,
+        llm_provider=provider,
+        llm_model="claude-opus-5",
+    )
+    bundle = build_reactor_components(config)
+    try:
+        engine = bundle.components.rca
+        assert isinstance(engine, AnthropicRcaEngine)
+        await engine.aclose()
+    finally:
+        await bundle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_factory_falls_back_to_noop_when_the_anthropic_transport_is_unusable(
+    tmp_path: Path, monkeypatch
+):
+    """A subscription token with no claude CLI, or no Anthropic credential at
+    all, must degrade at build time instead of failing on every tick."""
+    from hyperloom.agents.robustness.decision.rca_engine import NoopRcaEngine
+
+    monkeypatch.setattr("hyperloom.common.llm_config.anthropic_transport_ready", lambda *_a, **_kw: False)
     config = Config(
         session_dir=tmp_path,
         robustness_server_url="",
@@ -279,9 +315,7 @@ async def test_factory_uses_anthropic_engine_for_a_subscription_token_host(tmp_p
     )
     bundle = build_reactor_components(config)
     try:
-        engine = bundle.components.rca
-        assert isinstance(engine, AnthropicRcaEngine)
-        await engine.aclose()
+        assert isinstance(bundle.components.rca, NoopRcaEngine)
     finally:
         await bundle.aclose()
 
