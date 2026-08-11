@@ -2202,11 +2202,13 @@ class BaselineExecutor:
             warmup_runtime = warmup_result.get("subprocess_runtime_sec")
 
             # Round 2 (measured): re-attach to the hot server (client only).
+            # Keep the warm kernels, drop the warm prefix cache.
             #
             # No accuracy eval here: ordinary baselines already measured it in
             # round 1, while staged kernel integration intentionally defers it
             # until after this hot-throughput gate. In both cases round 2 only
             # needs the steady-state throughput number.
+            prefix_cache_reset = self._reset_prefix_cache(port)
             measure_dir = output_dir / "measure_round"
             measure_cfg = self._write_lifecycle_config(
                 materialized_config_path,
@@ -2219,9 +2221,10 @@ class BaselineExecutor:
             log.info(
                 "baseline_executor: cold-start guard — measured baseline "
                 "round in %s (warmup tput=%.1f tok/s discarded, reusing "
-                "hot server)",
+                "hot server, prefix_cache_reset=%s)",
                 measure_dir,
                 warmup_tput or 0.0,
+                prefix_cache_reset,
             )
             result = await self._run_single_benchmark(
                 config_path=measure_cfg,
@@ -2463,6 +2466,28 @@ class BaselineExecutor:
             )  # nosec B310 - fixed loopback health check.
             return r.status == 200
         except Exception:  # noqa: BLE001
+            return False
+
+    @staticmethod
+    def _reset_prefix_cache(port: int, timeout: float = 30.0) -> bool:
+        """Drop the server's prefix cache; True when the server confirms it.
+
+        Both rounds of the double-run send the same fixed-seed prompts, so
+        without this the measured round scores replayed prefill.
+        """
+        import urllib.request
+
+        try:
+            r = urllib.request.urlopen(
+                urllib.request.Request(
+                    f"http://127.0.0.1:{port}/reset_prefix_cache",
+                    method="POST",
+                ),
+                timeout=timeout,
+            )  # nosec B310 - fixed loopback control endpoint.
+            return bool(json.loads(r.read() or b"{}").get("success"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("baseline_executor: prefix-cache reset failed on port %s: %s", port, exc)
             return False
 
     def _pre_start_cleanup(
