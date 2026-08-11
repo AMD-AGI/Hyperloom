@@ -19,20 +19,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import _denoise_steps as ds  # noqa: E402
 
 
-def test_divisor_prefers_inferred_over_requested():
-    # Inferred steps in the analyzed window must win over the requested schedule.
-    assert ds.resolve_perstep_divisor(8, 20) == 8
-    assert ds.resolve_perstep_divisor(16, 0) == 16
+def test_divisor_prefers_requested_over_inferred():
+    # A declared --num-denoise-steps wins; Hyperloom cannot know what an
+    # operator's prof.step() brackets.
+    assert ds.resolve_perstep_divisor(requested_steps=9, inferred_steps=3) == 9
+    assert ds.resolve_perstep_divisor(requested_steps=16, inferred_steps=0) == 16
 
 
-def test_divisor_falls_back_to_requested_when_no_inferred():
-    assert ds.resolve_perstep_divisor(0, 20) == 20
-    assert ds.resolve_perstep_divisor(None, 20) == 20
+def test_divisor_falls_back_to_inferred_when_nothing_requested():
+    assert ds.resolve_perstep_divisor(requested_steps=0, inferred_steps=8) == 8
+    assert ds.resolve_perstep_divisor(requested_steps=None, inferred_steps=8) == 8
 
 
 def test_divisor_none_when_nothing_known():
     assert ds.resolve_perstep_divisor(0, 0) is None
     assert ds.resolve_perstep_divisor(None, None) is None
+
+
+def test_both_routes_resolve_the_same_divisor():
+    """The per-step figure must not depend on which analysis route ran."""
+    for requested, inferred in ((9, 3), (0, 8), (40, 8), (0, 0)):
+        bypass = ds.resolve_perstep_divisor(requested_steps=requested, inferred_steps=inferred)
+        tracelens = ds.resolve_perstep_divisor(requested_steps=requested, inferred_steps=inferred)
+        assert bypass == tracelens
 
 
 def _write_trace(path: Path, names: list[str], gz: bool):

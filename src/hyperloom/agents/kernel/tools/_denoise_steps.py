@@ -23,27 +23,28 @@ _CHUNK_BYTES = 1 << 20  # 1 MiB
 _OVERLAP_BYTES = 64
 
 
-def resolve_perstep_divisor(inferred_steps: int | None, requested_steps: int | None) -> int | None:
+def resolve_perstep_divisor(requested_steps: int | None, inferred_steps: int | None) -> int | None:
     """Return the denoise-step count to divide workload totals by for per-step.
 
-    Prefers the steps ACTUALLY IN the analyzed window/trace (``inferred_steps``)
-    over the requested full schedule (``requested_steps``), so per-step timings
-    reflect the profiled data -- consistent with the denoise-step-mismatch
-    warning the bypass route emits when the two disagree.
+    Prefers an explicitly requested count over the one inferred from the trace:
+    Hyperloom cannot know what an operator's ``prof.step()`` brackets, so a
+    declared ``--num-denoise-steps`` is authoritative. Both analysis routes use
+    this same precedence, so a per-step figure depends on the workload rather
+    than on which route ran. The bypass route warns when the two disagree.
 
     Args:
+        requested_steps: The operator-declared denoise-step count.
         inferred_steps: Denoise steps detected in the analyzed window/trace.
-        requested_steps: The requested full sampler schedule step count.
 
     Returns:
         The positive divisor to use, or ``None`` when neither is known (the
         caller then omits the per-step block).
     """
-    inf = int(inferred_steps or 0)
-    if inf > 0:
-        return inf
     req = int(requested_steps or 0)
-    return req or None
+    if req > 0:
+        return req
+    inf = int(inferred_steps or 0)
+    return inf or None
 
 
 def count_profiler_steps(trace_path: str) -> int:

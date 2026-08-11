@@ -857,11 +857,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             from diffusion_roofline import build_report_from_bypass  # noqa: E402
 
-            # Per-step divisor is the denoise steps in the analyzed window
-            # (trace-inferred), not the requested full schedule.
-            # An explicit --num-denoise-steps wins; the helper returns its
-            # first positive argument.
-            _diff_steps = resolve_perstep_divisor(requested_denoise_steps, inferred_denoise_steps)
+            _diff_steps = resolve_perstep_divisor(
+                requested_steps=requested_denoise_steps,
+                inferred_steps=inferred_denoise_steps,
+            )
             # Workload totals cover all analyzed device kernels (not just top-k).
             _workload_totals = _report.build_workload_roofline_totals(analyze, target_platform=args.target_platform)
             _all_kernels = [k for k in (analyze.get("kernels") or []) if float(k.get("gpu_time_us") or 0.0) > 0]
