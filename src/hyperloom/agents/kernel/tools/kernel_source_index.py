@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 # ``_bypass_source_resolver._NATIVE_SOURCE_EXTS`` (the editability filter): a
 # ``__global__`` def indexed from an extension the resolver would later reject as
 # non-editable is dead weight, so both lists must agree.
-_NATIVE_EXTS = (".cu", ".cuh", ".hip", ".h")
+_NATIVE_EXTS = (".cu", ".cuh", ".hip", ".h", ".hpp")
 
 # --- kernel-definition scanning ---------------------------------------------
 # A definition head is ``__global__`` <attrs / return type> NAME ( params ).

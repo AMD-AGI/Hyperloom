@@ -45,7 +45,7 @@ from hyperloom.common.env import is_truthy
 log = logging.getLogger(__name__)
 
 # Editable source extensions: native device code plus repo-resident Triton .py.
-_NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip", ".h")
+_NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip", ".h", ".hpp")
 
 
 def is_editable_source(path: str | None, kernel_kind: str | None = None) -> bool:
@@ -131,9 +131,9 @@ _GLOBAL_DEF_RE = re.compile(
     r"__launch_bounds__\s*\([^)]*\))\s*)*(\w+)\s*[\(<]"
 )
 # Directories/paths to skip while scanning source repos.
-_SCAN_SKIP_MARKERS = ("/__pycache__", "/3rdparty/", "/example", "/test", "/jit/build/", "/.git/")
+_SCAN_SKIP_MARKERS = ("/__pycache__", "/example", "/test", "/jit/build/", "/.git/")
 _TRITON_SCAN_EXTS = (".py",)
-_NATIVE_SCAN_EXTS = (".cu", ".cuh", ".hip", ".h")
+_NATIVE_SCAN_EXTS = (".cu", ".cuh", ".hip", ".h", ".hpp")
 
 
 def _demangle_kernel_name(name: str) -> str | None:
