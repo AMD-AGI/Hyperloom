@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 
 _AMD_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x", "mi355x"})
 
@@ -17,12 +18,9 @@ _GFX_TO_RUNNER: dict[str, str] = {
     "gfx950": "mi355x",
 }
 
-_AMD_GPU_DISPATCH_IDENTITIES: dict[str, tuple[str, int]] = {
-    "mi300x": ("gfx942", 304),
-    "mi308x": ("gfx942", 304),
-    "mi325x": ("gfx942", 304),
-    "mi355x": ("gfx950", 256),
-}
+#: Re-exported from ``hyperloom.common`` so provenance and this module cannot
+#: disagree about which arch a board dispatches to.
+_AMD_GPU_DISPATCH_IDENTITIES = AMD_GPU_DISPATCH_IDENTITIES
 
 
 def _gpu_runner_type(gpu_type: str) -> str:

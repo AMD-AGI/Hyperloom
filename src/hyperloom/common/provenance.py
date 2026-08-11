@@ -37,6 +37,8 @@ from importlib import metadata as _im
 from pathlib import Path
 from typing import Any, Mapping
 
+from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
+
 PROVENANCE_VERSION = 1
 #: Tags a full shared provenance block apart from a placeholder stub.
 PROVENANCE_SOURCE = "shared_v1"
@@ -50,7 +52,10 @@ _STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
     "vllm": ("VLLM_VERSION",),
 }
 
-_GFX_ENVS = ("HYPERLOOM_GFX_ARCH", "GFX_ARCH", "PYTORCH_ROCM_ARCH")
+#: Runtime-arch overrides only. ``PYTORCH_ROCM_ARCH`` is deliberately absent:
+#: it names the archs a wheel is *compiled* for, not the installed device, and
+#: ``framework/targeted_build.py`` sets it for exactly that purpose.
+_GFX_ENVS = ("HYPERLOOM_GFX_ARCH", "GFX_ARCH")
 _GRAPH_MODE_ENVS = ("HYPERLOOM_GRAPH_MODE", "GRAPH_MODE")
 _SERVER_ARGS_ENVS = ("HYPERLOOM_SERVER_ARGS", "SERVER_ARGS")
 _IMAGE_ENVS = ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE")
@@ -89,16 +94,41 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
-def detect_gfx_arch(env: Mapping[str, str], *, probe: bool = True) -> str | None:
+def detect_gfx_arch(
+    env: Mapping[str, str], *, gpu_type: str | None = None, probe: bool = True
+) -> str | None:
     """Detect the ROCm gfx arch (e.g. ``gfx950``).
 
-    env override first; else, when ``probe`` is set, a guarded ``rocminfo``
-    invocation. Returns ``None`` when neither resolves (never raises).
+    Resolution order, most authoritative first:
+
+    1. ``_GFX_ENVS`` -- an explicit operator override.
+    2. ``gpu_type`` -- the session's ``--gpu-type``, mapped through
+       :mod:`hyperloom.common.gpu_identity`. It is fixed for the session and is
+       already the recipe KB's hardware dimension, so it is a stronger source
+       than a probe of whatever binary happens to be on ``PATH``.
+    3. ``rocminfo`` -- a guarded subprocess, only when ``probe`` is set.
+
+    Returns ``None`` when none resolve (never raises).
+
+    ``PYTORCH_ROCM_ARCH`` is deliberately absent. It is a build-target list
+    ("gfx90a;gfx942;gfx950;...") and says nothing about the installed device:
+    reading it labelled MI355X nodes ``gfx90a`` (MI200, two generations off)
+    and, because an env hit short-circuits the probe, suppressed the
+    ``rocminfo`` call that would have answered correctly. A single-valued
+    ``PYTORCH_ROCM_ARCH=gfx942`` -- common in vendor images -- was wrong in the
+    same way while looking plausible, so it is excluded outright rather than
+    screened by value shape. Step 2 exists because dropping it otherwise left
+    detection resting entirely on ``rocminfo``, which lives in ``/opt/rocm/bin``
+    and is not placed on ``PATH`` by either install script -- turning a wrong
+    value into no value on exactly the bare-metal nodes that set the variable.
     """
     raw = _env_first(env, *_GFX_ENVS)
     if raw:
         m = _GFX_RE.search(raw)
         return m.group(0).lower() if m else raw
+    from_type = gfx_arch_for_gpu_type(gpu_type or _env_first(env, "GPU_TYPE"))
+    if from_type:
+        return from_type
     if not probe:
         return None
     try:
@@ -278,7 +308,9 @@ def build_provenance(
         "image": detect_image(env, probe=probe),
         # hardware / parallelism / graph
         "gpu_type": (_arg_first(args, "gpu_type") or _env_first(env, "GPU_TYPE")),
-        "gfx_arch": detect_gfx_arch(env, probe=probe),
+        "gfx_arch": detect_gfx_arch(
+            env, gpu_type=_arg_first(args, "gpu_type"), probe=probe
+        ),
         "tp": _int_or_none(_arg_first(args, "tp") or _env_first(env, "TP")),
         "ep": _int_or_none(_arg_first(args, "ep") or _env_first(env, "EP")),
         "graph_mode": (_arg_first(args, "graph_mode") or detect_graph_mode(env)),
