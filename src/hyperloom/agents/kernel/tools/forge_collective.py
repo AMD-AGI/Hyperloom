@@ -656,7 +656,6 @@ def _prepare_collective_workspace(
     else:
         config_snapshot = _config_snapshot(kernel_repo)
         prepared = None
-        config_restored = False
         try:
             prepared = _prepare_worktree(
                 source_file,
@@ -665,7 +664,6 @@ def _prepare_collective_workspace(
                 branch,
             )
             _restore_config(kernel_repo, config_snapshot)
-            config_restored = True
         except Exception:
             try:
                 _remove_verified_worktree(
@@ -675,8 +673,7 @@ def _prepare_collective_workspace(
                     branch,
                 )
             finally:
-                if not config_restored:
-                    _restore_config(kernel_repo, config_snapshot)
+                _restore_config(kernel_repo, config_snapshot)
             raise
         if prepared is None:
             return None

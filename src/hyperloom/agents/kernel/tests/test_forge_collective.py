@@ -1828,23 +1828,37 @@ def test_prepare_workspace_cleans_failed_worktree(tmp_path, monkeypatch):
     repo, source = _make_repo(tmp_path)
     output_dir = tmp_path / "output"
     output_dir.mkdir()
+    expected_snapshot = {"user.name": "baseline"}
+    restored = []
 
     def _uses_worktree(_repo: str) -> bool:
         """Force the isolated worktree path."""
         return False
 
+    def _snapshot(_repo: str) -> dict:
+        """Return a deterministic Git configuration snapshot."""
+        return expected_snapshot
+
     def _raise_worktree(*_args, **_kwargs):
         """Simulate a worktree creation failure."""
         raise RuntimeError("worktree exploded")
 
+    def _record_restore(repo_path: str, snapshot: dict) -> None:
+        """Record the Git configuration restoration request."""
+        restored.append((repo_path, snapshot))
+
     monkeypatch.setattr(fc, "_needs_inplace", _uses_worktree)
+    monkeypatch.setattr(fc, "_config_snapshot", _snapshot)
     monkeypatch.setattr(fc, "_prepare_worktree", _raise_worktree)
+    monkeypatch.setattr(fc, "_restore_config", _record_restore)
 
     with pytest.raises(RuntimeError, match="worktree exploded"):
         fc._prepare_collective_workspace(
             _repository_payload(output_dir, source, repo),
             output_dir,
         )
+
+    assert restored == [(str(repo), expected_snapshot)]
 
 
 def test_prepare_workspace_returns_none_for_unavailable_worktree(
