@@ -379,39 +379,59 @@ class PreludePhase(PhaseHandler):
                 os.environ.get("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "1.0") or 1.0
             ),
         }
+        # A fusion's patch only takes effect with the env switches recorded
+        # alongside it; applying the file alone re-measures the unfused path.
+        extra_envs = entry.get("extra_envs") or {}
+        if extra_envs:
+            payload["extra_envs"] = extra_envs
         config_path = str(getattr(ss, "baseline_config_path", "") or "").strip()
         if config_path:
             payload["config_path"] = config_path
         return await integrate_handler(payload, session_dir=self.session_dir)
 
     @staticmethod
-    def _warm_gemm_extra_envs(entry: dict[str, Any]) -> dict[str, str]:
-        """Rebuild a champion GEMM's env bundle against the downloaded tuned file.
+    def _warm_kernel_extra_envs(entry: dict[str, Any]) -> dict[str, str]:
+        """Rebuild a champion's env bundle against this run's downloaded files.
 
-        A GEMM champion is parameter-shaped: the tuned table travels as a file
-        ref and the env var that points at it is recorded per accepted tuner in
-        ``e2e_results.kept[].env_var``. The producing session's absolute path is
-        scrubbed before publish, so replay re-points that env var at this run's
-        local copy and merges the recorded path-free envs on top.
+        A champion's deliverable is not always a source file. GEMM is purely
+        parameter-shaped — the tuned table travels as a file ref and the env var
+        that carries it is recorded per accepted tuner in
+        ``e2e_results.kept[].env_var`` — and a fusion carries the env switches
+        (``extra_envs``/``env_flags``) that turn the fused path on. Applying the
+        patch without them re-measures the unoptimized path and reverts a good
+        champion, so replay merges every recorded env and re-points any
+        file-valued one at this run's local copy (the producing session's
+        absolute paths are scrubbed before publish).
         """
         meta = entry.get("meta") or {}
-        tuned = next((str(p) for p in (entry.get("source_paths") or []) if p), "")
-        if not tuned:
-            return {}
+        local = [str(p) for p in (entry.get("source_paths") or []) if p]
         envs: dict[str, str] = {}
-        for source in (meta.get("recommended_env"), meta.get("extra_envs")):
+
+        def _merge(source: Any) -> None:
             if isinstance(source, dict):
-                envs.update({str(k): str(v) for k, v in source.items() if str(k).strip()})
-        kept = ((meta.get("e2e_results") or {}).get("kept") or []) if isinstance(meta.get("e2e_results"), dict) else []
+                envs.update(
+                    {str(k): str(v) for k, v in source.items() if str(k).strip()}
+                )
+
+        for key in ("extra_envs", "env_flags", "recommended_env"):
+            _merge(meta.get(key))
+        e2e = meta.get("e2e")
+        if isinstance(e2e, dict):
+            _merge(e2e.get("extra_envs"))
+        results = meta.get("e2e_results")
+        kept = (results.get("kept") or []) if isinstance(results, dict) else []
         for tuner in kept:
             if not isinstance(tuner, dict):
                 continue
-            tuner_envs = tuner.get("envs")
-            if isinstance(tuner_envs, dict):
-                envs.update({str(k): str(v) for k, v in tuner_envs.items() if str(k).strip()})
+            _merge(tuner.get("envs"))
             env_var = str(tuner.get("env_var") or "").strip()
-            if env_var:
-                envs[env_var] = tuned
+            if env_var and local:
+                envs[env_var] = local[0]
+        by_name = {Path(path).name: path for path in local}
+        for name, value in list(envs.items()):
+            replacement = by_name.get(Path(value).name) if value else None
+            if replacement and replacement != value:
+                envs[name] = replacement
         return envs
 
     async def _integrate_warm_gemm(self, entry: dict[str, Any]) -> dict[str, Any]:
@@ -515,18 +535,21 @@ class PreludePhase(PhaseHandler):
             if not (entry.get("source_paths") or entry.get("patch_path")):
                 deferred += 1
                 continue
+            # Every column carries its env bundle: a fusion needs its switches to
+            # activate the patched path, and a GEMM is nothing but its bundle.
+            envs = self._warm_kernel_extra_envs(entry)
+            if envs:
+                entry["extra_envs"] = envs
             # GEMM is parameter-shaped: the tuned table is re-applied through its
             # env bundle rather than a source patch, but it is validated by the
             # same re-baseline gate.
             is_gemm = entry.get("column") == "gemm"
             target = ""
             if is_gemm:
-                envs = self._warm_gemm_extra_envs(entry)
                 if not envs:
                     entry["decision"] = "DEFERRED"
                     deferred += 1
                     continue
-                entry["extra_envs"] = envs
             else:
                 target = self._resolve_kernel_target_path(entry)
                 if not target:
