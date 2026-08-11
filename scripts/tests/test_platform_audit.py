@@ -33,17 +33,25 @@ pa = _load()
 
 # -------------------------------------------------------------- verdicts
 
-def test_determinism_prose_cannot_pass_as_power():
-    """Regression: the explanatory string must never satisfy the "power" target.
+def test_determinism_is_recorded_not_judged():
+    """58011 §4.2.2 makes determinism a deployment choice, not a correctness one.
 
-    The inference for Performance determinism used to be returned as the prose
-    "Performance (or Power at a uniform bin)". Substring matching then found
-    "power" inside it and returned PASS -- so the one configuration this check
-    exists to catch was the one it silently approved.
+    Performance determinism buys "uniform performance across identically
+    configured systems"; Power determinism buys "maximum performance of any
+    individual system ... resulting in a varying performance range across the
+    datacenter". Hyperloom wants both the highest number on this node and
+    comparability across nodes, so asserting either value would contradict one
+    of its own goals.
+
+    This also retires the substring bug at the source: the prose form used to be
+    matched against a "power" target and returned PASS, silently approving the
+    one configuration the check existed to catch.
     """
-    assert pa.verdict("determinism", "Performance (or Power at a uniform bin)") == "FAIL"
-    assert pa.verdict("determinism", "performance") == "FAIL"
-    assert pa.verdict("determinism", "power") == "PASS"
+    assert "determinism" in pa.RECORDED
+    assert "determinism" not in pa.CHECKED
+    row = {r["key"]: r for r in pa.build_rows({"determinism": "performance"})}["determinism"]
+    assert row["verdict"] == "RECORD"
+    assert row["value"] == "performance"
 
 
 def test_verdict_is_exact_not_substring():
@@ -56,7 +64,7 @@ def test_verdict_is_exact_not_substring():
 
 def test_verdict_normalizes_case_and_whitespace():
     assert pa.verdict("cpufreq_governor", "  PERFORMANCE  ") == "PASS"
-    assert pa.verdict("determinism", "Power") == "PASS"
+    assert pa.verdict("core_performance_boost", "  Enabled ") == "PASS"
 
 
 @pytest.mark.parametrize("value", ["", "unknown", "auto", "n/a", "none", None])
@@ -73,9 +81,8 @@ def test_infer_determinism_normalizes_value_and_separates_the_caveat():
 
     value, note = pa.infer_determinism(0.5)
     assert value == "performance"
-    # The caveat survives, but only as prose -- never as the matched value.
+    # The caveat survives, but only as prose -- never as the reported value.
     assert "uniformly binned" in note
-    assert pa.verdict("determinism", value) == "FAIL"
 
 
 def test_infer_determinism_declines_when_ambiguous_or_unmeasured():
@@ -104,9 +111,9 @@ def test_recorded_knobs_never_affect_the_exit_code():
 def test_quick_mode_can_still_pass():
     """--quick exists to be fast; it must not guarantee a non-zero exit.
 
-    Determinism needs load generation, so quick mode cannot judge it. Reporting
-    it as unresolved made every fast run exit 2, which made the flag useless as
-    a gate; it is now SKIPPED, which is excluded from the exit code.
+    Reporting the unmeasured knob as unresolved made every fast run exit 2,
+    which made the flag useless as a gate. No judged knob needs load generation
+    now, so quick mode can reach every verdict the tool offers.
     """
     osl = {
         "core_performance_boost": "enabled",
@@ -118,8 +125,8 @@ def test_quick_mode_can_still_pass():
         "quick": True,
     }
     rows = pa.build_rows(osl)
-    assert {r["key"]: r["verdict"] for r in rows}["determinism"] == "SKIPPED"
     assert pa.exit_code(rows) == pa.EXIT_OK
+    assert not any(r["key"] in pa.CHECKED for r in rows if r["verdict"] == "UNKNOWN")
 
 
 def test_quick_mode_still_fails_on_a_knob_it_can_read():
@@ -148,9 +155,16 @@ def test_build_rows_marks_recorded_knobs_and_judges_the_rest():
     by_key = {r["key"]: r for r in pa.build_rows(osl)}
     assert by_key["core_performance_boost"]["verdict"] == "PASS"
     assert by_key["cpufreq_governor"]["verdict"] == "FAIL"
-    assert by_key["determinism"]["verdict"] == "PASS"
+    assert by_key["determinism"]["verdict"] == "RECORD"
     assert by_key["smt"]["verdict"] == "RECORD"
     assert by_key["nps"]["verdict"] == "RECORD"
+
+
+def test_every_judged_knob_cites_its_basis():
+    """A target without a stated reason is how the profile drifted in the first place."""
+    for key, spec in pa.CHECKED.items():
+        assert spec["basis"].strip(), f"{key} has no basis"
+        assert spec["target"], f"{key} has no target"
 
 
 # -------------------------------------------------------------- epyc parsing

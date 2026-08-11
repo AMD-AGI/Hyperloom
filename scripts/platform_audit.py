@@ -5,7 +5,13 @@
 """Audit the AMD EPYC CPU tuning that affects inference benchmark results.
 
 Reads only what the operating system exposes -- ``/sys``, ``/proc`` and, when
-run as root, the HWCR MSR -- and reports each knob as PASS, FAIL or UNKNOWN.
+run as root, the HWCR MSR.
+
+Judges Core Performance Boost and the cpufreq governor, which have an
+unambiguous right answer here. Records determinism, SMT and nodes-per-socket
+without a verdict, because AMD's own tuning guide varies them by workload and
+this tool should not invent a recommendation for LLM inference that AMD does
+not publish. See ``SOURCE`` below for the citation and the per-knob reasoning.
 
 Why check at all, given a session's A/B is same-machine: host tuning applies to
 baseline and candidates alike, so it cancels out of the *delta*. It does not
@@ -55,51 +61,64 @@ import time
 # --------------------------------------------------------------------------
 # Target profile
 # --------------------------------------------------------------------------
-# Targets are asserted only where the reasoning is specific to this workload.
-# The host CPU in an inference benchmark is doing sampling, scheduling,
-# tokenization and request dispatch -- latency-sensitive, weakly threaded work
-# -- not the sustained all-core FP throughput that HPC tuning guides optimize
-# for. Where a knob's right answer is genuinely a judgement call for this
-# workload, it is RECORDED rather than judged, because a check that cannot fail
-# (or that fails everywhere) teaches readers to ignore the tool.
+#: AMD, "BIOS & Workload Tuning Guide for AMD EPYC 9004 Series Processors",
+#: publication 58011 rev 1.0 (2025-05-09).
+#: https://docs.amd.com/v/u/en-US/58011-epyc-9004-tg-bios-and-workload
+#:
+#: Chapter 5 ("Workload-Specific BIOS Settings") is the reference for the target
+#: profile, and reading it closely is also why this tool judges less than it
+#: originally did. Chapter 5 does not publish one performance profile: it
+#: publishes a different column per workload -- CPU-intensive, Java throughput,
+#: Java latency, virtualization, database, HPC/Telco -- and most rows differ
+#: between them. Where chapter 5 itself varies a knob by workload, this tool
+#: records it instead of asserting an answer for LLM inference that AMD does not
+#: publish. The guide covers 9004 (Genoa); these knobs and their semantics carry
+#: forward to 9005 (Turin), which is what the fleet actually runs.
+SOURCE = (
+    "AMD BIOS & Workload Tuning Guide for EPYC 9004 (pub. 58011 rev 1.0), ch. 5"
+)
 
 CHECKED: dict[str, dict] = {
     "core_performance_boost": {
         "label": "Core Performance Boost",
         "target": ("enabled",),
         "basis": (
-            "CPU-side work runs below rated clocks with boost off; the effect is "
-            "directly measurable here as achieved core MHz."
-        ),
-    },
-    "determinism": {
-        "label": "Determinism control",
-        "target": ("power",),
-        "basis": (
-            "Power determinism lets each part run to its own silicon limit. "
-            "Performance determinism pins every core to a common guaranteed "
-            "floor, trading measured throughput for run-to-run repeatability."
+            "Boost is Enable/Auto by default and no chapter 5 profile disables it "
+            "(58011 §4.1.3). Off, the CPU-side work in a serving benchmark -- "
+            "sampling, scheduling, tokenization, dispatch -- runs below rated "
+            "clocks, and the effect is directly measurable here as achieved MHz."
         ),
     },
     "cpufreq_governor": {
         "label": "cpufreq governor",
         "target": ("performance",),
         "basis": (
-            "A ramping governor distorts latency percentiles: the early requests "
-            "of a burst are served at a lower clock than the later ones."
+            "An OS setting, not a BIOS one, so it is outside 58011: the basis is "
+            "that a ramping governor distorts latency percentiles, because the "
+            "early requests of a burst are served at a lower clock than the later "
+            "ones. This is the knob most often wrong on a freshly imaged node."
         ),
     },
 }
 
 #: Recorded for comparability, never judged.
 #:
-#: ``smt``: on by default across the EPYC fleet. Judging it would fail nearly
-#: every node from day one, which is the same reason the preflight check stopped
-#: warning on it.
+#: ``determinism``: 58011 §4.2.2 frames this as a deployment choice, not a
+#: correctness one. Performance determinism gives "uniform performance across
+#: identically configured systems"; Power determinism gives "maximum performance
+#: of any individual system ... resulting in a varying performance range across
+#: the datacenter". Chapter 5 leaves it at default for general-purpose and most
+#: HPC columns and selects Power only for the database profile. Hyperloom wants
+#: both properties at once -- the highest number on this node, and comparability
+#: across nodes -- so asserting either value would contradict one of its own
+#: goals. It is measured and recorded; the operator picks.
+#: ``smt``: on by default across the EPYC fleet, and chapter 5 leaves SMT Control
+#: at default in every general-purpose column. Judging it would fail nearly every
+#: node from day one, which is why the preflight check stopped warning on it too.
 #: ``nps``: NPS1 and NPS4 are opposite, both defensible tradeoffs -- NPS1
-#: interleaves for bandwidth, NPS4 favours locality. With no conclusion for this
-#: workload, recording is the honest form.
-RECORDED = ("smt", "nps")
+#: interleaves for bandwidth, NPS4 favours locality -- and chapter 5's own NUMA
+#: rows differ per workload.
+RECORDED = ("determinism", "smt", "nps")
 
 #: Frequency spread, in MHz, above which cores are judged to be running to their
 #: own limits rather than a common one. Chosen as a threshold comfortably above
@@ -416,43 +435,39 @@ def verdict(key: str, value: object) -> str:
 EXIT_OK, EXIT_FAIL, EXIT_UNKNOWN = 0, 1, 2
 
 
-#: Knobs that can only be resolved by generating load, so ``--quick`` cannot
-#: judge them.
-MEASURED = ("determinism",)
+_RECORD_LABELS = {"determinism": "Determinism control", "smt": "SMT", "nps": "NPS"}
 
 
 def build_rows(osl: dict) -> list[dict]:
     """One row per checked knob, plus the recorded-only entries.
 
-    In ``--quick`` a measurement-dependent knob is reported SKIPPED rather than
-    UNKNOWN. The distinction is the difference between "we did not look" and
-    "we looked and could not tell", and it is what keeps ``--quick`` usable as
-    a gate: reporting it as unresolved made a fast run exit non-zero every time.
+    Only the two knobs with an unambiguous right answer are judged, and neither
+    needs load generation -- so ``--quick`` can reach every verdict this tool
+    offers and a fast run is a usable gate. Determinism is still measured and
+    reported when the run is not quick; it simply does not carry a verdict.
     """
-    quick = bool(osl.get("quick"))
     rows = []
     for key, spec in CHECKED.items():
         value = osl.get(key, "unknown")
-        skipped = quick and key in MEASURED
         rows.append(
             {
                 "knob": spec["label"],
                 "key": key,
                 "value": str(value),
                 "target": "/".join(spec["target"]),
-                "verdict": "SKIPPED" if skipped else verdict(key, value),
+                "verdict": verdict(key, value),
                 "note": osl.get(f"{key}_note", ""),
             }
         )
     for key in RECORDED:
         rows.append(
             {
-                "knob": key.upper() if key == "nps" else key.capitalize(),
+                "knob": _RECORD_LABELS.get(key, key),
                 "key": key,
                 "value": str(osl.get(key, "unknown")),
                 "target": "",
                 "verdict": "RECORD",
-                "note": "recorded for comparability; not judged",
+                "note": osl.get(f"{key}_note", "") or "recorded for comparability; not judged",
             }
         )
     return rows
@@ -502,6 +517,8 @@ def render(osl: dict, rows: list[dict]) -> None:
             print(f"    {r['knob']}: {r['note'] or 'not readable on this host'}")
     if not fails and not unknown:
         print("All checked knobs on target.")
+    print(f"\nTargets follow {SOURCE}.")
+    print("RECORD rows are reported, not judged: the guide varies them by workload.")
     if os.geteuid() != 0:
         print("\nNote: not root — the HWCR MSR was not read, so Core Performance Boost")
         print("falls back to the sysfs view.")
@@ -512,14 +529,14 @@ def main() -> int:
         description="Audit OS-visible AMD EPYC tuning that affects benchmark results",
         epilog=(
             "Exit: 0 all checked knobs on target, 1 a knob is wrong, "
-            "2 a knob could not be resolved. Recorded-only knobs (SMT, NPS) "
-            "never affect the exit code."
+            "2 a knob could not be resolved. Recorded-only knobs (determinism, "
+            f"SMT, NPS) never affect the exit code. Targets follow {SOURCE}."
         ),
     )
     ap.add_argument(
         "--quick",
         action="store_true",
-        help="skip load generation; determinism is then reported as unresolved",
+        help="skip load generation; determinism is then recorded as unmeasured",
     )
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args()

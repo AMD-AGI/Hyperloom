@@ -32,6 +32,7 @@ from hyperloom.common.llm_config import (
     provider_model_defaults,
 )
 from hyperloom.common.platform_probe import probe_cpu_platform
+from hyperloom.common.provenance import detect_gfx_arch
 
 from .credentials import (
     _is_stale_proxy_url,
@@ -981,6 +982,28 @@ def _check_shm_disk() -> None:
         )
 
 
+def _check_gfx_arch_resolvable(gpu_type: str | None = None) -> None:
+    """Warn when the GPU architecture cannot be resolved for provenance.
+
+    ``gfx_arch`` is what tells a reader of an archived report which ISA produced
+    a number. When no source resolves it is recorded as ``null``, which is
+    correct -- and silent. That silence lands on exactly the hosts where it is
+    hardest to notice: bare-metal nodes, where ``rocminfo`` is in ``/opt/rocm/bin``
+    and no install script puts it on ``PATH``.
+
+    Warn-only, and it names the three ways to fix it, because null provenance is
+    only cheap to correct before the run rather than after.
+    """
+    if detect_gfx_arch(os.environ, gpu_type=gpu_type):
+        return
+    print(
+        "Preflight: WARNING — GPU architecture could not be resolved; provenance "
+        "will record gfx_arch as null, so an archived report will not say which "
+        "ISA produced its numbers. Pass --gpu-type (mi300x/mi308x/mi325x/mi355x), "
+        "set HYPERLOOM_GFX_ARCH, or put rocminfo (/opt/rocm/bin) on PATH."
+    )
+
+
 def _check_platform_tuning() -> None:
     """Record host CPU tuning state and warn on settings that skew results.
 
@@ -1555,6 +1578,7 @@ def _preflight(
     _check_gpu_visibility()
     _check_shm_disk()
     _check_platform_tuning()
+    _check_gfx_arch_resolvable(getattr(args, "gpu_type", None))
 
     # --- Runtime dep install ---
     # 1. Ray — used broadly (multi-node scheduling, kernel/profile/recover
