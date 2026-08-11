@@ -11,7 +11,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -313,7 +312,7 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         self._write_metrics(self._summary())
         warnings: list[dict] = []
 
-        with mock.patch.object(tla, "_aiter_csrc_root", return_value=""):
+        with unittest.mock.patch.object(tla, "_aiter_csrc_root", return_value=""):
             tla._inject_collective_candidates(
                 self.tl,
                 [],

@@ -1257,9 +1257,15 @@ def _restore_inplace(restore: dict) -> None:
         # the git restore above raced or partially applied.
         try:
             Path(restore["source_file"]).write_bytes(restore["backup"])
-        except OSError:
+        except OSError as exc:
             # Best-effort rewrite; the git restore above already reverted it.
-            pass
+            # Surfaced rather than swallowed: if it fires alongside a failed
+            # git restore, the file is the one the caller must inspect.
+            log.warning(
+                "in-place restore could not rewrite %s: %s",
+                restore.get("source_file"),
+                exc,
+            )
         baseline_untracked = restore.get("baseline_untracked")
         if baseline_untracked is not None:
             if not isinstance(baseline_untracked, list) or any(

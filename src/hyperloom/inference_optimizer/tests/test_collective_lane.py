@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.kernel.request_handlers import (
     KERNEL_REQUEST_HANDLERS,
     _collective_budget,
@@ -341,8 +342,6 @@ def test_gate_falls_back_to_the_candidate_share_without_a_roofline(monkeypatch):
     Without a fallback the whole lane would disappear behind a log line on any
     such checkout, so the hottest resolved collective's own GPU share stands in.
     """
-    import hyperloom.orchestrator.kernel.request_handlers as krh
-
     monkeypatch.setattr(
         krh,
         "select_collective_candidate",
@@ -354,8 +353,6 @@ def test_gate_falls_back_to_the_candidate_share_without_a_roofline(monkeypatch):
 
 def test_candidate_fallback_still_respects_the_floor(monkeypatch):
     """The fallback substitutes the share, it does not bypass the gate."""
-    import hyperloom.orchestrator.kernel.request_handlers as krh
-
     monkeypatch.setattr(
         krh,
         "select_collective_candidate",
@@ -367,8 +364,6 @@ def test_candidate_fallback_still_respects_the_floor(monkeypatch):
 
 def test_candidate_fallback_survives_an_unreadable_artifact(monkeypatch):
     """A broken candidates artifact closes the gate instead of raising."""
-    import hyperloom.orchestrator.kernel.request_handlers as krh
-
     def _raise(_state):
         raise ValueError("candidate artifact has no valid hot_kernels list")
 
