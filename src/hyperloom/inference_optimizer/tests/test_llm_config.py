@@ -1310,6 +1310,41 @@ def test_ensure_available_accepts_a_cli_on_path(monkeypatch):
     claude_oneshot.ensure_available()
 
 
+@pytest.mark.parametrize("binary_name", ["claude", "claude.exe"])
+def test_ensure_available_accepts_either_bundled_binary_name(monkeypatch, tmp_path, binary_name):
+    """The SDK ships the binary under a platform-dependent name. Matching one
+    spelling exactly would fail a host whose SDK is perfectly usable -- and
+    this probe is what refuses to build the critic at startup."""
+    from hyperloom.common import claude_oneshot
+
+    bundled = tmp_path / "_bundled"
+    bundled.mkdir()
+    (bundled / ".gitignore").write_text("*\n", encoding="utf-8")
+    (bundled / binary_name).write_text("#!/bin/sh\n", encoding="utf-8")
+    fake_sdk = types.SimpleNamespace(__file__=str(tmp_path / "__init__.py"))
+    monkeypatch.setattr(claude_oneshot, "_load_sdk", lambda: fake_sdk)
+    monkeypatch.setattr(claude_oneshot.shutil, "which", lambda _name: None)
+
+    claude_oneshot.ensure_available()
+    assert claude_oneshot._locate_cli(fake_sdk) == str(bundled / binary_name)
+
+
+def test_ensure_available_ignores_non_binary_bundled_entries(monkeypatch, tmp_path):
+    """A bundle carrying only its .gitignore is not a usable transport."""
+    from hyperloom.common import claude_oneshot
+
+    bundled = tmp_path / "_bundled"
+    bundled.mkdir()
+    (bundled / ".gitignore").write_text("*\n", encoding="utf-8")
+    monkeypatch.setattr(
+        claude_oneshot, "_load_sdk", lambda: types.SimpleNamespace(__file__=str(tmp_path / "__init__.py"))
+    )
+    monkeypatch.setattr(claude_oneshot.shutil, "which", lambda _name: None)
+
+    with pytest.raises(RuntimeError, match="claude CLI is not available"):
+        claude_oneshot.ensure_available()
+
+
 @pytest.mark.parametrize(
     ("sdk_error", "expected"),
     [(None, True), (RuntimeError("claude_agent_sdk not installed"), False)],

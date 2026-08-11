@@ -1112,6 +1112,10 @@ write_env_file() {
     # exported here; gateway/OpenAI credentials are never persisted.
     [ -n "${_anthropic_url}" ] && echo "export ANTHROPIC_BASE_URL='${_anthropic_url}'"
     [ -n "${_anthropic_key}" ] && echo "export ANTHROPIC_API_KEY='${_anthropic_key}'"
+    # A subscription token is the Anthropic side on its own: an oauth-only host
+    # resolves neither URL nor key, so without this line sourcing the file
+    # leaves the kernel-agent with no Anthropic credential at all.
+    [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && echo "export CLAUDE_CODE_OAUTH_TOKEN='${CLAUDE_CODE_OAUTH_TOKEN}'"
     # Pin TRACELENS_ROOT and TRACELENS_INTERNAL_ROOT to the (possibly
     # mirrored) values resolved by ensure_tracelens(). This is what lets
     # setsid nohup python -m hyperloom.inference_optimizer.cli optimize →

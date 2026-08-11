@@ -92,17 +92,19 @@ def _load_sdk() -> Any:
 def _locate_cli(sdk: Any) -> str:
     """Path to the ``claude`` binary the SDK would drive, or "" when absent.
 
-    Mirrors the SDK's own lookup order: an explicit ``claude`` on PATH wins,
-    otherwise the copy bundled inside the installed package.
+    Follows the SDK's own order, which prefers its bundled copy over PATH. The
+    bundled file is matched by prefix rather than by an exact name: it ships as
+    ``claude`` or ``claude.exe`` depending on the platform, and this probe is
+    the gate that fails a critic at startup, so a wrong "absent" verdict is far
+    more expensive here than a wrong "present" one.
     """
-    found = shutil.which("claude")
-    if found:
-        return found
     package_dir = getattr(sdk, "__file__", None)
-    if not package_dir:
-        return ""
-    bundled = Path(package_dir).resolve().parent / "_bundled" / "claude"
-    return str(bundled) if bundled.exists() else ""
+    if package_dir:
+        bundled = Path(package_dir).resolve().parent / "_bundled"
+        for candidate in sorted(bundled.glob("claude*")):
+            if candidate.is_file():
+                return str(candidate)
+    return shutil.which("claude") or ""
 
 
 def ensure_available() -> None:
