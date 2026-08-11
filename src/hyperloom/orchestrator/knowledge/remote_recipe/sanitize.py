@@ -61,7 +61,6 @@ PUBLISH_ENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
     "TRITON_",
     "VLLM_",
 )
-_NONPORTABLE_ENV_NAMES: frozenset[str] = GPU_MASK_ENV_NAMES
 
 
 def _key_parts(value: str) -> tuple[list[str], str]:
@@ -137,7 +136,7 @@ def _is_publish_env_key(value: str) -> bool:
         not valid_env_key(upper)
         or _is_secret_key(upper)
         or upper in BENCHMARK_SECRET_ENV_NAMES
-        or upper in _NONPORTABLE_ENV_NAMES
+        or upper in GPU_MASK_ENV_NAMES
     ):
         return False
     return upper in PUBLISH_ENV_EXACT_ALLOWLIST or any(

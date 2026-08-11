@@ -685,9 +685,7 @@ def _resolve_eval_sitecustomize_paths(
 def eval_probe_targets_exist(inferencex_path: Path | str | None = None) -> bool:
     """Whether any discovered InferenceX root carries the probe target file.
 
-    Lets a caller tell "this checkout has the file and we failed to patch it"
-    from "this checkout does not lay the file out where we look", which are very
-    different verdicts about whether an accuracy eval is safe to start.
+    Separates "present and unpatchable" from "laid out somewhere we do not look".
     """
     return bool(_resolve_eval_sitecustomize_paths(inferencex_path))
 
@@ -701,7 +699,7 @@ def _apply_eval_probe_atomic(src: Path) -> bool:
     """Append the eval probe to ``src`` via temp-file + atomic rename."""
     try:
         original = src.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
+    except OSError as e:
         log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
         return False
     patched = original + _EVAL_PROBE_PY
@@ -730,8 +728,9 @@ def ensure_eval_probe_patched(
             discovery when ``None``.
 
     Returns:
-        True when at least one target is patched (or already patched), False when
-        none were found.
+        True when at least one target is patched (or already patched); False when
+        none were found or none could be patched. :func:`eval_probe_targets_exist`
+        tells the two apart.
     """
     return _ensure_patched(
         _resolve_eval_sitecustomize_paths(inferencex_path),

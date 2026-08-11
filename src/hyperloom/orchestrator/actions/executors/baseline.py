@@ -1148,23 +1148,11 @@ class BaselineExecutor:
             ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
             ensure_benchmark_lib_eval_start_patched(Path(ix_root))
         if not _materialized_run_eval_disabled(config_path):
-            # The probe is what bounds a non-terminating model's eval: without it
-            # lm-eval runs to the full max_tokens budget on every sample and takes
-            # the whole baseline timeout with it. A checkout that carries the
-            # target file and still cannot be patched is a hard stop; one that
-            # never had it is a layout we do not recognize, which warns instead of
-            # failing every eval run on an unproven path assumption.
+            # A checkout that carries the probe target and still cannot be patched
+            # is a hard stop; one that never had it is a layout we do not
+            # recognize, which warns rather than failing every eval run.
             probe_root = Path(ix_root) if ix_root else None
-            try:
-                probe_ok = ensure_eval_probe_patched(probe_root)
-            except Exception as exc:  # noqa: BLE001 — never mask as a silent skip
-                log.error(
-                    "baseline_executor: eval-probe patch raised for %s: %s",
-                    ix_root,
-                    exc,
-                )
-                probe_ok = False
-            if not probe_ok:
+            if not ensure_eval_probe_patched(probe_root):
                 msg = (
                     "the generation-pathology probe is not installed "
                     "(utils/evals/patches/lm_eval_sitecustomize.py, inferencex="

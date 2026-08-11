@@ -39,12 +39,10 @@ class GbrainPageError(RuntimeError):
 
 
 def _is_page_missing(exc: Exception) -> bool:
-    """Whether a gbrain tool error means "this page does not exist yet".
+    """Whether a gbrain tool error is an absent page rather than a real failure.
 
-    gbrain reports an absent slug as an in-band ``isError`` result carrying
-    ``page_not_found``, which :meth:`GbrainPageClient.call` surfaces as an
-    exception. An absent page is a miss, not a failure, so the caller must be
-    able to tell it apart from a transport / auth error.
+    gbrain reports an absent slug as an in-band ``isError``, which ``call``
+    surfaces as an exception like any other tool error.
     """
     return "page_not_found" in str(exc)
 

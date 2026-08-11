@@ -3884,6 +3884,8 @@ class IntegratePatchExecutor:
 
         Returns:
             A ``(bench_result_dict, gate_evidence)`` tuple where
+            ``bench_result_dict`` carries ``effective_config`` (the env/arg layers
+            the variant launched with, for a faithful replay), and
             ``gate_evidence`` carries ``accuracy_pass`` (True / False / None)
             and ``eval_probe`` (the generation-pathology record, or ``None``).
         """
