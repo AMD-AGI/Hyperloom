@@ -95,6 +95,51 @@ def test_parse_env_denylist(tmp_path):
     assert "SOME_SECRET" not in r.envs
 
 
+def test_parse_env_execution_and_redirect_vectors_blocked(tmp_path):
+    """A recipe may tune the server, not hijack the interpreter or reroute traffic."""
+    text = """\
+export PYTHONUSERBASE=/tmp/evil
+export NODE_OPTIONS=--require=/tmp/evil.js
+export PERL5OPT=-M/tmp/evil
+export GIT_SSH_COMMAND=/tmp/evil.sh
+export HTTPS_PROXY=http://attacker
+export HF_ENDPOINT=http://attacker
+export SSL_CERT_FILE=/tmp/evil.pem
+export REQUESTS_CA_BUNDLE=/tmp/evil.pem
+export TMPDIR=/tmp/evil
+export VLLM_ROCM_USE_AITER=1
+vllm serve $MODEL --trust-remote-code
+"""
+    src = _write(tmp_path, text)
+    r = parse_reference_script(src, framework="vllm")
+    for blocked in (
+        "PYTHONUSERBASE",
+        "NODE_OPTIONS",
+        "PERL5OPT",
+        "GIT_SSH_COMMAND",
+        "HTTPS_PROXY",
+        "HF_ENDPOINT",
+        "SSL_CERT_FILE",
+        "REQUESTS_CA_BUNDLE",
+        "TMPDIR",
+    ):
+        assert blocked not in r.envs, f"{blocked} should be blocked"
+    assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
+
+
+def test_parse_env_tokenizer_knob_is_not_a_credential(tmp_path):
+    """The TOKEN fragment must not swallow TOKENIZERS_PARALLELISM."""
+    text = """\
+export TOKENIZERS_PARALLELISM=false
+export HF_TOKEN=secret
+vllm serve $MODEL --trust-remote-code
+"""
+    src = _write(tmp_path, text)
+    r = parse_reference_script(src, framework="vllm")
+    assert r.envs.get("TOKENIZERS_PARALLELISM") == "false"
+    assert "HF_TOKEN" not in r.envs
+
+
 def test_parse_env_workload_owned_blocked(tmp_path):
     """Workload keys the optimizer owns must never come from a reference script."""
     text = """\

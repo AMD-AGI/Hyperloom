@@ -532,13 +532,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Reference launch recipe (.sh path or http(s) URL). Its serve "
-            "flags + whitelisted exports seed the baseline server args at "
-            "lowest priority (EXPLORE can override). Model-gated: ignored if "
-            "the run's model differs from the recipe's. If the given path is "
-            "unreadable / yields no flags, a matching InferenceX single-node "
-            "recipe is auto-discovered (exact filename match only; fuzzy "
-            "matches are logged, not used). When this flag is omitted, no "
-            "discovery runs and the baseline is unchanged."
+            "flags plus the exports the denylist allows seed the baseline "
+            "server args at lowest priority (EXPLORE can override); shell-unsafe, "
+            "credential-shaped and optimizer-owned workload variables are "
+            "dropped. The recipe is applied as given — there is no model gate "
+            "and no auto-discovery — so a path that cannot be read, or that "
+            "yields neither a flag nor an export, exits 2 instead of falling "
+            "back. Omit the flag to leave the baseline unchanged."
         ),
     )
     opt.add_argument("--precision", type=str, default=None, help=f"Model precision (default {DEFAULT_PRECISION})")

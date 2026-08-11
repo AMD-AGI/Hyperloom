@@ -41,7 +41,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env_safety import BLOCKED_EXTERNAL_ENV_NAMES, valid_env_key
+from hyperloom.common.env_safety import (
+    BLOCKED_EXTERNAL_ENV_NAMES,
+    is_secret_shaped_env_name,
+    valid_env_key,
+)
 
 
 log = logging.getLogger(__name__)
@@ -225,6 +229,9 @@ def parse_manifest(
         upper = name.upper()
         if upper in FORBIDDEN_SWITCHES:
             problems.append(f"dropped {name!r}: reserved benchmark variable, not a rewrite switch")
+            continue
+        if is_secret_shaped_env_name(upper):
+            problems.append(f"dropped {name!r}: credential-shaped name, not a rewrite switch")
             continue
         if upper in reserved:
             problems.append(

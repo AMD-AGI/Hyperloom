@@ -25,15 +25,20 @@ BLOCKED_UNTRUSTED_ENV_NAMES: frozenset[str] = frozenset(
         "DYLD_LIBRARY_PATH",
         "ENV",
         "GCONV_PATH",
+        "GIT_SSH_COMMAND",
         "IFS",
         "LD_AUDIT",
         "LD_LIBRARY_PATH",
         "LD_PRELOAD",
+        "NODE_OPTIONS",
         "PATH",
+        "PERL5OPT",
         "PYTHONHOME",
         "PYTHONINSPECT",
         "PYTHONPATH",
         "PYTHONSTARTUP",
+        # site.py adds its site-packages to sys.path, so it loads arbitrary code.
+        "PYTHONUSERBASE",
         "RUBYOPT",
         "SHELLOPTS",
     }
@@ -215,6 +220,19 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = BLOCKED_UNTRUSTED_ENV_NAMES | BENCH
         "PROFILE",
         "RESULT_DIR",
         "RESULT_FILENAME",
+        # Redirect what the run talks to or trusts: an external recipe has no
+        # business rerouting traffic, model downloads, TLS trust or scratch space.
+        # Kept out of BLOCKED_UNTRUSTED_ENV_NAMES because a local .env may set
+        # the proxies legitimately.
+        "CURL_CA_BUNDLE",
+        "HF_ENDPOINT",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "TMPDIR",
     }
 )
 
@@ -222,13 +240,25 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = BLOCKED_UNTRUSTED_ENV_NAMES | BENCH
 # into a session YAML by name alone.
 _SECRET_NAME_FRAGMENTS: tuple[str, ...] = ("APIKEY", "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
+# Tuning knobs that merely spell a fragment; TOKENIZERS_PARALLELISM is a common
+# recipe knob, not a credential.
+_SECRET_FRAGMENT_EXEMPTIONS: tuple[str, ...] = ("TOKENIZER",)
+
+
+def is_secret_shaped_env_name(key: object) -> bool:
+    """True when a name looks like a credential rather than a tuning knob."""
+    upper = str(key or "").strip().upper()
+    if any(exempt in upper for exempt in _SECRET_FRAGMENT_EXEMPTIONS):
+        return False
+    return any(fragment in upper for fragment in _SECRET_NAME_FRAGMENTS)
+
 
 def is_allowed_external_env_key(key: object) -> bool:
     """True when an env export from an untrusted external source is safe to carry."""
     upper = str(key or "").strip().upper()
     if not valid_env_key(upper) or upper in BLOCKED_EXTERNAL_ENV_NAMES:
         return False
-    return not any(fragment in upper for fragment in _SECRET_NAME_FRAGMENTS)
+    return not is_secret_shaped_env_name(upper)
 
 
 def is_python_package_root(path: object) -> bool:
@@ -333,6 +363,7 @@ __all__ = [
     "is_allowed_external_env_key",
     "is_allowed_kernel_agent_env_key",
     "is_python_package_root",
+    "is_secret_shaped_env_name",
     "redact_secret_values",
     "scrub_benchmark_process_env",
     "scrub_child_process_env",

@@ -147,6 +147,7 @@ def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
 def _extract_envs(text: str) -> dict[str, str]:
     """Pull literal exports the denylist allows, resolving self-referential defaults."""
     envs: dict[str, str] = {}
+    dropped: list[str] = []
     pat = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(\S+)\s*$")
     for line in text.splitlines():
         m = pat.match(line)
@@ -154,6 +155,7 @@ def _extract_envs(text: str) -> dict[str, str]:
             continue
         key, val = m.group(1), m.group(2)
         if not is_allowed_external_env_key(key):
+            dropped.append(key)
             continue
         # strip surrounding quotes if present
         if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
@@ -161,9 +163,12 @@ def _extract_envs(text: str) -> dict[str, str]:
         if _has_var(val):
             resolved = _resolve_self_default(key, val)
             if resolved is None:
+                dropped.append(key)
                 continue
             val = resolved
         envs[key] = val
+    if dropped:
+        log.info("reference recipe: dropped %d export(s): %s", len(dropped), ", ".join(sorted(set(dropped))))
     return envs
 
 

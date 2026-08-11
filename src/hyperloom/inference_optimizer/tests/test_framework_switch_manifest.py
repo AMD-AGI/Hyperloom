@@ -99,6 +99,13 @@ def test_a_reserved_benchmark_variable_is_dropped(reserved):
     assert any("reserved benchmark variable" in p for p in problems)
 
 
+def test_a_credential_shaped_switch_is_dropped():
+    """A manifest is held to the same boundary as a reference recipe."""
+    switches, problems = manifest.parse_manifest([_entry("MY_TOKEN")])
+    assert switches == []
+    assert any("credential-shaped name" in p for p in problems)
+
+
 def test_a_switch_colliding_with_benchmark_config_is_dropped():
     """A switch already set by the config would be toggled by unrelated config.
 
