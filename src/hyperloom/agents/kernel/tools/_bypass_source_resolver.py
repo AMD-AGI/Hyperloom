@@ -178,7 +178,7 @@ def _repo_scan_roots() -> tuple[str, ...]:
     """Discover live sglang/aiter source roots (and aiter csrc) without importing."""
     roots: list[str] = []
     seen: set[str] = set()
-    for pkg in ("sglang", "aiter"):
+    for pkg in ("sglang", "aiter", "vllm"):
         try:
             spec = importlib.util.find_spec(pkg)
         except (ImportError, ValueError, ModuleNotFoundError):
