@@ -177,6 +177,11 @@ def _build_backends(
     if critic_choice not in ("mock", "agent"):
         raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
 
+    # The two operands differ only in when they were evaluated, and that is the
+    # point: the caller samples this before _preflight() derives OPENAI_BASE_URL
+    # from ANTHROPIC_BASE_URL. Re-deriving it here alone would read an
+    # Anthropic-only deploy as two-sided, purely because preflight filled in the
+    # endpoint. Only `auto` consults this; an explicit --critic-protocol wins.
     provider_anthropic_only = codex_follows_claude or _official_anthropic_only()
     provider_openai_only = (not codex_follows_claude) and (
         _official_openai_only()

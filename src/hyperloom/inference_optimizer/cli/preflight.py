@@ -23,6 +23,7 @@ from hyperloom.common.env_safety import (
     is_allowed_kernel_agent_env_key,
 )
 from hyperloom.common.llm_config import (
+    CLAUDE_OAUTH_TOKEN_ENV,
     LEGACY_DEEPSEEK_ENV_KEYS,
     anthropic_synthesizable_key,
     deepseek_compat_env,
@@ -1431,12 +1432,24 @@ def _preflight(
     # back to the other.
     resolved_urls: tuple[str, str] | None = None
     anthropic_url, openai_url = _resolve_llm_endpoints()
+    # A subscription token needs no endpoint: the Claude CLI knows where to go.
+    # All three installers keep this URL a local variable and never export one,
+    # so publishing a derived official URL here would diverge from them and hand
+    # every child process a gateway signal the operator never set. The value is
+    # still resolved, since downstream decisions read it.
+    skip_anthropic_export = (
+        not os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+        and not anthropic_synthesizable_key()
+        and bool(os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip())
+    )
     if anthropic_url or openai_url:
         for var, want in (
             ("ANTHROPIC_BASE_URL", anthropic_url),
             ("OPENAI_BASE_URL", openai_url),
         ):
             if not want:
+                continue
+            if var == "ANTHROPIC_BASE_URL" and skip_anthropic_export:
                 continue
             prev = os.environ.get(var, "")
             if prev != want:
