@@ -25,6 +25,7 @@ from hyperloom.agents.robustness.decision.rca_engine import (
     load_rca_system_prompt,
 )
 from hyperloom.agents.robustness.signals import Symptom, SymptomSeverity
+from hyperloom.common import llm_config
 
 _LLM_CONFIG = "hyperloom.common.llm_config"
 
@@ -311,6 +312,67 @@ async def test_anthropic_engine_hands_the_discovered_credentials_to_the_transpor
     env = stub.calls[0]["env"]
     assert env["ANTHROPIC_API_KEY"] == "discovered-key"
     assert env["ANTHROPIC_BASE_URL"] == "https://gw.example/anthropic"
+
+
+@pytest.mark.asyncio
+async def test_engine_disables_itself_after_a_missing_credential(monkeypatch: pytest.MonkeyPatch):
+    """A missing credential fails identically on every later tick, so it costs
+    one ERROR and stops the engine rather than a warning per symptom."""
+    calls: list[int] = []
+
+    async def _raise(**_kw: Any) -> Any:
+        calls.append(1)
+        raise llm_config.LLMConfigError("no Anthropic credential configured")
+
+    monkeypatch.setattr(f"{_LLM_CONFIG}.aanthropic_completion", _raise)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: True)
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", throttle=_open_throttle())
+    engine.set_tick(1)
+
+    assert await engine.summarize(_sym()) == ""
+    assert await engine.summarize(_sym()) == ""
+    assert len(calls) == 1, "the second tick must not retry a call that cannot succeed"
+
+
+@pytest.mark.asyncio
+async def test_engine_keeps_retrying_after_a_transient_failure(monkeypatch: pytest.MonkeyPatch):
+    """A provider-side error may well not recur, so it must not be latched."""
+    calls: list[int] = []
+
+    async def _raise(**_kw: Any) -> Any:
+        calls.append(1)
+        raise RuntimeError("anthropic messages failed: HTTP 503")
+
+    monkeypatch.setattr(f"{_LLM_CONFIG}.aanthropic_completion", _raise)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: True)
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", throttle=_open_throttle())
+    engine.set_tick(1)
+
+    await engine.summarize(_sym())
+    await engine.summarize(_sym())
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_engine_disables_itself_when_the_transport_disappears(monkeypatch: pytest.MonkeyPatch):
+    """The claude CLI going missing mid-run is permanent for this process, and
+    is recognised by re-probing rather than by matching the error text."""
+    ready = {"value": True}
+
+    async def _raise(**_kw: Any) -> Any:
+        ready["value"] = False
+        raise RuntimeError("the claude CLI is not available")
+
+    monkeypatch.setattr(f"{_LLM_CONFIG}.aanthropic_completion", _raise)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: ready["value"])
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", throttle=_open_throttle())
+    engine.set_tick(1)
+    await engine.summarize(_sym())
+
+    assert engine._disabled is True
 
 
 @pytest.mark.asyncio

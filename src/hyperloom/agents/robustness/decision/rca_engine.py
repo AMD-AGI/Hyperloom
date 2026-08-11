@@ -244,6 +244,9 @@ class LlmRcaEngine:
     client: Any = None
     _owns_client: bool = field(default=False, init=False, repr=False)
     _config_warned: bool = field(default=False, init=False, repr=False)
+    # Set once a failure proves further calls cannot succeed, so a permanent
+    # misconfiguration costs one ERROR rather than a warning every tick.
+    _disabled: bool = field(default=False, init=False, repr=False)
     _current_tick_id: int = field(default=-1, init=False, repr=False)
     # Token-usage accumulator across the calls made since the last drain, so
     # the host (Coordinator) can fold the RCA LLM spend into its trace ledger.
@@ -334,7 +337,7 @@ class LlmRcaEngine:
         Returns:
             str: The (truncated) root-cause summary, or an empty string.
         """
-        if not self._is_configured():
+        if self._disabled or not self._is_configured():
             return ""
         now_unix = time.time()
         # tick_id = -1 = single shared bucket when no caller sets one;
@@ -347,6 +350,21 @@ class LlmRcaEngine:
         text = await self._call(symptom)
         self.throttle.record(symptom, now_unix=now_unix)
         return _truncate(text, self.max_chars)
+
+    def _note_call_failure(self, exc: BaseException) -> None:
+        """Record a failed call, disabling the engine when it can only recur.
+
+        A missing credential or an unusable transport is not a transient
+        provider error: every later tick would fail identically and log
+        identically. Those are reported once at ERROR and stop the engine;
+        everything else stays a warning and is retried.
+        """
+        permanent = isinstance(exc, llm_config.LLMConfigError) or not self._is_configured()
+        if permanent:
+            self._disabled = True
+            log.error("%s disabled; RCA cannot run in this configuration: %r", type(self).__name__, exc)
+            return
+        log.warning("%s: completion failed: %r", type(self).__name__, exc)
 
     def _accumulate_usage(self, usage: Any, *, latency_ms: int) -> None:
         """Fold one chat response's ``usage`` object into the accumulator.
@@ -409,7 +427,7 @@ class LlmRcaEngine:
         try:
             result = await llm_config.achat_completion(self._ensure_client(), **params)
         except Exception as exc:  # noqa: BLE001 - degrade-to-empty is this engine's contract
-            log.warning("LlmRcaEngine: chat completion failed: %r", exc)
+            self._note_call_failure(exc)
             return ""
         self._accumulate_usage(result.usage, latency_ms=int((time.perf_counter() - _t0) * 1000))
         return str(result.text or "").strip()
@@ -453,9 +471,9 @@ class AnthropicRcaEngine(LlmRcaEngine):
         """Issue one tool-free Anthropic completion and extract text content.
 
         Degrades to an empty string on failure for the same reason as
-        :meth:`LlmRcaEngine._call`. ``temperature`` is not sent: the CLI
-        transport exposes no such knob, and the prompt already pins the output
-        shape.
+        :meth:`LlmRcaEngine._call`. ``temperature`` matches the OpenAI engine's
+        0.2 and reaches the model on the HTTP path; the CLI path drops it,
+        having no such knob, and relies on the prompt to pin the output shape.
 
         The CLI transport gets its own budget instead of ``timeout_s``: that
         knob is sized for an HTTP round trip, while the CLI spawns a process
@@ -474,12 +492,13 @@ class AnthropicRcaEngine(LlmRcaEngine):
                 system=load_rca_system_prompt(),
                 messages=[{"role": "user", "content": _build_user_prompt(symptom)}],
                 max_tokens=600,
+                temperature=0.2,
                 env=self._resolved_env(),
                 timeout=_client_timeout(self.timeout_s),
                 timeout_s=max(self.timeout_s, _CLI_MIN_TIMEOUT_SEC),
             )
         except Exception as exc:  # noqa: BLE001 - degrade-to-empty is this engine's contract
-            log.warning("AnthropicRcaEngine: completion failed: %r", exc)
+            self._note_call_failure(exc)
             return ""
         self._accumulate_anthropic_usage(result.usage, latency_ms=int((time.perf_counter() - _t0) * 1000))
         return str(result.text or "").strip()

@@ -1140,6 +1140,7 @@ def _anthropic_http_params(
     messages: Sequence[Mapping[str, object]],
     system: str | None,
     max_tokens: int,
+    temperature: float | None = None,
 ) -> dict[str, object]:
     """Assemble the Messages request body, omitting an absent system prompt."""
     params: dict[str, object] = {
@@ -1149,6 +1150,8 @@ def _anthropic_http_params(
     }
     if system:
         params["system"] = system
+    if temperature is not None:
+        params["temperature"] = float(temperature)
     return params
 
 
@@ -1172,6 +1175,7 @@ def anthropic_completion(
     messages: Sequence[Mapping[str, object]],
     max_tokens: int,
     system: str | None = None,
+    temperature: float | None = None,
     env: Mapping[str, str] | None = None,
     timeout: object | None = None,
     timeout_s: float | None = None,
@@ -1183,16 +1187,20 @@ def anthropic_completion(
     cannot reach the Messages API; both transports return the same
     :class:`AnthropicMessageResult`.
 
-    Transports differ in two observable ways. ``max_tokens`` is a request field
-    on the HTTP path but rides the CLI environment on the SDK path, and
+    Transports differ in three observable ways. ``max_tokens`` is a request
+    field on the HTTP path but rides the CLI environment on the SDK path,
     ``stop_reason`` is always present on the HTTP path while the SDK reports it
-    only when the model supplies one.
+    only when the model supplies one, and ``temperature`` reaches the model only
+    on the HTTP path -- the CLI exposes no such knob.
 
     Args:
         model: The Claude model id.
         messages: Anthropic-style turns.
         max_tokens: Output-token cap; required by the Messages API.
         system: The system instruction, or ``None``.
+        temperature: Sampling temperature, or ``None`` for the model default.
+            Sent on the HTTP path and silently ignored on the SDK one, which
+            has nowhere to put it.
         env: Env mapping to read instead of ``os.environ``.
         timeout: HTTP-path transport timeout; build one with
             :func:`build_http_timeout`.
@@ -1221,7 +1229,13 @@ def anthropic_completion(
     with http_client:  # type: ignore[attr-defined]
         return anthropic_messages(
             http_client,
-            **_anthropic_http_params(model=model, messages=messages, system=system, max_tokens=max_tokens),
+            **_anthropic_http_params(
+                model=model,
+                messages=messages,
+                system=system,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            ),
         )
 
 
@@ -1231,6 +1245,7 @@ async def aanthropic_completion(
     messages: Sequence[Mapping[str, object]],
     max_tokens: int,
     system: str | None = None,
+    temperature: float | None = None,
     env: Mapping[str, str] | None = None,
     timeout: object | None = None,
     timeout_s: float | None = None,
@@ -1242,6 +1257,9 @@ async def aanthropic_completion(
         messages: Anthropic-style turns.
         max_tokens: Output-token cap; required by the Messages API.
         system: The system instruction, or ``None``.
+        temperature: Sampling temperature, or ``None`` for the model default.
+            Sent on the HTTP path and silently ignored on the SDK one, which
+            has nowhere to put it.
         env: Env mapping to read instead of ``os.environ``.
         timeout: HTTP-path transport timeout.
         timeout_s: SDK-path wall-clock budget in seconds.
@@ -1269,7 +1287,13 @@ async def aanthropic_completion(
     async with http_client:  # type: ignore[attr-defined]
         return await aanthropic_messages(
             http_client,
-            **_anthropic_http_params(model=model, messages=messages, system=system, max_tokens=max_tokens),
+            **_anthropic_http_params(
+                model=model,
+                messages=messages,
+                system=system,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            ),
         )
 
 
