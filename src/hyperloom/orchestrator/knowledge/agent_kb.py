@@ -34,6 +34,7 @@ to record must not fail an optimization.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -192,4 +193,68 @@ class KernelAgentKB:
         return expected if expected in staged_refs else ""
 
 
-__all__ = ["KERNEL_COLUMNS", "KERNEL_SECTION", "KernelAgentKB"]
+class KernelRecordReader:
+    """Read a downloaded independent kernel-agent KB record (``kernel:`` scheme).
+
+    The recipe warm-start nests kernel columns under ``value.kernel.*`` and is
+    read through :class:`KernelAgentKB`. The independent kernel-agent record
+    instead stores them flat at ``value.gemm``/``value.fusion``/``value.rewrite``
+    with a sibling ``files/`` tree. This reader exposes the same read surface
+    (``active`` + ``read_gemm``/``read_fusion``/``read_rewrite`` + ``prior_file``)
+    so the PRELUDE warm-apply planner can consume either source unchanged.
+
+    ``record_dir`` is a directory populated by ``read_remote_recipe`` — a
+    ``recipe.json`` plus a ``files/`` tree. An absent/empty record leaves the
+    reader inactive and every call a no-op.
+    """
+
+    def __init__(self, record_dir: str | Path | None) -> None:
+        self._dir = Path(record_dir) if record_dir else None
+        self._value: dict[str, Any] | None = None
+        if self._dir is not None:
+            recipe = self._dir / "recipe.json"
+            if recipe.is_file():
+                try:
+                    document = json.loads(recipe.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    document = None
+                if isinstance(document, Mapping):
+                    value = document.get("value")
+                    self._value = dict(value) if isinstance(value, Mapping) else {}
+
+    @property
+    def active(self) -> bool:
+        """True when a record was loaded and its columns can be read."""
+        return isinstance(self._value, Mapping)
+
+    def _column(self, name: str) -> dict[str, Any]:
+        node = (self._value or {}).get(name)
+        return dict(node) if isinstance(node, Mapping) else {}
+
+    def read_gemm(self) -> dict[str, Any]:
+        return self._column("gemm")
+
+    def read_fusion(self) -> dict[str, Any]:
+        return self._column("fusion")
+
+    def read_rewrite(self) -> dict[str, Any]:
+        return self._column("rewrite")
+
+    def prior_file(self, ref: str) -> Path | None:
+        """Resolve a recorded ref to its downloaded file under ``files/``."""
+        if self._dir is None:
+            return None
+        rel = str(ref or "").strip().lstrip("/")
+        parts = Path(rel).parts if rel else ()
+        if not parts or ".." in parts or Path(rel).is_absolute():
+            return None
+        candidate = self._dir / FILES_MEMBER_ROOT / rel
+        return candidate if candidate.is_file() else None
+
+
+__all__ = [
+    "KERNEL_COLUMNS",
+    "KERNEL_SECTION",
+    "KernelAgentKB",
+    "KernelRecordReader",
+]
