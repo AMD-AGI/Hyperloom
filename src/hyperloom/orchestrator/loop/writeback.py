@@ -1709,6 +1709,46 @@ class WritebackCollaborator:
                     error_type=type(exc).__name__,
                 )
                 log.exception("Remote Recipe KB finalize failed (non-fatal)")
+            # Independent kernel-agent KB (kernel: scheme). Separate record with
+            # its own keep-if-better on kernel gain, so kernel optimizations land
+            # even when this run does not win the recipe's e2e-throughput champion.
+            # Only runs when the session actually produced a kernel optimization,
+            # so a kernel-less CLOSE behaves exactly like the recipe-only path.
+            stack = getattr(self.shared_state, "optimization_stack", []) or []
+            has_kernel_opt = any(
+                isinstance(entry, dict)
+                and str(entry.get("action") or "").lower()
+                in ("gemm_tuning", "integrate", "fusion")
+                for entry in stack
+            )
+            if has_kernel_opt:
+                try:
+                    from ..knowledge.remote_recipe import (
+                        kernel_agent_canonical_id,
+                        write_kernel_agent_kb,
+                    )
+
+                    kernel_cid = kernel_agent_canonical_id(remote_cid)
+                    kernel_result = write_kernel_agent_kb(
+                        self.shared_state, kernel_cid, remote_sid
+                    )
+                    log.info(
+                        "Kernel-agent KB finalize: status=%s reason=%s cid=%s sid=%s",
+                        kernel_result.status,
+                        kernel_result.reason,
+                        kernel_cid,
+                        kernel_result.session_id,
+                    )
+                    self._record_remote_recipe_audit(
+                        source=f"{source}:kernel-agent",
+                        status=kernel_result.status,
+                        canonical_id=kernel_cid,
+                        session_id=kernel_result.session_id,
+                        optimized_throughput=kernel_result.optimized_throughput,
+                        reason=kernel_result.reason,
+                    )
+                except Exception:  # noqa: BLE001 - kernel-agent KB is best-effort
+                    log.exception("Kernel-agent KB finalize failed (non-fatal)")
             return
 
         # Local mode never consults ambient KB_STORE_* credentials.
@@ -2703,6 +2743,15 @@ class WritebackCollaborator:
             except Exception as exc:  # noqa: BLE001 — defensive
                 log.exception(
                     "PRELUDE: failed to enqueue warm-replay task: %r",
+                    exc,
+                )
+            # Warm-kernel KB: load prior-champion kernel patches/params (remote
+            # mode only; no-op without a KB draft/warm-start directory).
+            try:
+                await self._maybe_apply_warm_kernel_kb()
+            except Exception as exc:  # noqa: BLE001 — advisory; never block PRELUDE
+                log.exception(
+                    "PRELUDE: warm-kernel KB load/apply failed: %r",
                     exc,
                 )
             # Auto-analysis (roofline / profile); may defer.

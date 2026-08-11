@@ -615,6 +615,96 @@ def build_remote_knowledge(
     return bundle
 
 
+def kernel_agent_canonical_id(recipe_canonical_id: str) -> str:
+    """Map an ``inference:`` recipe id to the sibling ``kernel:`` identity.
+
+    Hyperloom's kernel-agent KB is an INDEPENDENT KB Store record under the
+    ``kernel:`` scheme, keyed by the same workload slug as the recipe. It is
+    deliberately not part of the recipe document, so it is never gated by the
+    recipe's end-to-end throughput champion nor wiped when a higher-throughput
+    run with empty kernel columns wins the recipe. Overlap with KernelForge's
+    own ``kernel:`` records is by design and out of scope here.
+    """
+    cid = str(recipe_canonical_id or "").strip()
+    if cid.startswith("inference:"):
+        return "kernel:" + cid[len("inference:") :]
+    if cid.startswith("kernel:"):
+        return cid
+    return "kernel:" + cid
+
+
+def _kernel_agent_score(value: Mapping[str, Any]) -> float:
+    """Best kernel end-to-end gain across accepted gemm/fusion/rewrite records.
+
+    Used as the kernel-agent KB's own keep-if-better metric so a kernel
+    optimization is stored whenever it beats what the kernel-agent KB already
+    holds — independent of recipe serving throughput.
+    """
+    best = 0.0
+    gemm = value.get("gemm") if isinstance(value, Mapping) else {}
+    optimizations = (gemm or {}).get("optimizations", []) if isinstance(gemm, Mapping) else []
+    for opt in optimizations:
+        if isinstance(opt, Mapping):
+            best = max(
+                best,
+                _number(opt.get("e2e_gain_pct")),
+                _number(opt.get("gain_pct")),
+                (_number(opt.get("best_speedup")) - 1.0) * 100.0,
+            )
+    for col in ("fusion", "rewrite"):
+        node = value.get(col) if isinstance(value, Mapping) else {}
+        items = (node or {}).get("items", []) if isinstance(node, Mapping) else []
+        for it in items:
+            if isinstance(it, Mapping):
+                e2e = it.get("e2e") if isinstance(it.get("e2e"), Mapping) else {}
+                best = max(
+                    best,
+                    _number(it.get("e2e_gain_pct")),
+                    _number(e2e.get("gain_pct")),
+                )
+    return best
+
+
+def build_kernel_agent_knowledge(
+    state: Any, files_dir: str | Path
+) -> tuple[KnowledgeBundle, float]:
+    """Build the standalone kernel-agent KB document and its keep-if-better score.
+
+    The document holds only the kernel sub-columns (gemm/fusion/rewrite) built
+    from this session's accepted optimizations, published under the ``kernel:``
+    identity. The score is the best kernel end-to-end gain across them.
+    """
+    root = Path(files_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    files = _Files(root)
+    value = {
+        "gemm": build_kernel_gemm_value(state, files),
+        "fusion": build_kernel_fusion_value(state, files),
+        "rewrite": build_kernel_rewrite_value(state, files),
+    }
+    score = _kernel_agent_score(value)
+    knowledge = sanitize_shared_knowledge(
+        {
+            "knowledge_schema_version": 2,
+            # Kernel keep-if-better metric — NOT end-to-end serving throughput.
+            "optimized_throughput": score,
+            "value": value,
+            "provenance": {
+                "producer": "hyperloom-kernel-agent",
+                "phase": "CLOSE",
+                "session_id": str(
+                    getattr(state, "recipe_kb_session_id", "")
+                    or getattr(state, "session_id", "")
+                ),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        }
+    )
+    bundle = KnowledgeBundle(knowledge=knowledge, artifacts=files.artifacts)
+    bundle.validate(files.refs)
+    return bundle, score
+
+
 def convert_v1_recipe_to_knowledge(recipe: Mapping[str, Any]) -> dict[str, Any]:
     """Wrap one legacy RecipeKB row for lossless storage in KB Store."""
     legacy = dict(recipe)
@@ -727,10 +817,12 @@ __all__ = [
     "build_framework_value",
     "build_kernel_fusion_value",
     "build_kernel_gemm_value",
+    "build_kernel_agent_knowledge",
     "build_kernel_rewrite_value",
     "build_remote_knowledge",
     "convert_v1_recipe_to_knowledge",
     "envelope_to_v1_recipe",
     "has_new_keep",
+    "kernel_agent_canonical_id",
     "merge_staged_sections",
 ]
