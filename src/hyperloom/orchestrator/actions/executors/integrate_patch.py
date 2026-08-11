@@ -2632,8 +2632,9 @@ class IntegratePatchExecutor:
           claimed to make the model boot, and eval-less runs must not be blocked.
 
         On KEEP the benched env/arg layers are reported as
-        ``enablement_effective_config``: the materialized YAML holds only the base
-        layer, so the revalidation baseline needs them to re-run the graded config.
+        ``enablement_effective_config``, captured from the variant that ran: the
+        materialized YAML holds only the base layer, so the revalidation baseline
+        needs them to re-run the graded config.
         When an attempt runtime was provisioned, the stack action is recorded in
         the result (``enablement_kept_stack_action``) so it survives rearm. On
         REVERT / non-KEEP, the attempt runtime dir is GC'd.
@@ -2817,23 +2818,9 @@ class IntegratePatchExecutor:
             "workspace": str(output_root),
             # Base YAML only; the env/arg layers live in enablement_effective_config.
             "enablement_accepted_config_path": str(bench_result.get("materialized_config") or ""),
-            # Base stack layer merged with the candidate's own levers, as benched.
-            "enablement_effective_config": {
-                "extra_envs": {
-                    **dict(params.get("base_extra_envs") or {}),
-                    **extra_envs_applied,
-                },
-                "extra_server_args": compose_server_args(
-                    inherited_args="",
-                    base_extra_args=str(params.get("base_extra_args") or ""),
-                    variant_extra_args=extra_server_args_applied,
-                    remove_args=params.get("base_remove_args"),
-                    args_mode=str(params.get("base_args_mode") or "append"),
-                ),
-                "remove_args": to_str_list(params.get("base_remove_args")),
-                "unset_envs": to_str_list(params.get("base_unset_envs")),
-                "args_mode": str(params.get("base_args_mode") or "append"),
-            },
+            # Captured from the variant this leg launched, so a revalidation
+            # replays the graded configuration rather than a re-derived one.
+            "enablement_effective_config": dict(bench_result.get("effective_config") or {}),
             **eval_provenance,
         }
         # Record the KEEP'd attempt runtime so it survives rearm and every later
@@ -4000,6 +3987,22 @@ class IntegratePatchExecutor:
                 "nonfatal_warnings": list(getattr(r, "nonfatal_warnings", []) or []),
                 # Materialized config used for this bench; needed by revalidation.
                 "materialized_config": str(config_path),
+                # What this leg actually launched, read off the variant rather than
+                # re-derived, so a replay cannot drift from the graded run. RUN_EVAL
+                # is dropped: the replay owns its own eval contract.
+                "effective_config": {
+                    "extra_envs": {k: v for k, v in variant.extra_envs.items() if k != "RUN_EVAL"},
+                    "extra_server_args": compose_server_args(
+                        inherited_args="",
+                        base_extra_args=str(params.get("base_extra_args") or "").strip(),
+                        variant_extra_args=variant.extra_server_args,
+                        remove_args=variant.remove_args,
+                        args_mode=variant.args_mode,
+                    ),
+                    "remove_args": list(variant.remove_args),
+                    "unset_envs": list(variant.unset_envs),
+                    "args_mode": variant.args_mode,
+                },
             }
 
         accuracy_pass: bool | None = None

@@ -823,6 +823,7 @@ async def _run_enablement_integrate(
     accuracy_task: str = "gsm8k",
     accuracy_metric: str = "exact_match",
     extra_params: dict[str, Any] | None = None,
+    bench_effective_config: dict[str, Any] | None = None,
 ):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -836,6 +837,7 @@ async def _run_enablement_integrate(
         bench_result = {
             "output_throughput": 137.0 if booted else 0.0,
             "error": bench_error,
+            "effective_config": dict(bench_effective_config or {}),
         }
         return bench_result, {
             "accuracy_pass": None,
@@ -1516,39 +1518,98 @@ async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monk
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "extra_params,expected_envs,expected_args",
+    "params,expected_envs,expected_args,expected_unset",
     [
         # Base stack layer merged with the candidate's own env levers.
         (
             {
                 "base_extra_envs": {"VLLM_ROCM_USE_AITER_FP4BMM": "0"},
-                "extra_envs": {"VLLM_ROCM_USE_AITER_MOE": "0"},
+                "extra_envs_applied": {"VLLM_ROCM_USE_AITER_MOE": "0"},
             },
             {"VLLM_ROCM_USE_AITER_FP4BMM": "0", "VLLM_ROCM_USE_AITER_MOE": "0"},
             "",
+            [],
         ),
         # Base args composed ahead of the candidate's args.
         (
-            {"base_extra_args": "--async-scheduling", "extra_server_args": "--kv-cache-dtype fp8_e4m3"},
+            {"base_extra_args": "--async-scheduling", "extra_server_args_applied": "--kv-cache-dtype fp8_e4m3"},
             {},
             "--async-scheduling --kv-cache-dtype fp8_e4m3",
+            [],
+        ),
+        # unset_envs drops an inherited key AND is reported, which a params-only
+        # re-derivation of the config cannot see.
+        (
+            {
+                "base_extra_envs": {"VLLM_ROCM_USE_AITER_FP4BMM": "0", "VLLM_X": "1"},
+                "unset_envs": ["VLLM_X"],
+            },
+            {"VLLM_ROCM_USE_AITER_FP4BMM": "0"},
+            "",
+            ["VLLM_X"],
         ),
         # No levers on either layer.
-        ({}, {}, ""),
+        ({}, {}, "", []),
     ],
 )
-async def test_enablement_keep_publishes_effective_config(
-    tmp_path: Path, monkeypatch, extra_params, expected_envs, expected_args
+async def test_bench_patch_captures_effective_config(
+    tmp_path: Path, params, expected_envs, expected_args, expected_unset
 ):
-    """A KEEP reports the env/arg layers it was actually benched with."""
+    """The bench reports the config off the variant it launched, not a re-derivation."""
+    from unittest.mock import patch
+
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+
+    async def fake_run_grid(*_args, **_kwargs):
+        return [VariantResult(name="v", extra_server_args="", extra_envs={}, status="succeeded")]
+
+    task_params = {"config_path": str(config_path)}
+    for key in ("base_extra_envs", "base_extra_args"):
+        if key in params:
+            task_params[key] = params[key]
+
+    with (
+        patch.object(ip_mod, "run_grid", new=fake_run_grid),
+        patch.object(ip_mod, "materialize_config_with_envs", return_value=config_path),
+    ):
+        bench, _ = await executor._bench_patch(
+            params=task_params,
+            output_root=tmp_path / "out",
+            extra_server_args_applied=params.get("extra_server_args_applied", ""),
+            extra_envs_applied=params.get("extra_envs_applied", {}),
+            specialist_task_id="task-abcd1234",
+            unset_envs=params.get("unset_envs"),
+        )
+
+    effective = bench["effective_config"]
+    assert effective["extra_envs"] == expected_envs
+    assert effective["extra_server_args"] == expected_args
+    assert effective["unset_envs"] == expected_unset
+
+
+@pytest.mark.asyncio
+async def test_enablement_keep_forwards_captured_effective_config(tmp_path: Path, monkeypatch):
+    """The KEEP passes the bench's captured config through untouched."""
+    captured = {
+        "extra_envs": {"VLLM_ROCM_USE_AITER_MOE": "0"},
+        "extra_server_args": "--kv-cache-dtype fp8_e4m3",
+        "remove_args": [],
+        "unset_envs": ["VLLM_X"],
+        "args_mode": "append",
+    }
     result, _ = await _run_enablement_integrate(
         tmp_path,
         monkeypatch,
         booted=True,
         enablement_accuracy=0.6,
-        extra_params=extra_params,
+        bench_effective_config=captured,
     )
     assert result["status"] == "kept"
-    effective = result["enablement_effective_config"]
-    assert effective["extra_envs"] == expected_envs
-    assert effective["extra_server_args"] == expected_args
+    assert result["enablement_effective_config"] == captured
