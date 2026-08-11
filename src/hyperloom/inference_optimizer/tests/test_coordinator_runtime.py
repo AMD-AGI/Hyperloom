@@ -26,6 +26,7 @@ from hyperloom.orchestrator.loop.coordinator_helpers import (
     _BASELINE_FINGERPRINT_KEYS,
     _baseline_params_fingerprint,
 )
+from hyperloom.orchestrator.loop.proposals import ProposalsCollaborator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import (
@@ -930,6 +931,15 @@ async def test_promote_baseline_keeps_higher_anchor(session_dir):
         assert last["extras"]["anchor_kept_tput"] == pytest.approx(1500.0)
     finally:
         await c.stop()
+
+
+def test_inject_explore_runtime_params_includes_baseline_accuracy():
+    class DummyCoordinator:
+        shared_state = SharedState(baseline_accuracy=0.81)
+
+    params: dict[str, Any] = {}
+    ProposalsCollaborator(DummyCoordinator())._inject_explore_runtime_params(params)
+    assert params["accuracy_baseline"] == pytest.approx(0.81)
 
 
 @pytest.mark.asyncio

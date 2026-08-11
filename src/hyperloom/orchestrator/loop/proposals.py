@@ -332,6 +332,9 @@ class ProposalsCollaborator:
         br = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
         if br > 0:
             params.setdefault("baseline_runtime_sec", br)
+        baseline_accuracy = float(getattr(self.shared_state, "baseline_accuracy", 0.0) or 0.0)
+        if baseline_accuracy > 0:
+            params.setdefault("accuracy_baseline", baseline_accuracy)
         # Warm measure-round anchor for the decision-round overtime kill.
         bwr = float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0)
         if bwr > 0:
