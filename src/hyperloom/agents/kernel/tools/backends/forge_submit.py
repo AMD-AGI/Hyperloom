@@ -1236,6 +1236,7 @@ def _restore_inplace(restore: dict) -> None:
         try:
             Path(restore["source_file"]).write_bytes(restore["backup"])
         except OSError:
+            # Best-effort rewrite; the git restore above already reverted it.
             pass
         baseline_untracked = restore.get("baseline_untracked")
         if baseline_untracked is not None:
