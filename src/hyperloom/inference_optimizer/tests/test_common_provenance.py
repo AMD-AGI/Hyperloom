@@ -142,12 +142,11 @@ def test_gfx_override_beats_gpu_type():
 
 def test_gfx_gpu_type_short_circuits_the_probe(monkeypatch):
     """A resolvable gpu_type must not spawn rocminfo."""
-    import hyperloom.common.provenance as prov
 
     def _boom(*a, **k):  # pragma: no cover - must never run
         raise AssertionError("rocminfo probed despite a known gpu_type")
 
-    monkeypatch.setattr(prov.subprocess, "run", _boom)
+    monkeypatch.setattr("hyperloom.common.provenance.subprocess.run", _boom)
     assert detect_gfx_arch({}, gpu_type="mi355x", probe=True) == "gfx950"
 
 
