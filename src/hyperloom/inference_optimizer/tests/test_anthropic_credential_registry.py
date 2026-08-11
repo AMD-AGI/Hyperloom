@@ -21,6 +21,8 @@ from hyperloom.common.llm_config import (
     CLAUDE_GATEWAY_SIGNAL_KEYS,
     CLAUDE_OAUTH_TOKEN_ENV,
 )
+from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer.cli import backends as bk
 from hyperloom.inference_optimizer.cli import credentials as cr
 from hyperloom.inference_optimizer.cli import preflight as pf
 from hyperloom.orchestrator.specialists.subprocess_ import _SPECIALIST_SECRET_ENV_ALLOWLIST
@@ -64,6 +66,22 @@ def test_detection_sites_recognize_a_newly_registered_form(registered_fake_crede
     cr._reject_cross_provider_pairing()
     # has_key / has_usable_endpoint both accept it: no SystemExit.
     cr._validate_credentials()
+    # Single-provider intent, which decides whether a stale OpenAI side from the
+    # kernel-agent env file gets suppressed.
+    assert pf._provider_only_mode() == "anthropic"
+    # The forced-protocol gate: an unrecognized form here would reject a host
+    # that the rest of the runtime considers fully configured.
+    assert bk._resolve_critic_protocol("anthropic", provider_anthropic_only=True) == "anthropic"
+
+
+def test_oauth_only_probe_skips_only_for_the_token_itself(registered_fake_credential, monkeypatch):
+    """Any other registered form can authenticate the catalog probe, so only a
+    lone subscription token may skip it."""
+    monkeypatch.setenv(CLAUDE_OAUTH_TOKEN_ENV, "sk-ant-oat01-fake")
+    # The fake form is registered and set, so this host is not oauth-only.
+    assert cli._catalog_probe_has_no_credential() is False
+    monkeypatch.delenv(registered_fake_credential)
+    assert cli._catalog_probe_has_no_credential() is True
 
 
 def test_materializing_subsets_ignore_a_newly_registered_form(registered_fake_credential):

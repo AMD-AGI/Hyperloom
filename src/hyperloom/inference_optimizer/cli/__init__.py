@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common import llm_config
 from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV, parse_custom_headers
 from .executors import (
     _build_specialist_executor,
@@ -693,10 +694,16 @@ def _catalog_probe_has_no_credential() -> bool:
     """
     if not os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip():
         return False
-    return not any(
-        os.environ.get(name, "").strip()
-        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY")
+    # Any other Anthropic-side form can authenticate the probe, so the list of
+    # what disqualifies "oauth-only" is the registry minus the token itself,
+    # derived rather than restated. OPENAI_API_KEY joins it because the probe
+    # accepts either side's bearer. Read off the module so the registry stays a
+    # single source at call time, not a tuple frozen at import.
+    bearer_capable = (
+        *(n for n in llm_config.ANTHROPIC_CREDENTIAL_ENV_ORDER if n != CLAUDE_OAUTH_TOKEN_ENV),
+        "OPENAI_API_KEY",
     )
+    return not any(os.environ.get(name, "").strip() for name in bearer_capable)
 
 
 def _custom_orch_model_allowed() -> bool:

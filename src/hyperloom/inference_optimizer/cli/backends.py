@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from .. import framework_registry
-from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
+from hyperloom.common import llm_config
+from hyperloom.common.llm_config import has_anthropic_credential
 from hyperloom.inference_optimizer.session.session_paths import agent_dir
 from hyperloom.orchestrator.roles import (
     ClaudeBackend,
@@ -75,10 +76,13 @@ def _resolve_critic_protocol(requested: str, *, provider_anthropic_only: bool) -
         return "anthropic" if provider_anthropic_only else "openai"
 
     if requested == "anthropic":
-        if not _any_env_set(("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", CLAUDE_OAUTH_TOKEN_ENV)):
+        # Asked through the registry rather than a local list of names, so a
+        # newly recognized credential form is accepted here the moment it is
+        # registered instead of being rejected by a copy nobody updated.
+        if not has_anthropic_credential():
             raise ValueError(
-                "--critic-protocol=anthropic requires one of ANTHROPIC_API_KEY, "
-                f"ANTHROPIC_AUTH_TOKEN or {CLAUDE_OAUTH_TOKEN_ENV}"
+                "--critic-protocol=anthropic requires one of "
+                + " / ".join(llm_config.ANTHROPIC_CREDENTIAL_ENV_ORDER)
             )
         return requested
 

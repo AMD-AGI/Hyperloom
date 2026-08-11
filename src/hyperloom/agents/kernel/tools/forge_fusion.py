@@ -89,7 +89,10 @@ def _inject_author_gateway_env(agent_backend: str) -> None:
     options = llm_config.claude_sdk_env_options(env=os.environ)
     resolved_env = options.get("env")
     if isinstance(resolved_env, dict):
-        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        # Exactly the synthesizable subset: mirroring the subscription token
+        # into a key slot is what would disable it, so the registry decides
+        # which forms may be copied here rather than a list kept in step by hand.
+        for name in llm_config.ANTHROPIC_SYNTHESIZABLE_KEY_ENVS:
             value = str(resolved_env.get(name) or "").strip()
             if value:
                 os.environ.setdefault(name, value)
