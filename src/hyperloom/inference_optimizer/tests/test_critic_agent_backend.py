@@ -1585,7 +1585,7 @@ def _make_anthropic_backend(
     is its own concern, and the critic must not depend on the host's env.
     """
     fake_completion = FakeAnthropicCompletion(results)
-    monkeypatch.setattr(f"{_CRITIC_MOD}.anthropic_transport", lambda *_a, **_kw: "sdk")
+    monkeypatch.setattr(f"{_CRITIC_MOD}.anthropic_transport_ready", lambda *_a, **_kw: True)
     monkeypatch.setattr(f"{_CRITIC_MOD}.aanthropic_completion", fake_completion)
     fake_caller = _make_fake_runtime(judge_bundle=judge_bundle)
     backend = CriticAgentBackend(
@@ -1757,14 +1757,19 @@ async def test_anthropic_protocol_wraps_unexpected_transport_error(
         await backend.run("prompt", system_prompt="critic system")
 
 
-def test_anthropic_protocol_refuses_a_host_without_an_anthropic_credential(
+def test_anthropic_protocol_refuses_a_host_without_a_usable_transport(
     fake_critic_root: Path,
     fake_session_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Constructing the backend must fail loudly rather than at the first review."""
-    monkeypatch.setattr(f"{_CRITIC_MOD}.anthropic_transport", lambda *_a, **_kw: "")
-    with pytest.raises(BackendError, match="requires an Anthropic-side credential"):
+    """Constructing the backend must fail loudly rather than at the first review.
+
+    The probe covers the transport, not just the credential: a subscription
+    token with no claude CLI is exactly the case that used to pass here and
+    fail later.
+    """
+    monkeypatch.setattr(f"{_CRITIC_MOD}.anthropic_transport_ready", lambda *_a, **_kw: False)
+    with pytest.raises(BackendError, match="requires a usable Anthropic transport"):
         CriticAgentBackend(
             critic_agent_root=fake_critic_root,
             session_dir=fake_session_dir,

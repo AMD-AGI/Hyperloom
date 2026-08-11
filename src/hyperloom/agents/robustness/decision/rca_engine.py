@@ -202,6 +202,12 @@ def load_rca_system_prompt() -> str:
     return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 
 
+# Floor for the Claude CLI transport's wall-clock budget. The RCA timeout is
+# sized for an HTTP round trip; the CLI spends part of its budget spawning a
+# process, so the HTTP figure would expire before the model is even reached.
+_CLI_MIN_TIMEOUT_SEC = 60.0
+
+
 def _client_timeout(timeout_s: float) -> Any:
     """Build the uniform per-request timeout both engines run with."""
     return llm_config.build_http_timeout(connect=timeout_s, read=timeout_s, write=timeout_s, pool=timeout_s)
@@ -420,12 +426,28 @@ class AnthropicRcaEngine(LlmRcaEngine):
     """
 
     def _is_configured(self) -> bool:
-        """Always ready: llm_config resolves the credential and its transport.
+        """Whether a completion could actually be issued.
 
-        An empty base_url/api_key pair is the normal shape here, since a
-        subscription token never reaches this process as a key.
+        Defers to the transport probe rather than the inherited
+        ``base_url and api_key`` test: a subscription token reaches this
+        process as neither, and answering an unconditional ``True`` would let a
+        host with no Anthropic credential at all — or with a token but no
+        Claude CLI — retry a doomed call on every tick.
         """
-        return True
+        return llm_config.anthropic_transport_ready(self._resolved_env())
+
+    def _resolved_env(self) -> dict[str, str]:
+        """Environment carrying whatever ``Config.discover`` resolved.
+
+        The discovered pair may come from provider-specific variables, so the
+        canonical names have to be overlaid before the transport reads them.
+        """
+        return _provider_env(
+            api_key_env="ANTHROPIC_API_KEY",
+            api_key=self.api_key,
+            base_url_env="ANTHROPIC_BASE_URL",
+            base_url=self.base_url,
+        )
 
     async def _call(self, symptom: Symptom) -> str:
         """Issue one tool-free Anthropic completion and extract text content.
@@ -434,6 +456,10 @@ class AnthropicRcaEngine(LlmRcaEngine):
         :meth:`LlmRcaEngine._call`. ``temperature`` is not sent: the CLI
         transport exposes no such knob, and the prompt already pins the output
         shape.
+
+        The CLI transport gets its own budget instead of ``timeout_s``: that
+        knob is sized for an HTTP round trip, while the CLI spawns a process
+        first, so reusing it would time out during startup on every call.
 
         Args:
             symptom (Symptom): The symptom whose evidence is sent to the LLM.
@@ -448,8 +474,9 @@ class AnthropicRcaEngine(LlmRcaEngine):
                 system=load_rca_system_prompt(),
                 messages=[{"role": "user", "content": _build_user_prompt(symptom)}],
                 max_tokens=600,
+                env=self._resolved_env(),
                 timeout=_client_timeout(self.timeout_s),
-                timeout_s=self.timeout_s,
+                timeout_s=max(self.timeout_s, _CLI_MIN_TIMEOUT_SEC),
             )
         except Exception as exc:  # noqa: BLE001 - degrade-to-empty is this engine's contract
             log.warning("AnthropicRcaEngine: completion failed: %r", exc)

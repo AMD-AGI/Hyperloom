@@ -20,6 +20,8 @@ from typing import Any
 
 import os
 
+from hyperloom.common import llm_config
+
 from .config import Config
 from .decision.action_ladder import ActionLadder, ActionLadderConfig
 from .decision.policy_aware import PolicyAware
@@ -354,8 +356,10 @@ def build_reactor_components(
 def _llm_credentials_ready(config: Config) -> bool:
     """Whether the discovered provider can authenticate an RCA call.
 
-    The Anthropic side runs through the Claude CLI, which resolves its own
-    credential, so an empty ``llm_api_key`` there is not a missing credential.
+    The Anthropic side may hold no in-process key at all — a subscription token
+    is spent by the Claude CLI, never by this process — so the key pair is the
+    wrong question there. Ask the transport instead, which also covers the case
+    where the token is present but the CLI that would spend it is not.
 
     Args:
         config (Config): The configuration carrying the discovered provider
@@ -365,7 +369,7 @@ def _llm_credentials_ready(config: Config) -> bool:
         bool: True when an RCA call can authenticate.
     """
     if config.llm_provider == "anthropic":
-        return True
+        return llm_config.anthropic_transport_ready()
     return bool(config.llm_base_url and config.llm_api_key)
 
 
