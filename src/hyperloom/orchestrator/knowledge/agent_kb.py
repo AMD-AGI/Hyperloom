@@ -19,9 +19,10 @@ that belong to it, and gets back the refs to record for those files::
     prior = kb.read_rewrite()
     refs = kb.write_rewrite({"items": [...]}, files=[patch_path])
 
-``refs`` comes back in the order the files were passed, so a caller that needs
-a ref inside its own metadata writes twice: once to stage the files, once with
-the refs folded into the payload. A caller that does not can ignore the return
+``refs`` comes back positionally — one slot per file passed, empty when that
+artifact could not be staged — so a caller that needs a ref inside its own
+metadata writes twice: once to stage the files, once with the refs folded into
+the payload. A caller that does not can ignore the return
 value, because the same refs are recorded under the column's ``files`` key.
 
 The write replaces the sub-column: what an agent hands over is the whole
@@ -40,6 +41,7 @@ to record must not fail an optimization.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections.abc import Iterable, Mapping
@@ -50,6 +52,7 @@ from .remote_recipe._vendor.kb_store_client import (
     FILES_MEMBER_ROOT,
     KBStoreError,
     KnowledgeSections,
+    _same_bytes,
 )
 
 log = logging.getLogger(__name__)
@@ -159,7 +162,10 @@ class KernelAgentKB:
         if not isinstance(knowledge, Mapping):
             log.warning("kernel kb: %s knowledge must be a mapping", column)
             return []
-        refs = [ref for source in files if (ref := self._stage(column, source))]
+        # Positional: a caller folds these back into its own metadata by index,
+        # so a failed stage keeps an empty placeholder rather than shifting every
+        # later artifact one slot up.
+        refs = [self._stage(column, source) for source in files]
         payload = dict(knowledge)
         try:
             staged = self._sections.staged(KERNEL_SECTION)
@@ -189,26 +195,36 @@ class KernelAgentKB:
         """Copy one artifact into the draft and return the ref that names it."""
         try:
             staged = self._sections.staged(KERNEL_SECTION)
-            before = len(staged.files) if staged is not None else 0
-            content = self._sections.write(
+            self._sections.write(
                 KERNEL_SECTION,
                 staged.knowledge if staged is not None else {},
                 files=[source],
                 kind=column,
                 mode="merge",
             )
-            staged_refs = [
-                path.relative_to(self._sections.files_dir).as_posix()
-                for path in content.files
-            ]
         except (KBStoreError, OSError, ValueError) as exc:
             log.warning("kernel kb: cannot stage %s for %s: %s", source, column, exc)
             return ""
-        if len(staged_refs) > before:
-            return staged_refs[-1]
-        # Re-staging a byte-identical artifact adds no ref; reuse the existing one.
-        expected = f"{KERNEL_SECTION}/{column}/{Path(str(source)).name}"
-        return expected if expected in staged_refs else ""
+        return self._staged_ref(column, source)
+
+    def _staged_ref(self, column: str, source: str | Path) -> str:
+        """Name the copy this artifact just landed as, by the draft's own rule.
+
+        The draft keeps ``{section}/{kind}/{name}`` and only falls back to a
+        digest-suffixed name when that path is already taken by different bytes.
+        Deriving the ref from the files on disk — rather than from whether the
+        staged list happened to grow — is what keeps a re-staged artifact from
+        being handed the ref of a same-named neighbour.
+        """
+        src = Path(str(source))
+        files_dir = self._sections.files_dir
+        plain = f"{KERNEL_SECTION}/{column}/{src.name}"
+        landed = files_dir / plain
+        if landed.is_file() and _same_bytes(src, landed):
+            return plain
+        digest = hashlib.sha256(str(src.resolve()).encode()).hexdigest()[:10]
+        suffixed = f"{KERNEL_SECTION}/{column}/{src.stem}-{digest}{src.suffix}"
+        return suffixed if (files_dir / suffixed).is_file() else ""
 
 
 class KernelRecordReader:

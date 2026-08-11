@@ -6,11 +6,14 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
+from hyperloom.orchestrator.knowledge import remote_recipe
 from hyperloom.orchestrator.knowledge.remote_recipe import (
     HyperloomRemoteKB,
     KBStoreError,
@@ -24,6 +27,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe import (
     read_remote_champion,
     read_remote_recipe,
     write_final_remote_recipe,
+    write_kernel_agent_kb,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor import kb_store_client
 from hyperloom.orchestrator.knowledge.remote_recipe.client import (
@@ -38,6 +42,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.models import (
     Artifact,
     KnowledgeBundle,
     RemoteRecipeValidationError,
+    RemoteWriteResult,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe.sanitize import (
     sanitize_publish_env_mapping,
@@ -1826,3 +1831,123 @@ def test_vendored_sdk_matches_upstream_git_blob() -> None:
 
 def test_read_alias_is_standalone_api() -> None:
     assert read_remote_champion is read_remote_recipe
+
+
+# --------------------------------------------------------------- kernel-agent KB
+
+
+def _kernel_state(tmp_path: Path, *, gain: float = 12.5):
+    """A session whose only accepted work is one GEMM tuning KEEP."""
+    tuned = tmp_path / "tuned.csv"
+    tuned.write_text("M,N,K\n16,512,7168\n", encoding="utf-8")
+    return SimpleNamespace(
+        optimization_stack=[
+            {
+                "action": "gemm_tuning",
+                "tuned_file": str(tuned),
+                "gain_pct": gain,
+                "tput": 6638.7,
+                "variant_name": "forge_a8w8_blockscale",
+            }
+        ],
+        last_gemm_tuning={"decision": "KEEP", "e2e_gain_pct": gain},
+        kernel_opt_task_attempts={},
+        current_best={"tput": 6638.7},
+        cumulative_gain_validated=84.9,
+        session_id="s1",
+        recipe_kb_session_id="s1",
+    )
+
+
+def _kernel_client(store):
+    client = RemoteRecipeClient.__new__(RemoteRecipeClient)
+    client.store = store
+    return client
+
+
+def test_kernel_agent_write_publishes_under_the_kernel_metric(tmp_path):
+    store = _FakeStore(champion=0.0, metric="kernel_gain_pct")
+
+    result = write_kernel_agent_kb(
+        _kernel_state(tmp_path),
+        "kernel:hyperloom-m:h:vllm:mt:a:0.1:fp8",
+        "sess-1",
+        client=_kernel_client(store),
+    )
+
+    assert result.status == "written"
+    champion = [c for c in store.calls if c[0] == "set_champion"][0]
+    # Graded on kernel gain, under a metric name that is not serving throughput.
+    assert champion[3] == "kernel_gain_pct"
+    assert champion[4] == 12.5
+    assert store.published_knowledge["kernel_gain_pct"] == 12.5
+
+
+def test_kernel_agent_write_skips_a_weaker_champion(tmp_path):
+    store = _FakeStore(champion=30.0, metric="kernel_gain_pct")
+
+    result = write_kernel_agent_kb(
+        _kernel_state(tmp_path, gain=12.5),
+        "kernel:hyperloom-m:h",
+        "sess-1",
+        client=_kernel_client(store),
+    )
+
+    assert result.status == "skipped"
+    assert result.reason == "not_better_than_champion"
+    assert not [c for c in store.calls if c[0] == "put_knowledge"]
+
+
+def test_kernel_agent_write_skips_a_session_without_kernel_work(tmp_path):
+    store = _FakeStore()
+    state = SimpleNamespace(
+        optimization_stack=[{"action": "replay_warm_recipe", "tput": 100.0}],
+        last_gemm_tuning={},
+        kernel_opt_task_attempts={},
+        current_best={"tput": 100.0},
+        cumulative_gain_validated=10.0,
+        session_id="s1",
+        recipe_kb_session_id="s1",
+    )
+
+    result = write_kernel_agent_kb(
+        state, "kernel:hyperloom-m:h", "sess-1", client=_kernel_client(store)
+    )
+
+    assert result.status == "skipped"
+    assert result.reason == "no_kernel_optimization"
+    assert store.calls == []
+
+
+def test_kernel_agent_write_runs_even_when_the_recipe_write_failed(tmp_path):
+    """The kernel record is independent: a recipe transport failure must not
+    take the kernel agent's knowledge down with it."""
+    coordinator = SimpleNamespace(
+        shared_state=_kernel_state(tmp_path),
+        session_dir=tmp_path,
+        recipe_kb=None,
+        knowledge_plane=None,
+        _ensure_journal=lambda: SimpleNamespace(finalize=lambda **_k: None),
+        _workload_canonical_id=lambda: "inference:m:h:vllm:mt:a:0.1:fp8",
+    )
+    written: list[tuple] = []
+
+    def _fake_write(state, kernel_cid, session_id):
+        written.append((kernel_cid, session_id))
+        return RemoteWriteResult("written", "", kernel_cid, session_id, 12.5)
+
+    with mock.patch.dict(
+        os.environ,
+        {
+            "KNOWLEDGE_STORE_MODE": "remote",
+            "KB_STORE_URL": "https://kb.example",
+            "KB_STORE_TOKEN": "token",
+        },
+    ), mock.patch.object(
+        remote_recipe.HyperloomRemoteKB,
+        "from_env",
+        classmethod(lambda cls: (_ for _ in ()).throw(OSError("transport down"))),
+    ), mock.patch.object(remote_recipe, "write_kernel_agent_kb", _fake_write):
+        WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+
+    assert written == [("kernel:hyperloom-m:h:vllm:mt:a:0.1:fp8", "s1")]

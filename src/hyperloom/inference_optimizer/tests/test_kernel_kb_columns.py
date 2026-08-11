@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 from hyperloom.orchestrator.knowledge.agent_kb import KernelAgentKB
 from hyperloom.orchestrator.knowledge.remote_recipe.values import (
+    KERNEL_AGENT_METRIC,
     build_kernel_agent_knowledge,
     kernel_agent_canonical_id,
 )
@@ -168,14 +169,17 @@ def test_staged_columns_overlay_into_close_document(tmp_path: Path) -> None:
     assert "kernel/rewrite/k.diff" in {artifact.path for artifact in bundle.artifacts}
 
 
-def test_kernel_agent_canonical_id_swaps_the_scheme() -> None:
+def test_kernel_agent_canonical_id_namespaces_the_producer() -> None:
+    # KernelForge publishes its own kernel: records; the producer prefix keeps
+    # the two from overwriting each other under a shared slug.
     assert (
         kernel_agent_canonical_id("inference:m:h:vllm:mt:a:0.1:fp8")
-        == "kernel:m:h:vllm:mt:a:0.1:fp8"
+        == "kernel:hyperloom-m:h:vllm:mt:a:0.1:fp8"
     )
-    # Idempotent, and a bare slug still lands under the kernel scheme.
-    assert kernel_agent_canonical_id("kernel:m:h") == "kernel:m:h"
-    assert kernel_agent_canonical_id("m:h") == "kernel:m:h"
+    assert kernel_agent_canonical_id("m:h") == "kernel:hyperloom-m:h"
+    # Idempotent: re-deriving from an already-namespaced id changes nothing.
+    once = kernel_agent_canonical_id("inference:m:h")
+    assert kernel_agent_canonical_id(once) == once
 
 
 def test_build_kernel_agent_knowledge_carries_gemm_and_scores_it(tmp_path):
@@ -207,10 +211,80 @@ def test_build_kernel_agent_knowledge_carries_gemm_and_scores_it(tmp_path):
     # is self-describing on its own identity.
     assert set(value) == {"gemm", "fusion", "rewrite"}
     assert len(value["gemm"]["optimizations"]) == 1
-    # Scored by kernel gain, not by serving throughput.
+    # Scored by kernel gain, under a metric name that says so.
     assert score == 15.2
-    assert bundle.knowledge["optimized_throughput"] == 15.2
+    assert bundle.knowledge[KERNEL_AGENT_METRIC] == 15.2
+    assert "optimized_throughput" not in bundle.knowledge
     assert bundle.knowledge["provenance"]["producer"] == "hyperloom-kernel-agent"
     assert {artifact.path for artifact in bundle.artifacts} == {
         "kernel/gemm/artifacts/tuned.csv"
     }
+
+
+def test_stage_gives_a_same_named_artifact_its_own_ref(tmp_path):
+    """Two different files sharing a basename must not share a ref.
+
+    The draft only keeps ``{section}/{kind}/{name}`` for the first bytes to
+    land; a same-named neighbour gets a digest-suffixed name. Handing the
+    second file the first one's ref would republish the wrong artifact.
+    """
+    kb = _kb(tmp_path)
+    first = tmp_path / "a" / "tuned.csv"
+    second = tmp_path / "b" / "tuned.csv"
+    first.parent.mkdir(parents=True, exist_ok=True)
+    second.parent.mkdir(parents=True, exist_ok=True)
+    first.write_text("first\n", encoding="utf-8")
+    second.write_text("second\n", encoding="utf-8")
+
+    first_ref = kb.write_gemm({"optimizations": []}, files=[first])[0]
+    second_ref = kb.write_gemm({"optimizations": []}, files=[second])[0]
+
+    assert first_ref == "kernel/gemm/tuned.csv"
+    assert second_ref != first_ref
+    files_dir = kb._sections.files_dir
+    assert (files_dir / first_ref).read_text(encoding="utf-8") == "first\n"
+    assert (files_dir / second_ref).read_text(encoding="utf-8") == "second\n"
+
+
+def test_restaging_identical_bytes_reuses_the_same_ref(tmp_path):
+    kb = _kb(tmp_path)
+    artifact = tmp_path / "tuned.csv"
+    artifact.write_text("same\n", encoding="utf-8")
+
+    first = kb.write_gemm({"optimizations": []}, files=[artifact])[0]
+    again = kb.write_gemm({"optimizations": []}, files=[artifact])[0]
+
+    assert first == again == "kernel/gemm/tuned.csv"
+
+
+def test_kernel_agent_canonical_id_refuses_an_unknown_workload() -> None:
+    # "kernel:" alone is a shared junk identity; an unknown workload publishes
+    # nowhere rather than there.
+    assert kernel_agent_canonical_id("") == ""
+    assert kernel_agent_canonical_id("   ") == ""
+
+
+def test_restaging_a_displaced_artifact_keeps_its_own_ref(tmp_path):
+    """Re-staging the file that lost the plain name must not return that name.
+
+    First bytes win ``kernel/gemm/tuned.csv``; the same-named neighbour is
+    stored under a digest name. Re-staging that neighbour adds no new file, and
+    guessing "no growth means the plain name" handed it the first file's ref —
+    republishing the wrong artifact under its metadata.
+    """
+    kb = _kb(tmp_path)
+    winner = tmp_path / "a" / "tuned.csv"
+    displaced = tmp_path / "b" / "tuned.csv"
+    winner.parent.mkdir(parents=True, exist_ok=True)
+    displaced.parent.mkdir(parents=True, exist_ok=True)
+    winner.write_text("winner\n", encoding="utf-8")
+    displaced.write_text("displaced\n", encoding="utf-8")
+
+    kb.write_gemm({"optimizations": []}, files=[winner])
+    displaced_ref = kb.write_gemm({"optimizations": []}, files=[displaced])[0]
+    restaged_ref = kb.write_gemm({"optimizations": []}, files=[displaced])[0]
+
+    assert restaged_ref == displaced_ref
+    assert restaged_ref != "kernel/gemm/tuned.csv"
+    files_dir = kb._sections.files_dir
+    assert (files_dir / restaged_ref).read_text(encoding="utf-8") == "displaced\n"
