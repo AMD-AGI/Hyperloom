@@ -9,8 +9,10 @@ orchestrator layer (shared ``hyperloom.common`` helpers are fine). The MCP/SSE
 contract mirrors the orchestrator's retained GBrain KG MCP transport.
 
 Exposes only the read surface PR KB consumption needs: ``get_page`` /
-``query`` (MCP ``search`` tool) / ``list_pages``. All failures raise
-:class:`GbrainPageError`; callers treat that as "source unavailable".
+``query`` (MCP ``search`` tool) / ``list_pages``. Failures raise
+:class:`GbrainPageError`; callers treat that as "source unavailable". An absent
+page is not a failure: ``get_page`` returns ``None`` for it, so a cold KB does
+not read as an outage.
 """
 
 from __future__ import annotations
@@ -34,6 +36,17 @@ def _require_http_url(url: str) -> None:
 
 class GbrainPageError(RuntimeError):
     """Raised on transport / envelope / tool-level gbrain failures."""
+
+
+def _is_page_missing(exc: Exception) -> bool:
+    """Whether a gbrain tool error means "this page does not exist yet".
+
+    gbrain reports an absent slug as an in-band ``isError`` result carrying
+    ``page_not_found``, which :meth:`GbrainPageClient.call` surfaces as an
+    exception. An absent page is a miss, not a failure, so the caller must be
+    able to tell it apart from a transport / auth error.
+    """
+    return "page_not_found" in str(exc)
 
 
 def _select_mcp_response(raw: str, want_id: Any = None) -> Any:
@@ -134,7 +147,12 @@ class GbrainPageClient:
 
     def get_page(self, slug: str) -> dict[str, Any] | None:
         """Return the page object for ``slug``, or ``None`` when absent."""
-        res = self.call("get_page", {"slug": slug})
+        try:
+            res = self.call("get_page", {"slug": slug})
+        except GbrainPageError as exc:
+            if not _is_page_missing(exc):
+                raise
+            return None
         return res if isinstance(res, dict) else None
 
     def query(self, text: str, *, limit: int = 20) -> list[dict[str, Any]]:

@@ -1299,6 +1299,22 @@ def test_gbrain_page_client_envelopes(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(gbrain.GbrainPageError, match="transport error"):
         client.call("search", {"query": "x"})
 
+    # An absent page is an in-band isError; get_page reports it as a miss.
+    class _MissingResp(_Resp):
+        def read(self, *_args):
+            payload = {"result": {"isError": True, "content": [{"text": "page_not_found"}]}}
+            return json.dumps(payload).encode()
+
+    monkeypatch.setattr(gbrain.urllib.request, "urlopen", lambda req, timeout: _MissingResp())
+    assert client.get_page("absent") is None
+    with pytest.raises(gbrain.GbrainPageError, match="page_not_found"):
+        client.call("get_page", {"slug": "absent"})
+
+    # A transport failure is still an outage, not a miss.
+    monkeypatch.setattr(gbrain.urllib.request, "urlopen", lambda req, timeout: (_ for _ in ()).throw(OSError("down")))
+    with pytest.raises(gbrain.GbrainPageError, match="transport error"):
+        client.get_page("page-1")
+
     monkeypatch.setenv("GBRAIN_BASE_URL", "https://gbrain.example")
     monkeypatch.setenv("GBRAIN_TOKEN", "tok")
     monkeypatch.setenv("GBRAIN_HTTP_TIMEOUT_SEC", "not-a-number")
