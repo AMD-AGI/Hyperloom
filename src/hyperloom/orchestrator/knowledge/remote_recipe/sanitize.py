@@ -13,6 +13,7 @@ from typing import Any
 
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
+    GPU_MASK_ENV_NAMES,
     redact_secret_values,
     valid_env_key,
 )
@@ -59,15 +60,6 @@ PUBLISH_ENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
     "TORCHINDUCTOR_",
     "TRITON_",
     "VLLM_",
-)
-_NONPORTABLE_ENV_NAMES: frozenset[str] = frozenset(
-    {
-        "CUDA_VISIBLE_DEVICES",
-        "GPU_DEVICE_ORDINAL",
-        "HIP_VISIBLE_DEVICES",
-        "HSA_VISIBLE_DEVICES",
-        "ROCR_VISIBLE_DEVICES",
-    }
 )
 
 
@@ -144,7 +136,7 @@ def _is_publish_env_key(value: str) -> bool:
         not valid_env_key(upper)
         or _is_secret_key(upper)
         or upper in BENCHMARK_SECRET_ENV_NAMES
-        or upper in _NONPORTABLE_ENV_NAMES
+        or upper in GPU_MASK_ENV_NAMES
     ):
         return False
     return upper in PUBLISH_ENV_EXACT_ALLOWLIST or any(

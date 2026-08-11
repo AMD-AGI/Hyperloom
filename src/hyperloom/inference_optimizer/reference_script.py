@@ -1,27 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reference launch-recipe parsing, rendering, and discovery.
+"""Reference launch-recipe parsing and rendering.
 
-A *reference recipe* is an InferenceX ``benchmarks/single_node/*.sh`` launch
-script. The optimizer lifts only its **static, fully-resolved** server flags and
-a whitelist of ``export`` lines and uses them as the lowest-priority base for
-the baseline server args (EXPLORE can still override). The shell is never
+A *reference recipe* is an operator-supplied launch script (local path or URL).
+The optimizer lifts its **static, fully-resolved** server flags plus the
+``export`` lines the denylist allows, and uses them as the lowest-priority base
+for the baseline server args (EXPLORE can still override). The shell is never
 executed — anything dynamic (``$VARS``: TP/CONC/ISL/OSL/model/port) is skipped,
 because the optimizer's normal env seeding already owns those.
-
-Public entry points:
-
-* :func:`parse_reference_script` — lift ``(server_args, envs, model)`` from a
-  recipe (local path or http(s) URL). Fail-soft: an unreachable / missing
-  source returns an empty recipe, never raises.
-* :func:`render_reference_script` — the inverse: emit a recipe text from the
-  current best ``server_args`` / ``envs`` (used to write the read-only
-  ``current_setting.sh`` artifact). Round-trips with the parser.
-* :func:`discover_reference_script` — when no recipe was supplied, find a
-  matching one in the InferenceX checkout by filename. Tiered + fail-soft.
-* :func:`models_compatible` — the shared model-gate predicate, used by
-  discovery and by the baseline executor.
 """
 
 from __future__ import annotations
@@ -32,31 +19,9 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from hyperloom.common.env_safety import is_allowed_external_env_key
+
 log = logging.getLogger(__name__)
-
-
-# Import allowlist for parsing an UNTRUSTED external reference recipe: an
-# explicit list, not a ``VLLM_*`` glob (which would drag in path-valued vars
-# absent in our sandbox). This gates ``parse_reference_script`` only; rendering
-# ``current_setting.sh`` emits optimizer-authored envs verbatim (see
-# ``render_reference_script``), so validated envs never need to be added here.
-_ENV_WHITELIST = frozenset(
-    {
-        "VLLM_USE_BREAKABLE_CUDAGRAPH",
-        "VLLM_USE_TRITON_FLASH_ATTN",
-        "VLLM_FP8_PADDING",
-        "VLLM_ROCM_USE_AITER",
-        "VLLM_ROCM_USE_AITER_MHA",
-        "VLLM_ROCM_USE_AITER_MOE",
-        "VLLM_ALLREDUCE_USE_FLASHINFER",
-        "VLLM_USE_RUST_FRONTEND",
-        "SGLANG_USE_AITER",
-        "SGLANG_MOE_PADDING",
-        "NCCL_DMABUF_ENABLE",
-        "NCCL_MIN_NCHANNELS",
-        "NCCL_MAX_NCHANNELS",
-    }
-)
 
 # Flags that never belong in the lifted base: the optimizer's env seeding owns
 # the workload + I/O, so drop these even when fully resolved.
@@ -82,24 +47,14 @@ class ReferenceRecipe:
     model: str | None = None
 
 
-def _read_source(source: str) -> str | None:
-    """Return the recipe text, or None on any failure (fail-soft)."""
+def _read_source(source: str) -> str:
+    """Return the recipe text; raises when the source cannot be read."""
     s = str(source or "").strip()
-    if not s:
-        return None
     if s.startswith(("http://", "https://")):
-        try:
-            from .baseline_comparison.inferencex_client import _fetch_raw
+        from .baseline_comparison.inferencex_client import _fetch_raw
 
-            return _fetch_raw(s).decode("utf-8", errors="replace")
-        except Exception as exc:  # noqa: BLE001 — fail-soft, never abort launch
-            log.warning("reference-script: could not fetch %r: %s", s, exc)
-            return None
-    try:
-        return Path(s).read_text(encoding="utf-8", errors="replace")
-    except Exception as exc:  # noqa: BLE001 — fail-soft
-        log.warning("reference-script: could not read %r: %s", s, exc)
-        return None
+        return _fetch_raw(s).decode("utf-8", errors="replace")
+    return Path(s).read_text(encoding="utf-8", errors="replace")
 
 
 def _entrypoint_markers(framework: str) -> tuple[str, ...]:
@@ -175,46 +130,32 @@ def _should_drop_flag(name: str) -> bool:
 
 
 def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
-    """Lift ``(server_args, envs, model)`` from a reference recipe.
-
-    Fail-soft: a missing/unreachable source or a recipe with no recognizable
-    entrypoint returns an empty :class:`ReferenceRecipe` (never raises), so a
-    bad ``--reference-script`` can never block a launch.
-    """
+    """Lift ``(server_args, envs, model)`` from a reference recipe; raises on a
+    source that cannot be read or shell-parsed."""
     text = _read_source(source)
-    if text is None:
-        return ReferenceRecipe()
 
     envs = _extract_envs(text)
     line = _find_entrypoint_line(text, framework)
     if not line:
-        log.warning(
-            "reference-script: no %s entrypoint found in %r; carrying exports only",
-            _entrypoint_markers(framework),
-            source,
-        )
+        log.warning("reference-script: no %s entrypoint in %r; carrying exports only", _entrypoint_markers(framework), source)
         return ReferenceRecipe(server_args="", envs=envs, model=None)
 
-    try:
-        tokens = shlex.split(line)
-    except ValueError:
-        log.warning("reference-script: could not shell-parse entrypoint line")
-        return ReferenceRecipe(server_args="", envs=envs, model=None)
-
-    server_args, model = _extract_server_args(tokens, framework)
+    server_args, model = _extract_server_args(shlex.split(line), framework)
     return ReferenceRecipe(server_args=server_args, envs=envs, model=model)
 
 
 def _extract_envs(text: str) -> dict[str, str]:
-    """Pull whitelisted literal exports, including self-referential defaults."""
+    """Pull literal exports the denylist allows, resolving self-referential defaults."""
     envs: dict[str, str] = {}
+    dropped: list[str] = []
     pat = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(\S+)\s*$")
     for line in text.splitlines():
         m = pat.match(line)
         if not m:
             continue
         key, val = m.group(1), m.group(2)
-        if key not in _ENV_WHITELIST:
+        if not is_allowed_external_env_key(key):
+            dropped.append(key)
             continue
         # strip surrounding quotes if present
         if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
@@ -222,9 +163,12 @@ def _extract_envs(text: str) -> dict[str, str]:
         if _has_var(val):
             resolved = _resolve_self_default(key, val)
             if resolved is None:
+                dropped.append(key)
                 continue
             val = resolved
         envs[key] = val
+    if dropped:
+        log.info("reference recipe: dropped %d export(s): %s", len(dropped), ", ".join(sorted(set(dropped))))
     return envs
 
 
@@ -337,12 +281,8 @@ def render_reference_script(
     max_model_len: int | None = None,
     gpu_type: str | None = None,
 ) -> str:
-    """Render a recipe text from the current best args/envs.
-
-    Output is a valid recipe that :func:`parse_reference_script` round-trips:
-    whitelisted ``export`` lines + a single entrypoint line. Read-only artifact
-    (``current_setting.sh``) — nothing parses it back to restore state.
-    """
+    """Render the read-only ``current_setting.sh`` artifact from the current best
+    args/envs. Optimizer-authored envs are emitted verbatim (not denylisted)."""
     fw = str(framework or "sglang").strip().lower()
     lines = ["#!/usr/bin/env bash", "# Auto-generated by hyperloom — current best launch recipe."]
     if model:
@@ -355,9 +295,6 @@ def render_reference_script(
     if gpu_type:
         lines.append(f"export GPU_TYPE={gpu_type}")
     for k, v in (envs or {}).items():
-        # current_best envs are optimizer-authored and trusted, so emit them all
-        # (skip empty/dynamic values). The whitelist only sanitizes the untrusted
-        # import path (parse_reference_script), not this render path.
         if str(k).strip() and not _has_var(str(v)):
             lines.append(f"export {k}={v}")
     args = str(server_args or "").strip()
@@ -371,164 +308,8 @@ def render_reference_script(
     return "\n".join(lines) + "\n"
 
 
-# ── discovery ──────────────────────────────────────────────────────────────
-
-# Filename pattern: {model}_{precision}_{gpu}[_{suffix}...].sh. Positional
-# fallback only (see _parse_filename): the leading ``[^_]+`` cannot represent a
-# model alias containing ``_``, so the GPU-anchored parse below is tried first.
-_FNAME_RE = re.compile(r"^([^_]+)_([^_]+)_([^_]+?)((?:_[^_]+)*)\.sh$")
-_KNOWN_FW_SUFFIXES = ("atom", "sglang", "vllm")
-
-# GPU segment anchor: the ``{gpu}`` field is drawn from a small vocabulary, so
-# anchoring on it lets ``{model}`` keep underscores.
-_GPU_TOKEN_RE = re.compile(r"^(mi\d{2,4}[a-z]?|[abh]\d{2,4}|g[bh]\d{2,4})$")
-
-
-def _normalize_model(s: str) -> str:
-    """Lowercase, drop ``.``/``-``, take the leading alnum run."""
-    base = Path(str(s or "")).name.lower()
-    base = base.replace(".", "").replace("-", "").replace("_", "")
-    m = re.match(r"^[a-z0-9]+", base)
-    return m.group(0) if m else ""
-
-
-def _trailing_digits(s: str) -> str:
-    m = re.search(r"(\d+)$", s)
-    return m.group(1) if m else ""
-
-
-def _model_tier(file_seg: str, run_model: str) -> str:
-    """Tier a filename model segment against the run's model.
-
-    ``exact`` — normalized equal. ``fuzzy`` — one is a substring of the other
-    AND their trailing version digits agree (so ``minimaxm2`` vs ``minimaxm3``
-    demotes to ``none``). Otherwise ``none``.
-    """
-    a = _normalize_model(file_seg)
-    b = _normalize_model(run_model)
-    if not a or not b:
-        return "none"
-    if a == b:
-        return "exact"
-    if a in b or b in a:
-        da, db = _trailing_digits(a), _trailing_digits(b)
-        if da and db and da != db:
-            return "none"
-        return "fuzzy"
-    return "none"
-
-
-def models_compatible(reference_model: str, run_model: str) -> bool:
-    """Whether a reference recipe's model is safe to apply to ``run_model``.
-
-    Single source of truth for the model-gate, shared by discovery and the
-    baseline executor. Empty ``reference_model`` is treated as ungated (returns
-    True). Uses the same normalized, version-aware tiering as discovery: an
-    ``exact`` or ``fuzzy`` tier is compatible; a trailing-version mismatch is not.
-    """
-    ref = str(reference_model or "").strip()
-    if not ref:
-        return True
-    return _model_tier(ref, run_model) in ("exact", "fuzzy")
-
-
-def _parse_filename(name: str) -> tuple[str, str, str, set[str]] | None:
-    """Return (model_seg, precision, gpu, suffix_set) or None.
-
-    Tries a GPU-anchored parse first so model aliases that contain ``_`` are
-    recognised: the GPU token is found by its known shape, the precision is the
-    segment immediately to its left, the model is everything before that, and
-    segments to its right are suffixes. Falls back to the positional
-    ``{model}_{precision}_{gpu}`` regex when no GPU-shaped segment is present.
-    """
-    if not name.endswith(".sh"):
-        return None
-    stem = name[: -len(".sh")]
-    segments = stem.split("_")
-    # GPU-anchored: find a GPU-shaped segment with at least a model + precision
-    # to its left (index >= 2).
-    for i in range(2, len(segments)):
-        if _GPU_TOKEN_RE.match(segments[i].lower()):
-            model_seg = "_".join(segments[: i - 1])
-            precision = segments[i - 1]
-            gpu = segments[i]
-            suffixes = {s for s in segments[i + 1 :] if s}
-            if model_seg and precision:
-                return model_seg, precision.lower(), gpu.lower(), suffixes
-            break
-    # Positional fallback (model alias must not contain ``_``).
-    m = _FNAME_RE.match(name)
-    if not m:
-        return None
-    model_seg, precision, gpu, rest = m.groups()
-    suffixes = {s for s in rest.split("_") if s}
-    return model_seg, precision.lower(), gpu.lower(), suffixes
-
-
-def discover_reference_script(
-    inferencex_path: str,
-    *,
-    model_path: str,
-    precision: str,
-    gpu_type: str,
-    framework: str,
-) -> tuple[str | None, str]:
-    """Find a matching single-node recipe in the InferenceX checkout.
-
-    Returns ``(path_or_None, tier)`` where tier is ``exact`` / ``fuzzy`` /
-    ``none``. Only ``exact`` should be auto-applied; ``fuzzy`` is a candidate
-    to surface to the operator. Total fail-soft: any error → ``(None, "none")``.
-    """
-    try:
-        root = Path(str(inferencex_path or "").strip())
-        if not root or not root.is_dir():
-            return (None, "none")
-        want_prec = str(precision or "").strip().lower()
-        want_gpu = str(gpu_type or "").strip().lower()
-        fw = str(framework or "").strip().lower()
-        want_fw = next((f for f in _KNOWN_FW_SUFFIXES if f in fw), "")
-
-        search_dirs = [
-            root / "benchmarks" / "single_node",
-            root / "benchmarks" / "single_node" / "fixed_seq_len",
-        ]
-        candidates: list[Path] = []
-        for d in search_dirs:
-            if d.is_dir():
-                candidates.extend(sorted(d.glob("*.sh")))
-
-        best_fuzzy: str | None = None
-        for path in candidates:
-            parsed = _parse_filename(path.name)
-            if not parsed:
-                continue
-            model_seg, prec, gpu, suffixes = parsed
-            if want_prec and prec != want_prec:
-                continue
-            if want_gpu and gpu != want_gpu:
-                continue
-            # framework gate: a script tagged with another framework is out;
-            # an untagged script is treated as the default (sglang/vllm) match.
-            other_fw = (suffixes & set(_KNOWN_FW_SUFFIXES)) - ({want_fw} if want_fw else set())
-            if other_fw:
-                continue
-            tier = _model_tier(model_seg, model_path)
-            if tier == "exact":
-                return (str(path), "exact")
-            if tier == "fuzzy" and best_fuzzy is None:
-                best_fuzzy = str(path)
-        if best_fuzzy:
-            return (best_fuzzy, "fuzzy")
-        return (None, "none")
-    except Exception as exc:  # noqa: BLE001 — total fail-soft
-        log.warning("reference-script discovery failed: %s", exc)
-        return (None, "none")
-
-
 __all__ = [
     "ReferenceRecipe",
     "parse_reference_script",
     "render_reference_script",
-    "discover_reference_script",
-    "models_compatible",
 ]
