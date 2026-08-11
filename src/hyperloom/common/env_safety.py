@@ -256,16 +256,17 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
 # into a session YAML by name alone.
 _SECRET_NAME_FRAGMENTS: tuple[str, ...] = ("APIKEY", "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
-# Tuning knobs that merely spell a fragment; TOKENIZERS_PARALLELISM is a common
-# recipe knob, not a credential.
+# Substrings that only accidentally spell a fragment: TOKENIZERS_PARALLELISM is a
+# common recipe knob. Masked out before matching rather than exempting the whole
+# name, so TOKENIZER_API_KEY still reads as a credential.
 _SECRET_FRAGMENT_EXEMPTIONS: tuple[str, ...] = ("TOKENIZER",)
 
 
 def is_secret_shaped_env_name(key: object) -> bool:
     """True when a name looks like a credential rather than a tuning knob."""
     upper = str(key or "").strip().upper()
-    if any(exempt in upper for exempt in _SECRET_FRAGMENT_EXEMPTIONS):
-        return False
+    for exempt in _SECRET_FRAGMENT_EXEMPTIONS:
+        upper = upper.replace(exempt, "")
     return any(fragment in upper for fragment in _SECRET_NAME_FRAGMENTS)
 
 
