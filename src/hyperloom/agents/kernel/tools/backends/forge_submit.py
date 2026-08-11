@@ -236,6 +236,16 @@ def _resolve_gpu_target(candidate: dict) -> str:
     )
 
 
+def _known_gpu_model(value: str) -> str:
+    """Return the canonical card name, or "" when this is not one.
+
+    The command line and the environment must agree on the model, so both
+    render it through here rather than each trusting what it was handed.
+    """
+    model = str(value or "").strip().lower()
+    return model if model in _PLATFORM_TO_GFX else ""
+
+
 def _resolve_gpu_type(candidate: dict) -> str:
     """Resolve the hardware model: env GPU_TYPE -> candidate platform.
 
@@ -247,14 +257,25 @@ def _resolve_gpu_type(candidate: dict) -> str:
     model. Returns "" when the model is unknown; KernelForge then declines to
     read or write rather than filing under an address nothing resolves to.
     """
-    for raw in (
+    offered = (
         os.environ.get("GPU_TYPE"),
         candidate.get("platform"),
         candidate.get("arch"),
-    ):
-        model = str(raw or "").strip().lower()
-        if model in _PLATFORM_TO_GFX:
+    )
+    for raw in offered:
+        model = _known_gpu_model(raw)
+        if model:
             return model
+    # Nothing downstream fails on this: the loop optimizes, the result looks
+    # ordinary, and only the experience is missing. So it is said here.
+    rejected = ", ".join(repr(str(v)) for v in offered if str(v or "").strip())
+    log.warning(
+        "forge: no known hardware model for this run%s; kernel experience is "
+        "addressed by model, so this run has no address to read or record one. "
+        "Set GPU_TYPE to a card such as %s.",
+        f" (offered {rejected})" if rejected else "",
+        ", ".join(sorted(_PLATFORM_TO_GFX)),
+    )
     return ""
 
 
@@ -265,23 +286,15 @@ def _apply_gpu_type_env(env: dict, gpu_type: str) -> None:
     accepted as a way to name a gfx target. Passing that through would file the
     run's experience under ``gfx950`` as though it were a card, so an
     unresolved model is removed rather than forwarded: KernelForge then declines
-    to read or write, which is visible in its result, instead of addressing a
-    record by a value that means something else.
+    to read or write instead of addressing a record by a value that means
+    something else. The reason it could not be resolved is reported by
+    :func:`_resolve_gpu_type`, which is where it is known.
     """
-    model = str(gpu_type or "").strip().lower()
-    if model in _PLATFORM_TO_GFX:
+    model = _known_gpu_model(gpu_type)
+    if model:
         env["GPU_TYPE"] = model
-        return
-    inherited = str(env.get("GPU_TYPE") or "").strip()
-    env.pop("GPU_TYPE", None)
-    # KernelForge skips its KB and carries on, so nothing downstream fails and
-    # the run simply accumulates nothing. Say so here, where the reason is known.
-    log.warning(
-        "forge: no known hardware model%s; KernelForge will skip its experience "
-        "KB for this run. Set GPU_TYPE to a card such as %s.",
-        f" (dropped inherited GPU_TYPE={inherited!r})" if inherited else "",
-        ", ".join(sorted(_PLATFORM_TO_GFX)),
-    )
+    else:
+        env.pop("GPU_TYPE", None)
 
 
 def _normalize_gpu_target(value: str) -> str:
@@ -3449,8 +3462,8 @@ def _run_loop_via_cli(
     # skips its KB and reports ``missing_gpu_type`` rather than stopping, so an
     # identity that arrived only by inheritance could be lost without the run
     # ever failing.
-    if gpu_type:
-        cmd += ["--gpu-type", gpu_type]
+    if _known_gpu_model(gpu_type):
+        cmd += ["--gpu-type", _known_gpu_model(gpu_type)]
     # Provider selection. KernelForge defaults agent_backend to "auto", which
     # resolves to its claude provider; an OpenAI-only deployment has no Anthropic
     # credential and no Claude CLI login, so every attempt would REVERT on "Not
@@ -3723,8 +3736,10 @@ def _run_rewrite_via_cli(
         "--result-json",
         str(result_json),
     ]
-    if gpu_type:
-        cmd += ["--gpu-type", gpu_type]
+    # Named on the command line for the same reason the loop names it: the
+    # rewrite producer files its port under an identity the model is part of.
+    if _known_gpu_model(gpu_type):
+        cmd += ["--gpu-type", _known_gpu_model(gpu_type)]
     if source_entry:
         cmd += ["--source-entry", source_entry]
     if source_language:

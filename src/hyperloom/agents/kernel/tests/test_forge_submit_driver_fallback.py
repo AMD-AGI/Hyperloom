@@ -115,6 +115,24 @@ def test_submit_names_the_card_alongside_the_target(monkeypatch, tmp_path):
     assert captured["gpu_type"] == "mi300x"
 
 
+def test_submit_reports_the_card_it_could_not_name(monkeypatch, tmp_path, caplog):
+    """A candidate that names no card leaves the run without a KB address.
+
+    Nothing downstream fails on this: the loop optimizes and the result looks
+    ordinary, so the only evidence is what is said here.
+    """
+    monkeypatch.delenv("GPU_TYPE", raising=False)
+    with caplog.at_level("WARNING"):
+        _result, captured = _submit_with_stubbed_loop(
+            monkeypatch,
+            tmp_path,
+            candidate={"operation": "op", "platform": "some-unreleased-card"},
+        )
+
+    assert captured["gpu_type"] == ""
+    assert any("no known hardware model" in record.message for record in caplog.records)
+
+
 def test_missing_autogen_driver_reaches_forge_loop_task_preparer(monkeypatch, tmp_path):
     result, captured = _submit_with_stubbed_loop(monkeypatch, tmp_path)
 
