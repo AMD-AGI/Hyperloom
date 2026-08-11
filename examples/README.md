@@ -30,12 +30,21 @@ Claude Code, or Codex before running the install command.
 - Access to the Anthropic LLM provider.
 - A dedicated workspace directory opened in the user's agent.
 
-From the agent terminal in that workspace, install the published release wheel
-into the current directory:
+From the agent terminal in that workspace, install the published release into the
+current directory. The version is required: `1.0.0b1` is a pre-release, so pip
+skips it unless it is pinned.
 
 ```bash
-python3 -m pip install \
-  https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0a3/hyperloom_inference_optimizer-1.0.0a3-py3-none-any.whl \
+pip install hyperloom-inference-optimizer==1.0.0b1 --target .
+```
+
+The same wheel is attached to the
+[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b1) for
+environments without PyPI access:
+
+```bash
+pip install \
+  https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0b1/hyperloom_inference_optimizer-1.0.0b1-py3-none-any.whl \
   --target .
 ```
 

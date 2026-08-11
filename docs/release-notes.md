@@ -1,13 +1,13 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 1.0.0a3, including Recipe-KB trace visibility, Cortex KB removal, and recipe-oriented naming."
+    "description": "Hyperloom release notes: headline capabilities for version 1.0.0b1, including the remote Recipe KB Store cutover and the session-wide accuracy-eval opt-out."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
 
-The current packaged version is 1.0.0a3 (`pyproject.toml`). For the
+The current packaged version is 1.0.0b1 (`pyproject.toml`). For the
 per-change history since the initial snapshot, see
 [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
 or view a detailed breakdown of all previous Hyperloom pre-release versions under
@@ -16,10 +16,24 @@ summarizes the headline capabilities.
 
 ## Unreleased
 
+## Hyperloom 1.0.0b1 release
+
+The [1.0.0b1 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b1)
+is the first beta, building on 1.0.0a3 with the remote Recipe knowledge cutover
+to KB Store and a session-wide accuracy-eval opt-out.
+
+### 1.0.0b1 highlights
+
 - **Remote Recipe KB Store cutover**: remote Recipe reads and CLOSE writes use
   KB Store with legacy v1 read compatibility, direct best-record selection,
   verified artifacts, and config/env-only T0 replay. Local Recipe storage and
   non-Recipe GBrain consumers are unchanged.
+
+- **`--no-eval` session-wide accuracy opt-out**: the accuracy eval can be turned
+  off for a whole run as an explicit choice, anchoring the baseline on throughput
+  instead of halting on the missing reference. It persists across `--resume` and
+  is refused once the session has anchored an accuracy. Runs made with the flag
+  are not accuracy-validated.
 
 ## Hyperloom 1.0.0a3 release
 
