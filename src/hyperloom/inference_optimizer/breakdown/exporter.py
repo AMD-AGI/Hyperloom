@@ -2140,6 +2140,20 @@ def write_minimal_final_report(
     return target
 
 
+def _crash_safe_platform(gpu_type: str | None) -> dict[str, Any]:
+    """Platform record for the crash-safe path, never raising.
+
+    Imported lazily and wrapped: the safety net must still produce consumable
+    JSON even if the probe itself is what is broken.
+    """
+    try:
+        from hyperloom.orchestrator.actions.executors.report import _platform_fingerprint
+
+        return _platform_fingerprint(gpu_type)
+    except Exception as exc:  # noqa: BLE001 - the safety net cannot itself fail
+        return {"status": "error", "reason": str(exc)}
+
+
 def write_minimal_final_json(
     session_dir: Path | str,
     *,
@@ -2215,6 +2229,10 @@ def write_minimal_final_json(
         "crash_count": state.crash_count,
         "max_minutes": state.max_minutes,
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
+        # A run that died unattended is exactly when the host record is most
+        # useful, since nobody was watching. Kept to the same one-shot, never-
+        # raising contract as the rest of this function.
+        "platform": _crash_safe_platform(state.gpu_type),
     }
 
     fd, tmp = tempfile.mkstemp(

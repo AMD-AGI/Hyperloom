@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
 import subprocess
 from collections import Counter
 from datetime import datetime, timezone
@@ -28,6 +29,8 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import io as _common_io
+from hyperloom.common.platform_probe import probe_cpu_platform, read_kernel_file
+from hyperloom.common.provenance import detect_gfx_arch, detect_stack_fingerprint
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
@@ -414,6 +417,96 @@ def _explain_stop_reason(stop_reason):
     return _STOP_REASON_EXPLANATIONS.get(str(stop_reason or "").strip(), "")
 
 
+def _platform_fingerprint(gpu_type: str | None = None) -> dict[str, Any]:
+    """Capture host CPU tuning state for run-to-run comparability.
+
+    Within one session the baseline and every trial run on the same node, so
+    host tuning applies to both sides and cancels out of the *delta*. What it
+    does not cancel out of is everything the session exports: the absolute
+    throughput, and the configuration the optimizer selects. On a de-tuned node
+    the search is conducted around a CPU-side bottleneck that does not exist on
+    a correct one, and the winning config is then filed in the recipe KB for
+    other people. This record is also the only way to interpret the two genuine
+    cross-machine comparisons -- an InferenceX reference pulled in by
+    ``--compare-against-gpu``, and an archived ``final.json`` re-read months or
+    a reimage later.
+
+    Read at report time rather than plumbed from CLI preflight: the sysfs read
+    is free, it needs no cross-process state, and sampling at both ends means a
+    knob toggled mid-session shows up as a mismatch rather than being silently
+    attributed to the optimizer.
+
+    Scope: this samples the process's own node. In a multi-node session the
+    orchestrator is usually not the benchmark node, so the record would then
+    describe a machine the numbers did not come from -- worse than no record,
+    since it reads as fact when someone explains a delta. ``host`` names the
+    sampled machine and ``multi_node_session`` marks when it is known to be
+    partial, so a reader can tell the two apart. Per-node collection is the
+    real fix and is not attempted here.
+
+    Always returns a dict carrying ``status``. An archived report must be able
+    to distinguish "this host had no CPU sysfs" from "the probe broke", which a
+    bare ``null`` cannot express -- and that distinction matters precisely when
+    someone is trying to explain a delta long after the run.
+
+    Args:
+        gpu_type: Session ``--gpu-type``. Resolves the gfx arch from the board
+            table, so report generation never spawns a probe subprocess.
+
+    Returns:
+        dict[str, Any]: ``status="ok"`` with the platform facts, or
+        ``status="unavailable"``/``"error"`` with a human-readable ``reason``.
+    """
+    try:
+        plat = probe_cpu_platform()
+        if plat is None:
+            return {
+                "status": "unavailable",
+                "reason": "no host CPU sysfs on this machine",
+            }
+        try:  # local import keeps this probe free of executor import order
+            from ._multi_node_env import is_multi_node
+
+            multi_node = bool(is_multi_node())
+        except Exception:  # noqa: BLE001 - scope marker only; absence means single-node
+            multi_node = False
+
+        record: dict[str, Any] = {
+            "status": "ok",
+            "host": socket.gethostname(),
+            "multi_node_session": multi_node,
+            **plat.as_dict(),
+        }
+        # Each block below degrades on its own: one unreadable file must not
+        # take the whole platform record with it.
+        try:
+            record["gpu"] = {
+                # PCI devices bound to amdgpu — the count the run actually had,
+                # independent of any *_VISIBLE_DEVICES masking.
+                "count": len(list(Path("/sys/bus/pci/drivers/amdgpu").glob("0000:*"))) or None,
+                # probe=False: gpu_type already answers this, and report
+                # generation runs in-process under unit tests that must not
+                # spawn rocminfo.
+                "gfx_arch": detect_gfx_arch(os.environ, gpu_type=gpu_type, probe=False)
+                or "unknown",
+                "amdgpu_driver": read_kernel_file("/sys/module/amdgpu/version") or "unknown",
+            }
+        except Exception:  # noqa: BLE001 - one degraded field, not a dropped record
+            log.warning("platform fingerprint: GPU block unreadable", exc_info=True)
+            record["gpu"] = {"status": "error"}
+        try:
+            record["stack"] = detect_stack_fingerprint(os.environ)
+        except Exception:  # noqa: BLE001
+            log.warning("platform fingerprint: stack block unreadable", exc_info=True)
+            record["stack"] = {"status": "error"}
+        return record
+    except Exception as exc:  # noqa: BLE001 - never break report generation
+        # Warning, not debug: this record is provenance, and a silent hole in it
+        # is only discovered when someone needs it and it is too late to re-run.
+        log.warning("platform fingerprint failed: %s", exc, exc_info=True)
+        return {"status": "error", "reason": str(exc)}
+
+
 def _build_summary_dict(
     state: SharedState,
     ev_counts: dict[str, int],
@@ -468,6 +561,7 @@ def _build_summary_dict(
         "crash_count": state.crash_count,
         "server_boot_failures": _count_server_boot_failures(session_dir),
         "pruned_families": state.pruned_families,
+        "platform": _platform_fingerprint(getattr(state, "gpu_type", None)),
         "max_minutes": state.max_minutes,
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
         "event_counts_by_topic": ev_counts,
@@ -576,6 +670,41 @@ def _format_md(summary: dict[str, Any]) -> str:
     if boot_fail:
         lines.append(f"- server_boot_failures : {boot_fail}  *(warmup_failed variants; excluded from crash_count)*")
     lines.append(f"- pruned_families: {summary['pruned_families'] or '(none)'}")
+    plat = summary.get("platform") or {}
+    if plat.get("status") != "ok":
+        # Say why it is missing rather than omitting the line: a silent absence
+        # is indistinguishable from a host that was never checked.
+        if plat.get("reason"):
+            lines.append(f"- platform       : not recorded — {plat['reason']}")
+    else:
+        if plat.get("multi_node_session"):
+            lines.append(
+                f"- platform scope : ⚠ multi-node session — sampled on `{plat.get('host')}` "
+                f"(the orchestrator), which may not be the benchmark node"
+            )
+        else:
+            lines.append(f"- host           : {plat.get('host', 'unknown')}")
+
+        def _q(value: Any) -> str:
+            """Render an unresolved field as '?' rather than the word None."""
+            return "?" if value in (None, "") else str(value)
+
+        lines.append(
+            f"- platform       : {_q(plat.get('cpu'))} — SMT {_q(plat.get('smt'))}, "
+            f"{_q(plat.get('nps'))} ({_q(plat.get('numa_nodes'))} NUMA nodes / "
+            f"{_q(plat.get('sockets'))} sockets), governor {_q(plat.get('governor'))}, "
+            f"boost {_q(plat.get('boost'))}"
+        )
+        gpu, stack = plat.get("gpu") or {}, plat.get("stack") or {}
+        lines.append(
+            f"- accelerators   : {gpu.get('count') or '?'}× {gpu.get('gfx_arch', 'unknown')}, "
+            f"amdgpu {gpu.get('amdgpu_driver', 'unknown')}"
+        )
+        lines.append(
+            "- stack          : "
+            + ", ".join(f"{k} {v}" for k, v in sorted(stack.items()))
+            + f", kernel {plat.get('kernel', 'unknown')}"
+        )
     lines.append("")
     lines.append("## Event counts")
     lines.append("")
