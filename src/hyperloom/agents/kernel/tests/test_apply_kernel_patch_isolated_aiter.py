@@ -148,12 +148,14 @@ def test_detect_strategy_sgl_workspace_aiter_unchanged(akp, monkeypatch):
     assert strat["rebuild_mode"] == "command"
     assert strat["rebuild_command"] == ["/opt/venv/bin/python", "setup.py", "develop"]
     assert strat["jit_build_dir"] == "/sgl-workspace/aiter/aiter/jit/build"
+    # Apply pins and revert trusts the same root, so neither can drift alone.
+    assert Path(strat["jit_build_dir"]) == akp._EDITABLE_AITER_ROOT / "aiter" / "jit" / "build"
 
 
 def test_editable_checkout_jit_build_dir_is_trusted(akp, tmp_path, monkeypatch):
     """The editable path _detect_strategy pins must pass revert-time validation."""
     checkout, aiter_pkg = _make_editable_aiter(tmp_path)
-    monkeypatch.setattr(akp, "_EDITABLE_KERNEL_DEPLOY_ROOTS", (checkout,))
+    monkeypatch.setattr(akp, "_EDITABLE_AITER_ROOT", checkout)
 
     assert akp._trusted_aiter_jit_build_dir(aiter_pkg / "jit" / "build") is True
 
@@ -171,7 +173,7 @@ def test_jit_build_dir_outside_every_known_root_is_rejected(
 ):
     """A forged manifest naming an aiter-shaped tree is still an rmtree target."""
     checkout, _aiter_pkg = _make_editable_aiter(tmp_path)
-    monkeypatch.setattr(akp, "_EDITABLE_KERNEL_DEPLOY_ROOTS", (checkout,))
+    monkeypatch.setattr(akp, "_EDITABLE_AITER_ROOT", checkout)
     forged = tmp_path / "attacker" / "aiter"
     (forged / "jit" / "build").mkdir(parents=True)
     (forged / "__init__.py").write_text("", encoding="utf-8")
@@ -188,7 +190,7 @@ def test_editable_root_without_package_markers_is_rejected(
     """A bare directory tree is not an importable aiter package."""
     checkout = tmp_path / "sgl-workspace" / "aiter"
     (checkout / "aiter" / "jit" / "build").mkdir(parents=True)
-    monkeypatch.setattr(akp, "_EDITABLE_KERNEL_DEPLOY_ROOTS", (checkout,))
+    monkeypatch.setattr(akp, "_EDITABLE_AITER_ROOT", checkout)
 
     assert (
         akp._trusted_aiter_jit_build_dir(checkout / "aiter" / "jit" / "build")
@@ -196,18 +198,38 @@ def test_editable_root_without_package_markers_is_rejected(
     )
 
 
+def test_symlinked_site_packages_wheel_stays_trusted(akp, tmp_path):
+    """site-packages is commonly a symlink; the wheel behind it is still a wheel."""
+    _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+    linked_site = tmp_path / "linked" / "lib" / "python3.12"
+    linked_site.mkdir(parents=True)
+    (linked_site / "site-packages").symlink_to(aiter_pkg.parent)
+
+    trusted = akp._trusted_aiter_jit_build_dir(
+        linked_site / "site-packages" / "aiter" / "jit" / "build"
+    )
+
+    assert trusted is True
+
+
+def test_symlink_loop_in_the_manifest_path_is_rejected(akp, tmp_path):
+    """An untrusted path that cannot be resolved is not trusted, and does not raise."""
+    loop = tmp_path / "loop"
+    other = tmp_path / "other"
+    loop.symlink_to(other)
+    other.symlink_to(loop)
+
+    assert akp._trusted_aiter_jit_build_dir(loop / "aiter" / "jit" / "build") is False
+
+
 def test_editable_jit_build_survives_invalidate_then_restore(
     akp,
     tmp_path,
     monkeypatch,
 ):
-    """The round trip an editable aiter revert performs, end to end.
-
-    Before the editable root was recognised this failed with "untrusted
-    strategy jit/build dir" and stranded the cache in the backup directory.
-    """
+    """The round trip an editable aiter revert performs, end to end."""
     checkout, aiter_pkg = _make_editable_aiter(tmp_path)
-    monkeypatch.setattr(akp, "_EDITABLE_KERNEL_DEPLOY_ROOTS", (checkout,))
+    monkeypatch.setattr(akp, "_EDITABLE_AITER_ROOT", checkout)
     jit_build = aiter_pkg / "jit" / "build"
     (jit_build / "baseline.so").write_text("baseline", encoding="utf-8")
     backup_root = tmp_path / "backups"
