@@ -187,13 +187,9 @@ def runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
 
 
 def unique_runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
-    """Create and return a unique per-task workspace under ``<sd>/runs/<action>/``.
-
-    Behaves like :func:`runs_dir` but guarantees the returned path does not
-    already exist.  When ``<task_id>/`` is already taken, appends ``-2``,
-    ``-3``, … until a free slot is found.  The directory is created atomically
-    via ``mkdir(exist_ok=False)``; concurrent callers on the same host will
-    each obtain a distinct path.
+    """Create a fresh :func:`runs_dir` workspace, suffixing ``-2``, ``-3``, …
+    when earlier attempts already claimed the name. ``mkdir(exist_ok=False)``
+    makes the claim atomic against concurrent callers.
 
     Args:
         session_dir (Path): The session root directory.
@@ -203,21 +199,21 @@ def unique_runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
             ``"unknown"``.
 
     Returns:
-        Path: A freshly created, unique workspace directory.
+        Path: The newly created workspace directory.
 
     Raises:
         ValueError: If ``action`` is not a recognised runs-workspace action.
     """
     base = runs_dir(session_dir, action, task_id)
     candidate = base
-    suffix = 1
+    attempt = 1
     while True:
         try:
             candidate.mkdir(parents=True, exist_ok=False)
             return candidate
         except FileExistsError:
-            suffix += 1
-            candidate = base.parent / f"{base.name}-{suffix}"
+            attempt += 1
+            candidate = base.with_name(f"{base.name}-{attempt}")
 
 
 def kernel_agent_runs_root(session_dir: Path) -> Path:

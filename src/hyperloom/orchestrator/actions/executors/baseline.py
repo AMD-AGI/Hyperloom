@@ -2742,7 +2742,7 @@ class BaselineExecutor:
             except Exception as exc:  # noqa: BLE001 - warmup is best-effort
                 log.warning("baseline_executor: MN warmup pass failed (ignored): %r", exc)
 
-        _workspaces_before = snapshot_workspaces(output_dir)
+        workspaces_before = snapshot_workspaces(output_dir)
         subprocess_started_unix = time.time()
         # Anchor the Magpie parent process cwd to the per-task output_dir. NOTE:
         # this does NOT keep the server's cuda-graph dump safe on its own —
@@ -2881,8 +2881,7 @@ class BaselineExecutor:
             proc_stdout or "",
         )
 
-        # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
-        workspace = select_run_workspace(output_dir, known_before=_workspaces_before)
+        workspace = select_run_workspace(output_dir, known_before=workspaces_before)
         # Always-on artifact harvest: copy wrapper-side leaks into the task
         # workspace so failure-path diagnostics survive; mtime gating rejects
         # stale prior-run leaks.

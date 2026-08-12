@@ -252,51 +252,32 @@ def _resolve_leak_roots(leak_root: Path | None) -> tuple[Path, ...]:
 
 
 def snapshot_workspaces(root: Path) -> frozenset[Path]:
-    """Return the set of ``benchmark_*`` subdirectories currently in ``root``.
+    """Return the ``benchmark_*`` workspaces present in ``root`` right now.
 
     Args:
-        root: Directory to scan for Magpie workspace subdirectories.
+        root: Directory holding Magpie workspaces.
 
     Returns:
-        Resolved absolute paths of all existing ``benchmark_*`` entries.
+        Resolved paths of the existing workspaces.
     """
-    try:
-        return frozenset(p.resolve() for p in root.glob("benchmark_*") if p.is_dir())
-    except OSError:
-        return frozenset()
+    return frozenset(p.resolve() for p in root.glob("benchmark_*") if p.is_dir())
 
 
-def select_run_workspace(
-    root: Path,
-    *,
-    known_before: frozenset[Path] | None = None,
-) -> Path | None:
-    """Return the benchmark workspace produced by the current run.
+def select_run_workspace(root: Path, *, known_before: frozenset[Path]) -> Path | None:
+    """Return the newest ``benchmark_*`` workspace this run created in ``root``.
 
-    When ``known_before`` is given, only directories that did not exist
-    before the subprocess started (i.e. the set difference) are eligible.
-    Falls back to the lexicographically largest name when ``known_before``
-    is ``None``.  Returns ``None`` when no eligible workspace exists.
+    Workspaces present in ``known_before`` belong to an earlier attempt and are
+    never selected, so a failed run cannot adopt a prior attempt's report.
 
     Args:
-        root: Directory containing Magpie ``benchmark_*`` workspaces.
-        known_before: Snapshot of pre-existing workspaces taken just before
-            the subprocess started; supply to restrict selection to this
-            run's output only.
+        root: Directory holding Magpie workspaces.
+        known_before: Snapshot taken immediately before the subprocess started.
 
     Returns:
-        The selected workspace path, or ``None`` when none qualify.
+        The selected workspace, or ``None`` when this run created none.
     """
-    try:
-        candidates = sorted(p for p in root.glob("benchmark_*") if p.is_dir())
-    except OSError:
-        return None
-    if not candidates:
-        return None
-    if known_before is None:
-        return candidates[-1]
-    new_candidates = [p for p in candidates if p.resolve() not in known_before]
-    return new_candidates[-1] if new_candidates else None
+    fresh = [p for p in root.glob("benchmark_*") if p.is_dir() and p.resolve() not in known_before]
+    return max(fresh, default=None)
 
 
 def harvest_leaked_artifacts(

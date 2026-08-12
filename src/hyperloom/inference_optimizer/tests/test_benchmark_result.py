@@ -59,13 +59,6 @@ class TestWorkspaceSelection:
     def test_snapshot_empty_on_missing_root(self, tmp_path):
         assert snapshot_workspaces(tmp_path / "nonexistent") == frozenset()
 
-    def test_select_run_workspace_no_known_before_returns_last(self, tmp_path):
-        (tmp_path / "benchmark_vllm_20260101_000000").mkdir()
-        (tmp_path / "benchmark_vllm_20260812_120000").mkdir()
-        result = select_run_workspace(tmp_path)
-        assert result is not None
-        assert result.name == "benchmark_vllm_20260812_120000"
-
     def test_select_run_workspace_known_before_excludes_stale(self, tmp_path):
         stale = tmp_path / "benchmark_vllm_20260101_000000"
         stale.mkdir()
@@ -83,7 +76,15 @@ class TestWorkspaceSelection:
         assert result is None
 
     def test_select_run_workspace_no_dirs_returns_none(self, tmp_path):
-        assert select_run_workspace(tmp_path) is None
+        assert select_run_workspace(tmp_path, known_before=frozenset()) is None
+
+    def test_select_run_workspace_picks_newest_of_several_fresh(self, tmp_path):
+        known = snapshot_workspaces(tmp_path)
+        (tmp_path / "benchmark_vllm_20260812_120000").mkdir()
+        (tmp_path / "benchmark_vllm_20260812_130000").mkdir()
+        result = select_run_workspace(tmp_path, known_before=known)
+        assert result is not None
+        assert result.name == "benchmark_vllm_20260812_130000"
 
     def test_select_run_workspace_stale_with_larger_name_not_selected(self, tmp_path):
         stale = tmp_path / "benchmark_vllm_29991231_235959"
