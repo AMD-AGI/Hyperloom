@@ -6406,11 +6406,10 @@ async def integrate_handler(
     extra_args = _vram_guarded_server_args(extra_args)
 
     # Wrap BaselineExecutor in a Task/RunnerContext.
-    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+    from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
 
     fake_task_id = f"integrate-{kernel_id or 'anon'}"
-    workspace = runs_dir(session_dir, "integrate", fake_task_id)
-    workspace.mkdir(parents=True, exist_ok=True)
+    workspace = unique_runs_dir(session_dir, "integrate", fake_task_id)
     baseline_executor = BaselineExecutor(session_dir=session_dir)
     rebaseline_timeout_sec = _integrate_rebaseline_timeout_sec(
         payload,
@@ -6675,8 +6674,7 @@ async def integrate_handler(
         paired_ab = {"status": "attempted"}
         try:
             paired_pristine_revert = _maybe_revert_kernel_patch(apply_result)
-            paired_ws = runs_dir(session_dir, "integrate", f"{fake_task_id}-pairedbase")
-            paired_ws.mkdir(parents=True, exist_ok=True)
+            paired_ws = unique_runs_dir(session_dir, "integrate", f"{fake_task_id}-pairedbase")
             paired_task = Task(
                 task_id=f"{fake_task_id}-pairedbase",
                 kind="baseline",

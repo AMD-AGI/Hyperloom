@@ -435,7 +435,7 @@ class KernelStackPhase(PhaseHandler):
             _maybe_revert_kernel_patch,
         )
         from ..loop.sub_agent_runner import RunnerContext
-        from hyperloom.inference_optimizer.session.session_paths import runs_dir
+        from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
 
         kernel_ids = [str(e.get("kernel_id") or "") for e in entries]
         stack_id = "+".join(kernel_ids)
@@ -461,8 +461,7 @@ class KernelStackPhase(PhaseHandler):
                 if applied.get("status") != "ok":
                     raise RuntimeError(f"stack patch apply failed for {entry.get('kernel_id')}: {applied}")
 
-            workspace = runs_dir(self.session_dir, "integrate", f"integrate-stack-{stack_id}")
-            workspace.mkdir(parents=True, exist_ok=True)
+            workspace = unique_runs_dir(self.session_dir, "integrate", f"integrate-stack-{stack_id}")
             fake_task = Task(
                 task_id=f"integrate-stack-{stack_id}",
                 kind="baseline",
