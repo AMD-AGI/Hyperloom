@@ -190,7 +190,6 @@ hyperloom = [
 # former agent skill file was replaced by docs/conceptual/kernel-execution-path.md.
 "hyperloom.agents.kernel" = [
     "scripts/*.sh",
-    "skills/unittest/SKILL.md",
 ]
 # Non-Python data file the kernel tools read at runtime.
 "hyperloom.agents.kernel.tools" = [
@@ -266,8 +265,6 @@ omit = [
     # Kernel-agent tool backends (subprocess submit).
     "src/hyperloom/agents/kernel/tools/backends/*",
     "src/hyperloom/agents/kernel/tools/_collective_names.py",
-    # Kernel-agent skill harness validator — standalone operator script.
-    "src/hyperloom/agents/kernel/skills/unittest/validate_harness.py",
     # quantization_agent CLI driver (argparse entrypoint).
     "src/hyperloom/agents/quantization/cli.py",
     # OOB server-side runtime (CLI, HTTP server, scheduler, auth proxy, agent
