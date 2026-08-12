@@ -5733,8 +5733,6 @@ async def _run_optimization_single(
         cmd += ["--candidates-path", str(payload["candidates_path"])]
     if payload.get("benchmark_file"):
         cmd += ["--benchmark-file", str(payload["benchmark_file"])]
-    if payload.get("test_harness_path"):
-        cmd += ["--test-harness-path", str(payload["test_harness_path"])]
     if payload.get("micro_speedup") is not None:
         cmd += ["--micro-speedup", str(payload["micro_speedup"])]
     if payload.get("e2e_gain_pct") is not None:
@@ -5749,8 +5747,6 @@ async def _run_optimization_single(
             "--accuracy-passed",
             "true" if bool(payload["accuracy_passed"]) else "false",
         ]
-    if payload.get("test_command"):
-        cmd += ["--test-command", str(payload["test_command"])]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     if payload.get("budget_minutes") is not None:

@@ -9,7 +9,6 @@ import ast
 import json
 import math
 import re
-import shlex
 from pathlib import Path
 from typing import Any
 
@@ -484,26 +483,6 @@ def _safe_mapping(value: Any, *, base_dir: str = "") -> dict[str, Any]:
     return sanitized if isinstance(sanitized, dict) else {}
 
 
-def _normalize_test_command(command: str, *, base_dir: str = "") -> str:
-    """Absolutize path-like argv entries in a diagnostic test command."""
-    text = str(command or "").strip()
-    if not text:
-        return ""
-    try:
-        argv = shlex.split(text)
-    except ValueError:
-        return ""
-    normalized: list[str] = []
-    for token in argv:
-        looks_like_path = (
-            token.startswith(("/", "./", "../", "~"))
-            or "/" in token
-            or token.endswith((".py", ".sh", ".json", ".yaml", ".yml"))
-        )
-        normalized.append(_absolute_path(token, base_dir=base_dir) if looks_like_path else token)
-    return shlex.join(normalized)
-
-
 def _load_model_config(model_path: str) -> tuple[str, dict[str, Any]]:
     """Read a bounded local model config and return its path and tuning summary."""
     if not model_path:
@@ -812,7 +791,6 @@ def build_invocation_spec(
     candidate: dict[str, Any],
     *,
     source_file: str = "",
-    test_command: str = "",
 ) -> dict[str, Any]:
     """Build a versioned invocation evidence document from a TraceLens candidate."""
     raw_repo_root = str(candidate.get("kernel_repo") or "").strip()
@@ -983,10 +961,6 @@ def build_invocation_spec(
             "related_files": benchmark_files,
             "test_harness_path": _absolute_path(
                 candidate.get("test_harness_path"),
-                base_dir=repo_root,
-            ),
-            "selected_test_command": _normalize_test_command(
-                test_command,
                 base_dir=repo_root,
             ),
             "driver_contract": _driver_contract(task_group_contract),
