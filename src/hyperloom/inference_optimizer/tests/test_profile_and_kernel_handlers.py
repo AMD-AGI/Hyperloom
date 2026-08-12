@@ -1980,6 +1980,45 @@ async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_di
     assert not any("bypass_trace_analysis.py" in c for c in cmd)
     assert "--analysis-route" in cmd and "agent" in cmd
     assert "--tracelens-root" in cmd
+    assert "--skip-split" in cmd
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_xdit_state_overrides_stale_payload_framework(
+    session_dir,
+    monkeypatch,
+):
+    """A stale text-generation payload must not make xDiT split its raw trace."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.framework = "xdit"
+    state.save(session_dir)
+
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "sglang",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "xdit"
+    assert "--skip-split" in cmd
+    assert "--analysis-mode" not in cmd
 
 
 @pytest.mark.asyncio
