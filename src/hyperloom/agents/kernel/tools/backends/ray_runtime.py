@@ -398,8 +398,14 @@ SAFE_ENV_KEYS = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
+    # Gateway auth headers travel with their endpoint, so a worker that gets the
+    # URL and key but not the header is rejected by a header-authenticated
+    # gateway (an AMD APIM subscription key, for one).
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "CLAUDE_CODE_OAUTH_TOKEN",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
+    "OPENAI_CUSTOM_HEADERS",
     "AMD_API_KEY",
     "AMD_LLM_API_KEY",
     "LLM_GATEWAY_KEY",
@@ -452,6 +458,8 @@ def safe_runtime_env() -> dict:
         env.setdefault("LLM_API_KEY", openai_key)
         env.setdefault("AMD_LLM_API_KEY", openai_key)
         env.setdefault("LLM_GATEWAY_KEY", openai_key)
+    # CLAUDE_CODE_OAUTH_TOKEN is forwarded verbatim, never mirrored into these:
+    # either key var switches the Claude CLI out of subscription mode.
     anthropic_key = env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN")
     if anthropic_key:
         env.setdefault("ANTHROPIC_API_KEY", anthropic_key)

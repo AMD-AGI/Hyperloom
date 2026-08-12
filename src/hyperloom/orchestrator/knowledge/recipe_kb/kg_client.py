@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 from ..config import KnowledgeConfig, KnowledgeStoreMode
-from .gbrain_remote_client import GbrainRemoteError, _GbrainMcp
+from .gbrain_mcp import GbrainRemoteError, _GbrainMcp
 from .local_graph_store import LocalGraphStore
 
 log = logging.getLogger(__name__)
@@ -1342,7 +1342,8 @@ def build_kg_client_from_env() -> KGClient | None:
     :class:`LocalGraphStore` rooted at
     ``$KNOWLEDGE_LOCAL_ROOT/hyperloom/kg``. Ambient GBrain credentials are
     deliberately ignored in local mode. Remote mode preserves the prior
-    GBrain transport and ``GBRAIN_KG_NATIVE`` compatibility.
+    GBrain transport and ``GBRAIN_KG_NATIVE`` compatibility when both optional
+    ``GBRAIN_BASE_URL`` and ``GBRAIN_TOKEN`` values are configured.
 
     Returns:
         A configured local or remote client. ``None`` is retained in the type
@@ -1352,6 +1353,13 @@ def build_kg_client_from_env() -> KGClient | None:
     if config.mode is KnowledgeStoreMode.LOCAL:
         graph_root = Path(config.local_root) / "hyperloom" / "kg"
         return KGClient(LocalGraphStore(graph_root), use_native_kg=True)
+
+    if not config.gbrain_base_url or not config.gbrain_token:
+        log.info(
+            "remote Recipe mode has no complete optional GBrain KG "
+            "configuration; KG disabled"
+        )
+        return None
 
     timeout_env = os.environ.get("GBRAIN_HTTP_TIMEOUT_SEC")
     timeout_sec = 2.0

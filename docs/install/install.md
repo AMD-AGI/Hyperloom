@@ -299,6 +299,48 @@ HYPERLOOM_RUN_MODE=baremetal
 EOF
 ```
 
+### Using an enterprise LLM gateway
+
+`https://api.anthropic.com` above is only the default. `ANTHROPIC_BASE_URL`
+accepts any Anthropic-protocol endpoint, so an enterprise LLM gateway is
+configured through the same official variables rather than a Hyperloom-specific
+one: point the base URL at the gateway and use the key the gateway issues.
+
+```bash
+cat > .env <<'EOF'
+ANTHROPIC_API_KEY=<PLEASE_FILL_IN>
+ANTHROPIC_BASE_URL=https://<your-gateway-host>/api/v1/llm-proxy
+# Pin an orchestration model id your gateway actually serves. Preflight
+# validates it against the gateway's /models catalog and does not silently
+# substitute a different model.
+CLAUDE_MODEL=<PLEASE_FILL_IN>
+USER_DATA_PATH=<PLEASE_FILL_IN>
+HYPERLOOM_RUN_MODE=baremetal
+EOF
+```
+
+Gateways that authenticate on a header of their own need that header in addition
+to the bearer key. AMD's gateway is one of them: `llm-api.amd.com` requires the
+API key to also travel as an `Ocp-Apim-Subscription-Key` header. Add one more line
+to `.env` below `ANTHROPIC_API_KEY` — `${VAR}` references are expanded from the
+same file, so the secret stays in one place:
+
+```bash
+ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}"
+```
+
+Keep the double quotes. Setup and the launch scripts may load `.env` with a shell
+`source`, and an unquoted value containing a space and a colon is parsed as a
+command, failing with exit 127.
+
+If the gateway also serves an OpenAI-compatible route, set `OPENAI_BASE_URL` and
+`OPENAI_API_KEY` against it to enable the Codex-side features. On the AMD
+network the interactive flow described in [Setup Hyperloom](#setup-hyperloom)
+offers the AMD gateway as a ready-made choice, so you do not need to write any
+of this by hand. See
+[Authentication and credentials](../reference/authentication.md) for the full
+set of accepted shapes, including split entrypoints and self-hosted gateways.
+
 ### Bare metal (source)
 
 Make sure the host already provides the required base environment:

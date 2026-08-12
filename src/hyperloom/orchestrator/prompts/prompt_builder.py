@@ -31,6 +31,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
 )
 from . import read_rules_fragment as _read_rules_fragment
+from .transport import TRANSPORTS, TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
 
 
 # Phase ordering for the catalogue; unknown phases appended at the end.
@@ -63,6 +64,10 @@ _BASELINE_RECOVERY_PHASES: frozenset[str] = frozenset({"PRELUDE"})
 
 # ``<!-- phase: A, B -->`` scopes the ``### `` heading that follows it.
 _PHASE_TAG_RE = re.compile(r"^<!--\s*phase:\s*(?P<phases>[A-Za-z_,\s]+?)\s*-->$")
+
+# ``<!-- transport: tools -->`` scopes the ``### `` heading that follows it,
+# exactly as the phase tag does, and the two compose.
+_TRANSPORT_TAG_RE = re.compile(r"^<!--\s*transport:\s*(?P<transports>[a-z_,\s]+?)\s*-->$")
 
 
 def _renders_in(phase: str, phases: frozenset[str]) -> bool:
@@ -538,7 +543,7 @@ def _section_action_catalogue(actions: list[ActionMetadata], *, phase: str = "")
     return lines
 
 
-def _section_decision_framework(*, kernel_enabled: bool, phase: str = "") -> list[str]:
+def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transport: str = "") -> list[str]:
     """Build the DECISION FRAMEWORK section lines.
 
     Covers the per-tick selection order, FAILURE RECOVERY, and the
@@ -549,6 +554,8 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "") -> lis
             run.
         phase (str): Normalised current pipeline phase; ``""`` renders every
             phase-scoped block.
+        transport (str): One of :data:`TRANSPORTS`; scopes the tool references
+            inside FAILURE RECOVERY.
 
     Returns:
         list[str]: Markdown lines for the decision framework.
@@ -618,26 +625,37 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "") -> lis
             "Robustness escalate. NEVER stay silent.",
         ]
     )
-    lines.extend(_failure_recovery_lines(phase=phase))
+    lines.extend(_failure_recovery_lines(phase=phase, transport=transport))
     if _renders_in(phase, _EXPLORE_GRID_PHASES):
         lines.extend(_idea_generation_lines())
     return lines
 
 
-def _failure_recovery_lines(*, phase: str) -> list[str]:
+def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
     """Build the FAILURE RECOVERY block.
 
     Always-on trigger and F3/F4 rules are inlined; the detailed diagnostic
     surfaces, fingerprint semantics, and worked examples live in the
-    ``failure_recovery`` reference document (pull with ``read_reference``).
+    ``failure_recovery`` reference document, which only a transport with the
+    ``read_reference`` tool can pull.
 
     Args:
         phase (str): Normalised current pipeline phase.
+        transport (str): One of :data:`TRANSPORTS`; a transport without tools
+            is not pointed at the reference document.
 
     Returns:
         list[str]: Markdown lines for the failure-recovery block.
     """
     baseline_scoped = _renders_in(phase, _BASELINE_RECOVERY_PHASES)
+    detail = (
+        "/ `last_action_failures` for the error detail."
+        if transport == TRANSPORT_STRUCTURED_OUTPUT
+        else (
+            "/ `last_action_failures` for the error detail. Full diagnostic surfaces,\n"
+            "fingerprint semantics, and examples: ``read_reference('failure_recovery')``."
+        )
+    )
     lines = [
         "",
         "### FAILURE RECOVERY (apply BEFORE re-proposing an action that just failed)",
@@ -645,8 +663,7 @@ def _failure_recovery_lines(*, phase: str) -> list[str]:
         "When the inbox carries a fresh `delegated_result{state!='succeeded'}`",
         "or `last_action_failures[-1].action == <X>`, do NOT re-propose the same",
         "action with the same params. Consult `last_<action>` / `<action>_attempts`",
-        "/ `last_action_failures` for the error detail. Full diagnostic surfaces,",
-        "fingerprint semantics, and examples: ``read_reference('failure_recovery')``.",
+        detail,
         "",
         "Rules (apply in order):",
         "",
@@ -799,47 +816,59 @@ Only rewrite reusable native sources in the trace. NEVER optimize
 kernels — they're tied to one compile cache and not reusable."""
 
 
-def _filter_rules_fragment(rules_md: str, *, phase: str = "") -> str:
-    """Drop rules-fragment ``### `` blocks that do not belong to ``phase``.
+def _filter_rules_fragment(rules_md: str, *, phase: str = "", transport: str = "") -> str:
+    """Drop rules-fragment ``### `` blocks that this run cannot reach.
 
-    A ``<!-- phase: A, B -->`` comment scopes the ``### `` heading that follows
-    it, up to the next ``### `` / ``## `` heading. Untagged blocks always render,
-    so a section added without a tag stays always-on. The tag comments and the
-    fragment's leading maintainer blockquote are never emitted.
+    A ``<!-- phase: A, B -->`` or ``<!-- transport: tools -->`` comment scopes
+    the ``### `` heading that follows it, up to the next ``### `` / ``## ``
+    heading; both may precede the same heading and both must then match.
+    Untagged blocks always render, so a section added without a tag stays
+    always-on. The tag comments and the fragment's leading maintainer
+    blockquote are never emitted.
 
     Args:
         rules_md (str): Raw rules-fragment markdown.
         phase (str): Normalised current pipeline phase; ``""`` keeps everything.
+        transport (str): One of :data:`TRANSPORTS`; ``""`` keeps everything.
 
     Returns:
-        str: The fragment with out-of-phase blocks removed.
+        str: The fragment with unreachable blocks removed.
     """
     kept: list[str] = []
-    pending: frozenset[str] | None = None
-    active: frozenset[str] | None = None
+    pending_phases: frozenset[str] | None = None
+    pending_transports: frozenset[str] | None = None
+    active_phases: frozenset[str] | None = None
+    active_transports: frozenset[str] | None = None
     in_header = True
     for line in rules_md.splitlines():
         if in_header:
             if not line.strip() or line.lstrip().startswith(">"):
                 continue
             in_header = False
-        tag = _PHASE_TAG_RE.match(line.strip())
-        if tag is not None:
-            pending = frozenset(p.strip().upper() for p in tag.group("phases").split(",") if p.strip())
+        stripped = line.strip()
+        phase_tag = _PHASE_TAG_RE.match(stripped)
+        if phase_tag is not None:
+            pending_phases = frozenset(p.strip().upper() for p in phase_tag.group("phases").split(",") if p.strip())
+            continue
+        transport_tag = _TRANSPORT_TAG_RE.match(stripped)
+        if transport_tag is not None:
+            pending_transports = frozenset(t.strip() for t in transport_tag.group("transports").split(",") if t.strip())
             continue
         if line.startswith("### "):
-            active = pending
-            pending = None
+            active_phases, pending_phases = pending_phases, None
+            active_transports, pending_transports = pending_transports, None
         elif line.startswith("## "):
-            active = None
-            pending = None
-        if active is not None and not _renders_in(phase, active):
+            active_phases = active_transports = None
+            pending_phases = pending_transports = None
+        if active_phases is not None and not _renders_in(phase, active_phases):
+            continue
+        if active_transports is not None and transport and transport not in active_transports:
             continue
         kept.append(line)
     return "\n".join(kept).strip()
 
 
-def _section_rules(rules_md: str, *, phase: str = "") -> list[str]:
+def _section_rules(rules_md: str, *, phase: str = "", transport: str = "") -> list[str]:
     """Build the RULES & OUTPUT PROTOCOL section wrapping the rules fragment.
 
     Args:
@@ -847,11 +876,13 @@ def _section_rules(rules_md: str, *, phase: str = "") -> list[str]:
             when empty.
         phase (str): Normalised current pipeline phase; scopes the fragment's
             phase-tagged blocks.
+        transport (str): One of :data:`TRANSPORTS`; scopes the fragment's
+            transport-tagged blocks.
 
     Returns:
         list[str]: Markdown lines for the RULES & OUTPUT PROTOCOL section.
     """
-    body = _filter_rules_fragment(rules_md, phase=phase) or (
+    body = _filter_rules_fragment(rules_md, phase=phase, transport=transport) or (
         "(orchestration.md rules fragment not found — Coordinator will still enforce PolicyGate hard rules at runtime.)"
     )
     return ["## 7. RULES & OUTPUT PROTOCOL", "", body]
@@ -959,6 +990,7 @@ def build_orchestration_prompt(
     macro_cycle: int = 0,
     cycle_directive: str = "",
     phase: str = "",
+    transport: str = TRANSPORT_TOOLS,
     rules_fragment_path: Path | None = None,
     framework_source_roots: tuple[str, ...] | None = None,
     references_dir: Path | None = None,
@@ -989,6 +1021,9 @@ def build_orchestration_prompt(
         phase: current pipeline phase; omits the modules whose behaviour it
             cannot reach. Empty renders every module. The Coordinator rebuilds
             the prompt at each phase seam.
+        transport: one of :data:`TRANSPORTS`, taken from the backend that will
+            actually run the role. Omits the modules describing a tool surface
+            that transport does not mount.
         rules_fragment_path: path to ``orchestration.md``; placeholder if
             unreadable.
         framework_source_roots: optional framework source roots passed through
@@ -998,7 +1033,23 @@ def build_orchestration_prompt(
 
     Returns:
         The composed Orchestration system prompt text.
+
+    Raises:
+        ValueError: If ``transport`` is neither empty nor one of
+            :data:`TRANSPORTS`. Raised rather than tolerated because the caller
+            builds this at start-up, and an unknown transport silently strips
+            the Output protocol instead of failing.
     """
+    # Checked here rather than tolerated downstream: a transport nobody declares
+    # matches no `<!-- transport: ... -->` block, and both Output protocol blocks
+    # are scoped by one, so an unknown value renders a prompt that never tells
+    # the model how to answer. Nothing later in the pipeline can tell that apart
+    # from a fragment that simply had nothing to say.
+    if transport and transport not in TRANSPORTS:
+        raise ValueError(
+            f"unknown prompt transport {transport!r}; expected one of "
+            f"{', '.join(sorted(TRANSPORTS))}"
+        )
     actions, kernel_enabled, framework_norm, rules_md = _resolve_prompt_prelude(
         action_registry,
         enabled_actions,
@@ -1032,7 +1083,7 @@ def build_orchestration_prompt(
             framework_agent_phase_enabled=framework_agent_phase_enabled,
         ),
         _section_action_catalogue(actions, phase=phase_norm),
-        _section_decision_framework(kernel_enabled=kernel_enabled, phase=phase_norm),
+        _section_decision_framework(kernel_enabled=kernel_enabled, phase=phase_norm, transport=transport),
         _section_cycle_directive(macro_cycle=macro_cycle, cycle_directive=cycle_directive),
     ]
     if (
@@ -1041,10 +1092,13 @@ def build_orchestration_prompt(
         and _renders_in(phase_norm, _KERNEL_REQUEST_PHASES)
     ):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
-    ref_index = _section_reference_index(references_dir=references_dir, phase=phase_norm)
-    if ref_index:
-        sections.append(ref_index)
-    sections.append(_section_rules(rules_md, phase=phase_norm))
+    # The reference index is an index of documents ``read_reference`` pulls;
+    # without that tool it is a list the model cannot act on.
+    if transport != TRANSPORT_STRUCTURED_OUTPUT:
+        ref_index = _section_reference_index(references_dir=references_dir, phase=phase_norm)
+        if ref_index:
+            sections.append(ref_index)
+    sections.append(_section_rules(rules_md, phase=phase_norm, transport=transport))
 
     return join_sections(sections)
 
@@ -1085,6 +1139,9 @@ __all__ = [
     "GRID_INJECTABLE_ACTIONS",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
+    "TRANSPORTS",
+    "TRANSPORT_STRUCTURED_OUTPUT",
+    "TRANSPORT_TOOLS",
     "VALID_PIPELINE_PHASES",
     "build_orchestration_prompt",
     "default_enabled_actions",

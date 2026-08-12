@@ -779,6 +779,8 @@ class ExploreExecutor:
         baseline_accuracy = float(params.get("accuracy_baseline") or 0.0) or float(
             params.get("baseline_accuracy") or 0.0
         )
+        if baseline_accuracy <= 0 and ss is not None:
+            baseline_accuracy = float(getattr(ss, "baseline_accuracy", 0.0) or 0.0)
         keep_threshold_pct = float(
             params.get(
                 "keep_threshold_pct",

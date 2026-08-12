@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,26 @@ def test_atomic_write_json_creates_parents_and_roundtrips(tmp_path):
     io.atomic_write_json(path, {"b": 2, "a": 1})
     loaded = json.loads(path.read_text(encoding="utf-8"))
     assert loaded == {"a": 1, "b": 2}
+
+
+def test_atomic_write_json_pins_utf8_on_the_temp_file(tmp_path, monkeypatch):
+    """``ensure_ascii=False`` callers put non-ASCII in the payload, so the temp
+    file cannot be left on a locale-derived encoding -- under an ASCII default it
+    raised UnicodeEncodeError and lost the report. Asserted on the call rather
+    than by forcing a locale, which the interpreter resolves too early to patch.
+    """
+    seen: dict[str, object] = {}
+    real = tempfile.NamedTemporaryFile
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", spy)
+    path = tmp_path / "out.json"
+    io.atomic_write_json(path, {"note": "em\u2014dash"}, ensure_ascii=False)
+    assert seen.get("encoding") == "utf-8"
+    assert json.loads(path.read_text(encoding="utf-8")) == {"note": "em\u2014dash"}
 
 
 def test_append_log_creates_parents_and_appends(tmp_path):

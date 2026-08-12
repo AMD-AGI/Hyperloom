@@ -4956,21 +4956,12 @@ def _batch_kernel_candidates(
     attempts_by_task: dict[str, dict] = {}
     in_flight: set[str] = set()
     from ..state.shared_state import (
-        _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
+        resolve_hot_kernel_min_gpu_pct,
         resolve_kernel_opt_max_failures,
     )
 
     max_failures = resolve_kernel_opt_max_failures()
-    # min_gpu_pct mirrors SharedState.untried_hot_reusable_kernels' default.
-    try:
-        min_gpu_pct = float(
-            os.environ.get(
-                "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT",
-                _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
-            )
-        )
-    except (TypeError, ValueError):
-        min_gpu_pct = _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
+    min_gpu_pct = resolve_hot_kernel_min_gpu_pct()
     if session_dir is not None:
         try:
             from ..state.shared_state import SharedState
@@ -6348,7 +6339,16 @@ async def integrate_handler(
             "error": "integrate_handler requires base_tput > 0 to compute KEEP/REVERT",
         }
 
-    env_only_validation = str(payload.get("source") or "").strip() in {"forge_gemm_tuning", "gemm_tuning"} and (
+    # Env-only is a property of the request, not of who sent it: a payload that
+    # carries a runtime bundle and names no artifact has nothing to apply, so it
+    # is graded on the bundle alone. Deciding by shape also keeps such a request
+    # away from _resolve_integrate_payload, which would otherwise back-fill
+    # patch_path/target_file from the last kernel optimization and silently
+    # measure an unrelated patch.
+    _has_artifact = bool(str(payload.get("patch_path") or "").strip()) or bool(
+        str(payload.get("target_file") or payload.get("source_file") or "").strip()
+    )
+    env_only_validation = not _has_artifact and (
         bool(payload.get("extra_envs")) or bool(str(payload.get("extra_server_args") or "").strip())
     )
     if not env_only_validation:

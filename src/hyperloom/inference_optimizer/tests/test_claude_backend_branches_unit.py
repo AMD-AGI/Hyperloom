@@ -363,6 +363,41 @@ async def test_context_peak_is_zero_without_any_usage():
     assert res.metadata["context_tokens_peak"] == 0
 
 
+# ---- stop_reason passthrough ---------------------------------------------
+@dataclass
+class _StopMsg(_Msg):
+    stop_reason: str | None = None
+
+
+async def test_stop_reason_reaches_metadata():
+    """Without it a truncated reply is indistinguishable from a badly formatted
+    one, so the SDK's own stop reason must survive to the caller."""
+    stream = [_StopMsg(content=[TextBlock("half a rep")], result="half a rep", stop_reason="max_tokens")]
+    b = _backend()
+    b.sdk_query_factory = _query(stream)
+    res = await b.run("hi", allow_no_intent=True)
+    assert res.metadata["stop_reason"] == "max_tokens"
+
+
+async def test_stop_reason_is_none_when_the_sdk_omits_it():
+    b = _backend()
+    b.sdk_query_factory = _query([_Msg(content=[TextBlock("hi")], result="hi")])
+    res = await b.run("hi", allow_no_intent=True)
+    assert res.metadata["stop_reason"] is None
+
+
+async def test_last_reported_stop_reason_wins():
+    """Per-message stop reasons stream in order; the terminal one describes the call."""
+    stream = [
+        _StopMsg(content=[TextBlock("a")], stop_reason="tool_use"),
+        _StopMsg(content=[TextBlock("b")], result="ab", stop_reason="end_turn"),
+    ]
+    b = _backend()
+    b.sdk_query_factory = _query(stream)
+    res = await b.run("hi", allow_no_intent=True)
+    assert res.metadata["stop_reason"] == "end_turn"
+
+
 def test_parse_tool_use_block_invalid_returns_none():
     b = _backend()
     bad = ToolUseBlock(name=cl.EMIT_INTENT_TOOL_QUALIFIED, input={"intent_type": "not_a_real_type", "payload": {}})

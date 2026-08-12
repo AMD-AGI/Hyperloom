@@ -20,6 +20,8 @@ from typing import Any
 
 import os
 
+from hyperloom.common import llm_config
+
 from .config import Config
 from .decision.action_ladder import ActionLadder, ActionLadderConfig
 from .decision.policy_aware import PolicyAware
@@ -351,6 +353,26 @@ def build_reactor_components(
     )
 
 
+def _llm_credentials_ready(config: Config) -> bool:
+    """Whether the discovered provider can authenticate an RCA call.
+
+    The Anthropic side may hold no in-process key at all — a subscription token
+    is spent by the Claude CLI, never by this process — so the key pair is the
+    wrong question there. Ask the transport instead, which also covers the case
+    where the token is present but the CLI that would spend it is not.
+
+    Args:
+        config (Config): The configuration carrying the discovered provider
+            and credentials.
+
+    Returns:
+        bool: True when an RCA call can authenticate.
+    """
+    if config.llm_provider == "anthropic":
+        return llm_config.anthropic_transport_ready()
+    return bool(config.llm_base_url and config.llm_api_key)
+
+
 def _build_rca_engine(
     config: Config,
     *,
@@ -373,9 +395,9 @@ def _build_rca_engine(
         return NoopRcaEngine()
     if config.llm_rca_enabled is False:
         return NoopRcaEngine()
-    if not config.llm_base_url or not config.llm_api_key:
+    if not _llm_credentials_ready(config):
         if config.llm_rca_enabled is True:
-            log.warning("llm_rca_enabled=True but base_url/api_key missing; using NoopRcaEngine")
+            log.warning("llm_rca_enabled=True but no usable LLM credential; using NoopRcaEngine")
         return NoopRcaEngine()
 
     severity_min = _parse_severity(config.llm_rca_severity_min)

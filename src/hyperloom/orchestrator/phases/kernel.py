@@ -1875,6 +1875,11 @@ class KernelPhase(PhaseHandler):
             await self._validate_forge_gemm_tuning_e2e(result)
         else:
             self._promote_gemm_tuning_keep(result)
+        # Per-round write: promotion/validation is what appends the
+        # ``gemm_tuning`` row to ``optimization_stack``, and the column is built
+        # from that row, so this is the first point where there is anything to
+        # stage. Staging never raises.
+        self.shared_state._stage_kernel_kb_columns()
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -2569,6 +2574,9 @@ class KernelPhase(PhaseHandler):
         self._promote_fusion_integrate_keep(result, integ, extra_envs=merged_envs)
         try:
             self.shared_state.last_fusion_integrate = integ
+            # Per-round write: a fusion integrate just completed, so re-stage the
+            # kernel KB columns (fusion integrate bypasses record_kernel_integrate_result).
+            self.shared_state._stage_kernel_kb_columns()
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001
             pass

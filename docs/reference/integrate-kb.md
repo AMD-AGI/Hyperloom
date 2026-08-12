@@ -1,7 +1,7 @@
 ---
 myst:
     html_meta:
-        "description": "Learn how to configure the optional knowledge base integration in Hyperloom. Covers local recipe KB setup, gbrain remote reads, resolver order, and degraded-mode behavior."
+        "description": "Learn how to configure the optional knowledge base integration in Hyperloom. Covers local Recipe KB setup, KB Store remote writes, resolver order, and degraded-mode behavior."
         "keywords": "Hyperloom, knowledge base, KB, recipe KB, gbrain, local KB, LLM inference, AMD GPU, ROCm, optimization, warm-start, session, configuration"
 ---
 # Integrate Recipe knowledge base in Hyperloom
@@ -15,10 +15,9 @@ Hyperloom uses a recipe-snapshot KB and selects exactly one store:
 | KB path | Owner / process | Purpose |
 |---------|-----------------|---------|
 | Local recipe KB | `inference_optimizer` | Selected by local/default mode; reads and writes durable Recipe JSON, history, and attempts. |
-| Remote gbrain recipe KB | gbrain page store | Selected only by `KNOWLEDGE_STORE_MODE=remote`; reads and writes canonical GBrain pages directly. |
+| Remote Recipe KB | KB Store | Selected only by `KNOWLEDGE_STORE_MODE=remote`; writes one final session at CLOSE. |
 
-Ambient GBrain credentials do not enable remote reads. `RECIPE_KB_MIRROR_MODE`
-is obsolete and ignored.
+Ambient KB Store or GBrain credentials do not select remote mode.
 
 ---
 
@@ -79,19 +78,32 @@ Recommended locations:
 
 ---
 
-## Remote recipe KB (gbrain)
+## Remote Recipe KB (KB Store)
 
-Remote mode reads and writes the gbrain page store directly:
+Remote mode writes the final session to KB Store:
 
 ```bash
 export KNOWLEDGE_STORE_MODE=remote
-export GBRAIN_BASE_URL=https://your-gbrain
-export GBRAIN_TOKEN=...
+export KB_STORE_URL=https://your-kb-store
+export KB_STORE_TOKEN=...
 ```
 
-Both credentials are required; missing credentials fail configuration. Remote
-mode does not fall back to local Recipe data. Use `--degraded-kb` to skip all
-Recipe KB hooks deliberately.
+Both credentials are required; missing credentials fail at startup. Remote mode
+reads the direct best-session record returned by `GET /v1/kb/{canonical_id}`;
+candidate rollups remain under `/sessions`, and Hyperloom does not issue a
+second session-document GET. The selected session ID is still used to list and
+download its files. Remote mode does not construct the legacy Recipe
+dispatcher, does not fall back to local Recipe data, and currently replays only
+the best record's Explore args/env through the existing T0/PRELUDE executor.
+Framework, Kernel, and patch replay remain deferred. Runtime amendments are
+skipped and CLOSE performs one best-effort final write. Optional `GBRAIN_*`
+credentials remain available only to non-Recipe KG and Framework PR
+capabilities.
+
+Graceful teardown and Ctrl-C retry an unfinished CLOSE write through the T4
+fallback. No in-process hook can run after SIGKILL, container force-deletion,
+host loss, or interpreter failure; preserving CLOSE-only knowledge across those
+failures requires the platform to resume the durable session and finalize it.
 
 ---
 
