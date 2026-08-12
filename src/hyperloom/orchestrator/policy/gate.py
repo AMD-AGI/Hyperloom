@@ -640,6 +640,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # UPDATE_STATE.
         "closing_phase",
         "baseline_config_path",
+        # Structured failure evidence; Coordinator-only writer.
+        "failures",
     }
 )
 

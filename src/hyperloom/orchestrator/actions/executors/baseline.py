@@ -2228,11 +2228,14 @@ class BaselineExecutor:
             warmup_runtime = warmup_result.get("subprocess_runtime_sec")
 
             # Round 2 (measured): re-attach to the hot server (client only).
+            # Warm re-attach is intentional — all comparison points (baseline,
+            # explore decision, stack_rebench, and their grading anchor) are
+            # measured with a warm prefix cache, keeping them mutually
+            # comparable. Carryover is config-dependent (tracks KV-block
+            # capacity) and is not a uniform offset.
             #
-            # No accuracy eval here: ordinary baselines already measured it in
-            # round 1, while staged kernel integration intentionally defers it
-            # until after this hot-throughput gate. In both cases round 2 only
-            # needs the steady-state throughput number.
+            # No accuracy eval: ordinary baselines measured it in round 1;
+            # staged kernel integration defers it until after this gate.
             measure_dir = output_dir / "measure_round"
             measure_cfg = self._write_lifecycle_config(
                 materialized_config_path,

@@ -74,12 +74,14 @@ intent and rationale in that summary, not raw numbers you can re-pull.
 <!-- transport: tools -->
 ### Closing the act->observe loop in-turn
 
-Three tools close the act->observe loop without waiting for the next tick:
+Five tools close the act->observe loop without waiting for the next tick
+(plus `Read` for any file under SESSION_DIR):
 
 - **`get_recent_outcomes`** — pull the most recent `delegated_result`
-  outcomes (kind / state / status / kept / gain / tput / error) plus
-  review verdicts. Use this to check how your prior delegated work
-  landed before deciding the next move, instead of re-emitting blindly.
+  outcomes (kind / state / status / kept / gain / tput / error, plus
+  per-variant failure lines for FAILED/KILLED_OVERTIME rows) plus review
+  verdicts. Use this to check how your prior delegated work landed before
+  deciding the next move, instead of re-emitting blindly.
 - **`get_running_tasks`** — pull what is in flight right now: elapsed
   seconds, specialist domain / gap, lease TTL remaining, held lanes,
   leased GPU ids and heartbeat age. `get_recent_outcomes` only shows
@@ -91,6 +93,14 @@ Three tools close the act->observe loop without waiting for the next tick:
   (the tool tells you which); anything heavy (benchmarks, sweeps, kernel
   work) must still go through a `delegate` intent so it runs async and
   preemptibly. PolicyGate still gates the run (phase / role / paths).
+- **`get_failure{failure_id}`** — pull the structured evidence packet for
+  one variant failure: stage, error_class, error_excerpt,
+  server_log_path, workspace. The failure_id appears in inbox failure
+  lines and gap attempts. Use it to get the exact log path, then `Read`
+  that path instead of guessing the root cause from a 160-char excerpt.
+- **`get_variant_failures{task_id}`** — list recent evidence packets,
+  optionally scoped to one task, to find a failure_id you do not already
+  hold.
 
 <!-- phase: EXPLORE, FRAMEWORK_AGENT -->
 ### Watching a running specialist
@@ -144,9 +154,11 @@ for several cycles), saturates, or the deadline hits. Short bounded runs
 can reloop too; they keep charge-back phase budgeting while long /
 unbounded runs use the fixed per-cycle budget window.
 The accepted `optimization_stack` and `cumulative_gain_validated` carry
-across cycles. **Consequence:** advancing OUT of the current phase never
-"strands" an idea — a config/param lever you cannot pursue in this phase
-gets a fresh EXPLORE round next macro-cycle. So when the current phase's
+across cycles. **Consequence:** when `cycle_reloop_feasible=true` in the
+``=== Phase ===`` block, advancing OUT of the current phase does not
+"strand" an idea — a config/param lever you cannot pursue in this phase
+gets a fresh EXPLORE round next macro-cycle. When `cycle_reloop_feasible=false`
+the deferred work will not come back; plan accordingly. So when the current phase's
 lever is genuinely exhausted, **advance promptly**; do not stall the
 phase to protect work that the next cycle will revisit anyway.
 
@@ -249,6 +261,11 @@ GEMMs), drain `pending_keep_kernels` then emit
 `escalate_strategy_change{next_action_hint='skip_to_sweep'}`. Config/env
 tuning is an EXPLORE lever — `integrate` no-ops on configs; the cyclic
 reloop gives EXPLORE another round.
+
+**Source-level failures can go straight to a specialist.** A variant
+crash uncovered during KERNEL_AGENT does not need to wait for a reloop;
+`delegate{action_name='specialist', params={scope='freeform', ...}}`
+is allowed here and uses the same GPU pool / lane isolation as in EXPLORE.
 
 **Never fabricate a measurement.** Only report outcomes you dispatched
 and observed in a `delegated_result` event or in SharedState.

@@ -915,3 +915,93 @@ def test_record_action_failure_caps_at_new_default():
         )
     assert len(s.last_action_failures) == 30
     assert s.last_action_failures[-1]["task_id"] == "t-34"
+
+
+# ---- failure evidence ledger ----
+
+
+def test_record_failure_evidence_stores_packet():
+    s = SharedState()
+    fe = {"failure_id": "fail.t1.abc", "task_id": "t1", "variant_name": "v"}
+    s.record_failure_evidence(fe)
+    assert len(s.failures) == 1
+    assert s.failures[0]["failure_id"] == "fail.t1.abc"
+
+
+def test_record_failure_evidence_is_idempotent_last_wins():
+    s = SharedState()
+    fe1 = {"failure_id": "fail.t1.abc", "task_id": "t1", "error_class": "a"}
+    fe2 = {"failure_id": "fail.t1.abc", "task_id": "t1", "error_class": "b"}
+    s.record_failure_evidence(fe1)
+    s.record_failure_evidence(fe2)
+    assert len(s.failures) == 1
+    assert s.failures[0]["error_class"] == "b"
+
+
+def test_record_failure_evidence_caps_at_default():
+    from hyperloom.orchestrator.state.shared_state import _DEFAULT_LAST_FAILURES
+
+    s = SharedState()
+    for i in range(_DEFAULT_LAST_FAILURES + 5):
+        s.record_failure_evidence({"failure_id": f"fail.t.{i:04d}", "task_id": "t"})
+    assert len(s.failures) == _DEFAULT_LAST_FAILURES
+
+
+def test_record_failure_evidence_does_not_raise_without_session_dir():
+    s = SharedState()
+    assert not hasattr(s, "_session_dir") or getattr(s, "_session_dir", None) is None
+    fe = {"failure_id": "fail.t1.abc", "task_id": "t1"}
+    s.record_failure_evidence(fe)
+    assert s.failures[0]["failure_id"] == "fail.t1.abc"
+
+
+def test_find_failure_returns_matching_entry():
+    s = SharedState()
+    s.record_failure_evidence({"failure_id": "fail.t1.abc", "task_id": "t1"})
+    s.record_failure_evidence({"failure_id": "fail.t1.def", "task_id": "t1"})
+    result = s.find_failure("fail.t1.abc")
+    assert result is not None
+    assert result["failure_id"] == "fail.t1.abc"
+
+
+def test_find_failure_returns_none_when_missing():
+    s = SharedState()
+    assert s.find_failure("fail.t1.xyz") is None
+
+
+def test_failures_for_task_returns_correct_entries():
+    s = SharedState()
+    s.record_failure_evidence({"failure_id": "fail.t1.a", "task_id": "t1"})
+    s.record_failure_evidence({"failure_id": "fail.t2.a", "task_id": "t2"})
+    s.record_failure_evidence({"failure_id": "fail.t1.b", "task_id": "t1"})
+    result = s.failures_for_task("t1")
+    assert len(result) == 2
+    ids = {e["failure_id"] for e in result}
+    assert ids == {"fail.t1.a", "fail.t1.b"}
+
+
+def test_record_failure_evidence_writes_json(tmp_path):
+    s = SharedState()
+    s._session_dir = tmp_path
+    fe = {"failure_id": "fail.t1.abc123456789", "task_id": "t1"}
+    s.record_failure_evidence(fe)
+    from hyperloom.inference_optimizer.session.session_paths import failure_evidence_path
+    import json
+
+    path = failure_evidence_path(tmp_path, "fail.t1.abc123456789")
+    assert path.exists()
+    data = json.loads(path.read_text())
+    assert data["failure_id"] == "fail.t1.abc123456789"
+
+
+def test_common_result_fields_includes_failure_id():
+    s = SharedState()
+    fields = s._common_result_fields({"failure_id": "fail.t1.abc"})
+    assert fields["failure_id"] == "fail.t1.abc"
+
+
+def test_common_result_fields_failure_id_none_when_absent():
+    s = SharedState()
+    fields = s._common_result_fields({})
+    assert "failure_id" in fields
+    assert fields["failure_id"] is None

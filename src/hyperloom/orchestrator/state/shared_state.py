@@ -762,6 +762,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     roofline_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Global rolling log of unpromotable task results (cap _DEFAULT_LAST_FAILURES); rich failure context for self-correction. Covers every task kind.
     last_action_failures: list[dict[str, Any]] = field(default_factory=list)
+    # Structured per-variant failure evidence, capped and keyed by failure_id (last-wins).
+    failures: list[dict[str, Any]] = field(default_factory=list)
     # Per-kernel run_optimization history by kernel_id; record_kernel_opt retires kernels stuck in PARTIAL (default 2; override via INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL).
     kernel_opt_attempts: dict[str, Any] = field(default_factory=dict)
     # Authoritative optimization history keyed by stable operator identity.
@@ -2308,6 +2310,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "raw_result_path": (str(result.get("raw_result_path")) if result.get("raw_result_path") else None),
             "reported_success": result.get("reported_success"),
             "variant_name": (str(result.get("variant_name")) if result.get("variant_name") else None),
+            "failure_id": result.get("failure_id"),
         }
 
     def record_action_attempt(
@@ -2435,6 +2438,58 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             history = history[-max_history:]
         self.last_action_failures = history
         return entry
+
+    def record_failure_evidence(self, fe: "dict[str, Any]") -> None:
+        """Append one structured failure packet to :attr:`failures` (last-wins on ``failure_id``).
+
+        Also mirrors the packet to ``<session_dir>/reports/failures/`` so it
+        survives state.json compaction.
+
+        Args:
+            fe: A failure evidence dict as produced by
+                :func:`~hyperloom.orchestrator.state.failure_evidence.failure_from_variant_outcome`.
+        """
+        fid = str(fe.get("failure_id") or "")
+        history = [e for e in (self.failures or []) if e.get("failure_id") != fid]
+        history.append(fe)
+        self.failures = history[-_DEFAULT_LAST_FAILURES:]
+
+        session_dir = getattr(self, "_session_dir", None)
+        if session_dir:
+            from hyperloom.common.io import atomic_write_json
+            from hyperloom.inference_optimizer.session.session_paths import failure_evidence_path
+
+            try:
+                atomic_write_json(failure_evidence_path(session_dir, fid), fe, make_parents=True)
+            except OSError:
+                log.debug("failure evidence mirror failed for %s", fid, exc_info=True)
+
+    def find_failure(self, failure_id: str) -> "dict[str, Any] | None":
+        """Return the :attr:`failures` entry for ``failure_id``, else ``None``.
+
+        Args:
+            failure_id: The stable failure id to look up.
+
+        Returns:
+            The matching entry, or ``None`` when not found.
+        """
+        fid = str(failure_id or "").strip()
+        for entry in reversed(self.failures or []):
+            if entry.get("failure_id") == fid:
+                return entry
+        return None
+
+    def failures_for_task(self, task_id: str) -> "list[dict[str, Any]]":
+        """Return the ``task_id`` entries from :attr:`failures`, newest first.
+
+        Args:
+            task_id: The task id to filter on.
+
+        Returns:
+            A list of matching failure evidence dicts.
+        """
+        tid = str(task_id or "").strip()
+        return [e for e in reversed(self.failures or []) if e.get("task_id") == tid]
 
     def _resolve_baseline_achieved_tput(self) -> float:
         """Baseline throughput for a baseline-arm roofline snapshot.
