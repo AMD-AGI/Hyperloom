@@ -274,7 +274,7 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--gpu-type",
         type=str.lower,
-        choices=["mi300x", "mi308x", "mi325x", "mi355x"],
+        choices=["mi300x", "mi308x", "mi325x", "mi355x", "rx9070xt", "rx9070", "rx9060xt", "r9000"],
         default=None,
         help="Hint for the real target GPU. The rocm-smi probe always "
         "wins when both are present and disagree; a WARN is "
