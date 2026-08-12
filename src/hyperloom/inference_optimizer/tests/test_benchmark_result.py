@@ -16,6 +16,8 @@ from hyperloom.orchestrator.actions.executors import benchmark_result as br
 from hyperloom.orchestrator.actions.executors.benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
+    select_run_workspace,
+    snapshot_workspaces,
 )
 
 
@@ -40,6 +42,58 @@ class TestCandidateRawJsons:
         ws = tmp_path / "empty"
         ws.mkdir()
         assert br._candidate_raw_jsons(ws) == []
+
+
+# snapshot_workspaces / select_run_workspace
+class TestWorkspaceSelection:
+    def test_snapshot_returns_existing_benchmark_dirs(self, tmp_path):
+        (tmp_path / "benchmark_vllm_20260101_000000").mkdir()
+        (tmp_path / "benchmark_vllm_20260812_120000").mkdir()
+        (tmp_path / "other_dir").mkdir()
+        snap = snapshot_workspaces(tmp_path)
+        names = {p.name for p in snap}
+        assert "benchmark_vllm_20260101_000000" in names
+        assert "benchmark_vllm_20260812_120000" in names
+        assert "other_dir" not in names
+
+    def test_snapshot_empty_on_missing_root(self, tmp_path):
+        assert snapshot_workspaces(tmp_path / "nonexistent") == frozenset()
+
+    def test_select_run_workspace_no_known_before_returns_last(self, tmp_path):
+        (tmp_path / "benchmark_vllm_20260101_000000").mkdir()
+        (tmp_path / "benchmark_vllm_20260812_120000").mkdir()
+        result = select_run_workspace(tmp_path)
+        assert result is not None
+        assert result.name == "benchmark_vllm_20260812_120000"
+
+    def test_select_run_workspace_known_before_excludes_stale(self, tmp_path):
+        stale = tmp_path / "benchmark_vllm_20260101_000000"
+        stale.mkdir()
+        known = snapshot_workspaces(tmp_path)
+        fresh = tmp_path / "benchmark_vllm_20260812_120000"
+        fresh.mkdir()
+        result = select_run_workspace(tmp_path, known_before=known)
+        assert result is not None
+        assert result.name == "benchmark_vllm_20260812_120000"
+
+    def test_select_run_workspace_all_known_returns_none(self, tmp_path):
+        (tmp_path / "benchmark_vllm_20260101_000000").mkdir()
+        known = snapshot_workspaces(tmp_path)
+        result = select_run_workspace(tmp_path, known_before=known)
+        assert result is None
+
+    def test_select_run_workspace_no_dirs_returns_none(self, tmp_path):
+        assert select_run_workspace(tmp_path) is None
+
+    def test_select_run_workspace_stale_with_larger_name_not_selected(self, tmp_path):
+        stale = tmp_path / "benchmark_vllm_29991231_235959"
+        stale.mkdir()
+        known = snapshot_workspaces(tmp_path)
+        fresh = tmp_path / "benchmark_vllm_20260812_120000"
+        fresh.mkdir()
+        result = select_run_workspace(tmp_path, known_before=known)
+        assert result is not None
+        assert result.name == "benchmark_vllm_20260812_120000"
 
 
 # _rescue_candidate_paths — env handling + workspace filter
