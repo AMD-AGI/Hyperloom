@@ -5,6 +5,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [v1.0.0b1] - 2026-08-11
+Current packaged version (`pyproject.toml`). See
+[release notes](docs/release-notes.md) and the
+[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b1)
+for the user-facing summary.
+
 ### Added
 
 - **Remote Recipe knowledge now uses KB Store.** Remote mode reads one
@@ -145,8 +151,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Rules) are not carried over; refer to the individual reference docs for those.
 
 ## [v1.0.0a3] - 2026-08-05
-Current packaged version (`pyproject.toml`). See
-[release notes](docs/release-notes.md) and the
+See [release notes](docs/release-notes.md) and the
 [GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a3)
 for the user-facing summary.
 
@@ -293,7 +298,8 @@ user-facing summary.
 - Vendor kernel configuration guidance and updated kernel-manager skills/actions (including local-test flow).
 - Launcher scripts refinements for orchestrator/kernel manager panes.
 
-[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.0.0a3...HEAD
+[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.0.0b1...HEAD
+[v1.0.0b1]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b1
 [v1.0.0a3]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a3
 [v1.0.0a2]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a2
 [v1.0.0a1]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a1
