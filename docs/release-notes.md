@@ -1,7 +1,7 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 1.0.0b1, including the remote Recipe KB Store cutover and the session-wide accuracy-eval opt-out."
+    "description": "Hyperloom release notes: headline capabilities for version 1.0.0b1, including the remote Recipe KB Store cutover, session-wide accuracy-eval opt-out, Claude subscription OAuth support, and enterprise gateway header handling."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, bare metal, kernel optimization"
 ---
 
@@ -20,7 +20,8 @@ summarizes the headline capabilities.
 
 The [1.0.0b1 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b1)
 is the first beta, building on 1.0.0a3 with the remote Recipe knowledge cutover
-to KB Store and a session-wide accuracy-eval opt-out.
+to KB Store, a session-wide accuracy-eval opt-out, Claude subscription OAuth
+support, and enterprise gateway header handling.
 
 ### 1.0.0b1 highlights
 
@@ -34,6 +35,19 @@ to KB Store and a session-wide accuracy-eval opt-out.
   instead of halting on the missing reference. It persists across `--resume` and
   is refused once the session has anchored an accuracy. Runs made with the flag
   are not accuracy-validated.
+
+- **Claude subscription OAuth support**: `CLAUDE_CODE_OAUTH_TOKEN` is now a
+  first-class Anthropic-side credential, so Claude Max/Pro subscribers can run
+  Hyperloom through the `claude` CLI without buying separate API credits. Install,
+  preflight, specialist subprocesses, and Ray-backed kernel work preserve the
+  token without mirroring it into API-key slots.
+
+- **Enterprise LLM gateway setup and headers**: the install docs now show how to
+  configure Anthropic-compatible enterprise gateways and custom auth headers,
+  including AMD APIM's `Ocp-Apim-Subscription-Key`. `.env` loading, setup
+  persistence, Ray runtime environments, and specialist secret forwarding preserve
+  `ANTHROPIC_CUSTOM_HEADERS` / `OPENAI_CUSTOM_HEADERS`, so header-authenticated
+  gateways work from a fresh shell.
 
 ## Hyperloom 1.0.0a3 release
 
