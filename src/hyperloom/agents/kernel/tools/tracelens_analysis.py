@@ -2196,11 +2196,8 @@ def _inject_collective_candidates(
             donors = [exact]
             borrowed = False
         elif len(workload_families) == 1 and _is_all_reduce_workload(item):
-            # Borrowing shapes from the trace's only all-reduce family is an
-            # inference, not a measurement: it is sound only because the symbol
-            # is itself an all-reduce and no other family could have produced
-            # it. Feeding a driver shapes the traced kernel never ran would
-            # yield confident SNR and latency for a workload that never existed.
+            # Shapes are inferred from the sole all-reduce family, valid only
+            # because the symbol is itself an all-reduce.
             donors = next(iter(workload_families.values()))
             borrowed = True
         else:
@@ -2217,8 +2214,6 @@ def _inject_collective_candidates(
         elif donors:
             _merge_workloads(target, donors)
         if borrowed:
-            # Downstream needs to know the shapes were attributed rather than
-            # observed on this symbol.
             target["shape_provenance"] = "borrowed_sole_all_reduce_family"
             messages.append(
                 "nccl_summary: attributing the trace's only all-reduce workload "

@@ -56,12 +56,8 @@ KERNEL_REQUEST_KIND_ALIASES: dict[str, str] = {
 }
 
 
-# Deterministic kernel lanes the Coordinator drives by calling their handler
-# directly at KERNEL entry. They are registered in ``KERNEL_REQUEST_HANDLERS``
-# so the Coordinator can dispatch them, but an LLM-issued request would bypass
-# the entry gate, the lane's SharedState accounting, and its integrate step, so
-# PolicyGate rejects those. Unlike ``COORDINATOR_INTERNAL_ACTIONS`` these are
-# request kinds, not actions: they have no executor and no prompt entry.
+# Request kinds the Coordinator dispatches itself at KERNEL entry; PolicyGate
+# rejects them from an LLM, which would bypass the lane's gate and accounting.
 COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
     {
         "run_fusion",

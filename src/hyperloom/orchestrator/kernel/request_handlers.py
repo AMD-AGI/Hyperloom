@@ -1201,12 +1201,8 @@ def materialize_unified_patch_snapshot(
 def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
     """Revert a kernel patch using its apply manifest.
 
-    A manifest is enough; the apply's own ``status`` is deliberately not
-    required. ``revert_kernel_patch`` restores strictly from the backups the
-    apply recorded and skips any whose source is missing, so a ``partial`` or
-    ``failed`` apply reverts exactly the files it managed to touch. Those are
-    the cases that most need reverting, and gating on ``status == "ok"`` used to
-    leave them applied.
+    A manifest is enough; the apply's ``status`` is not required, so a partial
+    apply reverts the files it managed to touch.
 
     Args:
         apply_result: Apply metadata carrying ``manifest_path``.
@@ -4409,25 +4405,15 @@ def select_collective_candidate(state: Any) -> dict[str, Any] | None:
 #: means adding one there first.
 SUPPORTED_COLLECTIVE_OPS = frozenset({"all_reduce", "reduce_scatter", "all_gather"})
 
-# Session time held back for the work that follows the campaign: the E2E
-# integrate round plus reporting. Distinct from forge-loop's own
-# ``IterationConfig.budget_reserve_sec`` (1800s), which only stops it admitting
-# another agent session near its deadline and buys no downstream time.
+# Session time held back for the E2E integrate round plus reporting.
 _COLLECTIVE_BUDGET_RESERVE_MIN = 45.0
-# Mirrors kernel_agents.loop.task_preparer.PREPARE_MAX_WALL_SEC (3000s), the
-# hard ceiling on driver preparation. Reserving more than preparation can spend
-# only shortens the campaign.
+# Mirrors kernel_agents.loop.task_preparer.PREPARE_MAX_WALL_SEC.
 _COLLECTIVE_PREP_GRACE_SEC = 3000
-# Wrapper-side grace after forge-loop returns: export the patch and restore the
-# repository. Distinct from forge-loop's ``finalize_reserve_sec`` (120s), which
-# covers its own KB publication inside the campaign.
+# Wrapper grace to export the patch and restore the repository.
 _COLLECTIVE_FINALIZE_GRACE_SEC = 300
-# Mirrors kernel_agents.cli.MIN_MAX_HOURS (1.0h); forge-loop rejects a shorter
-# --max-hours with a click error that leaves no checkpoint to salvage.
+# Mirrors kernel_agents.cli.MIN_MAX_HOURS (1.0h); forge-loop rejects less.
 _COLLECTIVE_MIN_CAMPAIGN_SEC = 3600
-# Wrapper window for a session that declares no deadline at all. Mirrors
-# forge_collective.DEFAULT_TIMEOUT_SEC so both sides bound an unbounded session
-# the same way.
+# Mirrors forge_collective.DEFAULT_TIMEOUT_SEC for a session with no deadline.
 _COLLECTIVE_UNBOUNDED_WRAPPER_SEC = 14400
 
 
@@ -4486,10 +4472,8 @@ def _collective_budget(state: Any, requested_hours: Any, timeout_sec: int) -> tu
     if timeout_sec > 0:
         wall_limits.append(timeout_sec)
     if requested_hours is None and not wall_limits:
-        # No session deadline, no requested hours, no wall override: there is no
-        # budget to divide, so hand the wrapper its own default window and let
-        # forge-loop pick the campaign length. Logged because the reserve and
-        # minimum-campaign contracts below cannot apply to an unbounded session.
+        # Unbounded session: no budget to divide, so the reserve and
+        # minimum-campaign contracts below cannot apply.
         log.info(
             "collective budget: unbounded session, defaulting the wrapper to %ds",
             _COLLECTIVE_UNBOUNDED_WRAPPER_SEC,
@@ -7614,11 +7598,7 @@ async def integrate_handler(
     )
 
     result: dict[str, Any] = {
-        # ``status`` reports whether the integration itself ran to a clean
-        # finish, including any revert it owed; the keep/revert verdict lives in
-        # ``decision``. Every in-tree consumer reads ``decision`` for the
-        # verdict, so a REVERT that reverted cleanly still reports ``ok`` and a
-        # stranded patch is the only thing that surfaces as ``failed``.
+        # Clean finish including any owed revert; the verdict is ``decision``.
         "status": "ok" if revert_complete else "failed",
         "decision": decision,
         "kernel_id": kernel_id,

@@ -109,11 +109,8 @@ def _add_opt(cmd: list[str], value: Any, flag: str) -> None:
 def _write_invocation_evidence(candidate: dict[str, Any], output_dir: Path) -> str:
     """Record how the traced collective is called, for forge-loop task prep.
 
-    The trace pins the launch site and the shapes but not the callee's
-    parameter order, which is what ``run_candidate`` needs. forge-loop's task
-    preparer treats this document as authoritative evidence when it authors the
-    driver, so a failure to write it degrades driver authoring rather than
-    failing the campaign.
+    Returns ``""`` when the evidence cannot be written; the campaign still runs,
+    with driver authoring falling back to the trace alone.
     """
     try:
         path = output_dir / invocation_spec_filename(candidate)
@@ -133,10 +130,8 @@ def _write_invocation_evidence(candidate: dict[str, Any], output_dir: Path) -> s
 def _campaign_is_resumable(workspace: str) -> bool:
     """Return whether the workspace holds a forge-loop campaign to continue.
 
-    The lane optimizes an editable install in place, so ``forge_experiments``
-    outlives a hard kill. forge-loop refuses to start a fresh campaign over
-    those artifacts and requires ``run_state.json`` before it accepts
-    ``--resume``, so that file is the only safe trigger.
+    ``run_state.json`` is the only safe trigger: forge-loop requires it for
+    ``--resume`` and refuses a fresh campaign over leftover artifacts.
     """
     return (Path(workspace) / "forge_experiments" / "run_state.json").is_file()
 
@@ -258,10 +253,7 @@ def _build_cmd(
     spec_file = str(args.get("invocation_spec_file") or "").strip()
     if spec_file and Path(spec_file).is_file():
         _add_opt(cmd, str(Path(spec_file).resolve()), "--invocation-spec-file")
-    # The generated rig keeps its parity gate in the same file the agent edits,
-    # so gate integrity depends entirely on forge-loop pinning the driver digest
-    # during task preparation. Disabling preparation would remove that guarantee
-    # without any local symptom.
+    # Gate integrity depends on task preparation pinning the driver digest.
     if "--no-prepare-task" in cmd:
         raise ValueError(
             "collective driver integrity requires forge-loop task preparation"
@@ -516,15 +508,9 @@ def _verify_restored_repo(repo: str, payload: dict[str, Any]) -> None:
 def _recover_stale_inplace(repo: str) -> bool:
     """Recover a journaled in-place campaign under the repository lock.
 
-    The journal, not the branch name, decides whether recovery is owed. A
-    campaign unlinks its journal only after the working tree is verified back
-    at the recorded baseline, while ``_restore_inplace`` returns HEAD to the
-    original branch and drops the temp branch in a ``finally`` that runs even
-    when the baseline replay raised. A surviving journal whose tree no longer
-    matches therefore means the previous restore did not finish, and it can
-    look exactly like an ordinary branch. Replaying it puts back the user's
-    pre-campaign content -- including their uncommitted work -- and discards
-    only the agent's edits.
+    The journal decides, not the branch name: an interrupted restore leaves HEAD
+    back on the original branch, so a surviving journal whose tree diverged means
+    the previous restore never finished and must be replayed.
     """
     journal = _restore_journal_path(repo)
     lock = _acquire_repo_lock(repo)
@@ -1254,11 +1240,8 @@ def main(argv: list[str] | None = None) -> int:
                     raise
                 forge_payload = {}
             if published_best:
-                # A validated published best supersedes a wrapper-level failure
-                # (the campaign committed it before dying), but the failure is
-                # the reason this run ended, so keep it as provenance instead of
-                # erasing it -- an operator reading a KEEP still needs to see
-                # that the campaign did not exit cleanly.
+                # A published best supersedes a wrapper failure but does not
+                # erase it: the KEEP still came out of an unclean exit.
                 superseded = {
                     key: forge_payload[key]
                     for key in ("error", "detail")

@@ -7,14 +7,9 @@
 
 """Generate the torchrun rig used to optimize a traced collective kernel.
 
-The parity gate (``run_reference`` / ``snr_db`` / ``make_inputs``) ships in the
-same file as ``run_candidate``, which the optimizing agent implements. Nothing
-on the Hyperloom side re-checks the gate afterwards, so its integrity rests on
-two forge-loop guarantees: task preparation pins the driver's
-``canonical_driver_sha256`` for the rest of the campaign, and the fellow is
-barred from editing gate files. Both hold only while ``--prepare-task`` is
-active, which ``forge_collective`` asserts before launching. If that upstream
-behaviour changes, this rig loses its protection silently.
+The parity gate lives in the same file the optimizing agent edits; its integrity
+depends on forge-loop pinning the driver digest during task preparation, which
+``forge_collective`` asserts stays enabled.
 """
 
 from __future__ import annotations
@@ -26,11 +21,8 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
-#: Per-op reference body for ``run_reference``. Each must be an independent
-#: ``torch.distributed`` implementation of the same contract -- it is the only
-#: parity reference that is itself distributed. ``reduce_scatter`` and
-#: ``all_gather`` change the output extent along dim 0, so each op allocates its
-#: own output rather than cloning the input.
+#: Per-op ``run_reference`` body. Scatter and gather change the dim-0 extent, so
+#: each op allocates its own output instead of cloning the input.
 _REFERENCE_BODIES: dict[str, str] = {
     "all_reduce": """    out = inputs["x"].clone()
     dist.all_reduce(out, op=dist.ReduceOp.SUM, group=ctx.group)
@@ -111,9 +103,7 @@ def _dtype_of(candidate: dict[str, Any]) -> str:
 def _collective_op(candidate: dict[str, Any]) -> str:
     """Validate and return the supported collective operation.
 
-    The generated references reduce with ``SUM``, which is what tensor-parallel
-    partial sums need. Nothing populates a reduction field today, so an explicit
-    non-SUM value is refused rather than silently compared against SUM.
+    References reduce with ``SUM``, so an explicit non-sum reduction is refused.
     """
     contract = candidate.get("kernel_contract")
     if not isinstance(contract, dict) or contract.get("kind") != "collective":

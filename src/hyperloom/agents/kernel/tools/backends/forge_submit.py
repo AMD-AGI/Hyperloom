@@ -1046,6 +1046,7 @@ def _prepare_inplace(
         return None  # another forge in-place run holds this repo; skip cleanly
 
     def _skip() -> None:
+        """Release the lock and report the repo as unusable."""
         _release_repo_lock(lock_fd)
         return None
 
