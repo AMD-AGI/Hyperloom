@@ -147,7 +147,16 @@ def _install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **env: str | None)
     every past test's hook write into the current test's directory.
     """
     env.setdefault("RESULT_DIR", str(tmp_path))
-    monkeypatch.delenv("HYPERLOOM_EVAL_PROBE", raising=False)
+    # Clear the whole family first: the block reads all of these, and a developer
+    # machine that happens to export one would silently change what is tested.
+    for key in (
+        "HYPERLOOM_EVAL_PROBE",
+        "HYPERLOOM_EVAL_MAX_TOKENS",
+        "HYPERLOOM_EVAL_STOP_STRINGS",
+        "HYPERLOOM_EVAL_DERIVE_STOP",
+        "MODEL_PATH",
+    ):
+        monkeypatch.delenv(key, raising=False)
     for key, val in env.items():
         if val is None:
             monkeypatch.delenv(key, raising=False)
@@ -486,13 +495,37 @@ BOUNDS_FILENAME = "hyperloom_eval_bounds.json"
 @pytest.fixture
 def bounds(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Install the block with the probe disabled, isolating the bounds shim."""
-    return _install(
-        monkeypatch,
-        tmp_path,
-        HYPERLOOM_EVAL_PROBE="0",
-        HYPERLOOM_EVAL_MAX_TOKENS=None,
-        HYPERLOOM_EVAL_STOP_STRINGS=None,
-    )
+    return _install(monkeypatch, tmp_path, HYPERLOOM_EVAL_PROBE="0")
+
+
+# Verbatim shape of the real Qwen3 metadata, which is the case that motivates
+# deriving at all: generation_config declares two terminators and eos_token is
+# only the first, so <|endoftext|> is invisible to anything reading eos_token.
+_QWEN3_GENERATION_CONFIG = {"bos_token_id": 151643, "eos_token_id": [151645, 151643]}
+_QWEN3_TOKENIZER_CONFIG = {
+    "eos_token": "<|im_end|>",
+    "pad_token": "<|endoftext|>",
+    "added_tokens_decoder": {
+        "151643": {"content": "<|endoftext|>", "special": True},
+        "151645": {"content": "<|im_end|>", "special": True},
+        "151667": {"content": "<think>", "special": False},
+    },
+}
+
+
+def _write_model_dir(tmp_path: Path, *, generation=..., tokenizer=...) -> Path:
+    """Write a model directory; pass ``None`` to omit a metadata file."""
+    model_dir = tmp_path / "model"
+    model_dir.mkdir(exist_ok=True)
+    for name, payload in (
+        ("generation_config.json", _QWEN3_GENERATION_CONFIG if generation is ... else generation),
+        ("tokenizer_config.json", _QWEN3_TOKENIZER_CONFIG if tokenizer is ... else tokenizer),
+    ):
+        if payload is None:
+            continue
+        text = payload if isinstance(payload, str) else json.dumps(payload)
+        (model_dir / name).write_text(text, encoding="utf-8")
+    return model_dir
 
 
 def _payload(env, generate=True, **kwargs):
@@ -599,3 +632,167 @@ def test_bounds_and_probe_coexist(probe):
     the probe still has to trip."""
     assert probe.cls.parse_generations(outputs=[{"choices": [{"finish_reason": "stop"}]}]) == ["upstream"]
     assert _payload(probe, gen_kwargs={"max_tokens": 16384})["max_tokens"] == 4096
+
+
+# ---------------------------------------------------------------------------
+# Model-derived terminators
+# ---------------------------------------------------------------------------
+
+
+def _derive(monkeypatch, tmp_path, **kwargs):
+    """Install with MODEL_PATH pointed at a written model dir."""
+    model_dir = _write_model_dir(tmp_path, **kwargs)
+    return _install(monkeypatch, tmp_path, HYPERLOOM_EVAL_PROBE="0", MODEL_PATH=str(model_dir))
+
+
+def test_derives_every_terminator_the_model_declares(monkeypatch, tmp_path):
+    """The gap this closes: eos_token is <|im_end|> alone, while the model stops
+    on <|endoftext|> too."""
+    payload = _payload(_derive(monkeypatch, tmp_path), gen_kwargs={"until": ["Question:"]})
+
+    assert payload["stop_token_ids"] == [151645, 151643]
+    assert payload["stop"] == ["Question:", "<|im_end|>", "<|endoftext|>"]
+
+
+def test_derived_ids_do_not_displace_the_tasks_own_stop_list(monkeypatch, tmp_path):
+    """Upstream keeps only 4 stop strings and the task's list is what its answer
+    extraction depends on, so the derived strings yield to it. stop_token_ids has
+    no such limit, which is why nothing is actually lost on vLLM/SGLang."""
+    payload = _payload(
+        _derive(monkeypatch, tmp_path),
+        gen_kwargs={"until": ["Question:", "\n\n", "Q:", "A:"]},
+    )
+
+    assert payload["stop"] == ["Question:", "\n\n", "Q:", "A:"]
+    assert payload["stop_token_ids"] == [151645, 151643]
+
+
+def test_operator_stop_strings_outrank_derived_ones(monkeypatch, tmp_path):
+    """An explicit operator value is a deliberate decision and wins."""
+    model_dir = _write_model_dir(tmp_path)
+    env = _install(
+        monkeypatch,
+        tmp_path,
+        HYPERLOOM_EVAL_PROBE="0",
+        MODEL_PATH=str(model_dir),
+        HYPERLOOM_EVAL_STOP_STRINGS="<|custom|>",
+    )
+
+    assert _payload(env, gen_kwargs={"until": ["Question:"]})["stop"][0] == "<|custom|>"
+
+
+def test_falls_back_to_tokenizer_eos_when_generation_config_is_absent(monkeypatch, tmp_path):
+    """generation_config is optional; without it there are no ids to send, but
+    the one terminator tokenizer_config names is still worth sending."""
+    payload = _payload(_derive(monkeypatch, tmp_path, generation=None), gen_kwargs={"until": ["Q:"]})
+
+    assert "stop_token_ids" not in payload
+    assert payload["stop"] == ["Q:", "<|im_end|>"]
+
+
+def test_derives_nothing_when_the_model_dir_has_no_metadata(monkeypatch, tmp_path):
+    """Leave upstream's behaviour exactly as it was rather than guessing."""
+    payload = _payload(
+        _derive(monkeypatch, tmp_path, generation=None, tokenizer=None),
+        gen_kwargs={"until": ["Q:"], "max_tokens": 16384},
+    )
+
+    assert "stop_token_ids" not in payload
+    assert payload["stop"] == ["Q:"]
+    assert payload["max_tokens"] == 4096
+
+
+def test_derives_nothing_when_model_path_is_unset(bounds):
+    """Nothing to read from, and the cap must still apply on its own."""
+    payload = _payload(bounds, gen_kwargs={"until": ["Q:"], "max_tokens": 16384})
+
+    assert "stop_token_ids" not in payload
+    assert payload["stop"] == ["Q:"]
+    assert payload["max_tokens"] == 4096
+
+
+@pytest.mark.parametrize(
+    "generation,tokenizer",
+    [
+        ("{not json", ...),
+        (..., "{not json"),
+        ([1, 2, 3], ...),
+        ({"eos_token_id": "151645"}, ...),
+        ({"eos_token_id": [151645, None, "x"]}, ...),
+        ({"eos_token_id": True}, ...),
+        ({"eos_token_id": [True, 151645]}, ...),
+        (..., {"eos_token": {"no_content": 1}, "added_tokens_decoder": []}),
+    ],
+)
+def test_unreadable_or_odd_metadata_never_breaks_the_eval(monkeypatch, tmp_path, generation, tokenizer):
+    """Metadata is not a contract we control, so every shape has to degrade to
+    'run as before' rather than take the eval down."""
+    env = _derive(monkeypatch, tmp_path, generation=generation, tokenizer=tokenizer)
+
+    payload = _payload(env, gen_kwargs={"until": ["Q:"], "max_tokens": 16384})
+
+    assert payload["max_tokens"] == 4096
+    assert payload["stop"][0] == "Q:"
+    # bool is an int in Python; a JSON ``true`` must not reach the wire as an id.
+    assert all(isinstance(i, int) and not isinstance(i, bool) for i in payload.get("stop_token_ids") or [])
+
+
+def test_a_single_eos_token_id_is_accepted(monkeypatch, tmp_path):
+    """Most models write a scalar there rather than a list."""
+    env = _derive(monkeypatch, tmp_path, generation={"eos_token_id": 151645})
+
+    assert _payload(env, gen_kwargs={"until": []})["stop_token_ids"] == [151645]
+
+
+def test_derivation_can_be_switched_off(monkeypatch, tmp_path):
+    """Escape hatch for reproducing an upstream number, or for a server that
+    rejects stop_token_ids."""
+    model_dir = _write_model_dir(tmp_path)
+    env = _install(
+        monkeypatch,
+        tmp_path,
+        HYPERLOOM_EVAL_PROBE="0",
+        MODEL_PATH=str(model_dir),
+        HYPERLOOM_EVAL_DERIVE_STOP="0",
+    )
+
+    payload = _payload(env, gen_kwargs={"until": ["Q:"]})
+
+    assert "stop_token_ids" not in payload
+    assert payload["stop"] == ["Q:"]
+
+
+def test_derived_terminators_leave_loglikelihood_payloads_untouched(monkeypatch, tmp_path):
+    payload = _payload(_derive(monkeypatch, tmp_path), generate=False)
+
+    assert "stop_token_ids" not in payload
+    assert "stop" not in payload
+
+
+def test_summary_records_the_terminators_the_run_actually_used(monkeypatch, tmp_path):
+    """A stored score is only comparable against another run under the same
+    terminators, so the run has to state them."""
+    env = _derive(monkeypatch, tmp_path)
+    _payload(env, gen_kwargs={"until": ["Q:"]})
+    env.cls.parse_generations(outputs=[{"choices": [{"finish_reason": "stop"}]}])
+    env.flush()
+
+    record = json.loads((env.result_dir / BOUNDS_FILENAME).read_text(encoding="utf-8"))
+    assert record["derived_stop"] == ["<|im_end|>", "<|endoftext|>"]
+    assert record["derived_stop_token_ids"] == [151645, 151643]
+
+
+def test_an_uncached_repo_id_derives_nothing_rather_than_downloading(monkeypatch, tmp_path):
+    """MODEL_PATH may be a repo id. Resolution is cache-only by design; the eval
+    must never be the thing that starts a multi-GB download."""
+    env = _install(
+        monkeypatch,
+        tmp_path,
+        HYPERLOOM_EVAL_PROBE="0",
+        MODEL_PATH="Qwen/Qwen3-0.6B-definitely-not-cached-9f3a",
+    )
+
+    payload = _payload(env, gen_kwargs={"until": ["Q:"], "max_tokens": 16384})
+
+    assert "stop_token_ids" not in payload
+    assert payload["max_tokens"] == 4096

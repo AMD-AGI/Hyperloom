@@ -6,8 +6,8 @@
 Each ``ensure_*`` function rewrites one upstream file in place: ``$NUM_PROMPTS``
 support and ``PROFILE_EXTRA_BODY`` consumption for profiling, the eval-artifact
 redirect to ``$RESULT_DIR``, the ``HYPERLOOM_EVAL_START`` phase marker, and the
-generation-pathology probe plus per-request generation bounds appended to
-lm-eval's ``lm_eval_sitecustomize.py``.
+generation-pathology probe plus per-request generation bounds and model-derived
+terminators appended to lm-eval's ``lm_eval_sitecustomize.py``.
 
 Applied in place, once: idempotent via a sentinel substring, serialized across
 processes via ``fcntl.flock``, written atomically.
@@ -93,7 +93,9 @@ _EVAL_START_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_l
 # waits for a decisive ratio. The bounds handle the ordinary case that ratio can
 # never catch -- a healthy model whose hardest samples do not converge -- by
 # capping each request so those samples are truncated individually and the rest
-# of the measurement survives.
+# of the measurement survives. The bounds also supply the terminators the model
+# declares, which lm-eval structurally cannot: eos_string holds one value and the
+# concurrent path never sends even that.
 #
 # Appended to ``lm_eval_sitecustomize.py``, so both land after InferenceX's own
 # patches and need no anchor line.
@@ -220,6 +222,90 @@ def _hl_eval_probe_install():
     _hl_api.TemplateAPI.amodel_call = _hl_probe_amodel_call
 
 
+def _hl_eval_model_dir():
+    # Upstream's own precedence (get_native_max_context_length): prefer
+    # MODEL_PATH, because the served model name may be neither a repo id nor a
+    # path. Hyperloom's CLI exports MODEL_PATH and it survives the benchmark env
+    # scrub, so it is here.
+    raw = (_hl_os.environ.get("MODEL_PATH") or "").strip()
+    if not raw:
+        return None
+    if _hl_os.path.isdir(raw):
+        return raw
+    # A repo id that was still uncached when Hyperloom assembled this
+    # subprocess's env is cached by the time this runs: the server had to
+    # download the weights to boot, and boot precedes the eval. Deriving here
+    # rather than in the parent is what makes that ordering work for us.
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        hit = try_to_load_from_cache(repo_id=raw, filename="config.json")
+    except Exception:
+        return None
+    if isinstance(hit, str) and _hl_os.path.isfile(hit):
+        return _hl_os.path.dirname(hit)
+    return None
+
+
+def _hl_eval_read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = _hl_json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _hl_eval_token_text(value):
+    # A special token is serialized either bare or as an AddedToken mapping.
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict) and isinstance(value.get("content"), str):
+        return value["content"]
+    return None
+
+
+def _hl_eval_derive_terminators():
+    # Returns (stop_strings, stop_token_ids) read from the model's own metadata.
+    #
+    # This exists because lm-eval cannot express what the model declares.
+    # eos_string carries exactly one terminator, while generation_config may list
+    # several: Qwen3 declares eos_token_id [151645, 151643] and eos_token is only
+    # the first, so <|endoftext|> never becomes a stop condition. Worse, the
+    # concurrent path (amodel_call, which is the one InferenceX drives) does not
+    # pass eos at all, so even the single value never reaches the payload.
+    if (_hl_os.environ.get("HYPERLOOM_EVAL_DERIVE_STOP") or "1").strip().lower() in ("0", "false", "no", "off"):
+        return [], []
+    model_dir = _hl_eval_model_dir()
+    if not model_dir:
+        return [], []
+    tok = _hl_eval_read_json(_hl_os.path.join(model_dir, "tokenizer_config.json"))
+    gen = _hl_eval_read_json(_hl_os.path.join(model_dir, "generation_config.json"))
+    decoder = tok.get("added_tokens_decoder")
+    decoder = decoder if isinstance(decoder, dict) else {}
+
+    ids = gen.get("eos_token_id")
+    if isinstance(ids, int) and not isinstance(ids, bool):
+        ids = [ids]
+    out_ids = []
+    out_stops = []
+    for tid in ids if isinstance(ids, list) else []:
+        # bool is an int in Python, and JSON can carry a true here.
+        if not isinstance(tid, int) or isinstance(tid, bool) or tid in out_ids:
+            continue
+        out_ids.append(tid)
+        # added_tokens_decoder is keyed by the id as a string.
+        text = _hl_eval_token_text(decoder.get(str(tid)))
+        if text and text not in out_stops:
+            out_stops.append(text)
+    # generation_config is authoritative for what generation stops on, but it is
+    # optional; tokenizer_config's eos_token is the fallback and yields no id.
+    text = _hl_eval_token_text(tok.get("eos_token"))
+    if text and text not in out_stops:
+        out_stops.append(text)
+    return out_stops, out_ids
+
+
 def _hl_eval_bounds_install():
     # Bound each request. Distinct from the probe above: the probe answers a
     # model that NEVER terminates, and short-circuits the whole eval to a ~0
@@ -249,7 +335,8 @@ def _hl_eval_bounds_install():
                 cap = default_cap
     raw_stop = (_hl_os.environ.get("HYPERLOOM_EVAL_STOP_STRINGS") or "").strip()
     extra_stop = [s for s in raw_stop.split("\\x1f") if s]
-    if cap <= 0 and not extra_stop:
+    derived_stop, derived_ids = _hl_eval_derive_terminators()
+    if cap <= 0 and not extra_stop and not derived_stop and not derived_ids:
         return
 
     import atexit as _hl_atexit
@@ -268,6 +355,8 @@ def _hl_eval_bounds_install():
         record = {
             "max_tokens": cap,
             "stop_prefix": extra_stop,
+            "derived_stop": derived_stop,
+            "derived_stop_token_ids": derived_ids,
             "generations": counts["generations"],
             "truncated": counts["truncated"],
         }
@@ -315,21 +404,39 @@ def _hl_eval_bounds_install():
             current = current if isinstance(current, int) else 0
             if current <= 0 or current > cap:
                 payload["max_tokens"] = cap
-        if extra_stop:
-            # Upstream's eos_string is a single hardcoded value, is wrong for
-            # several model families, and is not even passed on the concurrent
-            # path -- so the caller-supplied terminators go first: the API
-            # accepts at most 4 stop strings and the tail is what gets dropped.
+        if derived_ids:
+            # The exact mechanism, and the reason the string list below does not
+            # have to fight for room: both frameworks this repo drives (vLLM and
+            # SGLang) accept stop_token_ids, it takes token ids rather than text,
+            # and it has no length limit.
+            ids = list(derived_ids)
+            for item in payload.get("stop_token_ids") or []:
+                if item not in ids:
+                    ids.append(item)
+            payload["stop_token_ids"] = ids
+        if extra_stop or derived_stop:
+            # Order encodes priority under a 4-entry ceiling upstream enforces.
+            # An operator who named terminators explicitly outranks everything.
+            # The task's own ``until`` comes next: its answer extraction depends
+            # on that list, so silently dropping an entry would change what is
+            # being scored. Derived terminators go last -- they are the fallback
+            # for a server that ignores stop_token_ids, and where that field
+            # works they are already covered exactly.
             merged = list(extra_stop)
-            for item in payload.get("stop") or []:
-                if item not in merged:
-                    merged.append(item)
+            for group in (payload.get("stop") or [], derived_stop):
+                for item in group:
+                    if item not in merged:
+                        merged.append(item)
             payload["stop"] = merged[:4]
         if not announced["done"]:
             announced["done"] = True
             print(
-                "HYPERLOOM_EVAL_BOUNDS max_tokens=%s stop=%s"
-                % (payload.get("max_tokens"), _hl_json.dumps(payload.get("stop"))),
+                "HYPERLOOM_EVAL_BOUNDS max_tokens=%s stop=%s stop_token_ids=%s"
+                % (
+                    payload.get("max_tokens"),
+                    _hl_json.dumps(payload.get("stop")),
+                    _hl_json.dumps(payload.get("stop_token_ids")),
+                ),
                 file=_hl_sys.stderr,
                 flush=True,
             )
