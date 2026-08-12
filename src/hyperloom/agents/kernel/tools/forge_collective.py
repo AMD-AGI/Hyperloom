@@ -1146,6 +1146,25 @@ def _relay(stdout: Any, stderr: Any) -> None:
         sys.stderr.write(stderr if isinstance(stderr, str) else stderr.decode("utf-8", "replace"))
 
 
+def _final_case_bandwidth(output_dir: str) -> dict[str, Any]:
+    """Return the per-case bandwidth the last bench in the campaign measured.
+
+    Latency alone cannot separate a faster transfer from a cheaper barrier, so
+    the session keeps the bus bandwidth behind the kept kernel: it is the only
+    figure that says how much of the fabric the winner actually uses. forge-loop
+    consumes the driver's stdout, so the driver leaves this file behind instead.
+    """
+    try:
+        payload = json.loads(
+            (Path(output_dir or ".") / "collective_bandwidth.json").read_text(
+                encoding="utf-8",
+            )
+        )
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _emit(result: dict[str, Any], output_dir: str) -> None:
     """Persist and print the wrapper result contract."""
     if output_dir:
@@ -1334,6 +1353,8 @@ def main(argv: list[str] | None = None) -> int:
         result = _base_result(output_dir)
         result["error"] = "collective wrapper completed without a result"
         return_code = 2
+    if not result.get("bandwidth"):
+        result["bandwidth"] = _final_case_bandwidth(output_dir)
     _emit(result, output_dir)
     return return_code
 

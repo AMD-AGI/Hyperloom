@@ -486,6 +486,17 @@ def main(argv: list[str]) -> int:
             }
             result["status"] = "ok"
             if ctx.rank == 0:
+                # The bench tool consumes this stdout, so the session can only
+                # see the bandwidth through a file in its own attempt directory.
+                try:
+                    bw_path = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        "collective_bandwidth.json",
+                    )
+                    with open(bw_path, "w", encoding="utf-8") as handle:
+                        json.dump(result["bandwidth"], handle, indent=2, sort_keys=True)
+                except OSError as exc:
+                    print(f"warning: bandwidth not persisted: {exc}", file=sys.stderr, flush=True)
                 for name, latency_ms in timings.items():
                     band = result["bandwidth"][name]
                     print(f"case_ms: {name} {latency_ms:.9f}", flush=True)

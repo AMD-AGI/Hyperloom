@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import hashlib
+import importlib
 import importlib.util
 import json
 import logging
@@ -4406,14 +4407,32 @@ def select_collective_candidate(state: Any) -> dict[str, Any] | None:
 #: means adding one there first.
 SUPPORTED_COLLECTIVE_OPS = frozenset({"all_reduce", "reduce_scatter", "all_gather"})
 
+
+def _forge_loop_constant(module: str, name: str, fallback: float) -> float:
+    """Read a forge-loop budget constant, falling back when it is unreachable.
+
+    These bounds belong to forge-loop; a local copy of the number drifts the
+    moment upstream changes it and the lane then plans against a budget the
+    campaign will not honour. The fallback only covers a deployment without
+    KernelForge on the path, where the lane cannot run anyway.
+    """
+    try:
+        return float(getattr(importlib.import_module(module), name))
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return fallback
+
+
 # Session time held back for the E2E integrate round plus reporting.
 _COLLECTIVE_BUDGET_RESERVE_MIN = 45.0
-# Mirrors kernel_agents.loop.task_preparer.PREPARE_MAX_WALL_SEC.
-_COLLECTIVE_PREP_GRACE_SEC = 3000
+_COLLECTIVE_PREP_GRACE_SEC = int(
+    _forge_loop_constant("kernel_agents.loop.task_preparer", "PREPARE_MAX_WALL_SEC", 3000)
+)
 # Wrapper grace to export the patch and restore the repository.
 _COLLECTIVE_FINALIZE_GRACE_SEC = 300
-# Mirrors kernel_agents.cli.MIN_MAX_HOURS (1.0h); forge-loop rejects less.
-_COLLECTIVE_MIN_CAMPAIGN_SEC = 3600
+# forge-loop rejects a campaign shorter than its own minimum.
+_COLLECTIVE_MIN_CAMPAIGN_SEC = int(
+    _forge_loop_constant("kernel_agents.cli", "MIN_MAX_HOURS", 1.0) * 3600
+)
 # Mirrors forge_collective.DEFAULT_TIMEOUT_SEC for a session with no deadline.
 _COLLECTIVE_UNBOUNDED_WRAPPER_SEC = 14400
 

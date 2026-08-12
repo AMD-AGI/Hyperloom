@@ -2538,3 +2538,25 @@ def test_main_reports_structured_failure_on_bad_input(tmp_path, capsys):
     payload = json.loads(output.split(fc.RESULT_BEGIN, 1)[1].split(fc.RESULT_END, 1)[0])
     assert payload["status"] == "failed"
     assert payload["engine"] == "forge_collective"
+
+
+# --- Bandwidth carried back into the session -----------------------------------
+
+
+def test_bandwidth_is_read_from_the_attempt_directory(tmp_path):
+    """forge-loop consumes the driver's stdout, so the file is the only channel."""
+    payload = {"allreduce_bf16_1024x6144": {"bytes": 12582912, "busbw_gbps": 373.6}}
+    (tmp_path / "collective_bandwidth.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+    assert fc._final_case_bandwidth(str(tmp_path)) == payload
+
+
+@pytest.mark.parametrize("content", (None, "{not json", '"a string"'))
+def test_missing_or_unusable_bandwidth_is_not_an_error(tmp_path, content):
+    """A campaign still reports its verdict when the measurement is absent."""
+    if content is not None:
+        (tmp_path / "collective_bandwidth.json").write_text(content, encoding="utf-8")
+
+    assert fc._final_case_bandwidth(str(tmp_path)) == {}

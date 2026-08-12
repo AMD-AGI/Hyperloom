@@ -204,6 +204,12 @@ FIELD_GLOSSARY: dict[str, str] = {
         "``reduce_scatter`` or ``all_gather``."
     ),
     "world_size": ("Rank count the collective was measured across; the lane requires it to match the run's TP width."),
+    "bandwidth": (
+        "Per-case ``bytes`` / ``algbw_gbps`` / ``busbw_gbps`` from the final "
+        "bench. Latency alone cannot separate a faster transfer from a cheaper "
+        "barrier; bus bandwidth against the fabric peak says which one a "
+        "kept kernel bought, and which regime still has headroom."
+    ),
     "collective_attempt_id": (
         "Stable identity for one collective campaign, used to deduplicate "
         "resumed or salvaged attempts across a session."
