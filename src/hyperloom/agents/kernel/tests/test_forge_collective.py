@@ -2563,3 +2563,28 @@ def test_a_loop_result_without_bandwidth_reports_none(tmp_path):
     )
 
     assert "bandwidth" not in result
+
+
+# --- Optional campaign inputs ---------------------------------------------------
+
+
+def test_an_option_the_installed_forge_loop_lacks_is_dropped(monkeypatch, tmp_path):
+    """An undeclared option aborts the campaign before it starts."""
+    monkeypatch.setattr(fc, "_forge_loop_accepts", lambda option: False)
+    payload = _payload(tmp_path, e2e_pct=29.5)
+
+    cmd = fc._build_cmd(payload, _rig(tmp_path), tmp_path, deadline_unix=9_999_999_999)
+
+    assert "--e2e-pct" not in cmd
+    assert "--calibrate-noise-floor" not in cmd
+
+
+def test_a_forge_loop_that_declares_them_still_receives_them(monkeypatch, tmp_path):
+    """Dropping them is a concession to the build, not a change of intent."""
+    monkeypatch.setattr(fc, "_forge_loop_accepts", lambda option: True)
+    payload = _payload(tmp_path, e2e_pct=29.5)
+
+    cmd = fc._build_cmd(payload, _rig(tmp_path), tmp_path, deadline_unix=9_999_999_999)
+
+    assert "--e2e-pct" in cmd
+    assert "--calibrate-noise-floor" in cmd

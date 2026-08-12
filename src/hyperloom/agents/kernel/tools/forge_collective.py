@@ -10,6 +10,7 @@ import argparse
 import base64
 import binascii
 import fcntl
+import functools
 import hashlib
 import json
 import logging
@@ -214,11 +215,12 @@ def _build_cmd(
         raise ValueError(
             "calibrate_noise_floor must be a positive integer"
         )
-    _add_opt(
-        cmd,
-        calibrate_noise_floor,
-        "--calibrate-noise-floor",
-    )
+    if _forge_loop_accepts("--calibrate-noise-floor"):
+        _add_opt(
+            cmd,
+            calibrate_noise_floor,
+            "--calibrate-noise-floor",
+        )
     target_functions = args.get("target_functions")
     if not isinstance(target_functions, list) or not target_functions:
         raise ValueError("target_functions must be a non-empty list")
@@ -249,7 +251,8 @@ def _build_cmd(
             or float(e2e_pct) <= 0
         ):
             raise ValueError(f"e2e_pct must be a positive finite share: {e2e_pct!r}")
-        _add_opt(cmd, float(e2e_pct), "--e2e-pct")
+        if _forge_loop_accepts("--e2e-pct"):
+            _add_opt(cmd, float(e2e_pct), "--e2e-pct")
     spec_file = str(args.get("invocation_spec_file") or "").strip()
     if spec_file and Path(spec_file).is_file():
         _add_opt(cmd, str(Path(spec_file).resolve()), "--invocation-spec-file")
@@ -394,6 +397,25 @@ def _restore_config(repo: str, snapshot: dict[str, str | None]) -> None:
             proc = _git(repo, "config", "--local", key, value)
             if proc.returncode != 0:
                 raise RuntimeError(f"could not restore local Git config {key}")
+
+
+@functools.lru_cache(maxsize=None)
+def _forge_loop_accepts(option: str) -> bool:
+    """Return whether the installed forge-loop declares this option.
+
+    Two campaign inputs this lane would like to send -- the measured noise floor
+    and the operator's E2E share -- exist only in some forge-loop builds, and an
+    option the CLI does not declare aborts the campaign before it starts. What
+    the build does not accept is dropped, at the documented cost: without
+    ``--calibrate-noise-floor`` the loop keeps a fixed threshold instead of one
+    measured on the machine, and without ``--e2e-pct`` it cannot project the
+    Amdahl ceiling that says whether the campaign can pay for itself.
+    """
+    try:
+        from kernel_agents.cli import forge_loop
+    except (ImportError, AttributeError):
+        return True
+    return any(option in getattr(param, "opts", ()) for param in forge_loop.params)
 
 
 def _restore_journal_path(repo: str) -> Path:
