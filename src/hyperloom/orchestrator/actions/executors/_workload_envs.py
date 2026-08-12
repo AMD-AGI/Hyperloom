@@ -410,6 +410,40 @@ _RUN_EVAL_DISABLED_WARN_EMITTED = False
 _RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
 
 
+def materialized_run_eval_disabled(config_path: Path | str) -> bool:
+    """Report whether lm-eval is disabled in the materialized benchmark config.
+
+    :func:`materialize_config_with_envs` writes the effective ``RUN_EVAL``
+    (folded from the base YAML ``benchmark.envs``, ``reference_envs``,
+    ``extra_envs`` and process ``$RUN_EVAL``, defaulting to "true") into
+    ``benchmark.envs.RUN_EVAL`` -- the value the benchmark subprocess actually
+    consumes. Reading it back is the single source of truth for "did eval run
+    this round", reusing the shared ``_RUN_EVAL_FALSE_VALUES``
+    present-and-falsey semantics.
+
+    Lives here rather than beside either caller because both the baseline and
+    the grid arm need it, and neither can host it for the other: this module
+    already imports ``_grid_runner`` at module level, and ``baseline`` imports
+    both.
+
+    Args:
+        config_path (Path | str): The materialized benchmark YAML config path.
+
+    Returns:
+        bool: ``True`` when the config's ``RUN_EVAL`` is present and falsey.
+            A missing key reads as enabled (matches the materialize default).
+            An unreadable config also reads as enabled: the eval-side guards
+            keyed off this must fail closed, not skip themselves.
+    """
+    try:
+        cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return False
+    envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
+    val = envs.get("RUN_EVAL")
+    return val is not None and str(val).strip().lower() in _RUN_EVAL_FALSE_VALUES
+
+
 def _model_requires_remote_code(model_path: str | None) -> bool:
     """Return whether benchmark server/client must trust custom HF code.
 
