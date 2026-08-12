@@ -31,10 +31,10 @@ from hyperloom.common.env import env_bool
 from ..state.kernel_decision_settings import (
     _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_HOT_KERNEL_GATE_TOP_N,
-    _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
     _DEFAULT_KERNEL_OPT_MAX_PARTIAL,
     _MAX_INTEGRATE_FAULT_ATTEMPTS,
     _now_iso,
+    resolve_hot_kernel_min_gpu_pct,
     resolve_kernel_opt_max_failures,
 )
 from ..trace.trace_env import env_flag
@@ -1519,15 +1519,7 @@ def untried_hot_reusable_kernels(
         return []
 
     if min_gpu_pct is None:
-        try:
-            min_gpu_pct = float(
-                os.environ.get(
-                    "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT",
-                    _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
-                )
-            )
-        except (TypeError, ValueError):
-            min_gpu_pct = _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
+        min_gpu_pct = resolve_hot_kernel_min_gpu_pct()
     if top_n is None:
         try:
             top_n = int(

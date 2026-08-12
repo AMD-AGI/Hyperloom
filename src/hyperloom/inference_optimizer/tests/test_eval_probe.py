@@ -15,7 +15,7 @@ What the probe must guarantee:
   generate requests are answered with an empty string so lm-eval still writes a
   ``results*.json`` scoring ~0 instead of running for hours;
 * loglikelihood requests are never short-circuited (they have no EOS to emit);
-* a bug in any of the above degrades to "eval runs as before", never a crash.
+* a malformed response degrades to "eval runs as before", never a crash.
 """
 
 from __future__ import annotations
@@ -250,12 +250,16 @@ def test_probe_can_be_disabled(monkeypatch, tmp_path):
     assert openai_completions.LocalChatCompletion.parse_generations(outputs={}) == ["upstream"]
 
 
-def test_probe_never_raises_when_lm_eval_is_absent(monkeypatch):
-    """sitecustomize runs at interpreter startup; raising there would break
-    every python3 the benchmark shells out to, not just lm-eval."""
+def test_probe_surfaces_import_failure_when_lm_eval_absent(monkeypatch):
+    """A missing lm-eval must raise, not be swallowed: CPython's
+    ``site.execsitecustomize()`` prints it to stderr and keeps the interpreter
+    alive, so the failure is visible in the benchmark log."""
+    import pytest
+
     for name in ("lm_eval", "lm_eval.models", "lm_eval.models.api_models"):
         monkeypatch.setitem(sys.modules, name, None)
-    exec(compile(_EVAL_PROBE_PY, "<probe>", "exec"), {"__name__": "sitecustomize"})
+    with pytest.raises(ImportError):
+        exec(compile(_EVAL_PROBE_PY, "<probe>", "exec"), {"__name__": "sitecustomize"})
 
 
 def test_probe_survives_malformed_responses(probe):

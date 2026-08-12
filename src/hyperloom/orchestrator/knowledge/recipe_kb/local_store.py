@@ -1,12 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""On-disk recipe-snapshot store backing the local-only write path.
+"""On-disk recipe-snapshot store selected by ``KNOWLEDGE_STORE_MODE=local``.
 
-Mirrors the central kb-service wire contract so a caller dispatching reads
-against either the local store or the central kb-service sees identical
-dicts. Every put_recipe is the local equivalent of the v2
-``PUT /recipes/{cid}`` endpoint:
+Every ``put_recipe`` archives and atomically replaces one local row:
 
 * prior live row archived to ``history/v{N}.json`` with the incoming
   ``provenance`` recorded in ``replaced_by``;
@@ -30,9 +27,8 @@ Concurrency/durability contracts: ``fcntl.flock`` (advisory, exclusive)
 coordinates writers; tmp + rename gives readers atomic swaps; ``os.fsync``
 after rename is best-effort durability.
 
-The local store is the source of truth in degraded/offline mode and a
-best-effort cache in healthy mode. ``search`` is an O(N) walk + in-memory
-filter (N bounded by the number of distinct 7-tuples ever seen).
+The local store is authoritative in local mode. ``search`` is an O(N) walk
+plus in-memory filtering (N is bounded by the distinct 7-tuples seen).
 """
 
 from __future__ import annotations
@@ -716,6 +712,33 @@ class LocalRecipeStore:
             "recipe_canonical_id": canonical_id,
             "attempt_at": stamped_at,
         }
+
+    def list_attempts(
+        self,
+        *,
+        canonical_id: str,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return append-only attempts for one Recipe identity.
+
+        Args:
+            canonical_id: Parent Recipe identity.
+            session_id: Optional session filter.
+
+        Returns:
+            Valid attempt rows in append order.
+        """
+
+        if not canonical_id:
+            raise ValueError("list_attempts requires a non-empty canonical_id")
+        rows = _list_jsonl(self._attempts_path(canonical_id))
+        if session_id is None:
+            return rows
+        return [
+            row
+            for row in rows
+            if str(row.get("session_id") or "") == str(session_id)
+        ]
 
 
 # search filter helpers

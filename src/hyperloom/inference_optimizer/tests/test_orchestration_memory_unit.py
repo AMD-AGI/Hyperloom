@@ -510,3 +510,29 @@ def test_call_cumulative_usage_is_never_read_as_a_water_level():
     assert _context_tokens_estimate(usage, num_turns=8) < window
     # No turn count reported → pass the sum through unchanged.
     assert _context_tokens_estimate(usage, num_turns=0) == _context_tokens_estimate(usage, num_turns=1)
+
+
+def test_a_provider_reported_window_replaces_the_table_default():
+    """Prefer the window the provider states for the model actually running.
+
+    MODEL_CONTEXT_WINDOWS lists the Claude models this project pins to 200k, and
+    anything else falls back to the same conservative default. Codex states its
+    own window per turn -- 258400 for the model in use -- and compacting at 70%
+    of 200k instead of 70% of that fires a fifth of the way early. Compaction
+    resets the conversation, so an early one costs exactly what holding the
+    conversation was for.
+    """
+    policy = om.CheckpointPolicy(context_token_soft=int(200_000 * 0.70))
+
+    policy.adopt_context_window(258_400, 0.70)
+
+    assert policy.context_token_soft == int(258_400 * 0.70)
+
+
+def test_an_unreported_window_leaves_the_budget_alone():
+    """Keep the caller's own default when the provider states nothing."""
+    policy = om.CheckpointPolicy(context_token_soft=140_000)
+
+    policy.adopt_context_window(0, 0.70)
+
+    assert policy.context_token_soft == 140_000

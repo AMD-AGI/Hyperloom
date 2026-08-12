@@ -25,15 +25,20 @@ BLOCKED_UNTRUSTED_ENV_NAMES: frozenset[str] = frozenset(
         "DYLD_LIBRARY_PATH",
         "ENV",
         "GCONV_PATH",
+        "GIT_SSH_COMMAND",
         "IFS",
         "LD_AUDIT",
         "LD_LIBRARY_PATH",
         "LD_PRELOAD",
+        "NODE_OPTIONS",
         "PATH",
+        "PERL5OPT",
         "PYTHONHOME",
         "PYTHONINSPECT",
         "PYTHONPATH",
         "PYTHONSTARTUP",
+        # site.py adds its site-packages to sys.path, so it loads arbitrary code.
+        "PYTHONUSERBASE",
         "RUBYOPT",
         "SHELLOPTS",
     }
@@ -61,6 +66,7 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_CUSTOM_HEADERS",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAW_API_KEY",
         "DEEPSEEK_API_KEY",
         "GEAK_API_KEY",
@@ -92,7 +98,19 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_API_KEY",
+        # ANTHROPIC_AUTH_TOKEN is deliberately absent: no installer ever writes
+        # it (they persist the API-key spelling and actively remove this one),
+        # so anything read back here is a hand-written leftover -- and since it
+        # outranks a subscription token, reading it would silently move the run
+        # onto API billing.
         "ANTHROPIC_BASE_URL",
+        # Gateway auth header. Setup writes this one into .env (the AMD APIM
+        # subscription key), so the loader has to read it back or a
+        # header-authenticated gateway silently loses its credential whenever the
+        # shell has not exported it already. Its OpenAI-side counterpart below is
+        # operator-written only.
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
         # Retired provider variables, still readable so a pre-migration .env can
@@ -124,6 +142,7 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "KERNEL_OPT_BACKEND_ORDER",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
+        "OPENAI_CUSTOM_HEADERS",
         "NO_PROXY",
         "ROCM_PATH",
         "SGLANG_ROCM_EXTRA",
@@ -151,7 +170,9 @@ DOTENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
 KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "FORGE_PATH",
         "GEAK_CLAUDE_BIN",
         "GEAK_CLAUDE_MODEL",
@@ -181,6 +202,84 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "USER_DATA_PATH",
     }
 )
+
+# GPU visibility masks: setting one selects the hardware rather than tuning it.
+GPU_MASK_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "CUDA_VISIBLE_DEVICES",
+        "GPU_DEVICE_ORDINAL",
+        "HIP_VISIBLE_DEVICES",
+        "HSA_VISIBLE_DEVICES",
+        "ROCR_VISIBLE_DEVICES",
+    }
+)
+
+# Env names an untrusted external source (reference recipe, framework-switch
+# manifest) may never set: shell-unsafe vars plus the workload/benchmark keys the
+# optimizer's CLI flags own — setting one retargets the benchmark instead of
+# toggling a knob.
+BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
+    BLOCKED_UNTRUSTED_ENV_NAMES
+    | BENCHMARK_SECRET_ENV_NAMES
+    | GPU_MASK_ENV_NAMES
+    | frozenset(
+        {
+            "HOME",
+            "MODEL",
+            "MODEL_PATH",
+            "TP",
+            "EP",
+            "CONC",
+            "ISL",
+            "OSL",
+            "MAX_MODEL_LEN",
+            "PRECISION",
+            "PORT",
+            "NUM_PROMPTS",
+            "NUM_WARMUPS",
+            "RANDOM_RANGE_RATIO",
+            "RUN_EVAL",
+            "PROFILE",
+            "RESULT_DIR",
+            "RESULT_FILENAME",
+            # Reroute traffic, model downloads or TLS trust. Kept out of
+            # BLOCKED_UNTRUSTED_ENV_NAMES because a local .env may set the proxies.
+            "CURL_CA_BUNDLE",
+            "HF_ENDPOINT",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "REQUESTS_CA_BUNDLE",
+            "SSL_CERT_DIR",
+            "SSL_CERT_FILE",
+            "TMPDIR",
+        }
+    )
+)
+
+# Credential-shaped name fragments, so an unlisted secret cannot be persisted
+# into a session YAML by name alone.
+_SECRET_NAME_FRAGMENTS: tuple[str, ...] = ("APIKEY", "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
+
+# Masked out before matching, not exempted whole, so TOKENIZER_API_KEY still reads
+# as a credential while TOKENIZERS_PARALLELISM does not.
+_SECRET_FRAGMENT_EXEMPTIONS: tuple[str, ...] = ("TOKENIZER",)
+
+
+def is_secret_shaped_env_name(key: object) -> bool:
+    """True when a name looks like a credential rather than a tuning knob."""
+    upper = str(key or "").strip().upper()
+    for exempt in _SECRET_FRAGMENT_EXEMPTIONS:
+        upper = upper.replace(exempt, "")
+    return any(fragment in upper for fragment in _SECRET_NAME_FRAGMENTS)
+
+
+def is_allowed_external_env_key(key: object) -> bool:
+    """True when an env export from an untrusted external source is safe to carry."""
+    upper = str(key or "").strip().upper()
+    if not valid_env_key(upper) or upper in BLOCKED_EXTERNAL_ENV_NAMES:
+        return False
+    return not is_secret_shaped_env_name(upper)
 
 
 def is_python_package_root(path: object) -> bool:
@@ -277,12 +376,16 @@ def redact_secret_values(text: str) -> str:
 __all__ = [
     "BENCHMARK_SECRET_ENV_NAMES",
     "BLOCKED_CHILD_ENV_NAMES",
+    "BLOCKED_EXTERNAL_ENV_NAMES",
     "BLOCKED_UNTRUSTED_ENV_NAMES",
+    "GPU_MASK_ENV_NAMES",
     "filter_benchmark_env_mapping",
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",
+    "is_allowed_external_env_key",
     "is_allowed_kernel_agent_env_key",
     "is_python_package_root",
+    "is_secret_shaped_env_name",
     "redact_secret_values",
     "scrub_benchmark_process_env",
     "scrub_child_process_env",

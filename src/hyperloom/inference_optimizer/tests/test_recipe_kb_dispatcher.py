@@ -1,45 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for :class:`RecipeKB` — the local-write / remote-read dispatcher.
-
-Covers: writes never touch the remote; reads are remote-first with local
-fallback; ``remote=None`` and ``remote.enabled=False`` are local-only. A fake
-remote drives the dispatcher's routing/translation/audit logic without network.
-"""
+"""Tests for the local-only RecipeKB compatibility facade."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
     RecipeKB,
-    RemoteRecipeClientError,
     recipe_canonical_id,
 )
-from hyperloom.orchestrator.knowledge.recipe_kb.dispatcher import _v2_to_arbor
 
 
-def test_v2_to_arbor_reads_legacy_framework_label() -> None:
-    """A v2 row storing the framework under the legacy ``framework`` label is
-    still surfaced as ``framework_name`` by the arbor projection."""
-    v2 = {
-        "canonical_id": "inference:m:mi300x:sglang:unknown_model_type:unknown_arch:0.4.5:fp8",
-        "labels": {"model": "m", "hardware": "mi300x", "framework": "sglang"},
-        "body": {},
-        "metrics": {},
-    }
-    arbor = _v2_to_arbor(v2)
-    assert arbor["framework_name"] == "sglang"
-
-
-def _cid(model: str = "m") -> str:
+def _cid() -> str:
     return recipe_canonical_id(
-        model=model,
+        model="m",
         hardware="mi300x",
         framework_name="sglang",
         framework_version="0.4.5",
@@ -48,529 +27,60 @@ def _cid(model: str = "m") -> str:
 
 
 @pytest.fixture
-def local_store(tmp_path: Path) -> LocalRecipeStore:
-    return LocalRecipeStore(root=tmp_path / "kb")
+def kb(tmp_path: Path) -> RecipeKB:
+    return RecipeKB(local=LocalRecipeStore(tmp_path / "kb"))
 
 
-# Name matches the real client so ``RecipeKB._remote_label`` resolves "gbrain".
-class GbrainRemoteRecipeClient:
-    """Duck-typed read remote that returns canned rows / raises on demand.
-
-    ``get_row`` drives the exact-cid fast path; ``search_rows`` drives the
-    label-match search; ``raise_exc`` makes every read raise.
-    """
-
-    enabled = True
-
-    def __init__(
-        self,
-        *,
-        get_row: dict[str, Any] | None = None,
-        search_rows: list[dict[str, Any]] | None = None,
-        raise_exc: Exception | None = None,
-    ) -> None:
-        self._get_row = get_row
-        self._search_rows = search_rows or []
-        self._raise = raise_exc
-        self.last_search_kwargs: dict[str, Any] | None = None
-        self.search_calls: list[dict[str, Any]] = []
-        self.closed = False
-
-    def get_recipe(self, *, canonical_id: str, version: int | None = None) -> dict[str, Any] | None:
-        if self._raise is not None:
-            raise self._raise
-        return self._get_row
-
-    def search(
-        self,
-        *,
-        label_match: dict[str, Any] | None = None,
-        metric_filters: dict[str, Any] | None = None,
-        updated_since: str | None = None,
-        order_by: str = "updated_at DESC",
-        limit: int = 50,
-        prefer: dict[str, Any] | None = None,
-    ) -> list[dict[str, Any]]:
-        self.last_search_kwargs = {
-            "label_match": label_match,
-            "metric_filters": metric_filters,
-            "updated_since": updated_since,
-            "order_by": order_by,
-            "limit": limit,
-            "prefer": prefer,
-        }
-        self.search_calls.append(self.last_search_kwargs)
-        if self._raise is not None:
-            raise self._raise
-        return list(self._search_rows)
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class _ReadOnlyRemoteSpy:
-    """A remote-shaped sentinel that raises if any read method is invoked."""
-
-    enabled = True
-
-    def _boom(self, *_a: Any, **_k: Any) -> Any:
-        raise AssertionError(
-            "remote read method invoked during a write — writes must be local-only",
-        )
-
-    get_recipe = _boom
-    search = _boom
-
-    def close(self) -> None:
-        pass
-
-
-def test_put_recipe_never_touches_remote(local_store: LocalRecipeStore) -> None:
-    kb = RecipeKB(local=local_store, remote=_ReadOnlyRemoteSpy())  # type: ignore[arg-type]
+def test_local_crud_and_authority_read(kb: RecipeKB) -> None:
     cid = _cid()
-    out = kb.put_recipe(canonical_id=cid, best_throughput=1.0)
-    assert out["created"] is True
-    assert local_store.get_recipe(canonical_id=cid) is not None
-
-
-def test_get_recipe_returns_remote_when_remote_hits(local_store: LocalRecipeStore) -> None:
-    """A remote hit is returned, translated from the nested v2 envelope to arbor."""
-    cid = _cid()
-    v2_payload = {
-        "canonical_id": cid,
-        "version": 5,
-        "labels": {"model": "remote-model", "hardware": "mi300x"},
-        "body": {"best_config": {"tp": "16"}},
-        "metrics": {"throughput": 30000.0},
-    }
-    kb = RecipeKB(local=local_store, remote=GbrainRemoteRecipeClient(search_rows=[v2_payload]))
-    out = kb.get_recipe(canonical_id=cid)
-    assert out is not None
-    assert out["canonical_id"] == cid
-    assert out["version"] == 5
-    assert out["model"] == "remote-model"
-    assert out["hardware"] == "mi300x"
-    assert out["best_config"] == {"tp": "16"}
-    assert out["best_throughput"] == 30000.0
-
-
-def test_v2_framework_version_label_is_read(local_store: LocalRecipeStore) -> None:
-    """A remote row's ``framework_version`` label is surfaced; the row ``version`` stays independent."""
-    cid = _cid()
-    v2_payload = {
-        "canonical_id": cid,
-        "version": 7,
-        "labels": {
-            "model": "remote-model",
-            "hardware": "mi300x",
-            "framework_name": "sglang",
-            "framework_version": "0.4.5",
-            "precision": "fp8",
-        },
-        "body": {},
-        "metrics": {},
-    }
-    kb = RecipeKB(local=local_store, remote=GbrainRemoteRecipeClient(search_rows=[v2_payload]))
-    out = kb.get_recipe(canonical_id=cid)
-    assert out is not None
-    assert out["framework_version"] == "0.4.5"
-    assert out["version"] == 7
-
-
-def test_v2_legacy_version_label_is_not_read(local_store: LocalRecipeStore) -> None:
-    """The legacy ``labels.version`` key is no longer read; a row with only it yields empty ``framework_version``."""
-    cid = _cid()
-    v2_payload = {
-        "canonical_id": cid,
-        "version": 7,
-        "labels": {
-            "model": "remote-model",
-            "hardware": "mi300x",
-            "framework_name": "sglang",
-            "version": "0.4.5",
-            "precision": "fp8",
-        },
-        "body": {},
-        "metrics": {},
-    }
-    kb = RecipeKB(local=local_store, remote=GbrainRemoteRecipeClient(search_rows=[v2_payload]))
-    out = kb.get_recipe(canonical_id=cid)
-    assert out is not None
-    assert out["framework_version"] == ""
-    assert out["version"] == 7
-
-
-def test_get_recipe_falls_through_to_local_when_remote_empty(local_store: LocalRecipeStore) -> None:
-    """Remote search finding no match must NOT shadow an authoritative local write."""
-    cid = _cid()
-    local_store.put_recipe(canonical_id=cid, model="local-marker")
-    kb = RecipeKB(local=local_store, remote=GbrainRemoteRecipeClient(search_rows=[]))
-    out = kb.get_recipe(canonical_id=cid)
-    assert out is not None
-    assert out["model"] == "local-marker"
-
-
-def test_get_recipe_falls_through_to_local_on_transport_error(local_store: LocalRecipeStore) -> None:
-    cid = _cid()
-    local_store.put_recipe(canonical_id=cid, model="local-marker")
-    failures: list[tuple[str, Exception]] = []
-    remote = GbrainRemoteRecipeClient(raise_exc=RemoteRecipeClientError("down", category="transport"))
-    kb = RecipeKB(local=local_store, remote=remote)
-    kb.on_remote_failure = lambda m, exc: failures.append((m, exc))
-    out = kb.get_recipe(canonical_id=cid)
-    assert out is not None
-    assert out["model"] == "local-marker"
-    assert len(failures) == 1
-    assert failures[0][0] == "get_recipe"
-    assert isinstance(failures[0][1], RemoteRecipeClientError)
-
-
-def test_get_recipe_returns_none_when_neither_has_it(local_store: LocalRecipeStore) -> None:
-    cid = _cid(model="never-seen")
-    kb = RecipeKB(local=local_store, remote=GbrainRemoteRecipeClient(search_rows=[]))
-    assert kb.get_recipe(canonical_id=cid) is None
-
-
-def test_get_recipe_remote_sends_5tuple_label_match(local_store: LocalRecipeStore) -> None:
-    """The label-match search receives the full 7-tuple decoded from the cid."""
-    cid = _cid()
-    remote = GbrainRemoteRecipeClient(search_rows=[])  # fast-path miss -> search
-    kb = RecipeKB(local=local_store, remote=remote)
-    kb.get_recipe(canonical_id=cid)
-    label_match = remote.search_calls[0]["label_match"] if remote.search_calls else {}
-    assert set(label_match) == {
-        "model",
-        "hardware",
-        "framework_name",
-        "framework_version",
-        "precision",
-        "model_type",
-        "architectures",
-    }
-    assert all(label_match.values()), "all cid segments must be present"
-
-
-def test_get_recipe_remote_falls_back_without_framework_version(
-    local_store: LocalRecipeStore,
-) -> None:
-    """Remote get_recipe tolerates framework-version drift after exact misses."""
-    requested = recipe_canonical_id(
-        model="test-model",
-        hardware="mi300x",
-        framework_name="sglang",
-        model_type="qwen3",
-        architectures="qwen3forcausallm",
-        framework_version="0.5.12",
-        precision="fp8",
-    )
-    sibling = recipe_canonical_id(
-        model="test-model",
-        hardware="mi300x",
-        framework_name="sglang",
-        model_type="qwen3",
-        architectures="qwen3forcausallm",
-        framework_version="0.5.11",
-        precision="fp8",
-    )
-    row = {
-        "canonical_id": sibling,
-        "version": 4,
-        "labels": {
-            "model": "test-model",
-            "hardware": "mi300x",
-            "framework_name": "sglang",
-            "framework_version": "0.5.11",
-            "precision": "fp8",
-            "model_type": "qwen3",
-            "architectures": "qwen3forcausallm",
-        },
-        "body": {"best_config": {"tp": "8"}},
-        "metrics": {"throughput": 12345.0},
-    }
-
-    class _VersionDriftRemote(GbrainRemoteRecipeClient):
-        """Remote fake that only returns a row for relaxed label matches."""
-
-        def search(self, **kwargs: Any) -> list[dict[str, Any]]:
-            super().search(**kwargs)
-            labels = kwargs.get("label_match") or {}
-            if "framework_version" in labels:
-                return []
-            return [row]
-
-    remote = _VersionDriftRemote()
-    kb = RecipeKB(local=local_store, remote=remote)
-
-    out = kb.get_recipe(canonical_id=requested)
-
-    assert out is not None
-    assert out["canonical_id"] == sibling
-    assert out["best_config"] == {"tp": "8"}
-    assert len(remote.search_calls) == 2
-    assert remote.search_calls[0]["label_match"]["framework_version"] == "0.5.12"
-    assert "framework_version" not in remote.search_calls[1]["label_match"]
-
-
-def test_get_recipe_remote_exact_search_hit_skips_version_fallback(
-    local_store: LocalRecipeStore,
-) -> None:
-    """A full label-match hit must not issue the relaxed version fallback."""
-    cid = recipe_canonical_id(
-        model="test-model",
-        hardware="mi300x",
-        framework_name="sglang",
-        model_type="qwen3",
-        architectures="qwen3forcausallm",
-        framework_version="0.5.12",
-        precision="fp8",
-    )
-    row = {"canonical_id": cid, "version": 3, "labels": {"model": "test-model"}, "body": {}, "metrics": {}}
-    remote = GbrainRemoteRecipeClient(search_rows=[row])
-    kb = RecipeKB(local=local_store, remote=remote)
-
-    out = kb.get_recipe(canonical_id=cid)
-
-    assert out is not None
-    assert out["canonical_id"] == cid
-    assert len(remote.search_calls) == 1
-
-
-def test_search_falls_through_to_local_on_remote_failure(local_store: LocalRecipeStore) -> None:
-    cid = _cid()
-    local_store.put_recipe(
-        canonical_id=cid,
-        extras={"task": "pretrain"},
-        best_throughput=10000.0,
-    )
-    remote = GbrainRemoteRecipeClient(raise_exc=RemoteRecipeClientError("down", category="transport"))
-    kb = RecipeKB(local=local_store, remote=remote)
-    rows = kb.search(label_match={"task": "pretrain"})
-    assert len(rows) == 1
-    assert rows[0]["canonical_id"] == cid
-
-
-def test_no_remote_means_local_only_for_reads(local_store: LocalRecipeStore) -> None:
-    """``remote=None`` reads only from the local store and never makes a network call."""
-    kb = RecipeKB(local=local_store, remote=None)
-    cid = _cid()
-    local_store.put_recipe(canonical_id=cid, model="local-marker")
-    out = kb.get_recipe(canonical_id=cid)
-    assert out is not None
-    assert out["model"] == "local-marker"
-
-
-def test_remote_authority_miss_uses_exact_method_only() -> None:
-    class ExactAuthorityStore:
-        def __init__(self) -> None:
-            self.exact_calls = 0
-
-        def get_recipe_exact(self, **_kwargs: Any) -> None:
-            self.exact_calls += 1
-            return None
-
-        def get_recipe(self, **_kwargs: Any) -> None:
-            raise AssertionError("authority read used broad get_recipe")
-
-        def search(self, **_kwargs: Any) -> list[dict[str, Any]]:
-            raise AssertionError("authority read searched")
-
-    store = ExactAuthorityStore()
-    kb = RecipeKB(local=store, mode="remote", backend_name="gbrain")
-
-    assert kb.get_authoritative_recipe(canonical_id=_cid()) is None
-    assert store.exact_calls == 1
-
-
-def test_disabled_remote_treated_as_no_remote(local_store: LocalRecipeStore) -> None:
-    """A ``remote.enabled=False`` client behaves identically to ``remote=None``."""
-    disabled = GbrainRemoteRecipeClient(search_rows=[{"canonical_id": "x"}])
-    disabled.enabled = False
-    kb = RecipeKB(local=local_store, remote=disabled)
-    cid = _cid()
-    local_store.put_recipe(canonical_id=cid, model="local-marker")
-    out = kb.get_recipe(canonical_id=cid)
-    assert out is not None
-    assert out["model"] == "local-marker"
-
-
-def test_audit_hook_emitted_on_remote_hit(local_store: LocalRecipeStore) -> None:
-    cid = _cid()
-    events: list[dict[str, Any]] = []
-    v2_payload = {
-        "canonical_id": cid,
-        "version": 5,
-        "labels": {"model": "remote-model", "hardware": "mi300x"},
-        "body": {"best_config": {"tp": "16"}},
-        "metrics": {"throughput": 30000.0},
-    }
-    kb = RecipeKB(local=local_store, remote=GbrainRemoteRecipeClient(search_rows=[v2_payload]))
-    kb.audit_hook = lambda e: events.append(e)
-    kb.get_recipe(canonical_id=cid, prefer={"tp": 8})
-    assert len(events) == 1
-    ev = events[0]
-    assert ev["method"] == "get_recipe"
-    assert ev["remote"] == "gbrain"
-    assert ev["resolution"] == "remote"
-    assert ev["hit"] is True
-    assert ev["request"]["canonical_id"] == cid
-    assert ev["request"]["prefer_keys"] == ["tp"]
-    assert ev["result"]["exact"] is True
-    assert ev["result"]["best_throughput"] == 30000.0
-
-
-def test_audit_hook_emitted_on_local_fallthrough(local_store: LocalRecipeStore) -> None:
-    cid = _cid()
-    local_store.put_recipe(canonical_id=cid, model="local-marker")
-    events: list[dict[str, Any]] = []
-    remote = GbrainRemoteRecipeClient(raise_exc=RemoteRecipeClientError("down", category="transport"))
-    kb = RecipeKB(local=local_store, remote=remote)
-    kb.audit_hook = lambda e: events.append(e)
-    kb.get_recipe(canonical_id=cid)
-    assert len(events) == 1
-    ev = events[0]
-    assert ev["resolution"] == "remote_error"
-    assert ev["hit"] is True  # served from local
-
-
-def test_audit_hook_no_remote_records_local(local_store: LocalRecipeStore) -> None:
-    kb = RecipeKB(local=local_store, remote=None)
-    cid = _cid()
-    events: list[dict[str, Any]] = []
-    kb.audit_hook = lambda e: events.append(e)
-    kb.get_recipe(canonical_id=cid)
-    assert len(events) == 1
-    assert events[0]["remote"] == "none"
-    assert events[0]["resolution"] == "local"
-    assert events[0]["hit"] is False
-
-
-def test_audit_hook_never_raises_into_caller(local_store: LocalRecipeStore) -> None:
-    cid = _cid(model="never-seen")
-
-    def _boom(_e: dict[str, Any]) -> None:
-        raise RuntimeError("audit sink down")
-
-    kb = RecipeKB(local=local_store, remote=GbrainRemoteRecipeClient(search_rows=[]))
-    kb.audit_hook = _boom
-    # Must not raise despite the failing hook.
-    assert kb.get_recipe(canonical_id=cid) is None
-
-
-def test_read_audit_event_is_tagged_as_a_read(local_store: LocalRecipeStore) -> None:
-    """Reads carry ``op="read"`` so a consumer can tell them from writes."""
-    kb = RecipeKB(local=local_store, remote=None)
-    events: list[dict[str, Any]] = []
-    kb.audit_hook = events.append
-    kb.get_recipe(canonical_id=_cid())
-    assert events[0]["op"] == "read"
-
-
-def test_put_recipe_emits_write_audit_event(local_store: LocalRecipeStore) -> None:
-    """A write is audited with its identity, resulting version, and deltas."""
-    cid = _cid()
-    kb = RecipeKB(local=local_store, remote=None)
-    events: list[dict[str, Any]] = []
-    kb.audit_hook = events.append
-    kb.put_recipe(
+    result = kb.put_recipe(
         canonical_id=cid,
         model="m",
         hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        lessons=[{"statement": "raise tp to 8", "measured_impact": "+12%"}],
-        best_config={"extra_server_args": "--tp 8"},
-        best_throughput=1234.5,
-        provenance={"generator": "coordinator", "details": {"phase": "close_finalize"}},
+        best_throughput=10.0,
     )
-    assert len(events) == 1
-    ev = events[0]
-    assert ev["op"] == "write"
-    assert ev["method"] == "put_recipe"
-    # The local store is authoritative for writes; the remote is read-side only.
-    assert ev["resolution"] == "local_write"
-    assert ev["generator"] == "coordinator"
-    assert ev["phase"] == "close_finalize"
-    assert ev["identity"]["framework_name"] == "sglang"
-    assert ev["result"]["version"] == 1
-    assert ev["result"]["created"] is True
-    assert ev["result"]["best_throughput"] == 1234.5
-    assert ev["result"]["best_config_nonempty"] is True
-    assert ev["counts"]["lessons"] == 1
-    assert ev["delta"]["lessons"] == 1
+    assert result["created"] is True
+    assert kb.get_recipe(canonical_id=cid)["best_throughput"] == 10.0
+    assert kb.get_authoritative_recipe(canonical_id=cid)["canonical_id"] == cid
+    assert kb.search(label_match={"model": "m"})[0]["canonical_id"] == cid
 
 
-def test_write_audit_delta_is_zero_for_a_round_trip(local_store: LocalRecipeStore) -> None:
-    """A read-modify-write that adds nothing reports a zero delta.
-
-    This is what the T0 anchor does every session: it restamps identity and
-    writes the existing lists straight back. Absolute counts would look
-    identical to a real amend; the delta is what tells them apart.
-    """
+def test_attempt_api_delegates_locally(kb: RecipeKB) -> None:
     cid = _cid()
-    kb = RecipeKB(local=local_store, remote=None)
-    kb.put_recipe(
-        canonical_id=cid,
-        lessons=[{"statement": "raise tp to 8", "measured_impact": "+12%"}],
-    )
-    live = kb.local.get_recipe(canonical_id=cid) or {}
+    kb.append_attempt(canonical_id=cid, session_id="s1", outcome="kept")
+    kb.append_attempt(canonical_id=cid, session_id="s2", outcome="reverted")
+    assert len(kb.list_attempts(canonical_id=cid)) == 2
+    assert [
+        row["outcome"]
+        for row in kb.list_attempts(canonical_id=cid, session_id="s2")
+    ] == ["reverted"]
 
-    events: list[dict[str, Any]] = []
+
+def test_prefer_reranks_local_search_without_dropping(kb: RecipeKB) -> None:
+    first = _cid()
+    second = first.replace(":m:", ":m2:")
+    kb.put_recipe(canonical_id=first, model="m", extras={"tp": 4})
+    kb.put_recipe(canonical_id=second, model="m2", extras={"tp": 8})
+    rows = kb.search(prefer={"tp": 8})
+    assert [row["canonical_id"] for row in rows] == [second, first]
+
+
+def test_audit_is_local_and_best_effort(kb: RecipeKB) -> None:
+    events: list[dict] = []
     kb.audit_hook = events.append
     kb.put_recipe(
-        canonical_id=cid,
-        lessons=list(live.get("lessons") or []),
-        provenance={"generator": "t0_anchor", "details": {"sid": "s1"}},
+        canonical_id=_cid(),
+        lessons=[{"statement": "x", "measured_impact": "1%"}],
+        provenance={
+            "generator": "coordinator",
+            "details": {"phase": "close_finalize"},
+        },
     )
-    ev = events[0]
-    assert ev["generator"] == "t0_anchor"
-    assert ev["counts"]["lessons"] == 1
-    assert ev["delta"]["lessons"] == 0
-    assert not any(ev["delta"].values())
+    kb.get_recipe(canonical_id=_cid())
+    assert events[0]["resolution"] == "local_write"
+    assert events[0]["delta"]["lessons"] == 1
+    assert events[1]["resolution"] == "local"
+    assert all(event["remote"] == "none" for event in events)
 
-
-def test_put_recipe_never_raises_into_caller_on_audit_failure(
-    local_store: LocalRecipeStore,
-) -> None:
-    """A failing audit sink must not break the write it is observing."""
-
-    def _boom(_e: dict[str, Any]) -> None:
-        raise RuntimeError("audit sink down")
-
-    cid = _cid()
-    kb = RecipeKB(local=local_store, remote=None)
-    kb.audit_hook = _boom
-    result = kb.put_recipe(canonical_id=cid, best_throughput=1000.0)
-    assert result["version"] == 1
-    # The row still landed on disk.
-    assert kb.local.get_recipe(canonical_id=cid) is not None
-
-
-def test_put_recipe_without_audit_hook_is_fine(local_store: LocalRecipeStore) -> None:
-    """No hook wired (the default) means no audit and no error."""
-    kb = RecipeKB(local=local_store, remote=None)
-    assert kb.put_recipe(canonical_id=_cid(), best_throughput=1.0)["created"] is True
-
-
-def test_close_releases_remote_transport(local_store: LocalRecipeStore) -> None:
-    """``RecipeKB.close`` must call ``remote.close``."""
-    remote = GbrainRemoteRecipeClient()
-    kb = RecipeKB(local=local_store, remote=remote)
-    kb.close()
-    assert remote.closed is True
-
-
-def test_close_with_no_remote_is_noop(local_store: LocalRecipeStore) -> None:
-    kb = RecipeKB(local=local_store, remote=None)
-    kb.close()
-
-
-def test_close_swallows_remote_close_error(local_store: LocalRecipeStore) -> None:
-    remote = GbrainRemoteRecipeClient()
-
-    def _boom() -> None:
-        raise RuntimeError("close failed")
-
-    remote.close = _boom  # type: ignore[method-assign]
-    kb = RecipeKB(local=local_store, remote=remote)
-    kb.close()
+    kb.audit_hook = lambda _event: (_ for _ in ()).throw(RuntimeError("down"))
+    assert kb.get_recipe(canonical_id=_cid()) is not None
