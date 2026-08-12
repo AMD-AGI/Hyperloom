@@ -424,6 +424,7 @@ def test_read_failure_summary_and_final_summary_output(tmp_path: Path, capsys) -
 
 
 def test_resolve_reference_recipe_branches_and_final_summary(tmp_path: Path, monkeypatch, capsys) -> None:
+    import pytest
     from hyperloom.inference_optimizer import reference_script
 
     assert cb._resolve_reference_recipe(_args(reference_script="")) == ("", {}, "", "")
@@ -432,9 +433,9 @@ def test_resolve_reference_recipe_branches_and_final_summary(tmp_path: Path, mon
         reference_script,
         "parse_reference_script",
         lambda source, framework: SimpleNamespace(
-            server_args="--tp 8" if source == "usable.sh" else "",
-            envs={"A": "1"} if source == "usable.sh" else {},
-            model="kimi" if source == "usable.sh" else "",
+            server_args="--tp 8",
+            envs={"A": "1"},
+            model="kimi",
         ),
     )
     assert cb._resolve_reference_recipe(_args(reference_script="usable.sh")) == (
@@ -444,28 +445,15 @@ def test_resolve_reference_recipe_branches_and_final_summary(tmp_path: Path, mon
         "usable.sh",
     )
 
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    assert cb._resolve_reference_recipe(_args(reference_script="empty.sh")) == ("", {}, "", "")
-
-    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+    # Unreadable path raises SystemExit(2) instead of falling back to discovery.
     monkeypatch.setattr(
         reference_script,
-        "discover_reference_script",
-        lambda *_a, **_k: ("auto.sh", "exact"),
+        "parse_reference_script",
+        lambda source, framework: (_ for _ in ()).throw(OSError("not found")),
     )
-    assert cb._resolve_reference_recipe(_args(reference_script="empty.sh")) == (
-        "",
-        {},
-        "",
-        "auto.sh",
-    )
-
-    monkeypatch.setattr(
-        reference_script,
-        "discover_reference_script",
-        lambda *_a, **_k: ("fuzzy.sh", "fuzzy"),
-    )
-    assert cb._resolve_reference_recipe(_args(reference_script="empty.sh")) == ("", {}, "", "")
+    with pytest.raises(SystemExit) as exc_info:
+        cb._resolve_reference_recipe(_args(reference_script="empty.sh"))
+    assert exc_info.value.code == 2
 
     cb._print_final_summary(
         SharedState(session_id="s2", model_name="m2", baseline_tput=0.0),
@@ -544,6 +532,7 @@ def test_kernel_opt_summary_line_prints_totals(tmp_path: Path, monkeypatch, caps
 
 
 def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
+    import pytest
     from hyperloom.inference_optimizer import reference_script
 
     args = _args(model="/models/kimi", reference_script="")
@@ -553,9 +542,9 @@ def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
         reference_script,
         "parse_reference_script",
         lambda source, framework: SimpleNamespace(
-            server_args="--tp 8" if source == "usable.sh" else "",
-            envs={"A": "1"} if source == "usable.sh" else {},
-            model="kimi" if source == "usable.sh" else "",
+            server_args="--tp 8",
+            envs={"A": "1"},
+            model="kimi",
         ),
     )
     assert cb._resolve_reference_recipe(_args(reference_script="usable.sh")) == (
@@ -565,28 +554,15 @@ def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
         "usable.sh",
     )
 
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    assert cb._resolve_reference_recipe(_args(reference_script="empty.sh")) == ("", {}, "", "")
-
-    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+    # Unreadable path raises SystemExit(2).
     monkeypatch.setattr(
         reference_script,
-        "discover_reference_script",
-        lambda *_a, **_k: ("auto.sh", "exact"),
+        "parse_reference_script",
+        lambda source, framework: (_ for _ in ()).throw(OSError("not found")),
     )
-    assert cb._resolve_reference_recipe(_args(reference_script="empty.sh")) == (
-        "",
-        {},
-        "",
-        "auto.sh",
-    )
-
-    monkeypatch.setattr(
-        reference_script,
-        "discover_reference_script",
-        lambda *_a, **_k: ("fuzzy.sh", "fuzzy"),
-    )
-    assert cb._resolve_reference_recipe(_args(reference_script="empty.sh")) == ("", {}, "", "")
+    with pytest.raises(SystemExit) as exc_info:
+        cb._resolve_reference_recipe(_args(reference_script="empty.sh"))
+    assert exc_info.value.code == 2
 
 
 # ---------------------------------------------------------------------------

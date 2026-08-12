@@ -932,6 +932,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_inject_warm_recipe_history_into_ledger": "phase_prelude",
         "_filter_warm_patches_with_kg": "phase_prelude",
         "_maybe_enqueue_warm_replay": "phase_prelude",
+        "_maybe_apply_warm_kernel_kb": "phase_prelude",
         "_promote_warm_replay": "phase_prelude",
         "_maybe_enqueue_prelude_initial_analysis_after_baseline": "phase_prelude",
         "_enqueue_internal_analysis_task": "phase_prelude",

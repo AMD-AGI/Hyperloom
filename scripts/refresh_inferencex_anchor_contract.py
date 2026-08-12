@@ -8,7 +8,9 @@ Hyperloom patches InferenceX by matching exact upstream text, so bumping
 ``INFERENCEX_REF`` -- or editing an anchor -- can silently take a patch offline.
 ``test_inferencex_anchor_contract.py`` fails whenever either happens, and this is
 the tool it points at: it fetches the pinned files, confirms every anchor still
-matches exactly one site, and records the result.
+matches exactly one site, and records the result. It also records the file the
+eval probe and the request bounds are appended to -- that one needs no anchor,
+but it does have to exist.
 
 It refuses to record a broken contract. If an anchor no longer matches, re-anchor
 it in ``_inferencex_patcher.py`` first, then run this again.
@@ -65,6 +67,7 @@ def main() -> int:
     for rel_path, spec in sorted(record["files"].items()):
         for name, hits in sorted(spec["anchors"].items()):
             print(f"  {name:<20} {hits} site(s)  {rel_path}")
+    print(f"  {'probe_target':<20} present   {record['probe_target']['path']}")
     print(f"wrote {CONTRACT_PATH}")
     return 0
 

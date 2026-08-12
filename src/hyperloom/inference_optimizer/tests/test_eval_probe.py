@@ -1,12 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the lm-eval generation-pathology probe and generation bounds.
+"""Tests for the lm-eval generation-pathology probe and the per-request bounds.
 
-Both ship as one source string in ``_inferencex_patcher`` (injected into the
-lm-eval subprocess's ``sitecustomize.py``), so no linter or import ever
-type-checks them. These tests exec that string against stub lm-eval modules —
-hermetic, so they pin the contract whether or not lm-eval is installed.
+Both ship as one source string in ``_inferencex_patcher`` (it is appended to
+lm-eval's ``lm_eval_sitecustomize.py``), so no linter or import ever type-checks
+it. These tests exec it against stub lm-eval modules — hermetic, so they pin the
+contract whether or not lm-eval is installed.
+
+The two answer different failures and must not be conflated. The probe handles a
+model that never terminates at all, and pays for it by voiding the whole eval
+(~0 score). The bounds handle a healthy model whose hardest samples do not
+converge: those are truncated one at a time so the rest of the measurement
+survives — which is why the probe's ratio threshold cannot be lowered to cover
+them.
 
 What the probe must guarantee:
 
@@ -15,21 +22,17 @@ What the probe must guarantee:
   generate requests are answered with an empty string so lm-eval still writes a
   ``results*.json`` scoring ~0 instead of running for hours;
 * loglikelihood requests are never short-circuited (they have no EOS to emit);
-* a bug in any of the above degrades to "eval runs as before", never a crash.
+* a malformed response degrades to "eval runs as before", never a crash.
 
-The bounds cover the case the probe deliberately cannot: a healthy model whose
-few hardest samples do not converge. Short-circuiting there would throw away a
-real measurement, so those samples are truncated one at a time instead. What the
-bounds must guarantee:
+What the bounds must guarantee:
 
-* every generate request carries a ceiling, with no environment set up at all —
-  the gate is differential, so a bound only some arms get is a bias, not a bound;
-* the ceiling only ever lowers what upstream asked for, and never touches a
-  loglikelihood request;
-* caller-supplied terminators outrank upstream's inside the four ``stop`` slots
-  the API allows;
-* the run publishes how often the ceiling was actually hit, since a ceiling
-  nobody measures cannot be shown to be the right one.
+* every generate request carries a ceiling, with no cooperation from the caller
+  — the accuracy gate is differential, so a ceiling only one arm has is worse
+  than none;
+* an existing lower ceiling is never raised;
+* loglikelihood payloads are left alone;
+* caller-supplied stop strings outrank upstream's, which sends at most four;
+* the run reports how often the ceiling was hit, so it can be falsified.
 """
 
 from __future__ import annotations
@@ -136,7 +139,13 @@ def _install_stub_lm_eval(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any]:
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **env: str | None):
-    """Install the probe with an explicit env; ``None`` unsets a variable."""
+    """Install the injected block with an explicit env; ``None`` unsets a variable.
+
+    Returns a namespace whose ``flush()`` runs only the exit hooks this install
+    registered. Interpreter-wide ``atexit`` is left alone on purpose: the hooks
+    resolve ``RESULT_DIR`` when they fire, so a real registration would have
+    every past test's hook write into the current test's directory.
+    """
     env.setdefault("RESULT_DIR", str(tmp_path))
     monkeypatch.delenv("HYPERLOOM_EVAL_PROBE", raising=False)
     for key, val in env.items():
@@ -145,28 +154,26 @@ def _install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **env: str | None)
         else:
             monkeypatch.setenv(key, val)
     api_models, openai_completions = _install_stub_lm_eval(monkeypatch)
+    exit_hooks: list[Any] = []
+    monkeypatch.setattr(atexit, "register", exit_hooks.append)
     exec(compile(_EVAL_PROBE_PY, "<probe>", "exec"), {"__name__": "sitecustomize"})
     return types.SimpleNamespace(
         api_models=api_models,
         openai_completions=openai_completions,
         cls=openai_completions.LocalChatCompletion,
         result_dir=tmp_path,
+        flush=lambda: [hook() for hook in exit_hooks],
     )
 
 
 @pytest.fixture
 def probe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Install the probe over stub lm-eval modules with a low trip threshold."""
-    monkeypatch.setenv("RESULT_DIR", str(tmp_path))
-    monkeypatch.setenv("HYPERLOOM_EVAL_PROBE_MIN_SAMPLES", "8")
-    monkeypatch.setenv("HYPERLOOM_EVAL_PROBE_LENGTH_RATIO", "0.75")
-    monkeypatch.delenv("HYPERLOOM_EVAL_PROBE", raising=False)
-    api_models, openai_completions = _install_stub_lm_eval(monkeypatch)
-    exec(compile(_EVAL_PROBE_PY, "<probe>", "exec"), {"__name__": "sitecustomize"})
-    return types.SimpleNamespace(
-        api_models=api_models,
-        openai_completions=openai_completions,
-        result_dir=tmp_path,
+    return _install(
+        monkeypatch,
+        tmp_path,
+        HYPERLOOM_EVAL_PROBE_MIN_SAMPLES="8",
+        HYPERLOOM_EVAL_PROBE_LENGTH_RATIO="0.75",
     )
 
 
@@ -272,6 +279,9 @@ def test_sidecar_is_written_once(probe):
 
 
 def test_probe_can_be_disabled(monkeypatch, tmp_path):
+    """Only the probe's own hooks come off. The bounds shim shares this block and
+    installs regardless, so ``parse_generations`` stays wrapped — it just has to
+    keep chaining through to upstream's."""
     monkeypatch.setenv("RESULT_DIR", str(tmp_path))
     monkeypatch.setenv("HYPERLOOM_EVAL_PROBE", "0")
     api_models, openai_completions = _install_stub_lm_eval(monkeypatch)
@@ -283,12 +293,16 @@ def test_probe_can_be_disabled(monkeypatch, tmp_path):
     assert openai_completions.LocalChatCompletion.parse_generations(outputs={}) == ["upstream"]
 
 
-def test_probe_never_raises_when_lm_eval_is_absent(monkeypatch):
-    """sitecustomize runs at interpreter startup; raising there would break
-    every python3 the benchmark shells out to, not just lm-eval."""
+def test_probe_surfaces_import_failure_when_lm_eval_absent(monkeypatch):
+    """A missing lm-eval must raise, not be swallowed: CPython's
+    ``site.execsitecustomize()`` prints it to stderr and keeps the interpreter
+    alive, so the failure is visible in the benchmark log."""
+    import pytest
+
     for name in ("lm_eval", "lm_eval.models", "lm_eval.models.api_models"):
         monkeypatch.setitem(sys.modules, name, None)
-    exec(compile(_EVAL_PROBE_PY, "<probe>", "exec"), {"__name__": "sitecustomize"})
+    with pytest.raises(ImportError):
+        exec(compile(_EVAL_PROBE_PY, "<probe>", "exec"), {"__name__": "sitecustomize"})
 
 
 def test_probe_survives_malformed_responses(probe):
@@ -462,141 +476,126 @@ def test_breakdown_attempt_extras_default_to_empty(tmp_path):
     assert section["attempts_history"][0]["extras"] == {}
 
 
-# --- per-request generation bounds ------------------------------------------
-# Same injected block, different job. The probe answers a model that NEVER
-# terminates by short-circuiting the whole eval to a ~0 score. The bounds handle
-# the healthy model whose few hardest samples do not converge: those have to be
-# truncated individually so the rest of the measurement survives.
+# ---------------------------------------------------------------------------
+# Per-request bounds
+# ---------------------------------------------------------------------------
+
+BOUNDS_FILENAME = "hyperloom_eval_bounds.json"
 
 
 @pytest.fixture
 def bounds(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Install the block with the probe off, and capture its atexit hook.
-
-    The probe shares this block and the same ``parse_generations`` seam; leaving
-    it on would let a tripped probe replace the very payloads under assertion.
-    """
-    hooks: list = []
-    monkeypatch.setattr(atexit, "register", hooks.append)
-    installed = _install(monkeypatch, tmp_path, HYPERLOOM_EVAL_PROBE="0")
-    installed.at_exit = hooks
-    return installed
-
-
-def _payload(bounds, max_tokens: int = 12288, until=None, eos=None) -> dict[str, Any]:
-    """Build one generate payload through the (possibly bounded) upstream seam."""
-    return bounds.cls()._create_payload(
-        [{"role": "user", "content": "q"}],
-        generate=True,
-        gen_kwargs={"max_tokens": max_tokens, "until": list(until or [])},
-        eos=eos,
+    """Install the block with the probe disabled, isolating the bounds shim."""
+    return _install(
+        monkeypatch,
+        tmp_path,
+        HYPERLOOM_EVAL_PROBE="0",
+        HYPERLOOM_EVAL_MAX_TOKENS=None,
+        HYPERLOOM_EVAL_STOP_STRINGS=None,
     )
 
 
-def test_bounds_clamp_max_tokens_with_no_env_set(bounds, monkeypatch):
-    """The ceiling has to hold on an empty environment. The gate compares two
-    arms, so a bound that only applies where someone remembered to export it
-    would bias the comparison rather than bound it."""
-    assert _payload(bounds)["max_tokens"] == 4096
+def _payload(env, generate=True, **kwargs):
+    """Build one payload through the patched class, as lm-eval would."""
+    return env.cls()._create_payload([{"role": "user", "content": "hi"}], generate=generate, **kwargs)
+
+
+def test_bounds_clamp_max_tokens_with_no_env_set(bounds):
+    """The ceiling cannot depend on the caller remembering to set it: InferenceX
+    passes ``max_tokens=min(16384, ctx-4096)`` and both gate arms must share
+    whatever bound applies."""
+    assert _payload(bounds, gen_kwargs={"max_tokens": 16384})["max_tokens"] == 4096
 
 
 def test_bounds_env_overrides_the_default(monkeypatch, tmp_path):
-    installed = _install(monkeypatch, tmp_path, HYPERLOOM_EVAL_PROBE="0", HYPERLOOM_EVAL_MAX_TOKENS="2048")
+    env = _install(monkeypatch, tmp_path, HYPERLOOM_EVAL_PROBE="0", HYPERLOOM_EVAL_MAX_TOKENS="512")
 
-    assert _payload(installed)["max_tokens"] == 2048
+    assert _payload(env, gen_kwargs={"max_tokens": 16384})["max_tokens"] == 512
 
 
 def test_bounds_never_raise_an_existing_lower_ceiling(bounds):
-    """Clamping is one-directional: a task that asked for less keeps it."""
-    assert _payload(bounds, max_tokens=512)["max_tokens"] == 512
+    """Clamping is one-directional. A task that asked for less knows something we
+    do not, and granting it more would change what is being measured."""
+    assert _payload(bounds, gen_kwargs={"max_tokens": 64})["max_tokens"] == 64
 
 
 def test_bounds_zero_disables_the_clamp(monkeypatch, tmp_path):
-    """The escape hatch for measuring the unbounded tail on purpose."""
-    installed = _install(monkeypatch, tmp_path, HYPERLOOM_EVAL_PROBE="0", HYPERLOOM_EVAL_MAX_TOKENS="0")
+    """An operator reproducing an upstream number needs a way out."""
+    env = _install(monkeypatch, tmp_path, HYPERLOOM_EVAL_PROBE="0", HYPERLOOM_EVAL_MAX_TOKENS="0")
 
-    assert _payload(installed)["max_tokens"] == 12288
+    assert _payload(env, gen_kwargs={"max_tokens": 16384})["max_tokens"] == 16384
 
 
-@pytest.mark.parametrize("bad", ["", "   ", "lots", "4096.5", "-1"])
-def test_bounds_unparseable_env_falls_back_to_the_default(monkeypatch, tmp_path, bad):
-    """Falls back to the default rather than to "no bound": a typo'd override
-    must not silently restore the tail the ceiling was added to remove."""
-    installed = _install(monkeypatch, tmp_path, HYPERLOOM_EVAL_PROBE="0", HYPERLOOM_EVAL_MAX_TOKENS=bad)
+@pytest.mark.parametrize("raw", ["", "   ", "lots", "4096.5", "-1"])
+def test_bounds_fall_back_to_the_default_when_the_env_is_unusable(monkeypatch, tmp_path, raw):
+    """A typo must not silently mean "unbounded" — that is the failure this
+    exists to prevent. Only an explicit 0 disables it."""
+    env = _install(monkeypatch, tmp_path, HYPERLOOM_EVAL_PROBE="0", HYPERLOOM_EVAL_MAX_TOKENS=raw)
 
-    assert _payload(installed)["max_tokens"] == 4096
+    assert _payload(env, gen_kwargs={"max_tokens": 16384})["max_tokens"] == 4096
 
 
 def test_bounds_leave_loglikelihood_payloads_untouched(bounds):
-    """Scoring requests share the seam and carry max_tokens=1 by design."""
-    payload = bounds.cls()._create_payload([{"role": "user", "content": "q"}], generate=False)
+    """Scoring requests share this seam and generate nothing."""
+    payload = _payload(bounds, generate=False)
 
     assert payload["max_tokens"] == 1
     assert "stop" not in payload
 
 
 def test_bounds_prepend_stop_strings_ahead_of_upstreams(monkeypatch, tmp_path):
-    """Upstream keeps only stop[:4], so ordering decides which terminators
-    survive. The model-correct ones cannot be the ones that get dropped."""
-    installed = _install(
+    """Upstream keeps only the first four, so the caller's terminators — the ones
+    derived from the model actually under test — have to go first."""
+    env = _install(
         monkeypatch,
         tmp_path,
         HYPERLOOM_EVAL_PROBE="0",
         HYPERLOOM_EVAL_STOP_STRINGS="<|im_end|>\x1f<|endoftext|>",
     )
 
-    payload = _payload(installed, until=["Question:", "</s>", "\n\n", "###"])
-    assert payload["stop"][:2] == ["<|im_end|>", "<|endoftext|>"]
-    assert len(payload["stop"]) == 4
+    payload = _payload(env, gen_kwargs={"until": ["Q:", "\n\n", "Question:"]}, eos="</s>")
+
+    assert payload["stop"] == ["<|im_end|>", "<|endoftext|>", "Q:", "\n\n"]
 
 
 def test_bounds_do_not_duplicate_a_stop_string_upstream_already_sent(monkeypatch, tmp_path):
-    installed = _install(
-        monkeypatch, tmp_path, HYPERLOOM_EVAL_PROBE="0", HYPERLOOM_EVAL_STOP_STRINGS="<|im_end|>"
-    )
+    """Duplicates would burn one of the four slots for nothing."""
+    env = _install(monkeypatch, tmp_path, HYPERLOOM_EVAL_PROBE="0", HYPERLOOM_EVAL_STOP_STRINGS="Q:")
 
-    assert _payload(installed, until=["Question:", "<|im_end|>"])["stop"] == ["<|im_end|>", "Question:"]
-
-
-def test_bounds_survive_a_payload_they_cannot_read(bounds):
-    """Bounding must never break the eval it is protecting."""
-    payload = bounds.cls()._create_payload(
-        [{"role": "user", "content": "q"}],
-        generate=True,
-        gen_kwargs={"max_tokens": "not-a-number", "until": []},
-    )
-
-    assert payload["max_tokens"] == "not-a-number"
+    assert _payload(env, gen_kwargs={"until": ["Q:", "\n\n"]})["stop"] == ["Q:", "\n\n"]
 
 
 def test_bounds_summary_reports_how_often_the_ceiling_was_hit(bounds):
-    """A ceiling nobody measures is unfalsifiable: too low quietly depresses
-    both arms, too high leaves the tail in place. Neither is visible without the
-    truncation count, so the run has to publish it."""
-    _feed(bounds, "stop", 2)
-    _feed(bounds, "length", 1)
+    """Truncation is only defensible while it is rare, so the run has to say how
+    rare it was: too low a ceiling depresses both arms' scores and nothing else
+    would show it."""
+    cls = bounds.cls
+    cls.parse_generations(outputs=[{"choices": [{"finish_reason": "length"}, {"finish_reason": "stop"}]}])
+    cls.parse_generations(outputs=[{"choices": [{"finish_reason": "stop"}]}])
+    _payload(bounds, gen_kwargs={"max_tokens": 16384})
+    bounds.flush()
 
-    assert len(bounds.at_exit) == 1
-    bounds.at_exit[0]()
-
-    # Never results*.json: that glob is how InferenceX finds the accuracy score.
-    record = json.loads((bounds.result_dir / "hyperloom_eval_bounds.json").read_text(encoding="utf-8"))
+    record = json.loads((bounds.result_dir / BOUNDS_FILENAME).read_text(encoding="utf-8"))
     assert record["generations"] == 3
     assert record["truncated"] == 1
     assert record["max_tokens"] == 4096
 
 
 def test_bounds_summary_is_silent_when_nothing_was_generated(bounds):
-    """sitecustomize loads in every python3 the benchmark shells out to."""
-    bounds.at_exit[0]()
+    """A run that never reached lm-eval must not leave a misleading sidecar."""
+    bounds.flush()
 
-    assert not (bounds.result_dir / "hyperloom_eval_bounds.json").exists()
+    assert not (bounds.result_dir / BOUNDS_FILENAME).exists()
 
 
-def test_bounds_keep_the_probe_wrapper_in_the_chain(monkeypatch, tmp_path):
-    """Both features wrap parse_generations. Whichever installs second must call
-    through, or enabling one silently disables the other."""
-    installed = _install(monkeypatch, tmp_path, HYPERLOOM_EVAL_PROBE="1", HYPERLOOM_EVAL_PROBE_MIN_SAMPLES="8")
+def test_bounds_counting_survives_a_response_it_cannot_read(bounds):
+    """Measuring the eval must never break it."""
+    for junk in (None, [], {"choices": "not-a-list"}, {"choices": [None]}):
+        assert bounds.cls.parse_generations(outputs=junk) == ["upstream"]
 
-    out = installed.openai_completions.LocalChatCompletion.parse_generations(outputs=_response("stop"))
-    assert out == ["upstream"]
+
+def test_bounds_and_probe_coexist(probe):
+    """Both wrap ``parse_generations``; the chain has to reach upstream's, and
+    the probe still has to trip."""
+    assert probe.cls.parse_generations(outputs=[{"choices": [{"finish_reason": "stop"}]}]) == ["upstream"]
+    assert _payload(probe, gen_kwargs={"max_tokens": 16384})["max_tokens"] == 4096

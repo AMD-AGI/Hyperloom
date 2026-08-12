@@ -2359,8 +2359,10 @@ class EnablementBreakdown(TypedDict, total=False):
         observed_task: Eval task name observed at the trigger.
         observed_metric: Eval metric observed at the trigger.
         probe_config_path: Materialized config re-run to reproduce the contract.
-        accepted_config_path: Effective config from the KEEP'd candidate bench
-            used as the revalidation baseline config.
+        accepted_config_path: Base YAML from the KEEP'd candidate bench, used as
+            the revalidation baseline config.
+        accepted_config: Server args / envs that bench also launched with, which
+            the YAML does not carry; the revalidation replays them on top.
         eval_contract_fingerprint: Fingerprint of the captured eval contract.
     """
 
@@ -2400,6 +2402,7 @@ class EnablementBreakdown(TypedDict, total=False):
     observed_metric: str
     probe_config_path: str
     accepted_config_path: str
+    accepted_config: dict[str, Any]
     eval_contract_fingerprint: str
 
 

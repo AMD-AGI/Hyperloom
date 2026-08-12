@@ -11,7 +11,7 @@ import math
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Collection, Mapping
 
 from .models import (
     MAX_FILE_BYTES,
@@ -419,7 +419,7 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
     return {"items": [record]}
 
 
-def _match_rewrite_attempt(
+def match_rewrite_attempt(
     integrate: Mapping[str, Any],
     attempts: Mapping[str, Any],
 ) -> Mapping[str, Any]:
@@ -472,7 +472,7 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
         if isinstance(entry, Mapping) and str(entry.get("action") or "").lower() == "integrate"
     ]
     for entry in integrated:
-        raw = _match_rewrite_attempt(entry, attempts)
+        raw = match_rewrite_attempt(entry, attempts)
         kernel_name = str(
             raw.get("kernel_name")
             or raw.get("current_kernel_id")
@@ -589,15 +589,23 @@ def merge_staged_sections(
     value: dict[str, Any],
     sections: Any,
     files: "_Files",
+    *,
+    only: Collection[str] | None = None,
 ) -> list[str]:
     """Overlay agent-staged sections onto the values scraped from the stack.
 
     An agent that stages a section owns the keys it wrote; keys it left alone
     keep whatever the stack scrape produced. That is what lets a section-aware
     agent and a not-yet-migrated one publish into the same document.
+
+    ``only`` restricts the overlay to named sections. A document that carries
+    one agent's columns must not adopt another's files, which would land as
+    artifacts nothing in the knowledge references.
     """
     merged: list[str] = []
     for name in sections.sections():
+        if only is not None and name not in only:
+            continue
         try:
             staged = sections.staged(name)
             if staged is None or not staged.knowledge:
@@ -703,6 +711,131 @@ def build_remote_knowledge(
     bundle = KnowledgeBundle(knowledge=knowledge, artifacts=files.artifacts)
     bundle.validate()
     return bundle
+
+
+_KERNEL_SECTION = "kernel"
+# Producer prefix keeping this record out of KernelForge's kernel: slugs.
+_KERNEL_ID_PREFIX = "hyperloom-"
+# Champion metric for the kernel-agent record: a percentage, not a throughput.
+KERNEL_AGENT_METRIC = "kernel_gain_pct"
+
+
+def kernel_agent_canonical_id(recipe_canonical_id: str) -> str:
+    """Map an ``inference:`` recipe id to the sibling ``kernel:`` identity.
+
+    Hyperloom's kernel-agent KB is an INDEPENDENT KB Store record under the
+    ``kernel:`` scheme. It is deliberately not part of the recipe document, so
+    it is never gated by the recipe's end-to-end throughput champion nor wiped
+    when a higher-throughput run with empty kernel columns wins the recipe.
+
+    The slug is prefixed with the producer. KernelForge publishes its own
+    ``kernel:`` records, and this record is graded on a different metric and
+    written with ``mode="replace"`` — sharing a slug would let either side
+    overwrite the other's document, or make the champion unreadable because the
+    two metrics are not comparable.
+    """
+    cid = str(recipe_canonical_id or "").strip()
+    if not cid:
+        # An unknown workload has no kernel identity either; returning "kernel:"
+        # would publish this session under a junk shared id.
+        return ""
+    slug = cid[len("inference:") :] if cid.startswith("inference:") else cid
+    if slug.startswith("kernel:"):
+        slug = slug[len("kernel:") :]
+    if slug.startswith(_KERNEL_ID_PREFIX):
+        return "kernel:" + slug
+    return f"kernel:{_KERNEL_ID_PREFIX}{slug}"
+
+
+def _kernel_agent_score(value: Mapping[str, Any]) -> float:
+    """Best kernel end-to-end gain across accepted gemm/fusion/rewrite records.
+
+    Used as the kernel-agent KB's own keep-if-better metric so a kernel
+    optimization is stored whenever it beats what the kernel-agent KB already
+    holds — independent of recipe serving throughput. Only end-to-end gain
+    percentages are compared: a micro-benchmark speedup is a different unit and
+    would always outrank a real E2E gain.
+    """
+    best = 0.0
+    gemm = value.get("gemm") if isinstance(value, Mapping) else {}
+    optimizations = (gemm or {}).get("optimizations", []) if isinstance(gemm, Mapping) else []
+    for opt in optimizations:
+        if isinstance(opt, Mapping):
+            best = max(
+                best,
+                _number(opt.get("e2e_gain_pct")),
+                _number(opt.get("gain_pct")),
+            )
+    for col in ("fusion", "rewrite"):
+        node = value.get(col) if isinstance(value, Mapping) else {}
+        items = (node or {}).get("items", []) if isinstance(node, Mapping) else []
+        for it in items:
+            if isinstance(it, Mapping):
+                e2e = it.get("e2e") if isinstance(it.get("e2e"), Mapping) else {}
+                best = max(
+                    best,
+                    _number(it.get("e2e_gain_pct")),
+                    _number(e2e.get("gain_pct")),
+                )
+    return best
+
+
+def build_kernel_agent_knowledge(
+    state: Any,
+    files_dir: str | Path,
+    *,
+    sections: Any = None,
+) -> tuple[KnowledgeBundle, float]:
+    """Build the standalone kernel-agent KB document and its keep-if-better score.
+
+    The document holds only the kernel sub-columns (gemm/fusion/rewrite),
+    published under the ``kernel:`` identity. Columns the kernel backends staged
+    during the run win over the CLOSE-time scrape, so a run that recorded its
+    work as it happened publishes that record rather than one reconstructed at
+    the end. The score is the best kernel end-to-end gain across the columns.
+    """
+    root = Path(files_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    files = _Files(root)
+    # Merge against the section's own shape ({"kernel": {...}}) so the staged
+    # overlay is the one build_remote_knowledge uses, then publish it flat: this
+    # record's whole subject is the kernel agent.
+    nested = {
+        _KERNEL_SECTION: {
+            "gemm": build_kernel_gemm_value(state, files),
+            "fusion": build_kernel_fusion_value(state, files),
+            "rewrite": build_kernel_rewrite_value(state, files),
+        }
+    }
+    staged_sections = (
+        merge_staged_sections(nested, sections, files, only={_KERNEL_SECTION})
+        if sections is not None
+        else []
+    )
+    value = nested[_KERNEL_SECTION]
+    score = _kernel_agent_score(value)
+    knowledge = sanitize_shared_knowledge(
+        {
+            "knowledge_schema_version": 2,
+            # This record is graded on kernel gain, not serving throughput; the
+            # field is named for what it holds so a consumer cannot misread it.
+            KERNEL_AGENT_METRIC: score,
+            "value": value,
+            "provenance": {
+                "producer": "hyperloom-kernel-agent",
+                "phase": "CLOSE",
+                "session_id": str(
+                    getattr(state, "recipe_kb_session_id", "")
+                    or getattr(state, "session_id", "")
+                ),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "staged_sections": staged_sections,
+            },
+        }
+    )
+    bundle = KnowledgeBundle(knowledge=knowledge, artifacts=files.artifacts)
+    bundle.validate()
+    return bundle, score
 
 
 def convert_v1_recipe_to_knowledge(recipe: Mapping[str, Any]) -> dict[str, Any]:
@@ -821,10 +954,13 @@ __all__ = [
     "build_framework_value",
     "build_kernel_fusion_value",
     "build_kernel_gemm_value",
+    "build_kernel_agent_knowledge",
     "build_kernel_rewrite_value",
     "build_remote_knowledge",
     "convert_v1_recipe_to_knowledge",
     "envelope_to_v1_recipe",
     "has_new_keep",
+    "kernel_agent_canonical_id",
+    "match_rewrite_attempt",
     "merge_staged_sections",
 ]

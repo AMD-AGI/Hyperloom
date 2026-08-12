@@ -5,9 +5,14 @@
 
 Hyperloom does not fork InferenceX; it rewrites a handful of upstream lines at
 run time, each located by matching exact text. That makes a purely cosmetic
-upstream edit indistinguishable from "nothing to patch", which is how an
+upstream edit indistinguishable from "nothing to patch", which is how the
 eval-probe anchor once stayed broken across every checkout while the runs still
 looked healthy.
+
+The probe was since re-homed: it is appended to an upstream file instead of
+anchored to a line, so it has no anchor to rot. It still has a dependency worth
+pinning, though -- that file's path. Upstream moving it degrades the probe and
+the request bounds back to a warning, and the eval runs unbounded again.
 
 :func:`..._inferencex_patcher.verify_patch_anchors` catches that at launch, for
 the user who is already affected. These tests catch it one step earlier -- when
@@ -32,7 +37,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import subprocess
 from pathlib import Path
 
@@ -44,6 +48,7 @@ from hyperloom.inference_optimizer.cli.preflight import (
 )
 from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
     _ANCHOR_CONTRACT,
+    EVAL_PROBE_TARGET_PARTS,
     count_anchor_hits,
 )
 
@@ -52,13 +57,16 @@ REFRESH_CMD = "python scripts/refresh_inferencex_anchor_contract.py"
 _FETCH_TIMEOUT_SEC = 30
 
 
-def anchors_by_file() -> dict[str, list[tuple[str, str | re.Pattern[str]]]]:
+PROBE_TARGET_PATH = "/".join(EVAL_PROBE_TARGET_PARTS)
+
+
+def anchors_by_file() -> dict[str, list[tuple[str, str]]]:
     """Group the patch anchors by the upstream file they are matched against.
 
     Returns:
         Mapping of repo-relative path to its ``(anchor_name, anchor)`` pairs.
     """
-    grouped: dict[str, list[tuple[str, str | re.Pattern[str]]]] = {}
+    grouped: dict[str, list[tuple[str, str]]] = {}
     for name, rel_parts, _sentinel, anchor in _ANCHOR_CONTRACT:
         grouped.setdefault("/".join(rel_parts), []).append((name, anchor))
     return grouped
@@ -75,9 +83,10 @@ def anchors_fingerprint() -> str:
         A hex digest over every anchor's name, target path and pattern.
     """
     parts = [
-        f"{name}\x1f{'/'.join(rel_parts)}\x1f{anchor.pattern if isinstance(anchor, re.Pattern) else anchor}"
+        f"{name}\x1f{'/'.join(rel_parts)}\x1f{anchor}"
         for name, rel_parts, _sentinel, anchor in _ANCHOR_CONTRACT
     ]
+    parts.append(f"probe_target\x1f{PROBE_TARGET_PATH}")
     return hashlib.sha256("\x1e".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -156,11 +165,22 @@ def build_record(ref: str) -> dict:
             "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             "anchors": hits,
         }
+    probe_target = fetch_pinned_file(PROBE_TARGET_PATH, ref)
+    if probe_target is None:
+        raise RuntimeError(
+            f"cannot fetch {PROBE_TARGET_PATH} at {ref}. The probe and the request bounds are "
+            "appended to this file; if upstream moved it, re-home them in _inferencex_patcher.py "
+            "before recording the contract."
+        )
     return {
         "ref": ref,
         "anchors_fingerprint": anchors_fingerprint(),
         "refresh_with": REFRESH_CMD,
         "files": files,
+        "probe_target": {
+            "path": PROBE_TARGET_PATH,
+            "sha256": hashlib.sha256(probe_target.encode("utf-8")).hexdigest(),
+        },
     }
 
 
@@ -234,4 +254,28 @@ def test_pinned_upstream_still_matches_every_anchor(rel_path):
     )
     assert hashlib.sha256(text.encode("utf-8")).hexdigest() == record["files"][rel_path]["sha256"], (
         f"the anchors still match, but {rel_path} is not the file the contract recorded. Refresh it: {REFRESH_CMD}"
+    )
+
+
+def test_recorded_probe_target_is_the_path_the_patcher_appends_to():
+    """The probe has no anchor to rot, but it does need this file to exist: if
+    upstream moves it the patch degrades to a warning and the eval runs unbounded
+    again -- the exact failure the probe was written to stop."""
+    record = load_record()
+
+    assert record["probe_target"]["path"] == PROBE_TARGET_PATH, (
+        f"the probe target moved to {PROBE_TARGET_PATH}. Re-verify and refresh: {REFRESH_CMD}"
+    )
+
+
+def test_pinned_upstream_still_carries_the_probe_target():
+    """Networked counterpart: confirm the file is really there at the pin."""
+    record = load_record()
+    text = fetch_pinned_file(PROBE_TARGET_PATH, record["ref"])
+    if text is None:
+        pytest.skip(f"InferenceX@{record['ref'][:9]} unreachable (needs `gh` + repo access)")
+
+    assert hashlib.sha256(text.encode("utf-8")).hexdigest() == record["probe_target"]["sha256"], (
+        f"{PROBE_TARGET_PATH} changed upstream. The probe and the bounds are appended to it, so "
+        f"re-read it before refreshing: {REFRESH_CMD}"
     )

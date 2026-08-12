@@ -168,6 +168,7 @@ _SPECIALIST_SECRET_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "ANTHROPIC_CUSTOM_HEADERS",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "AWS_ACCESS_KEY_ID",
         "AWS_CONFIG_FILE",
         "AWS_PROFILE",

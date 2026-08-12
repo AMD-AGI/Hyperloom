@@ -153,14 +153,18 @@ def test_restaging_the_same_artifact_keeps_one_ref(tmp_path: Path) -> None:
     assert kb._sections.staged("kernel").files == [kb._sections.files_dir / first[0]]
 
 
-def test_an_unreadable_artifact_is_dropped_instead_of_raising(tmp_path: Path) -> None:
+def test_an_unreadable_artifact_yields_an_empty_slot_instead_of_raising(
+    tmp_path: Path,
+) -> None:
+    # Positional: callers fold these back by index, so a failure holds its slot
+    # rather than shifting every later artifact one place up.
     good = tmp_path / "good.diff"
     good.write_text("diff", encoding="utf-8")
     kb = _kb(tmp_path)
 
     refs = kb.write_rewrite({"items": []}, files=[tmp_path / "absent.diff", good])
 
-    assert refs == ["kernel/rewrite/good.diff"]
+    assert refs == ["", "kernel/rewrite/good.diff"]
 
 
 def test_a_prior_ref_resolves_to_its_downloaded_file(tmp_path: Path) -> None:
