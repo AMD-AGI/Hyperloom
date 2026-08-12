@@ -1089,42 +1089,23 @@ def _invalidate_aiter_jit_build(
 def _trusted_aiter_jit_build_dir(path: Path) -> bool:
     """Validate a strategy-persisted AITER JIT destination.
 
-    Accepts both deployment shapes the apply strategy can emit: a wheel install
-    (``<site-packages>/aiter/jit/build``) and the editable checkout
-    :data:`_EDITABLE_AITER_ROOT` that ``_detect_strategy`` pins.
-
-    Args:
-        path: The strategy-persisted ``jit/build`` directory to validate.
-
-    Returns:
-        ``True`` when ``path`` is exactly the ``jit/build`` directory of an
-        aiter package rooted at a known install or editable root.
+    Accepts both shapes apply can pin: a wheel install under site-packages and
+    the editable checkout :data:`_EDITABLE_AITER_ROOT`.
     """
-    # ``path`` comes from an untrusted manifest, so a symlink loop in it must
-    # read as "not trusted" rather than escape as an exception.
+    # A manifest path is untrusted: an unresolvable one reads as not trusted.
     try:
         resolved = path.resolve()
     except (OSError, RuntimeError):
         return False
-    roots: list[Path] = []
-    # The lexical path classifies the install: site-packages is commonly a
-    # symlink, and the resolved spelling no longer carries that marker.
-    installed_root = _installed_aiter_runtime_root(path.absolute())
-    if installed_root is not None:
-        roots.append(installed_root)
-    roots.append(_EDITABLE_AITER_ROOT)
-    for root in roots:
-        try:
-            expected = (root / "aiter" / "jit" / "build").resolve()
-        except (OSError, RuntimeError):
-            continue
-        if resolved != expected:
-            continue
-        return (
-            (root / "aiter" / "__init__.py").is_file()
-            and (root / "aiter" / "jit" / "__init__.py").is_file()
-        )
-    return False
+    # Classify on the lexical path: site-packages is commonly a symlink, and the
+    # resolved spelling no longer carries that marker.
+    root = _installed_aiter_runtime_root(path) or _EDITABLE_AITER_ROOT
+    if resolved != (root / "aiter" / "jit" / "build").resolve():
+        return False
+    return (
+        (root / "aiter" / "__init__.py").is_file()
+        and (root / "aiter" / "jit" / "__init__.py").is_file()
+    )
 
 
 def _restore_aiter_jit_build(
@@ -1552,7 +1533,6 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
         root = _EDITABLE_AITER_ROOT
         deploy_roots = _editable_kernel_deploy_roots()
         rebuild_mode = _REBUILD_MODE_COMMAND
-        # Derived, not spelled out: revert validates against the same root.
         jit_build_dir = str(_EDITABLE_AITER_ROOT / "aiter" / "jit" / "build")
         rebuild_command = ["/opt/venv/bin/python", "setup.py", "develop"]
         artifact_roots = [root]

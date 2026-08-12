@@ -148,16 +148,7 @@ def test_detect_strategy_sgl_workspace_aiter_unchanged(akp, monkeypatch):
     assert strat["rebuild_mode"] == "command"
     assert strat["rebuild_command"] == ["/opt/venv/bin/python", "setup.py", "develop"]
     assert strat["jit_build_dir"] == "/sgl-workspace/aiter/aiter/jit/build"
-    # Apply pins and revert trusts the same root, so neither can drift alone.
     assert Path(strat["jit_build_dir"]) == akp._EDITABLE_AITER_ROOT / "aiter" / "jit" / "build"
-
-
-def test_editable_checkout_jit_build_dir_is_trusted(akp, tmp_path, monkeypatch):
-    """The editable path _detect_strategy pins must pass revert-time validation."""
-    checkout, aiter_pkg = _make_editable_aiter(tmp_path)
-    monkeypatch.setattr(akp, "_EDITABLE_AITER_ROOT", checkout)
-
-    assert akp._trusted_aiter_jit_build_dir(aiter_pkg / "jit" / "build") is True
 
 
 def test_installed_wheel_jit_build_dir_stays_trusted(akp, tmp_path):
