@@ -59,8 +59,9 @@ _CACHED_KNOWN_TARGET_ROOTS: tuple[str, ...] | None = None
 _ALLOWED_KERNEL_DEPLOY_PACKAGES = frozenset(
     {"aiter", "aiter_meta", "sglang", "vllm"}
 )
+_EDITABLE_AITER_ROOT = Path("/sgl-workspace/aiter")
 _EDITABLE_KERNEL_DEPLOY_ROOTS = (
-    Path("/sgl-workspace/aiter"),
+    _EDITABLE_AITER_ROOT,
     Path("/sgl-workspace/sglang"),
     Path("/sgl-workspace/vllm"),
 )
@@ -1089,11 +1090,8 @@ def _trusted_aiter_jit_build_dir(path: Path) -> bool:
     """Validate a strategy-persisted AITER JIT destination.
 
     Accepts both deployment shapes the apply strategy can emit: a wheel install
-    (``<site-packages>/aiter/jit/build``) and an editable checkout
-    (``<checkout>/aiter/jit/build``). Only recognising the wheel shape rejected
-    the editable path that ``_detect_strategy`` itself pins, so every revert
-    against an in-place aiter tree failed and left the cache parked in the
-    backup directory.
+    (``<site-packages>/aiter/jit/build``) and the editable checkout
+    :data:`_EDITABLE_AITER_ROOT` that ``_detect_strategy`` pins.
 
     Args:
         path: The strategy-persisted ``jit/build`` directory to validate.
@@ -1102,12 +1100,19 @@ def _trusted_aiter_jit_build_dir(path: Path) -> bool:
         ``True`` when ``path`` is exactly the ``jit/build`` directory of an
         aiter package rooted at a known install or editable root.
     """
-    resolved = path.resolve()
+    # ``path`` comes from an untrusted manifest, so a symlink loop in it must
+    # read as "not trusted" rather than escape as an exception.
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError):
+        return False
     roots: list[Path] = []
-    installed_root = _installed_aiter_runtime_root(resolved)
+    # The lexical path classifies the install: site-packages is commonly a
+    # symlink, and the resolved spelling no longer carries that marker.
+    installed_root = _installed_aiter_runtime_root(path.absolute())
     if installed_root is not None:
         roots.append(installed_root)
-    roots.extend(_EDITABLE_KERNEL_DEPLOY_ROOTS)
+    roots.append(_EDITABLE_AITER_ROOT)
     for root in roots:
         try:
             expected = (root / "aiter" / "jit" / "build").resolve()
@@ -1544,10 +1549,11 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
     installed_aiter_root = _installed_aiter_runtime_root(target_file)
 
     if "/sgl-workspace/aiter/" in lower:
-        root = Path("/sgl-workspace/aiter")
+        root = _EDITABLE_AITER_ROOT
         deploy_roots = _editable_kernel_deploy_roots()
         rebuild_mode = _REBUILD_MODE_COMMAND
-        jit_build_dir = "/sgl-workspace/aiter/aiter/jit/build"
+        # Derived, not spelled out: revert validates against the same root.
+        jit_build_dir = str(_EDITABLE_AITER_ROOT / "aiter" / "jit" / "build")
         rebuild_command = ["/opt/venv/bin/python", "setup.py", "develop"]
         artifact_roots = [root]
     elif "/sgl-workspace/sglang/sgl-kernel/" in lower:
