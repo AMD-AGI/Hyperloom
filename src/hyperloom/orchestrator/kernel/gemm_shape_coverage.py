@@ -78,24 +78,56 @@ def aiter_lookup_keys(shape: Shape) -> tuple[Shape, Shape, Shape]:
     )
 
 
+#: Smallest ladder rung. Any M below it pads up to 16 through the ``gl=0``
+#: lookup, so starting here still covers M=1..16.
+_LADDER_MIN_M = 16
+#: aiter clamps the coarse key at 8192 for wide-N GEMMs, so no rung above it can
+#: ever be reached.
+_LADDER_MAX_M = 8192
+
+
+def _pow2_ladder(max_m: int) -> list[int]:
+    """Return the power-of-two M rungs from 16 up to ``nextPow2(max_m)``."""
+    top = min(_LADDER_MAX_M, max(_LADDER_MIN_M, _next_pow2(max_m)))
+    rungs = []
+    rung = _LADDER_MIN_M
+    while rung <= top:
+        rungs.append(rung)
+        rung *= 2
+    return rungs
+
+
 def align_shapes_to_aiter_keys(
     shapes: Iterable[Shape],
     *,
     max_shapes: int = 64,
+    max_m: int = 0,
 ) -> tuple[list[Shape], dict[str, Any]]:
-    """Replace observed M values with the M keys aiter will look up.
+    """Re-key observed shapes onto the M values aiter will actually look up.
 
-    For every observed shape both padded keys are emitted: the fine-grained one
-    covers the immediate neighbourhood of the observed operating point, and the
-    power-of-two one acts as a wide net for M values that land in a different
-    fine bucket on a later run.
+    Two row families are emitted per observed ``(N, K)`` projection:
+
+    ``ladder``
+        Every power-of-two M rung up to the observed maximum. Because the
+        ``gl=1`` lookup key is ``nextPow2(M)`` and the ``gl=0`` key pads anything
+        below 16 up to 16, a complete ladder makes *every* M resolvable — which
+        matters because a profile trace only ever samples a few operating points
+        and cannot see decode M at all (decode replays inside a CUDA graph and
+        emits no op events).
+    ``fine``
+        The ``gl=0`` padded key for each observed M. These are tried before the
+        ladder, so where the profile does carry evidence the tuner's answer for
+        that neighbourhood wins over the coarser rung.
 
     Args:
-        shapes: Observed ``(M, N, K)`` triples, typically harvested from a
-            profile trace or a server log.
-        max_shapes: Upper bound on the returned shape count, so a wide observed
-            M distribution cannot blow up the tuning budget. Larger M is kept
-            first because those GEMMs dominate runtime.
+        shapes: Observed ``(M, N, K)`` triples from a profile trace or server log.
+        max_shapes: Upper bound on the returned shape count, bounding tuning
+            time. The ladder is preserved ahead of the fine rows because it is
+            what guarantees coverage; ladder rungs are then dropped smallest
+            first, since small-M GEMMs contribute least to throughput.
+        max_m: Optional upper bound on the M the workload can schedule (e.g.
+            ``max_num_batched_tokens``). Extends the ladder past the observed
+            maximum when the profile under-sampled prefill.
 
     Returns:
         The aligned shapes plus a report describing what changed.
@@ -104,21 +136,25 @@ def align_shapes_to_aiter_keys(
     if not observed:
         return [], {"observed": 0, "aligned": 0, "dropped": 0, "unchanged": True}
 
-    aligned: set[Shape] = set()
-    for m, n, k in observed:
-        aligned.add((aiter_padded_m_fine(m), n, k))
-        aligned.add((aiter_padded_m_coarse(m, n), n, k))
+    nk_pairs = sorted({(n, k) for _m, n, k in observed})
+    ladder = _pow2_ladder(max(max(m for m, _, _ in observed), int(max_m or 0)))
 
-    # Keep one row per (N, K) before trimming so no projection loses coverage.
-    by_nk: dict[tuple[int, int], list[int]] = {}
-    for m, n, k in aligned:
-        by_nk.setdefault((n, k), []).append(m)
-    kept: set[Shape] = set()
-    for (n, k), ms in by_nk.items():
-        kept.add((max(ms), n, k))
-    remaining = sorted(aligned - kept, key=lambda s: s[0], reverse=True)
-    budget = max(len(kept), max_shapes)
-    for shape in remaining:
+    ladder_rows = {(m, n, k) for n, k in nk_pairs for m in ladder}
+    fine_rows = {(aiter_padded_m_fine(m), n, k) for m, n, k in observed} - ladder_rows
+
+    budget = max(len(nk_pairs), int(max_shapes))
+    kept = set(ladder_rows)
+    if len(kept) > budget:
+        # Drop the smallest rungs first, but never leave an (N, K) with no row.
+        for m in ladder:
+            if len(kept) <= budget:
+                break
+            for n, k in nk_pairs:
+                if len(kept) <= budget:
+                    break
+                if len([1 for _m, _n, _k in kept if (_n, _k) == (n, k)]) > 1:
+                    kept.discard((m, n, k))
+    for shape in sorted(fine_rows, key=lambda s: s[0], reverse=True):
         if len(kept) >= budget:
             break
         kept.add(shape)
@@ -127,8 +163,10 @@ def align_shapes_to_aiter_keys(
     return result, {
         "observed": len(observed),
         "aligned": len(result),
-        "dropped": max(0, len(aligned) - len(result)),
+        "dropped": max(0, len(ladder_rows | fine_rows) - len(result)),
         "unchanged": result == observed,
+        "nk_pairs": len(nk_pairs),
+        "ladder_m": ladder,
         "observed_m": sorted({m for m, _, _ in observed})[:32],
         "aligned_m": sorted({m for m, _, _ in result})[:32],
     }
