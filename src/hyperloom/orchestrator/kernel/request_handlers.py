@@ -4201,20 +4201,22 @@ async def trace_analyze_handler(
     state = SharedState.load_or_init(session_dir)
     state_framework = str(state.framework or "").strip()
     payload_framework = str(payload.get("framework") or "").strip()
-    # The persisted session framework is the runtime authority.  Internal
-    # roofline tasks can otherwise inherit a stale/default payload framework
-    # (commonly ``sglang``), which makes xDiT follow the LLM trace splitter.
-    # That splitter selects a prefill/decode window that diffusion traces do
-    # not have, discarding the raw GPU kernels before TraceLens sees them.
-    framework = state_framework or payload_framework
+    from hyperloom.inference_optimizer.framework_registry import is_scriptable
+
+    # Payload metadata remains authoritative for ordinary serving frameworks.
+    # The exception is a scriptable session receiving a stale non-scriptable
+    # default (commonly ``sglang``): that would make xDiT follow the LLM trace
+    # splitter, which discards its raw diffusion GPU kernels.
+    framework = payload_framework or state_framework
     if (
-        state_framework
-        and payload_framework
-        and state_framework.lower() != payload_framework.lower()
+        payload_framework
+        and is_scriptable(state_framework)
+        and not is_scriptable(payload_framework)
     ):
+        framework = state_framework
         log.warning(
             "trace_analyze: overriding payload framework %r with session "
-            "framework %r so analysis matches the captured workload",
+            "scriptable framework %r to preserve the raw trace",
             payload_framework,
             state_framework,
         )
@@ -4270,8 +4272,6 @@ async def trace_analyze_handler(
 
     # Scriptable frameworks (xDiT) have no decode steady-state window, so feed the
     # raw trace and drop the --split-* hints.
-    from hyperloom.inference_optimizer.framework_registry import is_scriptable
-
     scriptable = is_scriptable(framework)
 
     # Load materialized baseline workload metadata once.
