@@ -4409,12 +4409,10 @@ SUPPORTED_COLLECTIVE_OPS = frozenset({"all_reduce", "reduce_scatter", "all_gathe
 
 
 def _forge_loop_constant(module: str, name: str, fallback: float) -> float:
-    """Read a forge-loop budget constant, falling back when it is unreachable.
+    """Read a forge-loop budget bound, falling back when KernelForge is off the path.
 
-    These bounds belong to forge-loop; a local copy of the number drifts the
-    moment upstream changes it and the lane then plans against a budget the
-    campaign will not honour. The fallback only covers a deployment without
-    KernelForge on the path, where the lane cannot run anyway.
+    A local copy of the number drifts the moment upstream changes it, and the
+    lane then plans against a budget the campaign will not honour.
     """
     try:
         return float(getattr(importlib.import_module(module), name))
@@ -7068,21 +7066,16 @@ def _grade_integrate_accuracy(
 def _cold_start_rebaseline_timeout(resolved_sec: int) -> int:
     """Raise a re-baseline timeout to the cold-start cap when the JIT cache is empty.
 
-    Applying a kernel patch moves aiter's JIT cache aside, so the re-baseline that
-    follows always pays a full recompile. Passing an explicit ``timeout_sec`` also
-    suppresses the baseline executor's own cold-start branch, so without this the
-    warm budget is the only one a patched re-baseline ever gets, and the compile
-    it cannot finish surfaces as a stale JIT lock instead of a slow boot.
+    An apply moves the cache aside, so the re-baseline recompiles from scratch;
+    the explicit ``timeout_sec`` integrate passes also suppresses the baseline
+    executor's own cold-start branch, leaving the warm budget as the only one.
     """
     from ..actions.executors.baseline import (
         BASELINE_COLD_START_TIMEOUT_SEC,
         _probe_aiter_jit_cache,
     )
 
-    try:
-        cache = _probe_aiter_jit_cache()
-    except Exception:  # noqa: BLE001 - a probe failure must not shorten the boot
-        return resolved_sec
+    cache = _probe_aiter_jit_cache()
     if cache.get("probe_status") != "found" or not cache.get("is_cold"):
         return resolved_sec
     cold_cap = int(

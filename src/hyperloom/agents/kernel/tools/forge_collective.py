@@ -404,19 +404,16 @@ def _restore_config(repo: str, snapshot: dict[str, str | None]) -> None:
 def _forge_loop_accepts(option: str) -> bool:
     """Return whether the installed forge-loop declares this option.
 
-    Two campaign inputs this lane would like to send -- the measured noise floor
-    and the operator's E2E share -- exist only in some forge-loop builds, and an
-    option the CLI does not declare aborts the campaign before it starts. What
-    the build does not accept is dropped, at the documented cost: without
-    ``--calibrate-noise-floor`` the loop keeps a fixed threshold instead of one
-    measured on the machine, and without ``--e2e-pct`` it cannot project the
-    Amdahl ceiling that says whether the campaign can pay for itself.
+    An option the CLI does not declare aborts the campaign before it starts, and
+    the noise-floor and E2E-share inputs exist only in some builds. An
+    unimportable forge-loop cannot run the campaign either way, so the answer
+    there is the one that keeps a caller's argv intact.
     """
     try:
         from kernel_agents.cli import forge_loop
     except (ImportError, AttributeError):
         return True
-    return any(option in getattr(param, "opts", ()) for param in forge_loop.params)
+    return any(option in param.opts for param in forge_loop.params)
 
 
 def _restore_journal_path(repo: str) -> Path:

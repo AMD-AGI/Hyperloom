@@ -372,10 +372,9 @@ def _patch_target_paths(patches: Sequence[Path]) -> frozenset[str]:
     """Return the slash-joined paths a patch set writes to."""
     targets: set[str] = set()
     for patch in patches:
-        try:
-            text = patch.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
+        # An unreadable patch would silently shrink the sentinel set, which is
+        # the detection hole this derivation exists to close.
+        text = patch.read_text(encoding="utf-8", errors="replace")
         for line in text.splitlines():
             if not line.startswith("+++ "):
                 continue

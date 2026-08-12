@@ -162,11 +162,9 @@ DTYPE = "$dtype"
 BUSBW_NUMERATOR = $busbw_numerator
 #: True when the measured payload is the gathered output rather than the input.
 GATHERED_OUTPUT = $gathered_output
-#: Payload size separating the two regimes a collective runs in. Below it the
-#: pair of cross-device barriers dominates the kernel; above it the fabric does.
-#: The regimes respond to different edits, so a gain in one says nothing about
-#: the other and forge-loop scores them apart. 1 MiB is the payload a barrier
-#: pair's worth of time moves at fabric bandwidth.
+#: Below this payload the pair of cross-device barriers dominates the kernel;
+#: above it the fabric does. 1 MiB is what a barrier pair's worth of time moves
+#: at fabric bandwidth.
 REGIME_CUT_BYTES = 1048576
 _DIST_ENV = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
 
@@ -374,7 +372,11 @@ def payload_bytes(shape: tuple[int, ...], ctx: WorkerCtx) -> int:
 
 
 def case_group(shape: tuple[int, ...], ctx: WorkerCtx) -> str:
-    """Return the scoring group a case belongs to."""
+    """Return the scoring group a case belongs to.
+
+    The two regimes respond to different edits, so a gain in one says nothing
+    about the other and forge-loop scores them apart.
+    """
     if payload_bytes(shape, ctx) >= REGIME_CUT_BYTES:
         return "fabric_bound"
     return "barrier_bound"
