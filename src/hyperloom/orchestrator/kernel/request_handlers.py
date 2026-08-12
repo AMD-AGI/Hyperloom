@@ -4177,6 +4177,11 @@ async def trace_analyze_handler(
 ) -> HandlerResult:
     """Run Hyperloom/kernel-agent's tracelens_analysis.py on a trace dir.
 
+    The explicit payload framework normally takes precedence over the persisted
+    session value.  A scriptable session overrides a conflicting non-scriptable
+    payload framework so a diffusion trace is not sent through the LLM
+    prefill/decode splitter.
+
     Args:
         payload (dict): Request payload (see ``Required payload`` /
             ``Optional payload`` below for the recognized keys).
@@ -4199,7 +4204,41 @@ async def trace_analyze_handler(
     from ..state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
-    framework = (payload.get("framework") or state.framework or "").strip()
+    state_framework = str(state.framework or "").strip()
+    payload_framework = str(payload.get("framework") or "").strip()
+    from hyperloom.inference_optimizer.framework_registry import is_scriptable
+
+    # Payload metadata remains authoritative for ordinary serving frameworks.
+    # The exception is a scriptable session receiving a stale non-scriptable
+    # default (commonly ``sglang``): that would make xDiT follow the LLM trace
+    # splitter, which discards its raw diffusion GPU kernels.
+    framework = payload_framework or state_framework
+    framework_warnings: list[dict[str, Any]] = []
+    if (
+        payload_framework
+        and is_scriptable(state_framework)
+        and not is_scriptable(payload_framework)
+    ):
+        framework = state_framework
+        framework_warnings.append(
+            {
+                "code": "stale_framework_overridden",
+                "severity": "warning",
+                "message": (
+                    f"overrode non-scriptable payload framework {payload_framework!r} "
+                    f"with scriptable session framework {state_framework!r} "
+                    "to preserve the raw trace"
+                ),
+                "payload_framework": payload_framework,
+                "session_framework": state_framework,
+            }
+        )
+        log.warning(
+            "trace_analyze: overriding payload framework %r with session "
+            "scriptable framework %r to preserve the raw trace",
+            payload_framework,
+            state_framework,
+        )
     target_platform = (payload.get("target_platform") or state.gpu_type or "").strip()
     model_name = (payload.get("model_name") or state.model_name or state.model_path or "").strip()
     analysis_mode = (payload.get("analysis_mode") or "").strip()
@@ -4252,8 +4291,6 @@ async def trace_analyze_handler(
 
     # Scriptable frameworks (xDiT) have no decode steady-state window, so feed the
     # raw trace and drop the --split-* hints.
-    from hyperloom.inference_optimizer.framework_registry import is_scriptable
-
     scriptable = is_scriptable(framework)
 
     # Load materialized baseline workload metadata once.
@@ -4330,8 +4367,12 @@ async def trace_analyze_handler(
             result["hot_kernels"] = []
             result.setdefault("orchestrator_error", failure_warning.get("error", ""))
 
-        # Prepend any route-validation warning so it reaches the LLM.
-        result["trace_health_warnings"] = route_health_warnings + list(result.get("trace_health_warnings") or [])
+        # Prepend handler validation warnings so they reach the LLM.
+        result["trace_health_warnings"] = (
+            framework_warnings
+            + route_health_warnings
+            + list(result.get("trace_health_warnings") or [])
+        )
 
         _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
         candidates_path = result.get("candidates_path")
