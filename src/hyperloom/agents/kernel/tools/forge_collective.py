@@ -67,8 +67,9 @@ MIN_CAMPAIGN_TIMEOUT_SEC = 60
 #: Caller-owned campaign id. Pinning it makes forge-loop's checkpoint filename
 #: predictable, which is what external recovery reads after a hard kill.
 EXPERIMENT_ID = "hyperloom_collective"
-#: aiter owns every custom all-reduce this lane can reach, so its fellow (and
-#: the matching knowledge base) is the correct specialist.
+#: aiter implements every collective this lane can reach -- all-reduce,
+#: reduce-scatter and all-gather all live in its custom_all_reduce sources -- so
+#: its fellow (and the matching knowledge base) is the correct specialist.
 COLLECTIVE_FELLOW = "aiter"
 FORGE_SHUTDOWN_GRACE_SEC = 30
 
