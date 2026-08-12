@@ -3508,9 +3508,10 @@ def _run_loop_via_cli(
     # Named on the command line as well as in the environment: KernelForge
     # skips its KB and reports ``missing_gpu_type`` rather than stopping, so an
     # identity that arrived only by inheritance could be lost without the run
-    # ever failing.
-    if _known_gpu_model(gpu_type):
-        cmd += ["--gpu-type", _known_gpu_model(gpu_type)]
+    # ever failing. Passed even when it resolves to nothing, because an omitted
+    # option is how KernelForge is told to use its own default -- saying nothing
+    # would file the run under a card it may never have run on.
+    cmd += ["--gpu-type", _known_gpu_model(gpu_type)]
     # Provider selection. KernelForge defaults agent_backend to "auto", which
     # resolves to its claude provider; an OpenAI-only deployment has no Anthropic
     # credential and no Claude CLI login, so every attempt would REVERT on "Not
@@ -3784,9 +3785,9 @@ def _run_rewrite_via_cli(
         str(result_json),
     ]
     # Named on the command line for the same reason the loop names it: the
-    # rewrite producer files its port under an identity the model is part of.
-    if _known_gpu_model(gpu_type):
-        cmd += ["--gpu-type", _known_gpu_model(gpu_type)]
+    # rewrite producer files its port under an identity the model is part of,
+    # and an unresolved model has to be said rather than left out.
+    cmd += ["--gpu-type", _known_gpu_model(gpu_type)]
     if source_entry:
         cmd += ["--source-entry", source_entry]
     if source_language:
