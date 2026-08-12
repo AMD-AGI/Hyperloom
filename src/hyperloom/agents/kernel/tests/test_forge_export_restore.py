@@ -403,11 +403,6 @@ def test_submit_salvages_validated_best_after_timeout(tmp_path, monkeypatch):
     monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(
         forge_submit,
-        "_autogen_forge_driver",
-        lambda *_args, **_kwargs: str(driver),
-    )
-    monkeypatch.setattr(
-        forge_submit,
         "_resolve_gpu_target",
         lambda _candidate: "gfx942",
     )
