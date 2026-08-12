@@ -2558,11 +2558,20 @@ def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
 _AITER_CSV_TUNER_FRAMEWORKS = ("sglang", "vllm-aiter")
 
 
+#: Wall-clock the aiter CK tuner needs per shape, measured on gfx950 at
+#: ``--mp 1`` (12 shapes / 1462s in production, ~135s each). Used to size the
+#: shape budget so a wider ladder cannot push the tuner past its timeout and
+#: return nothing at all.
+_AITER_TUNE_SEC_PER_SHAPE = 150
+
+
 def _align_forge_shapes_for_aiter(
     shapes_json: str,
     *,
     forge_framework: str,
     workspace: Path,
+    budget_sec: int = 0,
+    mp: int = 1,
 ) -> tuple[str, dict[str, Any] | None]:
     """Re-key profiled GEMM shapes onto the M values aiter actually looks up.
 
@@ -2590,7 +2599,18 @@ def _align_forge_shapes_for_aiter(
         max_shapes = int(os.environ.get("HYPERLOOM_GEMM_ALIGN_MAX_SHAPES") or 64)
     except (TypeError, ValueError):
         max_shapes = 64
-    aligned, report = align_shapes_to_aiter_keys(observed, max_shapes=max(1, max_shapes))
+    max_shapes = max(1, max_shapes)
+    if budget_sec > 0:
+        try:
+            per_shape = int(
+                os.environ.get("HYPERLOOM_GEMM_TUNE_SEC_PER_SHAPE") or _AITER_TUNE_SEC_PER_SHAPE
+            )
+        except (TypeError, ValueError):
+            per_shape = _AITER_TUNE_SEC_PER_SHAPE
+        # Reserve a third of the window for JIT builds and the report step.
+        affordable = int(budget_sec * 0.66 * max(1, mp) // max(1, per_shape))
+        max_shapes = min(max_shapes, max(len(observed), affordable))
+    aligned, report = align_shapes_to_aiter_keys(observed, max_shapes=max_shapes)
     if not aligned or report.get("unchanged"):
         return shapes_json, {**report, "applied": False, "source_shapes_json": shapes_json}
     try:
@@ -3357,16 +3377,18 @@ async def _run_forge_gemm_tuning(
             # specialist CSV resolved before the capture pass.
             untuned_csv = ""
 
+    timeout = _gemm_tuning_timeout_sec(payload)
+    session_max_min = float(getattr(state, "max_minutes", 0) or 0)
     shape_alignment: dict[str, Any] | None = None
     if shapes_json:
         shapes_json, shape_alignment = _align_forge_shapes_for_aiter(
             shapes_json,
             forge_framework=forge_framework,
             workspace=workspace,
+            budget_sec=timeout,
+            mp=mp,
         )
 
-    timeout = _gemm_tuning_timeout_sec(payload)
-    session_max_min = float(getattr(state, "max_minutes", 0) or 0)
     input_payload = {
         "model_path": model_path,
         "framework": forge_framework,
