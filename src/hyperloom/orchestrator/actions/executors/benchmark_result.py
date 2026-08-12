@@ -251,6 +251,54 @@ def _resolve_leak_roots(leak_root: Path | None) -> tuple[Path, ...]:
     return tuple(roots)
 
 
+def snapshot_workspaces(root: Path) -> frozenset[Path]:
+    """Return the set of ``benchmark_*`` subdirectories currently in ``root``.
+
+    Args:
+        root: Directory to scan for Magpie workspace subdirectories.
+
+    Returns:
+        Resolved absolute paths of all existing ``benchmark_*`` entries.
+    """
+    try:
+        return frozenset(p.resolve() for p in root.glob("benchmark_*") if p.is_dir())
+    except OSError:
+        return frozenset()
+
+
+def select_run_workspace(
+    root: Path,
+    *,
+    known_before: frozenset[Path] | None = None,
+) -> Path | None:
+    """Return the benchmark workspace produced by the current run.
+
+    When ``known_before`` is given, only directories that did not exist
+    before the subprocess started (i.e. the set difference) are eligible.
+    Falls back to the lexicographically largest name when ``known_before``
+    is ``None``.  Returns ``None`` when no eligible workspace exists.
+
+    Args:
+        root: Directory containing Magpie ``benchmark_*`` workspaces.
+        known_before: Snapshot of pre-existing workspaces taken just before
+            the subprocess started; supply to restrict selection to this
+            run's output only.
+
+    Returns:
+        The selected workspace path, or ``None`` when none qualify.
+    """
+    try:
+        candidates = sorted(p for p in root.glob("benchmark_*") if p.is_dir())
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    if known_before is None:
+        return candidates[-1]
+    new_candidates = [p for p in candidates if p.resolve() not in known_before]
+    return new_candidates[-1] if new_candidates else None
+
+
 def harvest_leaked_artifacts(
     destination: Path,
     *,
