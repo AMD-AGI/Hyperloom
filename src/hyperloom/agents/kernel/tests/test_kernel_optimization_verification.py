@@ -21,8 +21,7 @@ def _args(**overrides):
     base = {
         "backends": "",
         "benchmark_file": "",
-        "test_harness_path": "",
-        "micro_speedup": None,
+                "micro_speedup": None,
         "e2e_gain_pct": None,
         "accuracy_passed": None,
         "correctness_passed": None,
@@ -638,7 +637,6 @@ def test_benchmark_files_list_counts_as_benchmark(tmp_path):
     bench.write_text("print('ok')\n", encoding="utf-8")
     args = _args()
     args.benchmark_file = ""
-    args.test_harness_path = ""
     assert ko.has_benchmark(args, {"benchmark_files": [str(bench)]}) is True
 
 
@@ -1478,7 +1476,6 @@ def test_run_attempt_dry_run_emits_optimized_suffix_file(tmp_path):
         budget_minutes=60,
         num_gpus=1,
         target_platform="",
-        test_command="",
         kernel_id="k001",
     )
     log_path = tmp_path / "run.log"
@@ -1518,7 +1515,6 @@ def test_unrecoverable_forge_timeout_is_not_promoted_to_partial(
     args.session_id = "sess001"
     args.budget_minutes = 60
     args.num_gpus = 1
-    args.test_command = ""
     log_path = tmp_path / "run.log"
     log_path.write_text("")
 

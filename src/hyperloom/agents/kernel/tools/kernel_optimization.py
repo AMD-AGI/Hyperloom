@@ -245,28 +245,19 @@ def existing_path(value: str) -> str:
 
 
 def has_benchmark(args: argparse.Namespace, candidate: dict[str, Any]) -> bool:
-    """Report whether any usable benchmark/test harness exists for a kernel.
-
-    Checks the CLI-supplied benchmark/harness paths and the candidate's own
-    ``benchmark_file`` / ``test_harness_path`` / ``benchmark_files`` fields,
-    treating only paths that resolve on disk as available.
+    """Report whether any usable benchmark file exists for a kernel.
 
     Args:
-        args (argparse.Namespace): Parsed CLI args carrying ``benchmark_file``
-            and ``test_harness_path``.
-        candidate (dict[str, Any]): Kernel candidate dict that may declare
-            benchmark/harness paths.
+        args (argparse.Namespace): Parsed CLI args carrying ``benchmark_file``.
+        candidate (dict[str, Any]): Kernel candidate dict.
 
     Returns:
-        bool: True when at least one referenced benchmark or harness file
-            exists on disk.
+        bool: True when at least one referenced benchmark file exists on disk.
     """
     bench_files = candidate.get("benchmark_files") or []
     return bool(
         existing_path(args.benchmark_file)
-        or existing_path(args.test_harness_path)
         or existing_path(str(candidate.get("benchmark_file") or ""))
-        or existing_path(str(candidate.get("test_harness_path") or ""))
         or any(existing_path(str(p)) for p in bench_files)
     )
 
@@ -425,68 +416,6 @@ def _match_benchmark_for_kernel(
 
         return sorted(existing, key=_priority)
     return existing
-
-
-def _profile_timeout_sec() -> int:
-    """Per-subprocess profiling timeout (seconds) for GEAK profiling.
-
-    Injected as a ``timeout <N>`` prefix on the test_command so a default-matrix
-    benchmark (e.g. aiter test_pa.py) can't stall profiling for hours; SIGTERM at N
-    surfaces as a normal profiling failure.
-
-    Returns:
-        The timeout in seconds: 600 by default, overridable via
-        ``KERNEL_OPT_PROFILE_TIMEOUT_SEC``, floored at 1.
-    """
-    try:
-        value = int(os.environ.get("KERNEL_OPT_PROFILE_TIMEOUT_SEC", "600"))
-    except (ValueError, TypeError):
-        return 600
-    return max(1, value)
-
-
-def _render_geak_test_command(
-    kernel_name: str,
-    bench_files: list[Any],
-    is_multigpu: bool,
-    num_gpus: int,
-    timeout_sec: int,
-) -> str:
-    """Render the ``test_command`` handed to the Forge submitter, with timeout
-    + match.
-
-    Picks the first existing ``test_*.py`` / ``bench*.py`` from the
-    semantically-ordered bench list, prefixes ``timeout <N>``, and wraps
-    multi-GPU collectives in ``torchrun --nproc_per_node=<num_gpus>`` so
-    the subprocess can ``init_process_group`` correctly. Returns ``""``
-    when no usable benchmark exists; Forge then falls back to its own
-    autogen / task-preparer driver generation.
-
-    Args:
-        kernel_name (str): Kernel name used to order benchmark candidates.
-        bench_files (list[Any]): Candidate benchmark/test file paths.
-        is_multigpu (bool): True when the kernel implies a multi-GPU
-            collective and needs ``torchrun``.
-        num_gpus (int): Number of GPUs to pass to ``--nproc_per_node`` when
-            multi-GPU.
-        timeout_sec (int): Per-subprocess timeout prefixed via ``timeout``.
-
-    Returns:
-        str: The rendered ``--test-command`` string, or empty string when no
-            usable benchmark file is found.
-    """
-    ordered = _match_benchmark_for_kernel(kernel_name, bench_files)
-    for bf in ordered:
-        path = Path(bf)
-        if not bf.endswith(".py") or not path.exists():
-            continue
-        name = path.name
-        if "test_" not in name and "bench" not in name:
-            continue
-        if is_multigpu and num_gpus >= 2:
-            return f"timeout {timeout_sec} torchrun --nproc_per_node={num_gpus} {bf}"
-        return f"timeout {timeout_sec} python {bf}"
-    return ""
 
 
 def parse_backends(backends: str) -> list[str]:
@@ -1954,77 +1883,6 @@ def _kernel_agent_root() -> Path:
     return Path(workspace_root()) / "kernel-agent"
 
 
-def _extract_py_path(test_command: str) -> str | None:
-    """Extract the .py file path from a test command string.
-
-    Args:
-        test_command (str): A shell-style test command string.
-
-    Returns:
-        str | None: The first ``.py`` token found, or None when none is
-            present or the command cannot be split.
-    """
-    try:
-        for part in shlex.split(test_command):
-            if part.endswith(".py"):
-                return part
-    except ValueError:
-        # No matching path part; return None below.
-        pass
-    return None
-
-
-def _try_generate_harness(
-    test_command: str,
-    candidate: dict,
-    source_file: str,
-    out_dir: Path,
-    kernel_repo: str,
-    log_path: Path | None,
-) -> str | None:
-    """Try to auto-generate a GEAK-compatible harness from a benchmark file.
-
-    Returns a new test_command pointing to the generated harness, or None.
-
-    Args:
-        test_command (str): Existing test command whose ``.py`` path is the
-            benchmark source for generation.
-        candidate (dict): Kernel candidate dict passed to the generator.
-        source_file (str): Path to the kernel source under optimization.
-        out_dir (Path): Directory the generated harness is written to.
-        kernel_repo (str): Repo root used to resolve imports for the harness.
-        log_path (Path | None): Optional run log for generator diagnostics.
-
-    Returns:
-        str | None: A new ``test_command`` pointing at the generated harness,
-            or None when generation is not possible or fails.
-    """
-    bench_py = _extract_py_path(test_command)
-    if not bench_py or not Path(bench_py).is_file():
-        return None
-
-    try:
-        tools_dir = str(Path(__file__).resolve().parent)
-        if tools_dir not in sys.path:
-            sys.path.insert(0, tools_dir)
-        from harness_generator import maybe_generate_harness
-
-        hr = maybe_generate_harness(
-            benchmark_file=bench_py,
-            candidate=candidate,
-            source_file=source_file,
-            out_dir=out_dir,
-            kernel_repo=kernel_repo,
-            log_fn=(lambda msg: append_log(log_path, msg)) if log_path else None,
-        )
-        if hr is not None:
-            return hr.test_command
-    except Exception as exc:
-        if log_path:
-            append_log(log_path, f"[harness_gen] failed: {exc}")
-    return None
-
-
 def _forge_output_dir(session_id: str, prompt_file: Path) -> Path:
     """Return the per-attempt output directory for a Forge run.
 
@@ -2110,39 +1968,7 @@ def invoke_backend(
     # GPU count: CLI override, then candidate hint, then 1.
     num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0) or int(candidate.get("num_gpus_recommended") or 1))
 
-    # Common test-command setup, shared across backend execution and validation.
-    cand_name = str(candidate.get("name") or "")
-    is_multigpu_common = bool(candidate.get("is_multigpu")) or kernel_name_implies_multigpu(cand_name)
-    common_test_command = getattr(args, "test_command", "").strip()
-    # With an authoritative kernel_contract + exact traced shapes, do NOT hand GEAK
-    # a discovered benchmark file (it would override our USER TASK CONTEXT).
-    _contract = candidate.get("kernel_contract")
-    _has_contract = (
-        isinstance(_contract, dict)
-        and _contract.get("kind") in ("collective", "attention")
-        and bool(candidate.get("shapes") or candidate.get("kernel_shapes"))
-    )
-    if not common_test_command and not _has_contract:
-        common_test_command = _render_geak_test_command(
-            kernel_name=cand_name,
-            bench_files=bench_files,
-            is_multigpu=is_multigpu_common,
-            num_gpus=num_gpus,
-            timeout_sec=_profile_timeout_sec(),
-        )
     _shared_out_dir = _forge_output_dir(args.session_id, prompt_file)
-    # Build a harness for backends lacking their own preprocess stage (forge).
-    if common_test_command:
-        _harness_cmd = _try_generate_harness(
-            common_test_command,
-            candidate,
-            source_file,
-            _shared_out_dir,
-            kernel_repo,
-            log_path,
-        )
-        if _harness_cmd:
-            common_test_command = _harness_cmd
     try:
         if backend == "forge":
             # Kernel-Forge backend: runs inside a git worktree of kernel_repo and
@@ -2154,7 +1980,6 @@ def invoke_backend(
                 invocation_spec = build_invocation_spec(
                     candidate,
                     source_file=source_file,
-                    test_command=common_test_command,
                 )
                 write_invocation_spec(invocation_spec_path, invocation_spec)
                 if log_path is not None:
@@ -2171,7 +1996,6 @@ def invoke_backend(
                 source_file=source_file,
                 prompt_file=prompt_file,
                 output_dir=out_dir,
-                test_command=common_test_command,
                 source_type=str((candidate or {}).get("source_type") or "unknown"),
                 candidate=candidate or {},
                 num_gpus=num_gpus,
@@ -2187,8 +2011,6 @@ def invoke_backend(
             result["output_dir"] = str(out_dir)
             if invocation_spec_path.is_file():
                 result["invocation_spec_path"] = str(invocation_spec_path)
-            if common_test_command:
-                result["test_command"] = common_test_command
             return result
         return {
             "returncode": 2,
@@ -2379,9 +2201,6 @@ def run_attempt(
                 backend_paths["cli_execution_log"] = cli_log
             if session_id_oob:
                 backend_paths["kernel_session_id"] = session_id_oob
-            test_cmd_used = (result.get("test_command") or "") if isinstance(result, dict) else ""
-            if test_cmd_used:
-                backend_paths["test_command"] = test_cmd_used
             # Promote a timed-out / failed attempt with on-disk artifacts to
             # "partial", except on a persistent inner-LLM auth loop.
             partial_evidence_keys = (
@@ -3599,7 +3418,7 @@ def main() -> int:
     )
     parser.add_argument("--backends", default="")
     parser.add_argument("--benchmark-file", default="")
-    parser.add_argument("--test-harness-path", default="")
+
     parser.add_argument("--source-file", default="")
     parser.add_argument("--target-platform", default=_env_target_platform())
     parser.add_argument("--extra-sglang-args", default="")
@@ -3613,12 +3432,6 @@ def main() -> int:
     parser.add_argument("--e2e-gain-pct", type=float, default=None)
     parser.add_argument("--correctness-passed", choices=["true", "false", "unknown"], default="unknown")
     parser.add_argument("--accuracy-passed", choices=["true", "false", "unknown"], default="unknown")
-    parser.add_argument(
-        "--test-command",
-        type=str,
-        default="",
-        help="Test command from unittest skill. Passed to GEAK as --test-command.",
-    )
     parser.add_argument(
         "--num-gpus",
         type=int,

@@ -136,7 +136,6 @@ def test_builds_compact_operator_contract_with_absolute_paths(tmp_path):
     repo = Path(candidate["kernel_repo"])
     spec = invocation_spec.build_invocation_spec(
         candidate,
-        test_command="python generated/driver.py --correctness",
     )
 
     assert invocation_spec.invocation_spec_filename(candidate) == "invocation_spec_scaled_gemm.json"
@@ -170,7 +169,6 @@ def test_builds_compact_operator_contract_with_absolute_paths(tmp_path):
     assert primary["public_call_targets"] == ["aiter.gemm_a8w8_blockscale"]
     assert primary["reference_call_targets"] == ["F.linear"]
     assert spec["tests"]["related_files"] == [str(repo / "tests" / "test_scaled_gemm.py")]
-    assert str(repo / "generated" / "driver.py") in spec["tests"]["selected_test_command"]
     assert spec["execution"] == {
         "framework": "sglang",
         "precision": "bf16",
@@ -276,7 +274,6 @@ def test_missing_optional_context_is_fail_soft(tmp_path):
             "device_kernel_names": 123,
             "runtime_args": {"model": "remote/model-id", "workload": {"isl": "unknown"}},
         },
-        test_command="'unterminated",
     )
 
     assert spec["status"] == "partial"
@@ -347,7 +344,6 @@ def test_forge_invoke_persists_and_passes_operator_spec(tmp_path, monkeypatch):
         argparse.Namespace(
             budget_minutes=60,
             num_gpus=1,
-            test_command="",
             session_id="session",
         ),
         candidate=candidate,
