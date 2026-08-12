@@ -21,7 +21,7 @@ def _args(**overrides):
     base = {
         "backends": "",
         "benchmark_file": "",
-                "micro_speedup": None,
+        "micro_speedup": None,
         "e2e_gain_pct": None,
         "accuracy_passed": None,
         "correctness_passed": None,
