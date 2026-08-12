@@ -59,8 +59,9 @@ _CACHED_KNOWN_TARGET_ROOTS: tuple[str, ...] | None = None
 _ALLOWED_KERNEL_DEPLOY_PACKAGES = frozenset(
     {"aiter", "aiter_meta", "sglang", "vllm"}
 )
+_EDITABLE_AITER_ROOT = Path("/sgl-workspace/aiter")
 _EDITABLE_KERNEL_DEPLOY_ROOTS = (
-    Path("/sgl-workspace/aiter"),
+    _EDITABLE_AITER_ROOT,
     Path("/sgl-workspace/sglang"),
     Path("/sgl-workspace/vllm"),
 )
@@ -1085,18 +1086,25 @@ def _invalidate_aiter_jit_build(
     }
 
 
-def _trusted_installed_aiter_jit_build_dir(path: Path) -> bool:
-    """Validate a strategy-persisted installed AITER JIT destination."""
-    resolved = path.resolve()
-    runtime_root = _installed_aiter_runtime_root(resolved)
-    if (
-        runtime_root is None
-        or resolved != (runtime_root / "aiter" / "jit" / "build").resolve()
-    ):
+def _trusted_aiter_jit_build_dir(path: Path) -> bool:
+    """Validate a strategy-persisted AITER JIT destination.
+
+    Accepts both shapes apply can pin: a wheel install under site-packages and
+    the editable checkout :data:`_EDITABLE_AITER_ROOT`.
+    """
+    # A manifest path is untrusted: an unresolvable one reads as not trusted.
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError):
+        return False
+    # Classify on the lexical path: site-packages is commonly a symlink, and the
+    # resolved spelling no longer carries that marker.
+    root = _installed_aiter_runtime_root(path) or _EDITABLE_AITER_ROOT
+    if resolved != (root / "aiter" / "jit" / "build").resolve():
         return False
     return (
-        (runtime_root / "aiter" / "__init__.py").is_file()
-        and (runtime_root / "aiter" / "jit" / "__init__.py").is_file()
+        (root / "aiter" / "__init__.py").is_file()
+        and (root / "aiter" / "jit" / "__init__.py").is_file()
     )
 
 
@@ -1141,7 +1149,7 @@ def _restore_aiter_jit_build(
     # Only the strategy-pinned or importable aiter jit/build dir is legitimate.
     expected_raw = str(expected_jit_build_dir or "").strip()
     expected = Path(expected_raw) if expected_raw else _aiter_jit_build_dir()
-    if expected_raw and not _trusted_installed_aiter_jit_build_dir(expected):
+    if expected_raw and not _trusted_aiter_jit_build_dir(expected):
         return {
             "status": "failed",
             "error": f"untrusted strategy jit/build dir: {expected}",
@@ -1522,10 +1530,10 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
     installed_aiter_root = _installed_aiter_runtime_root(target_file)
 
     if "/sgl-workspace/aiter/" in lower:
-        root = Path("/sgl-workspace/aiter")
+        root = _EDITABLE_AITER_ROOT
         deploy_roots = _editable_kernel_deploy_roots()
         rebuild_mode = _REBUILD_MODE_COMMAND
-        jit_build_dir = "/sgl-workspace/aiter/aiter/jit/build"
+        jit_build_dir = str(_EDITABLE_AITER_ROOT / "aiter" / "jit" / "build")
         rebuild_command = ["/opt/venv/bin/python", "setup.py", "develop"]
         artifact_roots = [root]
     elif "/sgl-workspace/sglang/sgl-kernel/" in lower:
