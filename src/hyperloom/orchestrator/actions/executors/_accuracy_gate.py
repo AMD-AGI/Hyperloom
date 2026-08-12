@@ -229,7 +229,10 @@ def _extract_eval_contract_fields(config_path: str | Path | None) -> dict[str, s
     envs: dict = bench.get("envs") or {}
 
     # Eval-contract keys in benchmark.envs; all others are excluded. The probe
-    # knobs belong here: they change how early an eval is cut short.
+    # knobs belong here: they change how early an eval is cut short. So do the
+    # generation-bounds knobs, for the same reason one rung lower: they decide
+    # where each individual answer is truncated, so two runs that disagree on
+    # them are not scoring the same eval even when the task and limit match.
     _EVAL_CONTRACT_ENV_KEYS = (
         "RUN_EVAL",
         "MAGPIE_EVAL_TASKS",
@@ -237,6 +240,9 @@ def _extract_eval_contract_fields(config_path: str | Path | None) -> dict[str, s
         "HYPERLOOM_EVAL_PROBE",
         "HYPERLOOM_EVAL_PROBE_MIN_SAMPLES",
         "HYPERLOOM_EVAL_PROBE_LENGTH_RATIO",
+        "HYPERLOOM_EVAL_MAX_TOKENS",
+        "HYPERLOOM_EVAL_DERIVE_STOP",
+        "HYPERLOOM_EVAL_STOP_STRINGS",
     )
     # Workload-shape keys that define what is being measured.
     _WORKLOAD_SHAPE_ENV_KEYS = (
