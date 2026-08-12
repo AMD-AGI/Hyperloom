@@ -2794,131 +2794,110 @@ class KernelPhase(PhaseHandler):
         if kept:
             await self._integrate_collective(recorded)
 
-    async def _integrate_collective(self, result: dict) -> None:
-        """Apply a collective patch and adopt it only after an E2E KEEP."""
+    async def _run_collective_integration(
+        self,
+        result: dict,
+        inputs: "_collective_recovery.IntegrationInputs",
+        *,
+        preapplied: dict,
+        backup_root: Path,
+        apply_checkpoint: Path,
+    ) -> dict:
+        """Run the E2E integrate round, or describe why it could not run.
+
+        Every failure path returns a REVERT result rather than raising, so the
+        caller always has a decision to settle and a patch state to unwind.
+        """
         from ..kernel.request_handlers import (
-            _maybe_finalize_kernel_patch,
-            _maybe_revert_kernel_patch,
             integrate_handler,
             materialize_unified_patch_snapshot,
         )
-        from hyperloom.inference_optimizer.session.session_paths import patches_dir
 
-        inputs = _collective_recovery.validate_integration_inputs(
-            result,
-            self.shared_state,
-        )
         patch = inputs.patch
         target_file = inputs.target_file
-        kernel_repo = inputs.kernel_repo
-        integration_id = inputs.integration_id
-        current_envs = inputs.extra_envs
-        patch_root = patches_dir(
-            self.session_dir,
-            "forge_collective_"
-            + hashlib.sha256(integration_id.encode("utf-8")).hexdigest()[:16],
-        )
-        backup_root = patch_root / "backup"
-        apply_checkpoint = patch_root / "apply_checkpoint.json"
-        backup_root.parent.mkdir(parents=True, exist_ok=True)
-        recovered = await _collective_recovery.recover_apply_state(
-            result,
-            checkpoint=apply_checkpoint,
-            backup_root=backup_root,
-            patch=patch,
-            target_file=target_file,
-        )
-        preapplied = recovered.preapplied
-        integ = recovered.integ
-        recovery_uncertain = recovered.uncertain
 
-        if integ is None and (not patch or not target_file):
-            integ = {
+        def _failed(error_class: str, error: str) -> dict:
+            return {
                 "status": "failed",
                 "decision": "REVERT",
-                "error_class": "collective_patch_missing",
-                "error": "collective KEEP is missing patch or target_file",
+                "error_class": error_class,
+                "error": error,
                 "patch_path": patch,
                 "target_file": target_file,
                 "apply_result": preapplied or {},
             }
 
+        if not patch or not target_file:
+            return _failed(
+                "collective_patch_missing",
+                "collective KEEP is missing patch or target_file",
+            )
+
         snapshot_dir = str(result.get("snapshot_dir") or "").strip()
-        if (
-            integ is None
-            and not snapshot_dir
-            and patch.endswith(".patch")
-            and kernel_repo
-        ):
+        if not snapshot_dir and patch.endswith(".patch") and inputs.kernel_repo:
             try:
                 snapshot_dir = await asyncio.to_thread(
                     materialize_unified_patch_snapshot,
                     patch_path=patch,
-                    repo_root=kernel_repo,
+                    repo_root=inputs.kernel_repo,
                     snapshot_dir=Path(patch).parent / "collective_snapshot",
                 )
             except Exception as exc:  # noqa: BLE001
                 log.exception(
                     "KERNEL entry collective snapshot materialization failed"
                 )
-                integ = {
-                    "status": "failed",
-                    "decision": "REVERT",
-                    "error_class": exc.__class__.__name__,
-                    "error": repr(exc),
+                return _failed(exc.__class__.__name__, repr(exc))
+
+        try:
+            keep_threshold = float(
+                os.environ.get("HYPERLOOM_COLLECTIVE_KEEP_PCT", "1.0")
+            )
+            if not math.isfinite(keep_threshold) or keep_threshold < 0:
+                raise ValueError(
+                    "HYPERLOOM_COLLECTIVE_KEEP_PCT must be finite and non-negative"
+                )
+            integ = await integrate_handler(
+                {
+                    "task_id": "collective_e2e",
+                    "kernel_id": "forge_collective",
+                    "source": "forge_collective",
                     "patch_path": patch,
                     "target_file": target_file,
-                    "apply_result": preapplied or {},
-                }
-        if integ is None:
-            try:
-                keep_threshold = float(
-                    os.environ.get(
-                        "HYPERLOOM_COLLECTIVE_KEEP_PCT",
-                        "1.0",
-                    )
-                )
-                if (
-                    not math.isfinite(keep_threshold)
-                    or keep_threshold < 0
-                ):
-                    raise ValueError(
-                        "HYPERLOOM_COLLECTIVE_KEEP_PCT must be finite and non-negative"
-                    )
-                integ = await integrate_handler(
-                    {
-                        "task_id": "collective_e2e",
-                        "kernel_id": "forge_collective",
-                        "source": "forge_collective",
-                        "patch_path": patch,
-                        "target_file": target_file,
-                        "kernel_repo": kernel_repo,
-                        "snapshot_dir": snapshot_dir,
-                        "backup_root": str(backup_root),
-                        "apply_checkpoint_path": str(apply_checkpoint),
-                        "preapplied_apply_result": preapplied,
-                        "extra_envs": current_envs,
-                        "defer_patch_finalize": True,
-                        "integration_id": integration_id,
-                        "keep_threshold_pct": keep_threshold,
-                    },
-                    session_dir=self.session_dir,
-                )
-                if not isinstance(integ, dict):
-                    raise TypeError(
-                        "Collective integration result must be a mapping"
-                    )
-            except Exception as exc:  # noqa: BLE001
-                log.exception("KERNEL entry collective integrate failed")
-                integ = {
-                    "status": "failed",
-                    "decision": "REVERT",
-                    "error_class": exc.__class__.__name__,
-                    "error": repr(exc),
-                    "patch_path": patch,
-                    "target_file": target_file,
-                    "apply_result": preapplied or {},
-                }
+                    "kernel_repo": inputs.kernel_repo,
+                    "snapshot_dir": snapshot_dir,
+                    "backup_root": str(backup_root),
+                    "apply_checkpoint_path": str(apply_checkpoint),
+                    "preapplied_apply_result": preapplied,
+                    "extra_envs": inputs.extra_envs,
+                    "defer_patch_finalize": True,
+                    "integration_id": inputs.integration_id,
+                    "keep_threshold_pct": keep_threshold,
+                },
+                session_dir=self.session_dir,
+            )
+            if not isinstance(integ, dict):
+                raise TypeError("Collective integration result must be a mapping")
+            return integ
+        except Exception as exc:  # noqa: BLE001
+            log.exception("KERNEL entry collective integrate failed")
+            return _failed(exc.__class__.__name__, repr(exc))
+
+    async def _settle_collective_integration(
+        self,
+        integ: dict,
+        *,
+        apply_checkpoint: Path,
+        backup_root: Path,
+        integration_id: str,
+        recovery_uncertain: bool,
+    ) -> str:
+        """Resolve the decision and finish the revert a non-KEEP owes.
+
+        Mutates ``integ`` in place and returns the settled decision. A patch the
+        session cannot prove reverted stays flagged ``recovery_required`` so the
+        next run picks it up.
+        """
+        from ..kernel.request_handlers import _maybe_revert_kernel_patch
 
         apply_result = integ.get("apply_result")
         manifest_path = (
@@ -2928,11 +2907,9 @@ class KernelPhase(PhaseHandler):
         )
         if not manifest_path and apply_checkpoint.is_file():
             try:
-                apply_result, manifest_status = (
-                    _load_collective_apply_checkpoint(
-                        apply_checkpoint,
-                        backup_root,
-                    )
+                apply_result, _manifest_status = _load_collective_apply_checkpoint(
+                    apply_checkpoint,
+                    backup_root,
                 )
                 integ["apply_result"] = apply_result
             except Exception as exc:  # noqa: BLE001
@@ -2965,30 +2942,73 @@ class KernelPhase(PhaseHandler):
             apply_result = {}
             integ["apply_result"] = apply_result
         manifest_path = str(apply_result.get("manifest_path") or "").strip()
-        if decision != "KEEP":
-            revert_result = integ.get("revert_result")
-            if (
-                manifest_path
-                and not _patch_lifecycle_complete(revert_result)
-            ):
-                revert_result = await asyncio.to_thread(
-                    _maybe_revert_kernel_patch,
-                    apply_result,
-                )
-                integ["revert_result"] = revert_result
-            revert_complete = (
-                not manifest_path
-                or _patch_lifecycle_complete(
-                    integ.get("revert_result")
-                )
+        if decision == "KEEP":
+            return decision
+
+        revert_result = integ.get("revert_result")
+        if manifest_path and not _patch_lifecycle_complete(revert_result):
+            integ["revert_result"] = await asyncio.to_thread(
+                _maybe_revert_kernel_patch,
+                apply_result,
             )
-            integration_complete = revert_complete and not recovery_uncertain
-            integ["integration_status"] = (
-                "complete" if integration_complete else "recovery_required"
+        revert_complete = not manifest_path or _patch_lifecycle_complete(
+            integ.get("revert_result")
+        )
+        integration_complete = revert_complete and not recovery_uncertain
+        integ["integration_status"] = (
+            "complete" if integration_complete else "recovery_required"
+        )
+        integ["integration_recovery_action"] = (
+            "" if integration_complete else "revert"
+        )
+        return decision
+
+    async def _integrate_collective(self, result: dict) -> None:
+        """Apply a collective patch and adopt it only after an E2E KEEP."""
+        from ..kernel.request_handlers import (
+            _maybe_finalize_kernel_patch,
+            _maybe_revert_kernel_patch,
+        )
+        from hyperloom.inference_optimizer.session.session_paths import patches_dir
+
+        inputs = _collective_recovery.validate_integration_inputs(
+            result,
+            self.shared_state,
+        )
+        integration_id = inputs.integration_id
+        current_envs = inputs.extra_envs
+        patch_root = patches_dir(
+            self.session_dir,
+            "forge_collective_"
+            + hashlib.sha256(integration_id.encode("utf-8")).hexdigest()[:16],
+        )
+        backup_root = patch_root / "backup"
+        apply_checkpoint = patch_root / "apply_checkpoint.json"
+        backup_root.parent.mkdir(parents=True, exist_ok=True)
+        recovered = await _collective_recovery.recover_apply_state(
+            result,
+            checkpoint=apply_checkpoint,
+            backup_root=backup_root,
+            patch=inputs.patch,
+            target_file=inputs.target_file,
+        )
+        integ = recovered.integ
+        if integ is None:
+            integ = await self._run_collective_integration(
+                result,
+                inputs,
+                preapplied=recovered.preapplied,
+                backup_root=backup_root,
+                apply_checkpoint=apply_checkpoint,
             )
-            integ["integration_recovery_action"] = (
-                "" if integration_complete else "revert"
-            )
+        decision = await self._settle_collective_integration(
+            integ,
+            apply_checkpoint=apply_checkpoint,
+            backup_root=backup_root,
+            integration_id=integration_id,
+            recovery_uncertain=recovered.uncertain,
+        )
+        apply_result = integ["apply_result"]
 
         state_snapshot = {
             "optimization_stack": list(
