@@ -46,7 +46,6 @@ class TestCandidateRawJsons:
 class TestRescueCandidatePaths:
     def test_no_env_no_default_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.delenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", raising=False)
-        monkeypatch.setattr(br, "_DEFAULT_RESCUE_PATHS", ())
         ws = tmp_path / "ws"
         ws.mkdir()
         assert br._rescue_candidate_paths(ws) == []
@@ -56,7 +55,6 @@ class TestRescueCandidatePaths:
         leak.parent.mkdir()
         leak.write_text("{}")
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak))
-        monkeypatch.setattr(br, "_DEFAULT_RESCUE_PATHS", ())
         ws = tmp_path / "ws"
         ws.mkdir()
         out = br._rescue_candidate_paths(ws)
@@ -72,7 +70,6 @@ class TestRescueCandidatePaths:
         unrelated = leak_dir / "unrelated.json"
         unrelated.write_text("{}")
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak_dir))
-        monkeypatch.setattr(br, "_DEFAULT_RESCUE_PATHS", ())
         ws = tmp_path / "ws"
         ws.mkdir()
         out = br._rescue_candidate_paths(ws)
@@ -85,7 +82,6 @@ class TestRescueCandidatePaths:
         nested = ws / "inferencex_result.json"
         nested.write_text("{}")
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(nested))
-        monkeypatch.setattr(br, "_DEFAULT_RESCUE_PATHS", ())
         out = br._rescue_candidate_paths(ws)
         assert nested.resolve() not in [p.resolve() for p in out]
 
@@ -96,7 +92,6 @@ class TestRescueCandidatePaths:
         old = leak.stat().st_mtime - 3600.0
         os.utime(leak, (old, old))
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak))
-        monkeypatch.setattr(br, "_DEFAULT_RESCUE_PATHS", ())
         ws = tmp_path / "ws"
         ws.mkdir()
         out = br._rescue_candidate_paths(
@@ -569,7 +564,6 @@ def test_rescue_candidate_paths_scan_inferencex_checkout(tmp_path, monkeypatch):
     """A leaked ``inferencex_result.json`` in the InferenceX checkout is a
     rescue candidate via the ``$INFERENCEX_PATH``-derived root."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", raising=False)
-    monkeypatch.setattr(br, "_DEFAULT_RESCUE_PATHS", ())
     ix_root = tmp_path / "InferenceX@abc123"
     ix_root.mkdir()
     leak = ix_root / "inferencex_result.json"
