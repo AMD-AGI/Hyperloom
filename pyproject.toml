@@ -285,9 +285,8 @@ omit = [
     "src/hyperloom/orchestrator/actions/executors/_server_patcher.py",
     # Breakdown collectors — exercised end-to-end by the reporter tests.
     "src/hyperloom/inference_optimizer/breakdown/collectors/*",
-    # Operator CLIs and A/B experiment scripts, not library code.
+    # Operator CLIs, not library code.
     "src/hyperloom/inference_optimizer/tools/*",
-    "src/hyperloom/inference_optimizer/experiments/*",
     # Subprocess transports for the robustness / critic sub-agent runtimes.
     "src/hyperloom/orchestrator/roles/robustness_agent.py",
     "src/hyperloom/orchestrator/roles/critic_agent.py",
