@@ -110,7 +110,6 @@ def _checkpoint(base_commit: str, best_commit: str, **overrides) -> dict:
 
 def _stub_submit_environment(monkeypatch) -> None:
     """Neutralize everything submit does outside the loop/recovery contract."""
-    monkeypatch.setenv("FORGE_BASELINE_GATE", "0")
     monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
 
 
@@ -300,7 +299,6 @@ def test_warm_start_best_is_exported_without_a_later_keep(tmp_path, monkeypatch)
         source_file=str(source),
         prompt_file=prompt,
         output_dir=output_dir,
-        test_command="python -c 'print(\"allclose: True\")'",
         source_type="triton",
         candidate={
             "name": "direct_kernel",
@@ -377,7 +375,6 @@ def test_nonzero_exit_with_sidecar_timings_never_exports_dirty_worktree(
         source_file=str(source),
         prompt_file=prompt,
         output_dir=output_dir,
-        test_command="python -c 'print(\"allclose: True\")'",
         source_type="triton",
         candidate={
             "operation": "direct_kernel",
@@ -394,49 +391,28 @@ def test_nonzero_exit_with_sidecar_timings_never_exports_dirty_worktree(
     assert not (output_dir / "optimized_versions").exists()
 
 
-def test_generated_drivers_stage_in_the_workspace_without_clobbering(tmp_path):
-    """Both driver generators write a hidden, unique driver into the workspace.
+def test_placeholder_driver_stages_in_workspace_without_clobbering(tmp_path):
+    """The task-preparer placeholder is written as a hidden unique file in the workspace.
 
     ``campaign_config._relative_file`` rejects a ``--driver`` outside
-    ``--workspace``, so a generated driver parked in the attempt output dir
-    kills every forge-loop run with "driver must be inside workspace". Staging
-    it in the workspace is therefore mandatory, and the ``.forge_driver_``
-    mkstemp naming is what keeps that safe: a unique hidden name can never
-    clobber a tracked file, ``git diff`` of tracked paths keeps it out of the
-    keep/revert patch, and ``_finalize_forge_workspace`` deletes it by prefix.
+    ``--workspace``, so every staged driver must live inside it. The
+    ``.forge_driver_`` prefix keeps it out of the keep/revert patch, and
+    ``_finalize_forge_workspace`` cleans it up by prefix after the run.
     """
     workspace = tmp_path / "worktree"
     workspace.mkdir()
     tracked_driver = workspace / "forge_driver.py"
     tracked_driver.write_text("TRACKED_DRIVER\n")
-    output_dir = tmp_path / "attempt"
-    output_dir.mkdir()
 
-    adapter = Path(
-        forge_submit._build_driver_adapter(
-            "python test.py",
-            str(workspace),
-        )
-    )
-    generated = Path(
-        forge_submit._autogen_forge_driver(
-            {"operation": "gemm"},
-            str(workspace / "kernel.py"),
-            workspace,
-        )
+    staged = Path(
+        forge_submit._write_generated_driver(workspace, forge_submit._TASK_PREPARER_PLACEHOLDER)
     )
 
-    assert {adapter.parent, generated.parent} == {workspace}
-    assert adapter.name.startswith(".forge_driver_")
-    assert generated.name.startswith(".forge_driver_")
-    assert adapter.name != generated.name
-    assert adapter.is_file() and generated.is_file()
-    # The tracked file is untouched and the attempt dir stays clean.
+    assert staged.parent == workspace
+    assert staged.name.startswith(".forge_driver_")
+    assert staged.is_file()
+    assert "task-preparer placeholder" in staged.read_text()
     assert tracked_driver.read_text() == "TRACKED_DRIVER\n"
-    assert list(output_dir.iterdir()) == []
-    assert sorted(path.name for path in workspace.iterdir()) == sorted(
-        ["forge_driver.py", adapter.name, generated.name]
-    )
 
 
 def test_finalize_removes_staged_drivers_from_the_live_repo(tmp_path):
@@ -1207,8 +1183,7 @@ def test_disagreeing_recovery_channels_keep_the_published_manifest(
             source_file=str(source),
             prompt_file=prompt,
             output_dir=output_dir,
-            test_command="python -c 'print(\"allclose: True\")'",
-            source_type="triton",
+                source_type="triton",
             candidate={"platform": "mi355x"},
             timeout_s=10,
             kernel_repo=str(repo),
@@ -1316,7 +1291,6 @@ def test_submit_timeout_salvages_only_the_validated_best_commit(
         source_file=str(source),
         prompt_file=prompt,
         output_dir=output_dir,
-        test_command="python -c 'print(\"allclose: True\")'",
         source_type="triton",
         candidate={"platform": "mi355x"},
         timeout_s=10,
@@ -1407,7 +1381,6 @@ def test_submit_timeout_export_failure_writes_no_promotable_artifacts(
         source_file=str(source),
         prompt_file=prompt,
         output_dir=output_dir,
-        test_command="python -c 'print(\"allclose: True\")'",
         source_type="triton",
         candidate={"platform": "mi355x"},
         timeout_s=10,
@@ -1458,7 +1431,6 @@ def test_submit_timeout_without_validated_recovery_discards_measurements(
         source_file=str(source),
         prompt_file=prompt,
         output_dir=output_dir,
-        test_command="python -c 'print(\"allclose: True\")'",
         source_type="triton",
         candidate={"platform": "mi355x"},
         timeout_s=10,
@@ -1508,8 +1480,7 @@ def test_submit_non_timeout_error_fails_and_uses_unique_retained_branch(
             source_file=str(source),
             prompt_file=prompt,
             output_dir=tmp_path / "results" / f"attempt-{attempt}",
-            test_command="python -c 'print(\"allclose: True\")'",
-            source_type="triton",
+                source_type="triton",
             candidate={"platform": "mi355x"},
             timeout_s=10,
             kernel_repo=str(repo),
@@ -1578,8 +1549,7 @@ def test_finalization_failure_does_not_swallow_the_forge_result(
             source_file=str(source),
             prompt_file=prompt,
             output_dir=output_dir,
-            test_command="python -c 'print(\"allclose: True\")'",
-            source_type="triton",
+                source_type="triton",
             candidate={"platform": "mi355x"},
             timeout_s=10,
             kernel_repo=str(repo),
@@ -1690,7 +1660,6 @@ def test_inplace_campaign_state_never_lands_in_the_live_repo(tmp_path, monkeypat
         source_file=str(source),
         prompt_file=prompt,
         output_dir=output_dir,
-        test_command="python -c 'print(\"allclose: True\")'",
         source_type="triton",
         candidate={"platform": "mi355x"},
         timeout_s=10,
@@ -1787,8 +1756,7 @@ def test_inplace_restore_failure_is_surfaced_without_losing_the_result(
             source_file=str(source),
             prompt_file=prompt,
             output_dir=output_dir,
-            test_command="python -c 'print(\"allclose: True\")'",
-            source_type="triton",
+                source_type="triton",
             candidate={"platform": "mi355x"},
             timeout_s=10,
             kernel_repo=str(repo),
@@ -1840,7 +1808,6 @@ def test_retained_worktree_collision_skips_without_delete_or_nogit_fallback(
         source_file=str(source),
         prompt_file=prompt,
         output_dir=output_dir,
-        test_command="python test.py",
         source_type="triton",
         candidate={"platform": "mi355x"},
         timeout_s=10,
@@ -1983,8 +1950,7 @@ def test_same_iteration_recovery_conflict_resolves_wholly_to_the_manifest(
             source_file=str(source),
             prompt_file=prompt,
             output_dir=output_dir,
-            test_command="python -c 'print(\"allclose: True\")'",
-            source_type="triton",
+                source_type="triton",
             candidate={"platform": "mi355x"},
             timeout_s=10,
             kernel_repo=str(repo),
@@ -2790,7 +2756,6 @@ def _submit_with_rewrite_route(tmp_path, monkeypatch, captured=None, **submit_ov
         "source_file": str(source),
         "prompt_file": prompt,
         "output_dir": output_dir,
-        "test_command": "python -c 'print(\"allclose: True\")'",
         "source_type": "triton",
         "candidate": {
             "name": "fused_gemm",
