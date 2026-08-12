@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import fcntl
 import json
+import os
 import subprocess
 import sys
 import time
@@ -22,6 +23,23 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import forge_collective as fc  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_environ():
+    """Restore ``os.environ`` after every test.
+
+    ``_inject_author_gateway_env`` mutates ``os.environ`` in place by design and
+    ``monkeypatch`` does not revert keys a function writes directly, so without
+    this snapshot the injected auth aliases pollute later auth/endpoint tests in
+    a full-suite run.
+    """
+    saved = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
 
 
 _CANDIDATE = {
@@ -73,7 +91,7 @@ def _rig(tmp_path: Path) -> dict:
 
 
 def _clear_author_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Register every author environment mutation with monkeypatch."""
+    """Drop inherited author environment so the derivation path is deterministic."""
     for key in _AUTHOR_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
 
