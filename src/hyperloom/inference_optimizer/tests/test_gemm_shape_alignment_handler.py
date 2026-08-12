@@ -31,10 +31,12 @@ class TestAlignForgeShapesForAiter:
         assert out != source
         assert out.endswith("forge_shapes.aiter_aligned.json")
         assert report["applied"] is True
-        assert set(load_shapes_json(out)) == {
-            (1088, 5120, 17408),
-            (2048, 5120, 17408),
-        }
+        aligned = set(load_shapes_json(out))
+        # The raw prefill M is gone; its fine-padded key plus a full power-of-two
+        # ladder up to the observed maximum take its place.
+        assert (1076, 5120, 17408) not in aligned
+        assert (1088, 5120, 17408) in aligned
+        assert {m for m, _, _ in aligned} == {16, 32, 64, 128, 256, 512, 1024, 1088, 2048}
 
     def test_sglang_also_uses_the_aiter_csv_lookup(self, tmp_path):
         source = _write_shapes(tmp_path, [(2087, 7168, 5120)])
@@ -91,11 +93,17 @@ class TestAlignForgeShapesForAiter:
         assert out == str(tmp_path / "absent.json")
         assert report is None
 
-    def test_already_aligned_shapes_report_no_change(self, tmp_path):
-        source = _write_shapes(tmp_path, [(1088, 5120, 17408), (2048, 5120, 17408)])
-        _out, report = krh._align_forge_shapes_for_aiter(
+    def test_alignment_is_idempotent(self, tmp_path):
+        source = _write_shapes(tmp_path, [(1076, 5120, 17408)])
+        first, _ = krh._align_forge_shapes_for_aiter(
             source,
             forge_framework="vllm-aiter",
-            workspace=tmp_path / "ws",
+            workspace=tmp_path / "ws1",
         )
+        second, report = krh._align_forge_shapes_for_aiter(
+            first,
+            forge_framework="vllm-aiter",
+            workspace=tmp_path / "ws2",
+        )
+        assert set(load_shapes_json(second)) == set(load_shapes_json(first))
         assert report["applied"] is False
