@@ -389,11 +389,6 @@ def conversations_path(session_dir: Path) -> Path:
     return trace_dir(session_dir) / "conversations.jsonl"
 
 
-def orchestration_turns_path(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/orchestration_turns.jsonl``."""
-    return trace_dir(session_dir) / "orchestration_turns.jsonl"
-
-
 def research_hints_md(session_dir: Path) -> Path:
     """``<sd>/research_hints.md`` — human-readable proven-prior hints
     collected by the research scout.
@@ -831,7 +826,6 @@ __all__ = [
     "kernel_agent_runs_root",
     "llm_calls_path",
     "manifest_path",
-    "orchestration_turns_path",
     "patches_dir",
     "failure_evidence_path",
     "reports_dir",

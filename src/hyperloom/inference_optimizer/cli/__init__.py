@@ -72,7 +72,6 @@ from .credentials import (
 )
 from .multi_node import (
     _prepare_multi_node_state as _prepare_multi_node_state,
-    _dump_mn_input_params as _dump_mn_input_params,
     _resolve_mn_backend as _resolve_mn_backend,
 )
 from .quantization import (
@@ -1555,10 +1554,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             v = (getattr(args, cli_attr, "") or "").strip()
             if v:
                 os.environ[env_key] = v
-
-    # Multi-node: dump resolved input params (CLI + env) for env->CLI tracing.
-    if nodes_resolved >= 2:
-        _dump_mn_input_params(args, nodes_resolved)
 
     # Stale aiter JIT lock sweep: killed runs leave locks that block subsequent starts (locks <5min preserved).
     aiter_sweep = clean_stale_aiter_locks()

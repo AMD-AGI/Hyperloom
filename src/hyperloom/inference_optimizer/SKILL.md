@@ -157,10 +157,10 @@ run silently degrades the next `baseline` by 5–30 % (shares VRAM +
 schedules on the same XCD); `current_best` cannot detect this
 pollution after the fact.
 > Inside a running session, the equivalent guard is enforced in
-> `orchestrator/kernel/request_handlers.py`: `restart_server_for_round` and
-> `apply_and_bench.py` run `kill_server` + `check_gpu_memory` before every
-> server restart. IR-1 above is the *outer* gate that fires before the
-> optimizer process exists.
+> `orchestrator/kernel/request_handlers.py` via
+> `_multi_node_server_lifecycle.py::restart_server_for_round`, which kills
+> stale servers before every restart. IR-1 above is the *outer* gate that
+> fires before the optimizer process exists.
 
 ### IR-2 — install.sh MUST succeed before every launch
 
