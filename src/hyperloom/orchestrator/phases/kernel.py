@@ -1506,6 +1506,7 @@ class KernelPhase(PhaseHandler):
         Replaying the lookup against the round's ``server.log`` separates the two.
         """
         from ..kernel.gemm_shape_coverage import (
+            parse_aiter_consulted_tables,
             parse_aiter_shape_lookups,
             tuned_config_coverage,
             tuned_csv_shapes,
@@ -1534,6 +1535,16 @@ class KernelPhase(PhaseHandler):
         report["runtime_lookup_miss"] = len(missed)
         report["runtime_lookup_hit"] = len(hit)
         report["artifact_applied"] = bool(report.get("covered"))
+        consulted = parse_aiter_consulted_tables(log_text)
+        report["consulted_tables"] = sorted(consulted)[:8]
+        wanted = {Path(path).name for path in csv_paths}
+        if consulted and not (wanted & {Path(name).name for name in consulted}):
+            # The runtime resolved a different quantisation variant's table, so
+            # the tuner targeted a kernel this server never dispatches to.
+            report["artifact_applied"] = False
+            report["not_applied_reason"] = "artifact_table_not_consulted"
+        elif not report["artifact_applied"]:
+            report["not_applied_reason"] = "no_shape_key_matched"
         return report
 
     def _merge_gemm_candidate_with_runtime(

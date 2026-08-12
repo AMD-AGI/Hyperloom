@@ -32,9 +32,9 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
-# Emitted by aiter on every tuned-config lookup miss.
+# Emitted by aiter on every tuned-config lookup miss, naming the table consulted.
 _AITER_SHAPE_MISS_RE = re.compile(
-    r"shape is M:(\d+), N:(\d+), K:(\d+)(?:[^\n]*?)not found tuned config",
+    r"shape is M:(\d+), N:(\d+), K:(\d+)(?:[^\n]*?)not found tuned config in (\S+?),",
 )
 # Emitted by aiter (only under AITER_LOG_TUNED_CONFIG) on a lookup hit.
 _AITER_SHAPE_HIT_RE = re.compile(
@@ -206,9 +206,21 @@ def write_shapes_json(shapes: Iterable[Shape], destination: Path) -> str:
 
 def parse_aiter_shape_lookups(log_text: str) -> tuple[set[Shape], set[Shape]]:
     """Return the ``(missed, hit)`` GEMM shapes aiter reported in a server log."""
-    missed = {(int(m), int(n), int(k)) for m, n, k in _AITER_SHAPE_MISS_RE.findall(log_text or "")}
+    missed = {(int(m), int(n), int(k)) for m, n, k, _table in _AITER_SHAPE_MISS_RE.findall(log_text or "")}
     hit = {(int(m), int(n), int(k)) for m, n, k, _padded in _AITER_SHAPE_HIT_RE.findall(log_text or "")}
     return missed, hit
+
+
+def parse_aiter_consulted_tables(log_text: str) -> set[str]:
+    """Return the tuned-config files the runtime actually looked in.
+
+    aiter keys each quantisation variant to its own table and env var (plain
+    block-scale vs ``..._BPRESHUFFLE``, for instance). When the server dispatches
+    to a variant the tuner did not target, the tuned CSV is never consulted at
+    all -- a different failure from a CSV that is consulted but has no matching
+    row, and one worth naming separately.
+    """
+    return {table for _m, _n, _k, table in _AITER_SHAPE_MISS_RE.findall(log_text or "")}
 
 
 def tuned_csv_shapes(path: str | Path) -> set[Shape]:
