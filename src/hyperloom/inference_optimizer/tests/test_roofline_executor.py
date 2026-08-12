@@ -129,6 +129,35 @@ async def test_happy_path_promotes_profile_and_caches_trace_analyze(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_roofline_passes_resolved_framework_to_trace_analysis(tmp_path, monkeypatch):
+    """The trace-analysis payload carries the same framework as the profile."""
+    state = _state()
+    state.framework = "xdit"
+    captured: list[dict] = []
+
+    async def fake_profile(_ctx):
+        return _profile_success("/tmp/xdit.trace.json.gz")
+
+    async def fake_trace_analyze(payload, *, session_dir):
+        captured.append(dict(payload))
+        return _trace_analyze_success()
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
+        fake_profile,
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+        fake_trace_analyze,
+    )
+
+    result = await RooflineExecutor(shared_state=state)(_ctx(tmp_path))
+
+    assert result["status"] == "succeeded"
+    assert captured[0]["framework"] == "xdit"
+
+
+@pytest.mark.asyncio
 async def test_profile_retry_records_successful_child_runtime(tmp_path, monkeypatch):
     state = _state()
     state.framework = "vllm"

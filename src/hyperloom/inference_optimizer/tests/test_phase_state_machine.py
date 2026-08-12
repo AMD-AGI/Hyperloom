@@ -90,6 +90,11 @@ def test_llm_proposable_set_drops_coordinator_internal_actions():
     framework = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["FRAMEWORK_AGENT"]
     assert "framework" not in framework
     assert "integrate_patch" in framework
+    # Investigation reaches the two mid-chain phases but not the wind-down ones.
+    assert "specialist" in framework
+    assert "specialist" in phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["KERNEL_AGENT"]
+    assert "specialist" not in phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["SWEEP"]
+    assert "specialist" not in phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["CLOSE"]
 
 
 def test_is_action_llm_proposable_in_phase_handles_unknowns():

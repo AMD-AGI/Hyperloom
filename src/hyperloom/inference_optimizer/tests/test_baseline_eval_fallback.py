@@ -1073,6 +1073,15 @@ def test_end_to_end_flagged_script_is_scrubbed_before_launch(tmp_path):
         '            *)                echo "Unknown parameter: $1"; return 1 ;;\n'
         "        esac\n"
         "    done\n"
+        "}\n"
+        # This test runs the patcher unmocked, so the file has to carry the
+        # anchors a real checkout carries: the hook now refuses to launch an
+        # eval whose patches could not be applied.
+        "run_eval() {\n"
+        '    export EVAL_RESULT_DIR="$results_dir"\n'
+        "}\n"
+        "append_lm_eval_summary() {\n"
+        '    mv -f "$jf" ./ || echo "WARN: failed to move ${jf}" >&2\n'
         "}\n",
         encoding="utf-8",
     )

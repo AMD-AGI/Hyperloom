@@ -137,6 +137,47 @@ eval with a small `MAGPIE_EVAL_LIMIT` shrinks that margin sharply and can make
 the gate noise-sensitive — prefer the full task set whenever a gate decision
 depends on the result.
 
+### Eval generation bounds
+
+InferenceX runs lm-eval with `max_tokens=min(16384, ctx-4096)`, so a sample that
+does not converge spends that entire budget, and 1319 of them can consume the
+whole baseline timeout. Every generation request is therefore capped, and the
+terminators the model declares are supplied with it — lm-eval carries a single
+`eos_string` and its concurrent request path does not send even that one, so a
+model like Qwen3, which declares `eos_token_id` `[151645, 151643]`, would
+otherwise run with no end-of-turn stop condition at all.
+
+Both are applied inside the eval process rather than passed in, which is what
+keeps them equal across the baseline and candidate arms. **That symmetry is the
+whole point**: the gate compares a *difference* of two scores, so a bound or a
+terminator that reaches only one arm biases the verdict instead of merely
+limiting it. Prefer leaving these alone; if you do change one, change it for the
+whole session rather than a single round.
+
+Each run reports what it applied, to stderr as `HYPERLOOM_EVAL_BOUNDS_SUMMARY`
+and to `hyperloom_eval_bounds.json` in the result dir, including how many
+generations hit the ceiling. Check `truncated` there before concluding a score
+is low for any other reason.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYPERLOOM_EVAL_MAX_TOKENS` | `4096` | Per-request generation ceiling. Never raises a lower ceiling a task already asked for. `0` disables the cap and restores the full upstream budget — a degenerate model then costs the whole timeout again. An unparseable value falls back to the default rather than to "unbounded". |
+| `HYPERLOOM_EVAL_DERIVE_STOP` | On | Whether to read the model's `generation_config.json` / `tokenizer_config.json` for its terminators. Resolution is cache-only and never downloads, so an uncached repo id simply derives nothing. Set to `0` / `false` / `no` / `off` to reproduce an upstream number exactly, or for a server that rejects `stop_token_ids` (vLLM and SGLang both accept it). |
+| `HYPERLOOM_EVAL_STOP_STRINGS` | Unset (derived) | Explicit terminators, separated by ASCII unit separator `0x1f` — commas and newlines are themselves legitimate stop strings. Outranks the derived values; use it when a checkpoint's metadata is absent or wrong. |
+
+Set explicit terminators like this, quoting so the separator is a real `0x1f`
+byte:
+
+```bash
+export HYPERLOOM_EVAL_STOP_STRINGS=$'<|im_end|>\x1f<|endoftext|>'
+```
+
+Upstream keeps at most four stop strings, and the task's own `until` list is what
+its answer extraction depends on, so that list is never displaced: an explicit
+`HYPERLOOM_EVAL_STOP_STRINGS` goes first, the task's list next, and derived
+terminators last. Derived token ids travel separately as `stop_token_ids`, which
+has no such limit, so nothing is lost on a server that supports it.
+
 ---
 
 ## Kernel-opt backend selection
@@ -597,6 +638,14 @@ env var controls it; it is always present (zeroed on pre-trace sessions).
 To get the single "total tokens for this run" number, read
 `token_usage.session_total.grand_total` (all-in) or `.total_in_out`
 (prompt+completion only).
+
+---
+
+## Phase tuning
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC` | Optional | `10800` | Absolute minimum remaining session seconds to justify opening a new macro-cycle. For bounded sessions the effective floor is `min(this, max_minutes * 60 * 0.15)` so shorter sessions are not unconditionally blocked. |
 
 ---
 

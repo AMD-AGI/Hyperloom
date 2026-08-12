@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Any
+
+from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 
 
 def _shared_state_module():
@@ -22,6 +25,9 @@ def _shared_state_module():
 # Failure rows rendered into the prompt, and per-row excerpt budget.
 _FAILURES_RENDERED = 10
 _FAILURE_EXCERPT_CHARS = 600
+
+# Width budget for artifact anchors; sized so a full uuid4 fid still fits ws=.
+_VARIANT_ANCHOR_MAX_CHARS = 100
 
 
 class _RenderMixin:
@@ -144,7 +150,7 @@ class _RenderMixin:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-tick ``=== Phase ===`` block (≤6 lines). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate.
+        """Render the per-tick ``=== Phase ===`` block (≤7 lines). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate; the mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable.
 
         Args:
             budget_pct (dict[str, float] | None): Per-phase budget fractions;
@@ -158,6 +164,9 @@ class _RenderMixin:
             DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
             DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
             PHASE_EXPLORE,
+            PHASE_FRAMEWORK_AGENT,
+            PHASE_KERNEL_AGENT,
+            PHASE_SWEEP,
             _phase_budget_total_seconds,
             llm_proposable_actions_for,
             normalize_budget_pct,
@@ -165,6 +174,7 @@ class _RenderMixin:
             phase_cumulative_seconds,
             phase_elapsed_seconds,
             session_remaining_seconds,
+            should_reloop_to_explore,
         )
 
         phase = (self.phase or "").strip().upper() or "UNSET"
@@ -231,6 +241,24 @@ class _RenderMixin:
             if phase_remaining_pct is not None:
                 force_line += f" phase_remaining_pct={phase_remaining_pct:.3f}"
             lines.append(force_line)
+        # Whether deferring work to a later cycle is still a real option. Mirrors
+        # the SWEEP-exit decision, so it is a projection before SWEEP is reached.
+        if phase in (PHASE_FRAMEWORK_AGENT, PHASE_EXPLORE, PHASE_KERNEL_AGENT, PHASE_SWEEP):
+            reloop, evidence = should_reloop_to_explore(self, now_unix=now_unix)
+            feasible = reloop and (self.framework_agent_phase_enabled or self.explore_enabled)
+            reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
+            threshold = evidence.get("min_remaining_sec_effective")
+            if threshold is not None:
+                reloop_line += f" threshold_sec={int(threshold)}"
+            session_remaining = session_remaining_seconds(self, now_unix=now_unix)
+            if session_remaining is not None:
+                reloop_line += f" session_remaining_sec={int(session_remaining)}"
+            blocked = evidence.get("reloop_blocked")
+            if blocked:
+                reloop_line += f" blocked={blocked}"
+            if phase != PHASE_SWEEP:
+                reloop_line += " (projected)"
+            lines.append(reloop_line)
         return "\n".join(lines)
 
     def to_phase_budget_telemetry(
@@ -372,11 +400,14 @@ class _RenderMixin:
             out.append(f"  · (truncated to {max_lines} lines; see runtime/recipe_kb/.kb_warm.json for full snapshot)")
         return "\n".join(out)
 
-    def to_gaps_summary(self, *, max_entries: int = 10) -> str:
+    def to_gaps_summary(self, *, max_entries: int = 10, max_attempts: int = 0) -> str:
         """Render :attr:`gaps` for prompt injection; empty when no gaps. Capped at ``max_entries`` newest rows.
 
         Args:
             max_entries (int): Maximum number of newest gap rows to render.
+            max_attempts (int): When > 0, include the ``max_attempts`` most
+                recent attempt rows for each gap.  0 (default) shows the count
+                and last action only (prompt-compact mode).
 
         Returns:
             str: The rendered gaps block, or ``""`` when no gaps exist.
@@ -409,6 +440,15 @@ class _RenderMixin:
                 if isinstance(last, dict):
                     last_tag = f" last={last.get('action', '?')}:{last.get('outcome', '?')}"
             rows.append(f"  - {cid} [{layer}/{severity}] {symptom}\n      attempts={attempt_n}{last_tag}")
+            if max_attempts > 0 and isinstance(attempts, list):
+                for a in attempts[-max_attempts:]:
+                    if not isinstance(a, dict):
+                        continue
+                    fid = a.get("failure_id") or ""
+                    rows.append(
+                        f"        attempt: {a.get('action', '?')} outcome={a.get('outcome', '?')}"
+                        f" err={a.get('error_class', '')}" + (f" fid={fid}" if fid else "")
+                    )
         if len(ordered) > max_entries:
             rows.append(f"  · (+{len(ordered) - max_entries} older gaps elided; see state.json `gaps[]`)")
         return "\n".join(rows)
@@ -714,9 +754,33 @@ class _RenderMixin:
         if reason and reason not in ("not_keep", "gain_below_threshold"):
             ratio = entry.get("wall_clock_ratio_vs_baseline")
             ratio_s = f" {ratio:.2f}x" if isinstance(ratio, (int, float)) and ratio > 0 else ""
-            parts.append(f"reason={reason[:120]}{ratio_s}")
+            # error_excerpt on variant rows is tail-1200 (boot assertion at end);
+            # flatten+defang prevents section-header injection from untrusted log text.
+            body = _flatten_for_prompt(str(entry.get("error_excerpt") or reason))
+            parts.append(f"reason={body[-120:]}{ratio_s}")
+
+        # Paths show last two segments; full path available via get_failure(fid).
+        # Progressive degradation: drop log=, then ws=, keeping fid= alone.
+        fid = str(entry.get("failure_id") or "").strip()
+        ws_raw = str(entry.get("workspace") or "").strip()
+        log_raw = str(entry.get("server_log_path") or "").strip()
+        ws_seg = "/".join(PurePosixPath(ws_raw).parts[-2:]) if ws_raw else ""
+        log_seg = "/".join(PurePosixPath(log_raw).parts[-2:]) if log_raw else ""
+        anchors = (
+            ([f"fid={fid}"] if fid else [])
+            + ([f"ws={ws_seg}"] if ws_seg else [])
+            + ([f"log={log_seg}"] if log_seg else [])
+        )
+        anchor_s = ("  " + " ".join(anchors)) if anchors else ""
+        if len(anchor_s) > _VARIANT_ANCHOR_MAX_CHARS and log_seg:
+            anchors = [a for a in anchors if not a.startswith("log=")]
+            anchor_s = ("  " + " ".join(anchors)) if anchors else ""
+        if len(anchor_s) > _VARIANT_ANCHOR_MAX_CHARS and ws_seg:
+            anchors = [a for a in anchors if not a.startswith("ws=")]
+            anchor_s = ("  " + " ".join(anchors)) if anchors else ""
+
         suffix = "  " + " ".join(parts) if parts else ""
-        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}{suffix}"
+        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}{suffix}{anchor_s}"
 
     @staticmethod
     def _enrich_with_tested_gain(

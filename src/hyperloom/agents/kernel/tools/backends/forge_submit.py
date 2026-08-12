@@ -236,6 +236,67 @@ def _resolve_gpu_target(candidate: dict) -> str:
     )
 
 
+def _known_gpu_model(value: str) -> str:
+    """Return the canonical card name, or "" when this is not one.
+
+    The command line and the environment must agree on the model, so both
+    render it through here rather than each trusting what it was handed.
+    """
+    model = str(value or "").strip().lower()
+    return model if model in _PLATFORM_TO_GFX else ""
+
+
+def _resolve_gpu_type(candidate: dict) -> str:
+    """Resolve the hardware model: env GPU_TYPE -> candidate platform.
+
+    KernelForge files a kernel's experience under the card it was measured on,
+    not under the architecture it was compiled for. The two are not
+    interchangeable: mi300x, mi308x and mi325x all build for gfx942 while
+    differing in bandwidth and cache, so a recipe tuned on one is not a
+    recommendation for the others, and the target cannot be reversed into a
+    model. Returns "" when the model is unknown; KernelForge then declines to
+    read or write rather than filing under an address nothing resolves to.
+    """
+    offered = (
+        os.environ.get("GPU_TYPE"),
+        candidate.get("platform"),
+        candidate.get("arch"),
+    )
+    for raw in offered:
+        model = _known_gpu_model(raw)
+        if model:
+            return model
+    # Nothing downstream fails on this: the loop optimizes, the result looks
+    # ordinary, and only the experience is missing. So it is said here.
+    rejected = ", ".join(repr(str(v)) for v in offered if str(v or "").strip())
+    log.warning(
+        "forge: no known hardware model for this run%s; kernel experience is "
+        "addressed by model, so this run has no address to read or record one. "
+        "Set GPU_TYPE to a card such as %s.",
+        f" (offered {rejected})" if rejected else "",
+        ", ".join(sorted(_PLATFORM_TO_GFX)),
+    )
+    return ""
+
+
+def _apply_gpu_type_env(env: dict, gpu_type: str) -> None:
+    """Hand the child a hardware model, or none at all.
+
+    The child inherits this process's environment, where ``GPU_TYPE`` is also
+    accepted as a way to name a gfx target. Passing that through would file the
+    run's experience under ``gfx950`` as though it were a card, so an
+    unresolved model is removed rather than forwarded: KernelForge then declines
+    to read or write instead of addressing a record by a value that means
+    something else. The reason it could not be resolved is reported by
+    :func:`_resolve_gpu_type`, which is where it is known.
+    """
+    model = _known_gpu_model(gpu_type)
+    if model:
+        env["GPU_TYPE"] = model
+    else:
+        env.pop("GPU_TYPE", None)
+
+
 def _normalize_gpu_target(value: str) -> str:
     """Return a canonical lowercase gfx architecture or an empty string."""
     normalized = str(value or "").strip().lower()
@@ -660,9 +721,10 @@ def _prepare_worktree_nogit(
        installed package — torch, vllm, ... — 5-15 GB per submit, risking
        ENOSPC). Ignores ``.git``, ``__pycache__``, ``*.egg-info``, ``build/``,
        ``dist/`` to keep the copy small and fast.
-    3. ``git init`` + sets ``user.name``/``user.email`` + ``git add -A`` +
-       initial commit so Forge's ``IterationLoop`` (which uses ``git
-       commit``/``reset --hard``) can manage its iterative keep/revert loop.
+    3. ``git init`` + sets ``user.name``/``user.email`` + excludes regenerated
+       bytecode caches + ``git add -A`` + initial commit so Forge's
+       ``IterationLoop`` (which uses ``git commit``/``reset --hard``) can manage
+       its iterative keep/revert loop.
     4. Returns ``(scratch_dir, scratch_kernel_file, base_commit)`` with the same
        signature as :func:`_prepare_worktree`.
 
@@ -744,23 +806,40 @@ def _prepare_worktree_nogit(
         shutil.rmtree(scratch_dir, ignore_errors=True)
         return None
 
+    def _scaffold(cmds: list[list[str]]) -> bool:
+        for cmd in cmds:
+            proc = _run(cmd, timeout=120)
+            if proc.returncode != 0:
+                log.warning(
+                    "forge: non-git scaffold git init step failed: %s -> %s",
+                    cmd,
+                    proc.stderr.strip() or proc.stdout.strip(),
+                )
+                shutil.rmtree(scratch_dir, ignore_errors=True)
+                return False
+        return True
+
     # Bootstrap a real git repo so IterationLoop's commit/revert works.
-    for cmd in [
-        ["git", "-C", str(scratch_dir), "init", "-b", branch],
-        ["git", "-C", str(scratch_dir), "config", "user.name", "forge-bot"],
-        ["git", "-C", str(scratch_dir), "config", "user.email", "forge-bot@local"],
-        ["git", "-C", str(scratch_dir), "add", "-A"],
-        ["git", "-C", str(scratch_dir), "commit", "-q", "-m", "forge: scratch baseline"],
-    ]:
-        proc = _run(cmd, timeout=120)
-        if proc.returncode != 0:
-            log.warning(
-                "forge: non-git scaffold git init step failed: %s -> %s",
-                cmd,
-                proc.stderr.strip() or proc.stdout.strip(),
-            )
-            shutil.rmtree(scratch_dir, ignore_errors=True)
-            return None
+    if not _scaffold(
+        [
+            ["git", "-C", str(scratch_dir), "init", "-b", branch],
+            ["git", "-C", str(scratch_dir), "config", "user.name", "forge-bot"],
+            ["git", "-C", str(scratch_dir), "config", "user.email", "forge-bot@local"],
+        ]
+    ):
+        return None
+
+    # Must precede the baseline `git add -A`, so the pattern is in force for
+    # every commit the loop later makes against this repository.
+    _exclude_bytecode_caches(scratch_dir)
+
+    if not _scaffold(
+        [
+            ["git", "-C", str(scratch_dir), "add", "-A"],
+            ["git", "-C", str(scratch_dir), "commit", "-q", "-m", "forge: scratch baseline"],
+        ]
+    ):
+        return None
 
     base_commit_proc = _run(["git", "-C", str(scratch_dir), "rev-parse", "HEAD"], timeout=30)
     if base_commit_proc.returncode != 0:
@@ -1239,6 +1318,7 @@ sys.exit("forge task-preparer placeholder: no measurement driver authored yet")
 
 
 _GENERATED_DRIVER_GLOB = ".forge_driver_*.py"
+_BYTECODE_CACHE_GLOB = "__pycache__/"
 
 
 def _exclude_generated_drivers(workspace: Path) -> None:
@@ -1281,6 +1361,34 @@ def _git_exclude_file(workspace: Path) -> Path | None:
     if not common.is_absolute():
         common = (Path(workspace) / common).resolve()
     return common / "info" / "exclude"
+
+
+def _exclude_bytecode_caches(workspace: Path) -> None:
+    """Keep regenerated bytecode caches out of the scratch repository's commits.
+
+    Importing the sources the loop edits rewrites ``__pycache__`` beside them.
+    The scratch copy skips the caches that existed, but nothing stops a broad
+    ``git add`` from staging the ones written while the loop runs: they then
+    reach the published patch as binary hunks, and ``git apply`` refuses those
+    for lacking a full index line, so the solution cannot be replayed.
+
+    Only the throwaway scratch repository needs this. Real repositories carry
+    their own ignore rules, and an entry written there would outlive the run.
+    """
+    exclude = _git_exclude_file(workspace)
+    if exclude is None:
+        return
+    try:
+        existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+        if _BYTECODE_CACHE_GLOB in existing.split():
+            return
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with open(exclude, "a", encoding="utf-8") as handle:
+            if existing and not existing.endswith("\n"):
+                handle.write("\n")
+            handle.write(_BYTECODE_CACHE_GLOB + "\n")
+    except OSError as error:
+        log.warning("forge: could not exclude bytecode caches from git: %s", error)
 
 
 def _restore_generated_driver_exclude(workspace: Path) -> None:
@@ -3305,6 +3413,7 @@ def _run_loop_via_cli(
     max_hours: float,
     branch: str,
     gpu_target: str,
+    gpu_type: str,
     fellow: str,
     program_md_file: str,
     invocation_spec_file: str,
@@ -3353,6 +3462,7 @@ def _run_loop_via_cli(
     if forge_root:
         env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
     env["GPU_TARGET"] = gpu_target
+    _apply_gpu_type_env(env, gpu_type)
     # Fellow stability defaults scoped to this child env only.
     _apply_fellow_env(env)
     # KernelForge owns content-addressed AITER cache invalidation. Do not set
@@ -3399,6 +3509,13 @@ def _run_loop_via_cli(
         "--result-json",
         str(result_json),
     ]
+    # Named on the command line as well as in the environment: KernelForge
+    # skips its KB and reports ``missing_gpu_type`` rather than stopping, so an
+    # identity that arrived only by inheritance could be lost without the run
+    # ever failing. Passed even when it resolves to nothing, because an omitted
+    # option is how KernelForge is told to use its own default -- saying nothing
+    # would file the run under a card it may never have run on.
+    cmd += ["--gpu-type", _known_gpu_model(gpu_type)]
     # Provider selection. KernelForge defaults agent_backend to "auto", which
     # resolves to its claude provider; an OpenAI-only deployment has no Anthropic
     # credential and no Claude CLI login, so every attempt would REVERT on "Not
@@ -3569,6 +3686,7 @@ def _run_rewrite_via_cli(
     driver_preparation: bool,
     snr_threshold: float,
     gpu_target: str,
+    gpu_type: str,
     max_iters: int,
     max_hours: float,
     branch: str,
@@ -3625,6 +3743,7 @@ def _run_rewrite_via_cli(
     if forge_root:
         env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
     env["GPU_TARGET"] = gpu_target
+    _apply_gpu_type_env(env, gpu_type)
     _apply_fellow_env(env)
     # Same provider pin the generic loop applies through argv, which this command
     # has no options for: it takes no --agent-backend, so its Config reads these.
@@ -3669,6 +3788,10 @@ def _run_rewrite_via_cli(
         "--result-json",
         str(result_json),
     ]
+    # Named on the command line for the same reason the loop names it: the
+    # rewrite producer files its port under an identity the model is part of,
+    # and an unresolved model has to be said rather than left out.
+    cmd += ["--gpu-type", _known_gpu_model(gpu_type)]
     if source_entry:
         cmd += ["--source-entry", source_entry]
     if source_language:
@@ -3814,6 +3937,7 @@ def _run_rewrite_attempt(
     forge_log: Path,
     invocation_spec_file: str,
     snr_threshold: float,
+    gpu_type: str,
     max_iters: int,
     max_hours: float,
     deadline_unix: float,
@@ -3843,6 +3967,7 @@ def _run_rewrite_attempt(
         driver_preparation=bool(route.capabilities and route.capabilities.driver_preparation),
         snr_threshold=snr_threshold,
         gpu_target=spec.gpu_target,
+        gpu_type=gpu_type,
         max_iters=max_iters,
         max_hours=max_hours,
         branch=spec.branch,
@@ -4295,6 +4420,7 @@ def submit(
         )
         source_framework = _resolve_framework(candidate, source_file)
         gpu_target = _resolve_gpu_target(candidate)
+        gpu_type = _resolve_gpu_type(candidate)
         # Decided before any driver exists, because the rewrite route brings its
         # own dual-mode driver rather than the generic harness.
         rewrite_route = _flydsl_rewrite.evaluate_rewrite_route(
@@ -4501,6 +4627,7 @@ def submit(
                 forge_log=forge_log,
                 invocation_spec_file=invocation_spec_file,
                 snr_threshold=snr_threshold,
+                gpu_type=gpu_type,
                 max_iters=max_iters,
                 max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),
                 deadline_unix=max(time.time() + 1.0, started + timeout_s),
@@ -4520,6 +4647,7 @@ def submit(
             max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),
             branch=branch,
             gpu_target=gpu_target,
+            gpu_type=gpu_type,
             fellow=fellow,
             program_md_file=str(prompt_file),
             invocation_spec_file=invocation_spec_file,

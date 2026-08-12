@@ -691,6 +691,7 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         max_hours=1.0,
         branch="forge/session/kernel",
         gpu_target="gfx950",
+        gpu_type="mi355x",
         fellow="triton-fellow",
         program_md_file=str(program),
         invocation_spec_file="",
@@ -748,6 +749,7 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         "--max-hours": "1.0",
         "--git-branch": "forge/session/kernel",
         "--gpu-target": "gfx950",
+        "--gpu-type": "mi355x",
         "--fellow": "triton-fellow",
         "--experiments-dir": str(experiments),
         "--experiment-id": "hyperloom",
@@ -765,6 +767,10 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     assert "--kernel-kind" not in command
 
     assert captured["env"]["GPU_TARGET"] == "gfx950"
+    # The card, alongside the target it builds for: KernelForge addresses a
+    # kernel's experience by the former, and declines to read or write without
+    # it, so a run that carried only the target would accumulate nothing.
+    assert captured["env"]["GPU_TYPE"] == "mi355x"
     assert captured["env"]["PYTHONPATH"].startswith("/forge/src")
     # Isolated process group -- the timeout kill signals the group, not just pid.
     assert captured["popen_kwargs"]["start_new_session"] is True
@@ -904,6 +910,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             max_hours=1.0,
             branch=f"forge/test/{index}",
             gpu_target="gfx950",
+            gpu_type="mi355x",
             fellow=fellow,
             program_md_file="",
             invocation_spec_file="",
@@ -997,6 +1004,7 @@ def test_cli_timeout_recovers_only_this_run_s_checkpoint(tmp_path, monkeypatch):
         max_hours=1.0,
         branch="forge/session/kernel",
         gpu_target="gfx950",
+        gpu_type="mi355x",
         fellow="triton-fellow",
         program_md_file="",
         invocation_spec_file="",
@@ -1632,6 +1640,48 @@ def test_nogit_scratch_bootstraps_a_committable_scratch_repo(tmp_path):
     assert source.read_text() == "pass\n"
 
 
+def test_nogit_scratch_keeps_regenerated_bytecode_out_of_the_patch(tmp_path):
+    """Caches written while the loop runs must not reach the published diff.
+
+    The scratch copy skips pre-existing caches, but the loop imports what it
+    edits and writes new ones. Committed, they reach the patch as binary hunks
+    with no full index line, which ``git apply`` refuses — so a solution
+    published to the KB could not be replayed.
+    """
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = source_root / "kernel.py"
+    source.write_text("pass\n")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    prepared = forge_submit._prepare_worktree_nogit(
+        str(source),
+        str(source_root),
+        output_dir,
+        "forge/session/kernel-attempt",
+    )
+
+    assert prepared is not None
+    workspace, kernel, base_commit = prepared
+
+    # Stands in for the import that happens the moment the loop benchmarks its
+    # edit, which is what actually produced the unappliable patch.
+    cache = Path(workspace) / "__pycache__"
+    cache.mkdir()
+    (cache / "kernel.cpython-312.pyc").write_bytes(b"\xcb\x0d\x0d\x0a\x00binary")
+
+    Path(kernel).write_text("OPTIMIZED\n")
+    _git(workspace, "add", "-A")
+    _git(workspace, "commit", "-m", "iter1")
+
+    patch = _git(workspace, "diff", "--binary", base_commit, "HEAD")
+    assert "__pycache__" not in patch
+    assert "kernel.py" in patch
+    # Excluded, not merely unstaged: a later `add -A` cannot pick it up either.
+    assert _git(workspace, "status", "--porcelain") == ""
+
+
 def test_inplace_campaign_state_never_lands_in_the_live_repo(tmp_path, monkeypatch):
     """An in-place campaign must leave the developer's checkout as it found it.
 
@@ -1896,6 +1946,7 @@ def test_unclearable_stale_artifact_aborts_before_starting_a_campaign(
             max_hours=1.0,
             branch="forge/session/kernel",
             gpu_target="gfx950",
+            gpu_type="mi355x",
             fellow="triton-fellow",
             program_md_file="",
             invocation_spec_file="",
@@ -3163,6 +3214,7 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         driver_preparation=True,
         snr_threshold=30.0,
         gpu_target="gfx950",
+        gpu_type="mi355x",
         max_iters=8,
         max_hours=2.0,
         branch="forge/session/fused-gemm",
@@ -3188,6 +3240,7 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         "--invocation-spec-file": str(invocation_spec),
         "--snr-threshold": "30.0",
         "--gpu-target": "gfx950",
+        "--gpu-type": "mi355x",
         "--max-iters": "8",
         "--framework": "vllm",
         "--git-branch": "forge/session/fused-gemm",
@@ -3198,6 +3251,9 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         assert command[command.index(flag) + 1] == value, flag
     # A boolean switch carries no value, so it is checked apart from the pairs.
     assert "--prepare-driver" in command
+    # The rewrite producer files its port under the same identity scheme, so it
+    # needs the card as much as the loop does.
+    assert captured["popen_kwargs"]["env"]["GPU_TYPE"] == "mi355x"
     # The producer is aimed one reserve short of this process's hard kill, so it
     # publishes the apply-back inside its own budget instead of racing the kill.
     producer_deadline = float(command[command.index("--deadline-unix") + 1])
@@ -3275,6 +3331,7 @@ def test_rewrite_cli_hard_kills_the_producer_at_the_deadline(tmp_path, monkeypat
         driver_preparation=False,
         snr_threshold=30.0,
         gpu_target="gfx942",
+        gpu_type="mi300x",
         max_iters=4,
         max_hours=1.0,
         branch="forge/session/op",
@@ -3328,6 +3385,7 @@ def test_rewrite_cli_prefers_the_caller_named_result_file(tmp_path, monkeypatch)
         driver_preparation=False,
         snr_threshold=30.0,
         gpu_target="gfx942",
+        gpu_type="mi300x",
         max_iters=4,
         max_hours=1.0,
         branch="forge/session/op",

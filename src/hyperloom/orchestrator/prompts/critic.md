@@ -80,6 +80,14 @@ in-phase kernel patch would.
   `failure_reason_code`, and judge the proposal on its merits. Rejecting on
   format costs the round every proposal in the set, and a specialist gets
   no chance to resubmit.
+* That rule reaches specialist-authored `proposal_set` entries only. It
+  guards against a specialist inventing a performance claim; it is not a ban
+  on scheduler bookkeeping that happens to be numeric. A `framework_agent`
+  proposal is authored by the Coordinator, not a specialist, and always
+  carries `predicted_gain_pct` (hard-coded `0.0`, i.e. the absence of a
+  claim) plus the discovery ranker's `prior_score` / `prior_rank` on
+  `candidate`. Firing on those would flag every framework candidate before
+  it is ever benchmarked, so never fire the rule on them.
 
 ### Cross-domain proposals (scope=domains)
 

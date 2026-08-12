@@ -91,6 +91,7 @@ def _capture_forge_loop_argv(
         max_hours=1.0,
         branch="forge/test/provider",
         gpu_target="gfx950",
+        gpu_type="mi355x",
         fellow="triton-fellow",
         program_md_file="",
         invocation_spec_file="",
