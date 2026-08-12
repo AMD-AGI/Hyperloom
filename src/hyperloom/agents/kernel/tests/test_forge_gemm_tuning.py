@@ -63,7 +63,8 @@ def test_build_cmd_maps_all_options():
     assert "--thorough" in cmd
 
 
-def test_build_cmd_uses_mode_selected_reads_without_enable_flag(monkeypatch):
+def test_build_cmd_forwards_provenance_but_no_knowledge_base_options(monkeypatch):
+    """Tuning has no knowledge base; asking it to consult one aborts the run."""
     payload = _payload()
     payload.update(
         {
@@ -74,12 +75,14 @@ def test_build_cmd_uses_mode_selected_reads_without_enable_flag(monkeypatch):
         }
     )
     monkeypatch.setenv("FORGE_GEMM_TUNE_KB_READ", "1")
+    monkeypatch.setenv("FORGE_GEMM_TUNE_KB_ACCEPT_CANDIDATE", "1")
+    monkeypatch.setenv("FORGE_GEMM_TUNE_KB_STRICT_LIB", "1")
 
     cmd = forge_gemm_tuning._build_cmd(payload)
 
-    assert "--kb-read" not in cmd
-    assert "--kb-accept-candidate" in cmd
-    assert "--kb-strict-lib" in cmd
+    for retired in ("--kb-read", "--kb-accept-candidate", "--kb-strict-lib"):
+        assert retired not in cmd
+    # Which backend build produced the artifact is provenance, and still travels.
     assert cmd[cmd.index("--kb-current-lib") + 1] == "aiter-1"
 
 
