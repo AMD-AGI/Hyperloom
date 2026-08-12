@@ -1242,6 +1242,44 @@ def _ensure_eval_concurrency_compat(magpie_path: str, inferencex_path: str) -> b
     return ok
 
 
+def _report_inferencex_patch_anchors(inferencex_path: str) -> bool:
+    """Report whether Hyperloom's InferenceX patches can still find their place.
+
+    Report-only by design. Preflight runs once per session and cannot know
+    whether some later round will enable lm-eval, so aborting here would block
+    throughput-only users over patches they never exercise. The baseline executor
+    re-checks immediately before launch, where eval is known, and fails there.
+
+    Args:
+        inferencex_path: The resolved InferenceX checkout root.
+
+    Returns:
+        ``True`` when every anchor is intact (or nothing resolved to check).
+    """
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        verify_patch_anchors,
+    )
+
+    statuses = verify_patch_anchors(inferencex_path or None)
+    broken = [status for status in statuses if not status.ok]
+    if not broken:
+        return True
+    print(
+        f"Preflight: WARNING — {len(broken)} of {len(statuses)} InferenceX patch "
+        "anchors no longer match; those patches will not be applied:"
+    )
+    for status in broken:
+        print(f"  {status.describe()}")
+    print(
+        "  Hyperloom patches InferenceX by matching exact upstream text, so this "
+        "means the checkout drifted from the pinned revision. Re-anchor the "
+        "patches in _inferencex_patcher.py or pin INFERENCEX_REF back to a "
+        "revision they match. An accuracy-gate run aborts at launch on the ones "
+        "that would void its score."
+    )
+    return False
+
+
 def _ensure_client_trust_compat(magpie_path: str) -> bool:
     """Assert the custom-tokenizer trust patch on the resolved Magpie tree.
 
@@ -1650,6 +1688,8 @@ def _preflight(
         # tree permanently unpatchable by that path.
         _ensure_client_trust_compat(os.environ.get("MAGPIE_PATH", ""))
         _ensure_eval_concurrency_compat(os.environ.get("MAGPIE_PATH", ""), inferencex_path)
+
+    _report_inferencex_patch_anchors(inferencex_path)
 
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()
