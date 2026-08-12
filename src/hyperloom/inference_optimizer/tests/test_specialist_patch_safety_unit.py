@@ -7,6 +7,8 @@ git grounding, missing-target detection, and quantitative-claim guards)."""
 from __future__ import annotations
 
 
+import pytest
+
 from hyperloom.orchestrator.specialists import patch_safety as ps
 
 
@@ -166,22 +168,65 @@ def test_patch_safety_report_notes_empty():
 # ---- scan_quantitative_claims ---------------------------------------------
 def test_scan_quantitative_claims():
     payload = {
-        "confidence": 0.9,
+        "expected_gain": 12.0,
         "summary": "gives 20% boost",
         "proposal_set": [
-            {"score": 1, "expected_qualitative_argument": "3x faster"},
+            {"score": 1, "confidence": 0.9, "expected_qualitative_argument": "3x faster"},
             "not-a-dict",
         ],
     }
     forbidden, warnings = ps.scan_quantitative_claims(payload)
-    assert "confidence" in forbidden
+    assert "expected_gain" in forbidden
     assert "score" in forbidden
+    assert "confidence" in forbidden
     assert any("%" in w for w in warnings)
     assert any("x" in w.lower() for w in warnings)
 
 
 def test_scan_quantitative_claims_empty():
     assert ps.scan_quantitative_claims({}) == ([], [])
+
+
+def test_round_level_confidence_is_not_a_per_proposal_gain_claim():
+    """The output schema asks for it and the round audit records it, so flagging
+    it at the top level only made our own template a violation."""
+    forbidden, _ = ps.scan_quantitative_claims({"confidence": 0.6})
+
+    assert forbidden == []
+
+
+# ---- strip_forbidden_proposal_fields --------------------------------------
+def test_forbidden_fields_are_stripped_so_the_critic_cannot_reject_on_format():
+    payload = {
+        "expected_gain": 9.0,
+        "confidence": 0.6,
+        "summary": "keep me",
+        "proposal_set": [
+            {"name": "v1", "confidence": 0.4, "score": 3, "reason": "keep me too"},
+            "not-a-dict",
+        ],
+    }
+
+    removed = ps.strip_forbidden_proposal_fields(payload)
+
+    assert set(removed) == {"expected_gain", "confidence", "score"}
+    assert "expected_gain" not in payload
+    assert payload["confidence"] == 0.6  # round-level self-assessment survives
+    assert payload["summary"] == "keep me"
+    assert payload["proposal_set"][0] == {"name": "v1", "reason": "keep me too"}
+    assert payload["proposal_set"][1] == "not-a-dict"
+
+
+def test_stripping_a_clean_payload_changes_nothing():
+    payload = {"proposal_set": [{"name": "v1", "reason": "why"}]}
+
+    assert ps.strip_forbidden_proposal_fields(payload) == []
+    assert payload == {"proposal_set": [{"name": "v1", "reason": "why"}]}
+
+
+@pytest.mark.parametrize("payload", [None, [], "", 0])
+def test_stripping_tolerates_a_payload_that_is_not_a_dict(payload):
+    assert ps.strip_forbidden_proposal_fields(payload) == []
 
 
 # ---- vet_patches ----------------------------------------------------------

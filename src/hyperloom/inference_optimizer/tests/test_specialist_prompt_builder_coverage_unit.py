@@ -173,6 +173,21 @@ def test_cold_start_directive():
     assert "COLD-START MODE" in user_p
 
 
+def test_cold_start_does_not_ask_for_a_field_the_safety_gate_forbids():
+    """It used to direct the fallback proposals to carry ``confidence: low`` --
+    a field in FORBIDDEN_PROPOSAL_FIELDS -- so a compliant specialist tripped
+    the guard on exactly the round where it was the only source of ideas."""
+    inp = SpecialistPromptInputs(
+        task_id="t",
+        domain=get_domain("serving_specialist"),
+    )
+    _, user_p = build_specialist_prompts(inp)
+
+    cold_start = user_p[user_p.index("COLD-START MODE") :]
+    assert "confidence: low" not in cold_start
+    assert "provenance: domain_focus_default" in cold_start
+
+
 def test_research_hints_fallback():
     inp = SpecialistPromptInputs(
         task_id="t",

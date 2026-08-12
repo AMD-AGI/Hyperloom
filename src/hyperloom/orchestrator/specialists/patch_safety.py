@@ -10,8 +10,8 @@ freeform). It provides:
 * unified-diff structural validation (a patch must carry at least one hunk),
 * git-grounding (``git apply --check`` against a clean checkout so a fabricated
   patch that does not apply to real source is flagged),
-* quantitative-claim guards (forbidden numeric fields + numeric-claim regex on
-  the qualitative argument),
+* quantitative-claim guards (forbidden numeric fields, stripped rather than
+  merely reported, + numeric-claim regex on the qualitative argument),
 * the cross-domain Critic rule descriptors, surfaced when ``scope == 'domains'``.
 
 Pure / dependency-light: imports only stdlib + git via subprocess so it can be
@@ -41,6 +41,14 @@ FORBIDDEN_PROPOSAL_FIELDS: frozenset[str] = frozenset(
         "force_provenance",
     }
 )
+
+# The same guard at the payload's top level, where ``confidence`` means
+# something else: the output schema asks for a round-level self-assessment and
+# the specialist-round audit rows record it. That is not a per-proposal gain
+# claim and cannot bias which variant gets benched, so banning it here only
+# made the schema contradict itself -- the guard's own scope, per the Critic
+# rules, is ``proposal_set[*]``.
+FORBIDDEN_PAYLOAD_FIELDS: frozenset[str] = FORBIDDEN_PROPOSAL_FIELDS - {"confidence"}
 
 
 # Numeric speedup claims smuggled into a qualitative argument / summary.
@@ -417,7 +425,7 @@ def scan_quantitative_claims(payload: dict[str, Any]) -> tuple[list[str], list[s
         A ``(forbidden_fields_present, numeric_warning_strings)`` tuple, each
         de-duped with order preserved.
     """
-    forbidden = sorted(set((payload or {}).keys()) & FORBIDDEN_PROPOSAL_FIELDS)
+    forbidden = sorted(set((payload or {}).keys()) & FORBIDDEN_PAYLOAD_FIELDS)
     warnings: list[str] = []
     for key in ("summary", "expected_qualitative_argument", "cross_domain_rationale"):
         hits = numeric_claims(str((payload or {}).get(key) or ""))
@@ -434,6 +442,42 @@ def scan_quantitative_claims(payload: dict[str, Any]) -> tuple[list[str], list[s
     forbidden = list(dict.fromkeys(forbidden))
     warnings = list(dict.fromkeys(warnings))
     return forbidden, warnings
+
+
+def strip_forbidden_proposal_fields(payload: dict[str, Any]) -> list[str]:
+    """Remove the forbidden quantitative keys from ``payload`` in place.
+
+    Uses :data:`FORBIDDEN_PAYLOAD_FIELDS` at the top level and
+    :data:`FORBIDDEN_PROPOSAL_FIELDS` on each ``proposal_set`` entry.
+
+    Detecting a self-reported gain number and then forwarding it is what turns a
+    format slip into a lost round: the Critic is told to reject the whole
+    ``proposal_set`` over it, so the specialist's ideas never reach a benchmark
+    and there is rarely budget to resubmit. The claim is worthless either way —
+    measured gain is the Coordinator's — so dropping it costs nothing and makes
+    the violation unreachable rather than merely audited. Callers keep the
+    scanned field list for the audit note.
+
+    Args:
+        payload: The ``specialist_done`` payload, mutated in place. Both the
+            top level and each ``proposal_set`` entry are cleaned.
+
+    Returns:
+        The removed field names, de-duped with first-seen order preserved.
+    """
+    if not isinstance(payload, dict):
+        return []
+    removed: list[str] = []
+    for key in sorted(set(payload.keys()) & FORBIDDEN_PAYLOAD_FIELDS):
+        payload.pop(key, None)
+        removed.append(key)
+    for proposal in payload.get("proposal_set") or []:
+        if not isinstance(proposal, dict):
+            continue
+        for key in sorted(set(proposal.keys()) & FORBIDDEN_PROPOSAL_FIELDS):
+            proposal.pop(key, None)
+            removed.append(key)
+    return list(dict.fromkeys(removed))
 
 
 def vet_patches(
@@ -474,6 +518,7 @@ def vet_patches(
 __all__ = [
     "CROSS_DOMAIN_RULES",
     "CrossDomainRule",
+    "FORBIDDEN_PAYLOAD_FIELDS",
     "FORBIDDEN_PROPOSAL_FIELDS",
     "GROUND_APPLIES",
     "GROUND_MISSING_TARGET",
@@ -492,5 +537,6 @@ __all__ = [
     "patch_file_targets",
     "patch_targets_missing",
     "scan_quantitative_claims",
+    "strip_forbidden_proposal_fields",
     "vet_patches",
 ]
