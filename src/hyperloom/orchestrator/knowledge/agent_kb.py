@@ -19,9 +19,10 @@ that belong to it, and gets back the refs to record for those files::
     prior = kb.read_rewrite()
     refs = kb.write_rewrite({"items": [...]}, files=[patch_path])
 
-``refs`` comes back in the order the files were passed, so a caller that needs
-a ref inside its own metadata writes twice: once to stage the files, once with
-the refs folded into the payload. A caller that does not can ignore the return
+``refs`` comes back positionally — one slot per file passed, empty when that
+artifact could not be staged — so a caller that needs a ref inside its own
+metadata writes twice: once to stage the files, once with the refs folded into
+the payload. A caller that does not can ignore the return
 value, because the same refs are recorded under the column's ``files`` key.
 
 The write replaces the sub-column: what an agent hands over is the whole
@@ -40,6 +41,8 @@ to record must not fail an optimization.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -49,6 +52,7 @@ from .remote_recipe._vendor.kb_store_client import (
     FILES_MEMBER_ROOT,
     KBStoreError,
     KnowledgeSections,
+    _same_bytes,
 )
 
 log = logging.getLogger(__name__)
@@ -158,7 +162,10 @@ class KernelAgentKB:
         if not isinstance(knowledge, Mapping):
             log.warning("kernel kb: %s knowledge must be a mapping", column)
             return []
-        refs = [ref for source in files if (ref := self._stage(column, source))]
+        # Positional: a caller folds these back into its own metadata by index,
+        # so a failed stage keeps an empty placeholder rather than shifting every
+        # later artifact one slot up.
+        refs = [self._stage(column, source) for source in files]
         payload = dict(knowledge)
         try:
             staged = self._sections.staged(KERNEL_SECTION)
@@ -188,26 +195,100 @@ class KernelAgentKB:
         """Copy one artifact into the draft and return the ref that names it."""
         try:
             staged = self._sections.staged(KERNEL_SECTION)
-            before = len(staged.files) if staged is not None else 0
-            content = self._sections.write(
+            self._sections.write(
                 KERNEL_SECTION,
                 staged.knowledge if staged is not None else {},
                 files=[source],
                 kind=column,
                 mode="merge",
             )
-            staged_refs = [
-                path.relative_to(self._sections.files_dir).as_posix()
-                for path in content.files
-            ]
         except (KBStoreError, OSError, ValueError) as exc:
             log.warning("kernel kb: cannot stage %s for %s: %s", source, column, exc)
             return ""
-        if len(staged_refs) > before:
-            return staged_refs[-1]
-        # Re-staging a byte-identical artifact adds no ref; reuse the existing one.
-        expected = f"{KERNEL_SECTION}/{column}/{Path(str(source)).name}"
-        return expected if expected in staged_refs else ""
+        return self._staged_ref(column, source)
+
+    def _staged_ref(self, column: str, source: str | Path) -> str:
+        """Name the copy this artifact just landed as, by the draft's own rule.
+
+        The draft keeps ``{section}/{kind}/{name}`` and only falls back to a
+        digest-suffixed name when that path is already taken by different bytes.
+        Deriving the ref from the files on disk — rather than from whether the
+        staged list happened to grow — is what keeps a re-staged artifact from
+        being handed the ref of a same-named neighbour.
+        """
+        src = Path(str(source))
+        files_dir = self._sections.files_dir
+        plain = f"{KERNEL_SECTION}/{column}/{src.name}"
+        landed = files_dir / plain
+        if landed.is_file() and _same_bytes(src, landed):
+            return plain
+        digest = hashlib.sha256(str(src.resolve()).encode()).hexdigest()[:10]
+        suffixed = f"{KERNEL_SECTION}/{column}/{src.stem}-{digest}{src.suffix}"
+        return suffixed if (files_dir / suffixed).is_file() else ""
 
 
-__all__ = ["KERNEL_COLUMNS", "KERNEL_SECTION", "KernelAgentKB"]
+class KernelRecordReader:
+    """Read a downloaded independent kernel-agent KB record (``kernel:`` scheme).
+
+    The recipe warm-start nests kernel columns under ``value.kernel.*`` and is
+    read through :class:`KernelAgentKB`. The independent kernel-agent record
+    instead stores them flat at ``value.gemm``/``value.fusion``/``value.rewrite``
+    with a sibling ``files/`` tree. This reader exposes the same read surface
+    (``active`` + ``read_gemm``/``read_fusion``/``read_rewrite`` + ``prior_file``)
+    so the PRELUDE warm-apply planner can consume either source unchanged.
+
+    ``record_dir`` is a directory populated by ``read_remote_recipe`` — a
+    ``recipe.json`` plus a ``files/`` tree. An absent/empty record leaves the
+    reader inactive and every call a no-op.
+    """
+
+    def __init__(self, record_dir: str | Path | None) -> None:
+        self._dir = Path(record_dir) if record_dir else None
+        self._value: dict[str, Any] | None = None
+        if self._dir is not None:
+            recipe = self._dir / "recipe.json"
+            if recipe.is_file():
+                try:
+                    document = json.loads(recipe.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    document = None
+                if isinstance(document, Mapping):
+                    value = document.get("value")
+                    self._value = dict(value) if isinstance(value, Mapping) else {}
+
+    @property
+    def active(self) -> bool:
+        """True when a record was loaded and its columns can be read."""
+        return isinstance(self._value, Mapping)
+
+    def _column(self, name: str) -> dict[str, Any]:
+        node = (self._value or {}).get(name)
+        return dict(node) if isinstance(node, Mapping) else {}
+
+    def read_gemm(self) -> dict[str, Any]:
+        return self._column("gemm")
+
+    def read_fusion(self) -> dict[str, Any]:
+        return self._column("fusion")
+
+    def read_rewrite(self) -> dict[str, Any]:
+        return self._column("rewrite")
+
+    def prior_file(self, ref: str) -> Path | None:
+        """Resolve a recorded ref to its downloaded file under ``files/``."""
+        if self._dir is None:
+            return None
+        rel = str(ref or "").strip().lstrip("/")
+        parts = Path(rel).parts if rel else ()
+        if not parts or ".." in parts or Path(rel).is_absolute():
+            return None
+        candidate = self._dir / FILES_MEMBER_ROOT / rel
+        return candidate if candidate.is_file() else None
+
+
+__all__ = [
+    "KERNEL_COLUMNS",
+    "KERNEL_SECTION",
+    "KernelAgentKB",
+    "KernelRecordReader",
+]

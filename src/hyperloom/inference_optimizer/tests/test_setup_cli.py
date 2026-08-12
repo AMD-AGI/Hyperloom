@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 from pathlib import Path
@@ -330,6 +331,9 @@ def _baremetal_credential_functions() -> str:
 _CLEAN_PROVIDER_ENV = [
     "unset OPENAI_BASE_URL OPENAI_API_KEY OPENAI_CUSTOM_HEADERS",
     "unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN",
+    # Now that the shell reads the subscription token too, a developer machine
+    # exporting one would otherwise change what these runs resolve.
+    "unset CLAUDE_CODE_OAUTH_TOKEN",
     "unset CLAUDE_MODEL CODEX_MODEL GEAK_CLAUDE_MODEL",
     "unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL",
 ]
@@ -509,6 +513,14 @@ _SHIM_CASES = {
         "_".join(("DEEPSEEK", "API", "KEY")): "sk-ds",
         "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
     },
+    # A subscription token is a configured Anthropic side, so a stale DEEPSEEK_*
+    # leftover must be ignored whole rather than pointing the run at DeepSeek's
+    # host -- where the migrated API key would also outrank the token and move
+    # the run onto API billing.
+    "subscription token already configured": {
+        "_".join(("DEEPSEEK", "API", "KEY")): "sk-ds",
+        "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")): "sk-ant-oat01-fake",
+    },
 }
 
 
@@ -681,7 +693,7 @@ def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
             encoding="utf-8",
         )
 
-        proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True)
+        proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, env=_oauth_only_env())
 
         assert proc.returncode != 0, f"{name}: mispaired credentials were accepted"
         assert "Conflicting LLM credentials" in proc.stderr, proc.stderr
@@ -722,10 +734,246 @@ def test_baremetal_setup_rejects_cross_provider_pairing(tmp_path: Path):
         encoding="utf-8",
     )
 
-    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True)
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, env=_oauth_only_env())
 
     assert proc.returncode != 0, "mispaired credentials were accepted"
     assert "Conflicting LLM credentials" in proc.stderr, proc.stderr
+
+
+def _oauth_only_env() -> dict[str, str]:
+    """Ambient provider credentials would mask an oauth-only preflight."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "OPENAI_", "DEEPSEEK_"))}
+    env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+    return env
+
+
+def test_install_preflights_accept_oauth_only_credentials(tmp_path: Path):
+    """A Claude subscription token alone is a self-consistent Anthropic side."""
+    script_paths = [
+        (
+            "install",
+            Path(setup.__file__).resolve().parent / "assets" / "install.sh",
+            ["preflight_load_dotenv() { :; }"],
+        ),
+        (
+            "kernel",
+            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            [],
+        ),
+    ]
+    for name, script_path, stubs in script_paths:
+        script_text = script_path.read_text(encoding="utf-8")
+        start = script_text.index("preflight_reject_cross_provider() {")
+        end = script_text.index(
+            "\npreflight_validate_credentials", script_text.index("preflight_validate_credentials() {")
+        )
+        runner = tmp_path / f"{name}-oauth-preflight.sh"
+        runner.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    "set -uo pipefail",
+                    f"REPO_ROOT={tmp_path}",
+                    "CHECK_ONLY=0",
+                    "DRY_RUN=0",
+                    "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test",
+                    "log() { :; }",
+                    'warn() { echo "$*" >&2; }',
+                    'die() { echo "$*" >&2; exit 99; }',
+                    *stubs,
+                    script_text[start:end],
+                    "preflight_validate_credentials",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, env=_oauth_only_env())
+
+        assert proc.returncode == 0, f"{name}: oauth-only rejected: {proc.stderr}"
+
+
+def test_baremetal_setup_accepts_oauth_only_without_mirroring_it(tmp_path: Path):
+    """Subscription token resolves on its own and stays out of API-key slots."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("read_dotenv_var() {")
+    end = script_text.index("\nwrite_runtime_dotenv() {")
+    credential_functions = script_text[start:end]
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("HYPERLOOM_RUN_MODE=baremetal\n", encoding="utf-8")
+    dump = tmp_path / "resolved.txt"
+    runner = tmp_path / "oauth-only-run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -uo pipefail",
+                f"DOTENV={dotenv}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "log() { :; }",
+                'warn() { echo "$*" >&2; }',
+                'die() { echo "$*" >&2; exit 99; }',
+                "is_interactive() { return 1; }",
+                credential_functions,
+                "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test",
+                "resolve_credentials",
+                f'printf "%s|%s|%s\\n" "${{CLAUDE_CODE_OAUTH_TOKEN:-}}" "${{ANTHROPIC_API_KEY:-}}"'
+                f' "${{ANTHROPIC_AUTH_TOKEN:-}}" > {dump}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, env=_oauth_only_env())
+
+    assert proc.returncode == 0, f"oauth-only rejected: {proc.stderr}"
+    assert dump.read_text(encoding="utf-8").strip() == "sk-ant-oat01-test||"
+    persisted = dotenv.read_text(encoding="utf-8")
+    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test" in persisted
+    assert "ANTHROPIC_API_KEY=" not in persisted
+    assert "ANTHROPIC_AUTH_TOKEN=" not in persisted
+
+
+def test_install_preflights_accept_oauth_alongside_bare_openai_key(tmp_path: Path):
+    """Mirrors the CLI: both keys imply their own official endpoint, so neither
+    borrows the other's and the pair is legal."""
+    script_paths = [
+        (
+            "install",
+            Path(setup.__file__).resolve().parent / "assets" / "install.sh",
+            ["preflight_load_dotenv() { :; }"],
+        ),
+        (
+            "kernel",
+            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            [],
+        ),
+    ]
+    for name, script_path, stubs in script_paths:
+        script_text = script_path.read_text(encoding="utf-8")
+        start = script_text.index("preflight_reject_cross_provider() {")
+        end = script_text.index(
+            "\npreflight_validate_credentials", script_text.index("preflight_validate_credentials() {")
+        )
+        runner = tmp_path / f"{name}-oauth-openai-pair.sh"
+        runner.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    "set -uo pipefail",
+                    f"REPO_ROOT={tmp_path}",
+                    "CHECK_ONLY=0",
+                    "DRY_RUN=0",
+                    "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test",
+                    "OPENAI_API_KEY=sk-openai-official",
+                    "log() { :; }",
+                    'warn() { echo "$*" >&2; }',
+                    'die() { echo "$*" >&2; exit 99; }',
+                    *stubs,
+                    script_text[start:end],
+                    "preflight_validate_credentials",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, env=_oauth_only_env())
+
+        assert proc.returncode == 0, f"{name}: oauth + official OpenAI key rejected: {proc.stderr}"
+
+
+def test_install_preflights_still_reject_gateway_url_with_bare_openai_key(tmp_path: Path):
+    """An explicit ANTHROPIC_BASE_URL keeps flagging an OpenAI key that lost its
+    own base URL."""
+    script_paths = [
+        (
+            "install",
+            Path(setup.__file__).resolve().parent / "assets" / "install.sh",
+            ["preflight_load_dotenv() { :; }"],
+        ),
+        (
+            "kernel",
+            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            [],
+        ),
+    ]
+    for name, script_path, stubs in script_paths:
+        script_text = script_path.read_text(encoding="utf-8")
+        start = script_text.index("preflight_reject_cross_provider() {")
+        end = script_text.index(
+            "\npreflight_validate_credentials", script_text.index("preflight_validate_credentials() {")
+        )
+        runner = tmp_path / f"{name}-gateway-bare-openai.sh"
+        runner.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    "set -uo pipefail",
+                    f"REPO_ROOT={tmp_path}",
+                    "CHECK_ONLY=0",
+                    "DRY_RUN=0",
+                    "ANTHROPIC_BASE_URL=https://gw.example.com/anthropic",
+                    "ANTHROPIC_API_KEY=gw-key",
+                    "OPENAI_API_KEY=gw-key",
+                    "log() { :; }",
+                    'warn() { echo "$*" >&2; }',
+                    'die() { echo "$*" >&2; exit 99; }',
+                    *stubs,
+                    script_text[start:end],
+                    "preflight_validate_credentials",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, env=_oauth_only_env())
+
+        assert proc.returncode != 0, f"{name}: gateway URL with bare OpenAI key was accepted"
+        assert "Conflicting LLM credentials" in proc.stderr, proc.stderr
+
+
+def test_baremetal_setup_accepts_oauth_alongside_bare_openai_key(tmp_path: Path):
+    """install_baremetal.sh mirrors the same relaxed pairing rule."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("read_dotenv_var() {")
+    end = script_text.index("\nwrite_runtime_dotenv() {")
+    credential_functions = script_text[start:end]
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("HYPERLOOM_RUN_MODE=baremetal\n", encoding="utf-8")
+    runner = tmp_path / "oauth-openai-pair-run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -uo pipefail",
+                f"DOTENV={dotenv}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "OPENAI_BASE_URL_ARG=",
+                "log() { :; }",
+                'warn() { echo "$*" >&2; }',
+                'die() { echo "$*" >&2; exit 99; }',
+                "is_interactive() { return 1; }",
+                credential_functions,
+                "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test",
+                "OPENAI_API_KEY=sk-openai-official",
+                "resolve_credentials",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, env=_oauth_only_env())
+
+    assert proc.returncode == 0, f"oauth + official OpenAI key rejected: {proc.stderr}"
 
 
 def test_baremetal_install_no_longer_accepts_openai_safe_credential_flags():

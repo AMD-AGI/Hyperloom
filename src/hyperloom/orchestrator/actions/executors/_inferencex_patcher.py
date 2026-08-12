@@ -3,27 +3,27 @@
 
 """Idempotent, backward-compatible patchers for the InferenceX checkout.
 
-Each ``ensure_*`` function rewrites one upstream line in place: ``$NUM_PROMPTS``
+Each ``ensure_*`` function rewrites one upstream file in place: ``$NUM_PROMPTS``
 support and ``PROFILE_EXTRA_BODY`` consumption for profiling, the eval-artifact
 redirect to ``$RESULT_DIR``, the ``HYPERLOOM_EVAL_START`` phase marker, and the
-generation-pathology probe injected into lm-eval's ``sitecustomize.py``.
+generation-pathology probe plus per-request generation bounds appended to
+lm-eval's ``lm_eval_sitecustomize.py``.
 
 Applied in place, once: idempotent via a sentinel substring, serialized across
-processes via ``fcntl.flock``, written atomically. Returns ``False``
-(non-fatal) when the legacy line is missing.
+processes via ``fcntl.flock``, written atomically.
 
-Because every patch is gated on locating exact upstream text, a ``False`` return
-is ambiguous on its own -- it reads the same whether there was nothing to patch
-or the anchor rotted. :func:`verify_patch_anchors` reports that distinction
-without touching the checkout, so callers can assert the contract instead of
-inferring it.
+The four line-replacement patches are gated on locating exact upstream text, so a
+``False`` return is ambiguous on its own -- it reads the same whether there was
+nothing to patch or the anchor rotted. :func:`verify_patch_anchors` reports that
+distinction without touching the checkout, so callers can assert the contract
+instead of inferring it. The probe needs none of this: it is appended to a real
+file, and :func:`eval_probe_targets_exist` already separates the two cases.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import re
 import tempfile
 from dataclasses import dataclass
 from functools import partial
@@ -83,13 +83,22 @@ _EVAL_START_PATCHED = '    export EVAL_RESULT_DIR="$results_dir"\n    echo "HYPE
 _EVAL_START_SENTINEL = "HYPERLOOM_EVAL_START"
 _EVAL_START_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_eval_start_patcher.lock")
 
-# Early-exit probe for a model that never emits EOS. InferenceX runs lm-eval
-# with ``--gen_kwargs max_tokens=min(16384, ctx-4096)``, so a degenerate model
-# burns that budget on every one of GSM8K's 1319 docs and takes the whole
-# baseline timeout with it. Injected as source rather than imported: the
-# lm-eval subprocess shares an interpreter with Hyperloom only by accident.
+# Two independent answers to the same budget, injected together. InferenceX runs
+# lm-eval with ``--gen_kwargs max_tokens=min(16384, ctx-4096)``, so a model that
+# does not terminate burns that budget on every one of GSM8K's 1319 docs and
+# takes the whole baseline timeout with it.
+#
+# The probe handles a model that never emits EOS at all: it short-circuits the
+# remaining requests, which voids the eval (~0 score) and is only safe because it
+# waits for a decisive ratio. The bounds handle the ordinary case that ratio can
+# never catch -- a healthy model whose hardest samples do not converge -- by
+# capping each request so those samples are truncated individually and the rest
+# of the measurement survives.
+#
+# Appended to ``lm_eval_sitecustomize.py``, so both land after InferenceX's own
+# patches and need no anchor line.
 _EVAL_PROBE_PY = """
-# --- HYPERLOOM_EVAL_PROBE ---------------------------------------------------
+# --- HYPERLOOM_EVAL_PROBE (early-exit probe + per-request bounds) ------------
 import json as _hl_json
 import os as _hl_os
 import sys as _hl_sys
@@ -199,7 +208,7 @@ def _hl_eval_probe_install():
         loop = _hl_asyncio.get_running_loop()
         if gate["loop"] is not loop:
             gate["loop"] = loop
-            gate["sem"] = _hl_asyncio.Semaphore(max(1, int(self._concurrent or 1)))
+            gate["sem"] = _hl_asyncio.Semaphore(max(1, getattr(self, "_concurrent", 1) or 1))
         async with gate["sem"]:
             if not (state["tripped"] and kwargs.get("generate", True)):
                 return await _hl_prev_amodel_call(self, session, sem, messages, **kwargs)
@@ -212,19 +221,20 @@ def _hl_eval_probe_install():
 
 
 def _hl_eval_bounds_install():
-    # Bound each accuracy-gate request. Distinct from the probe above: the probe
-    # answers a model that NEVER terminates, and short-circuits the whole eval
-    # to a ~0 score. A healthy model whose few hardest reasoning samples do not
-    # converge must not be scored that way -- those samples have to be truncated
-    # individually so the rest of the measurement survives. InferenceX derives
-    # max_tokens from the eval context (16384-4096=12288 by default) and allows
-    # 1800s per request, so a handful of outliers alone can add a ~30min tail.
+    # Bound each request. Distinct from the probe above: the probe answers a
+    # model that NEVER terminates, and short-circuits the whole eval to a ~0
+    # score. A healthy model whose few hardest reasoning samples do not converge
+    # must not be scored that way -- those samples have to be truncated
+    # individually so the rest of the measurement survives. The probe's ratio
+    # threshold is what makes it safe, and also what makes it unable to help
+    # here.
     #
     # The default lives here rather than in the caller's environment on purpose.
     # The gate is differential (baseline_accuracy - new_accuracy <= 0.05), so the
     # ceiling is only sound if every arm shares it; defaulting inside the shim
-    # makes that structural instead of a plumbing invariant two call sites have
-    # to remember. HYPERLOOM_EVAL_MAX_TOKENS overrides it; 0 disables the clamp.
+    # makes that structural instead of a plumbing invariant the baseline and grid
+    # call sites each have to remember. HYPERLOOM_EVAL_MAX_TOKENS overrides it;
+    # 0 disables the clamp.
     default_cap = 4096
     raw_cap = (_hl_os.environ.get("HYPERLOOM_EVAL_MAX_TOKENS") or "").strip()
     if not raw_cap:
@@ -247,9 +257,9 @@ def _hl_eval_bounds_install():
     from lm_eval.models.openai_completions import LocalChatCompletion as _hl_lcc
 
     # Truncation is only defensible while it stays rare, so the run has to say
-    # how rare it actually was. Without this the ceiling is an unfalsifiable
-    # guess: too low silently depresses both arms' scores, too high leaves the
-    # tail in place, and neither shows up anywhere.
+    # how rare it actually was. Without this the ceiling is unfalsifiable: too
+    # low silently depresses both arms' scores, too high leaves the tail in
+    # place, and neither shows up anywhere.
     counts = {"generations": 0, "truncated": 0}
 
     def _hl_emit_bounds_summary():
@@ -275,6 +285,9 @@ def _hl_eval_bounds_install():
     _hl_prev_parse = _hl_lcc.parse_generations
 
     def _hl_bounds_parse_generations(outputs, **kwargs):
+        # Counting must never break the eval it is measuring, hence the guard --
+        # same reason the probe guards its own observation above. The payload
+        # hook below needs none: it reads defensively instead.
         try:
             for out in outputs if isinstance(outputs, list) else [outputs]:
                 for choice in out.get("choices") or []:
@@ -297,77 +310,45 @@ def _hl_eval_bounds_install():
         # this seam and must pass through untouched.
         if not kwargs.get("generate", False):
             return payload
-        try:
-            if cap > 0:
-                current = int(payload.get("max_tokens") or 0)
-                if current <= 0 or current > cap:
-                    payload["max_tokens"] = cap
-            if extra_stop:
-                # The upstream eos_string is a single hardcoded value, is wrong
-                # for several model families, and is not even passed on the
-                # concurrent path -- so the caller-supplied terminators go
-                # first: the API accepts at most 4 stop strings and the tail is
-                # what gets dropped.
-                merged = list(extra_stop)
-                for item in payload.get("stop") or []:
-                    if item not in merged:
-                        merged.append(item)
-                payload["stop"] = merged[:4]
-            if not announced["done"]:
-                announced["done"] = True
-                print(
-                    "HYPERLOOM_EVAL_BOUNDS max_tokens=%s stop=%s"
-                    % (payload.get("max_tokens"), _hl_json.dumps(payload.get("stop"))),
-                    file=_hl_sys.stderr,
-                    flush=True,
-                )
-        except Exception:
-            # Bounding must never break the eval it is protecting.
-            return payload
+        if cap > 0:
+            current = payload.get("max_tokens")
+            current = current if isinstance(current, int) else 0
+            if current <= 0 or current > cap:
+                payload["max_tokens"] = cap
+        if extra_stop:
+            # Upstream's eos_string is a single hardcoded value, is wrong for
+            # several model families, and is not even passed on the concurrent
+            # path -- so the caller-supplied terminators go first: the API
+            # accepts at most 4 stop strings and the tail is what gets dropped.
+            merged = list(extra_stop)
+            for item in payload.get("stop") or []:
+                if item not in merged:
+                    merged.append(item)
+            payload["stop"] = merged[:4]
+        if not announced["done"]:
+            announced["done"] = True
+            print(
+                "HYPERLOOM_EVAL_BOUNDS max_tokens=%s stop=%s"
+                % (payload.get("max_tokens"), _hl_json.dumps(payload.get("stop"))),
+                file=_hl_sys.stderr,
+                flush=True,
+            )
         return payload
 
     _hl_lcc._create_payload = _hl_bounded_create_payload
 
 
-# sitecustomize runs at interpreter startup: raising here would break every
-# python3 the benchmark shells out to, not just lm-eval.
-try:
-    _hl_eval_probe_install()
-except Exception:
-    pass
-try:
-    _hl_eval_bounds_install()
-except Exception:
-    pass
+_hl_eval_probe_install()
+_hl_eval_bounds_install()
 # --- end HYPERLOOM_EVAL_PROBE -----------------------------------------------
 """
 
-# Anchored on the ``export PYTHONPATH`` line that closes ``_patch_lm_eval``.
-# The prefix is matched rather than the whole line: upstream rewrote the tail
-# from ``"${patch_dir}:${PYTHONPATH:-}"`` to
-# ``"${patch_dir}${PYTHONPATH:+:${PYTHONPATH}}"`` (same meaning, minus a
-# trailing colon that would have put the cwd on sys.path), and a line-literal
-# anchor silently stopped matching in every checkout. Only the assignment's
-# left side is Hyperloom's business, so only that is pinned. The heredoc is
-# quoted so nothing inside it is shell-expanded, and its terminator must sit at
-# column 0.
-_EVAL_PROBE_ANCHOR_RE = re.compile(
-    r'^(?:[ \t]*)export PYTHONPATH="\$\{patch_dir\}.*$',
-    re.MULTILINE,
-)
-
-
-def _eval_probe_replacement(anchor_line: str) -> str:
-    """Build the patched block that keeps ``anchor_line`` as its last line."""
-    indent = anchor_line[: len(anchor_line) - len(anchor_line.lstrip(" \t"))]
-    return (
-        f"{indent}cat >> \"$patch_dir/sitecustomize.py\" <<'HYPERLOOM_PY'\n"
-        + _EVAL_PROBE_PY.lstrip("\n")
-        + "HYPERLOOM_PY\n"
-        + anchor_line
-    )
 _EVAL_PROBE_SENTINEL = "HYPERLOOM_EVAL_PROBE"
-_EVAL_PROBE_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_eval_probe_patcher.lock")
+_EVAL_PROBE_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_eval_probe_patcher.lock")
+# Appending needs no anchor, but it does need this file: upstream renaming or
+# moving it puts the probe and the bounds back to warn-only, and the eval runs
+# unbounded again. That is what the anchor contract pins in its place.
+EVAL_PROBE_TARGET_PARTS = ("utils", "evals", "patches", "lm_eval_sitecustomize.py")
 
 
 def _discover_inferencex_roots(
@@ -835,97 +816,76 @@ def ensure_benchmark_lib_eval_start_patched(
     )
 
 
-def _is_eval_probe_patched(src: Path) -> bool:
-    """Return whether ``benchmark_lib.sh`` already injects the eval probe.
+def _resolve_eval_sitecustomize_paths(
+    inferencex_path: Path | str | None,
+) -> list[Path]:
+    """Return every existing ``<root>/utils/evals/patches/lm_eval_sitecustomize.py``."""
+    return _resolve_inferencex_files(inferencex_path, *EVAL_PROBE_TARGET_PARTS)
 
-    Args:
-        src (Path): The ``benchmark_lib.sh`` file to inspect.
 
-    Returns:
-        bool: ``True`` if the eval-probe sentinel is present; ``False`` on a
-        miss or read error.
+def eval_probe_targets_exist(inferencex_path: Path | str | None = None) -> bool:
+    """Whether any discovered InferenceX root carries the probe target file.
+
+    Separates "present and unpatchable" from "laid out somewhere we do not look".
     """
+    return bool(_resolve_eval_sitecustomize_paths(inferencex_path))
+
+
+def _is_eval_probe_patched(src: Path) -> bool:
+    """Return whether ``lm_eval_sitecustomize.py`` already carries the eval probe."""
     return file_contains_sentinel(src, _EVAL_PROBE_SENTINEL, log, "_inferencex_patcher")
 
 
-def _apply_eval_probe(src: Path) -> bool:
-    """Insert the eval probe above ``_patch_lm_eval``'s PYTHONPATH export.
-
-    Resolves the anchor against the file before delegating, so the shared
-    exact-line replacer still gets a literal while the anchor itself tolerates
-    upstream rewriting the export's right-hand side.
-
-    Args:
-        src: The ``benchmark_lib.sh`` to patch in place.
-
-    Returns:
-        bool: ``True`` when the patched bytes were written.
-    """
+def _apply_eval_probe_atomic(src: Path) -> bool:
+    """Append the eval probe to ``src`` via temp-file + atomic rename."""
     try:
         original = src.read_text(encoding="utf-8")
     except OSError as e:
         log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
         return False
-    match = _EVAL_PROBE_ANCHOR_RE.search(original)
-    if match is None:
-        log.warning(
-            "_inferencex_patcher: no _patch_lm_eval PYTHONPATH export matching %r "
-            "in %s; upstream layout may have changed. A model that never emits EOS "
-            "will run the accuracy eval to the full max_tokens budget on every "
-            "sample instead of exiting early.",
-            _EVAL_PROBE_ANCHOR_RE.pattern,
-            src,
-        )
-        return False
-    anchor_line = match.group(0)
-    return _apply_line_replacement_atomic(
+    patched = original + _EVAL_PROBE_PY
+    if not atomic_write_text(
         src,
-        legacy=anchor_line,
-        patched_line=_eval_probe_replacement(anchor_line),
-        tmp_prefix=".benchmark_lib.sh.eval_probe_",
-        missing_msg=(
-            "_inferencex_patcher: the _patch_lm_eval PYTHONPATH export vanished "
-            "from %s between the anchor match and the write."
-        ),
-        success_msg=("_inferencex_patcher: installed eval generation-pathology probe in %s"),
-    )
+        patched,
+        tmp_prefix=".lm_eval_sitecustomize.eval_probe_",
+        log_prefix="_inferencex_patcher",
+    ):
+        return False
+    log.info("_inferencex_patcher: appended eval generation-pathology probe to %s", src)
+    return True
 
 
-def ensure_benchmark_lib_eval_probe_patched(
+def ensure_eval_probe_patched(
     inferencex_path: Path | str | None = None,
 ) -> bool:
-    """Ensure ``_patch_lm_eval`` also installs Hyperloom's early-exit probe.
+    """Ensure the early-exit probe is appended to ``lm_eval_sitecustomize.py``.
 
-    The probe watches ``finish_reason`` on completed responses; once the sample
-    is decisive it answers the remaining requests with an empty string, so
-    lm-eval still finishes normally and writes a ``results*.json`` scoring ~0 --
-    the verdict a non-terminating model would have earned hours later anyway.
-    Returns ``True`` when patched at exit, ``False`` (non-fatal) when the file
-    is missing or the anchor line is absent — the eval then runs unbounded as
-    before. Concurrency-safe; independent lock so it does not serialize with
-    the other patches on the same file.
+    The probe watches ``finish_reason`` on completed responses; once the pattern
+    says the model never terminates it short-circuits the remaining requests, so
+    lm-eval finishes in seconds with a ~0 score instead of burning the budget.
 
     Args:
         inferencex_path: Caller-provided override root; defaults to env-based
             discovery when ``None``.
 
     Returns:
-        True when at least one discovered ``benchmark_lib.sh`` is patched (or
-        already patched), False when none could be patched.
+        True when at least one target is patched (or already patched); False when
+        none were found or none could be patched. :func:`eval_probe_targets_exist`
+        tells the two apart.
     """
     return _ensure_patched(
-        _resolve_benchmark_lib_paths(inferencex_path),
+        _resolve_eval_sitecustomize_paths(inferencex_path),
         _is_eval_probe_patched,
-        _apply_eval_probe,
+        _apply_eval_probe_atomic,
         _EVAL_PROBE_LOCK_PATH,
         empty_msg=(
             "_inferencex_patcher: no InferenceX root discovered "
             "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
-            "benchmark_lib.sh missing — skipping eval-probe patch (fine for "
-            "tests and dry-runs without a real InferenceX tree)"
+            "utils/evals/patches/lm_eval_sitecustomize.py missing — "
+            "skipping eval-probe patch"
         ),
         failure_msg=(
-            "_inferencex_patcher: failed to eval-probe-patch %s; other discovered roots will still be attempted"
+            "_inferencex_patcher: failed to append eval-probe to %s; other discovered roots will still be attempted"
         ),
     )
 
@@ -933,13 +893,15 @@ def ensure_benchmark_lib_eval_probe_patched(
 # =====================================================================
 # Anchor contract
 # =====================================================================
-# Every patch above is gated on locating exact upstream text. That makes a
-# cosmetic upstream edit indistinguishable from "nothing to patch": the
-# ``ensure_*`` call returns False, the caller logs nothing, and the run proceeds
-# with the patch silently absent. That is how an eval-probe anchor stayed broken
-# across every checkout while the runs still looked healthy. Verification is
-# therefore separate from patching, so a caller can assert the contract instead
-# of inferring it from a boolean nobody reads.
+# The probe no longer has an anchor to rot: it is appended to a real file, and
+# ``eval_probe_targets_exist`` already separates "present and unpatchable" from
+# "laid out somewhere we do not look". The four patches below are still gated on
+# locating exact upstream text, which makes a cosmetic upstream edit
+# indistinguishable from "nothing to patch": the ``ensure_*`` call returns False,
+# no caller reads it, and the run proceeds with the patch silently absent -- the
+# same failure mode that took the probe offline before it was re-homed.
+# Verification is therefore separate from patching, so a caller can assert the
+# contract instead of inferring it from a boolean nobody reads.
 
 
 @dataclass(frozen=True)
@@ -975,11 +937,10 @@ class AnchorStatus:
 
 
 # name -> (relative path parts, sentinel, anchor)
-_ANCHOR_CONTRACT: tuple[tuple[str, tuple[str, ...], str, str | re.Pattern[str]], ...] = (
+_ANCHOR_CONTRACT: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
     ("num_prompts", ("benchmarks", "benchmark_lib.sh"), _PATCH_SENTINEL, _LEGACY_LINE),
     ("eval_dest", ("benchmarks", "benchmark_lib.sh"), _EVAL_DEST_SENTINEL, _EVAL_DEST_LEGACY),
     ("eval_start", ("benchmarks", "benchmark_lib.sh"), _EVAL_START_SENTINEL, _EVAL_START_LEGACY),
-    ("eval_probe", ("benchmarks", "benchmark_lib.sh"), _EVAL_PROBE_SENTINEL, _EVAL_PROBE_ANCHOR_RE),
     (
         "profile_extra_body",
         ("utils", "bench_serving", "benchmark_serving.py"),
@@ -989,19 +950,16 @@ _ANCHOR_CONTRACT: tuple[tuple[str, tuple[str, ...], str, str | re.Pattern[str]],
 )
 
 
-def count_anchor_hits(text: str, anchor: str | re.Pattern[str]) -> int:
+def count_anchor_hits(text: str, anchor: str) -> int:
     """Return how many sites in ``text`` the given anchor would rewrite.
 
     Args:
         text: Full contents of the file the patch targets.
-        anchor: Literal upstream text, or a compiled pattern for the anchors
-            whose surrounding line upstream is free to reformat.
+        anchor: The literal upstream text the patch replaces.
 
     Returns:
         The number of matching sites.
     """
-    if isinstance(anchor, re.Pattern):
-        return len(anchor.findall(text))
     return text.count(anchor)
 
 
@@ -1063,9 +1021,9 @@ __all__ = [
     "count_anchor_hits",
     "ensure_benchmark_lib_patched",
     "ensure_benchmark_lib_eval_dest_patched",
-    "ensure_benchmark_lib_eval_probe_patched",
     "ensure_benchmark_lib_eval_start_patched",
     "ensure_benchmark_serving_patched",
+    "ensure_eval_probe_patched",
     "failed_patch_anchors",
     "verify_patch_anchors",
 ]

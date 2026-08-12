@@ -20,10 +20,13 @@ from .client import (
 )
 from .models import RemoteRecipeValidationError, RemoteWriteResult
 from .values import (
+    KERNEL_AGENT_METRIC,
+    build_kernel_agent_knowledge,
     build_remote_knowledge,
     convert_v1_recipe_to_knowledge,
     envelope_to_v1_recipe,
     has_new_keep,
+    kernel_agent_canonical_id,
 )
 
 log = logging.getLogger(__name__)
@@ -44,6 +47,52 @@ def read_remote_recipe(
 
 # Kept as a standalone API compatibility alias.
 read_remote_champion = read_remote_recipe
+
+
+def write_kernel_agent_kb(
+    state: Any,
+    kernel_canonical_id: str,
+    session_id: str,
+    *,
+    client: RemoteRecipeClient | None = None,
+) -> RemoteWriteResult:
+    """Write Hyperloom's independent kernel-agent KB record (``kernel:`` scheme).
+
+    Unlike the recipe record, this write is NOT gated by end-to-end serving
+    throughput: it stores this session's kernel optimizations (gemm/fusion/
+    rewrite) into their own KB Store record and keeps whichever beats what the
+    kernel-agent KB already holds, scored by the kernel's own gain. Overlap with
+    KernelForge's ``kernel:`` records is by design and not consulted here.
+    """
+    resolved = client or RemoteRecipeClient.from_env_optional()
+    if resolved is None:
+        return RemoteWriteResult("disabled", "KB_STORE_URL/TOKEN not configured")
+    with tempfile.TemporaryDirectory(prefix="hyperloom-kernel-agent-") as temporary:
+        files_dir = Path(temporary) / "files"
+        bundle, score = build_kernel_agent_knowledge(
+            state, files_dir, sections=KnowledgeSections.from_env()
+        )
+        value = bundle.knowledge.get("value") or {}
+        has_opt = bool(
+            (value.get("gemm") or {}).get("optimizations")
+            or (value.get("fusion") or {}).get("items")
+            or (value.get("rewrite") or {}).get("items")
+        )
+        if not has_opt:
+            return RemoteWriteResult(
+                "skipped", "no_kernel_optimization", kernel_canonical_id, session_id
+            )
+        # Ensure a first kernel optimization always lands even if its gain field
+        # is missing; real KEEPs carry a positive gain that drives keep-if-better.
+        score_value = score if score > 0 else 1e-6
+        return resolved.write_if_better(
+            kernel_canonical_id,
+            session_id,
+            bundle,
+            optimized_throughput=score_value,
+            files_dir=files_dir,
+            metric=KERNEL_AGENT_METRIC,
+        )
 
 
 def write_final_remote_recipe(
@@ -211,11 +260,15 @@ __all__ = [
     "RemoteRecipeConfigurationError",
     "RemoteWarmRecipeAdapter",
     "SectionContent",
+    "KERNEL_AGENT_METRIC",
+    "build_kernel_agent_knowledge",
     "build_remote_knowledge",
     "convert_v1_recipe_to_knowledge",
     "envelope_to_v1_recipe",
     "has_new_keep",
+    "kernel_agent_canonical_id",
     "read_remote_champion",
     "read_remote_recipe",
     "write_final_remote_recipe",
+    "write_kernel_agent_kb",
 ]

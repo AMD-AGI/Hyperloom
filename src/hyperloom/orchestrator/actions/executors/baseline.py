@@ -62,8 +62,9 @@ from ._workload_envs import (
 )
 from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
-    ensure_benchmark_lib_eval_probe_patched,
     ensure_benchmark_lib_eval_start_patched,
+    ensure_eval_probe_patched,
+    eval_probe_targets_exist,
     failed_patch_anchors,
 )
 from ._magpie_patcher import ensure_eval_concurrency_compat
@@ -406,50 +407,31 @@ def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] 
     return not (params or {}).get("quality_ref_exempt")
 
 
-def _resolve_reference_base(
-    session_dir: Path,
-    *,
-    model_path: str,
-) -> tuple[str, dict[str, str]]:
-    """Read the model-gated reference base server args/envs from SharedState.
+def _resolve_reference_base(session_dir: Path) -> tuple[str, dict[str, str]]:
+    """Read the reference base server args/envs from SharedState.
 
     Baseline is the single choke point every run funnels through, so reading the
-    reference here seeds every baseline (including resume restarts). Model-gated:
-    a recipe captured for a different model is skipped.
+    reference here seeds every baseline (including resume restarts).
 
-    Returns ``("", {})`` on any failure or when no reference is set — the
-    caller then materializes exactly as before.
+    Returns ``("", {})`` when no reference is set.
     """
-    try:
-        from ...state.shared_state import SharedState
-        from hyperloom.inference_optimizer.reference_script import models_compatible
+    from ...state.shared_state import SharedState
 
-        # The baseline executor is a module-level singleton instantiated before
-        # $INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR is pinned, so its cached
-        # session_dir can point at the workspace root. Prefer the live pin when
-        # present; otherwise honor the caller-supplied path.
-        from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
+    # The baseline executor is a module-level singleton instantiated before
+    # $INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR is pinned, so its cached
+    # session_dir can point at the workspace root. Prefer the live pin when
+    # present; otherwise honor the caller-supplied path.
+    from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 
-        _pinned = os.environ.get(ENV_CURRENT_SESSION_DIR)
-        if _pinned:
-            session_dir = Path(_pinned)
-        state = SharedState.load_or_init(session_dir)
-        ref_args = str(getattr(state, "reference_server_args", "") or "").strip()
-        ref_envs = dict(getattr(state, "reference_envs", {}) or {})
-        if not ref_args and not ref_envs:
-            return ("", {})
-        ref_model = str(getattr(state, "reference_model", "") or "").strip()
-        if not models_compatible(ref_model, str(model_path or "")):
-            log.warning(
-                "reference recipe is for model %r but run model is %r; skipping reference base (flags may not apply).",
-                ref_model,
-                Path(str(model_path or "")).name,
-            )
-            return ("", {})
-        return (ref_args, ref_envs)
-    except Exception as exc:  # noqa: BLE001 — fail-soft, never block baseline
-        log.warning("reference base lookup failed: %s", exc)
+    _pinned = os.environ.get(ENV_CURRENT_SESSION_DIR)
+    if _pinned:
+        session_dir = Path(_pinned)
+    state = SharedState.load_or_init(session_dir)
+    ref_args = str(getattr(state, "reference_server_args", "") or "").strip()
+    ref_envs = dict(getattr(state, "reference_envs", {}) or {})
+    if not ref_args and not ref_envs:
         return ("", {})
+    return (ref_args, ref_envs)
 
 
 # Filesystem types that can be revoked / unmounted mid-run (e.g. a wekafs/NFS
@@ -1139,31 +1121,20 @@ class BaselineExecutor:
     ) -> dict[str, Any] | None:
         """Hook after YAML materialization, before launch.
 
-        Applies the eval-dest redirect patch to the InferenceX checkout the
-        subprocess will run, so ``append_lm_eval_summary``'s ``mv ./`` writes
-        lm-eval ``results*.json`` into ``$RESULT_DIR`` (the per-task session
-        dir set in :meth:`_run_single_benchmark`) instead of the process cwd —
-        which, when InferenceX is mirrored to local disk, is a dir outside the
-        session that ``parse_eval_results`` never scans (baseline then wrongly
-        stops with ``baseline_accuracy_failed`` despite eval passing). Baseline
-        previously left this to ProfileExecutor only, so pure baseline runs
-        never got the redirect. Best-effort; never blocks the run.
+        Applies the eval-dest redirect so ``append_lm_eval_summary``'s ``mv ./``
+        writes lm-eval ``results*.json`` into ``$RESULT_DIR`` instead of the
+        process cwd, which is outside the session once InferenceX is mirrored to
+        local disk and would fail the accuracy gate despite a passing eval.
 
-        Also re-asserts the eval-concurrency compatibility fixes. Magpie's
-        ``_prepare_benchmark_scripts`` re-copies its own generic ``*.sh``
-        scripts into ``<inferencex>/benchmarks/`` on EVERY run, and
-        :func:`_ensure_local_inferencex` re-mirrors that checkout from scratch
-        on every run, so an install-time-only patch does not survive: a Magpie
-        installed by ``preflight`` (which never ran the patcher) re-introduces
-        ``run_eval ... --concurrent-requests $CONC`` into the copy that
-        actually executes, and InferenceX's ``run_lm_eval`` aborts the whole
-        benchmark with ``Unknown parameter: --concurrent-requests``. Applying
-        the fixes here — after materialization pins the exact checkout, before
-        launch — closes that window without an install re-run.
+        The patches are re-asserted here rather than at install time because
+        Magpie's ``_prepare_benchmark_scripts`` re-copies its own generic ``*.sh``
+        into ``<inferencex>/benchmarks/`` and :func:`_ensure_local_inferencex`
+        re-mirrors the checkout on every run, so an install-time patch does not
+        survive. Materialization has pinned the exact checkout by this point.
 
         ProfileExecutor fully REPLACES this hook (it does not call ``super()``)
-        with NUM_PROMPTS / PROFILE_EXTRA_BODY validation; the eval-start and
-        eval-concurrency fixes below therefore apply to the baseline path only.
+        with NUM_PROMPTS / PROFILE_EXTRA_BODY validation, so the eval patches
+        below apply to the baseline path only.
 
         Args:
             config_path: The materialized Magpie YAML config path.
@@ -1175,36 +1146,35 @@ class BaselineExecutor:
         """
         ix_root = self._inferencex_root_from_config(config_path)
         if ix_root:
-            try:
-                ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
-            except Exception as exc:  # noqa: BLE001 — patch is best-effort
-                log.warning(
-                    "baseline_executor: eval-dest patch skipped for %s: %s",
-                    ix_root,
-                    exc,
-                )
-            try:
-                ensure_benchmark_lib_eval_start_patched(Path(ix_root))
-            except Exception as exc:  # noqa: BLE001 — patch is best-effort
-                log.warning(
-                    "baseline_executor: eval-start patch skipped for %s: %s",
-                    ix_root,
-                    exc,
-                )
-            try:
-                ensure_benchmark_lib_eval_probe_patched(Path(ix_root))
-            except Exception as exc:  # noqa: BLE001 — patch is best-effort
-                log.warning(
-                    "baseline_executor: eval-probe patch skipped for %s: %s",
-                    ix_root,
-                    exc,
-                )
-        # Fail LOUDLY (never warn-and-continue) when the fatal eval flag cannot
-        # be removed AND this run is meant to execute lm-eval: the benchmark is
-        # guaranteed to abort in run_lm_eval, and the accuracy gate then stops
-        # the whole session. Surfacing it here costs seconds instead of a full
-        # doomed server boot + benchmark.
+            ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
+            ensure_benchmark_lib_eval_start_patched(Path(ix_root))
         if not _materialized_run_eval_disabled(config_path):
+            # Target present but unpatchable is a hard stop; target absent is an
+            # unrecognized layout, which warns rather than failing every eval run.
+            probe_root = Path(ix_root) if ix_root else None
+            if not ensure_eval_probe_patched(probe_root):
+                msg = (
+                    "the generation-pathology probe is not installed "
+                    "(utils/evals/patches/lm_eval_sitecustomize.py, inferencex="
+                    f"{ix_root or '<unset>'}, INFERENCEX_PATH="
+                    f"{os.environ.get('INFERENCEX_PATH', '') or '<unset>'}). "
+                    "A model that never emits EOS will run the accuracy eval to "
+                    "the full max_tokens budget on every sample and consume the "
+                    "entire baseline timeout."
+                )
+                if eval_probe_targets_exist(probe_root):
+                    log.error("baseline_executor: %s", msg)
+                    return {
+                        "status": "failed",
+                        "error_class": "eval_probe_unpatchable",
+                        "error": msg,
+                    }
+                log.warning("baseline_executor: %s", msg)
+            # Fail LOUDLY (never warn-and-continue) when the fatal eval flag cannot
+            # be removed AND this run is meant to execute lm-eval: the benchmark is
+            # guaranteed to abort in run_lm_eval, and the accuracy gate then stops
+            # the whole session. Surfacing it here costs seconds instead of a full
+            # doomed server boot + benchmark.
             try:
                 compat_ok = ensure_eval_concurrency_compat(inferencex_dir=ix_root or None)
             except Exception as exc:  # noqa: BLE001 — never mask as a silent skip
@@ -1241,27 +1211,27 @@ class BaselineExecutor:
                 return anchor_result
         return None
 
-    # Scoped to the patches this hook actually applies: ``num_prompts`` and
-    # ``profile_extra_body`` belong to the profiling path and are ProfileExecutor's
-    # to judge.
-    _EVAL_HOOK_ANCHORS = ("eval_dest", "eval_start", "eval_probe")
-    # Of those, the ones whose silent absence corrupts the accuracy gate rather
+    # Scoped to the line-replacement patches this hook applies. The probe is
+    # judged above by its own target-exists test, and ``num_prompts`` /
+    # ``profile_extra_body`` belong to the profiling path and are
+    # ProfileExecutor's to judge.
+    _EVAL_HOOK_ANCHORS = ("eval_dest", "eval_start")
+    # Of those, the one whose silent absence corrupts the accuracy gate rather
     # than degrading it: without ``eval_dest`` the results file lands in the cwd
-    # and no score is ever parsed; without ``eval_probe`` neither the pathology
-    # probe nor the per-request generation bounds are installed, so one
-    # non-terminating model consumes the entire time budget. ``eval_start`` is a
-    # log breadcrumb -- worth reporting, never worth aborting for.
-    _EVAL_CRITICAL_ANCHORS = ("eval_dest", "eval_probe")
+    # and no score is ever parsed. ``eval_start`` is a log breadcrumb -- worth
+    # reporting, never worth aborting for.
+    _EVAL_CRITICAL_ANCHORS = ("eval_dest",)
 
     def _eval_patch_anchors_result(self, ix_root: str | None) -> dict[str, Any] | None:
         """Fail the launch when an eval-critical patch can no longer be applied.
 
-        The ``ensure_*`` calls above report a miss as ``False`` and no caller has
-        ever read it, so an upstream edit that moves an anchor takes the patch
-        offline silently -- the run still looks healthy and only the symptom
-        (no score, or a budget-consuming eval) shows up hours later. Checked
-        only when this run executes lm-eval; anchors that merely degrade
-        something are logged, not fatal.
+        The ``ensure_*`` calls above report a miss as ``False`` and no caller
+        reads it, so an upstream edit that moves an anchor takes the patch
+        offline silently -- the run still looks healthy and only the symptom (no
+        score) shows up much later. This is the same failure mode that took the
+        probe offline before it was re-homed to a real file. Checked only when
+        this run executes lm-eval; anchors that merely degrade something are
+        logged, not fatal.
 
         Args:
             ix_root: The resolved InferenceX root for this run, if any.
@@ -1269,11 +1239,7 @@ class BaselineExecutor:
         Returns:
             An early-return failure dict, or ``None`` to proceed.
         """
-        try:
-            broken = [s for s in failed_patch_anchors(ix_root or None) if s.name in self._EVAL_HOOK_ANCHORS]
-        except Exception as exc:  # noqa: BLE001 — never mask as a silent skip
-            log.error("baseline_executor: InferenceX anchor verification raised: %s", exc)
-            return None
+        broken = [s for s in failed_patch_anchors(ix_root or None) if s.name in self._EVAL_HOOK_ANCHORS]
         if not broken:
             return None
         for status in broken:
@@ -1282,16 +1248,16 @@ class BaselineExecutor:
         if not fatal:
             return None
         msg = (
-            "accuracy eval cannot run: Hyperloom patches InferenceX by matching "
-            "exact upstream text, and that text is no longer there "
+            "accuracy eval cannot run: Hyperloom redirects lm-eval's results file "
+            "by matching exact upstream text, and that text is no longer there "
             f"(inferencex={ix_root or '<unset>'}). Broken: "
             + "; ".join(s.describe() for s in fatal)
             + ". Re-anchor the patch in _inferencex_patcher.py against the "
             "checkout in use, or pin INFERENCEX_REF back to a revision it "
-            "matches. Continuing would run the eval with the patch silently "
-            "absent, which either yields no accuracy score at all or lets a "
-            "single non-terminating model consume the whole time budget — do "
-            "NOT work around this with RUN_EVAL=false."
+            "matches. Continuing would leave every results*.json in the "
+            "benchmark's cwd, where the accuracy parser never looks, so the gate "
+            "would see no score at all — do NOT work around this with "
+            "RUN_EVAL=false."
         )
         log.error("baseline_executor: %s", msg)
         return {
@@ -2055,14 +2021,11 @@ class BaselineExecutor:
                 "output_dir": str(output_dir),
             }
         # Reference recipe base (lowest priority): prefer the explicit param,
-        # else read the model-gated SharedState value.
+        # else read the SharedState value.
         ref_args = str(params.get("reference_server_args") or "").strip()
         ref_envs = dict(params.get("reference_envs") or {})
         if not ref_args and not ref_envs:
-            ref_args, ref_envs = _resolve_reference_base(
-                self.session_dir,
-                model_path=resolved_model,
-            )
+            ref_args, ref_envs = _resolve_reference_base(self.session_dir)
         # Accuracy eval (GSM8K) opt-out: ``--no-eval``, the ``disable_run_eval``
         # param and the eval-failure fallback force ``RUN_EVAL=false``. Candidates
         # template from this materialized YAML, so they inherit it.
@@ -2728,16 +2691,13 @@ class BaselineExecutor:
                 # Merge the reference base UNDER the per-task args (last-wins) so
                 # a multi-node per-round restart carries the same reference flags
                 # the single-node materialized YAML does. Prefer explicit params,
-                # else the model-gated SharedState value.
+                # else the SharedState value.
                 from ._grid_runner import merge_server_args
 
                 _mn_ref_args = str(params.get("reference_server_args") or "").strip()
                 _mn_ref_envs = dict(params.get("reference_envs") or {})
                 if not _mn_ref_args and not _mn_ref_envs:
-                    _mn_ref_args, _mn_ref_envs = _resolve_reference_base(
-                        self.session_dir,
-                        model_path=resolved_model,
-                    )
+                    _mn_ref_args, _mn_ref_envs = _resolve_reference_base(self.session_dir)
                 # Base on effective_extra_server_args (carries the one-shot
                 # cuda-graph eager-fallback flag when armed) so the MN per-round
                 # restart keeps that fallback too.

@@ -12,6 +12,13 @@ matching single-shot helpers (:func:`achat_completion`, :func:`aresponse`,
 :func:`anthropic_messages` and their twins) own the request shapes, so no caller
 hand-builds a payload or an endpoint path either.
 
+Single-turn Anthropic work goes through :func:`anthropic_completion` /
+:func:`aanthropic_completion`, which additionally own *transport* selection: the
+Messages API rejects a Claude Max/Pro subscription token, so that credential is
+served by a tool-free single-turn Claude CLI session instead. Both transports
+return the same :class:`AnthropicMessageResult`, so a call site does not encode
+which credential shape a deployment carries.
+
 Hyperloom serves three deployment shapes — Anthropic-only, OpenAI-compatible
 only, and both. Explicit configuration for a protocol always wins; when the
 OpenAI side is absent, :func:`resolve_openai_client_config` falls back to the
@@ -35,7 +42,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 log = logging.getLogger(__name__)
@@ -66,11 +73,70 @@ class OpenAIClientConfig:
         return kwargs
 
 
+# Subscription credential minted by ``claude setup-token``. Never synthesized
+# into the API-key vars; see ``claude_sdk_env_options``.
+CLAUDE_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+
+# Single source of truth for "what counts as an Anthropic-side credential",
+# highest precedence first. Mirrors the Claude CLI's own resolution: an API key
+# or gateway bearer token disables subscription (OAuth) mode entirely, so OAuth
+# is only live when both are unset. Detection sites derive from this tuple via
+# has_anthropic_credential(); adding a form here makes them all recognize it.
+ANTHROPIC_CREDENTIAL_ENV_ORDER: tuple[str, ...] = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    CLAUDE_OAUTH_TOKEN_ENV,
+)
+
+# The subset whose value may be copied into another credential var or persisted
+# to ~/.claude/config.json. Enumerated explicitly rather than derived by
+# subtraction: a newly recognized credential form must be reviewed before it may
+# be materialized, since anything that outranks a subscription token moves the
+# run onto API-credits billing. A test asserts this stays a subset that excludes
+# CLAUDE_OAUTH_TOKEN_ENV.
+ANTHROPIC_SYNTHESIZABLE_KEY_ENVS: tuple[str, ...] = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+)
+
+
+def _first_set_value(names: Iterable[str], source: Mapping[str, str]) -> str:
+    """First non-blank value among ``names``, in the order given."""
+    for name in names:
+        value = (source.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def has_anthropic_credential(env: Mapping[str, str] | None = None) -> bool:
+    """True when any Anthropic-side credential form is set."""
+    return bool(
+        _first_set_value(
+            ANTHROPIC_CREDENTIAL_ENV_ORDER,
+            env if env is not None else os.environ,
+        )
+    )
+
+
+def anthropic_synthesizable_key(env: Mapping[str, str] | None = None) -> str:
+    """Highest-precedence credential that may be copied elsewhere.
+
+    Returns "" when a subscription token is the only credential available, which
+    is what keeps OAuth out of API-key slots and out of config.json.
+    """
+    return _first_set_value(
+        ANTHROPIC_SYNTHESIZABLE_KEY_ENVS,
+        env if env is not None else os.environ,
+    )
+
+
 CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_CUSTOM_HEADERS",
+    CLAUDE_OAUTH_TOKEN_ENV,
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
     "OPENAI_CUSTOM_HEADERS",
@@ -105,11 +171,9 @@ _HOST_DEFAULT_MODELS: dict[str, str] = {"api.deepseek.com": _DEEPSEEK_MODEL}
 # when that whole side is empty -- and then for BOTH protocols, since they
 # describe one gateway. Adopting them piecemeal next to an existing Anthropic
 # credential would send that credential to DeepSeek's host.
-_ANTHROPIC_SIDE_KEYS: tuple[str, ...] = (
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-)
+# Derived from the credential registry so a newly registered form makes the
+# side detectable everywhere at once, subscription tokens included.
+_ANTHROPIC_SIDE_KEYS: tuple[str, ...] = ("ANTHROPIC_BASE_URL", *ANTHROPIC_CREDENTIAL_ENV_ORDER)
 _OPENAI_SIDE_KEYS: tuple[str, ...] = ("OPENAI_BASE_URL", "OPENAI_API_KEY")
 
 
@@ -725,8 +789,10 @@ def claude_sdk_env_options(
     if not any((source.get(key) or "").strip() for key in CLAUDE_GATEWAY_SIGNAL_KEYS):
         return {}
 
-    # Anthropic-side credentials only.
-    fallback_key = source.get("ANTHROPIC_AUTH_TOKEN") or source.get("ANTHROPIC_API_KEY") or ""
+    # Anthropic-side credentials only, and only the synthesizable subset: an
+    # OAuth token copied into either API-key var would drop the CLI out of
+    # subscription mode and 401 the run.
+    fallback_key = anthropic_synthesizable_key(source)
     if fallback_key:
         source.setdefault("ANTHROPIC_API_KEY", fallback_key)
         source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
@@ -1008,6 +1074,229 @@ async def aanthropic_messages(
     return _anthropic_message_result(resp)
 
 
+# Single-shot Anthropic transports. "http" is the Messages API; "sdk" drives the
+# Claude CLI, the only channel that accepts a Max/Pro subscription token.
+ANTHROPIC_TRANSPORT_HTTP = "http"
+ANTHROPIC_TRANSPORT_SDK = "sdk"
+
+_ANTHROPIC_NO_CREDENTIAL = (
+    f"no Anthropic credential configured: set one of {' / '.join(ANTHROPIC_CREDENTIAL_ENV_ORDER)}"
+)
+
+
+def anthropic_transport(env: Mapping[str, str] | None = None) -> str:
+    """Pick the single-shot Anthropic transport the credential can authenticate.
+
+    An API key or gateway bearer token authenticates the Messages API directly.
+    A subscription token cannot: ``/v1/messages`` rejects it with "OAuth
+    authentication is currently not supported", and the Claude CLI is the only
+    sanctioned channel that accepts it. Key beats token, matching the CLI's own
+    precedence, so a host carrying both resolves the same way everywhere.
+
+    Args:
+        env: Env mapping to read instead of ``os.environ``.
+
+    Returns:
+        :data:`ANTHROPIC_TRANSPORT_HTTP`, :data:`ANTHROPIC_TRANSPORT_SDK`, or
+        ``""`` when no Anthropic-side credential is configured.
+    """
+    source = env if env is not None else os.environ
+    if anthropic_synthesizable_key(source):
+        return ANTHROPIC_TRANSPORT_HTTP
+    if (source.get(CLAUDE_OAUTH_TOKEN_ENV) or "").strip():
+        return ANTHROPIC_TRANSPORT_SDK
+    return ""
+
+
+def anthropic_transport_ready(env: Mapping[str, str] | None = None) -> bool:
+    """Whether a single-shot Anthropic call could actually be issued right now.
+
+    Distinct from :func:`anthropic_transport`, which only reads the credential:
+    the CLI transport additionally needs the agent SDK installed. Callers that
+    degrade gracefully rather than failing the run probe with this first.
+
+    Args:
+        env: Env mapping to read instead of ``os.environ``.
+
+    Returns:
+        True when a credential is configured and its transport is available.
+    """
+    transport = anthropic_transport(env)
+    if not transport:
+        return False
+    if transport == ANTHROPIC_TRANSPORT_SDK:
+        from .claude_oneshot import ensure_available
+
+        try:
+            ensure_available()
+        except RuntimeError:
+            return False
+    return True
+
+
+def _anthropic_http_params(
+    *,
+    model: str,
+    messages: Sequence[Mapping[str, object]],
+    system: str | None,
+    max_tokens: int,
+    temperature: float | None = None,
+) -> dict[str, object]:
+    """Assemble the Messages request body, omitting an absent system prompt."""
+    params: dict[str, object] = {
+        "model": model,
+        "messages": list(messages),
+        "max_tokens": int(max_tokens),
+    }
+    if system:
+        params["system"] = system
+    if temperature is not None:
+        params["temperature"] = float(temperature)
+    return params
+
+
+def _one_shot_client(timeout_s: float | None, env: Mapping[str, str] | None) -> object:
+    """Build the Claude CLI one-shot client, imported late to avoid a cycle.
+
+    ``env`` is forwarded rather than dropped: the CLI resolves its own
+    credential from the environment it is handed, so a caller that passed an
+    explicit mapping would otherwise silently get the ambient one.
+    """
+    from .claude_oneshot import ClaudeOneShotClient
+
+    if timeout_s is None:
+        return ClaudeOneShotClient(env=env)
+    return ClaudeOneShotClient(timeout_s=float(timeout_s), env=env)
+
+
+def anthropic_completion(
+    *,
+    model: str,
+    messages: Sequence[Mapping[str, object]],
+    max_tokens: int,
+    system: str | None = None,
+    temperature: float | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: object | None = None,
+    timeout_s: float | None = None,
+) -> AnthropicMessageResult:
+    """Issue one single-shot Anthropic completion over whichever transport works.
+
+    The single sanctioned entry point for single-turn Anthropic inference. It
+    owns transport selection so no caller has to know that a subscription token
+    cannot reach the Messages API; both transports return the same
+    :class:`AnthropicMessageResult`.
+
+    Transports differ in three observable ways. ``max_tokens`` is a request
+    field on the HTTP path but rides the CLI environment on the SDK path,
+    ``stop_reason`` is always present on the HTTP path while the SDK reports it
+    only when the model supplies one, and ``temperature`` reaches the model only
+    on the HTTP path -- the CLI exposes no such knob.
+
+    Args:
+        model: The Claude model id.
+        messages: Anthropic-style turns.
+        max_tokens: Output-token cap; required by the Messages API.
+        system: The system instruction, or ``None``.
+        temperature: Sampling temperature, or ``None`` for the model default.
+            Sent on the HTTP path and silently ignored on the SDK one, which
+            has nowhere to put it.
+        env: Env mapping to read instead of ``os.environ``.
+        timeout: HTTP-path transport timeout; build one with
+            :func:`build_http_timeout`.
+        timeout_s: SDK-path wall-clock budget in seconds, CLI startup included.
+
+    Returns:
+        The flattened :class:`AnthropicMessageResult`.
+
+    Raises:
+        LLMConfigError: If no Anthropic-side credential is configured.
+        RuntimeError: On an HTTP failure status, a non-JSON body, or an
+            unavailable Claude CLI.
+    """
+    transport = anthropic_transport(env)
+    if transport == ANTHROPIC_TRANSPORT_SDK:
+        client = _one_shot_client(timeout_s, env)
+        return client.messages(  # type: ignore[attr-defined]
+            model=model,
+            messages=messages,
+            system=system,
+            max_tokens=max_tokens,
+        )
+    if not transport:
+        raise LLMConfigError(_ANTHROPIC_NO_CREDENTIAL)
+    http_client = get_anthropic_client(env=dict(env) if env is not None else None, timeout=timeout)
+    with http_client:  # type: ignore[attr-defined]
+        return anthropic_messages(
+            http_client,
+            **_anthropic_http_params(
+                model=model,
+                messages=messages,
+                system=system,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            ),
+        )
+
+
+async def aanthropic_completion(
+    *,
+    model: str,
+    messages: Sequence[Mapping[str, object]],
+    max_tokens: int,
+    system: str | None = None,
+    temperature: float | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: object | None = None,
+    timeout_s: float | None = None,
+) -> AnthropicMessageResult:
+    """Async twin of :func:`anthropic_completion`; see it for the full contract.
+
+    Args:
+        model: The Claude model id.
+        messages: Anthropic-style turns.
+        max_tokens: Output-token cap; required by the Messages API.
+        system: The system instruction, or ``None``.
+        temperature: Sampling temperature, or ``None`` for the model default.
+            Sent on the HTTP path and silently ignored on the SDK one, which
+            has nowhere to put it.
+        env: Env mapping to read instead of ``os.environ``.
+        timeout: HTTP-path transport timeout.
+        timeout_s: SDK-path wall-clock budget in seconds.
+
+    Returns:
+        The flattened :class:`AnthropicMessageResult`.
+
+    Raises:
+        LLMConfigError: If no Anthropic-side credential is configured.
+        RuntimeError: On an HTTP failure status, a non-JSON body, or an
+            unavailable Claude CLI.
+    """
+    transport = anthropic_transport(env)
+    if transport == ANTHROPIC_TRANSPORT_SDK:
+        client = _one_shot_client(timeout_s, env)
+        return await client.amessages(  # type: ignore[attr-defined]
+            model=model,
+            messages=messages,
+            system=system,
+            max_tokens=max_tokens,
+        )
+    if not transport:
+        raise LLMConfigError(_ANTHROPIC_NO_CREDENTIAL)
+    http_client = get_async_anthropic_client(env=dict(env) if env is not None else None, timeout=timeout)
+    async with http_client:  # type: ignore[attr-defined]
+        return await aanthropic_messages(
+            http_client,
+            **_anthropic_http_params(
+                model=model,
+                messages=messages,
+                system=system,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            ),
+        )
+
+
 def stream_chat_completion_text(
     client: object,
     **params: object,
@@ -1049,8 +1338,13 @@ async def astream_chat_completion_text(
 
 
 __all__ = [
+    "ANTHROPIC_CREDENTIAL_ENV_ORDER",
+    "ANTHROPIC_SYNTHESIZABLE_KEY_ENVS",
+    "ANTHROPIC_TRANSPORT_HTTP",
+    "ANTHROPIC_TRANSPORT_SDK",
     "AnthropicMessageResult",
     "CLAUDE_GATEWAY_SIGNAL_KEYS",
+    "CLAUDE_OAUTH_TOKEN_ENV",
     "ChatCompletionResult",
     "DEFAULT_ANTHROPIC_BASE_URL",
     "DEFAULT_ANTHROPIC_VERSION",
@@ -1058,9 +1352,14 @@ __all__ = [
     "LLMConfigError",
     "OpenAIClientConfig",
     "ResponsesResult",
+    "aanthropic_completion",
     "aanthropic_messages",
     "achat_completion",
+    "anthropic_completion",
     "anthropic_messages",
+    "anthropic_synthesizable_key",
+    "anthropic_transport",
+    "anthropic_transport_ready",
     "apply_reasoning_effort",
     "aresponse",
     "astream_chat_completion_text",
@@ -1075,6 +1374,7 @@ __all__ = [
     "get_async_anthropic_client",
     "get_async_openai_client",
     "get_openai_client",
+    "has_anthropic_credential",
     "has_anthropic_side",
     "has_openai_side",
     "is_anthropic_only",

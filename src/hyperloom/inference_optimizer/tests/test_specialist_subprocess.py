@@ -61,6 +61,23 @@ def test_build_specialist_env_inherits_provider_secrets_by_default(monkeypatch):
     assert "LD_PRELOAD" not in env
 
 
+def test_build_specialist_env_forwards_oauth_token_without_mirroring_it(monkeypatch):
+    """A subscription-only parent must hand the token down untouched.
+
+    Mirroring it into either API-key var would drop the child out of
+    subscription mode and 401 it.
+    """
+    oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv(oauth_env, "sk-ant-oat01-fake")
+    env = _build_specialist_env()
+    assert env[oauth_env] == "sk-ant-oat01-fake"
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+
+
 def test_build_specialist_env_secret_inheritance_can_be_disabled(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", "0")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-api-value")

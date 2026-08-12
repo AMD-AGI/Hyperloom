@@ -1080,9 +1080,6 @@ def test_end_to_end_flagged_script_is_scrubbed_before_launch(tmp_path):
         "run_eval() {\n"
         '    export EVAL_RESULT_DIR="$results_dir"\n'
         "}\n"
-        "_patch_lm_eval() {\n"
-        '    export PYTHONPATH="${patch_dir}${PYTHONPATH:+:${PYTHONPATH}}"\n'
-        "}\n"
         "append_lm_eval_summary() {\n"
         '    mv -f "$jf" ./ || echo "WARN: failed to move ${jf}" >&2\n'
         "}\n",
