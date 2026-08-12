@@ -7065,6 +7065,44 @@ def _grade_integrate_accuracy(
     }
 
 
+def _cold_start_rebaseline_timeout(resolved_sec: int) -> int:
+    """Raise a re-baseline timeout to the cold-start cap when the JIT cache is empty.
+
+    Applying a kernel patch moves aiter's JIT cache aside, so the re-baseline that
+    follows always pays a full recompile. Passing an explicit ``timeout_sec`` also
+    suppresses the baseline executor's own cold-start branch, so without this the
+    warm budget is the only one a patched re-baseline ever gets, and the compile
+    it cannot finish surfaces as a stale JIT lock instead of a slow boot.
+    """
+    from ..actions.executors.baseline import (
+        BASELINE_COLD_START_TIMEOUT_SEC,
+        _probe_aiter_jit_cache,
+    )
+
+    try:
+        cache = _probe_aiter_jit_cache()
+    except Exception:  # noqa: BLE001 - a probe failure must not shorten the boot
+        return resolved_sec
+    if cache.get("probe_status") != "found" or not cache.get("is_cold"):
+        return resolved_sec
+    cold_cap = int(
+        os.environ.get(
+            "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC",
+            BASELINE_COLD_START_TIMEOUT_SEC,
+        )
+    )
+    if cold_cap <= resolved_sec:
+        return resolved_sec
+    log.warning(
+        "integrate_handler: aiter JIT cache is cold (%s kernels); raising "
+        "re-baseline timeout %ds -> %ds for the recompile the patch forces",
+        cache.get("kernel_count"),
+        resolved_sec,
+        cold_cap,
+    )
+    return cold_cap
+
+
 def _integrate_rebaseline_timeout_sec(
     payload: dict,
     *,
@@ -7258,9 +7296,11 @@ async def integrate_handler(
     fake_task_id = f"integrate-{kernel_id or 'anon'}"
     workspace = unique_runs_dir(session_dir, "integrate", fake_task_id)
     baseline_executor = BaselineExecutor(session_dir=session_dir)
-    rebaseline_timeout_sec = _integrate_rebaseline_timeout_sec(
-        payload,
-        default_timeout_sec=baseline_executor.default_timeout_sec,
+    rebaseline_timeout_sec = _cold_start_rebaseline_timeout(
+        _integrate_rebaseline_timeout_sec(
+            payload,
+            default_timeout_sec=baseline_executor.default_timeout_sec,
+        )
     )
     fake_task = Task(
         task_id=fake_task_id,

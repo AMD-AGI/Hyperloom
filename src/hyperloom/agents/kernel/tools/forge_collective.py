@@ -397,7 +397,13 @@ def _restore_config(repo: str, snapshot: dict[str, str | None]) -> None:
 
 
 def _restore_journal_path(repo: str) -> Path:
-    """Return the crash-recovery journal path for an in-place campaign."""
+    """Return the crash-recovery journal path for an in-place campaign.
+
+    This does not duplicate forge-loop's ``run_state.json``: that recovers
+    iteration progress inside a campaign, while forge-loop explicitly leaves
+    worktree prep, export and restore to its caller. Only this journal can put
+    an in-place checkout back the way the operator left it.
+    """
     return Path(repo) / ".git" / "hyperloom_collective_restore.json"
 
 
