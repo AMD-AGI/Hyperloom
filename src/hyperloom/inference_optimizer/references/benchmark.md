@@ -38,8 +38,8 @@ In-loop, defense-in-depth — the launcher does not touch this. Magpie shell
 wrappers hardcode artifacts under `/workspace/` (`inferencex_result.json`,
 `server.log`, `gpu_metrics.csv`, `profile_*.trace.json.gz`). When a task's
 in-workspace search finds no usable measurement, the executors run an
-mtime-gated salvage pass over `$INFERENCE_OPTIMIZER_RESCUE_PATHS` (default
-`/workspace/`) and copy fresh matches into the task workspace, tagged in
+mtime-gated salvage pass over `$INFERENCE_OPTIMIZER_RESCUE_PATHS` (unset =
+no salvage) and copy fresh matches into the task workspace, tagged in
 `nonfatal_warnings` (`rescued_from_leaked_path:` / `harvested_leaked_artifact:`).
 Extend the scan roots via `$INFERENCE_OPTIMIZER_LEAK_ROOTS` if a script leaks
 elsewhere; the default `{framework}_{runner_type}.sh` already respects
