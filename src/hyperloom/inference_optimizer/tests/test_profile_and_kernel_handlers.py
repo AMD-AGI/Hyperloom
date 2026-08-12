@@ -2019,6 +2019,48 @@ async def test_trace_analyze_handler_xdit_state_overrides_stale_payload_framewor
     assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "xdit"
     assert "--skip-split" in cmd
     assert "--analysis-mode" not in cmd
+    warnings = res["trace_health_warnings"]
+    assert warnings[0]["code"] == "stale_framework_overridden"
+    assert warnings[0]["payload_framework"] == "sglang"
+    assert warnings[0]["session_framework"] == "xdit"
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_custom_state_overrides_stale_payload_framework(
+    session_dir,
+    monkeypatch,
+):
+    """All scriptable session frameworks preserve their raw trace."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.framework = "custom"
+    state.save(session_dir)
+
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "sglang",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "custom"
+    assert "--skip-split" in cmd
+    assert res["trace_health_warnings"][0]["code"] == "stale_framework_overridden"
 
 
 @pytest.mark.asyncio
