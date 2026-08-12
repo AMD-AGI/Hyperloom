@@ -34,9 +34,7 @@ From the agent terminal in that workspace, install the published release wheel
 into the current directory:
 
 ```bash
-python3 -m pip install \
-  https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0a3/hyperloom_inference_optimizer-1.0.0a3-py3-none-any.whl \
-  --target .
+pip install hyperloom-inference-optimizer==1.0.0b1 --target .
 ```
 
 It is normal for the current directory to contain many Python package directories
