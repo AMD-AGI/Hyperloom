@@ -237,6 +237,39 @@ def cross_domain_rule_descriptors() -> list[dict[str, str]]:
     ]
 
 
+# Audit code the Critic cites when a self-reported gain field reaches review.
+QUANTITATIVE_CLAIM_REASON_CODE: str = "specialist_quantitative_claim_violation"
+
+
+def quantitative_claim_rule_descriptor() -> dict[str, Any]:
+    """Return the self-reported-gain rule in the shape the Critic bundle uses.
+
+    Single-sources the field list from :data:`FORBIDDEN_PROPOSAL_FIELDS` so the
+    Critic's copy cannot drift from the one the runner enforces, and carries
+    ``advise`` as the verdict: the fields are stripped before review, so one
+    arriving anyway is a format problem, and rejecting over format costs the
+    round every proposal in the set.
+
+    Returns:
+        A ``rule_id`` / ``description`` / ``forbidden_proposal_fields`` /
+        ``failure_verdict`` / ``failure_reason_code`` dict.
+    """
+    return {
+        "rule_id": "no_self_reported_gain",
+        "description": (
+            "proposal_set[*] must not carry a self-reported gain, priority or "
+            "confidence field: measured gain is the Coordinator's, never the "
+            "worker's claim. These fields are stripped from specialist output "
+            "before review, so treat any that still reach you -- including an "
+            "equivalent smuggled under another name -- as advisory: ignore the "
+            "field and judge the proposal on its merits."
+        ),
+        "forbidden_proposal_fields": sorted(FORBIDDEN_PROPOSAL_FIELDS),
+        "failure_verdict": "advise",
+        "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+    }
+
+
 def numeric_claims(text: str) -> list[str]:
     """Return numeric-speedup claim substrings found in ``text``.
 
@@ -528,6 +561,7 @@ __all__ = [
     "GROUND_UNCHECKED",
     "PatchGroundingResult",
     "PatchSafetyReport",
+    "QUANTITATIVE_CLAIM_REASON_CODE",
     "SCOPE_DOMAINS_LITERAL",
     "cross_domain_rule_descriptors",
     "ground_patch_text",
@@ -536,6 +570,7 @@ __all__ = [
     "patch_escapes_tree",
     "patch_file_targets",
     "patch_targets_missing",
+    "quantitative_claim_rule_descriptor",
     "scan_quantitative_claims",
     "strip_forbidden_proposal_fields",
     "vet_patches",

@@ -306,6 +306,25 @@ def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None
     rc["cross_domain_rules"] = cross_domain_rule_descriptors()
 
 
+def _inject_quantitative_claim_constraint(judge_bundle: dict[str, Any]) -> None:
+    """Set ``review_constraints.quantitative_claim_rule`` from the enforced list.
+
+    Unconditional: the guard applies to every specialist proposal regardless of
+    scope, and delivering it as data keeps the Critic's field list identical to
+    the one the runner strips, instead of a hand-copied prose list that drifts.
+
+    Args:
+        judge_bundle: The judge bundle to enrich in place.
+    """
+    from ..specialists.patch_safety import quantitative_claim_rule_descriptor
+
+    rc = judge_bundle.setdefault("review_constraints", {})
+    if not isinstance(rc, dict):
+        rc = {}
+        judge_bundle["review_constraints"] = rc
+    rc["quantitative_claim_rule"] = quantitative_claim_rule_descriptor()
+
+
 @dataclass
 class CriticAgentBackend:
     """Real Critic backend that drives the critic-agent runtime.
@@ -600,6 +619,7 @@ class CriticAgentBackend:
 
         _inject_phase_constraints(judge_bundle, self._trace_phase or "")
         _maybe_inject_cross_domain_constraints(judge_bundle)
+        _inject_quantitative_claim_constraint(judge_bundle)
 
         # Codex reasoning; short-circuit when there are no proposals.
         proposals = judge_bundle.get("proposals") or []

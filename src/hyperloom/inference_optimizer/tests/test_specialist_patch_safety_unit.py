@@ -229,6 +229,22 @@ def test_stripping_tolerates_a_payload_that_is_not_a_dict(payload):
     assert ps.strip_forbidden_proposal_fields(payload) == []
 
 
+# ---- quantitative_claim_rule_descriptor ------------------------------------
+def test_the_rule_the_critic_gets_lists_exactly_what_the_runner_strips():
+    """A hand-copied field list in the prompt is how the Critic came to reject
+    over a field the runner never enforced."""
+    rule = ps.quantitative_claim_rule_descriptor()
+
+    assert set(rule["forbidden_proposal_fields"]) == set(ps.FORBIDDEN_PROPOSAL_FIELDS)
+
+
+def test_a_format_slip_is_advisory_not_a_reject():
+    rule = ps.quantitative_claim_rule_descriptor()
+
+    assert rule["failure_verdict"] == "advise"
+    assert rule["failure_reason_code"] == ps.QUANTITATIVE_CLAIM_REASON_CODE
+
+
 # ---- vet_patches ----------------------------------------------------------
 def test_vet_patches(tmp_path, monkeypatch):
     good = tmp_path / "good.patch"

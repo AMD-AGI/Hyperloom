@@ -32,6 +32,7 @@ from hyperloom.orchestrator.roles.critic_agent import (
     _reviewed_msg_ids_from_bundle,
     _verdict_references_kb,
 )
+from hyperloom.orchestrator.specialists.patch_safety import FORBIDDEN_PROPOSAL_FIELDS
 from hyperloom.inference_optimizer.protocol.intent import IntentType
 
 
@@ -920,6 +921,54 @@ async def test_user_prompt_includes_judge_bundle_and_instructions(
     assert "JUDGE BUNDLE" in user_text
     assert "OUTPUT FORMAT" in user_text
     assert '"abc"' in user_text  # proposal msg_id from judge bundle
+
+
+@pytest.mark.asyncio
+async def test_the_reviewed_bundle_carries_the_quantitative_claim_rule(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+):
+    """Delivered as data so the Critic's field list stays identical to the one
+    the runner strips, and so a format slip is advisory rather than a reject
+    that costs the round every proposal in the set."""
+    judge_bundle = {
+        "kind": "coordinator_inbox",
+        "merged_context": {"model": "m", "framework": "sglang"},
+        "proposals": [
+            {
+                "msg_id": "abc",
+                "from_agent": "orchestration",
+                "action_name": "baseline",
+                "payload": {},
+                "predicted_gain_pct": 0.0,
+            }
+        ],
+        "kb_priors_by_proposal": {"abc": []},
+        "kb_read_skipped_reason": None,
+        "review_constraints": {},
+        "notes": [],
+        "missing_context": [],
+        "required_context": [],
+    }
+    reply = '{"review_verdicts": [{"target_proposal_msg_id": "abc", "verdict": "approve"}]}'
+    backend, client = _make_backend(
+        fake_critic_root,
+        fake_session_dir,
+        codex_replies=[reply],
+        judge_bundle=judge_bundle,
+    )
+    await backend.run("ignored", system_prompt="you are critic")
+
+    user_text = client.completions.calls[0]["messages"][1]["content"]
+    match = re.search(
+        r"==== JUDGE BUNDLE ====\s*(\{.*?\})\s*==== END JUDGE BUNDLE ====",
+        user_text,
+        re.DOTALL,
+    )
+    assert match
+    rule = json.loads(match.group(1))["review_constraints"]["quantitative_claim_rule"]
+    assert rule["failure_verdict"] == "advise"
+    assert set(rule["forbidden_proposal_fields"]) == set(FORBIDDEN_PROPOSAL_FIELDS)
 
 
 # Static context propagation — backend sources model/framework from manifest.json or explicit static_context.

@@ -71,10 +71,15 @@ in-phase kernel patch would.
 * Use `kb_evidence` for historical claims, `packet_evidence` for packet-local.
 * Never `delegate` / `request` / `propose_action` (PolicyGate rejects).
 * RCA belongs to Robustness, not you.
-* `proposal_set[*]` MUST NOT carry `expected_gain` / `bench_evidence`
-  / `confidence` / `score` / `rank` / `force_provenance`. Reject with
-  `reason="specialist_quantitative_claim_violation"`. This guard applies to
-  every specialist proposal regardless of scope.
+* `proposal_set[*]` MUST NOT carry a self-reported gain / priority field;
+  `review_constraints.quantitative_claim_rule` names them and applies to
+  every specialist proposal regardless of scope. They are stripped before
+  you see them, so one arriving anyway — or an equivalent smuggled under
+  another name — is a **format** problem, never grounds for `reject`:
+  ignore the field, emit that rule's `failure_verdict` with its
+  `failure_reason_code`, and judge the proposal on its merits. Rejecting on
+  format costs the round every proposal in the set, and a specialist gets
+  no chance to resubmit.
 
 ### Cross-domain proposals (scope=domains)
 
