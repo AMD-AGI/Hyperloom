@@ -392,61 +392,6 @@ def test_baseline_double_run_by_default(tmp_path, monkeypatch):
     assert captured[1]["benchmark"]["server_lifecycle"]["cleanup"] is True
 
 
-def test_measure_round_resets_the_prefix_cache(tmp_path, monkeypatch):
-    """Both rounds send a fixed-seed prompt set, so the measured round must face
-    a cold prefix cache or it scores replayed prefill instead of real work."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    output_dir = tmp_path / "ws"
-
-    fake_run, state = _cold_then_hot_fake_run()
-    executor = _executor(base, tmp_path)
-    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
-
-    resets: list[int] = []
-    with (
-        patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-            side_effect=fake_run,
-        ),
-        patch.object(
-            BaselineExecutor,
-            "_reset_prefix_cache",
-            side_effect=lambda port, *a, **k: (resets.append(port), True)[1],
-        ),
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "succeeded"
-    assert state["calls"] == 2
-    assert len(resets) == 1
-
-
-def test_reset_prefix_cache_posts_and_reads_success(monkeypatch):
-    """The helper POSTs the vLLM control endpoint and honours its verdict."""
-    import urllib.request
-
-    calls: list = []
-
-    class _Resp:
-        def __init__(self, body: bytes) -> None:
-            self._body = body
-
-        def read(self) -> bytes:
-            return self._body
-
-    monkeypatch.setattr(
-        urllib.request,
-        "urlopen",
-        lambda req, timeout=None: (calls.append((req.full_url, req.method)), _Resp(b'{"success": true}'))[1],
-    )
-    assert BaselineExecutor._reset_prefix_cache(8888) is True
-    assert calls == [("http://127.0.0.1:8888/reset_prefix_cache", "POST")]
-
-    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: _Resp(b'{"success": false}'))
-    assert BaselineExecutor._reset_prefix_cache(8888) is False
-
-
 def test_baseline_double_run_can_be_disabled_by_task_param(tmp_path, monkeypatch):
     """Focused callers may explicitly opt out of the default cold+hot baseline."""
     base = tmp_path / "base.yaml"

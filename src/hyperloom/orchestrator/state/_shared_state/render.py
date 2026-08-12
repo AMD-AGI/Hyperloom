@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
+from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
+
 
 def _shared_state_module():
     """Import parent shared_state lazily to avoid a module-level cycle."""
@@ -24,8 +26,8 @@ def _shared_state_module():
 _FAILURES_RENDERED = 10
 _FAILURE_EXCERPT_CHARS = 600
 
-# Width budget for the artifact anchors appended to a variant line.
-_VARIANT_ANCHOR_MAX_CHARS = 62
+# Width budget for artifact anchors; sized so a full uuid4 fid still fits ws=.
+_VARIANT_ANCHOR_MAX_CHARS = 100
 
 
 class _RenderMixin:
@@ -752,22 +754,30 @@ class _RenderMixin:
         if reason and reason not in ("not_keep", "gain_below_threshold"):
             ratio = entry.get("wall_clock_ratio_vs_baseline")
             ratio_s = f" {ratio:.2f}x" if isinstance(ratio, (int, float)) and ratio > 0 else ""
-            body = str(entry.get("error_excerpt") or reason)
-            parts.append(f"reason={body[:120]}{ratio_s}")
+            # error_excerpt on variant rows is tail-1200 (boot assertion at end);
+            # flatten+defang prevents section-header injection from untrusted log text.
+            body = _flatten_for_prompt(str(entry.get("error_excerpt") or reason))
+            parts.append(f"reason={body[-120:]}{ratio_s}")
 
-        # Paths keep only their last two segments; the full value comes from
-        # ``get_failure(fid)``, so the line stays inside the prompt's width.
-        anchors: list[str] = []
+        # Paths show last two segments; full path available via get_failure(fid).
+        # Progressive degradation: drop log=, then ws=, keeping fid= alone.
         fid = str(entry.get("failure_id") or "").strip()
-        if fid:
-            anchors.append(f"fid={fid}")
-        for label, key in (("ws", "workspace"), ("log", "server_log_path")):
-            raw = str(entry.get(key) or "").strip()
-            if raw:
-                anchors.append(f"{label}={'/'.join(PurePosixPath(raw).parts[-2:])}")
-        anchor_s = "  " + " ".join(anchors) if anchors else ""
-        if len(anchor_s) > _VARIANT_ANCHOR_MAX_CHARS and fid:
-            anchor_s = f"  fid={fid}"
+        ws_raw = str(entry.get("workspace") or "").strip()
+        log_raw = str(entry.get("server_log_path") or "").strip()
+        ws_seg = "/".join(PurePosixPath(ws_raw).parts[-2:]) if ws_raw else ""
+        log_seg = "/".join(PurePosixPath(log_raw).parts[-2:]) if log_raw else ""
+        anchors = (
+            ([f"fid={fid}"] if fid else [])
+            + ([f"ws={ws_seg}"] if ws_seg else [])
+            + ([f"log={log_seg}"] if log_seg else [])
+        )
+        anchor_s = ("  " + " ".join(anchors)) if anchors else ""
+        if len(anchor_s) > _VARIANT_ANCHOR_MAX_CHARS and log_seg:
+            anchors = [a for a in anchors if not a.startswith("log=")]
+            anchor_s = ("  " + " ".join(anchors)) if anchors else ""
+        if len(anchor_s) > _VARIANT_ANCHOR_MAX_CHARS and ws_seg:
+            anchors = [a for a in anchors if not a.startswith("ws=")]
+            anchor_s = ("  " + " ".join(anchors)) if anchors else ""
 
         suffix = "  " + " ".join(parts) if parts else ""
         return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}{suffix}{anchor_s}"

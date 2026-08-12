@@ -256,13 +256,14 @@ class ConversationCollaborator:
 
         # Flip newest-first query to newest-last for chronological reading.
         msgs = [Message.from_row(r) for r in rows][::-1]
-        lines = ["=== Recent action outcomes (newest last) ==="]
-        lines.extend(_format_inbox_event(m, max_variant_rows=_RECENT_OUTCOMES_VARIANT_ROWS) for m in msgs)
-        rendered = "\n".join(lines).splitlines()
+        header = "=== Recent action outcomes (newest last) ==="
+        body_lines: list[str] = []
+        body_lines.extend(_format_inbox_event(m, max_variant_rows=_RECENT_OUTCOMES_VARIANT_ROWS) for m in msgs)
+        rendered = "\n".join(body_lines).splitlines()
         if len(rendered) > _RECENT_OUTCOMES_LINE_CAP:
-            rendered = rendered[:_RECENT_OUTCOMES_LINE_CAP]
-            rendered.append(f"(truncated at {_RECENT_OUTCOMES_LINE_CAP} lines; re-query with a smaller top_k)")
-        return "\n".join(rendered)
+            rendered = rendered[-_RECENT_OUTCOMES_LINE_CAP:]
+            return "\n".join([header] + rendered + [f"(truncated at {_RECENT_OUTCOMES_LINE_CAP} lines; re-query with a smaller top_k)"])
+        return "\n".join([header] + rendered)
 
     def _context_running_tasks_reader(self) -> str:
         """Synchronous projection of in-flight tasks with their held resources.
