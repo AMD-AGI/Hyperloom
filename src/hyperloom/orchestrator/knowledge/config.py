@@ -97,17 +97,19 @@ class KnowledgeConfig:
     def apply_to_child_env(self, env: MutableMapping[str, str]) -> None:
         """Apply the exact shared contract to a KernelForge child environment."""
 
-        env["KNOWLEDGE_STORE_MODE"] = self.mode.value
+        # The child resolves remote knowledge through GBrain and has no KB Store
+        # client, and this contract withholds GBrain from it (below). Passing our
+        # own ``remote`` down would therefore make the child fail closed on
+        # startup -- "KNOWLEDGE_STORE_MODE=remote requires GBRAIN_BASE_URL and
+        # GBRAIN_TOKEN" -- before it optimizes a single kernel. It reads and
+        # writes its local store instead; Hyperloom owns KB Store publication
+        # and collects the child's experience from its result document.
+        env["KNOWLEDGE_STORE_MODE"] = KnowledgeStoreMode.LOCAL.value
         env["KNOWLEDGE_LOCAL_ROOT"] = self.local_root
-        if self.mode is KnowledgeStoreMode.REMOTE:
-            env["KB_STORE_URL"] = self.kb_store_url
-            env["KB_STORE_TOKEN"] = self.kb_store_token
-        else:
-            env.pop("KB_STORE_URL", None)
-            env.pop("KB_STORE_TOKEN", None)
-        # Rewrite knowledge is owned by KB Store. Legacy GBrain credentials
-        # remain available to Hyperloom's own KG/Framework integrations but
-        # never cross into the KernelForge child.
+        env.pop("KB_STORE_URL", None)
+        env.pop("KB_STORE_TOKEN", None)
+        # Legacy GBrain credentials remain available to Hyperloom's own
+        # KG/Framework integrations but never cross into the KernelForge child.
         env.pop("GBRAIN_BASE_URL", None)
         env.pop("GBRAIN_TOKEN", None)
         env["KERNELFORGE_GBRAIN_ENABLED"] = "false"

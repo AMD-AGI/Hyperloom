@@ -90,9 +90,15 @@ def test_the_card_is_resolved_from_the_candidate_when_the_environment_is_silent(
     assert forge_submit._resolve_gpu_type({"arch": "gfx942"}) == ""
 
 
-def test_remote_child_env_forwards_kb_store_alone_when_gbrain_is_absent(
+def test_a_remote_run_still_launches_the_child_against_its_local_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A ``remote`` run must not hand the child a mode it cannot satisfy.
+
+    KernelForge resolves remote knowledge through GBrain only, and this env
+    withholds GBrain, so a child told ``remote`` exits rc=1 on startup instead
+    of optimizing anything.
+    """
     _avoid_unrelated_fellow_setup(monkeypatch)
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", "unchanged/root")
@@ -108,10 +114,10 @@ def test_remote_child_env_forwards_kb_store_alone_when_gbrain_is_absent(
         "KERNELFORGE_GBRAIN_ENABLED": "true",
     }
     forge_submit._apply_fellow_env(env)
-    assert env["KNOWLEDGE_STORE_MODE"] == "remote"
+    assert env["KNOWLEDGE_STORE_MODE"] == "local"
     assert env["KNOWLEDGE_LOCAL_ROOT"] == "unchanged/root"
-    assert env["KB_STORE_URL"] == "https://kb.test"
-    assert env["KB_STORE_TOKEN"] == "token"
+    assert "KB_STORE_URL" not in env
+    assert "KB_STORE_TOKEN" not in env
     assert env["KERNELFORGE_GBRAIN_ENABLED"] == "false"
 
 
@@ -134,7 +140,8 @@ def test_remote_child_env_strips_parent_gbrain_credentials(
         "GBRAIN_TOKEN": "gbrain-token",
     }
     forge_submit._apply_fellow_env(env)
-    assert env["KB_STORE_URL"] == "https://kb.test"
+    assert env["KNOWLEDGE_STORE_MODE"] == "local"
+    assert "KB_STORE_URL" not in env
     assert "GBRAIN_BASE_URL" not in env
     assert "GBRAIN_TOKEN" not in env
     assert env["KERNELFORGE_GBRAIN_ENABLED"] == "false"

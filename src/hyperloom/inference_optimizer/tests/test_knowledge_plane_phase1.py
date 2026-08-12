@@ -123,7 +123,13 @@ def test_remote_config_uses_kb_store_backend_and_keeps_optional_gbrain() -> None
     assert config.gbrain_base_url == "https://gbrain.test"
 
 
-def test_a_remote_child_gets_only_kb_store_credentials() -> None:
+def test_a_remote_parent_never_tells_a_child_a_mode_it_cannot_satisfy() -> None:
+    """KernelForge resolves remote knowledge through GBrain and nothing else.
+
+    This contract withholds GBrain from the child on purpose, so a child told
+    ``remote`` exits before its first kernel with "KNOWLEDGE_STORE_MODE=remote
+    requires GBRAIN_BASE_URL and GBRAIN_TOKEN".
+    """
     remote = KnowledgeConfig.from_env(
         {
             "KNOWLEDGE_STORE_MODE": "remote",
@@ -135,14 +141,29 @@ def test_a_remote_child_gets_only_kb_store_credentials() -> None:
     )
     child: dict[str, str] = {}
     remote.apply_to_child_env(child)
-    assert child["KB_STORE_URL"] == "https://kb.test"
-    assert child["KB_STORE_TOKEN"] == "kb-token"
+    assert remote.mode is KnowledgeStoreMode.REMOTE
+    assert child["KNOWLEDGE_STORE_MODE"] == "local"
     assert "GBRAIN_BASE_URL" not in child
     assert "GBRAIN_TOKEN" not in child
     assert child["KERNELFORGE_GBRAIN_ENABLED"] == "false"
 
 
-def test_a_remote_child_without_gbrain_is_told_so_rather_than_left_guessing() -> None:
+def test_a_child_is_handed_no_credential_it_has_no_reader_for() -> None:
+    """KB Store is Hyperloom's own backend; the child has no client for it."""
+    remote = KnowledgeConfig.from_env(
+        {
+            "KNOWLEDGE_STORE_MODE": "remote",
+            "KB_STORE_URL": "https://kb.test",
+            "KB_STORE_TOKEN": "kb-token",
+        }
+    )
+    child: dict[str, str] = {}
+    remote.apply_to_child_env(child)
+    assert "KB_STORE_URL" not in child
+    assert "KB_STORE_TOKEN" not in child
+
+
+def test_ambient_child_credentials_are_replaced_by_a_local_store() -> None:
     remote = KnowledgeConfig.from_env(
         {
             "KNOWLEDGE_STORE_MODE": "remote",
@@ -156,7 +177,8 @@ def test_a_remote_child_without_gbrain_is_told_so_rather_than_left_guessing() ->
         "GBRAIN_TOKEN": "ambient-secret",
     }
     remote.apply_to_child_env(child)
-    assert child["KB_STORE_URL"] == "https://kb.test"
+    assert child["KNOWLEDGE_STORE_MODE"] == "local"
+    assert "KB_STORE_URL" not in child
     assert child["KERNELFORGE_GBRAIN_ENABLED"] == "false"
     assert "GBRAIN_BASE_URL" not in child
     assert "GBRAIN_TOKEN" not in child
