@@ -65,6 +65,7 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_start_patched,
     ensure_eval_probe_patched,
     eval_probe_targets_exist,
+    failed_patch_anchors,
 )
 from ._magpie_patcher import ensure_eval_concurrency_compat
 from .benchmark_result import (
@@ -1205,7 +1206,65 @@ class BaselineExecutor:
                     "error_class": "eval_concurrency_flag_unpatchable",
                     "error": msg,
                 }
+            anchor_result = self._eval_patch_anchors_result(ix_root)
+            if anchor_result is not None:
+                return anchor_result
         return None
+
+    # Scoped to the line-replacement patches this hook applies. The probe is
+    # judged above by its own target-exists test, and ``num_prompts`` /
+    # ``profile_extra_body`` belong to the profiling path and are
+    # ProfileExecutor's to judge.
+    _EVAL_HOOK_ANCHORS = ("eval_dest", "eval_start")
+    # Of those, the one whose silent absence corrupts the accuracy gate rather
+    # than degrading it: without ``eval_dest`` the results file lands in the cwd
+    # and no score is ever parsed. ``eval_start`` is a log breadcrumb -- worth
+    # reporting, never worth aborting for.
+    _EVAL_CRITICAL_ANCHORS = ("eval_dest",)
+
+    def _eval_patch_anchors_result(self, ix_root: str | None) -> dict[str, Any] | None:
+        """Fail the launch when an eval-critical patch can no longer be applied.
+
+        The ``ensure_*`` calls above report a miss as ``False`` and no caller
+        reads it, so an upstream edit that moves an anchor takes the patch
+        offline silently -- the run still looks healthy and only the symptom (no
+        score) shows up much later. This is the same failure mode that took the
+        probe offline before it was re-homed to a real file. Checked only when
+        this run executes lm-eval; anchors that merely degrade something are
+        logged, not fatal.
+
+        Args:
+            ix_root: The resolved InferenceX root for this run, if any.
+
+        Returns:
+            An early-return failure dict, or ``None`` to proceed.
+        """
+        broken = [s for s in failed_patch_anchors(ix_root or None) if s.name in self._EVAL_HOOK_ANCHORS]
+        if not broken:
+            return None
+        for status in broken:
+            log.error("baseline_executor: InferenceX patch anchor broken — %s", status.describe())
+        fatal = [s for s in broken if s.name in self._EVAL_CRITICAL_ANCHORS]
+        if not fatal:
+            return None
+        msg = (
+            "accuracy eval cannot run: Hyperloom redirects lm-eval's results file "
+            "by matching exact upstream text, and that text is no longer there "
+            f"(inferencex={ix_root or '<unset>'}). Broken: "
+            + "; ".join(s.describe() for s in fatal)
+            + ". Re-anchor the patch in _inferencex_patcher.py against the "
+            "checkout in use, or pin INFERENCEX_REF back to a revision it "
+            "matches. Continuing would leave every results*.json in the "
+            "benchmark's cwd, where the accuracy parser never looks, so the gate "
+            "would see no score at all — do NOT work around this with "
+            "RUN_EVAL=false."
+        )
+        log.error("baseline_executor: %s", msg)
+        return {
+            "status": "failed",
+            "error_class": "inferencex_patch_anchor_broken",
+            "error": msg,
+        }
 
     @staticmethod
     def _failure_carries_markers(
