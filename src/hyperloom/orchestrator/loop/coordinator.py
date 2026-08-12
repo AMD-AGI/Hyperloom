@@ -82,6 +82,8 @@ from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
+from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
+from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 from ..trace.orchestration_trace import (
     OrchestrationTurnRecord,
     append_orchestration_turn,
@@ -331,35 +333,6 @@ def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
         if v is not None:
             return v
     return None
-
-
-def _defang_prompt_structure(text: str) -> str:
-    """Neutralise prompt-structure sequences in an untrusted string leaf.
-
-    Robustness ``alert`` payloads can carry attacker-influenceable server.log
-    excerpts (``evidence.samples``) that reach the orchestration-LLM prompt.
-    This defangs — without dropping content — the sequences such an excerpt
-    could use to escape its quoted context and read as instructions: markdown
-    code fences, ``data:`` URLs, and angle-bracket role/tag markers. The text
-    stays human-readable; it just can no longer act as prompt structure.
-    """
-    out = str(text or "")
-    out = out.replace("```", "`\u200b``").replace("~~~", "~\u200b~~")
-    out = out.replace("data:", "data\u200b:").replace("DATA:", "DATA\u200b:")
-    out = out.replace("<", "\u2039").replace(">", "\u203a")
-    return out
-
-
-def _flatten_for_inbox(text: str) -> str:
-    """Fold untrusted text onto one inbox line that cannot forge a section header.
-
-    Newlines would break the one-event-one-line contract; a leading ``=`` would
-    be read as a ``=== ... ===`` header by the Critic's inbox parser.
-    """
-    flat = str(text or "").replace("\r\n", "\u23ce").replace("\r", "\u23ce").replace("\n", "\u23ce")
-    if flat.startswith("="):
-        flat = "\u2261" + flat[1:]
-    return _defang_prompt_structure(flat)
 
 
 def _defang_alert_payload(value: Any) -> Any:
