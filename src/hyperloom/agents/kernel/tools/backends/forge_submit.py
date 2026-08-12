@@ -665,10 +665,10 @@ def _prepare_worktree_nogit(
     4. Returns ``(scratch_dir, scratch_kernel_file, base_commit)`` with the same
        signature as :func:`_prepare_worktree`.
 
-    The caller's driver adapter prepends ``WORKTREE`` to ``PYTHONPATH`` so the
-    scratch copy shadows the dist-packages install at import time (pure-Python
-    only; editable-finder installs are excluded — those are handled by
-    :func:`_prepare_inplace`).
+    The measurement driver is staged inside this root and executed from it, so
+    the scratch copy shadows the dist-packages install at import time
+    (pure-Python only; editable-finder installs are excluded — those are handled
+    by :func:`_prepare_inplace`).
 
     Returns ``None`` on any error (e.g. ``shutil.copytree`` failure).
 
@@ -1087,11 +1087,9 @@ def _remove_worktree(kernel_repo: str, source_file: str, wt: str, branch: str) -
     _run(["git", "-C", repo, "worktree", "prune"], timeout=60)
 
 
-# Staged when the driver is delegated to forge-loop's task preparer. The CLI
-# resolves --driver against --workspace and requires an existing file before
-# prep runs (``preflight_task`` -> ``prepare_task_sync`` repairs it in place),
-# so the placeholder must exist and must fail preflight loudly rather than be
-# mistaken for a conforming measurement driver.
+# forge-loop requires --driver to exist before preflight_task repairs it in
+# place, so the delegated driver is a file that fails loudly rather than one
+# that could be mistaken for a conforming measurement driver.
 _TASK_PREPARER_PLACEHOLDER = '''#!/usr/bin/env python3
 """Placeholder driver — forge-loop's task preparer authors the real one."""
 import sys
@@ -1193,7 +1191,6 @@ def _write_generated_driver(workspace: str | Path, content: str) -> str:
             pass
         raise
     return str(path)
-
 
 
 def _shapes_from_candidate(candidate: dict) -> dict:
@@ -1444,10 +1441,10 @@ def _normalized(
 
     ``skipped=True`` marks a forge self-skip: forge bailed before any real
     optimization attempt (unsupported source type, repo not a clean git
-    checkout, no usable harness/driver, compile-only driver, etc.). It is the
-    structured signal downstream uses to classify the kernel outcome as ``skip``
-    rather than a kernel failure; forge returns ``returncode=2`` for every such
-    path, but consumers should read this flag rather than the return code.
+    checkout, etc.). It is the structured signal downstream uses to classify the
+    kernel outcome as ``skip`` rather than a kernel failure; forge returns
+    ``returncode=2`` for every such path, but consumers should read this flag
+    rather than the return code.
     """
     return {
         "returncode": returncode,
@@ -1587,7 +1584,6 @@ def _apply_fellow_env(env: dict) -> None:
                 env["ANTHROPIC_API_KEY"] = _key
         except Exception:  # noqa: S110
             pass
-
 
 
 def _read_forge_checkpoint(experiments_dir: Path) -> dict | None:
@@ -3591,8 +3587,7 @@ def submit(
         )
         source_framework = _resolve_framework(candidate, source_file)
         gpu_target = _resolve_gpu_target(candidate)
-        # Decided before any driver exists, because the rewrite route brings its
-        # own dual-mode driver rather than the generic harness.
+        # Decided before any driver exists: the rewrite route seeds its own.
         rewrite_route = _flydsl_rewrite.evaluate_rewrite_route(
             candidate=candidate,
             source_type=source_type,

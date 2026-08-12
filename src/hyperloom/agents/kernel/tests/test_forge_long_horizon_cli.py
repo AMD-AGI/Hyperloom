@@ -392,7 +392,7 @@ def test_nonzero_exit_with_sidecar_timings_never_exports_dirty_worktree(
 
 
 def test_placeholder_driver_stages_in_workspace_without_clobbering(tmp_path):
-    """The task-preparer placeholder is written as a hidden unique file in the workspace.
+    """The delegated driver is staged as a hidden unique file in the workspace.
 
     ``campaign_config._relative_file`` rejects a ``--driver`` outside
     ``--workspace``, so every staged driver must live inside it. The
@@ -404,9 +404,7 @@ def test_placeholder_driver_stages_in_workspace_without_clobbering(tmp_path):
     tracked_driver = workspace / "forge_driver.py"
     tracked_driver.write_text("TRACKED_DRIVER\n")
 
-    staged = Path(
-        forge_submit._write_generated_driver(workspace, forge_submit._TASK_PREPARER_PLACEHOLDER)
-    )
+    staged = Path(forge_submit._write_generated_driver(workspace, forge_submit._TASK_PREPARER_PLACEHOLDER))
 
     assert staged.parent == workspace
     assert staged.name.startswith(".forge_driver_")
@@ -1183,7 +1181,7 @@ def test_disagreeing_recovery_channels_keep_the_published_manifest(
             source_file=str(source),
             prompt_file=prompt,
             output_dir=output_dir,
-                source_type="triton",
+            source_type="triton",
             candidate={"platform": "mi355x"},
             timeout_s=10,
             kernel_repo=str(repo),
@@ -1480,7 +1478,7 @@ def test_submit_non_timeout_error_fails_and_uses_unique_retained_branch(
             source_file=str(source),
             prompt_file=prompt,
             output_dir=tmp_path / "results" / f"attempt-{attempt}",
-                source_type="triton",
+            source_type="triton",
             candidate={"platform": "mi355x"},
             timeout_s=10,
             kernel_repo=str(repo),
@@ -1549,7 +1547,7 @@ def test_finalization_failure_does_not_swallow_the_forge_result(
             source_file=str(source),
             prompt_file=prompt,
             output_dir=output_dir,
-                source_type="triton",
+            source_type="triton",
             candidate={"platform": "mi355x"},
             timeout_s=10,
             kernel_repo=str(repo),
@@ -1756,7 +1754,7 @@ def test_inplace_restore_failure_is_surfaced_without_losing_the_result(
             source_file=str(source),
             prompt_file=prompt,
             output_dir=output_dir,
-                source_type="triton",
+            source_type="triton",
             candidate={"platform": "mi355x"},
             timeout_s=10,
             kernel_repo=str(repo),
@@ -1950,7 +1948,7 @@ def test_same_iteration_recovery_conflict_resolves_wholly_to_the_manifest(
             source_file=str(source),
             prompt_file=prompt,
             output_dir=output_dir,
-                source_type="triton",
+            source_type="triton",
             candidate={"platform": "mi355x"},
             timeout_s=10,
             kernel_repo=str(repo),

@@ -359,8 +359,6 @@ def test_submit_salvages_validated_best_after_timeout(tmp_path, monkeypatch):
     best_commit = _git(repo, "rev-parse", "HEAD")
     kernel.write_text("KERNEL_UNVALIDATED_TIMEOUT_CANDIDATE\n")
 
-    driver = tmp_path / "driver.py"
-    driver.write_text("print('allclose: True')\n")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("# optimize\n")
     output_dir = tmp_path / "forge-output"

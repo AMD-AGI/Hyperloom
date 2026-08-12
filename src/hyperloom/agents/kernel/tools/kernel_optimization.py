@@ -20,9 +20,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-# Sibling import for multi-GPU collective detection.
+# Self-location so sibling modules import both as package members and as scripts.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _collective_names import kernel_name_implies_multigpu  # noqa: E402
 from _io_utils import (  # noqa: E402
     append_jsonl,
     append_log,
@@ -454,7 +453,7 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
 
     Args:
         args (argparse.Namespace): Parsed CLI args carrying ``backends`` and
-            benchmark/harness paths.
+            the benchmark path.
         candidate (dict[str, Any]): Kernel candidate dict used for benchmark
             availability.
 
@@ -1964,11 +1963,9 @@ def invoke_backend(
     prefer_ray = ray_available()
     candidate = candidate or {}
     kernel_repo = str(candidate.get("kernel_repo") or "")
-    bench_files: list[str] = list(candidate.get("benchmark_files") or [])
     # GPU count: CLI override, then candidate hint, then 1.
     num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0) or int(candidate.get("num_gpus_recommended") or 1))
 
-    _shared_out_dir = _forge_output_dir(args.session_id, prompt_file)
     try:
         if backend == "forge":
             # Kernel-Forge backend: runs inside a git worktree of kernel_repo and
@@ -1977,10 +1974,7 @@ def invoke_backend(
             out_dir = _forge_output_dir(args.session_id, prompt_file)
             invocation_spec_path = out_dir / invocation_spec_filename(candidate)
             try:
-                invocation_spec = build_invocation_spec(
-                    candidate,
-                    source_file=source_file,
-                )
+                invocation_spec = build_invocation_spec(candidate, source_file=source_file)
                 write_invocation_spec(invocation_spec_path, invocation_spec)
                 if log_path is not None:
                     append_log(log_path, f"[invocation_spec] wrote {invocation_spec_path}")
@@ -3418,7 +3412,6 @@ def main() -> int:
     )
     parser.add_argument("--backends", default="")
     parser.add_argument("--benchmark-file", default="")
-
     parser.add_argument("--source-file", default="")
     parser.add_argument("--target-platform", default=_env_target_platform())
     parser.add_argument("--extra-sglang-args", default="")

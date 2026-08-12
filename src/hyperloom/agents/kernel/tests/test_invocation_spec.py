@@ -134,9 +134,7 @@ def test_gemm(dtype, m, n, k):
 def test_builds_compact_operator_contract_with_absolute_paths(tmp_path):
     candidate = _candidate(tmp_path)
     repo = Path(candidate["kernel_repo"])
-    spec = invocation_spec.build_invocation_spec(
-        candidate,
-    )
+    spec = invocation_spec.build_invocation_spec(candidate)
 
     assert invocation_spec.invocation_spec_filename(candidate) == "invocation_spec_scaled_gemm.json"
     assert spec["status"] == "complete"
