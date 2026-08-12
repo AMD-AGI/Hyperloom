@@ -1560,7 +1560,7 @@ async def run_grid(
                         extra_server_args=variant.extra_server_args,
                         extra_envs=dict(variant.extra_envs),
                         status="failed",
-                        workspace=str(warmup_workspace) if warmup_candidates else None,
+                        workspace=str(warmup_workspace) if _warmup_run_ws is not None else None,
                         report_path=(
                             str(warmup_workspace / "benchmark_report.json")
                             if (warmup_workspace / "benchmark_report.json").exists()
