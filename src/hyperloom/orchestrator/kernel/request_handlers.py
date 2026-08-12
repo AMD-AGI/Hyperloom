@@ -4199,7 +4199,25 @@ async def trace_analyze_handler(
     from ..state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
-    framework = (payload.get("framework") or state.framework or "").strip()
+    state_framework = str(state.framework or "").strip()
+    payload_framework = str(payload.get("framework") or "").strip()
+    # The persisted session framework is the runtime authority.  Internal
+    # roofline tasks can otherwise inherit a stale/default payload framework
+    # (commonly ``sglang``), which makes xDiT follow the LLM trace splitter.
+    # That splitter selects a prefill/decode window that diffusion traces do
+    # not have, discarding the raw GPU kernels before TraceLens sees them.
+    framework = state_framework or payload_framework
+    if (
+        state_framework
+        and payload_framework
+        and state_framework.lower() != payload_framework.lower()
+    ):
+        log.warning(
+            "trace_analyze: overriding payload framework %r with session "
+            "framework %r so analysis matches the captured workload",
+            payload_framework,
+            state_framework,
+        )
     target_platform = (payload.get("target_platform") or state.gpu_type or "").strip()
     model_name = (payload.get("model_name") or state.model_name or state.model_path or "").strip()
     analysis_mode = (payload.get("analysis_mode") or "").strip()
