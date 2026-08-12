@@ -2553,6 +2553,61 @@ def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
         return ""
 
 
+# Forge tuner families whose deliverable is an aiter tuned-GEMM CSV, i.e. the
+# ones whose rows are resolved through aiter's padded (M, N, K) lookup.
+_AITER_CSV_TUNER_FRAMEWORKS = ("sglang", "vllm-aiter")
+
+
+def _align_forge_shapes_for_aiter(
+    shapes_json: str,
+    *,
+    forge_framework: str,
+    workspace: Path,
+) -> tuple[str, dict[str, Any] | None]:
+    """Re-key profiled GEMM shapes onto the M values aiter actually looks up.
+
+    Captured shapes carry the raw runtime M, which for prefill is the
+    data-dependent scheduled-token count and so never recurs between runs. aiter
+    resolves a tuned row by trying the raw M and then two padded M variants, so a
+    CSV keyed on raw M is unreachable and the tuner's micro win never reaches the
+    server. Padding the shapes first makes each tuned row serve the whole bucket
+    that pads onto it.
+
+    Returns the shapes-JSON path to hand forge plus an alignment report, or the
+    input path and ``None`` when alignment does not apply.
+    """
+    if forge_framework not in _AITER_CSV_TUNER_FRAMEWORKS:
+        return shapes_json, None
+    if not env_bool("HYPERLOOM_GEMM_ALIGN_SHAPES", True):
+        return shapes_json, None
+
+    from .gemm_shape_coverage import align_shapes_to_aiter_keys, load_shapes_json, write_shapes_json
+
+    observed = load_shapes_json(shapes_json)
+    if not observed:
+        return shapes_json, None
+    try:
+        max_shapes = int(os.environ.get("HYPERLOOM_GEMM_ALIGN_MAX_SHAPES") or 64)
+    except (TypeError, ValueError):
+        max_shapes = 64
+    aligned, report = align_shapes_to_aiter_keys(observed, max_shapes=max(1, max_shapes))
+    if not aligned or report.get("unchanged"):
+        return shapes_json, {**report, "applied": False, "source_shapes_json": shapes_json}
+    try:
+        out = write_shapes_json(aligned, workspace / "forge_shapes.aiter_aligned.json")
+    except OSError:
+        return shapes_json, {**report, "applied": False, "source_shapes_json": shapes_json}
+    log.info(
+        "Forge GEMM shapes: re-keyed %d observed shape(s) onto %d aiter lookup key(s) "
+        "(observed M=%s -> aligned M=%s)",
+        report.get("observed"),
+        report.get("aligned"),
+        report.get("observed_m"),
+        report.get("aligned_m"),
+    )
+    return out, {**report, "applied": True, "source_shapes_json": shapes_json}
+
+
 _VLLM_BLOCK_FP8_TRACE_OPS = (
     "w8a8_triton_block_scaled_mm",
     "rocm_aiter_gemm_a8w8_blockscale",
@@ -3302,6 +3357,14 @@ async def _run_forge_gemm_tuning(
             # specialist CSV resolved before the capture pass.
             untuned_csv = ""
 
+    shape_alignment: dict[str, Any] | None = None
+    if shapes_json:
+        shapes_json, shape_alignment = _align_forge_shapes_for_aiter(
+            shapes_json,
+            forge_framework=forge_framework,
+            workspace=workspace,
+        )
+
     timeout = _gemm_tuning_timeout_sec(payload)
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)
     input_payload = {
@@ -3361,6 +3424,8 @@ async def _run_forge_gemm_tuning(
     result.setdefault("framework", framework)
     result.setdefault("tuning_framework", forge_framework)
     result.setdefault("model_path", model_path)
+    if shape_alignment is not None:
+        result.setdefault("shape_alignment", shape_alignment)
     if shape_capture is not None:
         result.setdefault(
             "shape_capture",
