@@ -12,6 +12,7 @@ import logging as _logging
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -853,7 +854,14 @@ class KernelPhase(PhaseHandler):
             )
             return
 
-        cmd = ["python3", str(runner), str(handoff_path), str(out_dir), "--timeout-s", str(runner_timeout)]
+        cmd = [
+            sys.executable,
+            str(runner),
+            str(handoff_path),
+            str(out_dir),
+            "--timeout-s",
+            str(runner_timeout),
+        ]
         log.info(
             "KERNEL entry: delegating to GEAK e2e (from=%s) runner_timeout=%ds kill_timeout=%ds budget_known=%s cmd=%s",
             from_phase or "<unknown>",
