@@ -53,6 +53,7 @@ _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
 # of its recorded tput is flagged as drift.
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
 from ..phases import machine_state as _phase_state
+from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.optimization_journal import Journal
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from ..actions.registry import ActionRegistry
@@ -81,6 +82,8 @@ from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
+from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
+from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 from ..trace.orchestration_trace import (
     OrchestrationTurnRecord,
     append_orchestration_turn,
@@ -332,23 +335,6 @@ def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
     return None
 
 
-def _defang_prompt_structure(text: str) -> str:
-    """Neutralise prompt-structure sequences in an untrusted string leaf.
-
-    Robustness ``alert`` payloads can carry attacker-influenceable server.log
-    excerpts (``evidence.samples``) that reach the orchestration-LLM prompt.
-    This defangs — without dropping content — the sequences such an excerpt
-    could use to escape its quoted context and read as instructions: markdown
-    code fences, ``data:`` URLs, and angle-bracket role/tag markers. The text
-    stays human-readable; it just can no longer act as prompt structure.
-    """
-    out = str(text or "")
-    out = out.replace("```", "`\u200b``").replace("~~~", "~\u200b~~")
-    out = out.replace("data:", "data\u200b:").replace("DATA:", "DATA\u200b:")
-    out = out.replace("<", "\u2039").replace(">", "\u203a")
-    return out
-
-
 def _defang_alert_payload(value: Any) -> Any:
     """Recursively defang string leaves of an alert payload (keys untouched).
 
@@ -364,16 +350,20 @@ def _defang_alert_payload(value: Any) -> Any:
     return value
 
 
-def _format_inbox_event(m: "Message") -> str:
+
+def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
     """Render one inbox ``Message`` as a compact, high-signal line.
 
     Args:
         m: The inbox message to render; its topic selects a per-topic
             formatting branch (delegated_result, policy_denial, review_verdict,
             observation) with a generic fallback.
+        max_variant_rows: Cap on the indented per-variant failure lines
+            appended to a ``delegated_result``; 0 suppresses them.
 
     Returns:
-        A single-line string summarising the message header and payload.
+        The header line, plus one indented continuation line per rendered
+        variant failure.
     """
     topic = (m.topic or "").strip()
     payload = m.payload if isinstance(m.payload, dict) else {}
@@ -415,7 +405,26 @@ def _format_inbox_event(m: "Message") -> str:
         if notes:
             shown = "; ".join(str(n) for n in notes)
             parts.append(f"notes={shown[:300]!r}")
-        return " ".join(parts)
+        header_line = " ".join(parts)
+        if max_variant_rows <= 0 or not isinstance(result, dict):
+            return header_line
+        pvos = result.get("per_variant_outcomes")
+        if not isinstance(pvos, list):
+            return header_line
+        failures = [
+            v for v in pvos if isinstance(v, dict) and str(v.get("outcome") or "").upper() in UNMEASURED_OUTCOMES
+        ]
+        if not failures:
+            return header_line
+        lines = [header_line]
+        for vo in failures[:max_variant_rows]:
+            row = dict(vo)
+            row["error_excerpt"] = _flatten_for_inbox(vo.get("error_excerpt") or vo.get("reason") or "")
+            lines.append("  failure: " + render_failure_line(row, excerpt_chars=120))
+        elided = len(failures) - max_variant_rows
+        if elided > 0:
+            lines.append(f"  (+{elided} more failures; pull get_variant_failures)")
+        return "\n".join(lines)
 
     if topic in ("policy_denial", "denial") or (topic == "observation" and payload.get("kind") == "policy_denial"):
         return (

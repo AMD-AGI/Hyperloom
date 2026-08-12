@@ -780,6 +780,31 @@ def allocate_turn_workdir(session_dir: Path, subdir: str, turn_idx: int, *, keep
     return wd
 
 
+def session_failures_dir(session_dir: Path) -> Path:
+    """Compute ``<sd>/reports/failures/`` — durable failure evidence store.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        Path: ``<session_dir>/reports/failures``.
+    """
+    return reports_dir(session_dir) / "failures"
+
+
+def failure_evidence_path(session_dir: Path, failure_id: str) -> Path:
+    """Compute the path for one failure evidence JSON file.
+
+    Args:
+        session_dir: The session root directory.
+        failure_id: The failure's stable id (from ``make_failure_id``).
+
+    Returns:
+        Path: ``<session_dir>/reports/failures/<failure_id>.json``.
+    """
+    return session_failures_dir(session_dir) / f"{failure_id}.json"
+
+
 __all__ = [
     "allocate_turn_workdir",
     "agent_dir",
@@ -808,8 +833,10 @@ __all__ = [
     "manifest_path",
     "orchestration_turns_path",
     "patches_dir",
+    "failure_evidence_path",
     "reports_dir",
     "research_hints_json",
+    "session_failures_dir",
     "research_hints_md",
     "runs_dir",
     "runs_root",

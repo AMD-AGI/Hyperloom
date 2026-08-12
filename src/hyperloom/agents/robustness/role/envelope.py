@@ -201,6 +201,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # policy.CORE_STATE_FIELDS (see tests/test_role_contract.py).
         "closing_phase",
         "baseline_config_path",
+        "failures",
     }
 )
 

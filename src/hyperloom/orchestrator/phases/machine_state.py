@@ -69,6 +69,7 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             # Coordinator-internal; integrate_patch is the Critic-gated consume side.
             "framework_agent",
             "integrate_patch",
+            "specialist",
             "roofline",
             "profile",
             "recover",
@@ -94,11 +95,13 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "operator_tuning",
             "vendor_kernel_config",
             "gemm_tuning",
+            "specialist",
             "roofline",
             "profile",
             "recover",
         }
     ),
+    # No specialist below: SWEEP is the validation window and CLOSE only reports.
     PHASE_SWEEP: frozenset(
         {
             # conc_sweep: Coordinator-internal post-sweep CONC-ladder benchmark.
@@ -410,10 +413,33 @@ DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 5
 # Safety ceiling on macro-cycles (defense against a pathological tight loop).
 DEFAULT_MAX_MACRO_CYCLES: int = 1000
 
+# Share of a bounded session's total budget that must remain to open a cycle.
+_CYCLE_RELOOP_BUDGET_RATIO: float = 0.15
+
+
+def _default_cycle_reloop_min_remaining_sec() -> float:
+    """Absolute reloop floor in seconds; env-overridable via
+    ``INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC``.
+
+    Default 3 h. It is the only floor for unbounded runs; bounded runs take the
+    smaller of it and :data:`_CYCLE_RELOOP_BUDGET_RATIO` of their total budget,
+    so a short session is not blocked by a threshold it can never satisfy.
+    """
+    raw = (_os_fw_ratio.environ.get("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", "") or "").strip()
+    if raw:
+        try:
+            v = float(raw)
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass  # malformed env override; fall through to the 3 h default
+    return 10800.0
+
+
 # Minimum session wall-clock (seconds) that must remain to justify opening a new
 # macro-cycle; below this we wind down to CLOSE instead of starting a cycle we
 # cannot meaningfully use.
-DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = 10800.0  # 3 h
+DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = _default_cycle_reloop_min_remaining_sec()
 
 # R7 global convergence: number of consecutive no-gain macro-cycles after which
 # the run is considered converged (stop looping → CLOSE).
@@ -521,8 +547,11 @@ def should_reloop_to_explore(
         now_unix (float | None): Override for the current time; defaults to
             wall-clock resolution when None.
         max_cycles (int): Safety ceiling on macro-cycles.
-        min_remaining_sec (float): Minimum session seconds that must remain to
-            justify opening a new cycle.
+        min_remaining_sec (float): Absolute floor on the session seconds that
+            must remain to justify a new cycle. A bounded session instead uses
+            the smaller of this and :data:`_CYCLE_RELOOP_BUDGET_RATIO` of its
+            total budget; the applied value is reported as
+            ``evidence["min_remaining_sec_effective"]``.
         no_gain_cycles (int): Consecutive no-gain cycles that mark global
             convergence (R7).
         min_gain_pct (float | None): Per-cycle gain bar; ``None`` uses the
@@ -569,9 +598,18 @@ def should_reloop_to_explore(
         evidence["reloop_blocked"] = "global_converged"
         return False, evidence
 
-    # Budget remaining must justify a fresh cycle.
+    # Budget remaining must justify a fresh cycle. A bounded session scales the
+    # floor to its own length so it is never blocked by an unreachable bar.
+    effective_min_remaining = float(min_remaining_sec)
+    max_minutes = _max_minutes(state)
+    if max_minutes > 0:
+        effective_min_remaining = min(
+            effective_min_remaining,
+            max_minutes * 60.0 * _CYCLE_RELOOP_BUDGET_RATIO,
+        )
+    evidence["min_remaining_sec_effective"] = round(effective_min_remaining, 2)
     remaining = session_remaining_seconds(state, now_unix=now_unix)
-    if remaining is not None and remaining < float(min_remaining_sec):
+    if remaining is not None and remaining < effective_min_remaining:
         evidence["reloop_blocked"] = "insufficient_remaining"
         evidence["session_remaining_seconds"] = round(remaining, 2)
         return False, evidence

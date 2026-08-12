@@ -34,6 +34,8 @@ pipeline_phase: explore
 typical_runtime_min: 6.0
 applicable_when:
   - "phase == 'EXPLORE'"
+  - "phase == 'FRAMEWORK_AGENT'"
+  - "phase == 'KERNEL_AGENT'"
 params_schema:
   tags:
     type: list

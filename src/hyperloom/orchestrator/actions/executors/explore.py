@@ -40,6 +40,12 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
+from ...state.failure_evidence import (
+    FAILURE_STAGE_DECISION,
+    FAILURE_STAGE_WARMUP,
+    make_failure_id,
+    tail_excerpt,
+)
 from ...state.shared_state import first_positive_tput, resolve_grading_anchor_tput, stack_base_params
 from ._accuracy_gate import (
     accuracy_passed,
@@ -1228,6 +1234,10 @@ class ExploreExecutor:
                                 "reason": "warmup_failed",
                                 "error_class": w.error_class if w is not None else "",
                                 "server_log_path": w.server_log_path if w is not None else None,
+                                "stage": FAILURE_STAGE_WARMUP,
+                                "error_excerpt": tail_excerpt(w.error) if w is not None else None,
+                                "workspace": w.workspace if w is not None else None,
+                                "raw_result_path": w.raw_result_path if w is not None else None,
                             }
                             if gv.name:
                                 name_index[gv.name] = fp
@@ -1245,6 +1255,9 @@ class ExploreExecutor:
                                     "round_id": round_id,
                                     "ts": _now_iso(),
                                     "provenance": provenance,
+                                    "stage": FAILURE_STAGE_WARMUP,
+                                    "error_excerpt": tail_excerpt(w.error) if w is not None else None,
+                                    "workspace": w.workspace if w is not None else None,
                                 }
                             )
                             losers.append(
@@ -1337,6 +1350,8 @@ class ExploreExecutor:
                                 else "cold"
                             ),
                             "overtime_kill_ratio": overtime_kill_ratio,
+                            "stage": FAILURE_STAGE_DECISION,
+                            "error_class": "killed_overtime",
                         }
                         if gv.name:
                             name_index[gv.name] = fp
@@ -1473,6 +1488,7 @@ class ExploreExecutor:
                         "workspace": r.workspace,
                         "error_class": r.error_class or "",
                         "server_log_path": r.server_log_path,
+                        "stage": FAILURE_STAGE_DECISION,
                     }
                     if gv.name:
                         name_index[gv.name] = fp
@@ -1794,6 +1810,13 @@ class ExploreExecutor:
                     "variant_name": str(te.get("name") or ""),
                     "outcome": outcome,
                     "fingerprint": fp_key,
+                    "failure_id": make_failure_id(
+                        task_id=str(ctx.task.task_id),
+                        fingerprint=fp_key,
+                        variant_name=str(te.get("name") or ""),
+                    ),
+                    "stage": str(te.get("stage") or FAILURE_STAGE_DECISION),
+                    "error_excerpt": te.get("error_excerpt"),
                     "provenance": str(te.get("provenance") or ""),
                     "scope": str(te.get("scope") or ""),
                     "metrics": metrics,
@@ -1801,6 +1824,7 @@ class ExploreExecutor:
                     "error_class": str(te.get("error_class") or ""),
                     "server_log_path": te.get("server_log_path"),
                     "workspace": te.get("workspace"),
+                    "raw_result_path": te.get("raw_result_path"),
                     # Carry the variant knobs so the journal's
                     # ``classify_change_kind`` can classify the change kind.
                     "variant": {
