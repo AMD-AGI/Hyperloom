@@ -2490,7 +2490,14 @@ class TestRunGemmTuningHandler:
 
         assert captured_input["framework"] == "vllm-aiter"
         shapes_path = Path(captured_input["shapes_json"])
-        assert json.loads(shapes_path.read_text()) == [{"K": 5120, "M": 4149, "N": 34816}]
+        # The traced M=4149 is re-keyed onto the two padded M values aiter looks
+        # up, so the tuned rows stay reachable when the next run schedules a
+        # slightly different batch.
+        assert json.loads(shapes_path.read_text()) == [
+            {"K": 5120, "M": 4224, "N": 34816},
+            {"K": 5120, "M": 8192, "N": 34816},
+        ]
+        assert result["shape_alignment"]["applied"] is True
         assert captured_input["untuned_csv"] == ""
         assert result["shape_capture"]["capture_mode"] == "roofline_profile_reuse"
         assert result["shape_capture"]["source_profile_trace"] == str(steady_trace)
@@ -2934,7 +2941,13 @@ class TestRunGemmTuningHandler:
         result = asyncio.run(krh.run_gemm_tuning_handler({"task_id": "capture"}, session_dir=tmp_path))
 
         assert captured_input["framework"] == "vllm-aiter"
-        assert captured_input["shapes_json"] == str(shapes_path)
+        # Captured shapes are routed to the aiter family, then re-keyed onto the
+        # padded M values the runtime actually looks up.
+        assert result["shape_alignment"]["source_shapes_json"] == str(shapes_path)
+        assert json.loads(Path(captured_input["shapes_json"]).read_text()) == [
+            {"K": 5120, "M": 4224, "N": 34816},
+            {"K": 5120, "M": 8192, "N": 34816},
+        ]
         assert captured_input["untuned_csv"] == ""
         assert captured_input["tunableop_input"] == ""
         assert result["shape_capture"]["shape_count"] == 1

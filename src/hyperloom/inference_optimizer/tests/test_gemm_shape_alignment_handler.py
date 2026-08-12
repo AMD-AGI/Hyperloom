@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Tests for the forge shapes-JSON alignment hook in the GEMM tuning handler."""
+
+from __future__ import annotations
+
+import json
+
+from hyperloom.orchestrator.kernel import request_handlers as krh
+from hyperloom.orchestrator.kernel.gemm_shape_coverage import load_shapes_json
+
+
+def _write_shapes(tmp_path, shapes):
+    path = tmp_path / "forge_shapes.json"
+    path.write_text(
+        json.dumps([{"M": m, "N": n, "K": k} for m, n, k in shapes]),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+class TestAlignForgeShapesForAiter:
+    def test_aligns_for_aiter_tuner_families(self, tmp_path):
+        source = _write_shapes(tmp_path, [(1076, 5120, 17408)])
+        out, report = krh._align_forge_shapes_for_aiter(
+            source,
+            forge_framework="vllm-aiter",
+            workspace=tmp_path / "ws",
+        )
+        assert out != source
+        assert out.endswith("forge_shapes.aiter_aligned.json")
+        assert report["applied"] is True
+        assert set(load_shapes_json(out)) == {
+            (1088, 5120, 17408),
+            (2048, 5120, 17408),
+        }
+
+    def test_sglang_also_uses_the_aiter_csv_lookup(self, tmp_path):
+        source = _write_shapes(tmp_path, [(2087, 7168, 5120)])
+        out, report = krh._align_forge_shapes_for_aiter(
+            source,
+            forge_framework="sglang",
+            workspace=tmp_path / "ws",
+        )
+        assert report["applied"] is True
+        assert (2112, 7168, 5120) in load_shapes_json(out)
+
+    def test_non_aiter_framework_is_untouched(self, tmp_path):
+        source = _write_shapes(tmp_path, [(1076, 5120, 17408)])
+        out, report = krh._align_forge_shapes_for_aiter(
+            source,
+            forge_framework="vllm",
+            workspace=tmp_path / "ws",
+        )
+        assert out == source
+        assert report is None
+
+    def test_opt_out_via_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_GEMM_ALIGN_SHAPES", "0")
+        source = _write_shapes(tmp_path, [(1076, 5120, 17408)])
+        out, report = krh._align_forge_shapes_for_aiter(
+            source,
+            forge_framework="vllm-aiter",
+            workspace=tmp_path / "ws",
+        )
+        assert out == source
+        assert report is None
+
+    def test_shape_budget_is_configurable(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_GEMM_ALIGN_MAX_SHAPES", "2")
+        source = _write_shapes(
+            tmp_path,
+            [(1076, 5120, 17408), (4142, 5120, 17408), (7211, 5120, 17408)],
+        )
+        out, report = krh._align_forge_shapes_for_aiter(
+            source,
+            forge_framework="vllm-aiter",
+            workspace=tmp_path / "ws",
+        )
+        assert report["applied"] is True
+        # One (N, K) pair, so the budget floor keeps a single covering row.
+        assert len(load_shapes_json(out)) <= 2
+
+    def test_missing_shapes_file_is_a_no_op(self, tmp_path):
+        out, report = krh._align_forge_shapes_for_aiter(
+            str(tmp_path / "absent.json"),
+            forge_framework="vllm-aiter",
+            workspace=tmp_path / "ws",
+        )
+        assert out == str(tmp_path / "absent.json")
+        assert report is None
+
+    def test_already_aligned_shapes_report_no_change(self, tmp_path):
+        source = _write_shapes(tmp_path, [(1088, 5120, 17408), (2048, 5120, 17408)])
+        _out, report = krh._align_forge_shapes_for_aiter(
+            source,
+            forge_framework="vllm-aiter",
+            workspace=tmp_path / "ws",
+        )
+        assert report["applied"] is False
