@@ -27,7 +27,7 @@ from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     apply_compatibility_filter,
 )
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     _RUN_EVAL_FALSE_VALUES as _RUN_EVAL_FALSE,
 )
 from hyperloom.orchestrator.actions.executors.explore import (

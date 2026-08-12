@@ -26,8 +26,10 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from hyperloom.orchestrator.actions.executors import _accuracy_gate
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     eval_contract_fingerprint,
+    materialized_run_eval_disabled,
 )
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
@@ -36,9 +38,6 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 )
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     EVAL_PROBE_UNPATCHABLE_RETURNCODE,
-)
-from hyperloom.orchestrator.actions.executors._workload_envs import (
-    materialized_run_eval_disabled,
 )
 
 _PATCHER = "hyperloom.orchestrator.actions.executors._grid_runner"
@@ -333,3 +332,33 @@ def test_an_unreadable_config_reads_as_eval_enabled(tmp_path):
     broken = tmp_path / "broken.yaml"
     broken.write_text("benchmark: [unclosed\n", encoding="utf-8")
     assert materialized_run_eval_disabled(broken) is False
+
+
+def test_the_shared_reader_lives_in_a_module_every_arm_can_import():
+    """All three arms reach one reader, none of them through an import cycle.
+
+    ``_workload_envs`` imports ``_grid_runner`` at module scope, so hosting the
+    reader there forced the grid arm to import it from inside a function. It sits
+    in ``_accuracy_gate`` instead, whose leaf property — it imports no executor
+    sibling — is what lets the grid, the baseline and the env materializer all
+    import it at module scope. Keep that property or the cycle comes back.
+    """
+    import ast
+    from pathlib import Path as _Path
+
+    executors = _Path(_accuracy_gate.__file__).parent
+    tree = ast.parse((executors / "_accuracy_gate.py").read_text(encoding="utf-8"))
+    siblings = {
+        node.module.lstrip(".")
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module
+    }
+    assert siblings == set(), f"_accuracy_gate must stay a leaf, but it imports {sorted(siblings)}"
+
+    from hyperloom.orchestrator.actions.executors import _grid_runner, _workload_envs, baseline
+
+    for arm in (_grid_runner, baseline):
+        assert arm.materialized_run_eval_disabled is materialized_run_eval_disabled, arm.__name__
+    # The env materializer decides the same question from raw envs rather than a
+    # written config, so it shares the spellings instead of the reader.
+    assert _workload_envs._RUN_EVAL_FALSE_VALUES is _accuracy_gate._RUN_EVAL_FALSE_VALUES
