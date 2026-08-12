@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 import json
-import os
 import time
-from pathlib import Path
 from typing import Any
 from ..phases import machine_state as _phase_state
 from ..roles.base import BackendTurnResult
@@ -16,7 +14,6 @@ from ..bus.message_bus import Message
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 
 from .coordinator import (
-    _defang_prompt_structure,
     _format_inbox_event,
 )
 from .coordinator_helpers import _parse_iso_unix
@@ -26,9 +23,6 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
-# read_artifact window bounds.
-_ARTIFACT_LINE_CAP = 400
-_ARTIFACT_BYTE_CAP = 65536
 # Per-variant failure lines expanded by get_recent_outcomes, and the total cap
 # that keeps a wide top_k from flooding the turn.
 _RECENT_OUTCOMES_VARIANT_ROWS = 12
@@ -153,7 +147,6 @@ class ConversationCollaborator:
                 running_tasks_reader=self._context_running_tasks_reader,
                 action_runner=self._run_action_now_sync,
                 reference_reader=self._context_reference_reader,
-                artifact_reader=self._context_artifact_reader,
             )
             setter(provider)
         except Exception:  # noqa: BLE001 — context pull is best-effort
@@ -175,44 +168,6 @@ class ConversationCollaborator:
             available = sorted(p.stem for p in refs_dir.glob("*.md"))
             return f"(read_reference: {name!r} not found; available: {available})"
         return candidate.read_text(encoding="utf-8")
-
-    def _context_artifact_reader(self, path: str = "", offset: int = 0, limit: int = 200, mode: str = "tail") -> str:
-        """Return a bounded window of a file inside the session directory.
-
-        Args:
-            path: Absolute path to the file; must resolve within session_dir.
-            offset: Starting line index for ``head`` mode; unused for ``tail``.
-            limit: Maximum lines to return, capped at ``_ARTIFACT_LINE_CAP``.
-            mode: ``tail`` (default) or ``head``.
-
-        Returns:
-            Defanged text window, or a parenthesised error string.
-        """
-        p = (path or "").strip()
-        if not p:
-            return "(read_artifact: path is required)"
-        resolved = Path(p).resolve()
-        if not resolved.is_relative_to(self.session_dir.resolve()):
-            return "(read_artifact: path is outside the session directory)"
-        if not resolved.is_file():
-            return f"(read_artifact: file not found: {p!r})"
-        try:
-            with resolved.open("rb") as fh:
-                if mode == "head":
-                    blob = fh.read(_ARTIFACT_BYTE_CAP)
-                else:
-                    size = fh.seek(0, os.SEEK_END)
-                    fh.seek(max(0, size - _ARTIFACT_BYTE_CAP))
-                    blob = fh.read()
-        except OSError as exc:
-            return f"(read_artifact: cannot read {p!r}: {exc})"
-        if b"\x00" in blob:
-            return f"(read_artifact: file is not text: {p!r})"
-        # A byte-window boundary can split a codepoint, so never decode strictly.
-        lines = blob.decode("utf-8", errors="replace").splitlines()
-        n = max(1, min(limit, _ARTIFACT_LINE_CAP))
-        window = lines[offset : offset + n] if mode == "head" else lines[-n:]
-        return _defang_prompt_structure("\n".join(window))
 
     def _context_inbox_reader(self, since_seq: int = 0) -> str:
         """Synchronous projection of the orchestration inbox tail (sync SQLite path).

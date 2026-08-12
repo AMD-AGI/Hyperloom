@@ -244,7 +244,7 @@ class _RenderMixin:
         if phase in (PHASE_FRAMEWORK_AGENT, PHASE_EXPLORE, PHASE_KERNEL_AGENT, PHASE_SWEEP):
             reloop, evidence = should_reloop_to_explore(self, now_unix=now_unix)
             feasible = reloop and (self.framework_agent_phase_enabled or self.explore_enabled)
-            reloop_line = f"reloop    : feasible={feasible}"
+            reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
             threshold = evidence.get("min_remaining_sec_effective")
             if threshold is not None:
                 reloop_line += f" threshold_sec={int(threshold)}"
