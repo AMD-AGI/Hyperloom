@@ -53,6 +53,18 @@ _FORGE_BACKENDS = frozenset({"forge"})
 _FAILED_STATUSES = frozenset({"failed", "error", "crashed", "timeout"})
 _VALID_PRODUCER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
+# Statuses an action executor uses to state an adoption verdict itself. These
+# outrank a caller-supplied routing label when the two disagree.
+_EXECUTOR_ADOPTION_VERDICTS = frozenset(
+    {
+        "KEPT",
+        "KEPT_INERT",
+        "REVERTED",
+        "REJECTED",
+        "ACCURACY_UNAVAILABLE_REJECT",
+    }
+)
+
 
 def _now_iso_safe() -> str:
     """Return the current UTC time as an ISO-8601 string (``""`` on failure).
@@ -115,6 +127,39 @@ def _stable_id(prefix: str, *parts: Any) -> str:
     return f"{prefix}:{readable}:{digest}"
 
 
+def _measurement_occurrence(*values: Any, ordinal: Any = None) -> str:
+    """Tell measuring something again apart from describing it further.
+
+    A measurement id is derived from its operation, and an operation is
+    deliberately stable across a subject's retries -- one kernel, one
+    operation, however many times it is tried. Measurements inherited that
+    collapsing, so re-measuring a kernel wrote over the very numbers an
+    earlier adoption had been decided on, leaving the adoption citing evidence
+    that no longer agreed with it.
+
+    ``ordinal`` is the producer's own count of how many times it has measured
+    this subject, and is what should normally be passed: it separates two
+    readings even when they agree, which is the case a digest of the values
+    cannot see and the one that carries the repeatability evidence.
+
+    Falling back to the values keeps older callers from overwriting each other,
+    but it can only distinguish readings that differ. Note that neither form
+    may be allocated by the recorder itself: several producers replay their
+    records from state after a resume, so an id has to be reproducible from
+    what is being recorded rather than from how many parts already exist.
+    """
+    if ordinal is not None and str(ordinal).strip() != "":
+        return f"n{ordinal}"
+    parts: list[str] = []
+    for value in values:
+        numeric = to_float(value)
+        parts.append(f"{numeric:.10g}" if numeric is not None else str(value or ""))
+    raw = "|".join(parts)
+    if not raw.strip("|"):
+        return ""
+    return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:10]
+
+
 def _operation_status(status: Any) -> str:
     """Normalize action status while preserving terminal failures."""
     value = str(status or "").strip().lower()
@@ -125,6 +170,76 @@ def _operation_status(status: Any) -> str:
     if value in {"skipped", "discarded", "reverted", "revert", "rejected", "no_promote"}:
         return value
     return "failed" if value in _FAILED_STATUSES or value else "unknown"
+
+
+_AGENT_BY_ACTION = {
+    "framework_agent": "framework_agent",
+    "framework": "framework_agent",
+    "explore": "explore",
+    "backends": "explore",
+    "params": "explore",
+    "specialist": "explore",
+    "replay_warm_recipe": "warm_replay",
+    "warm_replay": "warm_replay",
+    "warm_recipe": "warm_replay",
+    "baseline": "coordinator",
+    "profile": "coordinator",
+    "roofline": "coordinator",
+    "sweep": "coordinator",
+    "conc_sweep": "coordinator",
+    "validate": "coordinator",
+    "validate_stack": "coordinator",
+    "trace_analyze": "coordinator",
+    "critic": "critic",
+    "robustness": "robustness",
+}
+
+_AGENT_BY_PHASE = {
+    "FRAMEWORK": "framework_agent",
+    "FRAMEWORK_AGENT": "framework_agent",
+    "EXPLORE": "explore",
+    "KERNEL": "kernel_agent",
+    "KERNEL_AGENT": "kernel_agent",
+}
+
+
+def _resolve_agent(
+    action: str,
+    *,
+    result: Mapping[str, Any] | None = None,
+    phase: str = "",
+) -> str:
+    """Name the agent that owns this unit of work, at the moment it settles.
+
+    Ownership is a fact the producer knows and the exporter cannot recover: by
+    the time a delayed ``integrate_patch`` lands, the active phase has usually
+    moved on. Returning ``unattributed`` means the producer genuinely has no
+    evidence of an owner, which is a reportable data gap rather than a guess.
+    """
+    name = str(action or "").strip().lower()
+    result = result or {}
+
+    # A patch application carries its author in the result; the phase that
+    # happens to be active when it lands says nothing about who wrote it.
+    if name.startswith("integrate_patch") or name == "integrate":
+        if result.get("framework_agent_authoring") or result.get("framework_agent_candidate_id"):
+            return "framework_agent"
+        provenance = str(result.get("provenance") or "").strip().lower()
+        if result.get("domain") or provenance.startswith("specialist:"):
+            return "explore"
+        recorded_phase = _AGENT_BY_PHASE.get(str(result.get("source_phase") or "").strip().upper(), "")
+        return recorded_phase or "unattributed"
+
+    direct = _AGENT_BY_ACTION.get(name)
+    if direct:
+        return direct
+    if name.startswith("kernel_opt") or name in {"geak_e2e", "gemm_tuning", "fusion", "kernel_optimization"}:
+        return "kernel_agent"
+
+    recorded_phase = _AGENT_BY_PHASE.get(str(result.get("source_phase") or "").strip().upper(), "")
+    if recorded_phase:
+        return recorded_phase
+    return _AGENT_BY_PHASE.get(str(phase or "").strip().upper(), "") or "unattributed"
 
 
 def _action_operation_id(action: str, entry: Mapping[str, Any]) -> str:
@@ -259,13 +374,14 @@ def _record_action_measurements(
         "samples": list(result.get("samples") or []) if isinstance(result.get("samples"), (list, tuple)) else [],
         "aggregation": result.get("aggregation") or "result_scalar",
     }
+    occurrence = _measurement_occurrence(*(result.get(field) for field, _, _ in metric_fields))
     seen_names: set[str] = set()
     for field, name, unit in metric_fields:
         value = result.get(field)
         if value is None or name in seen_names:
             continue
         seen_names.add(name)
-        measurement_id = _stable_id("measurement", operation_id, name)
+        measurement_id = _stable_id("measurement", operation_id, name, occurrence)
         measurement_ids.append(measurement_id)
         record_measurement(
             session_dir,
@@ -310,7 +426,14 @@ def _record_action_measurements(
             ):
                 if point.get(field) is None:
                     continue
-                measurement_id = _stable_id("measurement", operation_id, group, point_key, name)
+                measurement_id = _stable_id(
+                    "measurement",
+                    operation_id,
+                    group,
+                    point_key,
+                    name,
+                    _measurement_occurrence(point.get(field)),
+                )
                 measurement_ids.append(measurement_id)
                 record_measurement(
                     session_dir,
@@ -534,36 +657,103 @@ def _mirror_action_v4(
                     "evaluated_at": ended_at,
                 }
             )
+    agent = _resolve_agent(action, result=result, phase=phase)
+    gain_pct = to_float(result.get("delta_pct") or result.get("best_gain_pct"))
+    keep_threshold_pct = to_float(result.get("keep_threshold_pct"))
+    decision_reason = str(result.get("decision_reason") or result.get("reason") or "")
+    if keep_threshold_pct is not None:
+        # Without the threshold the verdict is unfalsifiable after the fact:
+        # "+0.55%" alone never explains why the run declined to keep it.
+        gates.append(
+            {
+                "gate_id": _stable_id("gate", operation_id, "keep_threshold"),
+                "kind": "keep_threshold",
+                "name": "keep_threshold",
+                "status": (
+                    "passed"
+                    if gain_pct is not None and gain_pct >= keep_threshold_pct
+                    else "failed"
+                    if gain_pct is not None
+                    else "partial"
+                ),
+                "decision": (
+                    "allow" if gain_pct is not None and gain_pct >= keep_threshold_pct else "deny"
+                ),
+                "reason": decision_reason,
+                "evaluated_at": ended_at,
+                "inputs": {"keep_threshold_pct": keep_threshold_pct},
+                "evidence": {
+                    "gain_pct": gain_pct,
+                    "keep_threshold_pct": keep_threshold_pct,
+                    "base_tput": to_float(result.get("base_tput")),
+                    "output_throughput": to_float(result.get("output_throughput")),
+                },
+            }
+        )
     adoption_ids: list[str] = []
     verdict = str(entry.get("decision") or result.get("decision") or result.get("status") or "").strip().upper()
+    # The executor owns the adoption verdict. A caller's coarse routing label
+    # ("discarded") must never overwrite a KEEP the executor already committed.
+    executor_verdict = str(result.get("status") or "").strip().upper()
+    if executor_verdict in _EXECUTOR_ADOPTION_VERDICTS:
+        verdict = executor_verdict
     adoptable_actions = {
         "framework_agent",
         "explore",
         "integrate",
+        "integrate_patch",
         "replay_warm_recipe",
         "warm_replay",
         "warm_recipe",
     }
-    keep_verdict = verdict in {"KEEP", "KEPT", "PROMOTED", "ADOPTED"}
-    revert_verdict = verdict in {"REVERT", "REVERTED", "REJECTED", "FAILED"}
-    validation_passed = bool(result.get("validated", result.get("accuracy_pass", keep_verdict)))
+    keep_verdict = verdict in {"KEEP", "KEPT", "KEPT_INERT", "PROMOTED", "ADOPTED"}
+    revert_verdict = verdict in {
+        "REVERT",
+        "REVERTED",
+        "REJECTED",
+        "FAILED",
+        "ACCURACY_UNAVAILABLE_REJECT",
+    }
+    validated = result.get("validated", result.get("accuracy_pass"))
+    validation_passed = keep_verdict if validated is None else bool(validated)
     if action in adoptable_actions and ((keep_verdict and validation_passed) or revert_verdict):
         adoption_id = _stable_id("adoption", operation_id)
         adoption_ids.append(adoption_id)
+        # Enablement and inert keeps are genuine adoptions that must not be
+        # counted as gain: the code lands, the measured delta is not its own.
+        attribution_eligible = result.get("attribution_eligible")
+        if attribution_eligible is None:
+            attribution_eligible = not (
+                bool(result.get("enablement"))
+                or bool(result.get("baseline_enablement"))
+                or verdict == "KEPT_INERT"
+            )
         _record_adoption_transition(
             session_dir,
             adoption_id=adoption_id,
             operation_id=operation_id,
             adopted=keep_verdict and validation_passed,
-            reason=str(result.get("decision_reason") or result.get("reason") or verdict),
+            reason=decision_reason or verdict,
             transitioned_at=ended_at,
             subject={"subject_id": subject_id, "subject_type": subject_type},
             artifact_ids=artifact_ids,
             measurement_ids=measurement_ids,
             kind=action,
-            gain_pct=to_float(result.get("delta_pct") or result.get("best_gain_pct")),
+            agent=agent,
+            attribution_eligible=bool(attribution_eligible),
+            gain_pct=gain_pct,
+            throughput_before=to_float(result.get("base_tput")),
+            throughput_after=to_float(
+                result.get("output_throughput") or result.get("tput")
+            ),
             configuration=dict(result.get("configuration") or {}),
             producer=producer,
+            metadata={
+                "keep_threshold_pct": keep_threshold_pct,
+                "executor_status": str(result.get("status") or ""),
+                "provenance": str(result.get("provenance") or ""),
+                "domain": str(result.get("domain") or ""),
+            },
         )
     record_operation(
         session_dir,
@@ -580,8 +770,14 @@ def _mirror_action_v4(
             "validation" if action == "baseline" else "optimization"
         ),
         scope=str(extras.get("scope") or ""),
+        agent=agent,
         strategy_group=action,
-        strategy=str(extras.get("provenance") or result.get("strategy") or action),
+        strategy=str(
+            extras.get("provenance")
+            or result.get("provenance")
+            or result.get("strategy")
+            or action
+        ),
         producer=producer,
         sequence=int(tick or 0),
         ended_at=ended_at,
@@ -592,10 +788,16 @@ def _mirror_action_v4(
             {
                 "decision_id": _stable_id("decision", operation_id),
                 "kind": action,
-                "verdict": decision,
+                "verdict": verdict or decision,
+                "reason": decision_reason,
                 "decided_at": ended_at,
                 "component": producer,
-                "evidence": extras,
+                "evidence": {
+                    **extras,
+                    "gain_pct": gain_pct,
+                    "keep_threshold_pct": keep_threshold_pct,
+                    "executor_status": str(result.get("status") or ""),
+                },
             }
         ],
         outputs=dict(result),
@@ -1592,7 +1794,9 @@ def record_geak_operation(
         numeric = to_float(raw)
         if numeric is None:
             continue
-        measurement_id = _stable_id("measurement", route_id, label, source_name)
+        measurement_id = _stable_id(
+            "measurement", route_id, label, source_name, _measurement_occurrence(numeric)
+        )
         metadata = _measurement_metadata(
             source_name,
             harness=validation_source if headline and validation_source else harness,
@@ -1845,6 +2049,12 @@ def record_gemm_tuning_operation(
             }
         )
     measurement_refs: list[str] = []
+    occurrence = _measurement_occurrence(
+        value.get("best_speedup"),
+        value.get("baseline_tput"),
+        value.get("new_tput") or value.get("final_throughput"),
+        value.get("e2e_gain_pct"),
+    )
     for name, raw, basis, unit in (
         ("best_speedup", value.get("best_speedup"), "kernel_time_ratio", "ratio"),
         ("baseline_throughput", value.get("baseline_tput"), "output", "tok/s"),
@@ -1854,7 +2064,7 @@ def record_gemm_tuning_operation(
         numeric = to_float(raw)
         if numeric is None:
             continue
-        measurement_id = _stable_id("measurement", operation_id, name)
+        measurement_id = _stable_id("measurement", operation_id, name, occurrence)
         record_measurement(
             session_dir,
             measurement_id=measurement_id,
@@ -2736,7 +2946,13 @@ def record_kernel_backend_result(
                     )
                 numeric_speedup = to_float(att.get("micro_speedup") or att.get("speedup"))
                 if numeric_speedup is not None:
-                    measurement_id = _stable_id("measurement", operation_id, canonical_attempt_id, "micro_speedup")
+                    measurement_id = _stable_id(
+                        "measurement",
+                        operation_id,
+                        canonical_attempt_id,
+                        "micro_speedup",
+                        _measurement_occurrence(numeric_speedup),
+                    )
                     record_measurement(
                         session_dir,
                         measurement_id=measurement_id,
@@ -2930,6 +3146,7 @@ def record_kernel_e2e(
     result: Mapping[str, Any] | None = None,
     route_strategy: str = "kernel_agent_forge",
     validation_tier: str = "",
+    occurrence: Any = None,
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
     """Record the latest end-to-end integrate outcome for one kernel (stage 4).
@@ -2951,6 +3168,10 @@ def record_kernel_e2e(
         patch_path (str | None): the applied patch path.
         target_file (str | None): the integrated target file.
         extra_server_args (str): extra server args carried by the change.
+        occurrence (Any): which integrate of this kernel these numbers came
+            from, as counted by the caller. Keeps a later re-measure from
+            landing on the readings an earlier KEEP was decided on, and is
+            recorded so a replay after resume reproduces the same ids.
         producer (str): the breakdown producer label (defaults to the
             kernel-agent).
     """
@@ -2958,6 +3179,11 @@ def record_kernel_e2e(
         return
     try:
         evidence = dict(result or {})
+        recorded_occurrence = (
+            occurrence
+            if occurrence is not None
+            else str(evidence.get("integration_id") or "") or None
+        )
         payload = {
             "kernel_id": str(kernel_id),
             "integrated": bool(integrated),
@@ -2968,6 +3194,10 @@ def record_kernel_e2e(
             "target_file": target_file,
             "extra_server_args": str(extra_server_args or ""),
             "ts": _now_iso_safe(),
+            # Carried on the record so the replay paths that re-record this
+            # outcome from state pass the same value back instead of counting
+            # a fresh occurrence on every pass.
+            "occurrence": recorded_occurrence,
         }
         for field in (
             "self_reported_e2e_gain_pct",
@@ -3005,6 +3235,20 @@ def record_kernel_e2e(
         }
         decision_value = str(decision or "").upper()
         measurement_refs: list[str] = []
+        # One integrate of one kernel is one occurrence. Re-integrating the
+        # same kernel later measures it again, and those numbers must not
+        # displace the ones an earlier KEEP was decided on.
+        #
+        # ``integration_id`` is the default because the handler that performs
+        # the integrate and the bookkeeping that files its verdict both record
+        # this outcome from the same result. Numbering it from either one's own
+        # counter would split a single reading in two.
+        occurrence_key = _measurement_occurrence(
+            evidence.get("base_tput"),
+            evidence.get("new_tput"),
+            e2e_gain_pct,
+            ordinal=recorded_occurrence,
+        )
         for name, raw, role in (
             ("baseline_throughput", evidence.get("base_tput"), "baseline"),
             ("final_throughput", evidence.get("new_tput"), "final"),
@@ -3013,7 +3257,9 @@ def record_kernel_e2e(
             numeric = to_float(raw)
             if numeric is None:
                 continue
-            measurement_id = _stable_id("measurement", operation_id, "integrate", name)
+            measurement_id = _stable_id(
+                "measurement", operation_id, "integrate", name, occurrence_key
+            )
             record_measurement(
                 session_dir,
                 measurement_id=measurement_id,
@@ -3026,6 +3272,11 @@ def record_kernel_e2e(
                 unit="percent" if role == "delta" else "tok/s",
                 status="validated" if validated is True else "provisional",
                 metric_basis="output",
+                **(
+                    {"occurrence": recorded_occurrence}
+                    if recorded_occurrence is not None
+                    else {}
+                ),
                 dimensions={"role": role, "baseline_source": "integrate_input", "final_source": "integrate_rebaseline"},
                 **_measurement_metadata(
                     "integrate_handler",
@@ -3090,6 +3341,11 @@ def record_kernel_e2e(
                 measurement_ids=measurement_refs,
                 kind="kernel_optimization",
                 gain_pct=to_float(e2e_gain_pct),
+                # Frozen inline, not just referenced: measurement ids are stable
+                # per kernel, so a later attempt on the same kernel overwrites
+                # the very numbers this adoption was decided on.
+                throughput_before=to_float(evidence.get("base_tput")),
+                throughput_after=to_float(evidence.get("new_tput")),
                 configuration={
                     "patch_path": patch_path,
                     "target_file": target_file,
@@ -3665,6 +3921,49 @@ def record_subject(
     )
 
 
+_AGENT_BY_PRODUCER = {
+    PRODUCER_KERNEL_AGENT: "kernel_agent",
+    "critic": "critic",
+    "robustness": "robustness",
+    "framework-kb": "framework_agent",
+}
+
+_AGENT_BY_OPERATION_KIND = {
+    "kernel_optimization": "kernel_agent",
+    "kernel_optimizer_run": "kernel_agent",
+    "kernel_optimizer_selection": "kernel_agent",
+    "strategy_selection": "kernel_agent",
+    "gemm_tuning": "kernel_agent",
+    "specialist": "explore",
+    "critic": "critic",
+    "kb_write": "critic",
+    "robustness": "robustness",
+}
+
+
+def _default_operation_agent(
+    value: Mapping[str, Any],
+    producer: str,
+) -> str:
+    """Fall back to the owning agent implied by the producer and work kind.
+
+    Explicit ``agent=`` at the call site always wins; this only keeps operations
+    recorded by paths that predate the field from landing without an owner.
+    """
+    kind = str(value.get("kind") or "").strip().lower()
+    by_kind = _AGENT_BY_OPERATION_KIND.get(kind)
+    if by_kind:
+        return by_kind
+    by_producer = _AGENT_BY_PRODUCER.get(str(producer or "").strip().lower())
+    if by_producer:
+        return by_producer
+    return _resolve_agent(
+        str(value.get("name") or kind),
+        result=value.get("outputs") if isinstance(value.get("outputs"), Mapping) else None,
+        phase=str(value.get("phase") or ""),
+    )
+
+
 def record_operation(
     session_dir: Path | str | None,
     operation: Mapping[str, Any] | None = None,
@@ -3674,11 +3973,17 @@ def record_operation(
     **fields: Any,
 ) -> None:
     """Upsert one v4 operation by stable ``operation_id``."""
+    value = _v4_payload(operation, fields)
+    # Only stamp an owner when this call actually defines the operation; a
+    # partial upsert that just patches one field must not overwrite the agent
+    # its defining call already recorded.
+    if not value.get("agent") and (value.get("kind") or value.get("name")):
+        value["agent"] = _default_operation_agent(value, producer)
     _record_v4_entity(
         session_dir,
         section="operations",
-        payload=operation,
-        fields=fields,
+        payload=value,
+        fields={},
         id_field="operation_id",
         entity_id=operation_id,
         producer=producer,
@@ -3715,6 +4020,10 @@ def record_adoption(
 ) -> None:
     """Upsert one v4 adoption by stable ``adoption_id``."""
     value = _v4_payload(adoption, fields)
+    if not value.get("agent") and value.get("kind"):
+        value["agent"] = _default_operation_agent(value, producer)
+    if value.get("attribution_eligible") is None and value.get("kind"):
+        value["attribution_eligible"] = True
     status = str(value.get("status") or "").lower()
     decision = str(value.get("decision") or "").upper()
     if status == "adopted" or (decision == "KEEP" and value.get("validated") is True):

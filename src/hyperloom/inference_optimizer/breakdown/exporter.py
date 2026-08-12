@@ -371,27 +371,58 @@ def build(
     # Canonical optimization read model.  This is the single downstream entry
     # point for adopted warm-replay, Explore, Framework Agent, and Kernel Agent
     # changes; the historical sections below remain compatibility/audit data.
-    optimizations = _safe_collect(
-        "optimizations",
-        lambda: collectors.collect_optimizations(
-            state,
-            attribution,
-            geak_invocations,
-            forge_invocations,
+    #
+    # Author-time records win whenever the run produced them: they carry the
+    # owning agent, the verdict, and the threshold behind it as recorded facts.
+    # Rebuilding the same model from ``state.json`` can only re-infer ownership
+    # from phase timestamps, so it is now a fallback for pre-recorder sessions.
+    recorded_operations = [row for row in assembled.get("operations") or [] if isinstance(row, dict)]
+    if recorded_operations:
+        optimizations = _safe_collect(
+            "optimizations",
+            lambda: collectors.collect_recorded_optimizations(
+                str(state.get("session_id") or "session"),
+                recorded_operations,
+                [row for row in assembled.get("measurements") or [] if isinstance(row, dict)],
+                [row for row in assembled.get("adoptions") or [] if isinstance(row, dict)],
+                [row for row in assembled.get("artifacts") or [] if isinstance(row, dict)],
+                geak_invocations,
+                forge_invocations,
+                warnings,
+            ),
             warnings,
-            gemm_tuning=gemm_tuning,
-        ),
-        warnings,
-        default={
-            "schema_version": 2,
-            "entries": [],
-            "backend_attempts": [],
-            "summary_by_source": {},
-            "summary_by_kind": {},
-            "validation": {},
-            "gemm_tuning_runs": [],
-        },
-    )
+            default=None,
+        )
+    else:
+        optimizations = None
+    if not optimizations:
+        if recorded_operations:
+            warnings.append(
+                "optimizations: recorder projection produced nothing; "
+                "falling back to the state.json read model"
+            )
+        optimizations = _safe_collect(
+            "optimizations",
+            lambda: collectors.collect_optimizations(
+                state,
+                attribution,
+                geak_invocations,
+                forge_invocations,
+                warnings,
+                gemm_tuning=gemm_tuning,
+            ),
+            warnings,
+            default={
+                "schema_version": collectors.OPTIMIZATIONS_SCHEMA_VERSION,
+                "entries": [],
+                "backend_attempts": [],
+                "summary_by_source": {},
+                "summary_by_kind": {},
+                "validation": {},
+                "gemm_tuning_runs": [],
+            },
+        )
+        optimizations.setdefault("source_of_truth", "state")
     kb_provenance = _pick(
         "kb_provenance",
         _safe_collect(

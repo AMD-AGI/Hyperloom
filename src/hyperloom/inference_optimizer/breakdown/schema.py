@@ -1719,34 +1719,46 @@ class OptimizationConfiguration(TypedDict, total=False):
 
 
 class OptimizationEntry(TypedDict, total=False):
-    """One adopted optimization, independent of its internal action name."""
+    """One adopted optimization's contribution to the session's reported gain.
+
+    On the recorder path this is a ledger row over ``Optimizations.attempts``:
+    it carries the chain arithmetic and enough identity to read, and defers
+    everything descriptive to the attempt named by ``adopted_attempt_id``.
+    The remaining fields are emitted only by the legacy state-rebuilt path,
+    which has no attempts to point at.
+    """
 
     id: str
     stack_index: int
+    adopted_attempt_id: str | None
+    adoption_id: str | None
     source: OptimizationSource
     source_method: OptimizationSourceMethod
     optimization_kind: str
     name: str
     backend: KernelOptimizationBackend | None
+    # Gain against the session baseline. This is the only gain figure in the
+    # report that may be summed across rows.
+    gain_pct: float | None
+    gain_method: str
+    # The adopting executor's own measurement, relative to its starting point.
+    local_gain_pct: float | None
+    cumulative_gain_pct: float | None
+    throughput_after: float | None
+    validated: bool
+    ts: str
     execution_mode: KernelExecutionMode | None
     kernel_id: str | None
-    adopted_attempt_id: str | None
     action: str
     variant_name: str
     fingerprint: str
     scope: str
     source_phase: str
-    gain_method: str
     accepted_heads: list[Any]
     extra_server_args_is_invariant: bool | None
     candidate_flags: Any
-    gain_pct: float | None
-    cumulative_gain_pct: float | None
     throughput_before: float | None
-    throughput_after: float | None
-    validated: bool
     task_id: str
-    ts: str
     provenance: str
     configuration: OptimizationConfiguration
     artifacts: list[OptimizationArtifact]
@@ -1787,6 +1799,10 @@ class OptimizationValidation(TypedDict, total=False):
     validated_at_stack_len: int
     validated_total_gain_pct: float | None
     attributed_total_gain_pct: float
+    # Gain the session really moved that no adopted step accounts for, most
+    # often a KEEP that never reached the ledger. Held out of every entry so it
+    # cannot be read as the next step's contribution.
+    unattributed_gain_pct: float
     attribution_gap_pct: float | None
     notes: list[str]
     source_breakdown: dict[str, float]
@@ -1794,12 +1810,93 @@ class OptimizationValidation(TypedDict, total=False):
     domain_attribution: dict[str, Any]
 
 
+class OptimizationAttemptGate(TypedDict, total=False):
+    """One gate the attempt had to clear, as evaluated at author time."""
+
+    kind: str
+    name: str
+    status: str
+    decision: str
+    reason: str
+
+
+class OptimizationAttempt(TypedDict, total=False):
+    """One attempt at making the workload faster, adopted or not.
+
+    This is the per-attempt layer of the optimization report: who proposed it,
+    what it touched, what it measured, whether it was kept, why, and what it
+    left behind. Rejected attempts appear here exactly like adopted ones.
+    """
+
+    attempt_id: str
+    agent: AgentBucket
+    # ``recorded`` when the producer stamped the owner, ``derived`` when it was
+    # reconstructed for a session recorded before that field existed.
+    agent_method: str
+    producer: str
+    kind: str
+    name: str
+    subject: dict[str, str]
+    kernel_id: str | None
+    backend: str
+    phase: str
+    macro_cycle: int | None
+    started_at: str
+    ended_at: str
+    duration_sec: float | None
+    status: str
+    decision: str
+    decision_reason: str
+    keep_threshold_pct: float | None
+    adopted: bool
+    attribution_eligible: bool | None
+    # Measured against this attempt's own starting point, not the session
+    # baseline. Never sum these; use ``OptimizationEntry.gain_pct`` instead.
+    local_gain_pct: float | None
+    throughput_before: float | None
+    throughput_after: float | None
+    adoption_id: str | None
+    gates: list[OptimizationAttemptGate]
+    backend_attempts: list[OptimizationBackendAttempt]
+    # Each row carries ``occurrence``, its position among this operation's
+    # readings of that metric name, oldest first, along with
+    # ``occurrences_of_name`` for how many there are in total. Two readings
+    # that agree are two readings: repeatability is the evidence, so it is
+    # counted rather than inferred from the values.
+    measurements: list[dict[str, Any]]
+    # ``adoption_pinned`` when the adoption named the readings it was decided
+    # on, ``latest_occurrence`` when the newest reading of each metric was used
+    # for want of one, ``adoption_pinned_stale`` when the pinned readings were
+    # overwritten by a later re-measure and no longer match the frozen decision
+    # values. ``measurement_occurrences`` counts every reading the operation
+    # kept, so a re-measured subject is visibly re-measured.
+    measurement_source: str
+    measurement_occurrences: int
+    artifacts: list[dict[str, str]]
+
+
+class OptimizationAgentSummary(TypedDict, total=False):
+    """Per-agent rollup: the top layer of the optimization report."""
+
+    attempts: int
+    keeps: int
+    reverts: int
+    attributable_gain_pct: float
+    non_attributable_keeps: int
+    by_kind: dict[str, dict[str, Any]]
+
+
 class Optimizations(TypedDict, total=False):
     """Canonical downstream optimization API."""
 
     schema_version: int
+    # ``recorder`` when projected from author-time records, ``state`` when
+    # rebuilt from business state for a session that predates the recorder.
+    source_of_truth: str
+    attempts: list[OptimizationAttempt]
     entries: list[OptimizationEntry]
     backend_attempts: list[OptimizationBackendAttempt]
+    summary_by_agent: dict[AgentBucket, OptimizationAgentSummary]
     summary_by_source: dict[OptimizationSource, OptimizationSourceSummary]
     summary_by_kind: dict[str, OptimizationSourceSummary]
     validation: OptimizationValidation
@@ -2496,6 +2593,20 @@ class OperationDecision(TypedDict, total=False):
 ExecutorClass = Literal["llm_agent", "llm_tool", "deterministic"]
 IntegrityStatus = Literal["exact", "derived", "partial", "unavailable"]
 
+# Which agent owns a unit of work. Recorded by the producer at author time;
+# ``unattributed`` means the producer genuinely could not name an owner, never
+# that the exporter failed to guess one.
+AgentBucket = Literal[
+    "kernel_agent",
+    "framework_agent",
+    "explore",
+    "warm_replay",
+    "coordinator",
+    "critic",
+    "robustness",
+    "unattributed",
+]
+
 
 class Operation(TypedDict, total=False):
     """Canonical unit of work, incrementally upserted by stable id."""
@@ -2516,6 +2627,9 @@ class Operation(TypedDict, total=False):
     executor_class: ExecutorClass
     purpose: str
     scope: str
+    # Canonical owning agent, stamped by the producer at author time so the
+    # exporter never has to infer ownership from phase timestamps.
+    agent: AgentBucket
     strategy_group: str
     strategy: str
     subject: SubjectRef
@@ -2599,8 +2713,18 @@ class Adoption(TypedDict, total=False):
     adopted_at: str
     validated: bool
     gain_pct: float | None
+    # Frozen at adoption time. Measurement ids are stable per subject, so a
+    # later attempt on the same subject overwrites the referenced measurements;
+    # these two carry the numbers this adoption was actually decided on.
+    throughput_before: float | None
+    throughput_after: float | None
     configuration: dict[str, Any]
     producer: str
+    # Mirrors ``Operation.agent`` so an adoption can be bucketed without a join.
+    agent: AgentBucket
+    # False for pre-baseline enablement work: real, adopted, and deliberately
+    # excluded from reported gain.
+    attribution_eligible: bool
     metadata: dict[str, Any]
 
 

@@ -2536,7 +2536,10 @@ class WritebackCollaborator:
                 from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
                 result_status = str(result.get("status") or "succeeded")
-                kept = task_kind == "framework_agent" and result_status.lower() == "kept"
+                # Every promotable kind reports its own verdict; hardcoding
+                # "discarded" for the rest made kept integrate_patch work look
+                # rejected in the breakdown and stripped its attribution.
+                kept = result_status.lower() in {"kept", "kept_inert", "promoted", "adopted"}
                 v4_result = dict(result)
                 v4_result.setdefault(
                     "workload",

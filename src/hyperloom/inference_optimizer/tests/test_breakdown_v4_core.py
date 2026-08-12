@@ -16,6 +16,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.assembler import (
     assemble_v4_parts,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.instrument import (
+    record_action_operation,
     record_adoption,
     record_artifact,
     record_critic_iteration,
@@ -1424,3 +1425,207 @@ def test_kb_writes_summary_skips_non_dict_and_empty_verdict():
     summary = _kb_writes_summary(rows)
     assert summary["total"] == 3
     assert summary["by_verdict"] == {"APPROVE": 2, "REJECT": 1}
+
+
+def _kept_specialist_patch_result():
+    """A specialist patch the executor kept, shaped like a real run's result."""
+    return {
+        "status": "kept",
+        "provenance": "specialist:serving_specialist",
+        "domain": "serving_specialist",
+        "framework_agent_authoring": True,
+        "source_phase": "FRAMEWORK_AGENT",
+        "reason": "throughput delta +10.95% >= 0.40%",
+        "delta_pct": 10.949641325767333,
+        "keep_threshold_pct": 0.4,
+        "base_tput": 5081.01,
+        "output_throughput": 5627.94,
+        "accuracy_pass": True,
+    }
+
+
+def test_kept_integrate_patch_records_its_author_and_adoption(tmp_path):
+    record_action_operation(
+        tmp_path,
+        action="integrate_patch",
+        task_id="t1",
+        status="kept",
+        decision="promoted",
+        result=_kept_specialist_patch_result(),
+        phase="KERNEL_AGENT",
+    )
+
+    assembled = assemble_parts(tmp_path)
+    operation = assembled["operations"][0]
+    adoption = assembled["adoptions"][0]
+
+    # A patch that lands during KERNEL_AGENT still belongs to whoever wrote it.
+    assert operation["agent"] == "framework_agent"
+    assert operation["adoption_refs"] == [adoption["adoption_id"]]
+    assert adoption["agent"] == "framework_agent"
+    assert adoption["decision"] == "KEEP"
+    assert adoption["validated"] is True
+    assert adoption["gain_pct"] == 10.949641325767333
+    assert adoption["reason"] == "throughput delta +10.95% >= 0.40%"
+    assert adoption["attribution_eligible"] is True
+
+
+def test_keep_threshold_is_recorded_beside_the_verdict_it_produced(tmp_path):
+    record_action_operation(
+        tmp_path,
+        action="integrate_patch",
+        task_id="t2",
+        status="reverted",
+        decision="discarded",
+        result={
+            **_kept_specialist_patch_result(),
+            "status": "reverted",
+            "delta_pct": 0.2,
+            "reason": "throughput delta +0.20% < keep_threshold 0.40%",
+        },
+        phase="KERNEL_AGENT",
+    )
+
+    operation = assemble_parts(tmp_path)["operations"][0]
+    gate = next(g for g in operation["gates"] if g["kind"] == "keep_threshold")
+
+    # Without the threshold beside it, "+0.20%" never explains the rejection.
+    assert gate["status"] == "failed"
+    assert gate["inputs"]["keep_threshold_pct"] == 0.4
+    assert gate["evidence"]["gain_pct"] == 0.2
+    assert assemble_parts(tmp_path)["adoptions"][0]["decision"] == "REVERT"
+
+
+def test_enablement_patch_is_adopted_but_not_attributable(tmp_path):
+    record_action_operation(
+        tmp_path,
+        action="integrate_patch",
+        task_id="t3",
+        status="kept",
+        decision="promoted",
+        result={
+            "status": "kept",
+            "enablement": True,
+            "source_phase": "FRAMEWORK_AGENT",
+            "reason": "enablement runnable",
+            "delta_pct": 0.37,
+        },
+        phase="PRELUDE",
+    )
+
+    adoption = assemble_parts(tmp_path)["adoptions"][0]
+
+    assert adoption["decision"] == "KEEP"
+    assert adoption["attribution_eligible"] is False
+
+
+def test_remeasuring_a_kernel_leaves_the_adopted_numbers_alone(tmp_path):
+    """The gemma overwrite, reproduced with its real numbers.
+
+    A kernel is integrated and kept on 5081.01, then measured again later and
+    found at 5100.76. Both readings are facts about the same kernel, but only
+    the first one was the basis of a decision, and it has to still be there
+    afterwards for that decision to mean anything.
+    """
+    record_kernel_e2e(
+        tmp_path,
+        kernel_id="gemm_tune",
+        integrated=True,
+        e2e_gain_pct=7.0904327726706935,
+        validated=True,
+        decision="KEEP",
+        result={"base_tput": 4744.5975753, "new_tput": 5081.0100767},
+    )
+    record_kernel_e2e(
+        tmp_path,
+        kernel_id="gemm_tune",
+        integrated=True,
+        e2e_gain_pct=0.38876256985480745,
+        validated=False,
+        decision="",
+        result={"base_tput": 5081.0100767, "new_tput": 5100.763142143991},
+    )
+
+    assembled = assemble_parts(tmp_path)
+    by_id = {row["measurement_id"]: row for row in assembled["measurements"]}
+    adoption = next(
+        row for row in assembled["adoptions"] if row["decision"] == "KEEP"
+    )
+    pinned = {
+        by_id[mid]["name"]: by_id[mid]["value"]
+        for mid in adoption["measurement_ids"]
+        if mid in by_id
+    }
+
+    # Both readings survive; the later one landed beside the first.
+    finals = sorted(
+        row["value"] for row in assembled["measurements"] if row["name"] == "final_throughput"
+    )
+    assert finals == [5081.0100767, 5100.763142143991]
+    # And the adoption still cites the pair it was actually decided on.
+    assert pinned["baseline_throughput"] == 4744.5975753
+    assert pinned["final_throughput"] == 5081.0100767
+    assert pinned["e2e_gain_pct"] == 7.0904327726706935
+
+
+def test_two_readings_that_agree_are_still_two_readings(tmp_path):
+    """Numbering an occurrence, rather than deriving it from the numbers.
+
+    Measuring a kernel twice and getting the same figure both times is not the
+    same event as measuring it once, and it is the more interesting of the two:
+    it is the evidence that the figure repeats. Anything that identifies an
+    occurrence by its values has to collapse these into one and throw that
+    evidence away, so the occurrence is counted by the caller instead.
+    """
+    for integration in ("integration-1", "integration-2"):
+        record_kernel_e2e(
+            tmp_path,
+            kernel_id="k1",
+            integrated=True,
+            e2e_gain_pct=5.0,
+            validated=True,
+            decision="KEEP",
+            result={
+                "base_tput": 100.0,
+                "new_tput": 105.0,
+                "integration_id": integration,
+            },
+        )
+
+    measurements = assemble_parts(tmp_path)["measurements"]
+    finals = [row for row in measurements if row["name"] == "final_throughput"]
+
+    assert [row["value"] for row in finals] == [105.0, 105.0]
+    assert sorted(row["occurrence"] for row in finals) == [
+        "integration-1",
+        "integration-2",
+    ]
+
+
+def test_rerecording_the_same_occurrence_still_merges(tmp_path):
+    """Per-occurrence ids must not turn an amendment into a duplicate.
+
+    The same integrate is recorded twice by the handler that runs it and again
+    by the bookkeeping that files its verdict, and is recorded once more on
+    every replay from state after a resume. All of those are one reading.
+    """
+    for _ in range(3):
+        record_kernel_e2e(
+            tmp_path,
+            kernel_id="k1",
+            integrated=True,
+            e2e_gain_pct=5.0,
+            validated=True,
+            decision="KEEP",
+            result={
+                "base_tput": 100.0,
+                "new_tput": 105.0,
+                "integration_id": "integration-1",
+            },
+        )
+
+    measurements = assemble_parts(tmp_path)["measurements"]
+
+    assert [row["value"] for row in measurements if row["name"] == "final_throughput"] == [
+        105.0
+    ]

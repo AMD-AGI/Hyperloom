@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any
 
 
-OPTIMIZATIONS_SCHEMA_VERSION = 2
+OPTIMIZATIONS_SCHEMA_VERSION = 3
 
 _SOURCES = (
     "warm_replay",
@@ -25,6 +25,36 @@ _SOURCES = (
     "kernel_agent",
     "unattributed",
 )
+
+# Operation kinds that represent one attempt at making the workload faster.
+# Everything else the recorder captures (discovery, review, routing, baseline
+# measurement) is context, not an attempt.
+_ATTEMPT_KINDS = frozenset(
+    {
+        "kernel_optimization",
+        "gemm_tuning",
+        "integrate_patch",
+        "integrate",
+        "framework_agent",
+        "explore",
+        "replay_warm_recipe",
+        "warm_replay",
+        "warm_recipe",
+    }
+)
+
+_KEEP_DECISIONS = frozenset({"KEEP", "KEPT", "KEPT_INERT", "ADOPT", "ADOPTED", "PROMOTED"})
+_REVERT_DECISIONS = frozenset(
+    {"REVERT", "REVERTED", "REJECTED", "FAILED", "ACCURACY_UNAVAILABLE_REJECT"}
+)
+
+_THROUGHPUT_AFTER_NAMES = frozenset(
+    {"throughput_after", "final_throughput", "output_throughput", "throughput"}
+)
+_THROUGHPUT_BEFORE_NAMES = frozenset(
+    {"throughput_before", "baseline_throughput", "base_tput"}
+)
+_GAIN_NAMES = frozenset({"e2e_gain_pct", "gain_pct", "gain", "delta_pct"})
 
 _NON_OPTIMIZATION_ACTIONS = {
     "baseline",
@@ -725,13 +755,475 @@ def collect_optimizations(
 
     return {
         "schema_version": OPTIMIZATIONS_SCHEMA_VERSION,
+        "source_of_truth": "state",
+        # Business state only retains what was adopted, so this fallback cannot
+        # enumerate attempts. An empty list means "not recorded", not "none".
+        "attempts": [],
         "entries": entries,
         "backend_attempts": backend_attempts,
+        "summary_by_agent": {},
         "summary_by_source": summary,
         "summary_by_kind": summary_by_kind,
         "validation": _validation_summary(state, attribution, entries),
         "gemm_tuning_runs": gemm_tuning_runs,
     }
+
+
+def _work_kind(operation: dict[str, Any]) -> str:
+    """Return the operation's real work kind.
+
+    ``composite`` is a container label the recorder uses for multi-step actions;
+    the action name underneath it is what identifies the work.
+    """
+    kind = str(operation.get("kind") or "").strip().lower()
+    if kind in {"", "composite"}:
+        return str(operation.get("name") or "").strip().lower()
+    return kind
+
+
+_AGENT_BY_RECORDED_KIND = {
+    "kernel_optimization": "kernel_agent",
+    "gemm_tuning": "kernel_agent",
+    "framework_agent": "framework_agent",
+    "explore": "explore",
+    "replay_warm_recipe": "warm_replay",
+    "warm_replay": "warm_replay",
+    "warm_recipe": "warm_replay",
+}
+
+
+def _attempt_agent(operation: dict[str, Any], adoption: dict[str, Any]) -> str:
+    """Return the owning agent, preferring what the producer actually recorded.
+
+    Sessions recorded before producers stamped ``agent`` still need a bucket, so
+    fall back to the work kind and, for patch application, the authoring markers
+    the executor left in its own result.
+    """
+    recorded = str(operation.get("agent") or adoption.get("agent") or "").strip()
+    if recorded:
+        return recorded
+
+    kind = _work_kind(operation)
+    by_kind = _AGENT_BY_RECORDED_KIND.get(kind)
+    if by_kind:
+        return by_kind
+
+    if kind in {"integrate_patch", "integrate"}:
+        outputs = operation.get("outputs") if isinstance(operation.get("outputs"), dict) else {}
+        if outputs.get("framework_agent_authoring") or outputs.get(
+            "framework_agent_candidate_id"
+        ):
+            return "framework_agent"
+        provenance = str(outputs.get("provenance") or "").strip().lower()
+        if outputs.get("domain") or provenance.startswith("specialist:"):
+            return "explore"
+        return _normalized_phase(outputs.get("source_phase")) or "unattributed"
+    return "unattributed"
+
+
+def _last_decision(operation: dict[str, Any]) -> dict[str, Any]:
+    decisions = [row for row in operation.get("decisions") or [] if isinstance(row, dict)]
+    return decisions[-1] if decisions else {}
+
+
+def _threshold_from_operation(operation: dict[str, Any]) -> float | None:
+    """Pull the keep threshold out of whichever gate or decision recorded it."""
+    for gate in operation.get("gates") or []:
+        if not isinstance(gate, dict):
+            continue
+        for holder in (gate.get("inputs"), gate.get("evidence")):
+            if isinstance(holder, dict):
+                value = _to_float(holder.get("keep_threshold_pct"))
+                if value is not None:
+                    return value
+    evidence = _last_decision(operation).get("evidence")
+    if isinstance(evidence, dict):
+        value = _to_float(evidence.get("keep_threshold_pct"))
+        if value is not None:
+            return value
+    outputs = operation.get("outputs")
+    if isinstance(outputs, dict):
+        return _to_float(outputs.get("keep_threshold_pct"))
+    return None
+
+
+def _gate_rows(operation: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for gate in operation.get("gates") or []:
+        if not isinstance(gate, dict):
+            continue
+        rows.append(
+            {
+                "kind": str(gate.get("kind") or ""),
+                "name": str(gate.get("name") or ""),
+                "status": str(gate.get("status") or ""),
+                "decision": str(gate.get("decision") or ""),
+                "reason": str(gate.get("reason") or ""),
+            }
+        )
+    return rows
+
+
+def _sub_attempt_rows(operation: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize the per-backend tries nested inside one optimization attempt."""
+    rows: list[dict[str, Any]] = []
+    for index, value in enumerate(operation.get("attempts") or []):
+        if not isinstance(value, dict):
+            continue
+        outputs = value.get("outputs") if isinstance(value.get("outputs"), dict) else {}
+        error = value.get("error")
+        rows.append(
+            {
+                "attempt_id": str(value.get("attempt_id") or ""),
+                "sequence": value.get("sequence") or index + 1,
+                "backend": str(value.get("backend") or ""),
+                "status": str(value.get("status") or ""),
+                "decision": str(outputs.get("decision") or "").upper(),
+                "started_at": str(value.get("started_at") or ""),
+                "duration_sec": _duration_between(
+                    value.get("started_at"),
+                    value.get("ended_at"),
+                ),
+                "micro_speedup": _to_float(outputs.get("micro_speedup")),
+                "compile_passed": outputs.get("compile_passed"),
+                "correctness_passed": outputs.get("correctness_passed"),
+                "error": str(error) if error and not isinstance(error, dict) else None,
+            }
+        )
+    return rows
+
+
+def _recorded_attempt_row(
+    operation: dict[str, Any],
+    *,
+    adoption: dict[str, Any],
+    measurement_by_id: dict[str, dict[str, Any]],
+    artifact_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Project one recorded operation into a single canonical attempt row."""
+    operation_id = str(operation.get("operation_id") or "")
+    outputs = operation.get("outputs") if isinstance(operation.get("outputs"), dict) else {}
+    decision_row = _last_decision(operation)
+    subject = operation.get("subject") if isinstance(operation.get("subject"), dict) else {}
+
+    recorded_ids = [str(mid) for mid in operation.get("measurement_refs") or []]
+    pinned_ids = [str(mid) for mid in adoption.get("measurement_ids") or []]
+    if pinned_ids:
+        # The adoption named the measurements it was decided on. Re-measuring
+        # the same subject now records new ones beside these instead of over
+        # them, so these still say what they said when the call was made.
+        measurement_ids = pinned_ids
+        measurement_source = "adoption_pinned"
+    else:
+        measurement_ids = _latest_measurement_per_name(recorded_ids, measurement_by_id)
+        measurement_source = "latest_occurrence"
+    occurrence_index = _occurrence_index(recorded_ids, measurement_by_id)
+    measured_before = None
+    measured_after = None
+    measured_gain = None
+    measurements: list[dict[str, Any]] = []
+    for measurement_id in measurement_ids:
+        measurement = measurement_by_id.get(str(measurement_id))
+        if not measurement:
+            continue
+        name = str(measurement.get("name") or "").strip().lower()
+        value = _to_float(measurement.get("value"))
+        measurements.append(
+            {
+                "name": name,
+                "value": measurement.get("value"),
+                "unit": str(measurement.get("unit") or ""),
+                # Which reading of this name it is, oldest first, so a reader
+                # can tell a re-measure from the one that was decided on
+                # without having to compare ids.
+                "occurrence": occurrence_index.get(str(measurement_id), 0),
+                "occurrences_of_name": sum(
+                    1
+                    for mid, _ in occurrence_index.items()
+                    if str((measurement_by_id.get(mid) or {}).get("name") or "")
+                    .strip()
+                    .lower()
+                    == name
+                ),
+            }
+        )
+        if value is None:
+            continue
+        if name in _THROUGHPUT_AFTER_NAMES and measured_after is None:
+            measured_after = value
+        elif name in _THROUGHPUT_BEFORE_NAMES and measured_before is None:
+            measured_before = value
+        elif name in _GAIN_NAMES and measured_gain is None:
+            measured_gain = value
+
+    # Values frozen on the adoption outrank the referenced measurements, which
+    # archives recorded before per-occurrence ids may have since overwritten.
+    frozen_before = _to_float(adoption.get("throughput_before"))
+    frozen_after = _to_float(adoption.get("throughput_after"))
+    throughput_before = frozen_before if frozen_before is not None else measured_before
+    throughput_after = frozen_after if frozen_after is not None else measured_after
+    if measurement_source == "adoption_pinned" and _disagrees(
+        (frozen_before, measured_before),
+        (frozen_after, measured_after),
+    ):
+        # The adoption pinned these readings, yet they no longer say what it
+        # was decided on: they were written over before ids carried an
+        # occurrence. The frozen values still stand; the citation does not.
+        measurement_source = "adoption_pinned_stale"
+
+    artifact_ids = list(operation.get("artifact_refs") or [])
+    artifact_ids += [
+        aid for aid in adoption.get("artifact_ids") or [] if aid not in artifact_ids
+    ]
+    artifacts: list[dict[str, str]] = []
+    for artifact_id in artifact_ids:
+        artifact = artifact_by_id.get(str(artifact_id))
+        if not artifact:
+            continue
+        path = str(artifact.get("path") or artifact.get("uri") or "")
+        if not path:
+            continue
+        artifacts.append({"kind": str(artifact.get("kind") or ""), "path": path})
+
+    decision = str(
+        adoption.get("decision")
+        or decision_row.get("verdict")
+        or outputs.get("decision")
+        or outputs.get("status")
+        or operation.get("status")
+        or ""
+    ).strip().upper()
+    adopted = (
+        bool(adoption)
+        and adoption.get("validated") is True
+        and str(adoption.get("decision") or "").upper() in _KEEP_DECISIONS
+    )
+    evidence = decision_row.get("evidence") if isinstance(decision_row.get("evidence"), dict) else {}
+    # Deliberately never named ``gain_pct``: this is what the executor measured
+    # against its own starting point, which is not the session baseline once
+    # anything has been adopted. Summing these across attempts is wrong, and a
+    # shared field name is all it takes for someone to try.
+    local_gain_pct = _to_float(adoption.get("gain_pct"))
+    if local_gain_pct is None:
+        local_gain_pct = _to_float(evidence.get("gain_pct"))
+    if local_gain_pct is None:
+        local_gain_pct = _to_float(outputs.get("delta_pct"))
+    if local_gain_pct is None:
+        local_gain_pct = measured_gain
+
+    return {
+        "attempt_id": operation_id,
+        "agent": _attempt_agent(operation, adoption),
+        "agent_method": (
+            "recorded"
+            if str(operation.get("agent") or adoption.get("agent") or "").strip()
+            else "derived"
+        ),
+        "producer": str(operation.get("producer") or ""),
+        "kind": _work_kind(operation),
+        "name": str(operation.get("name") or subject.get("name") or ""),
+        "subject": {
+            "type": str(subject.get("subject_type") or ""),
+            "name": str(subject.get("name") or ""),
+        },
+        "kernel_id": (
+            str(subject.get("name") or "")
+            if "kernel" in str(subject.get("subject_type") or "").lower()
+            else None
+        ),
+        "backend": str(operation.get("strategy") or ""),
+        "phase": str(operation.get("phase") or ""),
+        "macro_cycle": operation.get("macro_cycle"),
+        "started_at": str(operation.get("started_at") or ""),
+        "ended_at": str(operation.get("ended_at") or ""),
+        "duration_sec": _duration_between(
+            operation.get("started_at"),
+            operation.get("ended_at"),
+        ),
+        "status": str(operation.get("status") or ""),
+        "decision": decision,
+        "decision_reason": str(
+            adoption.get("reason")
+            or decision_row.get("reason")
+            or outputs.get("reason")
+            or ""
+        ),
+        "keep_threshold_pct": _threshold_from_operation(operation),
+        "adopted": adopted,
+        "attribution_eligible": (
+            bool(adoption.get("attribution_eligible", True)) if adoption else None
+        ),
+        "local_gain_pct": round(local_gain_pct, 6) if local_gain_pct is not None else None,
+        "throughput_before": throughput_before,
+        "throughput_after": throughput_after,
+        "adoption_id": str(adoption.get("adoption_id") or "") or None,
+        "gates": _gate_rows(operation),
+        "backend_attempts": _sub_attempt_rows(operation),
+        "measurements": measurements,
+        # Which reading of a repeatedly measured subject these numbers came
+        # from, and how many readings the operation has in total. Without this
+        # a re-measured kernel looks the same as one measured once.
+        "measurement_source": measurement_source,
+        "measurement_occurrences": sum(
+            1 for mid in recorded_ids if mid in measurement_by_id
+        ),
+        "artifacts": artifacts,
+    }
+
+
+def _disagrees(*pairs: tuple[float | None, float | None]) -> bool:
+    """Report whether a frozen value and its cited measurement have parted ways.
+
+    Compared in relative terms so a re-serialized float never counts, while a
+    genuine re-measurement always does.
+    """
+    for frozen, measured in pairs:
+        if frozen is None or measured is None or not frozen:
+            continue
+        if abs(measured - frozen) / abs(frozen) > 1e-6:
+            return True
+    return False
+
+
+def _occurrence_index(
+    measurement_ids: list[str],
+    measurement_by_id: dict[str, dict[str, Any]],
+) -> dict[str, int]:
+    """Number an operation's readings of each metric, oldest first.
+
+    Recorded ids have to be derived from what is being recorded rather than
+    from a counter, since several producers replay their records after a
+    resume. That makes them stable but unreadable, so the plain ordinal a
+    reader wants is assigned here, where the whole set is in hand at once.
+    """
+    ordered: dict[str, list[tuple[float, str]]] = {}
+    for measurement_id in measurement_ids:
+        measurement = measurement_by_id.get(str(measurement_id))
+        if not measurement:
+            continue
+        name = str(measurement.get("name") or "").strip().lower()
+        taken_at = _parse_ts(measurement.get("measured_at"))
+        ordered.setdefault(name, []).append(
+            (taken_at if taken_at is not None else float("inf"), str(measurement_id))
+        )
+    index: dict[str, int] = {}
+    for rows in ordered.values():
+        # Ties fall back to the id so the numbering is at least deterministic
+        # for readings whose timestamps are identical or missing.
+        for position, (_, measurement_id) in enumerate(sorted(rows)):
+            index[measurement_id] = position
+    return index
+
+
+def _latest_measurement_per_name(
+    measurement_ids: list[str],
+    measurement_by_id: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Keep one measurement per name: the most recent time it was taken.
+
+    An operation accumulates a reference for every occurrence of every metric
+    it measured, because retrying a subject no longer overwrites the earlier
+    numbers. With no adoption naming which occurrence a decision used, the
+    newest one is the operation's current state.
+    """
+    newest: dict[str, tuple[float, str]] = {}
+    for measurement_id in measurement_ids:
+        measurement = measurement_by_id.get(str(measurement_id))
+        if not measurement:
+            continue
+        name = str(measurement.get("name") or "").strip().lower()
+        taken_at = _parse_ts(measurement.get("measured_at")) or float("-inf")
+        current = newest.get(name)
+        if current is None or taken_at >= current[0]:
+            newest[name] = (taken_at, str(measurement_id))
+    chosen = {measurement_id for _, measurement_id in newest.values()}
+    return [
+        measurement_id for measurement_id in measurement_ids if measurement_id in chosen
+    ]
+
+
+def _recorded_baseline_throughput(
+    operations: list[dict[str, Any]],
+    measurement_by_id: dict[str, dict[str, Any]],
+) -> float | None:
+    """Return the session baseline throughput the recorder measured.
+
+    The baseline is where the session started, so when it has been measured
+    more than once the earliest reading is the one every gain in the report is
+    stated against. Taking the newest would quietly move the denominator under
+    figures that were already published.
+    """
+    earliest: tuple[float, float] | None = None
+    for operation in operations:
+        if not isinstance(operation, dict) or _work_kind(operation) != "baseline":
+            continue
+        for measurement_id in operation.get("measurement_refs") or []:
+            measurement = measurement_by_id.get(str(measurement_id))
+            if not measurement:
+                continue
+            if str(measurement.get("name") or "").strip().lower() != "throughput":
+                continue
+            value = _to_float(measurement.get("value"))
+            if not value:
+                continue
+            taken_at = _parse_ts(measurement.get("measured_at")) or float("inf")
+            if earliest is None or taken_at < earliest[0]:
+                earliest = (taken_at, value)
+    return earliest[1] if earliest else None
+
+
+def _summarize_by_agent(
+    attempts: list[dict[str, Any]],
+    gain_by_attempt: dict[str, float],
+) -> dict[str, Any]:
+    """Aggregate attempts into the per-agent view (first layer of the report).
+
+    ``gain_by_attempt`` holds each adopted attempt's baseline-relative
+    contribution, so per-agent totals add up to
+    ``validation.attributed_total_gain_pct``. They fall short of the session's
+    end-to-end gain by whatever no attempt accounts for, which is reported
+    separately as ``validation.unattributed_gain_pct``.
+    """
+    summary: dict[str, Any] = {}
+    for attempt in attempts:
+        agent = str(attempt.get("agent") or "unattributed")
+        bucket = summary.setdefault(
+            agent,
+            {
+                "attempts": 0,
+                "keeps": 0,
+                "reverts": 0,
+                "attributable_gain_pct": 0.0,
+                "non_attributable_keeps": 0,
+                "by_kind": {},
+            },
+        )
+        bucket["attempts"] += 1
+        kind_bucket = bucket["by_kind"].setdefault(
+            str(attempt.get("kind") or "unknown"),
+            {"attempts": 0, "keeps": 0, "attributable_gain_pct": 0.0},
+        )
+        kind_bucket["attempts"] += 1
+        decision = str(attempt.get("decision") or "").upper()
+        if attempt.get("adopted"):
+            bucket["keeps"] += 1
+            kind_bucket["keeps"] += 1
+            if attempt.get("attribution_eligible") is False:
+                bucket["non_attributable_keeps"] += 1
+            else:
+                gain = gain_by_attempt.get(str(attempt.get("attempt_id") or ""), 0.0)
+                bucket["attributable_gain_pct"] += gain
+                kind_bucket["attributable_gain_pct"] += gain
+        elif decision in _REVERT_DECISIONS:
+            bucket["reverts"] += 1
+    for bucket in summary.values():
+        bucket["attributable_gain_pct"] = round(float(bucket["attributable_gain_pct"]), 6)
+        for kind_bucket in bucket["by_kind"].values():
+            kind_bucket["attributable_gain_pct"] = round(
+                float(kind_bucket["attributable_gain_pct"]),
+                6,
+            )
+    return summary
 
 
 def _duration_between(started_at: Any, ended_at: Any) -> float | None:
@@ -1133,4 +1625,249 @@ def collect_v4_optimizations(
             "runs": _collect_v4_gemm_tuning_runs(operations, adoptions),
         },
     )
+
+
+def collect_recorded_optimizations(
+    session_id: str,
+    operations: list[dict[str, Any]],
+    measurements: list[dict[str, Any]],
+    adoptions: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+    geak_invocations: list[dict[str, Any]],
+    forge_invocations: list[dict[str, Any]],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Build the optimization read model straight from author-time records.
+
+    Every field here traces to something a producer recorded when it happened,
+    so ownership, verdicts, and the thresholds behind them survive export
+    instead of being re-inferred from business state after the fact.
+    """
+
+    measurement_by_id = {
+        str(row.get("measurement_id") or ""): row
+        for row in measurements
+        if isinstance(row, dict) and row.get("measurement_id")
+    }
+    artifact_by_id = {
+        str(row.get("artifact_id") or ""): row
+        for row in artifacts
+        if isinstance(row, dict) and row.get("artifact_id")
+    }
+    adoption_by_operation: dict[str, dict[str, Any]] = {}
+    for row in adoptions:
+        if not isinstance(row, dict):
+            continue
+        operation_id = str(row.get("operation_id") or "")
+        if not operation_id:
+            continue
+        current = adoption_by_operation.get(operation_id)
+        # An operation can transition (adopted then revoked); the last word wins.
+        if current is None or str(row.get("adopted_at") or row.get("revoked_at") or "") >= str(
+            current.get("adopted_at") or current.get("revoked_at") or ""
+        ):
+            adoption_by_operation[operation_id] = row
+
+    attempts: list[dict[str, Any]] = []
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        if _work_kind(operation) not in _ATTEMPT_KINDS:
+            continue
+        attempts.append(
+            _recorded_attempt_row(
+                operation,
+                adoption=adoption_by_operation.get(
+                    str(operation.get("operation_id") or ""),
+                    {},
+                ),
+                measurement_by_id=measurement_by_id,
+                artifact_by_id=artifact_by_id,
+            )
+        )
+    attempts.sort(
+        key=lambda row: (
+            _parse_ts(row.get("ended_at") or row.get("started_at")) or float("inf"),
+            str(row.get("attempt_id") or ""),
+        )
+    )
+
+    orphan_adoptions = [
+        str(row.get("adoption_id") or "")
+        for row in adoptions
+        if isinstance(row, dict)
+        and str(row.get("operation_id") or "") not in adoption_by_operation
+    ]
+    if orphan_adoptions:
+        warnings.append(
+            "optimizations: adoptions reference operations that were never "
+            f"recorded: {sorted(set(orphan_adoptions))[:5]}"
+        )
+
+    # Reported gain is measured against the session baseline, so each adopted
+    # step contributes the percentage points it added to the cumulative figure.
+    # An executor's own local gain is relative to whatever it started from,
+    # which is not the baseline once anything has already been adopted.
+    #
+    # ``entries`` is the gain ledger over ``attempts``: one row per adopted and
+    # attributable attempt, carrying only what the chain arithmetic needs.
+    # Everything descriptive stays on the attempt and is reachable through
+    # ``adopted_attempt_id``.
+    baseline_tput = _recorded_baseline_throughput(operations, measurement_by_id)
+    entries: list[dict[str, Any]] = []
+    cumulative = 0.0
+    # Throughput the next adopted step is expected to start from: the baseline
+    # for the first one, then wherever the previous one left off. A step that
+    # starts somewhere else means something moved the workload without being
+    # adopted, and that movement belongs to nobody. Crediting it to the next
+    # step is how a kernel's reported gain silently absorbs an earlier patch.
+    expected_before = baseline_tput
+    unattributed = 0.0
+    attributed = 0.0
+    for attempt in attempts:
+        if not attempt.get("adopted") or attempt.get("attribution_eligible") is False:
+            continue
+        local_gain = _to_float(attempt.get("local_gain_pct"))
+        throughput_before = _to_float(attempt.get("throughput_before"))
+        throughput_after = _to_float(attempt.get("throughput_after"))
+        if baseline_tput and throughput_after:
+            started_from = throughput_before or expected_before or baseline_tput
+            drift = (
+                (started_from - expected_before) / baseline_tput * 100.0
+                if expected_before
+                else 0.0
+            )
+            # Percentage points of the baseline this step added. Stated this
+            # way the rows sum exactly, with no chaining subtleties to get
+            # wrong, and any drift stays outside the sum.
+            gain = (throughput_after - started_from) / baseline_tput * 100.0
+            gain_method = "baseline_chain"
+            unattributed += drift
+            cumulative += drift + gain
+            expected_before = throughput_after
+        else:
+            gain = local_gain
+            cumulative += local_gain or 0.0
+            gain_method = "recorded_adoption" if local_gain is not None else "missing"
+        # Summed unrounded, so the reported gap equals the drift exactly rather
+        # than trailing it by a rounding step.
+        attributed += gain or 0.0
+        stack_index = len(entries)
+        entries.append(
+            {
+                "id": f"{session_id}:optimization:{stack_index}",
+                "stack_index": stack_index,
+                "adopted_attempt_id": attempt["attempt_id"],
+                "adoption_id": attempt.get("adoption_id"),
+                "source": attempt["agent"],
+                "source_method": attempt["agent_method"],
+                "optimization_kind": attempt["kind"],
+                "name": attempt["name"],
+                "backend": attempt.get("backend") or None,
+                # Gain against the session baseline: the only figure that may
+                # be summed, and the one ``cumulative_gain_pct`` is built from.
+                "gain_pct": round(gain, 6) if gain is not None else None,
+                "gain_method": gain_method,
+                # The executor's own figure, carried so the two are visibly
+                # different numbers rather than one ambiguous field.
+                "local_gain_pct": (
+                    round(local_gain, 6) if local_gain is not None else None
+                ),
+                "cumulative_gain_pct": round(cumulative, 6),
+                "throughput_after": throughput_after,
+                "validated": True,
+                "ts": attempt.get("ended_at") or "",
+            }
+        )
+
+    # Below this the drift is float noise from re-serialized throughputs, well
+    # under any measurement's own repeatability.
+    if abs(unattributed) > 0.01:
+        warnings.append(
+            "optimizations: "
+            f"{unattributed:+.6f}pp of the session's gain sits between adopted "
+            "steps and belongs to no attempt; it is reported as "
+            "validation.unattributed_gain_pct rather than credited to the step "
+            "that follows it"
+        )
+
+    summary_by_agent = _summarize_by_agent(
+        attempts,
+        {
+            str(entry["adopted_attempt_id"]): _to_float(entry.get("gain_pct")) or 0.0
+            for entry in entries
+        },
+    )
+    backend_attempts = _collect_backend_attempts(
+        session_id,
+        geak_invocations,
+        forge_invocations,
+    )
+
+    summary_by_source = _empty_summary()
+    summary_by_kind: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        source = str(entry["source"])
+        bucket = summary_by_source.setdefault(source, {"keeps": 0, "total_gain_pct": 0.0})
+        gain = _to_float(entry.get("gain_pct")) or 0.0
+        bucket["keeps"] += 1
+        bucket["total_gain_pct"] = round(float(bucket["total_gain_pct"]) + gain, 6)
+        if source == "kernel_agent":
+            backend = str(entry.get("backend") or "unattributed")
+            by_backend = bucket.setdefault("by_backend", {})
+            if backend not in by_backend:
+                backend = "unattributed"
+            backend_bucket = by_backend.setdefault(
+                backend,
+                {"keeps": 0, "total_gain_pct": 0.0},
+            )
+            backend_bucket["keeps"] += 1
+            backend_bucket["total_gain_pct"] = round(
+                float(backend_bucket["total_gain_pct"]) + gain,
+                6,
+            )
+        kind_bucket = summary_by_kind.setdefault(
+            str(entry.get("optimization_kind") or "unknown"),
+            _empty_kind_summary(),
+        )
+        kind_bucket["keeps"] += 1
+        kind_bucket["total_gain_pct"] = round(
+            float(kind_bucket["total_gain_pct"]) + gain,
+            6,
+        )
+
+    non_attributable = [
+        attempt
+        for attempt in attempts
+        if attempt.get("adopted") and attempt.get("attribution_eligible") is False
+    ]
+    return {
+        "schema_version": OPTIMIZATIONS_SCHEMA_VERSION,
+        "source_of_truth": "recorder",
+        "attempts": attempts,
+        "entries": entries,
+        "backend_attempts": backend_attempts,
+        "summary_by_agent": summary_by_agent,
+        "summary_by_source": summary_by_source,
+        "summary_by_kind": summary_by_kind,
+        "validation": {
+            "method": "recorded_adoptions",
+            "validated_at_stack_len": len(entries),
+            # What the session moved end to end, and how much of that any
+            # attempt is willing to claim. The difference is the part no
+            # adopted step accounts for, and it is stated rather than absorbed.
+            "validated_total_gain_pct": round(cumulative, 6),
+            "attributed_total_gain_pct": round(attributed, 6),
+            "unattributed_gain_pct": round(unattributed, 6),
+            "attribution_gap_pct": round(cumulative - attributed, 6),
+            "attempt_count": len(attempts),
+            "keep_count": len(entries),
+            "non_attributable_keep_count": len(non_attributable),
+            "notes": [
+                "Projected from author-time recorder streams "
+                "(operations/adoptions/measurements/artifacts)."
+            ],
+        },
+        "gemm_tuning_runs": _collect_v4_gemm_tuning_runs(operations, adoptions),
+    }
 

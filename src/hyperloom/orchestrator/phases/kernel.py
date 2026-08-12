@@ -1378,6 +1378,9 @@ class KernelPhase(PhaseHandler):
                         extra_server_args=str(e2e.get("extra_server_args") or ""),
                         result=e2e,
                         route_strategy="legacy_only",
+                        # Replaying must land on the reading it originally
+                        # recorded, not count itself as a fresh one.
+                        occurrence=e2e.get("occurrence"),
                     )
             except Exception:  # noqa: BLE001
                 log.debug("geak kernel_journey replay failed for %s", kid, exc_info=True)
@@ -1458,6 +1461,12 @@ class KernelPhase(PhaseHandler):
                     ),
                     result=evidence,
                     route_strategy="legacy_only",
+                    # This is a second look at a kernel that was already kept,
+                    # and ``evidence`` still carries the original integrate's
+                    # identity. Without a namespace of its own, the reading
+                    # that rejects the kernel would land on the reading that
+                    # adopted it.
+                    occurrence="revalidation",
                 )
             except Exception:  # noqa: BLE001
                 log.debug(

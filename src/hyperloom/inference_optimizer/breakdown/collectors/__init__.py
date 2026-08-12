@@ -137,6 +137,7 @@ from .attribution import (
 from .optimizations import (
     OPTIMIZATIONS_SCHEMA_VERSION as OPTIMIZATIONS_SCHEMA_VERSION,
     collect_optimizations as collect_optimizations,
+    collect_recorded_optimizations as collect_recorded_optimizations,
     collect_v4_optimizations as collect_v4_optimizations,
 )
 from .decision import (
@@ -208,5 +209,6 @@ __all__ = [
     "collect_workload",
     "collect_model_info",
     "collect_optimizations",
+    "collect_recorded_optimizations",
     "collect_v4_optimizations",
 ]
