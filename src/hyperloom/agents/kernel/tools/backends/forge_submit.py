@@ -3402,6 +3402,45 @@ def _validated_warm_start_result(
     }
 
 
+_REJECTED_OPTION_RE = re.compile(r"No such option:?\s*'?(--[A-Za-z0-9][\w-]*)'?")
+
+# forge-loop options this launcher may drop when the installed KernelForge does
+# not have them. Each is advisory or a compatibility shim, so a campaign without
+# it is still the campaign we asked for; click rejects an unknown option before
+# running anything, so keeping them mandatory costs the whole attempt instead.
+_DROPPABLE_FORGE_LOOP_OPTIONS = frozenset(
+    {
+        # Deprecated upstream and ignored by forge-loop's evaluation.
+        "--shapes-json",
+        # Input to an end-to-end projection, not to the search itself.
+        "--e2e-pct",
+        # forge-loop infers the framework from the kernel path when omitted.
+        "--framework",
+    }
+)
+
+
+def _rejected_forge_loop_option(output: str) -> str:
+    """Return the option an unknown-option rejection names, else empty."""
+
+    match = _REJECTED_OPTION_RE.search(output or "")
+    return match.group(1) if match else ""
+
+
+def _forge_loop_cmd_without(cmd: list[str], option: str) -> list[str] | None:
+    """Drop a droppable ``option`` and its value from a forge-loop argv.
+
+    Returns ``None`` when the option is load-bearing or absent, so the caller
+    reports the original failure rather than retrying on a guess.
+    """
+
+    if option not in _DROPPABLE_FORGE_LOOP_OPTIONS or option not in cmd:
+        return None
+    index = cmd.index(option)
+    # Every droppable option takes exactly one value.
+    return cmd[:index] + cmd[index + 2 :]
+
+
 def _run_loop_via_cli(
     *,
     worktree_kernel: str,
@@ -3550,34 +3589,54 @@ def _run_loop_via_cli(
     loop_exc = None
     out = ""
     timed_out = False
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-            cwd=workspace,
-            start_new_session=True,
-        )
+    # An installed forge-loop that predates an advisory option rejects it before
+    # running anything, which used to lose the whole attempt. Retry without it --
+    # once per droppable option, so a skew can never loop.
+    for _launch in range(1 + len(_DROPPABLE_FORGE_LOOP_OPTIONS)):
+        loop_exc = None
+        launch_out = ""
         try:
-            remaining = max(1.0, deadline_unix - time.time())
-            stdout, stderr = proc.communicate(timeout=remaining)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            stdout, stderr = _terminate_forge_process(proc)
-        out = (stdout or "") + "\n" + (stderr or "")
-        if timed_out:
-            loop_exc = RuntimeError(
-                f"forge-loop exceeded absolute deadline after {timeout_s}s"
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+                cwd=workspace,
+                start_new_session=True,
             )
-        if proc.returncode != 0:
-            if loop_exc is None:
+            try:
+                remaining = max(1.0, deadline_unix - time.time())
+                stdout, stderr = proc.communicate(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                stdout, stderr = _terminate_forge_process(proc)
+            launch_out = (stdout or "") + "\n" + (stderr or "")
+            if timed_out:
                 loop_exc = RuntimeError(
-                    f"forge-loop exited rc={proc.returncode}"
+                    f"forge-loop exceeded absolute deadline after {timeout_s}s"
                 )
-    except Exception as exc:  # noqa: BLE001
-        loop_exc = exc
+            if proc.returncode != 0:
+                if loop_exc is None:
+                    loop_exc = RuntimeError(
+                        f"forge-loop exited rc={proc.returncode}"
+                    )
+        except Exception as exc:  # noqa: BLE001
+            loop_exc = exc
+        out += launch_out
+        if loop_exc is None or timed_out:
+            break
+        rejected = _rejected_forge_loop_option(launch_out)
+        retry_cmd = _forge_loop_cmd_without(cmd, rejected)
+        if retry_cmd is None:
+            break
+        log.warning(
+            "Installed forge-loop rejected %s; retrying without it. Upgrade "
+            "KernelForge to keep this option's contribution.",
+            rejected,
+        )
+        out += f"\n=== retrying forge-loop without {rejected} ===\n"
+        cmd = retry_cmd
 
     try:
         with open(forge_log, "a") as f:

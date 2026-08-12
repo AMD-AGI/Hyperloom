@@ -3485,3 +3485,124 @@ def test_submit_falls_back_to_forge_loop_on_an_incompatible_producer(tmp_path, m
     assert verdict["eligible"] is False
     assert verdict["reason"] == "capability_artifact_schema_unsupported"
     assert result["best_ms"] == 1.0
+
+
+def _forge_loop_result_stdout() -> str:
+    payload = {
+        "baseline_ms": 2.0,
+        "best_ms": 1.0,
+        "mean_case_speedup": 2.0,
+        "search_start_mean_case_speedup": 1.0,
+        "total_improved": True,
+        "incremental_improved": True,
+    }
+    return f"__FORGE_RESULT__{json.dumps(payload)}__FORGE_RESULT__"
+
+
+def _run_loop_with_popen(tmp_path, monkeypatch, fake_popen):
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    kernel = workspace / "kernel.py"
+    driver = workspace / "driver.py"
+    kernel.write_text("pass\n")
+    driver.write_text("pass\n")
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "/forge/src")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
+
+    return forge_submit._run_loop_via_cli(
+        worktree_kernel=str(kernel),
+        driver=str(driver),
+        workspace=str(workspace),
+        shapes={"primary": {"M": 128}},
+        snr_threshold=30.0,
+        max_iters=8,
+        max_hours=1.0,
+        branch="forge/session/kernel",
+        gpu_target="gfx950",
+        gpu_type="mi355x",
+        fellow="triton-fellow",
+        program_md_file="",
+        invocation_spec_file="",
+        experiments_dir=experiments,
+        forge_log=tmp_path / "forge.log",
+        timeout_s=120,
+        deadline_unix=time.time() + 120.0,
+        experience_id="attempt-1",
+    )
+
+
+class _RejectingProcess:
+    """A forge-loop that predates one of the options this launcher passes."""
+
+    pid = 43211
+    returncode = 2
+
+    def __init__(self, option: str) -> None:
+        self._option = option
+
+    def communicate(self, timeout=None):
+        return (
+            "Usage: python -m kernel_agents.cli forge-loop [OPTIONS]\n"
+            "Try 'python -m kernel_agents.cli forge-loop --help' for help.\n"
+            f"\nError: No such option '{self._option}'. "
+            "(Did you mean one of: '--agent-options-json', '--result-json'?)\n",
+            "",
+        )
+
+
+class _SucceedingProcess:
+    pid = 43212
+    returncode = 0
+
+    def communicate(self, timeout=None):
+        return _forge_loop_result_stdout(), ""
+
+
+def test_a_rejected_compat_option_costs_the_option_not_the_attempt(tmp_path, monkeypatch):
+    """Click exits 2 on the first unknown option, before running anything.
+
+    ``--shapes-json`` is deprecated and ignored by forge-loop's evaluation, yet
+    an installed KernelForge without it turned every attempt into a total loss.
+    """
+    commands: list[list[str]] = []
+
+    def fake_popen(command, **kwargs):
+        commands.append(list(command))
+        if len(commands) == 1:
+            return _RejectingProcess("--shapes-json")
+        return _SucceedingProcess()
+
+    outcome = _run_loop_with_popen(tmp_path, monkeypatch, fake_popen)
+
+    assert len(commands) == 2
+    assert "--shapes-json" in commands[0]
+    assert "--shapes-json" not in commands[1]
+    # The dropped value must go with the option, not be left as a stray token.
+    assert json.dumps({"primary": {"M": 128}}) not in commands[1]
+    assert outcome.error is None
+    assert outcome.best_ms == 1.0
+    assert outcome.total_improved is True
+    assert "--shapes-json" in (tmp_path / "forge.log").read_text()
+
+
+def test_a_rejected_load_bearing_option_still_fails_the_attempt(tmp_path, monkeypatch):
+    """Only advisory options may be dropped.
+
+    Retrying without ``--kernel`` would optimize something other than the
+    candidate, so this skew has to stay loud.
+    """
+    commands: list[list[str]] = []
+
+    def fake_popen(command, **kwargs):
+        commands.append(list(command))
+        return _RejectingProcess("--kernel")
+
+    outcome = _run_loop_with_popen(tmp_path, monkeypatch, fake_popen)
+
+    assert len(commands) == 1
+    assert outcome.error is not None
+    assert "rc=2" in str(outcome.error)
