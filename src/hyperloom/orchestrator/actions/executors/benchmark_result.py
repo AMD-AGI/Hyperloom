@@ -30,11 +30,6 @@ from hyperloom.common.jsonio import read_json
 
 log = logging.getLogger(__name__)
 
-# Default rescue path: scripts hardcoding ``--result-dir /workspace/``
-# leak to ``/workspace/inferencex_result.json``. Extend/replace via
-# ``$INFERENCE_OPTIMIZER_RESCUE_PATHS`` (see :func:`_rescue_candidate_paths`).
-_DEFAULT_RESCUE_PATHS: tuple[Path, ...] = (Path("/workspace/inferencex_result.json"),)
-
 
 # Wrapper-side files that leak outside the per-task workspace (under /workspace
 # or env-derived roots like $INFERENCEX_PATH, where append_lm_eval_summary
@@ -84,10 +79,9 @@ def _rescue_candidate_paths(
 ) -> list[Path]:
     """Return absolute paths to known Magpie leak destinations.
 
-    Scripts hardcoding ``--result-dir /workspace/`` land the InferenceX
-    result at ``/workspace/inferencex_result.json`` outside the per-task
-    workspace. Order: ``$INFERENCE_OPTIMIZER_RESCUE_PATHS`` (files verbatim;
-    dirs scanned for ``inferencex_result*.json``) → :data:`_DEFAULT_RESCUE_PATHS`.
+    Scans ``$INFERENCE_OPTIMIZER_RESCUE_PATHS`` (files verbatim; dirs
+    scanned for ``inferencex_result*.json``) and env-derived roots
+    (``$INFERENCEX_PATH``, ``$RESULT_DIR``).
 
     When ``subprocess_started_unix`` is given, candidates older than it
     (minus :data:`_MTIME_GATE_SLACK_SEC`) are dropped as stale prior-run
@@ -165,9 +159,6 @@ def _rescue_candidate_paths(
                     _push(fp)
             except OSError:
                 continue
-
-    for default in _DEFAULT_RESCUE_PATHS:
-        _push(default)
 
     return candidates
 
