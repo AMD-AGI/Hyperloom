@@ -113,3 +113,31 @@ def test_absolute_path_outside_every_scope_is_still_denied(tmp_path, monkeypatch
     with pytest.raises(PolicyDenied) as exc:
         _gate(tmp_path).validate_intent("orchestration", _dispatch_intent("/etc/passwd"))
     assert exc.value.rule == "source_file_outside_trusted_scope"
+
+
+# Placeholder/vendor-label forms TraceLens can leave in source_file instead of
+# an empty string (test_source_resolution_guards.py _SENTINELS covers the
+# producer side; this covers the gate degrading them to an omitted field
+# rather than denying the whole delegate as a bogus path).
+_ABSENT_SENTINELS = (
+    "Not found",
+    "N/A",
+    "none",
+    "unknown",
+    "TBD",
+    "<unresolved>",
+    "AITER (vendor)",
+    "Triton (vendor)",
+)
+
+
+@pytest.mark.parametrize("sentinel", _ABSENT_SENTINELS)
+def test_absent_value_sentinel_is_accepted_not_denied(tmp_path, monkeypatch, sentinel):
+    """A known placeholder degrades the delegate gracefully instead of denying it."""
+    _framework_tree(tmp_path, monkeypatch)
+    _gate(tmp_path).validate_intent("orchestration", _dispatch_intent(sentinel))
+
+
+def test_sentinel_match_is_case_insensitive(tmp_path, monkeypatch):
+    _framework_tree(tmp_path, monkeypatch)
+    _gate(tmp_path).validate_intent("orchestration", _dispatch_intent("NOT FOUND"))

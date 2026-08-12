@@ -464,6 +464,9 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
         stop_reason="",
         pending_escalate_hint="skip_to_kernel",
         explore_search={},
+        # At least one specialist round this cycle, required for skip_to_kernel
+        # to fire at all (see test_exit_normal_explore_skip_to_kernel_*).
+        specialist_rounds=[{"proposals_total": 1, "proposals_kept": 0}],
         optimization_stack=[{"action": "explore"}],
     )
     out = phase_state.compute_next_phase(state, kernel_enabled=False)
@@ -472,6 +475,57 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
     assert next_phase == "SWEEP"
     assert reason == "no_kernel_skipped"
     assert evidence.get("passed_through_reason") == "plateau_explore"
+
+
+def test_exit_normal_explore_skip_to_kernel_requires_a_tested_round():
+    """A skip_to_kernel hint must not end EXPLORE with zero validated work.
+
+    Reproduces the cumulative_gain_validated=0.00% session: the hint arrived
+    before EXPLORE ever dispatched a specialist round this cycle, and must not
+    be honored until one actually has.
+    """
+    state = SimpleNamespace(
+        phase="EXPLORE",
+        phase_started_unix=1_000_000.0,
+        max_minutes=0,
+        phase_budget_pct={},
+        pending_escalate_hint="skip_to_kernel",
+        explore_search={},
+        specialist_rounds=[],
+        macro_cycle=0,
+        optimization_stack=[{"action": "explore"}],
+        _now_unix=lambda: 1_000_000.0,
+    )
+    out = phase_state.exit_normal_explore(
+        state,
+        force_exit_hours_remaining=0.0,
+        force_exit_budget_pct=0.0,
+    )
+    assert out is None
+
+
+def test_exit_normal_explore_skip_to_kernel_fires_once_a_round_ran():
+    state = SimpleNamespace(
+        phase="EXPLORE",
+        phase_started_unix=1_000_000.0,
+        max_minutes=0,
+        phase_budget_pct={},
+        pending_escalate_hint="skip_to_kernel",
+        explore_search={},
+        specialist_rounds=[{"proposals_total": 1, "proposals_kept": 0}],
+        macro_cycle=0,
+        optimization_stack=[{"action": "explore"}],
+        _now_unix=lambda: 1_000_000.0,
+    )
+    out = phase_state.exit_normal_explore(
+        state,
+        force_exit_hours_remaining=0.0,
+        force_exit_budget_pct=0.0,
+    )
+    assert out is not None
+    reason, evidence = out
+    assert reason == "plateau_explore"
+    assert evidence.get("hint") == "skip_to_kernel"
 
 
 def test_compute_next_phase_terminal_overrides_phase():

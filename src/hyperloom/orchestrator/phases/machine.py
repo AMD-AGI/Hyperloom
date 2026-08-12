@@ -264,14 +264,25 @@ class MachinePhase(PhaseHandler):
         # Consume escalate hint after a hint-driven transition.
         if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
             state.consume_pending_escalate_hint()
-        elif getattr(state, "pending_escalate_hint", ""):
-            # A phase change fired for a reason unrelated to the hint while
-            # one was still pending (e.g. set by a different phase's agent
-            # turn and never claimed, or SWEEP closing honestly on its own
-            # conc_sweep result while skip_to_close was suppressed) — clear it
-            # so it isn't inherited by the next phase's own exit checks as if
-            # it earned that leverage.
-            state.consume_pending_escalate_hint()
+        elif getattr(state, "pending_escalate_hint", "") and target != _phase_state.PHASE_EXPLORE:
+            # A phase change fired for a reason unrelated to the hint while one
+            # was still pending (e.g. set by a different phase's agent turn and
+            # never claimed, or SWEEP closing honestly on its own conc_sweep
+            # result while skip_to_close was suppressed). exit_normal_explore is
+            # the hint's only consumer, so a hint riding toward EXPLORE (target
+            # == PHASE_EXPLORE) is still legitimately in flight and must survive
+            # this transition to be checked there — only discard when the
+            # transition is NOT headed to EXPLORE (including EXPLORE itself
+            # force-exiting past the hint via IR-6), since it can then never
+            # reach that check.
+            discarded_hint = state.consume_pending_escalate_hint()
+            log.info(
+                "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",
+                discarded_hint,
+                prior,
+                target,
+                reason,
+            )
         # Terminal transition (target=CLOSE): mirror the stop_reason onto state.
         if (
             target == _phase_state.PHASE_CLOSE
