@@ -1450,7 +1450,7 @@ async def run_grid(
                     break
                 continue
 
-            _warmup_workspaces_before = snapshot_workspaces(warmup_slot)
+            warmup_workspaces_before = snapshot_workspaces(warmup_slot)
             warmup_started_unix = time.time()
             try:
                 warmup_rc, warmup_stdout, warmup_stderr = await asyncio.to_thread(
@@ -1507,13 +1507,13 @@ async def run_grid(
                     break
                 continue
 
-            _warmup_run_ws = select_run_workspace(warmup_slot, known_before=_warmup_workspaces_before)
-            warmup_workspace = _warmup_run_ws if _warmup_run_ws is not None else warmup_slot
+            warmup_run_ws = select_run_workspace(warmup_slot, known_before=warmup_workspaces_before)
+            warmup_workspace = warmup_run_ws if warmup_run_ws is not None else warmup_slot
             warmup_harvested = harvest_leaked_artifacts(
                 warmup_workspace,
                 subprocess_started_unix=warmup_started_unix,
             )
-            if _warmup_run_ws is not None:
+            if warmup_run_ws is not None:
                 _, warmup_measurement = await _settled_measurement(
                     warmup_workspace,
                     subprocess_started_unix=warmup_started_unix,
@@ -1560,7 +1560,7 @@ async def run_grid(
                         extra_server_args=variant.extra_server_args,
                         extra_envs=dict(variant.extra_envs),
                         status="failed",
-                        workspace=str(warmup_workspace) if _warmup_run_ws is not None else None,
+                        workspace=str(warmup_workspace) if warmup_run_ws is not None else None,
                         report_path=(
                             str(warmup_workspace / "benchmark_report.json")
                             if (warmup_workspace / "benchmark_report.json").exists()
@@ -1699,7 +1699,7 @@ async def run_grid(
 
         # Snapshot wall-clock before launch so the salvage path can mtime-gate
         # leak destinations per-variant.
-        _slot_workspaces_before = snapshot_workspaces(slot)
+        slot_workspaces_before = snapshot_workspaces(slot)
         variant_started_unix = time.time()
         try:
             rc, stdout, stderr = await asyncio.to_thread(
@@ -1931,8 +1931,7 @@ async def run_grid(
                 break
             continue
 
-        # Locate the workspace this run produced.
-        workspace = select_run_workspace(slot, known_before=_slot_workspaces_before)
+        workspace = select_run_workspace(slot, known_before=slot_workspaces_before)
         # Always-on artifact harvest so each slot keeps its server.log /
         # gpu_metrics / profile relay for Robustness RCA.
         harvest_destination = workspace if workspace is not None else slot

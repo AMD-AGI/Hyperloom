@@ -1644,9 +1644,7 @@ async def test_baseline_executor_keeps_valid_measurement_with_wrapper_failure(tm
     output_dir = tmp_path / "out"
     output_dir.mkdir(parents=True)
 
-    # Simulate Magpie writing the workspace during the subprocess call and then
-    # the cleanup step exiting non-zero.  The workspace must be created inside
-    # the fake to be counted as produced by this run.
+    # The workspace must be created inside the fake to count as this run's output.
     report_body = json.dumps(
         {
             "success": False,
@@ -1718,8 +1716,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     output_dir = tmp_path / "out"
     output_dir.mkdir(parents=True)
 
-    # Create the workspace inside the fake subprocess so it is counted as
-    # produced by this run (not a stale pre-existing directory).
+    # The workspace must be created inside the fake to count as this run's output.
     ws_name = "benchmark_sglang_20260501_001122"
 
     def _fake_run(cmd, *args, **kwargs):
