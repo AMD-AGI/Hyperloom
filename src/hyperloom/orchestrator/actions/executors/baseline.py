@@ -52,13 +52,15 @@ from ._subprocess_kill import (
     run_with_session_kill,
     server_log_death_excerpt,
 )
-from ._workload_envs import (
+from ._accuracy_gate import (
     _RUN_EVAL_FALSE_VALUES,
+    materialized_run_eval_disabled,
+)
+from ._workload_envs import (
     _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
-    materialized_run_eval_disabled,
     prepare_agentx_runtime,
 )
 from ._inferencex_patcher import (

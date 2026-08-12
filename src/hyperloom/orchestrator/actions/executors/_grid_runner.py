@@ -33,6 +33,7 @@ from hyperloom.common.env_safety import (
 )
 
 from ...roles.robustness_pulse import pulse as _robustness_pulse
+from ._accuracy_gate import materialized_run_eval_disabled
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_RETURNCODE,
     DETOKENIZER_STALL_RETURNCODE,
@@ -993,9 +994,6 @@ def _run_magpie(
         # through that hook: re-assert here so a resumed session or a re-cloned
         # checkout still emits the eval-start marker. Idempotent.
         ensure_benchmark_lib_eval_start_patched(Path(inferencex_path))
-
-    # Imported here, not at module scope: ``_workload_envs`` imports this module.
-    from ._workload_envs import materialized_run_eval_disabled
 
     # The generation bounds + pathology probe are asserted whether or not
     # ``$INFERENCEX_PATH`` is set: unset falls back to the same env discovery the

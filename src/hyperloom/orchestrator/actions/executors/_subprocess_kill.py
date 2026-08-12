@@ -968,7 +968,9 @@ def _communicate_with_soft_deadline(
 
 
 __all__ = [
+    "AGENTX_PREFLIGHT_RETURNCODE",
     "DETOKENIZER_STALL_RETURNCODE",
+    "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
     "OVERTIME_KILL_RETURNCODE",
     "SERVER_DEAD_RETURNCODE",
     "kill_my_spawned_server",
