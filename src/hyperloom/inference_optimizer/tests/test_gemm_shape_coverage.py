@@ -13,6 +13,7 @@ from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
     aiter_padded_m_fine,
     align_shapes_to_aiter_keys,
     load_shapes_json,
+    parse_aiter_consulted_tables,
     parse_aiter_shape_lookups,
     tuned_config_coverage,
     tuned_csv_shapes,
@@ -133,6 +134,20 @@ class TestServerLogParsing:
 
     def test_empty_log(self):
         assert parse_aiter_shape_lookups("") == (set(), set())
+
+    def test_reports_which_table_the_runtime_consulted(self):
+        """Observed on SGLang: the server resolves the bpreshuffle variant."""
+        line = (
+            "[aiter] shape is M:64, N:7168, K:5120, not found tuned config in "
+            "/tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv, "
+            "will use default config!"
+        )
+        assert parse_aiter_consulted_tables(line) == {
+            "/tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
+        }
+
+    def test_consulted_tables_of_empty_log(self):
+        assert parse_aiter_consulted_tables("") == set()
 
 
 class TestTunedCsvCoverage:
