@@ -2543,20 +2543,23 @@ def test_main_reports_structured_failure_on_bad_input(tmp_path, capsys):
 # --- Bandwidth carried back into the session -----------------------------------
 
 
-def test_bandwidth_is_read_from_the_attempt_directory(tmp_path):
-    """forge-loop consumes the driver's stdout, so the file is the only channel."""
-    payload = {"allreduce_bf16_1024x6144": {"bytes": 12582912, "busbw_gbps": 373.6}}
-    (tmp_path / "collective_bandwidth.json").write_text(
-        json.dumps(payload), encoding="utf-8"
+def test_bandwidth_travels_on_the_forge_result(tmp_path):
+    """forge-loop consumes the driver's stdout, so the loop result is the channel."""
+    payload = {"allreduce_bf16_1024x6144": {"bytes": 12582912.0, "busbw_gbps": 375.5}}
+    result = fc._normalize_result(
+        str(tmp_path),
+        0,
+        {},
+        result_payload={"improved": True, "case_bandwidth": payload},
     )
 
-    assert fc._final_case_bandwidth(str(tmp_path)) == payload
+    assert result["bandwidth"] == payload
 
 
-@pytest.mark.parametrize("content", (None, "{not json", '"a string"'))
-def test_missing_or_unusable_bandwidth_is_not_an_error(tmp_path, content):
-    """A campaign still reports its verdict when the measurement is absent."""
-    if content is not None:
-        (tmp_path / "collective_bandwidth.json").write_text(content, encoding="utf-8")
+def test_a_loop_result_without_bandwidth_reports_none(tmp_path):
+    """An older forge-loop still produces a verdict, just no bandwidth."""
+    result = fc._normalize_result(
+        str(tmp_path), 0, {}, result_payload={"improved": True}
+    )
 
-    assert fc._final_case_bandwidth(str(tmp_path)) == {}
+    assert "bandwidth" not in result
