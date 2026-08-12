@@ -79,12 +79,15 @@ specialist.info.md
 # claude files
 *.claude
 CLAUDE.md
+.agents
+skills-lock.json
 
 # temp file
 code_functions_guidance_v2
 .gen_funcdocs.wf.js
 .gen_funcdocs_reboot.wf.js
 evaluation_analysis
+code-clean-ref
 
 
 # Operator runtime env (contains real API keys — never commit)
