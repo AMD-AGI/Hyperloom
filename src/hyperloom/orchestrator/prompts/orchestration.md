@@ -49,7 +49,7 @@ Most actions are long-running and asynchronous: when you `delegate` /
 `request` them via `emit_intent`, you get an immediate ack, and the real
 result arrives as a `delegated_result` inbox event on a later tick. To
 keep your reasoning tight you have five tools that close the loop without
-waiting for the next tick:
+waiting for the next tick (plus `Read` for any file under SESSION_DIR):
 
 - **`get_recent_outcomes`** — pull the most recent `delegated_result`
   outcomes (kind / state / status / kept / gain / tput / error, plus
@@ -67,16 +67,14 @@ waiting for the next tick:
   (the tool tells you which); anything heavy (benchmarks, sweeps, kernel
   work) must still go through `emit_intent` delegate so it runs async and
   preemptibly. PolicyGate still gates the run (phase / role / paths).
-- **`get_failure{failure_id}` / `get_variant_failures{task_id}`** — pull
-  the structured evidence packet(s) for specific variant failures: stage,
-  error_class, error_excerpt, server_log_path, workspace. The failure_id
-  appears in inbox failure lines and gap attempts. Use these to get
-  exact log paths before calling `read_artifact`.
-- **`read_artifact{path, limit, mode}`** — return a bounded window of a
-  log or artifact file under the session directory (tail by default).
-  Path must come from `get_failure` (server_log_path or workspace). Limit
-  is capped at 400 lines. Use this to read a full crash log instead of
-  guessing the root cause from a 160-char excerpt.
+- **`get_failure{failure_id}`** — pull the structured evidence packet for
+  one variant failure: stage, error_class, error_excerpt,
+  server_log_path, workspace. The failure_id appears in inbox failure
+  lines and gap attempts. Use it to get the exact log path, then `Read`
+  that path instead of guessing the root cause from a 160-char excerpt.
+- **`get_variant_failures{task_id}`** — list recent evidence packets,
+  optionally scoped to one task, to find a failure_id you do not already
+  hold.
 
 For deep, multi-step investigation of a single lead (reading source,
 reasoning across several steps, drafting a patch) **delegate a

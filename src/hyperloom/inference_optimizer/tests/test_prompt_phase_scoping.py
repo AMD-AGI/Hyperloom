@@ -515,7 +515,8 @@ def test_reloop_line_reaches_every_mid_chain_phase():
     for phase in (_ps.PHASE_FRAMEWORK_AGENT, _ps.PHASE_EXPLORE, _ps.PHASE_KERNEL_AGENT, _ps.PHASE_SWEEP):
         line = _reloop_line(phase)
         assert line is not None, f"reloop line missing for {phase}"
-        assert "feasible=" in line
+        # The field name is the prompt/doc contract; models grep for it verbatim.
+        assert "cycle_reloop_feasible=" in line
         assert "threshold_sec=" in line
         assert "session_remaining_sec=" in line
 
@@ -533,7 +534,8 @@ def test_reloop_is_a_projection_before_sweep():
 def test_reloop_feasibility_matches_the_transition_decision():
     s = _render_state(_ps.PHASE_SWEEP)
     reloop, _ = _ps.should_reloop_to_explore(s)
-    assert f"feasible={reloop}" in (_reloop_line(_ps.PHASE_SWEEP) or "")
+    expected = "true" if reloop else "false"
+    assert f"cycle_reloop_feasible={expected}" in (_reloop_line(_ps.PHASE_SWEEP) or "")
 
 
 def test_reloop_infeasible_when_both_target_phases_are_disabled():
@@ -541,4 +543,4 @@ def test_reloop_infeasible_when_both_target_phases_are_disabled():
     s.explore_enabled = False
     s.framework_agent_phase_enabled = False
     line = next(line for line in s.to_phase_status_summary().splitlines() if line.startswith("reloop"))
-    assert "feasible=False" in line
+    assert "cycle_reloop_feasible=false" in line

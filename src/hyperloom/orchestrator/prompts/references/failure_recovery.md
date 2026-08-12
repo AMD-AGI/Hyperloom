@@ -22,18 +22,19 @@ Consult these SharedState surfaces in order before re-proposing:
    only covers the six explore/validate kinds).
    Each entry now carries `failure_id` when the failure has a structured
    evidence packet; use `get_failure(failure_id)` to retrieve the full
-   packet and `read_artifact(server_log_path)` to read the raw crash log.
+   packet and `Read` to open the raw crash log.
 3. **Structured failure evidence** — explore variant crashes write a
    full evidence packet to `failures[]` (accessible via
-   `get_variant_failures` / `get_failure`).  The packet carries:
-   `failure_id`, `stage` (warmup or decision), `error_class`,
+   `get_variant_failures` / `get_failure`), mirrored to
+   `<session_dir>/reports/failures/<failure_id>.json` so a packet
+   evicted from `failures[]` is still readable with `Read`.  The packet
+   carries: `failure_id`, `stage` (warmup or decision), `error_class`,
    `error_excerpt` (tail of the error blob), `server_log_path`,
    `workspace`, and the variant knobs that produced the failure.
    Inbox failure lines and gap attempt rows carry the `failure_id` for
    quick cross-reference.  Full investigation path:
-   `failure_id` → `get_failure` → `server_log_path` or `workspace`
-   → `read_artifact(path, limit=200)`.
-5. **`baseline_failure_streak`** (PRELUDE only — consecutive failed baselines).
+   `failure_id` → `get_failure` → `Read(server_log_path)`.
+4. **`baseline_failure_streak`** (PRELUDE only — consecutive failed baselines).
    Once this hits 3, Coordinator sets `stop_reason='baseline_failed'`
    and the run terminates; recover BEFORE the third failure.
 

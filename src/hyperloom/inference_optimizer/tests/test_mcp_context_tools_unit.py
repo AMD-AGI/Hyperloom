@@ -213,7 +213,7 @@ def test_build_server_with_fake_factories():
     assert len(created["tools"]) == len(mct.CONTEXT_TOOL_SPECS)
 
 
-# ---- new tools: get_failure / get_variant_failures / read_artifact ----
+# ---- new tools: get_failure / get_variant_failures ----
 
 
 def test_spec_methods_all_exist_on_provider():
@@ -224,10 +224,11 @@ def test_spec_methods_all_exist_on_provider():
         )
 
 
-def test_get_failure_not_found():
+def test_get_failure_not_found_points_at_the_disk_mirror():
+    """An evicted packet is still reachable, so the miss must say where."""
     p = mct.ContextProvider(shared_state=_shared_state())
     out = p.get_failure("fail.t1.abc")
-    assert "no entry" in out
+    assert "reports/failures/fail.t1.abc.json" in out
 
 
 def test_get_failure_returns_json():
@@ -270,35 +271,8 @@ def test_get_variant_failures_returns_entries():
     assert ids == {"fail.t1.a", "fail.t1.b"}
 
 
-def test_read_artifact_not_wired():
-    p = mct.ContextProvider(shared_state=_shared_state())
-    assert "not wired" in p.read_artifact("/some/path")
-
-
-def test_read_artifact_wired():
-    p = mct.ContextProvider(
-        shared_state=_shared_state(),
-        artifact_reader=lambda path, offset, limit, mode: f"content:{path}:{mode}",
-    )
-    out = p.read_artifact("/some/path", limit=50, mode="head")
-    assert "/some/path" in out
-    assert "head" in out
-
-
 async def test_make_handler_forwards_failure_id():
     p = mct.ContextProvider(shared_state=_shared_state())
     handler = mct._make_handler(p, "get_failure")
     out = await handler({"failure_id": "fail.t1.abc"})
-    assert "no entry" in out["content"][0]["text"]
-
-
-async def test_make_handler_forwards_artifact_kwargs():
-    p = mct.ContextProvider(
-        shared_state=_shared_state(),
-        artifact_reader=lambda path, offset, limit, mode: f"p={path} o={offset} l={limit} m={mode}",
-    )
-    handler = mct._make_handler(p, "read_artifact")
-    out = await handler({"path": "/a/b", "offset": 5, "limit": 10, "mode": "head"})
-    text = out["content"][0]["text"]
-    assert "/a/b" in text
-    assert "head" in text
+    assert "fail.t1.abc" in out["content"][0]["text"]

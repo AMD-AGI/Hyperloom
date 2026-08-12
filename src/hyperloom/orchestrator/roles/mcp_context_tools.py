@@ -52,8 +52,6 @@ class ContextProvider:
     action_runner: Callable[[str, dict[str, Any]], str] | None = None
     # On-demand reference documents directory; ``None`` => unavailable.
     reference_reader: Callable[[str], str] | None = None
-    # Sandboxed log/artifact file reader; ``None`` => unavailable.
-    artifact_reader: Callable[[str, int, int, str], str] | None = None
 
     def _safe(self, fn: Callable[[], str], label: str) -> str:
         """Invoke a projection callable, never letting it crash the reactor.
@@ -230,7 +228,12 @@ class ContextProvider:
         def _read() -> str:
             fe = self.shared_state.find_failure(fid)
             if fe is None:
-                return f"(get_failure: no entry for {fid!r})"
+                # Evicted from the in-memory cap, or never existed; the mirror
+                # under reports/failures/ answers both cases.
+                return (
+                    f"(get_failure: {fid!r} not in memory; "
+                    f"Read $SESSION_DIR/reports/failures/{fid}.json)"
+                )
             return json.dumps(fe, default=str, indent=2)
 
         return self._safe(_read, "get_failure")
@@ -257,22 +260,6 @@ class ContextProvider:
             return "\n".join(json.dumps(e, default=str) for e in entries[:k])
 
         return self._safe(_read, "get_variant_failures")
-
-    def read_artifact(self, path: str = "", offset: int = 0, limit: int = 200, mode: str = "tail") -> str:
-        """Return a bounded window of a log or artifact file under the session dir.
-
-        Args:
-            path: Absolute path to the file.
-            offset: Starting line index for ``head`` mode.
-            limit: Maximum number of lines to return.
-            mode: ``tail`` (default) or ``head``.
-
-        Returns:
-            The text window, or a not-wired / error marker.
-        """
-        if self.artifact_reader is None:
-            return "(read_artifact not wired)"
-        return self._safe(lambda: self.artifact_reader(path, offset, limit, mode), "read_artifact")
 
 
 # Tool descriptors: (tool_name, description, input_schema, provider-method).
@@ -320,19 +307,6 @@ _VARIANT_FAILURES_SCHEMA: dict[str, Any] = {
     },
     "additionalProperties": False,
 }
-_ARTIFACT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "path": {"type": "string"},
-        "offset": {"type": "integer", "minimum": 0},
-        "limit": {"type": "integer", "minimum": 1, "maximum": 400},
-        "mode": {"type": "string", "enum": ["tail", "head"]},
-    },
-    "required": ["path"],
-    "additionalProperties": False,
-}
-
-
 CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
     (
         "get_mission_status",
@@ -451,8 +425,10 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "Return the full structured failure evidence packet for a single "
         "failure_id (from a delegated_result failure line or gap attempt). "
         "Carries variant args, stage, error_class, error_excerpt, "
-        "server_log_path, and workspace so you can then use read_artifact "
-        "to pull the actual log.",
+        "server_log_path, and workspace so you can then `Read` the actual "
+        "log file.  Only the most recent packets stay in memory; an older "
+        "failure_id is still readable with "
+        "`Read($SESSION_DIR/reports/failures/<failure_id>.json)`.",
         _FAILURE_ID_SCHEMA,
         "get_failure",
     ),
@@ -462,19 +438,9 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "optionally filtered to a single task_id.  Each entry is a JSON "
         "object with failure_id, variant_name, stage, error_class, "
         "error_excerpt, server_log_path, and workspace.  Use this to find "
-        "failure_ids you can then inspect with get_failure or read_artifact.",
+        "failure_ids you can then inspect with get_failure.",
         _VARIANT_FAILURES_SCHEMA,
         "get_variant_failures",
-    ),
-    (
-        "read_artifact",
-        "Return a bounded window of a log or artifact file that lives under "
-        "the session directory.  path must be an absolute path obtained from "
-        "get_failure (server_log_path or workspace).  mode=tail (default) "
-        "returns the last limit lines; mode=head returns limit lines "
-        "starting at offset.  limit is capped at 400 lines.",
-        _ARTIFACT_SCHEMA,
-        "read_artifact",
     ),
 )
 
@@ -544,14 +510,6 @@ def _make_handler(
                 kwargs["failure_id"] = str(args["failure_id"])
             if "task_id" in args:
                 kwargs["task_id"] = str(args["task_id"])
-            if "path" in args:
-                kwargs["path"] = str(args["path"])
-            if "offset" in args:
-                kwargs["offset"] = int(args["offset"])
-            if "limit" in args:
-                kwargs["limit"] = int(args["limit"])
-            if "mode" in args:
-                kwargs["mode"] = str(args["mode"])
         try:
             text = method(**kwargs)
         except Exception as exc:  # noqa: BLE001 — never crash a pull
