@@ -1640,6 +1640,48 @@ def test_nogit_scratch_bootstraps_a_committable_scratch_repo(tmp_path):
     assert source.read_text() == "pass\n"
 
 
+def test_nogit_scratch_keeps_regenerated_bytecode_out_of_the_patch(tmp_path):
+    """Caches written while the loop runs must not reach the published diff.
+
+    The scratch copy skips pre-existing caches, but the loop imports what it
+    edits and writes new ones. Committed, they reach the patch as binary hunks
+    with no full index line, which ``git apply`` refuses — so a solution
+    published to the KB could not be replayed.
+    """
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = source_root / "kernel.py"
+    source.write_text("pass\n")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    prepared = forge_submit._prepare_worktree_nogit(
+        str(source),
+        str(source_root),
+        output_dir,
+        "forge/session/kernel-attempt",
+    )
+
+    assert prepared is not None
+    workspace, kernel, base_commit = prepared
+
+    # Stands in for the import that happens the moment the loop benchmarks its
+    # edit, which is what actually produced the unappliable patch.
+    cache = Path(workspace) / "__pycache__"
+    cache.mkdir()
+    (cache / "kernel.cpython-312.pyc").write_bytes(b"\xcb\x0d\x0d\x0a\x00binary")
+
+    Path(kernel).write_text("OPTIMIZED\n")
+    _git(workspace, "add", "-A")
+    _git(workspace, "commit", "-m", "iter1")
+
+    patch = _git(workspace, "diff", "--binary", base_commit, "HEAD")
+    assert "__pycache__" not in patch
+    assert "kernel.py" in patch
+    # Excluded, not merely unstaged: a later `add -A` cannot pick it up either.
+    assert _git(workspace, "status", "--porcelain") == ""
+
+
 def test_inplace_campaign_state_never_lands_in_the_live_repo(tmp_path, monkeypatch):
     """An in-place campaign must leave the developer's checkout as it found it.
 
