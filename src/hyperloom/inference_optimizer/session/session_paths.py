@@ -186,6 +186,40 @@ def runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
     return runs_root(session_dir) / a / tid
 
 
+def unique_runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
+    """Create and return a unique per-task workspace under ``<sd>/runs/<action>/``.
+
+    Behaves like :func:`runs_dir` but guarantees the returned path does not
+    already exist.  When ``<task_id>/`` is already taken, appends ``-2``,
+    ``-3``, … until a free slot is found.  The directory is created atomically
+    via ``mkdir(exist_ok=False)``; concurrent callers on the same host will
+    each obtain a distinct path.
+
+    Args:
+        session_dir (Path): The session root directory.
+        action (str): The owning action name; validated against the
+            runs-workspace action set.
+        task_id (str): The task identifier; blank/empty falls back to
+            ``"unknown"``.
+
+    Returns:
+        Path: A freshly created, unique workspace directory.
+
+    Raises:
+        ValueError: If ``action`` is not a recognised runs-workspace action.
+    """
+    base = runs_dir(session_dir, action, task_id)
+    candidate = base
+    suffix = 1
+    while True:
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            suffix += 1
+            candidate = base.parent / f"{base.name}-{suffix}"
+
+
 def kernel_agent_runs_root(session_dir: Path) -> Path:
     """``<sd>/kernel-agent/runs/`` — the parent of all per-tool-invocation
     kernel-agent run dirs (keyed by tool-invocation session id beneath it).
