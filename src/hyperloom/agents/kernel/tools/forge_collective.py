@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run KernelForge against a traced multi-GPU all-reduce kernel."""
+"""Run KernelForge against a traced multi-GPU collective kernel."""
 
 from __future__ import annotations
 
@@ -253,7 +253,8 @@ def _build_cmd(
     spec_file = str(args.get("invocation_spec_file") or "").strip()
     if spec_file and Path(spec_file).is_file():
         _add_opt(cmd, str(Path(spec_file).resolve()), "--invocation-spec-file")
-    # Gate integrity depends on task preparation pinning the driver digest.
+    # Gate integrity depends on task preparation pinning the driver digest;
+    # disabling preparation would remove it without any local symptom.
     if "--no-prepare-task" in cmd:
         raise ValueError(
             "collective driver integrity requires forge-loop task preparation"
@@ -510,7 +511,9 @@ def _recover_stale_inplace(repo: str) -> bool:
 
     The journal decides, not the branch name: an interrupted restore leaves HEAD
     back on the original branch, so a surviving journal whose tree diverged means
-    the previous restore never finished and must be replayed.
+    the previous restore never finished and must be replayed. Replaying puts back
+    the operator's pre-campaign content, including uncommitted work, and discards
+    only the agent's edits.
     """
     journal = _restore_journal_path(repo)
     lock = _acquire_repo_lock(repo)
@@ -990,6 +993,8 @@ def _normalize_result(
     result["collective_op"] = rig.get("collective_op", "")
     result["world_size"] = rig.get("world_size", "")
     result["driver"] = rig.get("driver", "")
+    # Empty marks a campaign that authored its driver from the trace alone.
+    result["invocation_spec"] = rig.get("invocation_spec", "")
 
     path = Path(output_dir or ".") / "forge_result.json"
     if result_payload is None and not path.is_file():
@@ -1202,6 +1207,7 @@ def main(argv: list[str] | None = None) -> int:
                 candidate,
                 Path(output_dir),
             )
+            rig["invocation_spec"] = prepared_payload["invocation_spec_file"]
             timeout_sec = _campaign_timeout_sec(
                 prepared_payload,
                 time.monotonic() - started,

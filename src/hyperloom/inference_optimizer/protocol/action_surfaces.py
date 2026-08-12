@@ -58,6 +58,8 @@ KERNEL_REQUEST_KIND_ALIASES: dict[str, str] = {
 
 # Request kinds the Coordinator dispatches itself at KERNEL entry; PolicyGate
 # rejects them from an LLM, which would bypass the lane's gate and accounting.
+# Unlike ``COORDINATOR_INTERNAL_ACTIONS`` these are request kinds, not actions:
+# they have no executor and no prompt entry.
 COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
     {
         "run_fusion",

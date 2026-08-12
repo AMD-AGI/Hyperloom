@@ -355,6 +355,42 @@ class _PatchPlan:
     optional_patches: frozenset[str] = frozenset()
 
 
+#: Annotation-pipeline sentinels as ``(path under the sglang package, markers)``.
+#: A release that does not patch a given file simply drops out of the set.
+_SGLANG_ANNOTATION_SENTINELS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("srt", "managers", "scheduler.py"), ("roofline_annotations",)),
+    (
+        ("srt", "managers", "scheduler_components", "profiler_manager.py"),
+        ("roofline_annotations", "shape_discovery", "kernel_shape_profiler"),
+    ),
+    (("srt", "managers", "io_struct.py"), ("shape_discovery", "roofline_annotations")),
+    (("srt", "model_executor", "step_span_utils.py"), ("roofline_annotations",)),
+)
+
+
+def _patch_target_paths(patches: Sequence[Path]) -> frozenset[str]:
+    """Return the slash-joined paths a patch set writes to."""
+    targets: set[str] = set()
+    for patch in patches:
+        try:
+            text = patch.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if not line.startswith("+++ "):
+                continue
+            target = line[4:].split("\t", 1)[0].strip()
+            if target and target != "/dev/null":
+                targets.add(target.replace("\\", "/"))
+    return frozenset(targets)
+
+
+def _patch_set_writes(targets: frozenset[str], parts: tuple[str, ...]) -> bool:
+    """Return whether any patch target ends with this package-relative path."""
+    suffix = "/".join(("sglang", *parts))
+    return any(target.endswith(suffix) for target in targets)
+
+
 def _resolve_tracelens_root(arg: Path | str | None) -> Path | None:
     """Resolve TRACELENS_ROOT from arg → env → None; fail-soft when unset or
     missing on disk.
@@ -673,32 +709,18 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     # ``sglang/srt/utils/kernel_shape_profiler.py`` in both layouts.
     sentinel = sglang_module.parent / "srt" / "utils" / "kernel_shape_profiler.py"
     sglang_pkg = sglang_module.parent
-    # Also verify the annotation pipeline sentinels so a partial apply (main
-    # sentinel present but annotations missing) is still detected.
-    # Markers must match what the TraceLens patch set actually writes. The
-    # v1.0.1 set split scheduler_profiler_mixin.py into
-    # scheduler_components/profiler_manager.py and ships no http_server.patch,
-    # so the pre-v1.0.1 sentinels could never be satisfied — every apply passed
-    # and was then rolled back by the post-apply check. These four cover the
-    # annotation pipeline end to end: scheduler callback -> profiler_manager
-    # toggle -> io_struct request fields -> step-span aggregates.
-    extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = (
-        (
-            sglang_pkg / "srt" / "managers" / "scheduler.py",
-            ("roofline_annotations",),
-        ),
-        (
-            sglang_pkg / "srt" / "managers" / "scheduler_components" / "profiler_manager.py",
-            ("roofline_annotations", "shape_discovery", "kernel_shape_profiler"),
-        ),
-        (
-            sglang_pkg / "srt" / "managers" / "io_struct.py",
-            ("shape_discovery", "roofline_annotations"),
-        ),
-        (
-            sglang_pkg / "srt" / "model_executor" / "step_span_utils.py",
-            ("roofline_annotations",),
-        ),
+    # Also verify the annotation pipeline so a partial apply (main sentinel
+    # present but annotations missing) is still detected: scheduler callback ->
+    # profiler_manager toggle -> io_struct request fields -> step-span
+    # aggregates. Which of these a patch set writes moved across TraceLens
+    # releases, so applicability is read from the set in hand rather than
+    # pinned: a file the set does write must carry its markers, and one it
+    # never writes is not a sentinel at all.
+    written = _patch_target_paths(filtered_patches)
+    extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = tuple(
+        (sglang_pkg.joinpath(*parts), markers)
+        for parts, markers in _SGLANG_ANNOTATION_SENTINELS
+        if _patch_set_writes(written, parts)
     )
     optional_patches = frozenset(
         p.name
@@ -934,14 +956,10 @@ def _is_patched(plan: _PatchPlan) -> bool:
         if not all(marker in content for marker in plan.sentinel_text):
             return False
         for path, markers in plan.extra_sentinels:
+            # The plan only keeps sentinels this patch set writes, so an absent
+            # file is an incomplete apply, not an inapplicable layout.
             if not path.exists():
-                # An older admitted layout lacks the file and the patch set never
-                # creates one, so absent means not applicable, not unpatched.
-                log.info(
-                    "_server_patcher: sentinel %s absent in this SGLang layout; skipping marker check",
-                    path,
-                )
-                continue
+                return False
             extra = path.read_text(encoding="utf-8", errors="replace")
             if not all(marker in extra for marker in markers):
                 return False

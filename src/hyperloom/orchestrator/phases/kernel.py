@@ -83,11 +83,15 @@ def _collective_comm_share(state: Any) -> tuple[float | None, str]:
 
 
 def _collective_attempt_identity(result: dict[str, Any]) -> str:
-    """Return a stable identity for one logical Collective campaign."""
+    """Return a stable identity for one logical Collective campaign.
+
+    ``workspace`` is deliberately excluded: every attempt gets a fresh
+    ``attempt-<time_ns>`` directory, so hashing it would make the identity a
+    timestamp and a replayed or salvaged campaign would never deduplicate.
+    """
     identity = {
         key: result.get(key)
         for key in (
-            "workspace",
             "analysis_key",
             "experiment_id",
             "patch",

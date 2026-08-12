@@ -195,13 +195,14 @@ The following variables control the kernel optimization backend ladder.
 
 ---
 
-## Collective (all-reduce) optimization lane
+## Collective optimization lane
 
 The collective lane is Coordinator-owned: it is dispatched directly at KERNEL
 entry, never as an agent request. It requires `TP > 1`, a latest-snapshot
 `Exposed Communication %` of at least 1% as parsed from the TraceLens executive
-summary, a `trace_analyze` snapshot, and a source-resolved custom `all_reduce`
-candidate — vendor RCCL/NCCL symbols are opaque binaries and never qualify.
+summary, a `trace_analyze` snapshot, and a source-resolved custom collective
+candidate (`all_reduce`, `reduce_scatter` or `all_gather`) — vendor RCCL/NCCL
+symbols are opaque binaries and never qualify.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|

@@ -87,7 +87,12 @@ def _prorated_totals(
     total_time_ms: float,
     total_count: int,
 ) -> "OrderedDict[str, tuple[float, int, int]]":
-    """Prorate summary totals by sampled kernel duration."""
+    """Prorate summary totals by sampled kernel duration.
+
+    Returns:
+        Kernel name -> ``(duration_us, call_count, stream)``, ordered by
+        descending sampled duration.
+    """
     if (
         isinstance(total_time_ms, bool)
         or not isinstance(total_time_ms, (int, float))

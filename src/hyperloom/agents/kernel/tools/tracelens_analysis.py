@@ -2197,7 +2197,10 @@ def _inject_collective_candidates(
             borrowed = False
         elif len(workload_families) == 1 and _is_all_reduce_workload(item):
             # Shapes are inferred from the sole all-reduce family, valid only
-            # because the symbol is itself an all-reduce.
+            # because the symbol is itself an all-reduce. Handing the driver
+            # shapes the traced kernel never ran would yield confident SNR and
+            # latency for a workload that never existed, so ``shape_provenance``
+            # travels with them to mark the values attributed, not observed.
             donors = next(iter(workload_families.values()))
             borrowed = True
         else:

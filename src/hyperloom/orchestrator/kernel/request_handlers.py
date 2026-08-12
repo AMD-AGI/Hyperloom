@@ -1202,7 +1202,8 @@ def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
     """Revert a kernel patch using its apply manifest.
 
     A manifest is enough; the apply's ``status`` is not required, so a partial
-    apply reverts the files it managed to touch.
+    apply reverts the files it managed to touch. Gating on ``status == "ok"``
+    used to leave exactly those applied.
 
     Args:
         apply_result: Apply metadata carrying ``manifest_path``.
@@ -4518,7 +4519,7 @@ def _collective_budget(state: Any, requested_hours: Any, timeout_sec: int) -> tu
 
 
 async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerResult:
-    """Run the strict all-reduce Forge lane and parse its result contract."""
+    """Run the strict collective Forge lane and parse its result contract."""
     from ..state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -7598,7 +7599,9 @@ async def integrate_handler(
     )
 
     result: dict[str, Any] = {
-        # Clean finish including any owed revert; the verdict is ``decision``.
+        # Clean finish including any owed revert; the verdict is ``decision``,
+        # which every in-tree consumer reads, so a REVERT that reverted cleanly
+        # still reports ``ok``.
         "status": "ok" if revert_complete else "failed",
         "decision": decision,
         "kernel_id": kernel_id,

@@ -199,7 +199,10 @@ FIELD_GLOSSARY: dict[str, str] = {
         "from the multi-GPU comm lane and carry no roofline geometry, so "
         "efficiency_pct / bound_type / arithmetic_intensity stay null."
     ),
-    "collective_op": ("The collective primitive that was optimized (currently always ``all_reduce``)."),
+    "collective_op": (
+        "The collective primitive that was optimized: ``all_reduce``, "
+        "``reduce_scatter`` or ``all_gather``."
+    ),
     "world_size": ("Rank count the collective was measured across; the lane requires it to match the run's TP width."),
     "collective_attempt_id": (
         "Stable identity for one collective campaign, used to deduplicate "

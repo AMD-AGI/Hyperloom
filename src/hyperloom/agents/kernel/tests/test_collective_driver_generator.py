@@ -56,8 +56,42 @@ def test_generated_driver_exposes_the_expected_entry_points(tmp_path):
     funcs = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
     for name in ("self_launch", "init_worker", "make_inputs", "snr_db",
                  "run_candidate", "run_reference", "check_case", "bench_case",
-                 "profile_case", "build_parser", "main"):
+                 "profile_case", "case_group", "payload_bytes", "build_parser",
+                 "main"):
         assert name in funcs, name
+
+
+def test_the_driver_scores_each_regime_apart(tmp_path):
+    """A blended mean lets a small-payload win pay for a large-payload loss."""
+    driver, _ = _gen(
+        tmp_path,
+        input_shapes=[{"shape": "(1024, 6144)"}, {"shape": "(64, 6144)"}],
+        input_dtypes=["bf16", "bf16"],
+    )
+
+    assert "group_ms: {name}" in driver
+    assert '"fabric_bound"' in driver and '"barrier_bound"' in driver
+
+
+@pytest.mark.parametrize(
+    ("shape", "group"),
+    (((1024, 6144), "fabric_bound"), ((64, 6144), "barrier_bound")),
+)
+def test_the_regime_cut_separates_the_traced_shapes(tmp_path, shape, group):
+    """The two traced payloads sit on opposite sides of the cut."""
+    driver, _ = _gen(tmp_path)
+    cut = next(
+        ast.literal_eval(node.value)
+        for node in ast.walk(ast.parse(driver))
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(t, ast.Name) and t.id == "REGIME_CUT_BYTES"
+            for t in node.targets
+        )
+    )
+
+    payload = shape[0] * shape[1] * 2  # bf16
+    assert ("fabric_bound" if payload >= cut else "barrier_bound") == group
 
 
 # --- forge-loop's CLI contract ------------------------------------------------
@@ -337,12 +371,12 @@ def test_unresolved_source_is_rejected(tmp_path):
         )
 
 
-def test_existing_driver_is_not_overwritten(tmp_path):
-    """A resumed campaign must preserve an implemented driver."""
+def test_the_driver_is_seeded_on_every_call(tmp_path):
+    """Each attempt gets its own directory, so the rig is always written fresh."""
     generate_collective_driver(_candidate(), tmp_path, tp=8)
     driver = tmp_path / "driver.py"
-    driver.write_text("# implemented\n", encoding="utf-8")
+    driver.write_text("# stale\n", encoding="utf-8")
 
     generate_collective_driver(_candidate(), tmp_path, tp=8)
 
-    assert driver.read_text(encoding="utf-8") == "# implemented\n"
+    assert driver.read_text(encoding="utf-8") != "# stale\n"

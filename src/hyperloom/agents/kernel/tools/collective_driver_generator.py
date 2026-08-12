@@ -9,7 +9,9 @@
 
 The parity gate lives in the same file the optimizing agent edits; its integrity
 depends on forge-loop pinning the driver digest during task preparation, which
-``forge_collective`` asserts stays enabled.
+``forge_collective`` asserts stays enabled. Nothing on the Hyperloom side
+re-checks the gate afterwards, so if that upstream behaviour changes this rig
+loses its protection silently.
 """
 
 from __future__ import annotations
@@ -130,7 +132,7 @@ def _world_size(tp: int) -> int:
 
 
 _DRIVER_TEMPLATE = Template('''#!/usr/bin/env python3
-"""Measure a traced all-reduce implementation under torchrun."""
+"""Measure a traced $collective_op implementation under torchrun."""
 
 from __future__ import annotations
 
@@ -160,6 +162,12 @@ DTYPE = "$dtype"
 BUSBW_NUMERATOR = $busbw_numerator
 #: True when the measured payload is the gathered output rather than the input.
 GATHERED_OUTPUT = $gathered_output
+#: Payload size separating the two regimes a collective runs in. Below it the
+#: pair of cross-device barriers dominates the kernel; above it the fabric does.
+#: The regimes respond to different edits, so a gain in one says nothing about
+#: the other and forge-loop scores them apart. 1 MiB is the payload a barrier
+#: pair's worth of time moves at fabric bandwidth.
+REGIME_CUT_BYTES = 1048576
 _DIST_ENV = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
 
 
@@ -355,6 +363,23 @@ def bench_case(
     return value
 
 
+def payload_bytes(shape: tuple[int, ...], ctx: WorkerCtx) -> int:
+    """Return the bytes one case moves across the fabric."""
+    elements = 1
+    for dim in shape:
+        elements *= dim
+    if GATHERED_OUTPUT:
+        elements *= ctx.world_size
+    return elements * torch.empty((), dtype=DTYPES[DTYPE]).element_size()
+
+
+def case_group(shape: tuple[int, ...], ctx: WorkerCtx) -> str:
+    """Return the scoring group a case belongs to."""
+    if payload_bytes(shape, ctx) >= REGIME_CUT_BYTES:
+        return "fabric_bound"
+    return "barrier_bound"
+
+
 def case_bandwidth(shape: tuple[int, ...], ctx: WorkerCtx, latency_ms: float) -> dict:
     """Return payload bytes plus algorithm and bus bandwidth for one case.
 
@@ -363,17 +388,12 @@ def case_bandwidth(shape: tuple[int, ...], ctx: WorkerCtx, latency_ms: float) ->
     comparable across rank counts: a collective moving the same payload over
     more ranks does strictly more link work for the same wall time.
     """
-    elements = 1
-    for dim in shape:
-        elements *= dim
-    if GATHERED_OUTPUT:
-        elements *= ctx.world_size
-    payload_bytes = elements * torch.empty((), dtype=DTYPES[DTYPE]).element_size()
-    algbw_gbps = payload_bytes / (latency_ms * 1.0e6)
+    payload = payload_bytes(shape, ctx)
+    algbw_gbps = payload / (latency_ms * 1.0e6)
     ranks = max(1, ctx.world_size)
     correction = BUSBW_NUMERATOR * (ranks - 1) / ranks
     return {
-        "bytes": payload_bytes,
+        "bytes": payload,
         "algbw_gbps": algbw_gbps,
         "busbw_gbps": algbw_gbps * correction,
     }
@@ -455,6 +475,15 @@ def main(argv: list[str]) -> int:
                 )
                 for s in CASES
             }
+            groups: dict = {}
+            for s in CASES:
+                groups.setdefault(case_group(tuple(s), ctx), []).append(
+                    timings[case_id(tuple(s))]
+                )
+            result["group_ms"] = {
+                name: math.exp(statistics.fmean(math.log(v) for v in values))
+                for name, values in groups.items()
+            }
             result["status"] = "ok"
             if ctx.rank == 0:
                 for name, latency_ms in timings.items():
@@ -466,6 +495,8 @@ def main(argv: list[str]) -> int:
                         f"busbw={band['busbw_gbps']:.3f}GB/s",
                         flush=True,
                     )
+                for name, score_ms in sorted(result["group_ms"].items()):
+                    print(f"group_ms: {name} {score_ms:.9f}", flush=True)
                 print(f"mean_ms: {result['mean_ms']:.9f}", flush=True)
         else:
             checks = [check_case(tuple(s), ctx, args.snr_threshold, args.seed) for s in CASES]
@@ -546,10 +577,21 @@ _PROGRAM_TEMPLATE = Template('''# Optimize `$kernel_name`
   reused across consecutive collectives is exercised.
 - Latency replays every iteration as one captured chain behind a single
   barrier, and takes the slowest rank.
+- Cases are scored per regime, not blended: `group_ms: fabric_bound` and
+  `group_ms: barrier_bound` split the suite at a 1 MiB payload. A win needs one
+  clear gain and no clear loss across groups, so speeding up the small payloads
+  cannot pay for a regression on the large ones.
 
 ## Shapes under test
 
 $cases_md
+
+## Reading the bench output
+
+`--bench-mode` also prints `case_bw: <case> bytes=… algbw=… busbw=…`. Latency
+alone cannot tell a faster transfer from a cheaper barrier; `busbw` against the
+fabric peak tells you which of the two a change actually bought, and which
+regime still has headroom.
 
 ## Constraints
 
@@ -566,7 +608,7 @@ def generate_collective_driver(
     *,
     tp: int,
 ) -> dict[str, str]:
-    """Write a strict all-reduce driver and Forge task brief."""
+    """Write a strict collective driver and Forge task brief."""
     if not isinstance(candidate, dict):
         raise TypeError("collective candidate must be a mapping")
     out_path = Path(out_dir)
@@ -646,11 +688,7 @@ def generate_collective_driver(
 
     driver_path = out_path / "driver.py"
     program_path = out_path / "program.md"
-    # A resumed campaign reuses its attempt directory, and by then forge-loop's
-    # task preparer may have authored or repaired the driver. Only the brief is
-    # regenerated; re-seeding the driver would discard that work.
-    if not driver_path.exists():
-        driver_path.write_text(driver_src, encoding="utf-8")
+    driver_path.write_text(driver_src, encoding="utf-8")
     program_path.write_text(program_src, encoding="utf-8")
 
     return {

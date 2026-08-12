@@ -31,7 +31,7 @@ No PolicyGate path runs for the RESPONSE because it is written directly via
 |---|---|---|
 | `trace_analyze` | `trace_analyze_handler` | TraceLens `tracelens_analysis.py` |
 | `run_gemm_tuning` | `run_gemm_tuning_handler` | GEAK or forge-gemm-tune |
-| `run_collective` | `run_collective_handler` | forge-collective (all-reduce rewrite) |
+| `run_collective` | `run_collective_handler` | forge-collective (collective rewrite) |
 | `run_optimization` | `run_optimization_handler` | GEAK or Forge per-kernel |
 | `integrate` | `integrate_handler` | patch → re-baseline → KEEP/REVERT |
 | `apply_patch` | `integrate_handler` (alias) | same as `integrate` |
@@ -123,15 +123,26 @@ Collective kernels do **not** ride the per-kernel backend. A trace row whose
   an id whose dispatch would be an empty batch. The FlyDSL rewrite route refuses
   such candidates independently (`collective_unsupported`).
 - **Collective lane** (`run_collective_handler`): the Coordinator selects the
-  hottest source-resolved `all_reduce` candidate itself at KERNEL entry. Vendor
+  hottest source-resolved collective candidate itself at KERNEL entry. Vendor
   RCCL/NCCL symbols never qualify — they are opaque binaries with no rewritable
-  source — and `all_reduce` is currently the only supported `collective_op`.
+  source. The supported `collective_op` values are `all_reduce`,
+  `reduce_scatter` and `all_gather` (`SUPPORTED_COLLECTIVE_OPS`); each needs its
+  own `torch.distributed` reference in the generated driver, so widening the set
+  means adding one there first.
 
 The lane is reached on the native/Forge KERNEL entry path; when GEAK owns the
 phase `_on_enter_kernel` returns before it. Under the default
 `KERNEL_OPT_BACKEND_ORDER=geak` it therefore runs only via
 `HYPERLOOM_COLLECTIVE_ONLY`, which turns the GEAK branch off. Its own gate keys
 on `TP > 1` and exposed-communication share, not on the backend order value.
+
+The lane writes three SharedState fields into `state.json`:
+
+| Field | Contents |
+|---|---|
+| `last_collective` | The most recent campaign result: `status`, `decision`, `kernel_name`, `kernel_speedup`, `kept` and the integrate verdict. |
+| `collective_attempts` | One row per logical campaign, deduplicated by `collective_attempt_id` so a resumed or salvaged run does not double-count. |
+| `collective_only_mode` | Mirrors `HYPERLOOM_COLLECTIVE_ONLY`, so a reader can tell a collective-only session from one where the lane merely happened to run. |
 
 ## Toolkit installation
 
