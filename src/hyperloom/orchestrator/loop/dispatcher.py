@@ -31,7 +31,11 @@ from ..bus.resource_lock import (
 )
 from .sub_agent_runner import SubAgentResult
 from ..state.task_registry import Task
-from .coordinator_helpers import coerce_needs_gpu
+from .coordinator_helpers import (
+    TIME_BUDGET_EXEMPT_ACTIONS,
+    action_fits_time_budget,
+    coerce_needs_gpu,
+)
 
 from .coordinator import (
     _format_inbox_event,
@@ -357,6 +361,8 @@ class DispatcherCollaborator:
             if task.kind == "targeted_build":
                 # Off-loop builds run in their own process group and are pumped/
                 # reaped by BuildLifecycleCollaborator; never drain them here.
+                continue
+            if await self._cancel_queued_task_over_budget(task):
                 continue
             lanes_needed = list(task.requires_lanes or [])
             if lanes_needed:
@@ -1157,6 +1163,129 @@ class DispatcherCollaborator:
             )
         return None
 
+    def _time_budget_denial_for_action(
+        self,
+        action_name: str,
+    ) -> PolicyDenied | None:
+        """Refuse an action whose expected cost cannot fit the remaining session budget.
+
+        The first of the wall-clock defences: cheaper to never start a 60-minute
+        action with 20 minutes left than to reap it half-done, because a reaped
+        action spends the budget and yields no measurement. Denying here also
+        keeps the refusal out of the failure ledgers — no task row is created, so
+        nothing teaches the KB that the action failed.
+
+        Args:
+            action_name: The proposed/delegated/inline action name.
+
+        Returns:
+            A :class:`PolicyDenied` when the budget cannot fit the action, else
+            ``None`` (unbounded budget, exempt action, or no cost on record).
+        """
+        action = str(action_name or "").strip()
+        if not action or action in TIME_BUDGET_EXEMPT_ACTIONS:
+            return None
+        if self.shared_state.stop_reason:
+            return None
+        reg = getattr(self, "action_registry", None)
+        meta = reg.get(action) if reg is not None else None
+        if meta is None:
+            return None
+        expected_min = float(getattr(meta, "cost_minutes_p50", 0.0) or 0.0)
+        usable_sec = self.shared_state.session_budget_usable_sec()
+        if action_fits_time_budget(
+            usable_sec=usable_sec,
+            expected_cost_minutes=expected_min,
+        ):
+            return None
+        remaining_min = (usable_sec or 0.0) / 60.0
+        return PolicyDenied(
+            f"action={action!r} denied: needs ~{expected_min:.0f} min but only "
+            f"{remaining_min:.0f} min of the session budget is left",
+            rule="time_budget",
+            hint=(
+                "the wall-clock budget cannot fit this action; delegate `report` "
+                "to close the session, or pick an action that fits the time left"
+            ),
+        )
+
+    def _admission_denial_for_action(
+        self,
+        action_name: str,
+    ) -> PolicyDenied | None:
+        """Run every pre-dispatch gate for an action name, first denial wins.
+
+        The single entry point the intent handlers and the inline runner share,
+        so a new gate reaches all three paths at once.
+
+        Args:
+            action_name: The proposed/delegated/inline action name.
+
+        Returns:
+            The first :class:`PolicyDenied` that fires, else ``None``.
+        """
+        denied = self._sequence_denial_for_action(action_name)
+        if denied is not None:
+            return denied
+        return self._time_budget_denial_for_action(action_name)
+
+    async def _cancel_queued_task_over_budget(self, task: Task) -> bool:
+        """Drop a queued task the budget can no longer fit, before it takes a lane.
+
+        The admission gate runs when the action is proposed, but a task can wait
+        for a busy lane long enough for the budget to drain underneath it. This
+        is the same gate re-applied at the last moment it is still free to say
+        no. The row is cancelled rather than left queued so the pump does not
+        re-examine it every tick, and it stays out of the failure ledgers: a task
+        that never ran is not evidence about the action.
+
+        Args:
+            task: The queued task about to be considered for dispatch.
+
+        Returns:
+            ``True`` when the task was cancelled and must be skipped this pass.
+        """
+        denied = self._time_budget_denial_for_action(task.kind)
+        if denied is None:
+            return False
+        try:
+            await self.tasks.transition(
+                task.task_id,
+                "cancelled",
+                evidence={"reason": "time_budget", "error": str(denied)},
+            )
+        except Exception:  # noqa: BLE001 — a lost row must not abort the pump
+            log.exception(
+                "dispatcher: could not cancel over-budget task=%s kind=%s",
+                task.task_id,
+                task.kind,
+            )
+            return True
+        log.warning(
+            "dispatcher: dropped queued task=%s kind=%s before dispatch: %s",
+            task.task_id,
+            task.kind,
+            denied,
+        )
+        try:
+            await self._record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "dispatch_denied_time_budget",
+                    "task_id": task.task_id,
+                    "action": task.kind,
+                    "error": str(denied),
+                    "hint": getattr(denied, "hint", ""),
+                },
+            )
+        except Exception:  # noqa: BLE001 — observability must not block dispatch
+            log.exception(
+                "dispatcher: could not record time-budget denial for task=%s",
+                task.task_id,
+            )
+        return True
+
     def _sequence_denial_for_request(
         self,
         target_agent: str,
@@ -1382,7 +1511,7 @@ class DispatcherCollaborator:
                 f"{getattr(denied, 'rule', '')!s} — "
                 f"{str(getattr(denied, 'hint', denied))[:200]})"
             )
-        seq_denied = self._sequence_denial_for_action(action_name)
+        seq_denied = self._admission_denial_for_action(action_name)
         if seq_denied is not None:
             await self._record_policy_denied(
                 "orchestration",

@@ -259,6 +259,11 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
 # How many hot / skipped kernels ``record_trace_analyze`` keeps in the trace
 # summary (matches the ``*_top15`` field names).
 _TRACE_HOT_KERNEL_TOP_N = 15
+
+# Wall-clock budget held back from every unit of work so the CLOSE phase can
+# still write its report. Matches the default closing grace window.
+CLOSING_RESERVE_SEC = 120.0
+
 # Session-level kernel-roofline report the analyzer writes for a non-close run;
 # read back when the trace_analyze envelope arrives without its payload keys.
 _DEFAULT_ROOFLINE_REPORT_NAME = "kernel_roofline_current.json"
@@ -3602,7 +3607,36 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             return None
         return max(0.0, float(self.max_minutes) - self.elapsed_minutes(now=now))
 
-    def grid_session_deadline_sec(self, *, reserve_sec: float = 120.0) -> float | None:
+    def session_budget_usable_sec(
+        self,
+        *,
+        reserve_sec: float = CLOSING_RESERVE_SEC,
+    ) -> float | None:
+        """Seconds of wall-clock budget left once the closing reserve is held back.
+
+        The single source for "how much time may a unit of work still claim".
+        Admission control (which action may start) and the grid deadline (how
+        long a variant may run) both read it, so they cannot disagree about how
+        much budget exists.
+
+        Args:
+            reserve_sec (float): Seconds held back for the CLOSE phase and its
+                report.
+
+        Returns:
+            float | None: Usable seconds (clamped at 0.0), or ``None`` when
+                ``max_minutes`` is unset (unbounded budget).
+        """
+        remaining = self.remaining_minutes()
+        if remaining is None:
+            return None
+        return max(0.0, remaining * 60.0 - reserve_sec)
+
+    def grid_session_deadline_sec(
+        self,
+        *,
+        reserve_sec: float = CLOSING_RESERVE_SEC,
+    ) -> float | None:
         """``time.monotonic()`` deadline for grid variant loops, or ``None`` when the budget is unbounded.
 
         Reserves ``reserve_sec`` so the CLOSE phase and report still have room
@@ -3614,15 +3648,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             reserve_sec (float): Seconds held back from the raw remaining budget.
 
         Returns:
-            float | None: A monotonic-clock deadline, or ``None`` when unbounded
-                or already past the reserve.
+            float | None: A monotonic-clock deadline, or ``None`` when unbounded;
+                ``time.monotonic()`` (i.e. already due) once the reserve is gone.
         """
-        remaining = self.remaining_minutes()
-        if remaining is None:
+        usable = self.session_budget_usable_sec(reserve_sec=reserve_sec)
+        if usable is None:
             return None
-        usable = remaining * 60.0 - reserve_sec
-        if usable <= 0.0:
-            return time.monotonic()
         return time.monotonic() + usable
 
     def optimization_stack_has_unvalidated_keeps(self) -> bool:

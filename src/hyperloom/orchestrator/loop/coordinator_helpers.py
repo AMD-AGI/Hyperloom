@@ -238,6 +238,49 @@ def effective_closing_grace_sec(
     return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
 
 
+# Actions that must stay startable no matter how little budget is left: they are
+# how a session ends cleanly (report/breakdown) or unsticks itself (recover), so
+# a time gate that refused them would strand the run with nothing to show.
+TIME_BUDGET_EXEMPT_ACTIONS: frozenset[str] = frozenset(
+    {
+        "report",
+        "session_breakdown",
+        "recover",
+    }
+)
+
+
+def action_fits_time_budget(
+    *,
+    usable_sec: float | None,
+    expected_cost_minutes: float,
+) -> bool:
+    """Decide whether an action's expected cost still fits the remaining budget.
+
+    The anchor is the action's *expected* cost (``cost_minutes_p50``), not its
+    p75 backstop. Judging fit on the pessimistic tail would abandon usable
+    budget — with 90 minutes left we would refuse an action that finishes in 60
+    minutes half the time — and the session already has a wall-clock reaper for
+    the overruns, so the optimistic anchor is the one that keeps the tail of a
+    session productive. This mirrors how the grid admits variants.
+
+    Args:
+        usable_sec: Budget left after the closing reserve, from
+            ``SharedState.session_budget_usable_sec``; ``None`` means unbounded.
+        expected_cost_minutes: The action's expected cost in minutes; values at
+            or below zero mean "no estimate on record".
+
+    Returns:
+        ``True`` when the action may start: the budget is unbounded, no estimate
+        is on record, or the expected cost fits what is left.
+    """
+    if usable_sec is None:
+        return True
+    if expected_cost_minutes <= 0.0:
+        return True
+    return usable_sec >= expected_cost_minutes * 60.0
+
+
 def _parse_iso_unix(ts: str) -> float:
     """Parse an ISO 8601 UTC timestamp into unix seconds; ``0.0`` on failure.
 
