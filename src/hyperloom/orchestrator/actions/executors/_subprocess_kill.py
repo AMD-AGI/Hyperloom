@@ -719,9 +719,12 @@ def session_deadline_to_remaining_sec(session_deadline_sec: float | None) -> flo
 def session_remaining_to_deadline_sec(session_remaining_sec: float | None) -> float | None:
     """Re-anchor a remaining session budget onto this process's monotonic clock.
 
-    The inverse of :func:`session_deadline_to_remaining_sec`. Whatever the
-    budget spent in transit is charged to the receiver, since no clock is shared
-    across the boundary to measure it with.
+    The inverse of :func:`session_deadline_to_remaining_sec`. Whatever the trip
+    itself cost is forgiven: no clock is shared across the boundary to measure it
+    with, so the receiver starts a fresh window of the full duration. The
+    receiver can therefore run marginally past the sender's deadline, which is
+    the safe direction -- the alternative is guessing at the transit and charging
+    a round for time it never had.
 
     Args:
         session_remaining_sec: Seconds left on the session budget as measured by
@@ -904,8 +907,7 @@ class _SessionDeadlineExceeded(_ReapedByWatchdog):
             elapsed_sec (float): Wall-clock elapsed for this round at trip time.
         """
         super().__init__(
-            f"the session wall-clock budget was exhausted {overrun_sec:.1f}s ago "
-            f"(round elapsed={elapsed_sec:.1f}s)"
+            f"the session wall-clock budget was exhausted {overrun_sec:.1f}s ago (round elapsed={elapsed_sec:.1f}s)"
         )
         self.overrun_sec = float(overrun_sec)
         self.elapsed_sec = float(elapsed_sec)
@@ -929,8 +931,7 @@ class _OrchestratorCancelled(_ReapedByWatchdog):
             elapsed_sec (float): Wall-clock elapsed for this round at trip time.
         """
         super().__init__(
-            f"the orchestrator cancelled this action ({reason or 'no reason given'}; "
-            f"round elapsed={elapsed_sec:.1f}s)"
+            f"the orchestrator cancelled this action ({reason or 'no reason given'}; round elapsed={elapsed_sec:.1f}s)"
         )
         self.reason = str(reason)
         self.elapsed_sec = float(elapsed_sec)
