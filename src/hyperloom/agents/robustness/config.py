@@ -98,6 +98,7 @@ class Config:
     # -- thresholds --
     gpu_temp_warn_c: float = 85.0
     agent_stall_timeout_s: float = 300.0
+    agent_stall_high_after_s: float = 900.0
 
     # -- LLM for RCA (auto-detected from Claw sandbox env) --
     llm_model: str = "claude-opus-5"

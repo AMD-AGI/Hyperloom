@@ -14,9 +14,13 @@ roofline, an explore grid — has no LLM turn to emit, so agent silence there is
 the design rather than a fault, and alerting on it trains operators to ignore
 the signal. :attr:`SourceData.local_task_progress` carries the counter-evidence:
 while an agent's *own* dispatched work is still reporting units, its accusation
-is downgraded rather than raised — and never past
-:attr:`StallConfig.severity_high_after_s`, because a busy machine is not proof
-that the agent on it is alive.
+is downgraded rather than raised. The suppression has no wall-clock ceiling,
+because the work units it covers routinely run past any threshold worth setting
+— a single warmup can take an hour — and a ceiling would make the alert fire on
+exactly the healthy runs it was written to stay quiet about. What bounds it
+instead is the freshness of the evidence: the moment the work stops reporting,
+the next tick accuses. A long wait still shows up, as a withheld accusation that
+rises from LOW to MEDIUM past :attr:`StallConfig.severity_high_after_s`.
 """
 
 from __future__ import annotations
@@ -52,10 +56,9 @@ class StallConfig:
     Attributes:
         stall_timeout_s (float): Silence past which an agent is accused, and
             the freshness a heartbeat must beat to count as counter-evidence.
-        severity_high_after_s (float): Silence past which the accusation is
-            HIGH. It doubles as the ceiling on suppression: work that keeps
-            reporting buys an agent time, never immunity, so a genuinely hung
-            Coordinator is still reported on a machine that never goes quiet.
+        severity_high_after_s (float): Silence past which an accusation is HIGH
+            rather than MEDIUM, and past which a withheld one is MEDIUM rather
+            than LOW.
     """
 
     stall_timeout_s: float = 300.0
@@ -73,7 +76,8 @@ def evaluate_stall_signals(
     Computes per-agent idle time from the most recent activity timestamp and
     fires MEDIUM (or HIGH past ``severity_high_after_s``) once idle time exceeds
     the stall timeout. An agent whose own dispatched work is still reporting is
-    downgraded to LOW instead of accused, up to the ceiling.
+    not accused: work units outlive the stall window by design, so suppression
+    lasts as long as the evidence stays fresh, and only its own severity rises.
 
     Args:
         ctx (ReactorContext): Reactor context (provides inbox and current time).
@@ -130,8 +134,9 @@ def _stall_symptom(
         cfg (StallConfig): Thresholds.
 
     Returns:
-        Symptom: MEDIUM (HIGH past ``severity_high_after_s``), or LOW when the
-        agent's own work is still reporting and the ceiling is not yet reached.
+        Symptom: MEDIUM (HIGH past ``severity_high_after_s``) when accused, or
+        LOW (MEDIUM past the same threshold) when the agent's own work is still
+        reporting and the accusation is withheld.
     """
     work_idle_s, work_task = _agent_in_flight_work(
         data.local_task_progress,
@@ -147,7 +152,7 @@ def _stall_symptom(
     if work_idle_s is not None:
         evidence["in_flight_work_idle_seconds"] = int(work_idle_s)
         evidence["in_flight_work"] = work_task
-    withheld = work_idle_s is not None and work_idle_s < cfg.stall_timeout_s and idle_s < cfg.severity_high_after_s
+    withheld = work_idle_s is not None and work_idle_s < cfg.stall_timeout_s
     if not withheld:
         severity = SymptomSeverity.HIGH if idle_s >= cfg.severity_high_after_s else SymptomSeverity.MEDIUM
         return Symptom(
@@ -160,16 +165,16 @@ def _stall_symptom(
             suggestion=("escalate strategy if agent remains silent"),
         )
     evidence["accusation_withheld"] = True
-    evidence["withheld_until_idle_s"] = int(cfg.severity_high_after_s)
+    long_wait = idle_s >= cfg.severity_high_after_s
     summary = (
         f"agent {agent} silent for {int(idle_s)}s but its dispatched work "
         f"({work_task or 'unknown'}) reported {int(work_idle_s)}s ago; "
-        f"accusation withheld until {int(cfg.severity_high_after_s)}s"
+        f"accusation withheld while that work keeps reporting"
     )
     log.info("stall: %s", summary)
     return Symptom(
         name="agent_stall",
-        severity=SymptomSeverity.LOW,
+        severity=SymptomSeverity.MEDIUM if long_wait else SymptomSeverity.LOW,
         summary=summary,
         evidence=evidence,
         subject={"agent": agent},

@@ -60,6 +60,17 @@ async def test_factory_config_map_covers_all_registry_entries(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_stall_escalation_threshold_is_operator_configurable(tmp_path: Path):
+    """Deployments whose work units differ need the escalation point to move."""
+    config = Config(session_dir=tmp_path, robustness_server_url="", agent_stall_high_after_s=7200.0)
+    bundle = build_reactor_components(config)
+    try:
+        assert bundle.components.classifier.signal_configs["stall"].severity_high_after_s == 7200.0
+    finally:
+        await bundle.aclose()
+
+
+@pytest.mark.asyncio
 async def test_build_reactor_components_uses_server_url_when_set(tmp_path: Path):
     config = Config(
         session_dir=tmp_path,

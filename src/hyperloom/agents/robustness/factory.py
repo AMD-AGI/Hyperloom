@@ -228,6 +228,7 @@ def build_reactor_components(
     signal_configs: dict[str, Any] = {
         "stall": StallConfig(
             stall_timeout_s=config.agent_stall_timeout_s,
+            severity_high_after_s=config.agent_stall_high_after_s,
         ),
         "crash": CrashConfig(),
         "event": EventConfig(

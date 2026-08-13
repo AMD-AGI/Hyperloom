@@ -100,13 +100,39 @@ def test_busy_work_of_one_agent_does_not_silence_another() -> None:
     assert by_agent["critic"] is SymptomSeverity.MEDIUM
 
 
-def test_progress_buys_time_but_never_immunity() -> None:
-    """Past the ceiling a busy machine stops excusing a Coordinator that is hung."""
-    ctx = ReactorContext(inbox=[_item("orchestration", ts=100.0)], now_unix=10_000.0)
-    data = SourceData(local_task_progress=_progress("orchestration", unix=9_999.0, task="explore"))
+def test_an_hour_long_warmup_that_keeps_reporting_is_never_accused() -> None:
+    """A measured warmup runs 3941s; a ceiling would alert on every healthy one."""
+    ctx = ReactorContext(inbox=[_item("orchestration", ts=10_000.0)], now_unix=13_941.0)
+    data = SourceData(local_task_progress=_progress("orchestration", unix=13_900.0, task="warmup"))
     out = evaluate_stall_signals(
         ctx,
         data,
+        config=StallConfig(stall_timeout_s=300.0, severity_high_after_s=900.0),
+    )
+    assert out[0].evidence["accusation_withheld"] is True
+    assert out[0].severity is SymptomSeverity.MEDIUM
+
+
+def test_a_long_wait_raises_the_withheld_note_without_turning_it_into_an_accusation() -> None:
+    """Operators need the long ones to stand out; they are still not stalls."""
+    ctx = ReactorContext(inbox=[_item("orchestration", ts=10_000.0)], now_unix=13_941.0)
+    data = SourceData(local_task_progress=_progress("orchestration", unix=13_900.0, task="warmup"))
+    cfg = StallConfig(stall_timeout_s=300.0, severity_high_after_s=900.0)
+    long_wait = evaluate_stall_signals(ctx, data, config=cfg)[0]
+    short_ctx = ReactorContext(inbox=[_item("orchestration", ts=13_500.0)], now_unix=13_941.0)
+    short_wait = evaluate_stall_signals(short_ctx, data, config=cfg)[0]
+    assert short_wait.severity is SymptomSeverity.LOW
+    assert long_wait.severity is SymptomSeverity.MEDIUM
+    assert short_wait.severity is not SymptomSeverity.HIGH
+
+
+def test_the_moment_the_work_stops_reporting_the_next_tick_accuses() -> None:
+    """Freshness, not the clock, is what bounds the suppression."""
+    ctx = ReactorContext(inbox=[_item("orchestration", ts=10_000.0)], now_unix=13_941.0)
+    stale = SourceData(local_task_progress=_progress("orchestration", unix=13_600.0, task="warmup"))
+    out = evaluate_stall_signals(
+        ctx,
+        stale,
         config=StallConfig(stall_timeout_s=300.0, severity_high_after_s=900.0),
     )
     assert [s.severity for s in out] == [SymptomSeverity.HIGH]
