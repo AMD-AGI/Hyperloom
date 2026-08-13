@@ -217,6 +217,18 @@ def test_forbidden_fields_are_stripped_so_the_critic_cannot_reject_on_format():
     assert payload["proposal_set"][1] == "not-a-dict"
 
 
+def test_a_gain_claim_under_the_coordinators_own_field_name_is_stripped_too():
+    """``predicted_gain_pct`` is the Coordinator's estimate on a propose_action
+    intent, which is exactly what made it a convenient place for a specialist
+    to put a number the guard was meant to strip."""
+    payload = {"proposal_set": [{"name": "v1", "predicted_gain_pct": 12.0, "reason": "keep me"}]}
+
+    removed = ps.strip_forbidden_proposal_fields(payload)
+
+    assert removed == ["predicted_gain_pct"]
+    assert payload["proposal_set"][0] == {"name": "v1", "reason": "keep me"}
+
+
 def test_stripping_a_clean_payload_changes_nothing():
     payload = {"proposal_set": [{"name": "v1", "reason": "why"}]}
 
