@@ -527,9 +527,11 @@ def _close_phase_stop_reason(state: dict[str, Any], *, leg_start_ts: str) -> tup
     A resume clears ``state.stop_reason`` and ``stop_ts`` but cannot clear the
     previous leg's CLOSE row, and that row is not evidence about the leg
     running now: honouring it reports a live session as having stopped, for
-    the reason it stopped last time. Both values are dropped together, because
-    the timestamp is stamped as the session's end even when the reason itself
-    is not adopted.
+    the reason it stopped last time. A row from before the leg boundary is
+    skipped whole -- reason and timestamp -- because the timestamp is stamped
+    as the session's end even when the reason itself is not adopted, and the
+    scan carries on so a history written out of order can still be answered
+    from a row that does belong to this leg.
 
     A row is only disqualified on comparable evidence. When either timestamp
     is missing or unparseable the row stands, since the whole point of the
@@ -557,9 +559,29 @@ def _close_phase_stop_reason(state: dict[str, Any], *, leg_start_ts: str) -> tup
         ts = str(row.get("ts") or row.get("entered_ts") or "").strip()
         closed_at = to_unix(ts)
         if leg_start is not None and closed_at is not None and closed_at < leg_start:
-            return "", ""
+            continue
         return reason, ts
     return "", ""
+
+
+def _first_recorded_end(*candidates: Any) -> str:
+    """The first candidate that reads as a timestamp, canonicalised to ``...Z``.
+
+    A value that does not parse is no more an end time than a missing one:
+    passed through it lands in ``ended_at_utc`` verbatim and collapses the
+    measured duration to zero, where the next candidate (or the export clock)
+    still answers.
+
+    Args:
+        *candidates (Any): Recorded end timestamps, best evidence first.
+
+    Returns:
+        str: The first parseable candidate, or ``""`` when none is.
+    """
+    for value in candidates:
+        if to_unix(value) is not None:
+            return iso_z(value)
+    return ""
 
 
 def _session_has_ended(stop_reason: Any) -> bool:
@@ -606,10 +628,11 @@ def _measured_duration_seconds(start_ts: Any, ended_at_utc: Any, stop_reason: An
 def session_elapsed_minutes(session_section: dict[str, Any]) -> float:
     """Wall-clock minutes of the leg described by a resolved ``session`` section.
 
-    Both producers of the section (the live recorder's snapshot and
-    :func:`collect_session`) carry the timestamps this is derived from, so the
-    field can be recomputed from whichever one supplied them and cannot drift
-    from ``session_meta.session_duration_seconds``.
+    Derived from the section's own timestamps rather than stored, so a section
+    assembled from the live recorder's snapshot reports the same elapsed time
+    as one built by :func:`collect_session`. ``session_meta`` measures the same
+    window from the same fields; the two agree because both producers of the
+    section carry those timestamps, not because either reads the other.
 
     Args:
         session_section (dict[str, Any]): A ``session`` section.
@@ -755,7 +778,7 @@ def collect_session(
         # ``stop_ts`` is stamped once, when the reason is written, so a re-export
         # of a finished session keeps reporting the same end. The CLOSE
         # transition and the export clock are only next-best guesses.
-        ended_at_utc = iso_z(state.get("stop_ts") or close_ts) or now_iso(timespec="seconds")
+        ended_at_utc = _first_recorded_end(state.get("stop_ts"), close_ts) or now_iso(timespec="seconds")
     image = _detect_image_for_session(manifest)
     if image is None:
         warnings.append("image: not configured (set HYPERLOOM_IMAGE env var)")

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.timeutil import iso_z
 from hyperloom.inference_optimizer.breakdown import exporter as ex
 from hyperloom.inference_optimizer.breakdown.collectors import sessions
 from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_session_meta
@@ -501,34 +502,39 @@ def test_a_session_with_nothing_to_measure_reports_zero():
     assert collect_session_meta({}, {}, [])["session_duration_seconds"] == 0
 
 
-def _stopped_session(session_dir: Path, *, ran_for: timedelta):
+def _stopped_session(session_dir: Path, *, ran_for: timedelta, stopped_ago: timedelta = timedelta(0)):
     """Write a stopped session's state so the recorder fragment is spooled.
 
     Args:
         session_dir (Path): The session directory to write into.
-        ran_for (timedelta): How long before now the session started.
+        ran_for (timedelta): How long the session ran before it stopped.
+        stopped_ago (timedelta): How long before now it stopped, so an export
+            measured to the recorded end can be told from one measured to now.
 
     Returns:
         SharedState: The saved state.
     """
     from hyperloom.orchestrator.state.shared_state import SharedState
 
+    # Whole seconds: the exported end is canonicalised to second precision.
+    stopped_at = (datetime.now(timezone.utc) - stopped_ago).replace(microsecond=0)
     state = SharedState.load_or_init(session_dir)
     state.session_id = "sess-1178"
-    state.start_ts = (datetime.now(timezone.utc) - ran_for).isoformat(timespec="microseconds")
+    state.start_ts = (stopped_at - ran_for).isoformat(timespec="microseconds")
     state.set_stop_reason("time_exhausted")
+    state.stop_ts = stopped_at.isoformat(timespec="microseconds")
     state.save(session_dir)
     return state
 
 
 def test_a_recorded_session_exports_the_time_it_actually_ran(tmp_path):
-    """End to end over the recorder path: state stop time -> exported duration."""
-    state = _stopped_session(tmp_path, ran_for=timedelta(hours=2))
+    """A session that stopped days ago still ran for two hours, however late it is exported."""
+    state = _stopped_session(tmp_path, ran_for=timedelta(hours=2), stopped_ago=timedelta(days=3))
 
     bd = ex.build(tmp_path)
     assert bd["session"]["start_ts"] == state.start_ts
-    assert bd["session"]["ended_at_utc"] != ""
-    assert 7150 <= bd["session_meta"]["session_duration_seconds"] <= 7250
+    assert bd["session"]["ended_at_utc"] == iso_z(state.stop_ts)
+    assert bd["session_meta"]["session_duration_seconds"] == 7200
 
 
 def test_the_human_report_reads_the_same_elapsed_time_as_the_machine_field(tmp_path):
@@ -654,6 +660,8 @@ def test_a_close_the_state_file_never_recorded_still_supplies_the_end(tmp_path):
         ("", "2026-08-01T00:00:00+00:00"),
         ("2026-08-01T00:00:00+00:00", ""),
         ("2026-08-01T00:00:00+00:00", "not-a-timestamp"),
+        # A CLOSE at the boundary belongs to the leg that started there.
+        ("2026-08-01T00:00:00+00:00", "2026-08-01T00:00:00+00:00"),
     ],
 )
 def test_a_close_stands_when_there_is_nothing_comparable_to_disqualify_it(tmp_path, start_ts, close_ts):
@@ -665,3 +673,115 @@ def test_a_close_stands_when_there_is_nothing_comparable_to_disqualify_it(tmp_pa
     }
 
     assert sessions.collect_session(tmp_path, state, {}, [])["stop_reason"] == "target_reached"
+
+
+def test_the_newest_close_of_the_leg_supplies_the_end(tmp_path):
+    """A cyclic run reaches CLOSE more than once; the last word is the session's."""
+    now = datetime.now(timezone.utc)
+    state = {
+        "session_id": "sess-1178",
+        "start_ts": (now - timedelta(hours=4)).isoformat(),
+        "phase_history": [
+            {"to_phase": "CLOSE", "reason": "conc_sweep_done", "ts": (now - timedelta(hours=3)).isoformat()},
+            {"to_phase": "EXPLORE", "reason": "cycle_reloop", "ts": (now - timedelta(hours=2)).isoformat()},
+            {"to_phase": "CLOSE", "reason": "target_reached", "ts": (now - timedelta(minutes=10)).isoformat()},
+        ],
+    }
+
+    section = sessions.collect_session(tmp_path, state, {}, [])
+    assert section["stop_reason"] == "target_reached"
+    assert 229.0 <= section["elapsed_minutes"] <= 231.0
+
+
+def test_a_history_written_out_of_order_still_supplies_the_end(tmp_path):
+    """The scan walks back from the newest row, so a stale one must not end the search."""
+    now = datetime.now(timezone.utc)
+    state = {
+        "session_id": "sess-1178",
+        "start_ts": (now - timedelta(hours=2)).isoformat(),
+        "resumed_ts": (now - timedelta(hours=2)).isoformat(),
+        "phase_history": [
+            {"to_phase": "CLOSE", "reason": "target_reached", "ts": (now - timedelta(minutes=5)).isoformat()},
+            {"to_phase": "CLOSE", "reason": "time_exhausted", "ts": (now - timedelta(days=3)).isoformat()},
+        ],
+    }
+
+    assert sessions.collect_session(tmp_path, state, {}, [])["stop_reason"] == "target_reached"
+
+
+def test_an_unreadable_stop_time_does_not_become_the_session_end(tmp_path):
+    """Pre-``stop_ts`` this branch stamped the export clock; a bad value must not read as an end."""
+    now = datetime.now(timezone.utc)
+    state = {
+        "session_id": "sess-1178",
+        "start_ts": (now - timedelta(hours=2)).isoformat(),
+        "stop_reason": "target_reached",
+        "stop_ts": "not-a-timestamp",
+    }
+
+    section = sessions.collect_session(tmp_path, state, {}, [])
+    assert section["ended_at_utc"] != "not-a-timestamp"
+    assert 119.0 <= section["elapsed_minutes"] <= 121.0
+
+
+def test_an_unreadable_stop_time_falls_back_to_the_close_transition(tmp_path):
+    now = datetime.now(timezone.utc)
+    closed_at = (now - timedelta(minutes=30)).isoformat()
+    state = {
+        "session_id": "sess-1178",
+        "start_ts": (now - timedelta(hours=2)).isoformat(),
+        "stop_reason": "target_reached",
+        "stop_ts": "not-a-timestamp",
+        "phase_history": [{"to_phase": "CLOSE", "reason": "target_reached", "ts": closed_at}],
+    }
+
+    section = sessions.collect_session(tmp_path, state, {}, [])
+    assert section["ended_at_utc"] == iso_z(closed_at)
+    assert 89.0 <= section["elapsed_minutes"] <= 91.0
+
+
+# ---- _merge_session ----
+
+
+def test_the_recorder_fragment_overlays_the_collected_section():
+    merged = ex._merge_session(
+        {"session_id": "sess-1178", "stop_reason": "target_reached"},
+        {"session_id": "", "stop_reason": "", "image": "registry.example/hyperloom:test"},
+    )
+    assert merged["session_id"] == "sess-1178"
+    assert merged["stop_reason"] == "target_reached"
+    assert merged["image"] == "registry.example/hyperloom:test"
+
+
+def test_a_section_with_no_fragment_is_returned_untouched():
+    section = {"session_id": "sess-1178"}
+    assert ex._merge_session(None, section) is section
+    assert ex._merge_session({}, section) is section
+
+
+def test_an_unrecorded_budget_does_not_erase_the_collected_one():
+    """The snapshot writes every key on every save, so an unset int arrives as 0."""
+    merged = ex._merge_session(
+        {"max_minutes": 0, "tick_count": 0},
+        {"max_minutes": 360, "tick_count": 12},
+    )
+    assert merged["max_minutes"] == 360
+    assert merged["tick_count"] == 12
+
+
+def test_the_live_phase_stays_in_the_section_even_when_blank():
+    """Only the recorder knows the phase; the key was always present before the merge."""
+    merged = ex._merge_session({"phase": ""}, {"session_id": "sess-1178"})
+    assert merged["phase"] == ""
+
+
+def test_the_merged_section_measures_its_own_elapsed_time():
+    merged = ex._merge_session(
+        {
+            "start_ts": "2026-08-08T00:00:00+00:00",
+            "ended_at_utc": "2026-08-08T02:00:00+00:00",
+            "stop_reason": "target_reached",
+        },
+        {"elapsed_minutes": 0.0},
+    )
+    assert merged["elapsed_minutes"] == 120.0
