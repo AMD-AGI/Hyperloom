@@ -28,6 +28,7 @@ from ._grid_runner import (
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
+    session_grid_bounds,
 )
 from ._workload_envs import (
     FrameworkScriptMismatchError,
@@ -796,12 +797,21 @@ class FrameworkAgentExecutor:
                 },
             )
 
-        # Bench via run_grid (size=1).
+        # Bench via run_grid (size=1). Bound it by the session wall-clock, as the
+        # sweep and explore arms already are: without it the declared cap is the
+        # only limit, and that cap answers "how long before this counts as hung",
+        # not "how much budget is left" -- so a candidate benched near the end of
+        # a run could outlive the run itself.
+        session_deadline_sec, variant_expected_sec = session_grid_bounds(
+            extra.get("shared_state") or extra.get("state")
+        )
         try:
             bench_result, gate_evidence = await self._bench_candidate(
                 params=params,
                 output_root=output_root,
                 slug=slug,
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
             )
         except FrameworkScriptMismatchError as exc:
             reverted = self._revert_patches(
@@ -1127,6 +1137,8 @@ class FrameworkAgentExecutor:
         params: dict[str, Any],
         output_root: Path,
         slug: str,
+        session_deadline_sec: float | None = None,
+        variant_expected_sec: float | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run a 1-variant Magpie bench under the patched server + accuracy
         gate. Mirrors :meth:`IntegratePatchExecutor._bench_patch`.
@@ -1135,6 +1147,11 @@ class FrameworkAgentExecutor:
             params: The task params (config / model / bench knobs).
             output_root: The per-task workspace root for the bench.
             slug: The candidate slug used to name the variant.
+            session_deadline_sec: Monotonic-clock session budget deadline, or
+                ``None`` when unbounded. Resolved by the caller, which owns the
+                session context.
+            variant_expected_sec: Expected bench runtime used to decide whether
+                the remaining budget can fit this bench at all.
 
         Returns:
             A ``(bench, gate_evidence)`` tuple: the bench result dict and a
@@ -1205,6 +1222,8 @@ class FrameworkAgentExecutor:
                 benchmark_script=override_script,
                 result_dir=override_result_dir,
                 serving_lease=serving_lease,
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
             )
         finally:
             if serving_lease is not None:

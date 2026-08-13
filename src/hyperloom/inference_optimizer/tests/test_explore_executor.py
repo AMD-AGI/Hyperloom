@@ -25,6 +25,7 @@ from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
     canonical_fingerprint,
 )
 from hyperloom.orchestrator.actions.executors._grid_runner import (
+    _SESSION_KILL_GRACE_SEC,
     apply_compatibility_filter,
 )
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
@@ -1603,6 +1604,138 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
     assert all(d is None for d in received_deadlines)
     out = res.result
     assert out["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_explore_variant_cap_is_clamped_to_the_session_budget(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """A granted cap never exceeds what is left of the session.
+
+    explore derives the cap from the measured baseline (up to 4h) and never
+    consulted the budget, so a 3h session could hand a single variant more time
+    than the whole run was given.
+    """
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.max_minutes = 3.0  # 180s budget - 120s close reserve => ~60s usable
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    granted: list[int] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        # Only benchmark rounds carry --output-dir; the interpreter probe does not,
+        # and it is module-memoized, so counting it would make this order-dependent.
+        if "--output-dir" not in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+        granted.append(int(kwargs["timeout"]))
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(slot, tput=840.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-clamp"),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "v_fits",
+                    "extra_args": "--max-num-seqs 256",
+                    "extra_envs": {},
+                    "provenance": "default_grid",
+                }
+            ],
+            "variant_timeout_sec": 3600,
+            "baseline_runtime_sec": 20.0,
+        },
+        idempotency_key="ex-budget-clamp",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    assert res.result["status"] == "succeeded"
+    assert granted, "the variant should have been admitted (20s expected, ~60s left)"
+    # The hard cap is allowed to sit a grace window past the deadline so the
+    # in-process session watchdog reaps the tree first and the kill is attributed
+    # to the budget rather than to a slow variant.
+    assert all(t <= 60 + _SESSION_KILL_GRACE_SEC for t in granted), (
+        f"caps must be clamped to the ~60s budget, got {granted}"
+    )
+    assert all(t < 3600 for t in granted), f"the declared 3600s cap must not survive the budget, got {granted}"
+
+
+@pytest.mark.asyncio
+async def test_explore_skips_a_variant_the_budget_cannot_fit(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """Admission is judged on the expected runtime, and refused when it does not fit."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.max_minutes = 3.0  # ~60s usable
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    granted: list[int] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        if "--output-dir" not in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+        granted.append(int(kwargs["timeout"]))
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(slot, tput=840.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-nofit"),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "v_too_long",
+                    "extra_args": "--max-num-seqs 256",
+                    "extra_envs": {},
+                    "provenance": "default_grid",
+                }
+            ],
+            "variant_timeout_sec": 3600,
+            "baseline_runtime_sec": 600.0,
+        },
+        idempotency_key="ex-budget-nofit",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    assert granted == [], "a variant needing 600s must not start with ~60s left"
+    # Measuring nothing because the budget ran out is not the same as variants
+    # failing, and it must not be reported as a bare, unattributed failure.
+    assert res.result["error_class"] == "session_time_exhausted"
+    assert res.result["session_budget_untested"] == 1
+    # Untested variants stay out of the ledger so a resume can retry them.
+    assert res.result["losers"] == []
+    assert res.result["explore_search_update"]["tested"] == {}
 
 
 @pytest.mark.asyncio

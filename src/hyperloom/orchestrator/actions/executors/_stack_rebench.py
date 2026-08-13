@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ._grid_runner import GridVariant, run_grid
+from ._grid_runner import SESSION_TIME_EXHAUSTED_CLASS, GridVariant, run_grid
 
 
 # Single source of truth for the post-KEEP confirmation floor shared by every
@@ -43,6 +43,15 @@ class StackRebenchResult:
         """True when the measured throughput cleared the stability floor."""
         return self.tput is not None and self.tput >= self.stable_floor
 
+    @property
+    def skipped_for_session_budget(self) -> bool:
+        """True when the round never ran because the session budget was spent.
+
+        Lets a caller tell "the confirmation did not happen" apart from "the
+        confirmation failed", which are different facts about the variant.
+        """
+        return any(w.startswith(f"stack_rebench_skipped:{SESSION_TIME_EXHAUSTED_CLASS}") for w in self.warnings)
+
 
 async def measure_stack_rebench(
     *,
@@ -64,6 +73,8 @@ async def measure_stack_rebench(
     soft_deadline_sec: float | None = None,
     server_already_ready: bool = False,
     serving_lease: Any = None,
+    session_deadline_sec: float | None = None,
+    variant_expected_sec: float | None = None,
 ) -> StackRebenchResult:
     """Run ``variant`` once on the stack and grade it against the floor.
 
@@ -76,6 +87,12 @@ async def measure_stack_rebench(
     execution, §12 T1) routes the round through the caller's held Ray lease so
     the rebench shares the same lease as the warmup/decision rounds it reuses
     the hot server from; ``None`` keeps the local path.
+
+    ``session_deadline_sec`` bounds the rebench by the session wall-clock, so a
+    confirmation round cannot outlive the run it is confirming for.
+    A rebench dropped for lack of budget is reported as its own warning rather
+    than as a failed measurement: not measuring a variant is not evidence that
+    the variant is unstable, and the caller grades on the distinction.
     """
     output_slot.mkdir(parents=True, exist_ok=True)
     results = await run_grid(
@@ -95,6 +112,8 @@ async def measure_stack_rebench(
         soft_deadline_sec=soft_deadline_sec,
         server_already_ready=server_already_ready,
         serving_lease=serving_lease,
+        session_deadline_sec=session_deadline_sec,
+        variant_expected_sec=variant_expected_sec,
     )
     rb = results[0] if results else None
     tput: float | None = None
@@ -104,6 +123,8 @@ async def measure_stack_rebench(
         tput = rb.output_throughput
         workspace = rb.workspace
         warnings = list(rb.nonfatal_warnings)
+    elif rb is not None and getattr(rb, "error_class", "") == SESSION_TIME_EXHAUSTED_CLASS:
+        warnings.append(f"stack_rebench_skipped:{SESSION_TIME_EXHAUSTED_CLASS}")
     elif rb is not None:
         warnings.append(f"stack_rebench_failed:{(rb.error or '')[-120:]}")
     else:

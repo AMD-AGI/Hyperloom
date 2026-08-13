@@ -238,6 +238,159 @@ async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
+def _capture_bench(captured: dict, result: dict, gate: dict):
+    """A ``_bench_patch`` stub that records the kwargs it was handed."""
+
+    async def _b(self, **kwargs):
+        captured.update(kwargs)
+        return result, gate
+
+    return _b
+
+
+@pytest.mark.asyncio
+async def test_bench_is_bounded_by_the_session_budget(tmp_path, monkeypatch):
+    """The patch bench is handed the session budget, as the other arms are.
+
+    Its declared cap answers "how long before this counts as hung", not "how much
+    budget is left", so without the session deadline a patch benched near the end
+    of a run outlives the run itself.
+    """
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    class _SS:
+        baseline_runtime_sec = 600.0
+
+        def get_specialist_patch_verdict(self, tid):
+            return "approve"
+
+        def grid_session_deadline_sec(self, **_kwargs):
+            return 4242.0
+
+    captured: dict[str, Any] = {}
+    ex = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _capture_bench(captured, {"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": None}),
+    )
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": str(repo),
+                "base_tput": 100.0,
+                "enable_stack_rebench": False,
+            },
+            extra={"shared_state": _SS()},
+        )
+    )
+
+    assert res["status"] == "kept"
+    assert captured["session_deadline_sec"] == 4242.0
+    # The expected runtime, not the backstop cap: admitting on the backstop
+    # abandons the tail of the budget.
+    assert captured["variant_expected_sec"] == 600.0
+
+
+@pytest.mark.asyncio
+async def test_bench_budget_is_unbounded_without_a_session(tmp_path, monkeypatch):
+    """No session context means no deadline, not a deadline of zero."""
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    captured: dict[str, Any] = {}
+    ex = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _capture_bench(captured, {"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": None}),
+    )
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": str(repo),
+                "base_tput": 100.0,
+                "enable_stack_rebench": False,
+            },
+        )
+    )
+
+    assert res["status"] == "kept"
+    assert captured["session_deadline_sec"] is None
+    assert captured["variant_expected_sec"] is None
+
+
+@pytest.mark.asyncio
+async def test_bench_patch_forwards_the_session_budget_to_the_grid(tmp_path, monkeypatch):
+    session = tmp_path / "s"
+    session.mkdir()
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+
+    captured: dict[str, Any] = {}
+
+    async def fake_run_grid(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
+    monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *a, **k: config_path)
+
+    await IntegratePatchExecutor(session_dir=session)._bench_patch(
+        params={"config_path": str(config_path)},
+        output_root=tmp_path / "out",
+        extra_server_args_applied="",
+        extra_envs_applied={},
+        specialist_task_id="spec",
+        session_deadline_sec=4242.0,
+        variant_expected_sec=600.0,
+    )
+
+    assert captured["session_deadline_sec"] == 4242.0
+    assert captured["variant_expected_sec"] == 600.0
+
+
+@pytest.mark.asyncio
+async def test_switch_off_parity_leg_is_bounded_by_the_session_budget(tmp_path, monkeypatch):
+    """The parity leg is a second full bench, so it needs the same bound."""
+    session = tmp_path / "s"
+    session.mkdir()
+    captured: dict[str, Any] = {}
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+        return ({"output_throughput": 100.0, "status": "succeeded"}, {"accuracy_pass": None})
+
+    ex = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(ex, "_bench_patch", _capture)
+
+    await ex._switch_off_parity(
+        params={},
+        output_root=tmp_path,
+        specialist_task_id="spec",
+        switch_manifest=[{"switch": "HYPERLOOM_REWRITE_X"}],
+        base_tput=100.0,
+        session_deadline_sec=4242.0,
+        variant_expected_sec=600.0,
+    )
+
+    assert captured["session_deadline_sec"] == 4242.0
+    assert captured["variant_expected_sec"] == 600.0
+
+
 @pytest.mark.asyncio
 async def test_keep_path(tmp_path, monkeypatch):
     session = tmp_path / "s"
@@ -306,6 +459,71 @@ async def test_confirmation_rebench_floor_stays_below_keep_threshold(tmp_path, m
     )
 
     assert captured["stable_threshold_pct"] == pytest.approx(0.2)
+
+
+@pytest.mark.asyncio
+async def test_stack_rebench_is_bounded_by_the_session_budget(tmp_path, monkeypatch):
+    """The confirmation round must not outlive the run it is confirming for."""
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+    captured: dict[str, Any] = {}
+
+    async def _measure(**kwargs):
+        captured.update(kwargs)
+        return StackRebenchResult(tput=None, workspace=None)
+
+    monkeypatch.setattr(ip, "materialize_config_with_envs", lambda *a, **k: config_path)
+    monkeypatch.setattr(ip, "measure_stack_rebench", _measure)
+
+    await IntegratePatchExecutor(session_dir=tmp_path)._confirm_stack_rebench(
+        params={"config_path": str(config_path)},
+        output_root=tmp_path / "output",
+        extra_server_args_applied="",
+        extra_envs_applied={},
+        specialist_task_id="spec",
+        base_tput=100.0,
+        session_deadline_sec=4242.0,
+        variant_expected_sec=600.0,
+    )
+
+    assert captured["session_deadline_sec"] == 4242.0
+    assert captured["variant_expected_sec"] == 600.0
+
+
+@pytest.mark.asyncio
+async def test_rebench_dropped_for_budget_is_not_reported_as_a_failed_measurement(tmp_path):
+    """Not measuring a variant is not evidence that the variant is unstable."""
+    from unittest.mock import patch
+
+    from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, VariantResult
+    from hyperloom.orchestrator.actions.executors import _stack_rebench as sr
+
+    skipped = VariantResult(
+        name="v",
+        extra_server_args="",
+        extra_envs={},
+        status="skipped",
+        error="session wall-clock budget exhausted before this variant ran",
+        error_class="session_time_exhausted",
+    )
+
+    async def _fake_run_grid(**_kwargs):
+        return [skipped]
+
+    with patch.object(sr, "run_grid", new=_fake_run_grid):
+        result = await sr.measure_stack_rebench(
+            config_path=tmp_path / "base.yaml",
+            base_extra_args="",
+            variant=GridVariant("v"),
+            base_tput=100.0,
+            stable_threshold_pct=0.5,
+            output_slot=tmp_path / "slot",
+            variant_timeout_sec=600,
+        )
+
+    assert result.skipped_for_session_budget
+    assert result.warnings == ["stack_rebench_skipped:session_time_exhausted"]
+    assert not any("stack_rebench_failed" in w for w in result.warnings)
 
 
 @pytest.mark.asyncio

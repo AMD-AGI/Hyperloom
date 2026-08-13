@@ -23,6 +23,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
+    SESSION_TIME_EXHAUSTED_RETURNCODE,
     _scan_logs_increment,
     _scan_server_log_increment,
     _server_log_shows_death,
@@ -296,6 +297,115 @@ def test_run_with_session_kill_soft_deadline_still_fires_without_eval_marker(tmp
     elapsed = time.monotonic() - start
     assert cp.returncode == OVERTIME_KILL_RETURNCODE
     assert elapsed < 10.0, f"soft-deadline path took {elapsed:.2f}s"
+
+
+class TestSessionDeadline:
+    """The session budget is a separate channel from the soft deadline.
+
+    The soft deadline answers "is this variant abnormally slow", which is why it
+    retires when the accuracy eval starts. The session budget answers "is the run
+    out of time", which no phase boundary changes.
+    """
+
+    def test_expired_session_budget_reaps_the_tree_with_its_own_sentinel(self):
+        start = time.monotonic()
+        cp = run_with_session_kill(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            timeout=60,
+            session_deadline_sec=time.monotonic() - 1.0,
+        )
+        elapsed = time.monotonic() - start
+        assert cp.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
+        assert cp.returncode != OVERTIME_KILL_RETURNCODE, (
+            "a budget kill must not share the overtime code, which asserts the variant is slow"
+        )
+        assert elapsed < 10.0, f"session-deadline path took {elapsed:.2f}s"
+
+    def test_eval_start_does_not_retire_the_session_budget(self, tmp_path):
+        """The marker that retires the soft deadline must not retire this one.
+
+        An accuracy eval that starts one minute before the run is out of time
+        still has to stop; this is the whole reason the two are separate channels.
+        """
+        log_path = tmp_path / "server.log"
+        log_path.write_text("Application startup complete\nHYPERLOOM_EVAL_START\n")
+        start = time.monotonic()
+        cp = run_with_session_kill(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            timeout=60,
+            soft_deadline_sec=1.0,
+            server_log_path=str(log_path),
+            session_deadline_sec=time.monotonic() + 1.5,
+        )
+        elapsed = time.monotonic() - start
+        assert cp.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
+        assert elapsed < 10.0, f"session budget was not enforced during eval ({elapsed:.2f}s)"
+
+    def test_a_budget_with_room_left_leaves_the_child_alone(self):
+        start = time.monotonic()
+        cp = run_with_session_kill(
+            [sys.executable, "-c", "import time; time.sleep(2)"],
+            timeout=60,
+            session_deadline_sec=time.monotonic() + 3600.0,
+        )
+        elapsed = time.monotonic() - start
+        assert cp.returncode == 0
+        assert elapsed >= 1.5, f"child was cut short at {elapsed:.2f}s"
+
+    def test_no_session_deadline_keeps_the_previous_behaviour(self):
+        cp = run_with_session_kill(
+            [sys.executable, "-c", "print('done')"],
+            timeout=30,
+            session_deadline_sec=None,
+        )
+        assert cp.returncode == 0
+        assert "done" in (cp.stdout or "")
+
+
+def _sentinel_returncodes() -> dict[int, set[str]]:
+    """Map every sentinel returncode to the qualified names that claim it."""
+    from hyperloom.orchestrator.actions.executors import _ray_serving, _subprocess_kill
+
+    assigned: dict[int, set[str]] = {}
+    for module in (_subprocess_kill, _ray_serving):
+        short = module.__name__.rsplit(".", 1)[-1]
+        for name, value in vars(module).items():
+            if not isinstance(value, int) or isinstance(value, bool):
+                continue
+            if not (name.endswith("_RETURNCODE") or name.endswith("_RC")):
+                continue
+            assigned.setdefault(value, set()).add(f"{short}.{name}")
+    return assigned
+
+
+def test_every_sentinel_returncode_names_exactly_one_cause():
+    """A sentinel shared by two causes makes attribution a coin flip.
+
+    The codes are handed out in more than one module and all arrive at their
+    consumer as a plain ``returncode``, so a new one can quietly reuse a number
+    already taken. That is how the session-budget code first landed on the Ray
+    actor-died number, which would have had every actor death read as a spent
+    budget and taught the ledger the wrong thing about both.
+    """
+    assigned = _sentinel_returncodes()
+
+    collisions = {code: sorted(names) for code, names in assigned.items() if len(names) > 1}
+    assert not collisions, f"sentinel return codes collide: {collisions}"
+    assert SESSION_TIME_EXHAUSTED_RETURNCODE in assigned
+
+
+def test_an_actor_timeout_is_not_recorded_as_a_failed_agentx_preflight():
+    """The two causes that share ``_run_magpie``'s return channel stay apart.
+
+    ``_run_magpie`` returns ``AGENTX_PREFLIGHT_RETURNCODE`` when the execution
+    boundary fails preflight and, a few lines on, whatever the serving lease's
+    actor returned -- including ``_ACTOR_TIMEOUT_RC``. Callers see one
+    ``returncode`` either way, so the two sharing a number (which they did) is
+    enough to have a hung actor blamed on a missing aiperf.
+    """
+    from hyperloom.orchestrator.actions.executors import _ray_serving, _subprocess_kill
+
+    assert _ray_serving._ACTOR_TIMEOUT_RC != _subprocess_kill.AGENTX_PREFLIGHT_RETURNCODE
 
 
 def test_run_with_session_kill_streams_child_output_to_parent(capsys):

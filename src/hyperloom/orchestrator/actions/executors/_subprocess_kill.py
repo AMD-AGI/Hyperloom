@@ -260,6 +260,14 @@ AGENTX_PREFLIGHT_RETURNCODE: int = -912
 # already fails with, so a bounds gap reads identically on both arms.
 EVAL_PROBE_UNPATCHABLE_RETURNCODE: int = -914
 
+# Sentinel ``returncode`` when the session wall-clock budget ran out mid-round and
+# the tree was reaped. Deliberately distinct from ``OVERTIME_KILL_RETURNCODE``:
+# that one says "this variant ran far longer than the baseline", which is a
+# judgement about the variant, while this one says "the run was out of time",
+# which says nothing about the variant at all. Sharing a code would teach the KB
+# that a variant is slow whenever a session happened to end during it.
+SESSION_TIME_EXHAUSTED_RETURNCODE: int = -915
+
 # Server-ready markers: their appearance in ``server.log`` means the server has
 # finished startup and is accepting traffic. Only after one is observed does the
 # detokenizer-stall clock start. Covers the uvicorn frontend (vLLM + sglang) and
@@ -686,13 +694,25 @@ def run_with_session_kill(
     detok_stall_grace_sec: float | None = None,
     server_already_ready: bool = False,
     on_output: Callable[[], None] | None = None,
+    session_deadline_sec: float | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a subprocess in its own session and reap descendants on every exit path.
+
+    ``session_deadline_sec`` is an absolute ``time.monotonic()`` instant, unlike
+    ``soft_deadline_sec`` which is a relative duration. It is the session's own
+    wall-clock budget and is enforced in every phase, including the accuracy
+    eval -- the phase that retires ``soft_deadline_sec``. That distinction is the
+    reason it is a separate channel rather than a reuse of the soft deadline: the
+    eval-start boundary is meaningful for "is this variant abnormally slow" and
+    meaningless for "is the run out of time".
 
     Args:
         on_output: Called from a reader thread each time the child produces
             output, so a caller can report a long step alive on the child's own
             activity rather than on a timer.
+        session_deadline_sec: Absolute ``time.monotonic()`` instant at which the
+            session budget expires. Reaps the tree and returns
+            ``SESSION_TIME_EXHAUSTED_RETURNCODE``.
     """
     if server_dead_grace_sec is None:
         try:
@@ -738,6 +758,7 @@ def run_with_session_kill(
                 detok_stall_grace_sec=detok_stall_grace_sec,
                 capture=capture,
                 server_already_ready=server_already_ready,
+                session_deadline_sec=session_deadline_sec,
             )
         except subprocess.TimeoutExpired:
             kill_my_spawned_server(proc)
@@ -783,6 +804,24 @@ def run_with_session_kill(
                 stdout=stdout if stdout is not None else ("" if text else b""),
                 stderr=stderr if stderr is not None else ("" if text else b""),
             )
+        except _SessionDeadlineExceeded as exc:
+            kill_my_spawned_server(proc)
+            stdout, stderr = (
+                capture.finish(timeout=2.0) if capture is not None else ("" if text else b"", "" if text else b"")
+            )
+            log.warning(
+                "_subprocess_kill: session wall-clock budget exhausted %.1fs ago "
+                "(round elapsed=%.1fs); reaped tree with sentinel returncode=%d.",
+                exc.overrun_sec,
+                exc.elapsed_sec,
+                SESSION_TIME_EXHAUSTED_RETURNCODE,
+            )
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=SESSION_TIME_EXHAUSTED_RETURNCODE,
+                stdout=stdout if stdout is not None else ("" if text else b""),
+                stderr=stderr if stderr is not None else ("" if text else b""),
+            )
         except _SoftDeadlineExceeded as exc:
             kill_my_spawned_server(proc)
             stdout, stderr = (
@@ -809,6 +848,25 @@ def run_with_session_kill(
         )
     finally:
         kill_my_spawned_server(proc)
+
+
+class _SessionDeadlineExceeded(Exception):
+    """Internal sentinel: the session wall-clock budget ran out mid-round.
+
+    Never bubbles past :func:`run_with_session_kill` (converted to a
+    ``CompletedProcess`` carrying ``SESSION_TIME_EXHAUSTED_RETURNCODE``).
+    """
+
+    def __init__(self, *, overrun_sec: float, elapsed_sec: float) -> None:
+        """Record how far past the session deadline the round got.
+
+        Args:
+            overrun_sec (float): Seconds past the session deadline at trip time.
+            elapsed_sec (float): Wall-clock elapsed for this round at trip time.
+        """
+        super().__init__(f"session budget exhausted {overrun_sec:.1f}s ago (round elapsed={elapsed_sec:.1f}s)")
+        self.overrun_sec = float(overrun_sec)
+        self.elapsed_sec = float(elapsed_sec)
 
 
 class _SoftDeadlineExceeded(Exception):
@@ -897,6 +955,7 @@ def _communicate_with_soft_deadline(
     detok_stall_grace_sec: float | None = None,
     capture: _StreamCapture | None = None,
     server_already_ready: bool = False,
+    session_deadline_sec: float | None = None,
 ) -> tuple[str | bytes, str | bytes]:
     """Communicate with a child while enforcing soft and server-log watchdogs."""
     watchdog_active = bool(server_log_path) and (
@@ -904,9 +963,10 @@ def _communicate_with_soft_deadline(
     )
     stall_active = bool(server_log_path) and (detok_stall_grace_sec is not None and float(detok_stall_grace_sec) > 0.0)
     soft_active = soft_deadline_sec is not None and float(soft_deadline_sec) > 0.0
-    if capture is None and not soft_active and not watchdog_active and not stall_active:
+    session_active = session_deadline_sec is not None
+    if capture is None and not soft_active and not watchdog_active and not stall_active and not session_active:
         return proc.communicate(timeout=hard_timeout)
-    if capture is not None and not soft_active and not watchdog_active and not stall_active:
+    if capture is not None and not soft_active and not watchdog_active and not stall_active and not session_active:
         proc.wait(timeout=hard_timeout)
         return capture.finish()
 
@@ -950,6 +1010,16 @@ def _communicate_with_soft_deadline(
     while True:
         now = time.monotonic()
         elapsed = now - start
+        # Session budget. Checked before every other gate and never suspended:
+        # unlike the soft deadline it makes no claim about the variant, so the
+        # eval-start boundary that retires the soft deadline does not apply. An
+        # accuracy eval that starts one minute before the run is out of time still
+        # has to stop.
+        if session_active and session_deadline_sec is not None and now >= session_deadline_sec:
+            raise _SessionDeadlineExceeded(
+                overrun_sec=now - float(session_deadline_sec),
+                elapsed_sec=elapsed,
+            )
         # Advance the log scan, latching the server-ready, last-activity
         # and eval-start signals.
         if scan_active:
@@ -1023,6 +1093,8 @@ def _communicate_with_soft_deadline(
         # Slice bounded by every active remaining window so the right gate
         # fires first; the child can still finish inside any slice.
         slice_sec = poll_interval
+        if session_active and session_deadline_sec is not None:
+            slice_sec = min(slice_sec, float(session_deadline_sec) - now)
         if soft_active and deadline_sec is not None and not soft_deadline_suspended:
             if soft_from_ready:
                 if server_ready_since is not None:
@@ -1050,6 +1122,7 @@ __all__ = [
     "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
     "OVERTIME_KILL_RETURNCODE",
     "SERVER_DEAD_RETURNCODE",
+    "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "kill_my_spawned_server",
     "new_session_kwargs",
     "run_with_session_kill",
