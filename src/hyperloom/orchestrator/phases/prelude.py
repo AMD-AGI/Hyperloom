@@ -24,7 +24,10 @@ from ..state.task_registry import Task
 from ..loop.coordinator import (
     _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE,
 )
-from ..loop.coordinator_helpers import expected_action_cost_minutes
+from ..loop.coordinator_helpers import (
+    expected_action_cost_minutes,
+    measured_baseline_runtime_sec,
+)
 from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
@@ -156,30 +159,25 @@ class PreludePhase(PhaseHandler):
     def _measured_analysis_cost_sec(self) -> float:
         """Expected cost of the initial roofline/profile arm, in seconds.
 
-        Anchored on this session's own baseline round rather than the action
-        catalog. The catalog's estimates (``baseline`` 5 min, ``roofline``
-        8 min) are calibrated on small models: the two sessions that motivated
-        this guard measured 51 and 125 minutes of baseline and an 81-minute
-        roofline, so a catalog-anchored guard admits an arm it cannot pay for.
-
         The analysis arm boots its own server and runs the same benchmark under
-        a profiler, so one measured baseline round is a floor on its cost
-        rather than a guess at it. The catalog is the fallback for the first
-        analysis of a session that has no measurement yet.
+        a profiler, so one measured baseline round is a floor on its cost rather
+        than a guess at it; :func:`expected_action_cost_minutes` applies that
+        floor and falls back to the catalog for the first analysis of a session
+        that has no measurement yet.
 
         Returns:
             float: Expected cost in seconds; ``0.0`` when nothing is on record,
             which :func:`machine_state.prelude_can_afford` reads as free.
         """
-        try:
-            measured = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            measured = 0.0
-        if measured > 0.0:
-            return measured
         registry = getattr(self, "action_registry", None)
         meta = registry.get(self._internal_analysis_kind()) if registry is not None else None
-        return expected_action_cost_minutes(meta) * 60.0
+        return (
+            expected_action_cost_minutes(
+                meta,
+                measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state),
+            )
+            * 60.0
+        )
 
     def _record_prelude_arm_dropped(self, arm: str, evidence: dict[str, Any]) -> None:
         """Record a PRELUDE arm dropped for budget on the current phase record.

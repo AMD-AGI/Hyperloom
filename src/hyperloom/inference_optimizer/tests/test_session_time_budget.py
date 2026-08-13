@@ -28,6 +28,7 @@ import asyncio
 import threading
 import time
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -49,6 +50,7 @@ from hyperloom.orchestrator.loop.coordinator_helpers import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
     expected_action_cost_minutes,
+    measured_baseline_runtime_sec,
 )
 from hyperloom.orchestrator.policy.gate import PolicyDenied
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
@@ -60,6 +62,10 @@ _EXPENSIVE_ACTION = "kernel_opt"
 _EXPENSIVE_COST_MIN = 60.0
 # Cheap enough to fit anything but a nearly-spent budget.
 _CHEAP_ACTION = "profile"
+# An action the catalogue prices at five minutes, and what one of the two
+# sessions that motivated the wall-clock work actually measured for it.
+_BASELINE_ACTION = "baseline"
+_MEASURED_BASELINE_SEC = 51 * 60.0
 
 
 def _heartbeat() -> Intent:
@@ -112,6 +118,52 @@ class TestTheCostTheGateJudgesOn:
         renamed field through a ``getattr`` default silently produced."""
         free = sorted(name for name, meta in ACTION_CATALOGUE.items() if expected_action_cost_minutes(meta) <= 0.0)
         assert free == []
+
+
+class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
+    """The catalogue prices a baseline at five minutes; the field runs it in 51.
+
+    Those estimates are calibrated on small models, so a gate anchored on them
+    admits arms a real model cannot pay for -- it would not have stopped either
+    of the two sessions that motivated the wall-clock work. PRELUDE's
+    affordability gate already anchors on the session's own baseline round;
+    admission now reads the same number through the same helper.
+    """
+
+    def test_a_measured_round_outprices_the_catalogue_for_an_action_that_benches(self):
+        cost = expected_action_cost_minutes(
+            ACTION_CATALOGUE["baseline"],
+            measured_baseline_sec=_MEASURED_BASELINE_SEC,
+        )
+        assert cost == pytest.approx(51.0)
+
+    def test_the_catalogue_wins_where_it_prices_more_than_one_round(self):
+        """The measurement is a floor, not a replacement: only the catalogue
+        knows an action benches a whole grid rather than a single variant."""
+        cost = expected_action_cost_minutes(
+            ACTION_CATALOGUE[_EXPENSIVE_ACTION],
+            measured_baseline_sec=_MEASURED_BASELINE_SEC,
+        )
+        assert cost == pytest.approx(_EXPENSIVE_COST_MIN)
+
+    def test_an_action_that_never_benches_keeps_its_own_estimate(self):
+        """Writing the report costs what it costs; the model's size is not in it."""
+        cost = expected_action_cost_minutes(
+            ACTION_CATALOGUE["report"],
+            measured_baseline_sec=_MEASURED_BASELINE_SEC,
+        )
+        assert cost == pytest.approx(ACTION_CATALOGUE["report"].typical_runtime_min)
+
+    def test_a_session_with_no_baseline_yet_falls_back_to_the_catalogue(self):
+        assert expected_action_cost_minutes(ACTION_CATALOGUE["baseline"]) == pytest.approx(5.0)
+
+    def test_a_measurement_that_is_not_a_number_is_not_a_cost(self):
+        assert measured_baseline_runtime_sec(None) == 0.0
+        assert measured_baseline_runtime_sec(SimpleNamespace(baseline_runtime_sec="not-a-number")) == 0.0
+        assert measured_baseline_runtime_sec(SimpleNamespace(baseline_runtime_sec=-1.0)) == 0.0
+        assert measured_baseline_runtime_sec(SimpleNamespace(baseline_runtime_sec=_MEASURED_BASELINE_SEC)) == (
+            pytest.approx(_MEASURED_BASELINE_SEC)
+        )
 
 
 class TestFitDecision:
@@ -250,6 +302,19 @@ class TestTimeBudgetGate:
         _set_budget(coord, minutes=1)
         coord.shared_state.stop_reason = "time_exhausted"
         assert coord._time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
+
+    def test_this_session_s_own_baseline_changes_the_answer(self, coord: Coordinator):
+        """Half an hour left admits a baseline the catalogue prices at five
+        minutes -- until this session has measured one and knows better."""
+        _set_budget(coord, minutes=30)
+        assert coord._time_budget_denial_for_action(_BASELINE_ACTION) is None
+
+        coord.shared_state.baseline_runtime_sec = _MEASURED_BASELINE_SEC
+        denied = coord._time_budget_denial_for_action(_BASELINE_ACTION)
+
+        assert isinstance(denied, PolicyDenied)
+        assert denied.rule == "time_budget"
+        assert "51 min" in str(denied)
 
     def test_the_budget_shrinks_the_gate_as_the_session_runs(self, coord: Coordinator):
         _set_budget(coord, minutes=120, elapsed_min=0.0)
