@@ -2656,6 +2656,42 @@ _AITER_SERVING_MARKERS = {
     "fused_moe": ("[aiter] [fused_moe]", "Mxfp4 MoE backend"),
 }
 
+#: aiter logs the fused-MoE problem it dispatched as
+#: ``[fused_moe] using ... (cu, token, dim, inter, experts, topk, act, dtype,
+#: q_dtype_a, q_dtype_w, q_type, ...)``.
+_AITER_FUSED_MOE_TUPLE_RE = re.compile(
+    r"\[fused_moe\] using \S+ \S+ for \(\d+, \d+, \d+, \d+, \d+, \d+, "
+    r"'[^']*', '[^']*', '([^']*)', '([^']*)'"
+)
+
+
+def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
+    """Return whether aiter's CK MoE tuner can tune what the server dispatched.
+
+    The tuner builds its kernel candidates from the activation/weight dtype pair
+    and rejects some combinations the serving path happily runs. Measured on
+    gpt-oss-120b at TP=1, a BF16-activation / FP4-weight MoE (the
+    ``AITER_MXFP4_BF16`` backend) benchmarks fine but fails candidate generation
+    with ``Unsupported data type combination: b16, fp4x2``, so routing it to
+    ``fmoe_ck`` would only trade silent no-op for a hard tuner error.
+    """
+    if not server_log:
+        return False
+    try:
+        text = Path(server_log).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    combos = {
+        (q_a.replace("torch.", ""), q_w.replace("torch.", ""))
+        for q_a, q_w in _AITER_FUSED_MOE_TUPLE_RE.findall(text)
+    }
+    if not combos:
+        # MoE evidence without a parseable problem tuple: let Forge decide.
+        return True
+    return not any(
+        act.startswith("bfloat") and weight.startswith("float4") for act, weight in combos
+    )
+
 
 def _aiter_serving_evidence(server_log: str) -> set[str]:
     """Return which aiter kernel families a server log shows in use.
@@ -2730,7 +2766,7 @@ def _resolve_vllm_aiter_routing(
     # rides along with its MoE routing instead.
     flags["aiter_bf16_dense"] = "bf16_dense" in evidence and not is_moe
 
-    if "fused_moe" in evidence and is_moe:
+    if "fused_moe" in evidence and is_moe and _aiter_ck_moe_tuner_supports(server_log):
         # Only route MoE when aiter's CK fused-MoE can actually serve this
         # checkpoint at this TP -- otherwise the tuner has no reachable target.
         from hyperloom.inference_optimizer.cli.model_gate import (

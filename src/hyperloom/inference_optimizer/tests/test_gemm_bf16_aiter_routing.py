@@ -43,6 +43,11 @@ AITER_FUSED_MOE = (
     "(256, 8192, 3072, 1536, 128, 4, 'ActivationType.Swiglu', 'torch.bfloat16', "
     "'torch.float8_e4m3fn', 'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False)"
 )
+AITER_FUSED_MOE_BF16_FP4 = (
+    "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage default for "
+    "(256, 8192, 3072, 3072, 128, 4, 'ActivationType.Swiglu', 'torch.bfloat16', "
+    "'torch.bfloat16', 'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False)"
+)
 
 
 class TestAiterServingEvidence:
@@ -64,6 +69,47 @@ class TestAiterServingEvidence:
         assert krh._aiter_serving_evidence(str(tmp_path / "absent.log")) == set()
 
 
+def _moe_tuple(q_a: str, q_w: str, q_type: str = "QuantType.per_1x32") -> str:
+    return (
+        "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage default for "
+        f"(256, 8192, 3072, 3072, 128, 4, 'ActivationType.Swiglu', 'torch.bfloat16', "
+        f"'{q_a}', '{q_w}', '{q_type}', True, False)"
+    )
+
+
+class TestCkMoeTunerSupport:
+    def test_bf16_activation_with_fp4_weights_is_unsupported(self, tmp_path):
+        """Measured: candidate generation raises 'Unsupported data type combination'."""
+        log = _log(tmp_path, _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2"))
+        assert not krh._aiter_ck_moe_tuner_supports(log)
+
+    def test_fp8_activation_with_fp4_weights_is_supported(self, tmp_path):
+        log = _log(tmp_path, _moe_tuple("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2"))
+        assert krh._aiter_ck_moe_tuner_supports(log)
+
+    def test_fp4_activation_and_weights_is_supported(self, tmp_path):
+        log = _log(tmp_path, _moe_tuple("torch.float4_e2m1fn_x2", "torch.float4_e2m1fn_x2"))
+        assert krh._aiter_ck_moe_tuner_supports(log)
+
+    def test_unquantised_bf16_moe_is_supported(self, tmp_path):
+        log = _log(tmp_path, _moe_tuple("torch.bfloat16", "torch.bfloat16", "QuantType.No"))
+        assert krh._aiter_ck_moe_tuner_supports(log)
+
+    def test_any_unsupported_combo_blocks_the_model(self, tmp_path):
+        """gpt-oss logs both combos; the unsupported one has to win."""
+        log = _log(
+            tmp_path,
+            _moe_tuple("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2")
+            + "\n"
+            + _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2"),
+        )
+        assert not krh._aiter_ck_moe_tuner_supports(log)
+
+    def test_moe_evidence_without_a_parseable_tuple_defers_to_forge(self, tmp_path):
+        log = _log(tmp_path, "INFO Using 'AITER_MXFP4_BF16' Mxfp4 MoE backend.\n")
+        assert krh._aiter_ck_moe_tuner_supports(log)
+
+
 class TestResolveVllmAiterRouting:
     def test_dense_bf16_model(self, tmp_path):
         flags = krh._resolve_vllm_aiter_routing(
@@ -80,6 +126,14 @@ class TestResolveVllmAiterRouting:
         assert flags["aiter_fused_moe"] is True
         # A MoE checkpoint's dense side rides along with its MoE routing.
         assert flags["aiter_bf16_dense"] is False
+
+    def test_moe_blocked_when_the_tuner_rejects_the_dtype_pair(self, tmp_path):
+        flags = krh._resolve_vllm_aiter_routing(
+            model_path=_model(tmp_path, moe=True),
+            server_log=_log(tmp_path, AITER_FUSED_MOE_BF16_FP4),
+            tp=1,
+        )
+        assert flags["aiter_fused_moe"] is False
 
     def test_moe_blocked_when_ck_cannot_serve_the_shard(self, tmp_path):
         """moe_intermediate_size=1536 shards to 192 at tp=8, which CK rejects."""
