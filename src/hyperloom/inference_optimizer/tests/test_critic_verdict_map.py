@@ -921,20 +921,27 @@ def test_a_rule_named_in_a_remediation_note_is_not_a_citation():
     "reasoning",
     [
         pytest.param(
-            f"x_{QUANTITATIVE_CLAIM_REASON_CODE}: the log key the trace is under.",
-            id="the_code_does_not_open_the_line",
+            f"{QUANTITATIVE_CLAIM_REASON_CODE}_v2: a successor rule, not this one.",
+            id="a_longer_identifier_the_code_only_starts",
         ),
         pytest.param(
-            f"{QUANTITATIVE_CLAIM_REASON_CODE}_v2: a successor rule, not this one.",
-            id="the_colon_does_not_follow_the_code",
+            f"{QUANTITATIVE_CLAIM_REASON_CODE}\u00a0: a non-breaking space, not the gap a citation leaves.",
+            id="a_space_that_is_not_the_gap_a_citation_leaves",
         ),
     ],
 )
-def test_a_code_that_neither_opens_the_line_nor_meets_the_colon_is_not_a_citation(reasoning):
-    """The scan anchors the code at the start of the grounds and requires the
-    colon to follow the code itself: nothing but whitespace or a backtick may
-    precede it, and nothing may sit between it and the colon. An identifier
-    that merely contains the code fails one end or the other."""
+def test_a_code_the_colon_does_not_follow_is_not_a_citation(reasoning):
+    """Nothing may sit between the code and the colon but a backtick and an
+    ASCII gap, so an identifier the code merely starts is not a citation. The
+    gap stays ASCII on purpose: a line has already been through ``splitlines``,
+    which leaves only exotic unicode spaces for a wider class to add, and
+    stretching the scan to reach them would buy a guess at the cost of reading
+    citations that were never made.
+
+    The other end of the anchor -- that nothing but whitespace or a backtick may
+    precede the code -- is what
+    ``test_a_rule_a_verdict_enumerates_or_quotes_is_not_the_ground_it_rests_on``
+    covers, through the list and quote markers a model actually writes."""
     entry = {"verdict": "reject", "reasoning": reasoning}
 
     assert verdict_held_to_its_rule(entry, action_name="specialist") == ("reject", "")
