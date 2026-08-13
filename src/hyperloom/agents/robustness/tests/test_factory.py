@@ -433,6 +433,44 @@ async def test_factory_uses_quiet_fallback_when_local_probe_disabled(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_the_quiet_fallback_does_not_pass_its_empty_process_list_off_as_evidence(tmp_path: Path):
+    """Nothing looked, so "no processes" is ignorance and must not read as "no server".
+
+    The stub probes no health targets of its own, so today the flag only matters
+    if its snapshot is ever merged with one that did probe — which is exactly the
+    consumer asserted here, the guard that suppresses
+    ``local_server_unreachable`` when the process probe saw no server.
+    """
+    from dataclasses import replace
+
+    from hyperloom.agents.robustness.role.prompt_inputs import ReactorContext, SharedStateSnapshot
+    from hyperloom.agents.robustness.signals import evaluate_local_health_signals
+
+    config = Config(session_dir=tmp_path, disable_local_probe=True)
+    bundle = build_reactor_components(config)
+    try:
+        data = await bundle.components.router._fallback.fetch(None)  # type: ignore[attr-defined]
+        assert data.local_processes_known is False
+        probed = replace(
+            data,
+            local_server_health=[
+                {"url": "http://localhost:8888/health", "reachable": False, "status": "error", "error": "connect"},
+            ],
+        )
+        ctx = ReactorContext(
+            tick_index=0,
+            shared_state=SharedStateSnapshot(session_id="sess-1"),
+            inbox=[],
+            now_unix=1.0,
+        )
+        matched = [s for s in evaluate_local_health_signals(ctx, probed) if s.name == "local_server_unreachable"]
+        assert len(matched) == 1
+        assert matched[0].evidence["server_process_seen"] is None
+    finally:
+        await bundle.aclose()
+
+
+@pytest.mark.asyncio
 async def test_factory_default_keeps_local_probe_fallback(tmp_path: Path):
     from hyperloom.agents.robustness.sources.local_probe import LocalProbeSource
 
