@@ -24,7 +24,10 @@ from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
     validate_envelope,
 )
-from hyperloom.orchestrator.loop.coordinator_helpers import verdict_held_to_its_rule
+from hyperloom.orchestrator.loop.coordinator_helpers import (
+    collapse_verdicts,
+    verdict_held_to_its_rule,
+)
 from hyperloom.orchestrator.policy.gate import (
     INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
     PolicyDenied,
@@ -704,6 +707,35 @@ async def test_a_held_reject_is_not_a_landing_permit(coord):
 
 
 @pytest.mark.asyncio
+async def test_a_held_variant_mirrors_the_verdict_the_critic_wrote(coord):
+    """The mirror is a landing permit for the specialist's patches, and the
+    per-variant path reaches it the same way the single one does: what the
+    Critic wrote is mirrored, whatever the hold made of it for this round."""
+    coord.shared_state = _PatchVerdictSharedState()
+    pending = PendingProposal(
+        proposal_msg_id="msg-map-permit",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-map"}},
+    )
+    coord.state.pending_proposals["msg-map-permit"] = pending
+    entry = {"verdict": "reject", "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE}
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-permit",
+            "verdict_map": {"v_a": dict(entry), "v_b": dict(entry)},
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "advise"
+    assert len(coord._materialise_calls) == 1
+    assert coord.shared_state.patch_verdicts["t-map"] == "reject"
+
+
+@pytest.mark.asyncio
 async def test_an_unheld_verdict_still_mirrors_itself(coord):
     """The mirror only diverges from the acted-on verdict when a hold moved it."""
     coord.shared_state = _PatchVerdictSharedState()
@@ -1052,6 +1084,28 @@ async def test_a_grid_rejected_only_on_advisory_rules_survives(coord):
     await coord._handle_review_verdict("critic", intent)
     assert pending.verdict == "advise"
     assert len(coord._materialise_calls) == 1
+
+
+def test_a_map_of_verdicts_none_of_which_decides_asks_for_review():
+    """``redirect`` is a legal verdict with no place in the collapse order, so a
+    map carrying only those decides nothing and must fall back to review."""
+    assert collapse_verdicts(["redirect", ""]) == "needs_review"
+
+
+def test_an_empty_map_asks_for_review():
+    assert collapse_verdicts([]) == "needs_review"
+
+
+@pytest.mark.parametrize(
+    ("verdicts", "expected"),
+    [
+        pytest.param(["approve", "reject", "advise", "needs_review"], "approve", id="one_approve_carries_it"),
+        pytest.param(["reject", "advise", "needs_review"], "reject", id="reject_outranks_advice"),
+        pytest.param(["advise", "needs_review"], "advise", id="advice_outranks_more_review"),
+    ],
+)
+def test_the_collapse_keeps_its_priority_order(verdicts, expected):
+    assert collapse_verdicts(verdicts) == expected
 
 
 # 4. _materialize_approved_proposal — filter semantics (unit)
