@@ -652,6 +652,205 @@ def _ensure_framework_deps(args, python_exe: str, pip_extra: list[str]) -> None:
     framework_deps.report(outcome, prefix="Preflight: framework deps")
 
 
+# Escape hatch for the serving-framework gate below, mirroring
+# install_baremetal.sh's --skip-base-check.
+SKIP_FRAMEWORK_CHECK_ENV = "HYPERLOOM_SKIP_FRAMEWORK_CHECK"
+
+# ROCm images that already ship a serving framework. Kept in sync with
+# install_baremetal.sh's IMAGE_HINT and docs/install/install.md.
+_FRAMEWORK_IMAGES = (
+    "rocm/hyperloom:vllm-v0.24.0-rocm7.2.0",
+    "rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x",
+    "rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi350x",
+)
+
+
+def _in_container() -> bool:
+    """Best-effort containerization test (never raises).
+
+    Deliberately not ``provenance.detect_image``: the demo skills export
+    ``HYPERLOOM_IMAGE`` on the *host* to pick an image, so that var cannot
+    stand in for "this process runs inside it".
+    """
+    if Path("/.dockerenv").exists():
+        return True
+    try:
+        cgroup = Path("/proc/1/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any(marker in cgroup for marker in ("docker", "containerd", "kubepods", "libpod"))
+
+
+def _framework_probe_interpreters(benchmark_python: str) -> list[str]:
+    """Interpreters that may hold the serving package, deduped in probe order.
+
+    ``$VLLM_VENV_ROOT`` is included because the bare-metal installer puts vLLM
+    in an isolated venv the benchmark interpreter cannot see.
+    """
+    candidates = [benchmark_python, sys.executable]
+    venv_root = os.environ.get("VLLM_VENV_ROOT", "").strip()
+    if venv_root:
+        candidates.append(str(Path(venv_root) / "bin" / "python"))
+    out: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in out:
+            out.append(candidate)
+    return out
+
+
+def _probe_rocm_build(framework: str, python_exe: str) -> bool | None:
+    """Tri-state: is ``framework`` in ``python_exe`` a ROCm build?
+
+    ``True`` verified, ``False`` refuted, ``None`` inconclusive. Deliberately
+    not ``adapters.verify_torch_is_rocm``: it collapses inconclusive into
+    ``False``, which cannot drive a hard gate, and its timeout is 30 minutes.
+    """
+    # rc 3 == torch absent: that is "cannot answer", not "wrong build", so it must
+    # not be reported as a CUDA wheel.
+    probe = [
+        "import sys",
+        "try:",
+        "    import torch",
+        "except Exception:",
+        "    sys.exit(3)",
+        "hip = getattr(torch.version, 'hip', None)",
+        "sys.exit(1) if not hip else None",
+    ]
+    if framework == "vllm":
+        # vLLM carries its own platform verdict, so a ROCm torch beside a CUDA
+        # vLLM is still caught.
+        probe += [
+            "import vllm",
+            "from vllm.platforms import current_platform",
+            "ck = getattr(current_platform, 'is_rocm', None)",
+            "ok = bool(ck()) if callable(ck) else 'rocm' in f'{current_platform!r}'.lower()",
+            "sys.exit(0 if ok else 1)",
+        ]
+    else:
+        probe.append("sys.exit(0)")
+    try:
+        proc = subprocess.run([python_exe, "-c", "\n".join(probe)], capture_output=True, timeout=180)
+    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode == 0:
+        return True
+    # Absent torch (3) and a signal death (negative rc, which a broken ROCm stack
+    # can trigger on ``import torch``) both mean no verdict was reached.
+    return False if proc.returncode == 1 else None
+
+
+def _find_framework_interpreter(framework: str, interpreters: list[str]) -> str | None:
+    """Return the first interpreter that can import ``framework``, else None.
+
+    Uses ``find_spec`` so a heavy framework is located without importing it,
+    which on a broken ROCm install can take the interpreter down by signal.
+    """
+    probe = f"import importlib.util as u, sys; sys.exit(0 if u.find_spec({framework!r}) else 1)"
+    for python_exe in interpreters:
+        try:
+            proc = subprocess.run([python_exe, "-c", probe], capture_output=True, timeout=60)
+        except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode == 0:
+            return python_exe
+    return None
+
+
+def _check_serving_framework(args, benchmark_python: str) -> None:
+    """Fail fast when the selected serving framework is not importable here.
+
+    The optimizer patches and rebuilds framework code in place, so the package
+    must exist on this host; a reachable endpoint is not a substitute. The same
+    check runs in install_baremetal.sh's Phase 1, but a run that skips setup and
+    calls ``optimize`` directly reaches the benchmark with nothing installed and
+    fails much later, far from the cause.
+
+    Exempt: scriptable frameworks (own entrypoint, no serving package), a remote
+    client (``$BENCHMARK_BASE_URL``), external multi-node (serving is on remote
+    pods), and the ``$HYPERLOOM_SKIP_FRAMEWORK_CHECK`` escape hatch.
+
+    Args:
+        args: Parsed CLI namespace; only ``framework`` is read.
+        benchmark_python (str): Interpreter the benchmark client runs under.
+    """
+    from hyperloom.inference_optimizer import framework_registry
+
+    framework = (
+        getattr(args, "framework", None) or os.environ.get("FRAMEWORK", "")
+    ).strip().lower() or framework_registry.DEFAULT_FRAMEWORK
+
+    if framework_registry.is_scriptable(framework):
+        return
+    if os.environ.get(SKIP_FRAMEWORK_CHECK_ENV, "").strip():
+        print(f"Preflight: {SKIP_FRAMEWORK_CHECK_ENV} set; skipping the {framework} importability check")
+        return
+    remote_base_url = os.environ.get("BENCHMARK_BASE_URL", "").strip()
+    if remote_base_url:
+        print(f"Preflight: BENCHMARK_BASE_URL={remote_base_url}; skipping the local {framework} check (remote server)")
+        return
+
+    from hyperloom.inference_optimizer.multi_node._internal.external_state import external_service_url
+    from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
+
+    if is_multi_node() and external_service_url():
+        print(f"Preflight: external multi-node mode; skipping the local {framework} check (serving is on remote pods)")
+        return
+
+    interpreters = _framework_probe_interpreters(benchmark_python)
+    found = _find_framework_interpreter(framework, interpreters)
+    if found:
+        rocm = _probe_rocm_build(framework, found)
+        if rocm is True:
+            print(f"Preflight: {framework} importable and a ROCm build ({found})")
+            return
+        if rocm is None:
+            print(f"Preflight: WARNING — {framework} is importable ({found}) but could not verify it is a ROCm build")
+            return
+        print(
+            f"\nERROR: {framework} is importable ({found}) but is NOT a ROCm build.\n\n"
+            "The wheel on PyPI is the CUDA build: it imports fine and then fails at\n"
+            "GPU init. Replace it with the ROCm build:\n"
+            "    python3 -m hyperloom.inference_optimizer.setup -- "
+            f"--install-framework {framework}\n"
+            "or run inside a ROCm image that already ships it:\n"
+            + "\n".join(f"  - {image}" for image in _FRAMEWORK_IMAGES)
+            + f"\n\nTo proceed anyway, set {SKIP_FRAMEWORK_CHECK_ENV}=1.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    probed = "\n".join(f"  - {python_exe}" for python_exe in interpreters)
+    if _in_container():
+        remedy = (
+            "This process is already running in a container, so its image does not\n"
+            f"ship {framework}. Restart it from an image that does:\n"
+            + "\n".join(f"  - {image}" for image in _FRAMEWORK_IMAGES)
+        )
+    else:
+        remedy = (
+            "Pick ONE of:\n"
+            f"  1. Install it on this host (ROCm {framework} is NOT on PyPI; setup pulls\n"
+            "     it from the ROCm wheel index instead):\n"
+            "       python3 -m hyperloom.inference_optimizer.setup -- "
+            f"--install-framework {framework}\n"
+            "  2. Run Hyperloom inside a ROCm image that already ships it, by setting\n"
+            "     HYPERLOOM_RUN_MODE=docker before setup. Images:\n"
+            + "\n".join(f"       - {image}" for image in _FRAMEWORK_IMAGES)
+            + "\n     See docs/install/install.md for the container recipe.\n"
+            "\nNote: HYPERLOOM_RUN_MODE selects where Hyperloom itself runs and is\n"
+            "unrelated to Magpie's run_mode=local, which only means: do not start a\n"
+            "second container. That stays correct in both cases."
+        )
+    print(
+        f"\nERROR: serving framework {framework!r} is not importable by any candidate interpreter:\n"
+        f"{probed}\n\n"
+        f"{remedy}\n\n"
+        f"To proceed anyway (e.g. the server lives elsewhere), set {SKIP_FRAMEWORK_CHECK_ENV}=1.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 # RUN_EVAL values that disable the accuracy gate (mirrors _workload_envs).
 _RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
 
@@ -1569,6 +1768,10 @@ def _preflight(
     # --framework is known, so its own attempt usually no-ops and a scriptable
     # framework would otherwise reach baseline with nothing installed.
     _ensure_framework_deps(args, benchmark_python, pip_extra)
+
+    # 1e. The serving framework itself, checked after 1d so everything that could
+    # have supplied it has run. Without this the failure surfaces far from its cause.
+    _check_serving_framework(args, benchmark_python)
 
     # 2. Magpie — the benchmark engine the Magpie backend shells out to.
     # Skipped entirely when the
