@@ -360,7 +360,14 @@ async def test_teardown_lets_the_note_in_flight_finish_before_giving_up() -> Non
 
 @pytest.mark.asyncio
 async def test_a_wedged_sink_cannot_hold_the_step_open(monkeypatch) -> None:
-    """Cooperative shutdown is bounded: past the grace the driver is cancelled."""
+    """Cooperative shutdown is bounded: past the grace the driver is cancelled.
+
+    The step is bounded here because the sink is not: a teardown that waited on
+    the sink instead of cancelling it would sit inside the ``async with`` for the
+    hour the sink sleeps, and with no timeout plugin in this suite that blocks
+    until the CI job is killed rather than failing. Which is the failure mode the
+    grace window exists to prevent, so the test for it may not have it either.
+    """
     monkeypatch.setattr(task_progress, "_DRIVER_STOP_GRACE_S", 0.05)
     events: list[str] = []
     entered = asyncio.Event()
@@ -374,10 +381,14 @@ async def test_a_wedged_sink_cannot_hold_the_step_open(monkeypatch) -> None:
             raise
 
     interval = 0.01
-    with progress_scope(_wedged_sink):
-        async with heartbeat_while_output_flows(label="t", interval_s=interval) as activity:
-            activity.note()
-            await entered.wait()
+
+    async def _step() -> None:
+        with progress_scope(_wedged_sink):
+            async with heartbeat_while_output_flows(label="t", interval_s=interval) as activity:
+                activity.note()
+                await entered.wait()
+
+    await asyncio.wait_for(_step(), timeout=_HEARTBEAT_BACKSTOP_S)
 
     await asyncio.sleep(0)
     # The cancellation is the whole claim: a teardown that waited on the sink
