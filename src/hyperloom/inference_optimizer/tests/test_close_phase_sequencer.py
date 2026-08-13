@@ -83,7 +83,8 @@ class _StubTaskRegistry:
         row = _StubTaskRow(
             task_id=tid,
             kind=kind,
-            state="succeeded",
+            # Matches the registry's INSERT: a new row is always ``queued``.
+            state="queued",
             params=dict(params),
             idempotency_key=idempotency_key,
         )
@@ -247,6 +248,87 @@ async def test_enqueue_internal_report_task_reuses_existing(coord):
     task = await coord._enqueue_internal_report_task(reason="close_phase_entry")
     assert task is existing
     assert "internal-report-close_phase_entry" not in coord.tasks._by_key
+
+
+@pytest.mark.asyncio
+async def test_enqueue_internal_report_task_replaces_a_cancelled_one(coord):
+    """A report the deadline path enqueued and then cancelled cannot be run; the sequencer needs a live one.
+
+    Regression for the ``cannot transition from 'cancelled' to 'running'``
+    crash: the helper used to answer "was one enqueued?" when the caller needs
+    "is one runnable?".
+    """
+    dead = _StubTaskRow(
+        task_id="wallclock-report",
+        kind="report",
+        state="cancelled",
+        params={},
+        idempotency_key="closing-report-1234",
+    )
+    coord.tasks._by_id["wallclock-report"] = dead
+    coord.shared_state.closing_report_task_id = "wallclock-report"
+
+    task = await coord._enqueue_internal_report_task(reason="close_phase_entry")
+
+    assert task is not dead
+    assert task.state == "queued"
+    assert coord.shared_state.closing_report_task_id == task.task_id
+
+
+@pytest.mark.asyncio
+async def test_enqueue_internal_report_task_retries_past_a_dead_idempotent_row(coord):
+    """The idempotency key itself can resolve to a corpse; the retry key mints a runnable row."""
+    coord.tasks._by_key["internal-report-close_phase_entry"] = _StubTaskRow(
+        task_id="dead-idempotent",
+        kind="report",
+        state="cancelled",
+        params={},
+        idempotency_key="internal-report-close_phase_entry",
+    )
+
+    task = await coord._enqueue_internal_report_task(reason="close_phase_entry")
+
+    assert task.task_id != "dead-idempotent"
+    assert task.idempotency_key == "internal-report-close_phase_entry-retry"
+    assert task.state == "queued"
+
+
+@pytest.mark.asyncio
+async def test_close_sequencer_still_reports_when_the_first_report_task_was_cancelled(coord):
+    """End to end: a session that hits its deadline is the one whose report matters most."""
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    coord.tasks._by_id["wallclock-report"] = _StubTaskRow(
+        task_id="wallclock-report",
+        kind="report",
+        state="cancelled",
+        params={},
+        idempotency_key="closing-report-1234",
+    )
+    coord.shared_state.closing_report_task_id = "wallclock-report"
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
+    by_step = {r["step"]: r for r in rows}
+    assert by_step["report"]["status"] == "done"
+    assert [t.task_id for t in coord.sub.run_calls] != ["wallclock-report"]
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_task_is_reported_not_run(coord):
+    """Backstop: nothing hands a terminal row to ``run_task``, whose ``queued -> running`` would raise."""
+    done = _StubTaskRow(
+        task_id="already-done",
+        kind="report",
+        state="succeeded",
+        params={},
+        idempotency_key="internal-report-close_phase_entry",
+    )
+
+    state = await coord._run_close_task(done, step="1 (report)")
+
+    assert state == "succeeded"
+    assert coord.sub.run_calls == []
 
 
 @pytest.mark.asyncio

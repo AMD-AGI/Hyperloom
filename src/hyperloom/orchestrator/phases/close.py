@@ -18,6 +18,34 @@ from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
 
+# Terminal task states, split by what the CLOSE sequencer can still do with a
+# task in one. Both are dead ends for ``run_task``: ``enter_running`` refuses
+# any terminal row, so handing one over takes the close step down with it.
+# ``succeeded`` means the step's artifact is already on disk (skip it);
+# ``cancelled``/``failed`` mean the work never happened and the sequencer needs
+# a fresh row (re-enqueue under a distinct idempotency key).
+_TASK_STATE_DONE: str = "succeeded"
+_DEAD_TASK_STATES: frozenset[str] = frozenset({"cancelled", "failed"})
+# Appended to a close step's idempotency key when its first row is dead, so
+# ``create_or_return_existing`` mints a new task instead of returning the
+# corpse.
+_RETRY_KEY_SUFFIX: str = "retry"
+
+
+def _task_is_dead(task: Task | None) -> bool:
+    """True when ``task`` reached a terminal state without producing its artifact.
+
+    Args:
+        task: The task to inspect; ``None`` reads as not dead (there is nothing
+            to reuse, which the caller handles as a fresh enqueue anyway).
+
+    Returns:
+        ``True`` when the task is ``cancelled`` or ``failed``.
+    """
+    if task is None:
+        return False
+    return str(getattr(task, "state", "") or "") in _DEAD_TASK_STATES
+
 
 class ClosePhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
@@ -189,8 +217,7 @@ class ClosePhase(PhaseHandler):
             report_task = await self._enqueue_internal_report_task(
                 reason="close_phase_entry",
             )
-            report_result = await self.sub.run_task(report_task)
-            terminal_state = report_result.state
+            terminal_state = await self._run_close_task(report_task, step="1 (report)")
             if terminal_state in {"succeeded", None}:
                 await self._record_close_step(
                     "report",
@@ -243,8 +270,7 @@ class ClosePhase(PhaseHandler):
             bd_task = await self._enqueue_internal_session_breakdown_task(
                 reason="close_phase_entry",
             )
-            bd_result = await self.sub.run_task(bd_task)
-            terminal_state = bd_result.state
+            terminal_state = await self._run_close_task(bd_task, step="2 (session_breakdown)")
             if terminal_state in {"succeeded", None}:
                 await self._record_close_step(
                     "session_breakdown",
@@ -340,6 +366,61 @@ class ClosePhase(PhaseHandler):
         await self._record_close_step("done", status="done")
         log.info("CLOSE 7-step sequencer complete")
 
+    async def _enqueue_runnable_internal_task(
+        self,
+        *,
+        kind: str,
+        params: dict[str, Any],
+        idempotency_key: str,
+    ) -> Task:
+        """Enqueue a Coordinator-internal close-step task the sequencer can still run.
+
+        Idempotency is what lets the wall-clock deadline path and the CLOSE
+        sequencer reach for the same task instead of writing the artifact
+        twice. Its cost is that the key can resolve to a row that is already
+        terminal — most often ``cancelled``, because the deadline path that
+        enqueued the task is also the path that cancels in-flight work. Such a
+        row cannot be run, so one retry under a suffixed key mints a fresh one.
+
+        Args:
+            kind: Task kind (``report`` / ``session_breakdown``).
+            params: Task parameters, identical across attempts.
+            idempotency_key: The step's key; the retry appends a suffix.
+
+        Returns:
+            The created or reused :class:`Task`. Still terminal only when the
+            retry also resolved to a dead row, which
+            :meth:`_run_close_task` reports rather than runs.
+        """
+        task: Task | None = None
+        for key in (idempotency_key, f"{idempotency_key}-{_RETRY_KEY_SUFFIX}"):
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind=kind,
+                params=params,
+                idempotency_key=key,
+                requires_lanes=[],
+                allowed_tools=["Read"],
+                side_effects=["writes_results"],
+                lease_ttl_sec=120,
+            )
+            if not was_existing:
+                return task
+            if not _task_is_dead(task):
+                log.info(
+                    "internal-%s task reused (idempotent: task_id=%s, state=%s)",
+                    kind,
+                    task.task_id,
+                    task.state,
+                )
+                return task
+            log.warning(
+                "internal-%s task %s is %s and cannot be run; re-enqueueing under a fresh key",
+                kind,
+                task.task_id,
+                task.state,
+            )
+        return task  # type: ignore[return-value]  # loop body always binds it
+
     async def _enqueue_internal_report_task(
         self,
         *,
@@ -357,8 +438,12 @@ class ClosePhase(PhaseHandler):
         """
         existing_id = (self.shared_state.closing_report_task_id or "").strip()
         if existing_id:
+            task = None
             try:
                 task = await self.tasks.get(existing_id)
+            except Exception:  # noqa: BLE001 — TaskNotFound + friends
+                pass  # Stale id; fall through to fresh enqueue.
+            if task is not None and not _task_is_dead(task):
                 log.info(
                     "internal-report task already enqueued by wall-clock "
                     "deadline path (task_id=%s, state=%s); sequencer will "
@@ -367,9 +452,15 @@ class ClosePhase(PhaseHandler):
                     task.state,
                 )
                 return task
-            except Exception:  # noqa: BLE001 — TaskNotFound + friends
-                # Stale id; fall through to fresh enqueue.
-                pass
+            # Dead or vanished: the id names a report that will never be
+            # written, so drop it before the fresh enqueue mirrors its own.
+            if task is not None:
+                log.warning(
+                    "internal-report task %s recorded on closing_report_task_id is %s; re-enqueueing",
+                    task.task_id,
+                    task.state,
+                )
+            self.shared_state.closing_report_task_id = ""
 
         params: dict[str, Any] = {
             "source": "coordinator_internal",
@@ -377,14 +468,10 @@ class ClosePhase(PhaseHandler):
             "session_dir": str(self.session_dir),
             "max_highlights": 50,
         }
-        task, was_existing = await self.tasks.create_or_return_existing(
+        task = await self._enqueue_runnable_internal_task(
             kind="report",
             params=params,
             idempotency_key=f"internal-report-{reason}",
-            requires_lanes=[],
-            allowed_tools=["Read"],
-            side_effects=["writes_results"],
-            lease_ttl_sec=120,
         )
         # Mirror onto closing_report_task_id.
         if not self.shared_state.closing_report_task_id:
@@ -393,12 +480,6 @@ class ClosePhase(PhaseHandler):
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001
                 log.exception("internal-report: closing_report_task_id save failed")
-        if was_existing:
-            log.info(
-                "internal-report task reused (idempotent: task_id=%s, state=%s)",
-                task.task_id,
-                task.state,
-            )
         return task
 
     async def _enqueue_internal_session_breakdown_task(
@@ -420,22 +501,46 @@ class ClosePhase(PhaseHandler):
             "reason": str(reason),
             "session_dir": str(self.session_dir),
         }
-        task, was_existing = await self.tasks.create_or_return_existing(
+        return await self._enqueue_runnable_internal_task(
             kind="session_breakdown",
             params=params,
             idempotency_key=f"internal-session_breakdown-{reason}",
-            requires_lanes=[],
-            allowed_tools=["Read"],
-            side_effects=["writes_results"],
-            lease_ttl_sec=120,
         )
-        if was_existing:
+
+    async def _run_close_task(self, task: Task, *, step: str) -> str | None:
+        """Run one close-step task and return its terminal state.
+
+        ``run_task`` transitions ``queued -> running``, which the registry
+        refuses for a row that is already terminal — and refuses correctly:
+        the rejection is the double-spawn guard. So a terminal row is reported
+        here instead of run, which keeps one dead task from taking down the
+        step that was supposed to salvage the session.
+
+        Args:
+            task: The task to run.
+            step: Close-step label, for logging.
+
+        Returns:
+            The task's terminal state.
+        """
+        state = str(getattr(task, "state", "") or "")
+        if state == _TASK_STATE_DONE:
             log.info(
-                "internal-session_breakdown task reused (idempotent: task_id=%s, state=%s)",
+                "CLOSE step %s: task_id=%s already succeeded; keeping its artifact",
+                step,
                 task.task_id,
-                task.state,
             )
-        return task
+            return state
+        if state in _DEAD_TASK_STATES:
+            log.warning(
+                "CLOSE step %s: task_id=%s is %s and cannot be run; recording the step as failed",
+                step,
+                task.task_id,
+                state,
+            )
+            return state
+        result = await self.sub.run_task(task)
+        return result.state
 
     async def _record_close_step(
         self,
