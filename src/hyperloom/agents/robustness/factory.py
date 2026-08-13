@@ -243,6 +243,7 @@ def build_reactor_components(
             shm_used_crit_pct=config.shm_used_crit_pct,
             fd_warn_used_pct=config.fd_warn_used_pct,
             fd_crit_used_pct=config.fd_crit_used_pct,
+            session_dir=config.session_dir,
         ),
         "gpu_leak": GpuLeakConfig(
             util_mem_pct_threshold=config.gpu_leak_util_mem_pct_threshold,

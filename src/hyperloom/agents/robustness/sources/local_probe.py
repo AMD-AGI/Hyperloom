@@ -633,9 +633,10 @@ def _sample_processes(
             server; matches are flagged ``is_server``.
 
     Returns:
-        list[dict[str, Any]] | None: One ``{pid, rss_mb, cmd, is_server}``
+        list[dict[str, Any]] | None: One ``{pid, rss_mb, cmd, is_server, cwd}``
         entry per matching process, where ``is_server`` marks an inference
-        server as opposed to a harness, Ray, or build process; ``None`` when
+        server as opposed to a harness, Ray, or build process and ``cwd`` is
+        what ties a process to a session on a shared node; ``None`` when
         the probe is disabled, ``ps`` is absent, times out, or exits non-zero.
     """
     if not patterns:
@@ -676,9 +677,32 @@ def _sample_processes(
                 "rss_mb": round(rss_kb / 1024.0, 1),
                 "cmd": cmd,
                 "is_server": any(pat in cmd for pat in server_patterns),
+                "cwd": _process_cwd(pid),
             }
         )
     return out
+
+
+def _process_cwd(pid: int) -> str:
+    """Read a process's working directory from ``/proc/<pid>/cwd``.
+
+    A run's harness is launched with its working directory inside the session
+    and children inherit it, which is what lets a consumer tell one session's
+    processes from another's on a shared node.
+
+    Args:
+        pid (int): The process to inspect.
+
+    Returns:
+        str: The resolved directory, or ``""`` when it cannot be read — another
+        user's process, a process that exited between ``ps`` and this call, or a
+        sandbox with no ``/proc``. Unknown, never "somewhere else".
+    """
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError as exc:
+        log.debug("local_probe: /proc/%d/cwd unreadable: %s", pid, exc)
+        return ""
 
 
 def _sample_gpu() -> dict[str, Any]:

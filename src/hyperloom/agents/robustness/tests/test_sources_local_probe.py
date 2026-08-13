@@ -1501,6 +1501,28 @@ def test_a_ray_serving_actor_is_a_process_the_probe_can_see(monkeypatch):
     assert [(p["pid"], p["is_server"]) for p in found] == [(1, False), (2, True)]
 
 
+def test_a_sampled_process_carries_the_directory_it_runs_in(monkeypatch):
+    """On a shared node the cwd is what says which session a process belongs to.
+
+    A pid that is gone by the time ``/proc`` is read — or one owned by another
+    user — reports no directory rather than a wrong one.
+    """
+    ps_out = (
+        f"  {os.getpid()} 1048576 python benchmark_serving.py --port 30000\n"
+        "  999999999 2048 python benchmark_serving.py --port 30001\n"
+    )
+    monkeypatch.setattr(
+        local_probe.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, ps_out, ""),
+    )
+
+    found = local_probe._sample_processes(("benchmark_serving",))
+
+    assert found is not None
+    assert [p["cwd"] for p in found] == [os.getcwd(), ""]
+
+
 def test_the_caller_decides_which_patterns_name_a_server(monkeypatch):
     """``is_server`` follows the patterns handed in, not a second copy of the list."""
     ps_out = "  9 1048576 python -m tinyserve.entrypoint --port 8888\n"

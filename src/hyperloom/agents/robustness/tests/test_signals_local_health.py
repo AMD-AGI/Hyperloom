@@ -85,6 +85,9 @@ def test_a_server_that_died_under_a_running_benchmark_is_still_a_fault():
     "Probed successfully, saw no server" is the gap between two variants, but it
     is also a server that crashed while its own client kept sending requests —
     the one snapshot where suppressing the alert hides the outage.
+
+    No session directory is configured here, so the client check has nothing to
+    attribute against and stays host-wide.
     """
     data = SourceData(
         local_processes=[
@@ -100,6 +103,58 @@ def test_a_server_that_died_under_a_running_benchmark_is_still_a_fault():
     assert len(matched) == 1
     assert matched[0].severity is SymptomSeverity.HIGH
     assert matched[0].evidence["server_process_seen"] is False
+    assert matched[0].evidence["benchmark_client_seen"] is True
+
+
+def _client_snapshot(cmd: str, cwd: str) -> SourceData:
+    """A refused port, no server process, and one benchmark client running."""
+    return SourceData(
+        local_processes=[{"pid": 8, "rss_mb": 96.0, "cmd": cmd, "cwd": cwd, "is_server": False}],
+        local_server_health=[
+            {"url": "http://localhost:30000/health", "reachable": False, "status": "error", "error": "connect"},
+        ],
+    )
+
+
+def test_a_co_tenants_benchmark_client_does_not_vouch_for_this_sessions_port(tmp_path):
+    """``ps`` is whole-host, so another session's load generator is in it too.
+
+    It has never sent a request to this port, so letting it vouch turns a
+    session's idle stretch into a HIGH alert on someone else's traffic.
+    """
+    ours, theirs = tmp_path / "session-a", tmp_path / "session-b"
+    data = _client_snapshot(
+        cmd=f"python benchmark_serving.py --result-dir {theirs}/runs/v1 --port 30000",
+        cwd=f"{theirs}/runs/v1",
+    )
+    out = evaluate_local_health_signals(_ctx(), data, config=LocalHealthConfig(session_dir=ours))
+    assert all(s.name != "local_server_unreachable" for s in out)
+
+
+@pytest.mark.parametrize("anchor", ["cwd", "result_dir"])
+def test_this_sessions_benchmark_client_still_vouches_for_its_dead_server(tmp_path, anchor):
+    """The harness runs with its cwd inside the session; children inherit it.
+
+    A launch path that chdirs elsewhere still names the session on the command
+    line, which is the second way a client can be attributed.
+    """
+    ours = tmp_path / "session-a"
+    run_dir = f"{ours}/runs/v1"
+    data = _client_snapshot(
+        cmd=(
+            f"python benchmark_serving.py --result-dir {run_dir} --port 30000"
+            if anchor == "result_dir"
+            else "python benchmark_serving.py --port 30000"
+        ),
+        cwd=run_dir if anchor == "cwd" else "/tmp",  # nosec B108 - a path in a fixture, not a temp file.
+    )
+    matched = [
+        s
+        for s in evaluate_local_health_signals(_ctx(), data, config=LocalHealthConfig(session_dir=ours))
+        if s.name == "local_server_unreachable"
+    ]
+    assert len(matched) == 1
+    assert matched[0].severity is SymptomSeverity.HIGH
     assert matched[0].evidence["benchmark_client_seen"] is True
 
 

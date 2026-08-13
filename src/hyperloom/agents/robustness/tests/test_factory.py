@@ -547,13 +547,9 @@ async def test_a_framework_added_to_the_config_knob_is_recognised_as_a_server(tm
             probe_cfg.server_process_patterns,
         )
 
-        assert found == [
-            {
-                "pid": 9,
-                "rss_mb": 1024.0,
-                "cmd": "python -m tinyserve.entrypoint --port 8888",
-                "is_server": True,
-            }
+        assert found is not None
+        assert [(p["pid"], p["rss_mb"], p["cmd"], p["is_server"]) for p in found] == [
+            (9, 1024.0, "python -m tinyserve.entrypoint --port 8888", True)
         ]
     finally:
         await bundle.aclose()
