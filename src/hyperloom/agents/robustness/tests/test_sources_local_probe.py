@@ -1425,32 +1425,33 @@ def test_task_progress_reports_the_freshest_heartbeat_per_agent(tmp_path):
     }
 
 
-def test_task_progress_keeps_the_quietest_unit_a_fresher_sibling_would_hide(tmp_path):
+@pytest.mark.parametrize("freshest_first", [False, True])
+def test_task_progress_keeps_the_quietest_unit_a_fresher_sibling_would_hide(tmp_path, freshest_first):
     """The dispatcher runs units concurrently; only the freshest used to survive.
 
     Keeping the newest is what answers "is this agent's work progressing", but
     dropping the others left a unit that has not reported in hours with no trace
     in the snapshot at all.
+
+    Both visit orders are exercised, because only one of them reaches the branch
+    that records the quiet end: rows arrive ordered by ``task_id``, so which
+    unit's note is folded in first is what the parameter chooses. Seeing the
+    quiet one first makes the freshest note the one that has to overtake it, and
+    a snapshot built that way tells nothing about the other direction.
     """
+    quiet = ("baseline", "2026-08-13T08:00:00+00:00")
+    fresh = ("explore", "2026-08-13T10:42:00+00:00")
+    first, second = (fresh, quiet) if freshest_first else (quiet, fresh)
     db = _tasks_db(
         tmp_path / "coordinator.db",
         [
-            (
-                "t1",
-                "baseline",
-                "running",
-                _history(("2026-08-13T08:00:00+00:00", {"progress": {"agent": "orchestration"}})),
-            ),
-            (
-                "t2",
-                "explore",
-                "running",
-                _history(("2026-08-13T10:42:00+00:00", {"progress": {"agent": "orchestration"}})),
-            ),
+            (f"t{index}", kind, "running", _history((ts, {"progress": {"agent": "orchestration"}})))
+            for index, (kind, ts) in enumerate((first, second))
         ],
     )
     entry = local_probe._read_task_progress(db)["by_agent"]["orchestration"]
     assert entry["task"] == "explore"
+    assert entry["last_progress_unix"] == to_unix("2026-08-13T10:42:00+00:00")
     assert entry["oldest_task"] == "baseline"
     assert entry["oldest_progress_unix"] == to_unix("2026-08-13T08:00:00+00:00")
 

@@ -378,7 +378,10 @@ def _read_task_progress(db_path: Path | None) -> dict[str, Any]:
         conn.row_factory = sqlite3.Row
         rows = _try_select(
             conn,
-            ["SELECT task_id, kind, history FROM tasks WHERE state='running'"],
+            # Ordered so the fold below is reproducible: the merge itself is
+            # order-independent, but a snapshot whose row order is SQLite's
+            # discretion cannot be reasoned about or pinned by a test.
+            ["SELECT task_id, kind, history FROM tasks WHERE state='running' ORDER BY task_id"],
             (),
         )
     finally:
