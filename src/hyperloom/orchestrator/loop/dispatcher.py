@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import os
+from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -59,7 +60,7 @@ class DispatcherCollaborator:
         # already blocked awaiting it, which is precisely the situation shutdown
         # and an exhausted wall-clock budget have to break. Entries remove
         # themselves in :meth:`_run_dispatched_with_gpu_release`.
-        self._inflight_actions: dict[str, tuple[str, asyncio.Task[SubAgentResult]]] = {}
+        self._inflight_actions: dict[str, tuple[str, asyncio.Task[Any]]] = {}
 
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
@@ -1576,6 +1577,16 @@ class DispatcherCollaborator:
                 "get_recent_outcomes or the next-tick inbox for its "
                 "delegated_result)"
             )
+        except (FuturesCancelledError, asyncio.CancelledError):
+            # The wall-clock defences stopped it on purpose. Named before the
+            # generic handler, which would file a deliberate stop as ``errored``
+            # and read as a fault in the action. Both classes are caught because
+            # whether the two are the same one varies by Python version, and on
+            # the versions where they are, it is a ``BaseException`` that would
+            # escape this bridge entirely and take the agent's turn down with it.
+            return (
+                f"(run_action_now: {name!r} was cancelled — the session is shutting down or out of wall-clock budget)"
+            )
         except Exception as exc:  # noqa: BLE001 — never crash the turn
             log.exception("run_action_now: inline run of %r failed", name)
             return f"(run_action_now: {name!r} errored: {exc!r})"
@@ -1642,7 +1653,19 @@ class DispatcherCollaborator:
                 f"(run_action_now: an identical {action_name!r} task is "
                 f"already {task.state!r}; wait for its delegated_result)"
             )
-        result = await self.sub.run_task(task)
+        # Publish a handle for as long as the action runs. This path abandons its
+        # future once the caller's inline wait elapses -- the action keeps going
+        # by design, so without a handle nothing could stop it, including a
+        # teardown that is about to close the database underneath it. The handle
+        # is this coroutine's own task: cancelling it drops the audit publication
+        # below, which the runner's terminal transition already accounts for.
+        inline_handle = asyncio.current_task()
+        if inline_handle is not None:
+            self._inflight_actions[task.task_id] = (task.kind, inline_handle)
+        try:
+            result = await self.sub.run_task(task)
+        finally:
+            self._inflight_actions.pop(task.task_id, None)
         result_payload = {
             "task_id": task.task_id,
             "kind": task.kind,

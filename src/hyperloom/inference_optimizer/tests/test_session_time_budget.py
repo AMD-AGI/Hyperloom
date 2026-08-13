@@ -24,6 +24,7 @@ reaper in ``test_kill_spawned_server``.
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 
@@ -525,6 +526,83 @@ class TestThePumpStopsWorkItCannotWaitFor:
 
         assert atask.cancelled()
         assert coord.dispatcher._inflight_actions == {}
+
+
+class TestInlineActionsAreReachableToo:
+    """The inline path abandons its future, so it needs the same handle."""
+
+    @staticmethod
+    def _allow_inline(coord: Coordinator, monkeypatch) -> asyncio.Event:
+        """Register a never-finishing executor and clear the gates around it."""
+        started = asyncio.Event()
+        coord.sub.register_executor(_CHEAP_ACTION, _never_finishes(started))
+        monkeypatch.setattr(coord.policy, "validate_intent", lambda *a, **k: None)
+        _set_budget(coord, minutes=600)
+        return started
+
+    @pytest.mark.asyncio
+    async def test_an_inline_action_that_outlived_its_caller_can_be_stopped(
+        self,
+        coord: Coordinator,
+        monkeypatch,
+    ):
+        """Before this, the only thing that ended it was the action itself."""
+        started = self._allow_inline(coord, monkeypatch)
+        inline = asyncio.create_task(coord.dispatcher._run_action_now(_CHEAP_ACTION, {}))
+        await asyncio.wait_for(started.wait(), timeout=5.0)
+        task_id = next(iter(coord.dispatcher._inflight_actions))
+
+        assert await coord.dispatcher.cancel_inflight_actions(reason="test") == [task_id]
+
+        await _settle(inline)
+        assert inline.cancelled()
+        assert (await coord.tasks.get(task_id)).state == "cancelled"
+        assert coord.dispatcher._inflight_actions == {}
+
+    @pytest.mark.asyncio
+    async def test_an_inline_action_that_finishes_leaves_no_handle(
+        self,
+        coord: Coordinator,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(coord.policy, "validate_intent", lambda *a, **k: None)
+        _set_budget(coord, minutes=600)
+        coord.sub.register_executor(_CHEAP_ACTION, lambda _ctx: _done({"ok": True}))
+
+        await coord.dispatcher._run_action_now(_CHEAP_ACTION, {})
+
+        assert coord.dispatcher._inflight_actions == {}
+
+    @pytest.mark.asyncio
+    async def test_the_sync_bridge_reports_the_cancellation_instead_of_raising(
+        self,
+        coord: Coordinator,
+        monkeypatch,
+    ):
+        """It runs on an agent's turn thread, which a ``CancelledError`` would end."""
+        started = self._allow_inline(coord, monkeypatch)
+        monkeypatch.setattr(
+            coord.dispatcher,
+            "_inline_action_whitelist",
+            lambda: frozenset({_CHEAP_ACTION}),
+        )
+        coord._inline_fast_actions_enabled = True
+        coord._coordinator_loop = asyncio.get_running_loop()
+
+        outcome: list[str] = []
+        caller = threading.Thread(
+            target=lambda: outcome.append(coord.dispatcher._run_action_now_sync(_CHEAP_ACTION, {})),
+            daemon=True,
+        )
+        caller.start()
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5.0)
+            await coord.dispatcher.cancel_inflight_actions(reason="test")
+            await asyncio.to_thread(caller.join, 5.0)
+        finally:
+            caller.join(5.0)
+
+        assert outcome and "was cancelled" in outcome[0]
 
 
 class TestCoordinatorStop:
