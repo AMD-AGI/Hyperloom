@@ -1256,37 +1256,96 @@ SESSION_TIME_EXHAUSTED_CLASS = "session_time_exhausted"
 ORCHESTRATOR_CANCELLED_CLASS = "orchestrator_cancelled"
 
 
-class _StoppedByTheRun(NamedTuple):
-    """How a returncode that stopped the round from outside is recorded.
+class StoppedByTheRun(NamedTuple):
+    """How a sentinel returncode that stopped a round from outside is recorded.
 
-    Neither cause is evidence about the variant, so both are recorded as
-    ``skipped`` rather than failed -- see the branch that consumes this.
+    Neither cause is evidence about what was being measured, so a round that
+    ends this way is never graded as a failed measurement -- see the branches
+    that consume this, in the grid and in the baseline arm.
+
+    Attributes:
+        error_class: The ledger class for the cause.
+        interrupted: What to report when the round was already running.
+        never_started: What to report when the round never began.
+        ends_the_batch: Whether the caller should stop launching further rounds
+            on its own, rather than leave that to a budget check it may not have.
     """
 
     error_class: str
     interrupted: str
     never_started: str
-    ends_the_grid: bool
+    ends_the_batch: bool
 
 
-# The two causes that stop a round without saying anything about the variant.
-# The budget leaves the rest of the grid to the fit check at the top of the loop,
-# which sees a deadline in the past and skips them all under the same label; a
-# cancel has no such check, and nothing new should start under one anyway.
-_STOPPED_BY_THE_RUN: dict[int, _StoppedByTheRun] = {
-    SESSION_TIME_EXHAUSTED_RETURNCODE: _StoppedByTheRun(
+# The two causes that stop a round without saying anything about what it was
+# measuring. The budget leaves the rest of a grid to the fit check at the top of
+# its loop, which sees a deadline in the past and skips them all under the same
+# label; a cancel has no such check, and nothing new should start under one.
+_STOPPED_BY_THE_RUN: dict[int, StoppedByTheRun] = {
+    SESSION_TIME_EXHAUSTED_RETURNCODE: StoppedByTheRun(
         error_class=SESSION_TIME_EXHAUSTED_CLASS,
-        interrupted="session wall-clock budget exhausted while this variant was running",
-        never_started="session wall-clock budget exhausted before this variant ran",
-        ends_the_grid=False,
+        interrupted="session wall-clock budget exhausted while this round was running",
+        never_started="session wall-clock budget exhausted before this round ran",
+        ends_the_batch=False,
     ),
-    ORCHESTRATOR_CANCELLED_RETURNCODE: _StoppedByTheRun(
+    ORCHESTRATOR_CANCELLED_RETURNCODE: StoppedByTheRun(
         error_class=ORCHESTRATOR_CANCELLED_CLASS,
-        interrupted="the orchestrator cancelled this action while this variant was running",
-        never_started="the orchestrator cancelled this action before this variant ran",
-        ends_the_grid=True,
+        interrupted="the orchestrator cancelled this action while this round was running",
+        never_started="the orchestrator cancelled this action before this round ran",
+        ends_the_batch=True,
     ),
 }
+
+
+def stopped_by_the_run(returncode: int | None) -> StoppedByTheRun | None:
+    """Return how to record a round the run itself stopped, if it did.
+
+    Args:
+        returncode: The round's returncode.
+
+    Returns:
+        StoppedByTheRun | None: How to record it, or ``None`` when the
+            returncode says something about the round rather than about the run.
+    """
+    if returncode is None:
+        return None
+    return _STOPPED_BY_THE_RUN.get(int(returncode))
+
+
+def session_clamped_timeout_sec(
+    cap: int,
+    session_deadline_sec: float | None,
+    *,
+    reserve_sec: float = 0.0,
+) -> int:
+    """Reduce a hard timeout to what the session budget can still pay for.
+
+    ``session_deadline_sec`` already excludes the close-window reserve, so no
+    further margin is taken for the session itself. Never returns less than 1 --
+    a non-positive cap reads as "no timeout" to the subprocess layer, which is
+    the opposite of what an exhausted budget means. Whether the round should
+    start at all is the caller's decision, not this one's.
+
+    A small grace is added past the session deadline so the in-process session
+    watchdog trips first: both fire at the same instant, and the hard cap raises
+    ``TimeoutExpired``, which the ledger records as a timeout of the thing being
+    measured. The watchdog's sentinel says the run ran out of time, which is what
+    actually happened.
+
+    Args:
+        cap: The timeout the caller would grant with an unbounded budget.
+        session_deadline_sec: Monotonic-clock session deadline, or ``None`` when
+            the budget is unbounded, which leaves ``cap`` untouched.
+        reserve_sec: Seconds held back for rounds that must still follow this
+            one, so an early round cannot spend the budget a later one needs.
+
+    Returns:
+        int: The hard timeout to grant this round, in seconds.
+    """
+    if session_deadline_sec is None:
+        return int(cap)
+    usable = int(session_deadline_sec - time.monotonic() - max(0.0, reserve_sec)) + _SESSION_KILL_GRACE_SEC
+    return int(cap) if usable >= int(cap) else max(1, usable)
 
 
 def session_grid_bounds(shared_state: Any) -> tuple[float | None, float | None]:
@@ -1514,18 +1573,8 @@ async def run_grid(
         data point, so it is the round the budget is kept for; a discarded
         warmup that overruns is the cheaper thing to cut short.
 
-        ``session_deadline_sec`` already excludes the close-window reserve, so
-        no further margin is taken for the session itself. Never returns less
-        than 1 -- a non-positive cap would read as "no timeout" to the
-        subprocess layer, which is the opposite of what an exhausted budget
-        means. Deciding whether the round should start at all belongs to the
-        caller's fit check.
-
-        A small grace is added past the session deadline so the in-process
-        session watchdog trips first: both fire at the same instant, and the hard
-        cap raises ``TimeoutExpired``, which the ledger records as a variant
-        timeout -- a claim about the variant. The watchdog's sentinel says the run
-        ran out of time, which is what actually happened.
+        The clamp itself is :func:`session_clamped_timeout_sec`; this adds the
+        grid's own log line.
 
         Args:
             idx (int): Zero-based variant index, for the log line.
@@ -1538,12 +1587,9 @@ async def run_grid(
             int: The hard timeout to grant this round, in seconds.
         """
         cap = int(variant_timeout_sec)
-        if session_deadline_sec is None:
+        clamped = session_clamped_timeout_sec(cap, session_deadline_sec, reserve_sec=reserve_sec)
+        if clamped == cap:
             return cap
-        usable = int(session_deadline_sec - time.monotonic() - max(0.0, reserve_sec)) + _SESSION_KILL_GRACE_SEC
-        if usable >= cap:
-            return cap
-        clamped = max(1, usable)
         log.info(
             "grid_runner: variant %d/%d name=%s %s cap clamped %ds -> %ds by the session budget",
             idx + 1,
@@ -2297,7 +2343,7 @@ async def run_grid(
                 )
             )
             await _pulse_after_variant(i)
-            if stopped.ends_the_grid:
+            if stopped.ends_the_batch:
                 results.extend(_not_run_skip_result(rest, stopped) for rest in grid[i + 1 :])
                 break
             if not keep_going_on_failure:
@@ -2523,7 +2569,7 @@ async def run_grid(
     return results
 
 
-def _not_run_skip_result(variant: GridVariant, stopped: _StoppedByTheRun) -> VariantResult:
+def _not_run_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> VariantResult:
     """Build the ``skipped`` result for a variant the run never got to.
 
     Args:
@@ -2679,6 +2725,7 @@ __all__ = [
     "MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
     "ORCHESTRATOR_CANCELLED_CLASS",
     "SESSION_TIME_EXHAUSTED_CLASS",
+    "StoppedByTheRun",
     "SGLANG_WATCHDOG_TIMEOUT_ENV",
     "SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
     "VariantResult",
@@ -2696,7 +2743,9 @@ __all__ = [
     "sanitize_result_dir",
     "sanitize_script_name",
     "server_args_env_name",
+    "session_clamped_timeout_sec",
     "session_grid_bounds",
+    "stopped_by_the_run",
     # Re-exported from the sibling modules to keep the namespace intact.
     "coerce_extra_envs",
     "compact_json_server_args",
