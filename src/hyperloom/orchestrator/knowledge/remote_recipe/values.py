@@ -780,6 +780,108 @@ def _kernel_agent_score(value: Mapping[str, Any]) -> float:
     return best
 
 
+_KERNEL_COLUMN_LISTS = (("gemm", "optimizations"), ("fusion", "items"), ("rewrite", "items"))
+
+
+def _kernel_record_key(column: str, record: Mapping[str, Any]) -> str:
+    """Identify the optimization a record describes, within its column.
+
+    Two sessions optimizing the same kernel compete for one slot; two sessions
+    optimizing different kernels must both survive the merge.
+    """
+    if column == "gemm":
+        candidates = (
+            record.get("variant_name"),
+            record.get("task_id"),
+            Path(str(record.get("tuned_file") or "")).name,
+        )
+    else:
+        candidates = (
+            record.get("kernel_name"),
+            record.get("best_pattern"),
+            record.get("id"),
+        )
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return f"{column}:{text}"
+    return f"{column}:{hashlib.sha256(repr(sorted(record.items())).encode()).hexdigest()[:10]}"
+
+
+def _kernel_record_score(record: Mapping[str, Any]) -> float:
+    """How good one recorded optimization was, in end-to-end gain percent."""
+    e2e = record.get("e2e") if isinstance(record.get("e2e"), Mapping) else {}
+    return max(
+        _number(record.get("e2e_gain_pct")),
+        _number(record.get("gain_pct")),
+        _number(e2e.get("gain_pct")),
+    )
+
+
+def merge_kernel_columns(
+    published: Mapping[str, Any] | None,
+    incoming: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Keep the better recording of each optimization, not the better document.
+
+    The kernel-agent record accumulates across sessions: a run that only tuned
+    GEMM must not erase a rewrite an earlier run learned. Records are matched
+    per column by the optimization they describe and the higher end-to-end gain
+    wins, so a session contributes exactly what it improved.
+
+    Returns the merged columns and the refs carried over from the published
+    record, which the caller has to re-upload for those refs to keep resolving.
+    """
+    merged: dict[str, Any] = {}
+    carried: list[str] = []
+    published = published if isinstance(published, Mapping) else {}
+    for column, list_key in _KERNEL_COLUMN_LISTS:
+        prior_node = published.get(column)
+        prior = list((prior_node or {}).get(list_key) or []) if isinstance(prior_node, Mapping) else []
+        fresh_node = incoming.get(column)
+        fresh = list((fresh_node or {}).get(list_key) or []) if isinstance(fresh_node, Mapping) else []
+        by_key: dict[str, tuple[Mapping[str, Any], bool]] = {}
+        order: list[str] = []
+        for record in prior:
+            if not isinstance(record, Mapping):
+                continue
+            key = _kernel_record_key(column, record)
+            if key not in by_key:
+                order.append(key)
+            by_key[key] = (record, True)
+        for record in fresh:
+            if not isinstance(record, Mapping):
+                continue
+            key = _kernel_record_key(column, record)
+            held = by_key.get(key)
+            if held is None:
+                order.append(key)
+                by_key[key] = (record, False)
+            elif _kernel_record_score(record) > _kernel_record_score(held[0]):
+                by_key[key] = (record, False)
+        rows = []
+        for key in order:
+            record, from_published = by_key[key]
+            rows.append(dict(record))
+            if from_published:
+                carried.extend(_kernel_record_refs(record))
+        merged[column] = {list_key: rows}
+    return merged, carried
+
+
+def _kernel_record_refs(record: Mapping[str, Any]) -> list[str]:
+    """Artifact refs one record depends on, so a carried record keeps its files."""
+    refs: list[str] = []
+    for key in ("patch", "source_file", "tuned_file", "experience_document"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            refs.append(value)
+    sources = record.get("source_files")
+    if isinstance(sources, list):
+        refs.extend(str(ref).strip() for ref in sources if str(ref or "").strip())
+    return refs
+
+
 def build_kernel_agent_knowledge(
     state: Any,
     files_dir: str | Path,
@@ -961,6 +1063,7 @@ __all__ = [
     "envelope_to_v1_recipe",
     "has_new_keep",
     "kernel_agent_canonical_id",
+    "merge_kernel_columns",
     "match_rewrite_attempt",
     "merge_staged_sections",
 ]
