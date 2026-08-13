@@ -182,6 +182,13 @@ def kill_my_spawned_server(
         pass
 
 
+# Sentinel ``returncode`` allocation. This module is not the only owner of the
+# space -- ``_ray_serving`` hands out Ray-actor codes from it too, and both
+# arrive at their consumer as a bare ``returncode`` carrying no other tag. A
+# number claimed by a second cause therefore makes attribution a coin flip, so
+# allocate an unused one; ``test_every_sentinel_returncode_names_exactly_one_cause``
+# enumerates both modules and fails on reuse.
+
 # Sentinel ``returncode`` when ``run_with_session_kill`` reaps a child for an
 # elapsed ``soft_deadline_sec`` (vs the ``timeout=`` hard cap, which raises
 # ``TimeoutExpired``). Chosen not to collide with a real signal-based returncode.

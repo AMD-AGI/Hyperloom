@@ -16,9 +16,12 @@ from hyperloom.common.env_safety import scrub_benchmark_process_env
 
 log = logging.getLogger(__name__)
 
-# Ray-side sentinel returncodes. -912 is also used by
-# ``_subprocess_kill.AGENTX_PREFLIGHT_RETURNCODE``.
-_ACTOR_TIMEOUT_RC: int = -912
+# Ray-side sentinel returncodes, allocated out of the same space as
+# ``_subprocess_kill``'s -- read the note there before claiming a new one. Both
+# of these leave ``_grid_runner._run_magpie`` through the very return channel
+# that carries ``AGENTX_PREFLIGHT_RETURNCODE``, so an overlap would have an
+# actor timeout recorded as a failed AgentX preflight.
+_ACTOR_TIMEOUT_RC: int = -916
 _RAY_ACTOR_DIED_RC: int = -913
 
 # Timeout for ray.get probes on specialist actor methods (is_alive/exit_code/stop).
