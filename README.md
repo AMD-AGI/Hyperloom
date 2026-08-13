@@ -77,24 +77,16 @@ feedback on how to improve Hyperloom by completing the
 - CLI entry point: `python -m hyperloom.inference_optimizer.cli optimize`
 - Operator tools: `python -m hyperloom.inference_optimizer.tools.*`
 - Platform tuning audit: `python3 scripts/platform_audit.py` — checks the host CPU
-  tuning that silently changes benchmark results. Judges Core Performance Boost,
-  the cpufreq governor, and determinism control, each citing [AMD's BIOS &
-  Workload Tuning Guide for EPYC 9004][58011]. Determinism targets **Power**
-  (58011 §4.2.2), which maximizes what a given platform can deliver; the cost —
-  that platforms then differ from each other — is paid by recording the setting
-  in every report, so a system-to-system delta stays explicable. SMT and NPS are
-  recorded without a verdict, because chapter 5 varies those by workload and this
-  tool does not invent a recommendation AMD does not publish. A determinism
-  verdict is inferred from per-core frequency spread rather than read from BIOS,
-  and says so. Reads only `/sys`, `/proc` and — as root —
-  the HWCR MSR; no credentials, nothing written. Exit codes are distinct: `0` all
-  checked knobs on target, `1` a knob is wrong, `2` a knob could not be resolved.
-  CI should treat `2` as missing coverage rather than as a failure. The BIOS-only
-  knobs (APBDIS, DF C-states, High Performance profile) are not reachable this
-  way and are deliberately not covered here.
+  tuning that silently changes benchmark results. Judges Core Performance Boost and
+  the cpufreq governor against [AMD's BIOS & Workload Tuning Guide for EPYC 9004][58011];
+  records determinism, SMT and NPS without a verdict, because chapter 5 varies those
+  by workload or the OS layer can only infer them. Reads `/sys`, `/proc` and — as
+  root — the HWCR MSR; no credentials, nothing written. Exit `0` on target, `1` a
+  knob is wrong, `2` unresolved, which CI should treat as missing coverage rather
+  than as a failure.
+- Documentation source: `docs/`
 
 [58011]: https://docs.amd.com/v/u/en-US/58011-epyc-9004-tg-bios-and-workload
-- Documentation source: `docs/`
 
 For contribution workflow, testing, and linting, see
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
