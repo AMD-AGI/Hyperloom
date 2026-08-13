@@ -89,9 +89,6 @@ _EVIDENCE_PRODUCER_ACTIONS: frozenset[str] = frozenset(
         "profile",
         "roofline",
         "kernel_opt",
-        "deep_kernel_analysis",
-        "operator_tuning",
-        "vendor_kernel_config",
     }
 )
 

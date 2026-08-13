@@ -16,9 +16,6 @@ KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
     {
         "kernel_opt",
         "integrate",
-        "deep_kernel_analysis",
-        "operator_tuning",
-        "vendor_kernel_config",
         "gemm_tuning",
     }
 )
@@ -81,15 +78,12 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "target_analysis",
     "baseline",
     "roofline",
-    "deep_kernel_analysis",
     "explore",
     "specialist",
     "integrate_patch",
     "sweep",
     "kernel_opt",
     "integrate",
-    "operator_tuning",
-    "vendor_kernel_config",
     "gemm_tuning",
     "report",
 )

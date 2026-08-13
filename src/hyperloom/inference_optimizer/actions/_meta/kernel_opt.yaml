@@ -7,7 +7,6 @@ accuracy_risk: 0.10
 crash_risk: 0.20
 prerequisites:
   - roofline
-  - deep_kernel_analysis
 requires_lanes:
   - server_lifecycle
   - workspace_mutation

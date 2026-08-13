@@ -12,8 +12,7 @@ Layout:
   never loaded by Python runtime code — PolicyGate and ActionRegistry read
   only ``_meta/*.yaml``
 
-The 6 "kernel_agent-owned" actions (kernel_opt / integrate /
-deep_kernel_analysis / operator_tuning / vendor_kernel_config / gemm_tuning)
+The 3 "kernel_agent-owned" actions (kernel_opt / integrate / gemm_tuning)
 are reachable only via REQUEST(target_agent="kernel_agent") — PolicyGate
 rejects a direct delegate or propose_action of any name in
 :data:`hyperloom.inference_optimizer.protocol.action_surfaces.KERNEL_AGENT_OWNED_ACTIONS`.

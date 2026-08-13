@@ -86,10 +86,7 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset(
         "framework_agent",
         "integrate",
         "kernel_opt",
-        "deep_kernel_analysis",
         "gemm_tuning",
-        "operator_tuning",
-        "vendor_kernel_config",
         "recover",
     }
 )

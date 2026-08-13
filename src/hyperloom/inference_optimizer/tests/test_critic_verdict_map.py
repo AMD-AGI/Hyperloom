@@ -935,9 +935,6 @@ class TestN38ActionVerdictClass:
             "explore",
             "sweep",
             "kernel_opt",
-            "operator_tuning",
-            "vendor_kernel_config",
-            "deep_kernel_analysis",
             "recover",
         )
         for n in registered_exploration:

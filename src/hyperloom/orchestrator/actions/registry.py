@@ -72,8 +72,8 @@ VALID_PIPELINE_PHASES: frozenset[str] = frozenset(
         "prep",  # target_analysis
         "measure",  # baseline / replay_warm_recipe (gates explore)
         "explore",  # explore / specialists / patch integration
-        "analysis",  # profile / roofline / deep_kernel_analysis
-        "deep",  # kernel_opt / integrate / operator_tuning / vendor_kernel_config
+        "analysis",  # profile / roofline
+        "deep",  # kernel_opt / integrate / gemm_tuning
         "validate",  # reserved; stack validation runs inside explore
         "finalize",  # report
         "support",  # recover
@@ -105,9 +105,6 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     "conc_sweep": "exploration",
     "kernel_opt": "exploration",
     "gemm_tuning": "exploration",
-    "operator_tuning": "exploration",
-    "vendor_kernel_config": "exploration",
-    "deep_kernel_analysis": "exploration",
     "recover": "exploration",
 }
 _DEFAULT_VERDICT_CLASS_FALLBACK: str = "exploration"
