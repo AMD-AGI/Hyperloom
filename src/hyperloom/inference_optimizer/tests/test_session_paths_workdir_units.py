@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the per-turn workdir allocator, its stale-dir pruner, and the
-``_runs_actions`` import-failure fallback."""
+"""Unit tests for the per-turn workdir allocator and its stale-dir pruner."""
 
 from __future__ import annotations
 

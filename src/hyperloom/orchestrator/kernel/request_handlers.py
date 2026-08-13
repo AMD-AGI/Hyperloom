@@ -44,9 +44,7 @@ from ..trace.parse_usage import (
     parse_forge_usage,
 )
 
-# Re-exported so ``request_handlers.<name>`` stays the monkeypatch surface the
-# callers below already patch. Everything else in _kernel_decisions is reached
-# through SharedState's methods, so it is not mirrored here.
+# Re-exported: callers patch these at ``request_handlers.<name>``.
 from ._kernel_decisions import (
     _honest_flag as _honest_flag,
     _format_last_kernel_opt as _format_last_kernel_opt,
@@ -6852,9 +6850,7 @@ async def integrate_handler(
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
     "trace_analyze": trace_analyze_handler,
     "run_gemm_tuning": run_gemm_tuning_handler,
-    # run_fusion is deliberately absent: KernelPhase awaits run_fusion_handler
-    # directly, so no request ever carries that kind and advertising it here
-    # would only invite one that nothing routes.
+    # No run_fusion entry: KernelPhase awaits run_fusion_handler directly.
     "run_optimization": run_optimization_handler,
     "integrate": integrate_handler,
     "apply_patch": integrate_handler,  # alias — same flow
@@ -6894,7 +6890,6 @@ __all__ = [
     "run_gemm_tuning_handler",
     "run_optimization_handler",
     "trace_analyze_handler",
-    # Re-exported from _kernel_decisions; declared so the re-export reads as
-    # intentional rather than an unused import.
+    # Re-exported from _kernel_decisions.
     "_format_last_kernel_opt",
 ]

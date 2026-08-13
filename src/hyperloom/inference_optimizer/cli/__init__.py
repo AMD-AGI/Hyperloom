@@ -2320,7 +2320,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     _register_executors(
         coordinator,
-        no_kernel=no_kernel,
         compare_against_gpu=getattr(args, "compare_against_gpu", None),
         session_dir=session_dir,
         specialist_executor=specialist_executor,

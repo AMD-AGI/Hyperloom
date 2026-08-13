@@ -845,8 +845,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         _CANONICAL_ORDER = ("orchestration", "critic", "robustness")
         self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
-        # Action catalogue mapping action_name -> metadata.
-        self.action_registry: dict[str, ActionMetadata] = ACTION_CATALOGUE
         # Inline fast-action execution: run cheap lane-light action in-turn. Default ON.
         _inline_raw = (
             os.environ.get(
@@ -1381,6 +1379,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
     _DISK_USED_MAX_FRAC: float = 0.85
     _DISK_RUNS_KEEP_PER_ACTION: int = 50
     _STATE_JSON_WARN_BYTES: int = 50 * 1024 * 1024
+
+    # Action catalogue mapping action_name -> metadata. Class-level so a
+    # partially-built Coordinator still resolves it.
+    action_registry: dict[str, ActionMetadata] = ACTION_CATALOGUE
 
     # Inline fast-action execution; deny report/session_breakdown (CLOSE artifacts).
     _INLINE_ACTION_DENY: frozenset[str] = frozenset(

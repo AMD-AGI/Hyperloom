@@ -45,8 +45,8 @@ Extend the scan roots via `$INFERENCE_OPTIMIZER_LEAK_ROOTS` if a script leaks
 elsewhere; the default `{framework}_{runner_type}.sh` already respects
 `$RESULT_DIR` so salvage normally never fires.
 
-Operators only interact through two `task.params` knobs (full schema in each
-`actions/_meta/<action>.yaml`): `params.benchmark_script` (bare sanitized `*.sh`
+Operators only interact through two `task.params` knobs:
+`params.benchmark_script` (bare sanitized `*.sh`
 name; overrides the gpu_type auto-pick) and `params.result_dir` (forwarded as
 `$RESULT_DIR`). A baseline retry after a failure MUST change at least one of
 `params.benchmark_script` / `params.result_dir` / `params.extra_server_args` /

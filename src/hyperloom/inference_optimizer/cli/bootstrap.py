@@ -212,8 +212,7 @@ def _seed_shared_state(
     # KB architecture tags from config.json; fresh-launch only.
     _cfg_tags = _load_model_config_tags(str(args.model))
 
-    # Persist the kernel optimizer under the same hard rule used by the runtime:
-    # only exact KERNEL_OPT_BACKEND_ORDER=forge opts into per-kernel forge.
+    # Persisted for the session breakdown; the runtime reads the env directly.
     _kernel_optimizer_record = "native" if forge_explicitly_enabled() else "geak"
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority

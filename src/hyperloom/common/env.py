@@ -130,15 +130,11 @@ def env_str(name: str, default: str = "") -> str:
 
 
 def forge_explicitly_enabled() -> bool:
-    """Return true only for the single supported forge opt-in switch.
-
-    KernelForge is private infrastructure, so forge must never be selected by
-    request payloads, legacy aliases, or GEMM_TUNING_BACKEND. The only runtime
-    contract that enables forge is an exact ``KERNEL_OPT_BACKEND_ORDER=forge``;
-    every other value leaves the default GEAK whole-phase backend in charge.
+    """Whether per-kernel forge is opted in.
 
     Returns:
-        True when the operator opted into per-kernel forge.
+        True for an exact ``KERNEL_OPT_BACKEND_ORDER=forge``; every other
+        value leaves GEAK owning the whole kernel phase.
     """
     return env_str("KERNEL_OPT_BACKEND_ORDER").lower() == "forge"
 

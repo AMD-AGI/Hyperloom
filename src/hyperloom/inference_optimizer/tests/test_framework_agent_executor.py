@@ -1151,7 +1151,7 @@ def test_framework_agent_executor_imports_clean():
 
 
 def test_framework_meta_loads():
-    """The action_registry can load actions/_meta/framework_agent.yaml."""
+    """The catalogue carries framework_agent metadata."""
     from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 
     reg = ACTION_CATALOGUE

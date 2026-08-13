@@ -7,22 +7,13 @@ Keep ownership, transport, and prompt-visibility classifications here so
 PolicyGate, prompt rendering, and CLI wiring do not grow separate
 action-name lists.
 
-:data:`ACTION_CATALOGUE` replaces the former ``actions/_meta/<name>.yaml``
-files and their loader. The catalogue had no external supplier -- it is not
-operator-configurable -- so the yaml layer bought a schema validator, a
-file scanner, and package-data entries without buying configurability, and
-let a name drift out of one surface while surviving in another. As a plain
-dict of frozen records it drifts at import time instead.
-
-Only the fields consumed by production code are modelled:
+:data:`ACTION_CATALOGUE` models only the fields production code reads:
 
 * ``requires_lanes`` / ``lease_ttl_sec`` -- dispatch gate and GPU lease TTL
 * ``allowed_tools`` / ``side_effects`` -- stamped onto the dispatched task
 * ``pipeline_phase`` -- runs-workspace ownership plus prompt grouping
 * ``verdict_class`` -- selects the Critic prompt rule set
-* ``family`` / ``description`` / ``expected_gain_pct`` / ``accuracy_risk`` /
-  ``crash_risk`` / ``typical_runtime_min`` -- rendered into the
-  Orchestration prompt catalogue
+* the rest -- rendered into the Orchestration prompt catalogue
 """
 
 from __future__ import annotations
@@ -40,10 +31,9 @@ KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
 )
 
 
-# Kernel-owned action name -> the request ``kind`` that reaches its handler in
-# ``orchestrator/kernel/request_handlers.KERNEL_REQUEST_HANDLERS``. The two
-# names differ for historical reasons, so the prompt must advertise the kind
-# rather than the action name.
+# Kernel-owned action name -> the request ``kind`` its handler is registered
+# under in ``request_handlers.KERNEL_REQUEST_HANDLERS``. The two differ, so the
+# prompt must advertise the kind.
 KERNEL_ACTION_REQUEST_KINDS: dict[str, str] = {
     "kernel_opt": "run_optimization",
     "gemm_tuning": "run_gemm_tuning",
@@ -123,44 +113,6 @@ NO_KERNEL_AGENT_ENABLED_ACTIONS: tuple[str, ...] = (
 )
 
 
-# Prompt grouping label only; no runtime scheduler reads it.
-VALID_FAMILIES: frozenset[str] = frozenset(
-    {
-        "prep",
-        "analysis",
-        "shallow",
-        "deep_kernel",
-        "long",
-        "creative",
-        "resilience",
-    }
-)
-
-# Coarse-grained pipeline phase: prompt grouping plus the source for
-# session_paths._RUNS_WORKSPACE_PHASES (runs-workspace ownership).
-VALID_PIPELINE_PHASES: frozenset[str] = frozenset(
-    {
-        "prep",  # target_analysis
-        "measure",  # baseline / replay_warm_recipe (gates explore)
-        "explore",  # explore / specialists / patch integration
-        "analysis",  # profile / roofline
-        "deep",  # kernel_opt / integrate / gemm_tuning
-        "validate",  # reserved; stack validation runs inside explore
-        "finalize",  # report
-        "support",  # recover
-    }
-)
-
-# Per-action verdict policy class selecting which Critic prompt rule set applies.
-VALID_VERDICT_CLASSES: frozenset[str] = frozenset(
-    {
-        "archival",
-        "exploration",
-        "promotion",
-    }
-)
-
-
 @dataclass(frozen=True)
 class ActionMetadata:
     """One action's dispatch contract plus its prompt-catalogue copy."""
@@ -169,15 +121,15 @@ class ActionMetadata:
     family: str
     pipeline_phase: str
     verdict_class: str
-    expected_gain_pct: tuple[float, float] = (0.0, 0.0)
-    accuracy_risk: float = 0.0
-    crash_risk: float = 0.0
-    typical_runtime_min: float = 0.0
-    lease_ttl_sec: int = 1800
+    expected_gain_pct: tuple[float, float]
+    accuracy_risk: float
+    crash_risk: float
+    typical_runtime_min: float
+    lease_ttl_sec: int
+    allowed_tools: tuple[str, ...]
+    side_effects: tuple[str, ...]
+    description: str
     requires_lanes: tuple[str, ...] = ()
-    allowed_tools: tuple[str, ...] = ()
-    side_effects: tuple[str, ...] = ()
-    description: str = ""
 
 
 ACTION_CATALOGUE: dict[str, ActionMetadata] = {
@@ -510,7 +462,4 @@ __all__ = [
     "KERNEL_REQUEST_KIND_ALIASES",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
     "ROBUSTNESS_DELEGATE_ONLY_ACTIONS",
-    "VALID_FAMILIES",
-    "VALID_PIPELINE_PHASES",
-    "VALID_VERDICT_CLASSES",
 ]

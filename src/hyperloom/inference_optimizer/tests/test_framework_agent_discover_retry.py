@@ -318,27 +318,6 @@ def test_enqueue_sources_lanes_and_lease_ttl_from_the_action_registry(tmp_path: 
     assert kwargs["requires_lanes"]
 
 
-def test_enqueue_refuses_to_run_unserialised_when_the_registry_is_missing(tmp_path: Path):
-    """No registry means no lanes, and a lane-less framework task shares the GPU with everything.
-
-    The coordinator downgrades a failed registry load to ``action_registry =
-    None``, so sourcing lanes from the registry made that failure reach this
-    call site. Enqueueing anyway is worse than the hardcoded lanes this
-    replaced; the candidate is skipped and the reason recorded instead.
-    """
-    stub = _CoordinatorStub(tmp_path)
-    stub.tasks = _TasksStub(fail=False)  # type: ignore[attr-defined]
-    stub.action_registry = None
-
-    asyncio.run(_call_enqueue(stub, {"candidate_id": "pr-no-reg", "batch_id": "b1"}))
-
-    assert stub.tasks.calls == []  # type: ignore[attr-defined]
-    rows = stub.shared_state.framework_agent_phase_progress
-    assert [r["status"] for r in rows] == ["enqueue_failed"]
-    assert "lanes" in rows[0]["error"]
-
-
-# Gap 4 — phase_history summary row when the pump gives up on discover.
 def test_record_framework_agent_phase_done_appends_history_row(tmp_path: Path):
     """The helper appends a phase_history summary row so the give-up decision is visible."""
     stub = _CoordinatorStub(tmp_path)

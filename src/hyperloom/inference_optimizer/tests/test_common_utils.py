@@ -1685,9 +1685,6 @@ def test_dispatcher_inline_whitelist_filters_denied_unregistered_and_lane_holdin
     coord.action_registry = {}
     assert disp._inline_action_whitelist() == frozenset()
 
-    coord.action_registry = None
-    assert disp._inline_action_whitelist() == frozenset()
-
 
 def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.orchestrator.loop import dispatcher as dispatcher_mod

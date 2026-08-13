@@ -34,6 +34,7 @@ from hyperloom.orchestrator.actions.executors.profile import profile_executor
 from hyperloom.orchestrator.actions.executors.roofline import make_roofline_executor
 from hyperloom.orchestrator.roles import ClaudeBackend
 from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
+
 if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycle
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
@@ -62,7 +63,7 @@ def _mcp_servers_from_config(config_path: str | None) -> tuple[str, ...] | None:
 
 
 # Declarative action_kind -> ExecutorFn map. Keep in sync with
-# session_paths._runs_actions() (not enforced by a test).
+# session_paths._RUNS_ACTIONS (not enforced by a test).
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline": baseline_executor,
     # replay_warm_recipe reuses BaselineExecutor, applying warm_start_recipe.best_config.
@@ -263,7 +264,6 @@ def _build_specialist_executor(
 def _register_executors(
     coordinator: "Coordinator",
     *,
-    no_kernel: bool = False,
     compare_against_gpu: str | None = None,
     session_dir: Path | None = None,
     specialist_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
@@ -272,12 +272,10 @@ def _register_executors(
     _REAL_EXECUTORS_FULL set, the always-wired Coordinator-internal executors,
     and the optional specialist executor.
 
-    Kernel-owned actions get no executor at all: they are REQUEST-only, and
-    PolicyGate denies a delegate or propose_action for them.
+    Kernel-owned actions get no executor: they are REQUEST-only.
 
     Args:
         coordinator: The live Coordinator to register executors on.
-        no_kernel: Unused; kept so callers keep their keyword.
         compare_against_gpu: Optional GPU type for the target-analysis executor.
         session_dir: Optional session directory passed to executors.
         specialist_executor: Optional specialist executor to register.
@@ -306,7 +304,7 @@ def _register_executors(
     # FRAMEWORK per-candidate executor — Coordinator-internal only.
     # Key must match the kind the FRAMEWORK phase enqueues ("framework_agent",
     # per action_surfaces.COORDINATOR_INTERNAL_ACTIONS and
-    # actions/_meta/framework_agent.yaml); registering it as "framework" left
+    # ACTION_CATALOGUE); registering it as "framework" left
     # every discovered PR candidate stamped no_result_failed.
     coordinator.sub.register_executor(
         "framework_agent",
@@ -324,9 +322,7 @@ def _register_executors(
         for required_kind in ("roofline", "profile"):
             if required_kind not in coordinator.sub.executor_registry:
                 log.debug(
-                    "register_executors: %r missing from sub-agent registry "
-                    "(no_kernel=%s); PRELUDE analysis task will fail with "
-                    "no_executor",
+                    "register_executors: %r missing from sub-agent registry; "
+                    "PRELUDE analysis task will fail with no_executor",
                     required_kind,
-                    no_kernel,
                 )

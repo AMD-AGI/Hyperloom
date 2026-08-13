@@ -936,7 +936,7 @@ class PolicyGate:
             raise PolicyDenied(
                 f"unknown action_name={action_name!r} (not in the action catalogue)",
                 rule="unknown_action",
-                hint="register a yaml under src/hyperloom/inference_optimizer/actions/_meta/<name>.yaml",
+                hint="add the action to protocol/action_surfaces.ACTION_CATALOGUE",
             )
         # Per-action source allowlist (e.g. ``recover`` is robustness-only).
         allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)

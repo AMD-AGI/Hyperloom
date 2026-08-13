@@ -25,7 +25,6 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     KERNEL_ACTION_REQUEST_KINDS,
     KERNEL_AGENT_OWNED_ACTIONS,
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
-    VALID_PIPELINE_PHASES,
 )
 from . import read_rules_fragment as _read_rules_fragment
 from .transport import TRANSPORTS, TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
@@ -1130,7 +1129,6 @@ __all__ = [
     "TRANSPORTS",
     "TRANSPORT_STRUCTURED_OUTPUT",
     "TRANSPORT_TOOLS",
-    "VALID_PIPELINE_PHASES",
     "build_orchestration_prompt",
     "default_enabled_actions",
 ]

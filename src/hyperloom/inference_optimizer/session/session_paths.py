@@ -71,13 +71,10 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset(
 )
 
 
-def _runs_actions() -> frozenset[str]:
-    """Action names that own a ``runs/<kind>/<task_id>/`` workspace.
-
-    Returns:
-        The set of action names that own a runs-workspace.
-    """
-    return frozenset(a.name for a in ACTION_CATALOGUE.values() if a.pipeline_phase in _RUNS_WORKSPACE_PHASES)
+# Action names that own a ``runs/<kind>/<task_id>/`` workspace.
+_RUNS_ACTIONS: frozenset[str] = frozenset(
+    a.name for a in ACTION_CATALOGUE.values() if a.pipeline_phase in _RUNS_WORKSPACE_PHASES
+)
 
 
 def _validate_action(action: str) -> str:
@@ -91,13 +88,11 @@ def _validate_action(action: str) -> str:
         str: The stripped action name when it is recognised.
 
     Raises:
-        ValueError: If the action is not one of the names returned by
-            :func:`_runs_actions`.
+        ValueError: If the action does not own a runs-workspace.
     """
     a = str(action or "").strip()
-    valid = _runs_actions()
-    if a not in valid:
-        raise ValueError(f"runs_dir: unknown action {action!r}; expected one of {sorted(valid)!r}")
+    if a not in _RUNS_ACTIONS:
+        raise ValueError(f"runs_dir: unknown action {action!r}; expected one of {sorted(_RUNS_ACTIONS)!r}")
     return a
 
 

@@ -131,7 +131,7 @@ def _fake_coordinator() -> SimpleNamespace:
 
 def test_register_executors_wires_full_set():
     coord = _fake_coordinator()
-    _register_executors(coord, no_kernel=False, session_dir=None)
+    _register_executors(coord, session_dir=None)
     reg = coord.sub.executor_registry
     for kind in _REAL_EXECUTORS_FULL:
         assert kind in reg
@@ -160,7 +160,7 @@ def test_register_executors_covers_every_phase_allowed_action():
     async def _spec(ctx):  # noqa: ANN001, ANN202 - test stub
         return {}
 
-    _register_executors(coord, no_kernel=False, session_dir=None, specialist_executor=_spec)
+    _register_executors(coord, session_dir=None, specialist_executor=_spec)
     reg = coord.sub.executor_registry
 
     expected: set[str] = set()
@@ -177,7 +177,7 @@ def test_register_executors_never_wires_kernel_owned_actions(caplog):
     """Kernel-owned actions are REQUEST-only, so they get no executor at all."""
     coord = _fake_coordinator()
     with caplog.at_level(logging.DEBUG, logger=cli_executors.log.name):
-        _register_executors(coord, no_kernel=True, session_dir=None)
+        _register_executors(coord, session_dir=None)
     reg = coord.sub.executor_registry
     assert "roofline" in reg
     assert not (set(reg) & KERNEL_AGENT_OWNED_ACTIONS)
@@ -189,7 +189,7 @@ def test_register_executors_registers_optional_specialist():
     async def _spec(ctx):  # noqa: ANN001, ANN202 - test stub
         return {}
 
-    _register_executors(coord, no_kernel=True, specialist_executor=_spec, session_dir=Path("."))
+    _register_executors(coord, specialist_executor=_spec, session_dir=Path("."))
     assert coord.sub.executor_registry["specialist"] is _spec
 
 
@@ -199,7 +199,7 @@ async def _spec_stub(ctx):  # noqa: ANN001, ANN202 - test stub
 
 def _fully_wired_registry() -> dict[str, object]:
     coord = _fake_coordinator()
-    _register_executors(coord, no_kernel=False, specialist_executor=_spec_stub, session_dir=None)
+    _register_executors(coord, specialist_executor=_spec_stub, session_dir=None)
     return coord.sub.executor_registry
 
 
@@ -235,7 +235,7 @@ def test_no_executor_is_registered_under_an_unknown_action_name():
     catalogue = {meta.name for meta in ACTION_CATALOGUE.values()}
 
     phantom = sorted(set(registry) - catalogue)
-    assert not phantom, f"executor keys with no actions/_meta/*.yaml: {phantom}"
+    assert not phantom, f"executor keys absent from ACTION_CATALOGUE: {phantom}"
 
 
 def test_conditional_registrations_are_exactly_the_documented_exceptions():
@@ -245,7 +245,7 @@ def test_conditional_registrations_are_exactly_the_documented_exceptions():
     drops the specialist. Anything else disappearing is a wiring bug.
     """
     minimal = _fake_coordinator()
-    _register_executors(minimal, no_kernel=True, specialist_executor=None, session_dir=None)
+    _register_executors(minimal, specialist_executor=None, session_dir=None)
 
     optional = set(_fully_wired_registry()) - set(minimal.sub.executor_registry)
     assert optional == {"specialist"}
