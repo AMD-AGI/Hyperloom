@@ -769,6 +769,46 @@ async def test_a_reject_still_asking_for_evidence_is_not_held(coord):
     assert coord._materialise_calls == []
 
 
+@pytest.mark.asyncio
+async def test_a_rule_the_critic_cleared_is_not_the_grounds_for_its_reject(coord):
+    """The prose scan used to fire on any word-bounded mention, so a Critic that
+    checked the advisory rule, found it clean, and refused for a real reason had
+    that reason read as the formatting complaint -- and the proposal ran."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-cleared",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-cleared"}},
+    )
+    coord.state.pending_proposals["msg-cleared"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-cleared",
+            "verdict": "reject",
+            "reasoning": (
+                f"Checked {QUANTITATIVE_CLAIM_REASON_CODE}: clean. Rejecting because the "
+                "patch rewrites a kernel with no before/after benchmark to stand on."
+            ),
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+def test_a_rule_named_in_a_remediation_note_is_not_a_citation():
+    """``notes`` is where a model writes what to do next, including "this is not
+    a <code> problem"; grounds are stated in ``reasoning``."""
+    entry = {
+        "verdict": "reject",
+        "reasoning": "the benchmark is not comparable with the baseline.",
+        "notes": [f"{QUANTITATIVE_CLAIM_REASON_CODE}: nothing to fix on that front."],
+    }
+    assert verdict_held_to_its_rule(entry) == ("reject", "")
+
+
 def test_a_reason_code_inside_a_longer_token_is_not_a_citation():
     """The prose scan is word-bounded, so a code embedded in another identifier does not move a verdict."""
     entry = {

@@ -544,10 +544,18 @@ def serialize_verdict_advisory(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-# The verdict fields a Critic writes its own prose into. Scanned for a rule
-# citation when ``failure_reason_code`` is absent; ``risks[*].summary``
-# describes the risk rather than naming the rule, so it stays out.
-_VERDICT_PROSE_KEYS: tuple[str, ...] = ("reasoning", "notes")
+# The one verdict field a Critic states its grounds in. ``notes`` is
+# remediation text and ``risks[*].summary`` describes the risk, so a rule named
+# in either is being discussed rather than invoked; both stay out.
+_VERDICT_PROSE_KEY: str = "reasoning"
+
+# What a citation looks like: the code opens the sentence and a colon
+# introduces the finding, the shape the field verdict used --
+# ``"specialist_quantitative_claim_violation: the proposal payload carries the
+# forbidden predicted_gain_pct field."`` A list marker or backticks may precede
+# it. Anything looser matches "checked <code>: clean, rejecting because ...",
+# where the code is the rule the Critic *cleared* the proposal on.
+_CITATION_OPENER: str = r"[ \t>*\-]*`?"
 
 
 def cited_advisory_reason_code(entry: dict[str, Any]) -> str:
@@ -557,9 +565,12 @@ def cited_advisory_reason_code(entry: dict[str, Any]) -> str:
     code to the model, but nothing on the output side requires it back, so a
     Critic that names its rule inside ``reasoning`` — the observed shape — is
     within contract. Recovering the citation from prose is therefore part of
-    reading the verdict, not a workaround. Reason codes are ``snake_case``
-    identifiers, so the scan is word-bounded and cannot fire on a substring of
-    some longer token.
+    reading the verdict, not a workaround.
+
+    A mention is not a citation, though: a Critic that clears one rule and
+    refuses on another names both, and reading the cleared one as the grounds
+    would materialise a proposal it meant to block. Only the opening-clause
+    form counts (see :data:`_CITATION_OPENER`).
 
     Args:
         entry: A ``review_verdict`` payload or one ``verdict_map`` entry.
@@ -573,20 +584,15 @@ def cited_advisory_reason_code(entry: dict[str, Any]) -> str:
     explicit = str(entry.get("failure_reason_code") or "").strip()
     if explicit:
         return explicit if explicit in advisory else ""
-    prose: list[str] = []
-    for key in _VERDICT_PROSE_KEYS:
-        raw = entry.get(key)
-        if isinstance(raw, (list, tuple)):
-            prose.extend(str(item) for item in raw if item)
-        elif raw:
-            prose.append(str(raw))
-    if not prose:
+    text = str(entry.get(_VERDICT_PROSE_KEY) or "")
+    if not text.strip():
         return ""
-    text = "\n".join(prose)
     # Sorted so a verdict citing several advisory rules still records one
     # deterministic code; every candidate is advisory, so the choice is only
     # about which one the audit trail names.
-    cited = sorted(code for code in advisory if re.search(rf"(?<![\w-]){re.escape(code)}(?![\w-])", text))
+    cited = sorted(
+        code for code in advisory if re.search(rf"^{_CITATION_OPENER}{re.escape(code)}`?\s*:", text, re.MULTILINE)
+    )
     return cited[0] if cited else ""
 
 
