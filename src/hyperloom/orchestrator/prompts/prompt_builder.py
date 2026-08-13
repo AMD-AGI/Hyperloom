@@ -19,14 +19,10 @@ import re
 from collections.abc import Iterable
 from pathlib import Path
 
-from ..actions.registry import (
-    ActionMetadata,
-    ActionRegistry,
-    VALID_PIPELINE_PHASES,
-)
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
+    ActionMetadata,
     FULL_ENABLED_ACTIONS,
-    GRID_INJECTABLE_ACTIONS,
+    KERNEL_ACTION_REQUEST_KINDS,
     KERNEL_AGENT_OWNED_ACTIONS,
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
 )
@@ -245,13 +241,13 @@ def _section_phase_semantics(
 
 
 def _filter_actions(
-    registry: ActionRegistry,
+    registry: dict[str, ActionMetadata],
     enabled: Iterable[str],
 ) -> list[ActionMetadata]:
-    """Resolve enabled action names to their registry metadata.
+    """Resolve enabled action names to their catalogue metadata.
 
     Args:
-        registry (ActionRegistry): The loaded action registry to look up.
+        registry (dict[str, ActionMetadata]): The action catalogue to look up.
         enabled (Iterable[str]): Enabled action names, drawn from the closed
             :data:`FULL_ENABLED_ACTIONS` set.
 
@@ -269,7 +265,7 @@ def _filter_actions(
 
 
 def _resolve_prompt_prelude(
-    action_registry: ActionRegistry,
+    action_registry: dict[str, ActionMetadata],
     enabled_actions: Iterable[str],
     framework: str,
     kernel_enabled: bool | None,
@@ -278,7 +274,7 @@ def _resolve_prompt_prelude(
     """Resolve the shared prelude for the orchestration / critic prompt builders.
 
     Args:
-        action_registry (ActionRegistry): The loaded action registry.
+        action_registry (dict[str, ActionMetadata]): The action catalogue.
         enabled_actions (Iterable[str]): Action names enabled for this run.
         framework (str): The framework name; normalised to lower-case (default
             ``sglang``).
@@ -414,14 +410,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
         str: The emit-hint string for the catalogue entry.
     """
     if meta.name in KERNEL_AGENT_OWNED_ACTIONS:
-        if meta.name == "kernel_opt":
-            kind_hint = "run_optimization"
-        elif meta.name == "gemm_tuning":
-            kind_hint = "run_gemm_tuning"
-        elif meta.name == "integrate":
-            kind_hint = "integrate"
-        else:
-            kind_hint = meta.name
+        kind_hint = KERNEL_ACTION_REQUEST_KINDS[meta.name]
         return f"REQUEST{{target_agent='kernel_agent', kind='{kind_hint}', params={{...}}}}"
     if meta.name == "report":
         return "propose_action{action_name='report', predicted_gain_pct=0.0}"
@@ -978,7 +967,7 @@ def _section_reference_index(*, references_dir: Path, phase: str = "") -> list[s
 
 def build_orchestration_prompt(
     *,
-    action_registry: ActionRegistry,
+    action_registry: dict[str, ActionMetadata],
     enabled_actions: Iterable[str],
     framework: str = "sglang",
     kernel_enabled: bool | None = None,
@@ -998,8 +987,7 @@ def build_orchestration_prompt(
     """Compose the Orchestration system prompt (deterministic for given inputs).
 
     Args:
-        action_registry: pre-loaded ``ActionRegistry`` (caller calls
-            ``.load()``).
+        action_registry: the ``ACTION_CATALOGUE`` mapping.
         enabled_actions: enabled action names; final ordering is by
             pipeline_phase.
         framework: ``sglang`` / ``vllm`` — printed in SESSION CONTEXT.
@@ -1136,13 +1124,11 @@ def default_enabled_actions(
 
 __all__ = [
     "FULL_ENABLED_ACTIONS",
-    "GRID_INJECTABLE_ACTIONS",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
     "TRANSPORTS",
     "TRANSPORT_STRUCTURED_OUTPUT",
     "TRANSPORT_TOOLS",
-    "VALID_PIPELINE_PHASES",
     "build_orchestration_prompt",
     "default_enabled_actions",
 ]

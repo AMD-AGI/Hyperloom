@@ -91,9 +91,6 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         {
             "kernel_opt",
             "integrate",
-            "deep_kernel_analysis",
-            "operator_tuning",
-            "vendor_kernel_config",
             "gemm_tuning",
             "specialist",
             "roofline",

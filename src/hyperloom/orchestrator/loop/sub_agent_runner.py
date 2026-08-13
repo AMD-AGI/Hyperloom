@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 
 import logging
 
-from hyperloom.inference_optimizer.session.session_paths import _runs_actions, runs_dir
+from hyperloom.inference_optimizer.session.session_paths import _RUNS_ACTIONS, runs_dir
 from ..bus.resource_lock import Lease, ResourceLockManager
 from ..policy.gate import PolicyDenied
 from ..state.task_registry import IllegalTransition, Task, TaskNotFound, TaskRegistry
@@ -134,7 +134,7 @@ class SubAgentRunner:
         if self.session_dir is None:
             return None
         kind = str(task.kind or "").strip()
-        if kind not in _runs_actions():
+        if kind not in _RUNS_ACTIONS:
             return None
         ws = runs_dir(self.session_dir, kind, task.task_id)
         ws.mkdir(parents=True, exist_ok=True)

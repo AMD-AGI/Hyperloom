@@ -72,7 +72,6 @@ from .credentials import (
 )
 from .multi_node import (
     _prepare_multi_node_state as _prepare_multi_node_state,
-    _dump_mn_input_params as _dump_mn_input_params,
     _resolve_mn_backend as _resolve_mn_backend,
 )
 from .quantization import (
@@ -86,7 +85,7 @@ from .recover import (
 __all__ = ["main"]
 from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
-from hyperloom.orchestrator.actions.registry import ActionRegistry
+from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
 from hyperloom.orchestrator.state.objective import Objective, build_objective
@@ -264,7 +263,7 @@ def _build_orchestration_prompt(
     cycle_directive: str = "",
     phase: str = "",
     transport: str = TRANSPORT_TOOLS,
-    action_registry: ActionRegistry | None = None,
+    action_registry: dict[str, ActionMetadata] | None = None,
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides).
 
@@ -281,13 +280,13 @@ def _build_orchestration_prompt(
             behaviour that phase cannot reach. Empty renders every module.
         transport (str): How the orchestration backend carries an intent; omits
             the prompt modules describing a tool surface it does not mount.
-        action_registry (ActionRegistry | None): The action registry to use;
-            a fresh loaded registry is built when ``None``.
+        action_registry (dict[str, ActionMetadata] | None): The action
+            catalogue to use; defaults to :data:`ACTION_CATALOGUE`.
 
     Returns:
         str: The composed Orchestration system prompt.
     """
-    registry = action_registry or ActionRegistry().load()
+    registry = action_registry or ACTION_CATALOGUE
     enabled = default_enabled_actions(no_kernel=no_kernel, no_explore=no_explore)
     kind, value = _objective_summary_for_prompt(objective)
     return build_orchestration_prompt(
@@ -1556,10 +1555,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             if v:
                 os.environ[env_key] = v
 
-    # Multi-node: dump resolved input params (CLI + env) for env->CLI tracing.
-    if nodes_resolved >= 2:
-        _dump_mn_input_params(args, nodes_resolved)
-
     # Stale aiter JIT lock sweep: killed runs leave locks that block subsequent starts (locks <5min preserved).
     aiter_sweep = clean_stale_aiter_locks()
     if aiter_sweep["dir"] and aiter_sweep["deleted"]:
@@ -2325,7 +2320,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     _register_executors(
         coordinator,
-        no_kernel=no_kernel,
         compare_against_gpu=getattr(args, "compare_against_gpu", None),
         session_dir=session_dir,
         specialist_executor=specialist_executor,

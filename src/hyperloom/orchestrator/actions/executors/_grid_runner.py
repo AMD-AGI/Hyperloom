@@ -47,6 +47,8 @@ from .benchmark_result import (
     estimate_killed_variant_throughput,
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
+    select_run_workspace,
+    snapshot_workspaces,
 )
 from .benchmark_backend import build_benchmark_command
 from ._inferencex_patcher import (
@@ -1476,6 +1478,7 @@ async def run_grid(
                     break
                 continue
 
+            warmup_workspaces_before = snapshot_workspaces(warmup_slot)
             warmup_started_unix = time.time()
             try:
                 warmup_rc, warmup_stdout, warmup_stderr = await asyncio.to_thread(
@@ -1532,13 +1535,13 @@ async def run_grid(
                     break
                 continue
 
-            warmup_candidates = sorted(warmup_slot.glob("benchmark_*"))
-            warmup_workspace = warmup_candidates[-1] if warmup_candidates else warmup_slot
+            warmup_run_ws = select_run_workspace(warmup_slot, known_before=warmup_workspaces_before)
+            warmup_workspace = warmup_run_ws if warmup_run_ws is not None else warmup_slot
             warmup_harvested = harvest_leaked_artifacts(
                 warmup_workspace,
                 subprocess_started_unix=warmup_started_unix,
             )
-            if warmup_candidates:
+            if warmup_run_ws is not None:
                 _, warmup_measurement = await _settled_measurement(
                     warmup_workspace,
                     subprocess_started_unix=warmup_started_unix,
@@ -1585,7 +1588,7 @@ async def run_grid(
                         extra_server_args=variant.extra_server_args,
                         extra_envs=dict(variant.extra_envs),
                         status="failed",
-                        workspace=str(warmup_workspace) if warmup_candidates else None,
+                        workspace=str(warmup_workspace) if warmup_run_ws is not None else None,
                         report_path=(
                             str(warmup_workspace / "benchmark_report.json")
                             if (warmup_workspace / "benchmark_report.json").exists()
@@ -1724,6 +1727,7 @@ async def run_grid(
 
         # Snapshot wall-clock before launch so the salvage path can mtime-gate
         # leak destinations per-variant.
+        slot_workspaces_before = snapshot_workspaces(slot)
         variant_started_unix = time.time()
         try:
             rc, stdout, stderr = await asyncio.to_thread(
@@ -1995,11 +1999,10 @@ async def run_grid(
                 break
             continue
 
-        # Locate workspace inside slot.
-        candidates = sorted(slot.glob("benchmark_*"))
+        workspace = select_run_workspace(slot, known_before=slot_workspaces_before)
         # Always-on artifact harvest so each slot keeps its server.log /
         # gpu_metrics / profile relay for Robustness RCA.
-        harvest_destination = candidates[-1] if candidates else slot
+        harvest_destination = workspace if workspace is not None else slot
         harvested = harvest_leaked_artifacts(
             harvest_destination,
             subprocess_started_unix=variant_started_unix,
@@ -2011,7 +2014,7 @@ async def run_grid(
                 len(harvested),
                 ", ".join(src.name for src, _ in harvested),
             )
-        if not candidates:
+        if workspace is None:
             harvest_tags = [f"harvested_leaked_artifact:{src}" for src, _ in harvested]
             no_ws_error_summary = server_log_death_excerpt(str(server_log)) or (
                 redact_secret_values((stderr or stdout)[-2000:]) if rc != 0 else "no benchmark_* workspace produced"
@@ -2048,7 +2051,6 @@ async def run_grid(
             if rc != 0 and not keep_going_on_failure:
                 break
             continue
-        workspace = candidates[-1]
         report_path = workspace / "benchmark_report.json"
         # A clean exit is worth waiting on: the report is written during shutdown
         # and the reader runs the moment the subprocess is reaped.

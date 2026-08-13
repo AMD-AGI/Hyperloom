@@ -782,6 +782,166 @@ def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
     assert result["error_class"] == "no_report", result
 
 
+def test_baseline_rejects_stale_workspace_on_crash(tmp_path, monkeypatch):
+    """A stale benchmark_* workspace from a prior attempt must not be adopted
+    as a successful result when the current subprocess crashes (rc=1)."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    stale = output_dir / "benchmark_vllm_20260101_000000"
+    stale.mkdir(parents=True)
+    (stale / "benchmark_report.json").write_text(
+        json.dumps({
+            "success": True,
+            "framework": "vllm",
+            "throughput": {
+                "output_throughput": 9999.0,
+                "completed_requests": 64,
+                "duration_seconds": 25.0,
+            },
+            "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
+        }),
+        encoding="utf-8",
+    )
+    old = 1735689600.0
+    os.utime(stale / "benchmark_report.json", (old, old))
+    os.utime(stale, (old, old))
+
+    def fake_run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, "", "HIP out of memory")
+
+    executor = _executor(base, tmp_path, baseline_double_run=False)
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed", result
+    assert result.get("output_throughput") is None
+
+
+def test_baseline_rejects_stale_workspace_on_silent_exit(tmp_path, monkeypatch):
+    """A stale benchmark_* workspace must not be adopted when the subprocess
+    exits 0 without producing any new workspace (silent no-op)."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    stale = output_dir / "benchmark_vllm_20260101_000000"
+    stale.mkdir(parents=True)
+    (stale / "benchmark_report.json").write_text(
+        json.dumps({
+            "success": True,
+            "framework": "vllm",
+            "throughput": {
+                "output_throughput": 9999.0,
+                "completed_requests": 64,
+                "duration_seconds": 25.0,
+            },
+            "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
+        }),
+        encoding="utf-8",
+    )
+    old = 1735689600.0
+    os.utime(stale / "benchmark_report.json", (old, old))
+    os.utime(stale, (old, old))
+
+    def fake_run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    executor = _executor(base, tmp_path, baseline_double_run=False)
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed", result
+    assert result.get("output_throughput") is None
+
+
+def test_baseline_accepts_new_workspace_ignores_older_stale(tmp_path, monkeypatch):
+    """When the subprocess produces a new benchmark_* workspace, that workspace
+    is selected even when a stale one with a larger name exists."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    stale = output_dir / "benchmark_vllm_29991231_235959"
+    stale.mkdir(parents=True)
+    (stale / "benchmark_report.json").write_text(
+        json.dumps({
+            "success": True,
+            "framework": "vllm",
+            "throughput": {
+                "output_throughput": 9999.0,
+                "completed_requests": 64,
+                "duration_seconds": 25.0,
+            },
+            "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
+        }),
+        encoding="utf-8",
+    )
+    old = 1735689600.0
+    os.utime(stale / "benchmark_report.json", (old, old))
+    os.utime(stale, (old, old))
+
+    def fake_run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, "", "boom")
+
+    executor = _executor(base, tmp_path, baseline_double_run=False)
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed", result
+    assert result.get("output_throughput") is None
+
+
+def test_baseline_fresh_workspace_succeeds_despite_stale_peer(tmp_path, monkeypatch):
+    """A new workspace with valid throughput produced by the current run succeeds
+    even when an older stale workspace is present in the same output_dir."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    stale = output_dir / "benchmark_vllm_20260101_000000"
+    stale.mkdir(parents=True)
+    (stale / "benchmark_report.json").write_text(
+        json.dumps({
+            "success": True,
+            "framework": "vllm",
+            "throughput": {"output_throughput": 1.0, "completed_requests": 1},
+        }),
+        encoding="utf-8",
+    )
+    old = 1735689600.0
+    os.utime(stale / "benchmark_report.json", (old, old))
+    os.utime(stale, (old, old))
+
+    def fake_run(cmd, *args, **kwargs):
+        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]), tput=4000.0)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    executor = _executor(base, tmp_path, baseline_double_run=False)
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded", result
+    assert result.get("output_throughput") == pytest.approx(4000.0)
+
+
 def test_ensure_local_inferencex_noop_for_local_path(tmp_path, monkeypatch):
     """A checkout already on a local filesystem is returned unchanged."""
     from hyperloom.orchestrator.actions.executors import baseline as bl

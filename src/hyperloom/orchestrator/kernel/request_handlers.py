@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
 from hyperloom.common import codex_session, llm_config
-from hyperloom.common.env import env_bool, is_truthy
+from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.kernel_shape_contract import (
     ALLOWED_SHAPE_PROVENANCE as _ALLOWED_SHAPE_PROVENANCE,
@@ -44,27 +44,10 @@ from ..trace.parse_usage import (
     parse_forge_usage,
 )
 
-# Cohesive clusters live in sibling modules; re-exported here so the module
-# namespace + monkeypatch surface is intact.
+# Re-exported: callers patch these at ``request_handlers.<name>``.
 from ._kernel_decisions import (
     _honest_flag as _honest_flag,
     _format_last_kernel_opt as _format_last_kernel_opt,
-    _resolve_kernel_patch_identity as _resolve_kernel_patch_identity,
-    kernel_patch_key as kernel_patch_key,
-    find_rejected_kernel_patch as find_rejected_kernel_patch,
-    record_kernel_integrate_result as record_kernel_integrate_result,
-    record_kernel_opt as record_kernel_opt,
-    record_gemm_tuning as record_gemm_tuning,
-    _kernel_ids_in_optimization_stack as _kernel_ids_in_optimization_stack,
-    _source_files_in_optimization_stack as _source_files_in_optimization_stack,
-    _kernel_ids_with_integrate_attempts as _kernel_ids_with_integrate_attempts,
-    integrate_attempt_count_for_kernel as integrate_attempt_count_for_kernel,
-    _kernel_trace_impact_pct as _kernel_trace_impact_pct,
-    next_pending_keep_kernel_id as next_pending_keep_kernel_id,
-    pending_keep_kernel_ids as pending_keep_kernel_ids,
-    has_keep_pending_integrate as has_keep_pending_integrate,
-    kernel_opt_attempts_count as kernel_opt_attempts_count,
-    untried_hot_reusable_kernels as untried_hot_reusable_kernels,
 )
 
 
@@ -1716,19 +1699,9 @@ exec {shlex.quote(runner)}
     return path
 
 
-def _forge_explicitly_enabled() -> bool:
-    """Return true only for the single supported forge opt-in switch.
-
-    KernelForge is private infrastructure, so forge must never be selected by
-    request payloads, legacy aliases, or GEMM_TUNING_BACKEND.  The only runtime
-    contract that enables forge is an exact KERNEL_OPT_BACKEND_ORDER=forge.
-    """
-    return str(os.environ.get("KERNEL_OPT_BACKEND_ORDER") or "").strip().lower() == "forge"
-
-
 def _resolve_gemm_tuning_backend(payload: dict) -> str:
     """Resolve GEMM tuning backend under the forge-explicit-only invariant."""
-    return "forge" if _forge_explicitly_enabled() else "geak"
+    return "forge" if forge_explicitly_enabled() else "geak"
 
 
 def _parse_forge_gemm_sentinel(stdout: str) -> dict[str, Any] | None:
@@ -4619,7 +4592,7 @@ def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
     missing value, legacy alias, or payload override stays on the GEAK
     whole-phase backend.
     """
-    if _forge_explicitly_enabled():
+    if forge_explicitly_enabled():
         return ["forge"]
     return list(_DEFAULT_KERNEL_PHASE_BACKEND_ORDER)
 
@@ -5733,8 +5706,6 @@ async def _run_optimization_single(
         cmd += ["--candidates-path", str(payload["candidates_path"])]
     if payload.get("benchmark_file"):
         cmd += ["--benchmark-file", str(payload["benchmark_file"])]
-    if payload.get("test_harness_path"):
-        cmd += ["--test-harness-path", str(payload["test_harness_path"])]
     if payload.get("micro_speedup") is not None:
         cmd += ["--micro-speedup", str(payload["micro_speedup"])]
     if payload.get("e2e_gain_pct") is not None:
@@ -5749,8 +5720,6 @@ async def _run_optimization_single(
             "--accuracy-passed",
             "true" if bool(payload["accuracy_passed"]) else "false",
         ]
-    if payload.get("test_command"):
-        cmd += ["--test-command", str(payload["test_command"])]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     if payload.get("budget_minutes") is not None:
@@ -6447,11 +6416,10 @@ async def integrate_handler(
     extra_args = _vram_guarded_server_args(extra_args)
 
     # Wrap BaselineExecutor in a Task/RunnerContext.
-    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+    from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
 
     fake_task_id = f"integrate-{kernel_id or 'anon'}"
-    workspace = runs_dir(session_dir, "integrate", fake_task_id)
-    workspace.mkdir(parents=True, exist_ok=True)
+    workspace = unique_runs_dir(session_dir, "integrate", fake_task_id)
     baseline_executor = BaselineExecutor(session_dir=session_dir)
     rebaseline_timeout_sec = _integrate_rebaseline_timeout_sec(
         payload,
@@ -6716,8 +6684,7 @@ async def integrate_handler(
         paired_ab = {"status": "attempted"}
         try:
             paired_pristine_revert = _maybe_revert_kernel_patch(apply_result)
-            paired_ws = runs_dir(session_dir, "integrate", f"{fake_task_id}-pairedbase")
-            paired_ws.mkdir(parents=True, exist_ok=True)
+            paired_ws = unique_runs_dir(session_dir, "integrate", f"{fake_task_id}-pairedbase")
             paired_task = Task(
                 task_id=f"{fake_task_id}-pairedbase",
                 kind="baseline",
@@ -6883,7 +6850,7 @@ async def integrate_handler(
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
     "trace_analyze": trace_analyze_handler,
     "run_gemm_tuning": run_gemm_tuning_handler,
-    "run_fusion": run_fusion_handler,
+    # No run_fusion entry: KernelPhase awaits run_fusion_handler directly.
     "run_optimization": run_optimization_handler,
     "integrate": integrate_handler,
     "apply_patch": integrate_handler,  # alias — same flow
@@ -6923,24 +6890,6 @@ __all__ = [
     "run_gemm_tuning_handler",
     "run_optimization_handler",
     "trace_analyze_handler",
-    # Re-exported from sibling modules for backward compat and the test
-    # monkeypatch surface (referenced via ``request_handlers.<name>``).
-    # Declared so the re-exports are intentional, not flagged imports.
+    # Re-exported from _kernel_decisions.
     "_format_last_kernel_opt",
-    "_resolve_kernel_patch_identity",
-    "kernel_patch_key",
-    "find_rejected_kernel_patch",
-    "record_kernel_integrate_result",
-    "record_kernel_opt",
-    "record_gemm_tuning",
-    "_kernel_ids_in_optimization_stack",
-    "_source_files_in_optimization_stack",
-    "_kernel_ids_with_integrate_attempts",
-    "integrate_attempt_count_for_kernel",
-    "_kernel_trace_impact_pct",
-    "next_pending_keep_kernel_id",
-    "pending_keep_kernel_ids",
-    "has_keep_pending_integrate",
-    "kernel_opt_attempts_count",
-    "untried_hot_reusable_kernels",
 ]
