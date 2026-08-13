@@ -1069,7 +1069,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_build_framework_working_memory": "phase_framework",
         "_render_framework_memory_for_prompt": "phase_framework",
         "_framework_agent_discover_repo_urls": "phase_framework",
-        "_write_prs_tested_from_framework_agent": "phase_framework",
+        "_emit_framework_agent_kg_decision": "phase_framework",
         "_emit_kg_decision": "phase_framework",
         "_record_framework_agent_phase_done": "phase_framework",
         "_discover_next_framework_batch": "phase_framework",

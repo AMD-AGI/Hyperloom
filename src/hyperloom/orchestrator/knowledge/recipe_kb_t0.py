@@ -577,10 +577,6 @@ def _build_warm_start_context(
                 }
             )
             ctx["recommended_replay"] = recommended_replay
-    if not current_remote:
-        # Local legacy RecipeKB keeps its isolated prs_tested representation.
-        ctx.setdefault("recommended_replay", {})
-        _extract_patches_from_prs_tested(ctx, recipe, model_architectures)
     # KG enhancement (best-effort, degradable).
     _enhance_warm_start_with_kg(
         ctx,
@@ -646,7 +642,7 @@ def _enhance_warm_start_with_kg(
       has lapsed.
 
     The whole step is wrapped in a degradation guard: any failure leaves
-    ``ctx`` exactly as the local prs_tested logic produced it.
+    ``ctx`` exactly as the warm-start context builder produced it.
 
     Args:
         ctx: The warm-start context to mutate in place.
@@ -821,82 +817,6 @@ def _validity_expired(props: Mapping[str, Any]) -> bool:
     if exp.tzinfo is None:
         exp = exp.replace(tzinfo=timezone.utc)
     return exp < datetime.now(timezone.utc)
-
-
-def _extract_patches_from_prs_tested(
-    ctx: dict,
-    recipe: "Mapping[str, Any] | None",
-    model_architectures: "list[str] | None" = None,
-) -> None:
-    """Populate ctx with replayable patches and blocked patches from prs_tested."""
-    if not isinstance(recipe, Mapping):
-        return
-    prs = recipe.get("prs_tested")
-    if not isinstance(prs, list) or not prs:
-        return
-    required_timeline = bool(recipe.get("required_patch_timeline"))
-
-    patches: list[dict] = []
-    blocked: list[dict] = []
-    arch_set = set(model_architectures or [])
-
-    for pr in prs:
-        if not isinstance(pr, dict):
-            continue
-        patch_content = pr.get("patch_content", "")
-        required = required_timeline or bool(pr.get("required"))
-        if not patch_content and not required:
-            continue
-        outcome = str(pr.get("outcome", "")).upper()
-        applicable_arch = pr.get("applicable_arch") or []
-
-        # Architecture match: at least one of applicable_arch must match.
-        if applicable_arch and arch_set:
-            if not any(a in arch_set for a in applicable_arch):
-                continue
-
-        if outcome == "KEEP":
-            try:
-                gain = float(pr.get("measured_gain_pct") or 0.0)
-            except (TypeError, ValueError):
-                gain = 0.0
-            if gain > 0 or required:
-                # Cap patch_content at 50KB to avoid state.json bloat.
-                pc = patch_content if len(patch_content) <= 50_000 else ""
-                patches.append(
-                    {
-                        "patch_file": str(pr.get("patch_file") or ""),
-                        "patch_content": pc,
-                        "patch_ref": str(pr.get("patch_ref") or ""),
-                        "measured_gain_pct": gain,
-                        "repo": str(pr.get("repo") or ""),
-                        "required": required,
-                        "timeline_index": pr.get("timeline_index"),
-                    }
-                )
-        elif outcome in ("REVERT", "FAILED"):
-            # Only block when applicable_arch is specified (an unconstrained
-            # REVERT is too broad to block all models).
-            if not applicable_arch:
-                continue
-            blocked.append(
-                {
-                    "patch_file": str(pr.get("patch_file") or ""),
-                    "reason": f"{outcome} on {', '.join(applicable_arch)} ({pr.get('measured_gain_pct', '?')}%)",
-                    "blocked_arch": list(applicable_arch),
-                    "error_class": str(pr.get("error_class") or ""),
-                }
-            )
-
-    if patches:
-        if not required_timeline:
-            patches.sort(key=lambda p: -(p.get("measured_gain_pct") or 0))
-        replay = ctx.setdefault("recommended_replay", {})
-        replay.setdefault("extra_server_args", "")
-        replay.setdefault("extra_envs", {})
-        replay["patches"] = patches
-    if blocked:
-        ctx["blocked_patches"] = blocked
 
 
 def _build_t0_trace_extras(
@@ -1484,7 +1404,6 @@ def run_t0_anchor(
             "what_worked",
             "what_failed",
             "remaining_gaps",
-            "prs_tested",
             "pitfalls",
             "lessons",
             "last_profiled",
@@ -1522,7 +1441,6 @@ def run_t0_anchor(
             what_worked=list(live.get("what_worked") or []),
             what_failed=list(live.get("what_failed") or []),
             remaining_gaps=list(live.get("remaining_gaps") or []),
-            prs_tested=list(live.get("prs_tested") or []),
             pitfalls=list(live.get("pitfalls") or []),
             lessons=list(live.get("lessons") or []),
             last_profiled=str(live.get("last_profiled") or ""),

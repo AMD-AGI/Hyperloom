@@ -8,7 +8,7 @@ over presigned URLs; only small JSON control messages touch the service.
 Typical producer flow::
 
     store = KBStoreClient.from_env()
-    store.put_knowledge(cid, {"prs_tested": [...]})
+    store.put_knowledge(cid, {"lessons": [...]})
     ref = store.put_file(cid, session_id, "patches/pr-123.patch",
                          local_path, kind="patch",
                          meta={"pr_url": url, "outcome": "integrated"})
