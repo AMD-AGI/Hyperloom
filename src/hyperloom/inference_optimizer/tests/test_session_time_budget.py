@@ -158,6 +158,24 @@ class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
     def test_a_session_with_no_baseline_yet_falls_back_to_the_catalogue(self):
         assert expected_action_cost_minutes(ACTION_CATALOGUE["baseline"]) == pytest.approx(5.0)
 
+    def test_a_warm_replay_is_priced_as_the_baseline_round_it_is(self):
+        """Warm replay is not a cheap re-attach to a server that is already hot.
+
+        ``replay_warm_recipe`` is dispatched to ``BaselineExecutor`` with the
+        recipe's ``extra_server_args``/``extra_envs``/``patches``, so it boots
+        its own server and runs the same benchmark the baseline ran; the recipe
+        changes what is measured, not how long measuring takes. Being refused
+        near the tail on a 51-minute price is therefore the gate working, not
+        the gate being timid — and if warm replay ever does learn to re-attach,
+        this is where the price stops being right.
+        """
+        cost = expected_action_cost_minutes(
+            ACTION_CATALOGUE["replay_warm_recipe"],
+            measured_baseline_sec=_MEASURED_BASELINE_SEC,
+        )
+        assert cost == pytest.approx(_MEASURED_BASELINE_SEC / 60.0)
+        assert ACTION_CATALOGUE["replay_warm_recipe"].requires_lanes == ACTION_CATALOGUE["baseline"].requires_lanes
+
     def test_a_measurement_that_is_not_a_number_is_not_a_cost(self):
         assert measured_baseline_runtime_sec(None) == 0.0
         assert measured_baseline_runtime_sec(SimpleNamespace(baseline_runtime_sec="not-a-number")) == 0.0
