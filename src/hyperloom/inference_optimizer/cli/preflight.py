@@ -673,15 +673,19 @@ def _in_container() -> bool:
     return any(marker in cgroup for marker in ("docker", "containerd", "kubepods", "libpod"))
 
 
-def _framework_probe_interpreters(benchmark_python: str) -> list[str]:
+def _framework_probe_interpreters(framework: str, benchmark_python: str) -> list[str]:
     """Interpreters that may hold the serving package, deduped in probe order.
 
-    ``$VLLM_VENV_ROOT`` is included because the bare-metal installer puts vLLM
-    in an isolated venv the benchmark interpreter cannot see.
+    ``$VLLM_VENV_ROOT`` leads for vLLM, mirroring install_baremetal.sh: the
+    installer defaults vLLM to that isolated venv, so it is the authoritative
+    build even when the benchmark interpreter carries a stray wheel.
     """
-    candidates = [benchmark_python, sys.executable]
+    candidates: list[str] = []
     venv_root = os.environ.get("VLLM_VENV_ROOT", "").strip()
-    if venv_root:
+    if venv_root and framework == "vllm":
+        candidates.append(str(Path(venv_root) / "bin" / "python"))
+    candidates += [benchmark_python, sys.executable]
+    if venv_root and framework != "vllm":
         candidates.append(str(Path(venv_root) / "bin" / "python"))
     out: list[str] = []
     for candidate in candidates:
@@ -731,21 +735,45 @@ def _probe_rocm_build(framework: str, python_exe: str) -> bool | None:
     return False if proc.returncode == 1 else None
 
 
-def _find_framework_interpreter(framework: str, interpreters: list[str]) -> str | None:
-    """Return the first interpreter that can import ``framework``, else None.
+def _framework_importable(framework: str, python_exe: str) -> bool:
+    """Whether ``python_exe`` can locate ``framework``.
 
     Uses ``find_spec`` so a heavy framework is located without importing it,
     which on a broken ROCm install can take the interpreter down by signal.
     """
     probe = f"import importlib.util as u, sys; sys.exit(0 if u.find_spec({framework!r}) else 1)"
+    try:
+        proc = subprocess.run([python_exe, "-c", probe], capture_output=True, timeout=60)
+    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
+def _resolve_framework_build(framework: str, interpreters: list[str]) -> tuple[str | None, bool | None]:
+    """Best (interpreter, ROCm verdict) across every candidate.
+
+    Scanning all of them, rather than stopping at the first import, is what lets
+    an isolated ROCm venv outrank a stray CUDA wheel earlier in the list. An
+    inconclusive verdict outranks a refuted one so the gate blocks only when
+    every importable candidate is provably the wrong build.
+    """
+    refuted: str | None = None
+    inconclusive: str | None = None
     for python_exe in interpreters:
-        try:
-            proc = subprocess.run([python_exe, "-c", probe], capture_output=True, timeout=60)
-        except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
+        if not _framework_importable(framework, python_exe):
             continue
-        if proc.returncode == 0:
-            return python_exe
-    return None
+        verdict = _probe_rocm_build(framework, python_exe)
+        if verdict is True:
+            return python_exe, True
+        if verdict is None:
+            inconclusive = inconclusive or python_exe
+        else:
+            refuted = refuted or python_exe
+    if inconclusive:
+        return inconclusive, None
+    if refuted:
+        return refuted, False
+    return None, None
 
 
 def _check_serving_framework(args, benchmark_python: str) -> None:
@@ -788,10 +816,9 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
         print(f"Preflight: external multi-node mode; skipping the local {framework} check (serving is on remote pods)")
         return
 
-    interpreters = _framework_probe_interpreters(benchmark_python)
-    found = _find_framework_interpreter(framework, interpreters)
+    interpreters = _framework_probe_interpreters(framework, benchmark_python)
+    found, rocm = _resolve_framework_build(framework, interpreters)
     if found:
-        rocm = _probe_rocm_build(framework, found)
         if rocm is True:
             print(f"Preflight: {framework} importable and a ROCm build ({found})")
             return

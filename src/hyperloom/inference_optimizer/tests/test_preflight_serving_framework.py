@@ -51,6 +51,25 @@ def _probe_result(monkeypatch, importable: bool, *, rocm: bool | None = True) ->
     return calls
 
 
+def _probe_per_interpreter(monkeypatch, table, default=(False, None)) -> list[list[str]]:
+    """Stub importability and the ROCm verdict per interpreter path."""
+    calls: list[list[str]] = []
+
+    class _Proc:
+        def __init__(self, rc: int) -> None:
+            self.returncode = rc
+            self.stdout = ""
+            self.stderr = ""
+
+    def _run(cmd, *_args, **_kwargs):
+        calls.append(list(cmd))
+        return _Proc(0 if table.get(cmd[0], default)[0] else 1)
+
+    monkeypatch.setattr(preflight.subprocess, "run", _run)
+    monkeypatch.setattr(preflight, "_probe_rocm_build", lambda _fw, py: table.get(py, default)[1])
+    return calls
+
+
 def _refuse_probe(monkeypatch) -> None:
     """Make any subprocess call an error, so an exemption can be proven."""
 
@@ -215,6 +234,66 @@ def test_rocm_build_proceeds_quietly(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "ROCm" in out
     assert "could not verify" not in out
+
+
+_ISOLATED_VENV = "/opt/hyperloom/vllm-venv"
+_ISOLATED_PY = f"{_ISOLATED_VENV}/bin/python"
+
+
+def test_isolated_venv_rocm_build_beats_a_stray_cuda_wheel(monkeypatch, capsys):
+    """Stopping at the first importable candidate rejects a working host.
+
+    install_baremetal.sh defaults vLLM to an isolated venv, so the ROCm build
+    routinely lives there while the benchmark interpreter may still carry a
+    stray PyPI CUDA wheel. Every candidate has to be considered.
+    """
+    monkeypatch.setenv("VLLM_VENV_ROOT", _ISOLATED_VENV)
+    _probe_per_interpreter(
+        monkeypatch,
+        {"/usr/bin/python3": (True, False), _ISOLATED_PY: (True, True)},
+    )
+
+    preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    assert _ISOLATED_PY in capsys.readouterr().out
+
+
+def test_isolated_venv_is_probed_before_the_benchmark_interpreter(monkeypatch, capsys):
+    """Mirror install_baremetal.sh, which switches the probe to the venv."""
+    monkeypatch.setenv("VLLM_VENV_ROOT", _ISOLATED_VENV)
+    calls = _probe_per_interpreter(monkeypatch, {_ISOLATED_PY: (True, True)})
+
+    preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    assert calls[0][0] == _ISOLATED_PY
+
+
+def test_every_importable_candidate_cuda_still_fails(monkeypatch, capsys):
+    """Scanning all candidates must not weaken the gate when all are wrong."""
+    monkeypatch.setenv("VLLM_VENV_ROOT", _ISOLATED_VENV)
+    _probe_per_interpreter(
+        monkeypatch,
+        {"/usr/bin/python3": (True, False), _ISOLATED_PY: (True, False)},
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    assert excinfo.value.code == 2
+    assert "NOT a ROCm build" in capsys.readouterr().err
+
+
+def test_an_inconclusive_candidate_outweighs_a_refuted_one(monkeypatch, capsys):
+    """Block only when every importable candidate is provably the wrong build."""
+    monkeypatch.setenv("VLLM_VENV_ROOT", _ISOLATED_VENV)
+    _probe_per_interpreter(
+        monkeypatch,
+        {"/usr/bin/python3": (True, False), _ISOLATED_PY: (True, None)},
+    )
+
+    preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    assert "could not verify" in capsys.readouterr().out
 
 
 def test_probe_rocm_build_reports_tri_state(monkeypatch):
