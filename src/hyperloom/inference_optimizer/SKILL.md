@@ -878,9 +878,9 @@ below describe the runtime behavior operators observe.
 - **Interpreter switch.** A from-source build records the venv interpreter it
   was compiled against (`runtime_python_exe`) and emits it as the
   `HYPERLOOM_FRAMEWORK_PYTHON` env into the per-variant YAML benchmark envs
-  (`benchmark.envs`). The bypass backend launches the server via `python -m`
-  with that interpreter; the Magpie backend re-exports it from the YAML
-  benchmark envs. This guarantees the server loads the exact build.
+  (`benchmark.envs`). Both backends export that mapping to the server env, and
+  bypass additionally launches the server via `python -m` with that
+  interpreter. This guarantees the server loads the exact build.
 - **`build_budget_sec`.** Per-build-action wall-clock timeout knob; `0` selects
   the per-component default.
 
