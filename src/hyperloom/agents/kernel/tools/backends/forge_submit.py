@@ -3299,8 +3299,13 @@ def _validated_forge_checkpoint(
                 and shape not in expected_coverage
             ):
                 expected_coverage.append(shape)
+    # forge-loop stopped reporting case coverage once drivers took over suite
+    # evaluation, so silence here says nothing about what was measured -- an
+    # older loop reports an empty list for the same reason. Only a coverage that
+    # is reported and disagrees is evidence the checkpoint measured something
+    # else; vetoing on absence discards every salvageable best from a timeout.
     actual_coverage = checkpoint.get("case_coverage")
-    if expected_coverage and actual_coverage != expected_coverage:
+    if actual_coverage and expected_coverage and actual_coverage != expected_coverage:
         return None
     normalized = dict(checkpoint)
     normalized["best_commit"] = best_commit

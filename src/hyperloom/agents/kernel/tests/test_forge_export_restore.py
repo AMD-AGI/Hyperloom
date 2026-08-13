@@ -348,6 +348,52 @@ def test_validated_checkpoint_requires_commit_metrics_and_coverage(tmp_path):
     )
 
 
+def test_a_checkpoint_that_reports_no_coverage_is_still_recoverable(tmp_path):
+    """forge-loop stopped reporting case coverage when drivers took over the suite.
+
+    Vetoing on the field's absence throws away every salvageable best from a
+    timed-out campaign, silently: the run just looks like it recovered nothing.
+    """
+    env = _make_repo(tmp_path)
+    repo = env["repo"]
+    kernel = env["kernel_agent"]
+    env["other"].write_text("committed_v1\n")
+    base_commit = _git(repo, "rev-parse", "HEAD")
+    kernel.write_text("KERNEL_VALIDATED_BEST\n")
+    _commit_all(repo, "iter1: validated best")
+    best_commit = _git(repo, "rev-parse", "HEAD")
+    shapes = {"validation": [{"CASE_ID": "case_001"}, {"CASE_ID": "case_002"}]}
+    checkpoint = {
+        "schema_version": 1,
+        "experiment_id": "hyperloom",
+        "state": "best_committed",
+        "base_commit": base_commit,
+        "best_commit": best_commit,
+        "baseline_ms": 1.0,
+        "best_ms": 0.8,
+        "mean_case_speedup": 1.25,
+        "search_start_mean_case_speedup": 1.0,
+        "total_improved": True,
+        "incremental_improved": True,
+        "validation_passed": True,
+    }
+
+    def recover(payload):
+        return forge_submit._validated_forge_checkpoint(
+            payload,
+            workspace=repo,
+            base_commit=base_commit,
+            shapes=shapes,
+        )
+
+    # Absent: a current forge-loop reports no coverage key at all.
+    assert recover(dict(checkpoint)) is not None
+    # Empty: an older forge-loop reports the key with nothing in it.
+    assert recover({**checkpoint, "case_coverage": []}) is not None
+    # Present and disagreeing still vetoes: that is evidence, not silence.
+    assert recover({**checkpoint, "case_coverage": [{"CASE_ID": "case_001"}]}) is None
+
+
 def test_submit_salvages_validated_best_after_timeout(tmp_path, monkeypatch):
     env = _make_repo(tmp_path)
     repo = env["repo"]
