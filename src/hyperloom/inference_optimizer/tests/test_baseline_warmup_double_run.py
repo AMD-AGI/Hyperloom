@@ -4,8 +4,10 @@
 """Regression tests for the baseline cold-start "warmup artifact".
 
 Covers the cold+hot double-run and its server-lifecycle reuse, the pre-start /
-teardown cleanup around the reused port, the local InferenceX mirror, and the
-subprocess-failure classifier.
+teardown cleanup around the reused port, the local InferenceX mirror, the
+subprocess-failure classifier, and the session wall-clock budget's reach into
+the round (the deadline the reaper is handed, the clamp on the hang backstop,
+and how a round the run stopped is told apart from one that failed).
 """
 
 from __future__ import annotations
@@ -26,9 +28,20 @@ import yaml
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
 )
+from hyperloom.orchestrator.actions.executors.profile import (
+    PROFILE_DEFAULT_TIMEOUT_SEC,
+    ProfileExecutor,
+)
 from hyperloom.orchestrator.actions.executors._grid_runner import (
+    ORCHESTRATOR_CANCELLED_CLASS,
+    SESSION_TIME_EXHAUSTED_CLASS,
     GridVariant,
+    _SESSION_KILL_GRACE_SEC,
     run_grid,
+)
+from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+    ORCHESTRATOR_CANCELLED_RETURNCODE,
+    SESSION_TIME_EXHAUSTED_RETURNCODE,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.trace.task_progress import progress_scope
@@ -1819,6 +1832,132 @@ def test_teardown_lifecycle_server_removes_state_files(tmp_path):
 
     assert not (pid_dir / "vllm_8888.pid").exists()
     assert not (pid_dir / "vllm_8888.json").exists()
+
+
+def _budgeted_state(*, remaining_sec: float | None) -> SimpleNamespace:
+    """A session state whose only content is how much wall-clock is left."""
+    return SimpleNamespace(
+        baseline_double_run=False,
+        grid_session_deadline_sec=lambda: (None if remaining_sec is None else time.monotonic() + remaining_sec),
+        baseline_runtime_sec=0.0,
+    )
+
+
+def _capturing_fake_run(returncode: int = 0, *, produces_workspace: bool = True):
+    """A ``run_with_session_kill`` stand-in that records how it was called."""
+    calls: list[dict] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(dict(kwargs))
+        if produces_workspace:
+            out_idx = cmd.index("--output-dir")
+            _fake_workspace(Path(cmd[out_idx + 1]), tput=_HOT_TPUT)
+        return subprocess.CompletedProcess(cmd, returncode, "ok", "")
+
+    return fake_run, calls
+
+
+def _run_baseline_under_budget(
+    tmp_path,
+    *,
+    remaining_sec: float | None,
+    timeout_sec: int = 7200,
+    returncode: int = 0,
+    produces_workspace: bool = True,
+    executor_cls=BaselineExecutor,
+) -> tuple[dict, list[dict]]:
+    """Run one baseline round against a session with ``remaining_sec`` left."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    fake_run, calls = _capturing_fake_run(returncode, produces_workspace=produces_workspace)
+    executor = executor_cls(
+        magpie_python=sys.executable,
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    ctx = _make_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": timeout_sec,
+            "gpu_type": "mi300x",
+        }
+    )
+    # The live state arrives on the context, the way the coordinator passes it.
+    ctx.extra["shared_state"] = _budgeted_state(remaining_sec=remaining_sec)
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+    return result, calls
+
+
+class TestTheSessionBudgetReachesTheBaselineRound:
+    """The arm #1146 names as the largest hole, and the one that motivated it.
+
+    A baseline is admitted on a catalogue cost of five minutes and given a
+    two-hour hang backstop (four, cold), so the round that runs first and
+    longest was the one round no wall-clock defence covered: no deadline
+    reached the reaper, and nothing clamped the cap to what was left.
+    """
+
+    def test_the_deadline_reaches_the_reaper(self, tmp_path):
+        _result, calls = _run_baseline_under_budget(tmp_path, remaining_sec=3600.0)
+
+        assert calls and calls[0]["session_deadline_sec"] is not None
+
+    def test_the_hang_backstop_is_clamped_to_what_is_left(self, tmp_path):
+        """A cap larger than the budget outlives the session it belongs to."""
+        _result, calls = _run_baseline_under_budget(tmp_path, remaining_sec=120.0, timeout_sec=7200)
+
+        assert 1 <= calls[0]["timeout"] <= 120 + _SESSION_KILL_GRACE_SEC
+
+    def test_an_unbounded_budget_leaves_the_cap_alone(self, tmp_path):
+        """No session context means no budget to respect, not a budget of zero."""
+        _result, calls = _run_baseline_under_budget(tmp_path, remaining_sec=None, timeout_sec=7200)
+
+        assert calls[0]["timeout"] == 7200
+        assert calls[0]["session_deadline_sec"] is None
+
+    def test_a_budget_kill_is_not_recorded_as_a_broken_model(self, tmp_path):
+        """A reaped round leaves exactly what a broken server leaves behind.
+
+        No workspace, no report, a non-zero returncode -- so without this branch
+        the run that ran out of time is filed as a fact about the model.
+        """
+        result, _calls = _run_baseline_under_budget(
+            tmp_path,
+            remaining_sec=1.0,
+            returncode=SESSION_TIME_EXHAUSTED_RETURNCODE,
+            produces_workspace=False,
+        )
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
+
+    def test_a_cancel_is_told_apart_from_a_spent_budget(self, tmp_path):
+        """A resume meets the spent budget again and does not meet the shutdown."""
+        result, _calls = _run_baseline_under_budget(
+            tmp_path,
+            remaining_sec=3600.0,
+            returncode=ORCHESTRATOR_CANCELLED_RETURNCODE,
+            produces_workspace=False,
+        )
+
+        assert result["error_class"] == ORCHESTRATOR_CANCELLED_CLASS
+
+    def test_the_profile_arm_gets_all_of_it(self, tmp_path):
+        """Profile is the same executor with a four-hour default -- longer than
+        any session budget it could be given."""
+        _result, calls = _run_baseline_under_budget(
+            tmp_path,
+            remaining_sec=120.0,
+            timeout_sec=PROFILE_DEFAULT_TIMEOUT_SEC,
+            executor_cls=ProfileExecutor,
+        )
+
+        assert calls[0]["session_deadline_sec"] is not None
+        assert 1 <= calls[0]["timeout"] <= 120 + _SESSION_KILL_GRACE_SEC
 
 
 # _classify_subprocess_error unit tests

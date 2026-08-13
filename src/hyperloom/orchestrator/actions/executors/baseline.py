@@ -50,12 +50,16 @@ from ._grid_runner import (
     _kill_stale_servers,
     sanitize_result_dir,
     sanitize_script_name,
+    session_clamped_timeout_sec,
+    session_grid_bounds,
+    stopped_by_the_run,
 )
 from ._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     run_with_session_kill,
     server_log_death_excerpt,
+    session_deadline_to_remaining_sec,
 )
 from ._accuracy_gate import (
     _RUN_EVAL_FALSE_VALUES,
@@ -1625,6 +1629,10 @@ class BaselineExecutor:
         ``INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC``) → warm default.
         Every path emits one log line for greppability.
 
+        All three are hang backstops sized in hours, with no reference to the
+        session budget; :meth:`_session_capped_timeout` reduces the result to
+        what is actually left, per round, at the point each round launches.
+
         Args:
             params: Task params; an explicit ``timeout_sec`` overrides the
                 probe-based selection.
@@ -1700,6 +1708,39 @@ class BaselineExecutor:
             self.default_timeout_sec,
         )
         return self.default_timeout_sec
+
+    @staticmethod
+    def _session_capped_timeout(
+        timeout_sec: int,
+        session_deadline_sec: float | None,
+        *,
+        output_dir: Path,
+    ) -> int:
+        """``timeout_sec`` reduced to what the session can still pay for.
+
+        The baseline's own timeout is a catastrophic-hang backstop -- two hours
+        by default, four for a cold start -- chosen with no reference to how much
+        of the session is left. A round granted more than the budget has runs
+        past the end of the session and takes the closing phase with it.
+
+        Args:
+            timeout_sec: The timeout this round would get on an unbounded budget.
+            session_deadline_sec: Monotonic-clock session deadline, or ``None``
+                when there is no budget to respect.
+            output_dir: The round's workspace, for the log line.
+
+        Returns:
+            int: The hard timeout to grant this round, in seconds.
+        """
+        clamped = session_clamped_timeout_sec(timeout_sec, session_deadline_sec)
+        if clamped != timeout_sec:
+            log.info(
+                "baseline_executor: timeout clamped %ds -> %ds by the session budget (round=%s)",
+                timeout_sec,
+                clamped,
+                output_dir.name,
+            )
+        return clamped
 
     @staticmethod
     def _inferencex_root_from_config(config_path: Path) -> str:
@@ -3614,6 +3655,11 @@ class BaselineExecutor:
         )
 
         ctx_extra = getattr(ctx, "extra", None) or {}
+        # The session's wall-clock budget, resolved per round rather than once
+        # per task: a baseline runs up to three of them, and a warmup that
+        # overran has already spent budget the ones after it were counting on.
+        session_deadline_sec, _ = session_grid_bounds(ctx_extra.get("shared_state") or self.shared_state)
+        timeout_sec = self._session_capped_timeout(timeout_sec, session_deadline_sec, output_dir=output_dir)
         if not ctx_extra.get("mn_round_restarted"):
             try:
                 # Merge the reference base UNDER the per-task args (last-wins) so
@@ -3699,6 +3745,7 @@ class BaselineExecutor:
                         timeout=timeout_sec,
                         server_log_path=_watchdog_server_log_path(_mn_warm_dir, framework),
                         on_output=_mn_warm_activity.note,
+                        session_deadline_sec=session_deadline_sec,
                     )
                 log.info("baseline_executor: MN warmup pass done (discarded)")
             except Exception as exc:  # noqa: BLE001 - warmup is best-effort
@@ -3753,6 +3800,7 @@ class BaselineExecutor:
                     cwd=str(output_dir),
                     timeout=timeout_sec,
                     server_log_path=watchdog_server_log,
+                    session_remaining_sec=session_deadline_to_remaining_sec(session_deadline_sec),
                 )
                 subprocess_runtime_sec = max(0.0, time.time() - subprocess_started_unix)
             else:
@@ -3768,6 +3816,7 @@ class BaselineExecutor:
                         timeout=timeout_sec,
                         server_log_path=watchdog_server_log,
                         on_output=activity.note,
+                        session_deadline_sec=session_deadline_sec,
                     )
                 subprocess_runtime_sec = max(
                     0.0,
@@ -3789,6 +3838,32 @@ class BaselineExecutor:
                 "output_dir": str(output_dir),
                 "harvested_artifacts": [str(dst) for _, dst in timeout_harvested],
                 "nonfatal_warnings": [f"harvested_leaked_artifact:{src}" for src, _ in timeout_harvested],
+                **capture_meta,
+            }
+
+        # The run stopped this round rather than the round failing: the session
+        # budget elapsed mid-round, or the orchestrator cancelled the action.
+        # Classified apart from every measurement failure and checked before
+        # them, because the reap leaves the same evidence a broken server does --
+        # no workspace, no report, a non-zero returncode -- and being graded as
+        # ``server_init_dead`` or ``subprocess_nonzero`` would put a verdict on
+        # the model that this round never reached. Nothing here arms a retry
+        # either: the cause is the run, and a resume meets it again.
+        stopped = stopped_by_the_run(proc_returncode)
+        if stopped is not None:
+            log.warning(
+                "baseline_executor: round reaped after %.1fs: %s; error_class=%s.",
+                subprocess_runtime_sec,
+                stopped.interrupted,
+                stopped.error_class,
+            )
+            return {
+                "status": "failed",
+                "error_class": stopped.error_class,
+                "returncode": proc_returncode,
+                "error": stopped.interrupted,
+                "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
+                "output_dir": str(output_dir),
                 **capture_meta,
             }
 
