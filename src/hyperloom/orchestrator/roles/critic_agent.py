@@ -87,7 +87,7 @@ Reply with EXACTLY ONE JSON object that matches this review schema:
       "risks": [{"severity": "blocker|major|minor", "summary": "..."}],
       "required_evidence": ["<key>", ...],
       "notes": ["..."],
-      "failure_reason_code": "<the review_constraints rule this verdict rests on, else \"\">",
+      "failure_reason_code": "<failure_reason_code of the review_constraints rule this verdict rests on, else \"\">",
       "persist_to_kb": false,
       "topic": "<slug>"
     }
@@ -318,8 +318,8 @@ def _maybe_inject_quantitative_claim_constraint(judge_bundle: dict[str, Any]) ->
 
     Delivering the rule as data keeps the Critic's field list identical to the
     one the runner strips, instead of a hand-copied prose list that drifts. It
-    is sent only when the bundle holds a proposal the rule is about (same
-    condition as the cross-domain rules above): a Critic handed a rule that
+    is sent only when the bundle holds a proposal the rule is about, on the same
+    principle as the cross-domain rules above: a Critic handed a rule that
     cannot apply to anything under review can still cite it, and a citation is
     what the verdict path reads.
 
