@@ -215,8 +215,13 @@ hyperloom = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 # One recursive glob covers every per-package tests/ dir under src/hyperloom.
+# ``scripts/tests`` is listed separately because the operator scripts sit
+# outside the package on purpose -- they have to run on hosts with no Hyperloom
+# install -- so the glob above cannot reach them, and without this line their
+# tests are collected by nobody and fail in silence.
 testpaths = [
     "src/hyperloom/**/tests",
+    "scripts/tests",
 ]
 pythonpath = ["src", "."]
 markers = [
