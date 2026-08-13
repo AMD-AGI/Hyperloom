@@ -185,6 +185,16 @@ def test_policy_gate_rejects_when_neither_present(gate):
     assert exc.value.rule == "payload"
 
 
+def test_the_per_variant_shape_the_gate_teaches_carries_the_cited_rule(gate):
+    """The gate's hint is where the per-variant entry shape is spelled out for
+    the emitter, so it is where a variant learns it can name the rule its
+    verdict rests on rather than leaving that to prose."""
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("critic", _critic_intent(target_proposal_msg_id="msg-1"))
+
+    assert "failure_reason_code" in (exc.value.hint or "")
+
+
 def test_policy_gate_rejects_unknown_per_variant_verdict(gate):
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(

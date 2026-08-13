@@ -28,6 +28,7 @@ from hyperloom.orchestrator.roles.critic_agent import (
     CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
     CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
     CRITIC_AGENT_MAX_COMPLETION_TOKENS,
+    _REVIEW_OUTPUT_INSTRUCTIONS,
     _extract_review_json,
     _reviewed_msg_ids_from_bundle,
     _verdict_references_kb,
@@ -921,6 +922,17 @@ async def test_user_prompt_includes_judge_bundle_and_instructions(
     assert "JUDGE BUNDLE" in user_text
     assert "OUTPUT FORMAT" in user_text
     assert '"abc"' in user_text  # proposal msg_id from judge bundle
+
+
+def test_the_output_schema_asks_for_the_rule_the_verdict_rests_on():
+    """The Critic is told to reply with *exactly* this schema, and the
+    Coordinator holds a reject to the verdict its cited rule declared by reading
+    `failure_reason_code`. Documenting the field only in a reference file
+    nothing loads is why prose-scanning became the only signal in production."""
+    schema, _, rules = _REVIEW_OUTPUT_INSTRUCTIONS.partition("Rules (mirror")
+
+    assert '"failure_reason_code"' in schema
+    assert "failure_reason_code" in rules
 
 
 def _bundle_reviewing(action_name: str) -> dict[str, Any]:
