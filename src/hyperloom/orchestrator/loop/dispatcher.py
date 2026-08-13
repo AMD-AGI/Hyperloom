@@ -17,6 +17,15 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     KERNEL_AGENT_OWNED_ACTIONS,
 )
 from ..actions.cancel_channel import CancelScope, use_cancel_scope
+from ..actions.executors._ray_serving import (
+    CANCEL_ROUND_GRACE_SEC,
+    CLOSE_STOP_TIMEOUT_SEC,
+)
+from ..actions.executors._subprocess_kill import (
+    COOPERATIVE_REAP_BUDGET_SEC,
+    STOP_GATE_POLL_SECONDS,
+    TERM_GRACE_SECONDS,
+)
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..kernel.request_handlers import get_handler
@@ -50,19 +59,36 @@ import logging as _logging
 log = _logging.getLogger(__name__)
 
 # How long a cancel waits for work that is listening on its cancel scope to stop
-# itself. Sized on what stopping actually costs: the poll the blocking side
-# checks the scope at, plus the SIGTERM grace before the tree is SIGKILLed, plus
-# the drain of the child's pipes. Past that the coroutine is cancelled anyway,
-# which is where this started -- the wait buys the guarantee when the work can
-# give it, and never turns a shutdown into a hang when it cannot.
-_COOPERATIVE_CANCEL_GRACE_SEC: float = 10.0
+# itself, composed from the two things an action still has to do after it is
+# asked:
+#
+# * stop the round in flight -- locally that is
+#   :data:`COOPERATIVE_REAP_BUDGET_SEC`, through a Ray actor it is
+#   :data:`CANCEL_ROUND_GRACE_SEC`, and whichever path this action took, only the
+#   longer of the two bounds it;
+# * release what the round held -- the driver-side teardown of a server it left
+#   behind (:data:`TERM_GRACE_SECONDS`) or the release of the Ray lease it ran in
+#   (:data:`CLOSE_STOP_TIMEOUT_SEC`). Alternatives, not a sequence: a round's
+#   server is reaped by whichever of the two owned it.
+#
+# Derived rather than picked, because these three windows only mean anything
+# together. Each was plausible on its own at ten, eight and five seconds, and
+# composed they said the dispatcher gives up a good five seconds before the work
+# it is waiting for can finish -- so the honest sentinel the round was about to
+# return was discarded for a hard ``CancelledError`` every time, which is exactly
+# what the cooperative channel exists to avoid. Past this window the coroutine is
+# cancelled anyway, and the window is only ever spent when work is still
+# unwinding: the wait ends the moment the last victim is done.
+_COOPERATIVE_CANCEL_GRACE_SEC: float = max(COOPERATIVE_REAP_BUDGET_SEC, CANCEL_ROUND_GRACE_SEC) + max(
+    TERM_GRACE_SECONDS, CLOSE_STOP_TIMEOUT_SEC
+)
 
 # How long a cancel waits for anything to start listening before deciding
 # nothing will. Work that is already blocking is listening before the cancel is
 # raised; the window is for the gap between an action starting and reaching the
-# call that watches the scope, so it is sized on the same poll interval rather
-# than on how long the work takes.
-_CANCEL_NOTICE_SEC: float = 0.5
+# call that watches the scope, so it is the poll that call checks the scope at
+# rather than anything about how long the work takes.
+_CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 
 
 class _InflightAction(NamedTuple):
