@@ -13,6 +13,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 _BACKENDS_DIR = Path(__file__).resolve().parent.parent / "tools" / "backends"
 sys.path.insert(0, str(_BACKENDS_DIR))
 import forge_submit  # noqa: E402
@@ -295,7 +297,7 @@ def test_canonical_forge_artifacts_rejects_files_symlink_escape(
     assert str(outside) in caplog.text
 
 
-def test_validated_checkpoint_requires_commit_metrics_and_coverage(tmp_path):
+def test_validated_checkpoint_requires_commit_metrics_and_coverage(tmp_path, caplog):
     env = _make_repo(tmp_path)
     repo = env["repo"]
     kernel = env["kernel_agent"]
@@ -337,15 +339,78 @@ def test_validated_checkpoint_requires_commit_metrics_and_coverage(tmp_path):
     assert recovered["best_commit"] == best_commit
     assert recovered["improved"] is True
     checkpoint["case_coverage"] = [{"CASE_ID": "case_001"}]
-    assert (
-        forge_submit._validated_forge_checkpoint(
-            checkpoint,
-            workspace=repo,
-            base_commit=base_commit,
-            shapes=shapes,
+    with caplog.at_level(logging.WARNING):
+        assert (
+            forge_submit._validated_forge_checkpoint(
+                checkpoint,
+                workspace=repo,
+                base_commit=base_commit,
+                shapes=shapes,
+            )
+            is None
         )
-        is None
+    # Discarding a KEEP the producer already published is the expensive outcome
+    # here, so it may not be inferred from a return value alone.
+    assert "case coverage mismatch" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        pytest.param(None, id="key-absent"),
+        pytest.param([], id="declared-empty"),
+    ],
+)
+def test_validated_checkpoint_accepts_a_producer_that_declares_no_coverage(
+    tmp_path,
+    declared,
+):
+    """A checkpoint that states no case set is still recoverable evidence.
+
+    KernelForge stopped echoing the case set back into the checkpoint, and an
+    older one writes an empty list when it was handed no case set. Treating
+    either as "declared as nothing" made the comparison unsatisfiable, which
+    rejected every KEEP and closed the recovery tier that outlives the worktree
+    -- the one that exists precisely for a hard kill.
+    """
+    env = _make_repo(tmp_path)
+    repo = env["repo"]
+    kernel = env["kernel_agent"]
+    env["other"].write_text("committed_v1\n")
+    base_commit = _git(repo, "rev-parse", "HEAD")
+    kernel.write_text("KERNEL_VALIDATED_BEST\n")
+    _commit_all(repo, "iter1: validated best")
+    best_commit = _git(repo, "rev-parse", "HEAD")
+    # Non-empty on this side, which is the case for every grouped candidate and
+    # for any candidate with derivable named dimensions.
+    shapes = {"validation": [{"CASE_ID": "case_001", "M": 4096}]}
+    checkpoint = {
+        "schema_version": 1,
+        "experiment_id": "hyperloom",
+        "state": "best_committed",
+        "base_commit": base_commit,
+        "best_commit": best_commit,
+        "baseline_ms": 1.0,
+        "best_ms": 0.8,
+        "mean_case_speedup": 1.25,
+        "search_start_mean_case_speedup": 1.0,
+        "total_improved": True,
+        "incremental_improved": True,
+        "validation_passed": True,
+    }
+    if declared is not None:
+        checkpoint["case_coverage"] = declared
+
+    recovered = forge_submit._validated_forge_checkpoint(
+        checkpoint,
+        workspace=repo,
+        base_commit=base_commit,
+        shapes=shapes,
     )
+
+    assert recovered is not None
+    assert recovered["best_commit"] == best_commit
+    assert recovered["improved"] is True
 
 
 def test_submit_salvages_validated_best_after_timeout(tmp_path, monkeypatch):

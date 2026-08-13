@@ -56,6 +56,17 @@ def _submit_with_stubbed_loop(
     )
     monkeypatch.setattr(forge_submit, "_remove_worktree", lambda *_args, **_kwargs: None)
 
+    # Shapes no longer cross the CLI boundary, so the recovery gate is the only
+    # consumer left that submit() has to hand them to. Spying on the real gate
+    # keeps that half of the chain under test without stubbing its verdict.
+    real_gate = forge_submit._validated_forge_checkpoint
+
+    def spy_gate(checkpoint, **kwargs):
+        captured["gate_kwargs"] = kwargs
+        return real_gate(checkpoint, **kwargs)
+
+    monkeypatch.setattr(forge_submit, "_validated_forge_checkpoint", spy_gate)
+
     def fake_run_loop(**kwargs):
         captured.update(kwargs)
         return forge_submit.ForgeLoopOutcome(
@@ -234,10 +245,11 @@ def test_grouped_multi_shape_task_requires_one_prepared_driver(monkeypatch, tmp_
 
     assert result["returncode"] == 0
     _assert_staged_placeholder(captured["driver"], tmp_path / "repo")
-    # The grouped selectors no longer reach forge-loop as an argument; they stay
-    # on this side as the case coverage a recovered checkpoint is validated
-    # against, so the resolution itself is what has to hold.
+    # The grouped selectors are resolved on this side and no longer travel on the
+    # argv, so both halves are checked here: that the resolution is right, and
+    # that submit() hands the resolved value to the consumer that still reads it.
     assert forge_submit._shapes_from_candidate(candidate)["validation"] == selectors
+    assert captured["gate_kwargs"]["shapes"]["validation"] == selectors
 
 
 def test_grouped_multi_shape_task_rejects_incomplete_invocation_spec(tmp_path):

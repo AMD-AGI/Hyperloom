@@ -762,9 +762,10 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     for flag, value in expected_flags.items():
         assert flag in command, flag
         assert command[command.index(flag) + 1] == value, flag
-    # forge-loop parses with click and has no ignore_unknown_options, so any
-    # option it does not declare aborts the child at exit 2 before the campaign
-    # starts. Shapes reach it through the invocation spec instead.
+    # An option forge-loop does not declare is never worth sending: a producer
+    # that tolerates it drops it silently, and one that does not aborts the child
+    # before the campaign starts. Either way the value never reaches the loop, so
+    # the argv must not imply otherwise. Shapes travel in the invocation spec.
     for unsupported in ("--kernel-kind", "--shapes-json", "--e2e-pct"):
         assert unsupported not in command, unsupported
 
@@ -782,6 +783,91 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     # The subprocess wait is bounded by the absolute deadline, not by wall time
     # already spent before the loop started.
     assert 100.0 < captured["communicate_timeout"] <= 120.0
+
+
+def test_failure_tail_prefers_the_usage_error_over_the_transcript():
+    """A producer that rejected its own argv must say so in the raised error.
+
+    A usage error is the shape cross-repo option drift takes, and the CLI prints
+    it instead of the progress output a plain tail would capture.
+    """
+    tail = forge_submit._forge_failure_tail(
+        "  [prepare] task already conforms\n"
+        "Usage: main forge-loop [OPTIONS]\n"
+        "Error: No such option '--shapes-json'.\n"
+    )
+
+    assert "No such option '--shapes-json'" in tail
+    assert "[prepare]" not in tail
+
+
+def test_failure_tail_falls_back_to_the_last_lines_and_skips_result_blobs():
+    payload = "__FORGE_RESULT__" + json.dumps({"x": "y" * 400}) + "__FORGE_RESULT__"
+    tail = forge_submit._forge_failure_tail(
+        f"first\n{payload}\nsegfault in driver\nlast line\n"
+    )
+
+    assert "__FORGE_RESULT__" not in tail
+    assert "segfault in driver" in tail
+    assert "last line" in tail
+    assert forge_submit._forge_failure_tail("") == "no output"
+    assert len(forge_submit._forge_failure_tail("z" * 900)) <= 500
+
+
+def test_nonzero_exit_reports_the_child_reason_not_only_the_code(
+    tmp_path,
+    monkeypatch,
+):
+    """The orchestrator sees the raised error, never the forge log.
+
+    Reporting only ``rc=2`` made a producer that refused its own argv look
+    identical to one that crashed while measuring, which is how a cross-repo
+    option removal stayed invisible.
+    """
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    (workspace / "kernel.py").write_text("pass\n")
+    (workspace / "driver.py").write_text("pass\n")
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
+
+    class RejectingProcess:
+        returncode = 2
+        pid = 99
+
+        def communicate(self, timeout=None):
+            return "", "Error: No such option '--future-option'.\n"
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(
+        forge_submit.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: RejectingProcess(),
+    )
+
+    outcome = forge_submit._run_loop_via_cli(
+        worktree_kernel=str(workspace / "kernel.py"),
+        driver=str(workspace / "driver.py"),
+        workspace=str(workspace),
+        snr_threshold=30.0,
+        max_iters=8,
+        max_hours=1.0,
+        branch="b",
+        gpu_target="gfx950",
+        gpu_type="mi355x",
+        fellow="triton-fellow",
+        program_md_file="",
+        invocation_spec_file="",
+        experiments_dir=experiments,
+        forge_log=tmp_path / "forge.log",
+        timeout_s=60,
+    )
+
+    assert outcome.error is not None
+    message = str(outcome.error)
+    assert "rc=2" in message
+    assert "No such option '--future-option'" in message
 
 
 def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(

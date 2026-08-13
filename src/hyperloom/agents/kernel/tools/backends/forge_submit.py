@@ -105,6 +105,30 @@ _FORGE_MIN_BUDGET_SEC = 3600
 _FORGE_SHUTDOWN_GRACE_SEC = 30
 
 
+def _forge_failure_tail(output: str, *, max_chars: int = 500) -> str:
+    """Summarize why the forge child failed, for the error the caller reads.
+
+    The whole transcript already goes to the forge log, which nobody opens while
+    the only thing reaching the orchestrator is a return code -- so a producer
+    that rejected its own argv looked identical to one that crashed measuring.
+
+    A usage error outranks the tail: the CLI names it on one line and exits
+    before emitting any of the progress output the tail would otherwise capture.
+    Result sentinels are skipped because one such line is a whole JSON document
+    and would crowd out everything else.
+    """
+    lines = [
+        line.strip()
+        for line in (output or "").splitlines()
+        if line.strip() and "__FORGE_RESULT__" not in line
+    ]
+    if not lines:
+        return "no output"
+    flagged = [line for line in lines if line.startswith(("Error:", "Usage:"))]
+    text = " | ".join(flagged or lines[-3:])
+    return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
+
+
 class ForgeLoopOutcome(NamedTuple):
     """Result and recovery evidence from one forge-loop subprocess."""
 
@@ -3277,7 +3301,26 @@ def _validated_forge_checkpoint(
             ):
                 expected_coverage.append(shape)
     actual_coverage = checkpoint.get("case_coverage")
-    if expected_coverage and actual_coverage != expected_coverage:
+    # A producer that states its coverage is held to it; one that never states it
+    # cannot be checked against anything. KernelForge stopped echoing the case set
+    # back into the checkpoint, so requiring a match rejected every KEEP it
+    # published and closed the only recovery tier that outlives the worktree.
+    # An older producer writes an empty list when it was given no case set, which
+    # means the same thing, so absence and emptiness are both "not declared".
+    if not actual_coverage:
+        log.debug(
+            "forge recovery: checkpoint for %s declares no case coverage; "
+            "accepting it without the coverage check",
+            best_commit[:12],
+        )
+    elif expected_coverage and actual_coverage != expected_coverage:
+        log.warning(
+            "forge recovery: dropping checkpoint for %s -- case coverage "
+            "mismatch: expected %r, checkpoint reported %r",
+            best_commit[:12],
+            expected_coverage,
+            actual_coverage,
+        )
         return None
     normalized = dict(checkpoint)
     normalized["best_commit"] = best_commit
@@ -3543,7 +3586,8 @@ def _run_loop_via_cli(
         if proc.returncode != 0:
             if loop_exc is None:
                 loop_exc = RuntimeError(
-                    f"forge-loop exited rc={proc.returncode}"
+                    f"forge-loop exited rc={proc.returncode}: "
+                    f"{_forge_failure_tail(out)}"
                 )
     except Exception as exc:  # noqa: BLE001
         loop_exc = exc
@@ -3799,7 +3843,10 @@ def _run_rewrite_via_cli(
                 f"forge rewrite exceeded absolute deadline after {timeout_s}s"
             )
         if proc.returncode != 0 and run_exc is None:
-            run_exc = RuntimeError(f"forge rewrite exited rc={proc.returncode}")
+            run_exc = RuntimeError(
+                f"forge rewrite exited rc={proc.returncode}: "
+                f"{_forge_failure_tail(out)}"
+            )
     except Exception as exc:  # noqa: BLE001
         run_exc = exc
 
