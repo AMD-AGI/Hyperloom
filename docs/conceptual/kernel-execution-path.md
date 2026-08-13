@@ -36,10 +36,11 @@ No PolicyGate path runs for the RESPONSE because it is written directly via
 | `apply_patch` | `integrate_handler` (alias) | same as `integrate` |
 
 Any other kind, including the action-name `kernel_opt`, yields an immediate
-`unknown_kernel_kind` rejection. `run_fusion_handler` is deliberately absent
-from the table: `KernelPhase` awaits it directly, so no request carries that
-kind. PolicyGate validates the REQUEST payload from
+`unknown_kernel_kind` rejection. PolicyGate validates the REQUEST payload from
 orchestration (path-sandbox, phase-action gate) but never sees the RESPONSE.
+
+`run_fusion_handler` is absent from the table on purpose: `KernelPhase` awaits
+it directly, so no request ever carries that kind.
 
 ## KERNEL phase entry: Coordinator-direct calls
 
