@@ -21,6 +21,7 @@ from typing import Any
 from ..actions.executors._grid_server_args import (
     tokenize_server_args_preserving_json,
 )
+from ..specialists.patch_safety import ADVISE_VERDICT, advisory_only_reason_codes
 
 log = logging.getLogger(__name__)
 
@@ -493,6 +494,10 @@ _VERDICT_ADVISORY_LIST_KEYS: tuple[str, ...] = (
     "kb_evidence",
     "packet_evidence",
 )
+# The verdict that ends a proposal's life; its counterpart ``ADVISE_VERDICT``
+# lets the proposal through. See :func:`verdict_held_to_its_rule`.
+_REJECT_VERDICT: str = "reject"
+
 _VERDICT_ADVISORY_TEXT_KEYS: tuple[str, ...] = (
     "advice_text",
     "alternative_action",
@@ -535,6 +540,34 @@ def serialize_verdict_advisory(payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(raw, str) and raw.strip():
             out[key] = raw
     return out
+
+
+def verdict_held_to_its_rule(entry: dict[str, Any]) -> tuple[str, str]:
+    """Return the verdict a ``review_verdict`` entry carries, and why it moved.
+
+    Several review rules declare ``advise`` as their failure verdict precisely
+    because rejecting on them costs the round every proposal in the set. That
+    declaration is prose in the Critic prompt, so a model that rejects anyway
+    silently gets its way. This holds the verdict to what the cited rule asked
+    for, which makes the declaration enforceable rather than advisory.
+
+    Args:
+        entry: A ``review_verdict`` payload or one ``verdict_map`` entry, with
+            a ``verdict`` and optionally the ``failure_reason_code`` it cites.
+
+    Returns:
+        A ``(verdict, reason_code)`` pair: the verdict to act on, and the cited
+        reason code when it forced a downgrade, else an empty string.
+    """
+    if not isinstance(entry, dict):
+        return "", ""
+    verdict = str(entry.get("verdict") or "").strip()
+    if verdict != _REJECT_VERDICT:
+        return verdict, ""
+    reason_code = str(entry.get("failure_reason_code") or "").strip()
+    if reason_code and reason_code in advisory_only_reason_codes():
+        return ADVISE_VERDICT, reason_code
+    return verdict, ""
 
 
 # Minimum over-baseline gain a same-harness revalidation must show to count as

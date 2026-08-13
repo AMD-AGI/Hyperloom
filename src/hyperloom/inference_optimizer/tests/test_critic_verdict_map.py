@@ -29,6 +29,10 @@ from hyperloom.orchestrator.policy.gate import (
     PolicyGate,
     REVIEW_VERDICTS,
 )
+from hyperloom.orchestrator.specialists.patch_safety import (
+    QUANTITATIVE_CLAIM_REASON_CODE,
+    cross_domain_rule_descriptors,
+)
 
 
 # 1. intent_parser — envelope schema accepts verdict OR verdict_map
@@ -504,6 +508,152 @@ async def test_single_verdict_without_advisory_keeps_bare_payload(coord):
     assert "required_evidence" not in line
     assert "risks=" not in line
     assert "advice=" not in line
+
+
+# 3b. A reject on a rule that asked for advice is held to that rule
+@pytest.mark.asyncio
+async def test_reject_on_an_advisory_only_rule_is_held_to_advise(coord):
+    """The quantitative-claim rule declares ``advise``; a reject citing it must not end the proposal."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-held",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-1"}},
+    )
+    coord.state.pending_proposals["msg-held"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-held",
+            "verdict": "reject",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+            "reasoning": "proposal carried confidence",
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "advise"
+    # advise materialises, so the round keeps the proposal.
+    assert len(coord._materialise_calls) == 1
+    assert [m for m in coord.bus.messages if m.topic == "review_verdict"][0].payload["verdict"] == "advise"
+
+
+@pytest.mark.asyncio
+async def test_a_held_reject_is_recorded_not_silently_corrected(coord, caplog):
+    """The downgrade leaves both a log line and an observation, so prompt drift stays visible."""
+    import logging
+
+    pending = _seed_explore_proposal(coord, msg_id="msg-audit")
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-audit",
+            "verdict": "reject",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+        },
+    )
+    with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.intent_router"):
+        await coord._handle_review_verdict("critic", intent)
+    assert any("held to its rule" in r.getMessage() for r in caplog.records)
+    kinds = [call.args[2].get("kind") for call in coord._record_observation.await_args_list]
+    assert "verdict_downgraded_to_rule_verdict" in kinds
+
+
+@pytest.mark.asyncio
+async def test_a_cross_domain_hint_reject_is_held_too(coord):
+    """Every rule declaring ``advise`` is covered, not just the quantitative-claim one."""
+    reason_code = cross_domain_rule_descriptors()[0]["failure_reason_code"]
+    pending = PendingProposal(
+        proposal_msg_id="msg-xd",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-2"}},
+    )
+    coord.state.pending_proposals["msg-xd"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-xd",
+            "verdict": "reject",
+            "failure_reason_code": reason_code,
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "advise"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload_extra",
+    [
+        pytest.param({}, id="no_reason_code"),
+        # A code no rule declares as advisory — e.g. the safety hard guard,
+        # which critic.md keeps at ``reject``.
+        pytest.param({"failure_reason_code": "specialist_patch_not_grounded"}, id="code_outside_the_advisory_set"),
+    ],
+)
+async def test_a_substantive_reject_still_rejects(coord, payload_extra):
+    """The backstop is scoped to rules that declared ``advise``; every other reject stands."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-real",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-3"}},
+    )
+    coord.state.pending_proposals["msg-real"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-real",
+            "verdict": "reject",
+            **payload_extra,
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_one_variant_held_to_advise_does_not_out_rank_its_siblings(coord):
+    """The hold runs per variant before the collapse, so an advisory-only reject cannot discard the set."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-grid", variants=["v_a", "v_b"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-grid",
+            "verdict_map": {
+                "v_a": {"verdict": "advise", "rationale": "worth a look"},
+                "v_b": {
+                    "verdict": "reject",
+                    "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+                },
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    # Without the per-entry hold, reject out-ranks advise and the set is lost.
+    assert pending.verdict == "advise"
+    assert len(coord._materialise_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_grid_rejected_only_on_advisory_rules_survives(coord):
+    """A whole map rejected on advisory-only grounds collapses to advise, not reject."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-grid-all", variants=["v_a", "v_b"])
+    entry = {"verdict": "reject", "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE}
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-grid-all",
+            "verdict_map": {"v_a": dict(entry), "v_b": dict(entry)},
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "advise"
+    assert len(coord._materialise_calls) == 1
 
 
 # 4. _materialize_approved_proposal — filter semantics (unit)

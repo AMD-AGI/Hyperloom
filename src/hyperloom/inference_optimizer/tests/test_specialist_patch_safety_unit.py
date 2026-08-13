@@ -245,6 +245,36 @@ def test_a_format_slip_is_advisory_not_a_reject():
     assert rule["failure_reason_code"] == ps.QUANTITATIVE_CLAIM_REASON_CODE
 
 
+# ---- advisory_only_reason_codes --------------------------------------------
+def test_every_rule_that_asked_for_advice_is_enforceable():
+    codes = ps.advisory_only_reason_codes()
+
+    assert ps.QUANTITATIVE_CLAIM_REASON_CODE in codes
+    for rule in ps.cross_domain_rule_descriptors():
+        if rule["failure_verdict"] == ps.ADVISE_VERDICT:
+            assert rule["failure_reason_code"] in codes
+
+
+def test_a_rule_asking_for_a_reject_is_left_alone(monkeypatch):
+    """The set is derived from the descriptors, so a rule keeping ``reject`` stays out of it."""
+    hard = ps.CrossDomainRule(
+        rule_id="hard_guard",
+        description="a violation here is grounds for refusal",
+        failure_verdict="reject",
+        failure_reason_code="cross_domain_hard_guard",
+    )
+    monkeypatch.setattr(ps, "CROSS_DOMAIN_RULES", ps.CROSS_DOMAIN_RULES + (hard,))
+
+    codes = ps.advisory_only_reason_codes()
+
+    assert "cross_domain_hard_guard" not in codes
+    assert ps.QUANTITATIVE_CLAIM_REASON_CODE in codes
+
+
+def test_the_codes_carry_no_blank_entry():
+    assert "" not in ps.advisory_only_reason_codes()
+
+
 # ---- vet_patches ----------------------------------------------------------
 def test_vet_patches(tmp_path, monkeypatch):
     good = tmp_path / "good.patch"

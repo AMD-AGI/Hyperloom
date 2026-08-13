@@ -28,6 +28,7 @@ from .coordinator_helpers import (
     coerce_needs_gpu,
     format_exc_brief,
     serialize_verdict_advisory,
+    verdict_held_to_its_rule,
 )
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -211,9 +212,14 @@ class IntentRouter:
                 },
             )
             return
-        verdict = str(single_verdict or "")
+        verdict = await self._verdict_held_to_its_rule(intent.payload, target=target)
         if not verdict and isinstance(verdict_map, dict) and verdict_map:
-            sub_verdicts = [str((entry or {}).get("verdict") or "").strip() for entry in verdict_map.values()]
+            # Per entry before the collapse below: a variant rejected on an
+            # advisory-only rule must not out-rank its siblings' advice.
+            sub_verdicts = [
+                await self._verdict_held_to_its_rule(entry or {}, target=target, variant=str(name))
+                for name, entry in verdict_map.items()
+            ]
             verdict = (
                 "approve"
                 if "approve" in sub_verdicts
@@ -243,6 +249,54 @@ class IntentRouter:
             reasoning=str(intent.payload.get("reasoning") or ""),
             advisory=serialize_verdict_advisory(intent.payload),
         )
+
+    async def _verdict_held_to_its_rule(
+        self,
+        entry: dict[str, Any],
+        *,
+        target: str,
+        variant: str = "",
+    ) -> str:
+        """Return ``entry``'s verdict, held to the verdict its cited rule declared.
+
+        A rule that declares ``advise`` does so because rejecting on it discards
+        the whole proposal set over a format or strategy hint. Enforcing the
+        declaration here means the Critic cannot spend a round's proposals on a
+        rule that never asked for a rejection; the downgrade is recorded so the
+        drift is visible rather than silently corrected.
+
+        Args:
+            entry: The ``review_verdict`` payload, or one ``verdict_map`` entry.
+            target: The target proposal msg_id, for the audit record.
+            variant: The ``verdict_map`` key when ``entry`` is one variant's
+                verdict; empty for a single verdict.
+
+        Returns:
+            The verdict to act on.
+        """
+        verdict, downgraded_from_code = verdict_held_to_its_rule(entry)
+        if not downgraded_from_code:
+            return verdict
+        log.warning(
+            "review_verdict held to its rule: target=%s variant=%s reject -> %s (reason_code=%s)",
+            target,
+            variant or "-",
+            verdict,
+            downgraded_from_code,
+        )
+        await self._record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "verdict_downgraded_to_rule_verdict",
+                "target": target,
+                "variant": variant,
+                "from_verdict": "reject",
+                "to_verdict": verdict,
+                "failure_reason_code": downgraded_from_code,
+            },
+        )
+        return verdict
 
     async def _handle_single_verdict(
         self,

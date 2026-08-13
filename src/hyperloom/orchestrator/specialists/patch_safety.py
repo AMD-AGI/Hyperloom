@@ -170,6 +170,12 @@ def patch_targets_missing(
 # specialists.profile.SCOPE_DOMAINS to keep this module dependency-light.
 SCOPE_DOMAINS_LITERAL: str = "domains"
 
+# The verdict a rule declares when its violation is advisory: the proposal still
+# reaches the Coordinator, carrying the reason code as a note. Spelled once so a
+# typo in one rule cannot quietly drop it from
+# :func:`advisory_only_reason_codes` and re-arm the reject it asked to avoid.
+ADVISE_VERDICT: str = "advise"
+
 
 @dataclass(frozen=True)
 class CrossDomainRule:
@@ -190,7 +196,7 @@ CROSS_DOMAIN_RULES: tuple[CrossDomainRule, ...] = (
             "domain in scope — why this change is necessary within that "
             "domain's boundary."
         ),
-        failure_verdict="advise",
+        failure_verdict=ADVISE_VERDICT,
         failure_reason_code="cross_domain_rationale_incomplete",
     ),
     CrossDomainRule(
@@ -200,7 +206,7 @@ CROSS_DOMAIN_RULES: tuple[CrossDomainRule, ...] = (
             "(why these changes must happen together) AND at least "
             "one potential side effect of the combination."
         ),
-        failure_verdict="advise",
+        failure_verdict=ADVISE_VERDICT,
         failure_reason_code="cross_domain_coupling_unspecified",
     ),
     CrossDomainRule(
@@ -213,7 +219,7 @@ CROSS_DOMAIN_RULES: tuple[CrossDomainRule, ...] = (
             "the motivation degenerates so the stack rebench + KEEP "
             "threshold can adjudicate."
         ),
-        failure_verdict="advise",
+        failure_verdict=ADVISE_VERDICT,
         failure_reason_code="cross_domain_motivation_invalid",
     ),
 )
@@ -265,9 +271,33 @@ def quantitative_claim_rule_descriptor() -> dict[str, Any]:
             "field and judge the proposal on its merits."
         ),
         "forbidden_proposal_fields": sorted(FORBIDDEN_PROPOSAL_FIELDS),
-        "failure_verdict": "advise",
+        "failure_verdict": ADVISE_VERDICT,
         "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
     }
+
+
+def advisory_only_reason_codes() -> frozenset[str]:
+    """Return the reason codes whose owning rule asked for ``advise``, not ``reject``.
+
+    Derived from the descriptors the Critic is actually handed rather than
+    restated, so a rule that changes its ``failure_verdict`` cannot leave a
+    stale entry behind. Lets the verdict path hold a ``reject`` citing one of
+    these to the verdict its own rule declared: every rule here is a format or
+    strategy hint, and a reject costs the round every proposal in the set.
+
+    Returns:
+        The ``failure_reason_code`` of every rule declaring
+        ``failure_verdict == "advise"``.
+    """
+    descriptors: list[dict[str, Any]] = [quantitative_claim_rule_descriptor()]
+    descriptors.extend(cross_domain_rule_descriptors())
+    codes = {
+        str(d.get("failure_reason_code") or "").strip()
+        for d in descriptors
+        if str(d.get("failure_verdict") or "").strip() == ADVISE_VERDICT
+    }
+    codes.discard("")
+    return frozenset(codes)
 
 
 def numeric_claims(text: str) -> list[str]:
@@ -549,6 +579,7 @@ def vet_patches(
 
 
 __all__ = [
+    "ADVISE_VERDICT",
     "CROSS_DOMAIN_RULES",
     "CrossDomainRule",
     "FORBIDDEN_PAYLOAD_FIELDS",
@@ -563,6 +594,7 @@ __all__ = [
     "PatchSafetyReport",
     "QUANTITATIVE_CLAIM_REASON_CODE",
     "SCOPE_DOMAINS_LITERAL",
+    "advisory_only_reason_codes",
     "cross_domain_rule_descriptors",
     "ground_patch_text",
     "is_unified_diff",
