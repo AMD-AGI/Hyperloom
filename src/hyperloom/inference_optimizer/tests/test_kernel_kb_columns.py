@@ -4,22 +4,21 @@
 """Per-round staging of the kernel agent's KB sub-columns (write side)."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from hyperloom.orchestrator.knowledge.agent_kb import KernelAgentKB
-from hyperloom.orchestrator.knowledge.remote_recipe.values import (
-    KERNEL_AGENT_METRIC,
-    build_kernel_agent_knowledge,
-    kernel_agent_canonical_id,
-    kernel_record_refs,
-    merge_kernel_columns,
-)
 from hyperloom.orchestrator.knowledge.kernel_kb_columns import stage_kernel_columns
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
     KnowledgeSections,
 )
-from hyperloom.orchestrator.knowledge.remote_recipe.values import build_remote_knowledge
+from hyperloom.orchestrator.knowledge.remote_recipe.values import (
+    _merge_kernel_section,
+    build_remote_knowledge,
+)
 
 
 def _kb(tmp_path: Path) -> KernelAgentKB:
@@ -171,56 +170,149 @@ def test_staged_columns_overlay_into_close_document(tmp_path: Path) -> None:
     assert "kernel/rewrite/k.diff" in {artifact.path for artifact in bundle.artifacts}
 
 
-def test_kernel_agent_canonical_id_namespaces_the_producer() -> None:
-    # KernelForge publishes its own kernel: records; the producer prefix keeps
-    # the two from overwriting each other under a shared slug.
-    assert (
-        kernel_agent_canonical_id("inference:m:h:vllm:mt:a:0.1:fp8")
-        == "kernel:hyperloom-m:h:vllm:mt:a:0.1:fp8"
+def test_replayed_kernel_artifact_stays_on_same_recipe_page(tmp_path: Path) -> None:
+    ref = "kernel/rewrite/warm.py"
+    row = {
+        "kernel_name": "warm",
+        "source_files": [ref],
+        "e2e_gain_pct": 5.0,
+    }
+    warm = tmp_path / "warm"
+    source = warm / "files" / ref
+    source.parent.mkdir(parents=True)
+    source.write_text("optimized", encoding="utf-8")
+    (warm / "recipe.json").write_text(
+        json.dumps(
+            {
+                "value": {
+                    "kernel": {
+                        "rewrite": {"items": [row]},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
     )
-    assert kernel_agent_canonical_id("m:h") == "kernel:hyperloom-m:h"
-    # Idempotent: re-deriving from an already-namespaced id changes nothing.
-    once = kernel_agent_canonical_id("inference:m:h")
-    assert kernel_agent_canonical_id(once) == once
-
-
-def test_build_kernel_agent_knowledge_carries_gemm_and_scores_it(tmp_path):
-    """The standalone record holds the kernel columns and a kernel-gain score."""
-    tuned = tmp_path / "tuned.csv"
-    tuned.write_text("M,N,K\n16,512,7168\n", encoding="utf-8")
     state = SimpleNamespace(
         optimization_stack=[
             {
-                "action": "gemm_tuning",
-                "tuned_file": str(tuned),
-                "gain_pct": 15.2,
-                "tput": 6638.7,
-                "variant_name": "forge_a8w8_blockscale",
+                "action": "replay_warm_recipe",
+                "kernel_replay": {
+                    "validation": "combined_recipe_kernel",
+                    "count": 1,
+                    "columns": ["rewrite"],
+                },
             }
         ],
-        last_gemm_tuning={"decision": "KEEP", "e2e_gain_pct": 15.2},
+        warm_replay_outcome={
+            "status": "reproduced",
+            "kernel": {
+                "status": "kept",
+                "kept": 1,
+                "validation": "combined_recipe_kernel",
+            },
+        },
+        warm_kernel_kb_plan=[
+            {
+                "column": "rewrite",
+                "recipe_row": row,
+            }
+        ],
+        current_best={
+            "tput": 105.0,
+            "extra_server_args": "--warm",
+            "extra_envs": {},
+        },
+        cumulative_gain_validated=5.0,
         kernel_opt_task_attempts={},
-        current_best={"tput": 6638.7},
-        cumulative_gain_validated=84.9,
-        session_id="s1",
-        recipe_kb_session_id="s1",
+        last_gemm_tuning={},
+        session_id="same-page",
+    )
+    sections = KnowledgeSections(
+        tmp_path / "draft",
+        warm_start_dir=warm,
     )
 
-    bundle, score = build_kernel_agent_knowledge(state, tmp_path / "ka_files")
+    bundle = build_remote_knowledge(
+        state,
+        tmp_path / "published-files",
+        sections=sections,
+    )
 
-    value = bundle.knowledge["value"]
-    # Columns sit flat on value (not nested under a "kernel" key) so the record
-    # is self-describing on its own identity.
-    assert set(value) == {"gemm", "fusion", "rewrite"}
-    assert len(value["gemm"]["optimizations"]) == 1
-    # Scored by kernel gain, under a metric name that says so.
-    assert score == 15.2
-    assert bundle.knowledge[KERNEL_AGENT_METRIC] == 15.2
-    assert "optimized_throughput" not in bundle.knowledge
-    assert bundle.knowledge["provenance"]["producer"] == "hyperloom-kernel-agent"
-    assert {artifact.path for artifact in bundle.artifacts} == {
-        "kernel/gemm/artifacts/tuned.csv"
-    }
+    rewrite = bundle.knowledge["value"]["kernel"]["rewrite"]
+    assert rewrite["items"] == [row]
+    assert {artifact.path for artifact in bundle.artifacts} == {ref}
+    assert (tmp_path / "published-files" / ref).read_text() == "optimized"
+    assert bundle.knowledge["optimized_throughput"] == 105.0
+    assert "kernel_gain_pct" not in bundle.knowledge
+
+
+@pytest.mark.parametrize(
+    ("column", "list_key", "prior_ref", "new_ref"),
+    [
+        ("gemm", "optimizations", "kernel/gemm/prior.csv", "kernel/gemm/new.csv"),
+        (
+            "fusion",
+            "items",
+            "kernel/fusion/prior.patch",
+            "kernel/fusion/new.patch",
+        ),
+    ],
+)
+def test_kernel_columns_merge_replayed_and_staged_rows(
+    column: str,
+    list_key: str,
+    prior_ref: str,
+    new_ref: str,
+) -> None:
+    ref_key = "tuned_file" if column == "gemm" else "patch"
+    merged = _merge_kernel_section(
+        {
+            column: {
+                list_key: [{"id": "prior", ref_key: prior_ref}],
+                "files": [prior_ref],
+            }
+        },
+        {
+            column: {
+                list_key: [{"id": "new", ref_key: new_ref}],
+                "files": [new_ref],
+            }
+        },
+    )
+
+    assert [row["id"] for row in merged[column][list_key]] == ["prior", "new"]
+    assert merged[column]["files"] == [new_ref, prior_ref]
+
+
+def test_new_kernel_row_replaces_same_stable_id_and_prunes_old_ref() -> None:
+    merged = _merge_kernel_section(
+        {
+            "rewrite": {
+                "items": [
+                    {
+                        "id": "same",
+                        "patch": "kernel/rewrite/prior.patch",
+                    }
+                ]
+            }
+        },
+        {
+            "rewrite": {
+                "items": [
+                    {
+                        "id": "same",
+                        "patch": "kernel/rewrite/new.patch",
+                    }
+                ]
+            }
+        },
+    )
+
+    assert merged["rewrite"]["items"] == [
+        {"id": "same", "patch": "kernel/rewrite/new.patch"}
+    ]
+    assert merged["rewrite"]["files"] == ["kernel/rewrite/new.patch"]
 
 
 def test_stage_gives_a_same_named_artifact_its_own_ref(tmp_path):
@@ -257,13 +349,6 @@ def test_restaging_identical_bytes_reuses_the_same_ref(tmp_path):
     again = kb.write_gemm({"optimizations": []}, files=[artifact])[0]
 
     assert first == again == "kernel/gemm/tuned.csv"
-
-
-def test_kernel_agent_canonical_id_refuses_an_unknown_workload() -> None:
-    # "kernel:" alone is a shared junk identity; an unknown workload publishes
-    # nowhere rather than there.
-    assert kernel_agent_canonical_id("") == ""
-    assert kernel_agent_canonical_id("   ") == ""
 
 
 def test_restaging_a_displaced_artifact_keeps_its_own_ref(tmp_path):

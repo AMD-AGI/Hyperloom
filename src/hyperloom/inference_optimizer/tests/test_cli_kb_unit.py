@@ -138,7 +138,7 @@ def test_bootstrap_recipe_kb_t0_failure_continues(tmp_path, monkeypatch) -> None
     assert args.kb_degraded_reason == "t0_runtime_fail"
 
 
-def test_bootstrap_recipe_kb_remote_replays_explore_config(
+def test_bootstrap_recipe_kb_remote_stores_metadata_not_replay_payload(
     tmp_path,
     monkeypatch,
     capsys,
@@ -155,12 +155,17 @@ def test_bootstrap_recipe_kb_remote_replays_explore_config(
             reads.append((identity, destination))
             return {
                 "schema_version": 2,
-                "knowledge_schema_version": 2,
+                "knowledge_schema_version": (
+                    remote_recipe.CURRENT_KNOWLEDGE_SCHEMA_VERSION
+                ),
+                "record_kind": remote_recipe.RECORD_KIND_HYPERLOOM_RECIPE,
                 "canonical_id": identity,
                 "session_id": "champion-session",
                 "optimized_throughput": 120.0,
                 "validated_e2e_gain": 20.0,
                 "value": {
+                    "patch_timeline": [],
+                    "kernel": {},
                     "explore": {
                         "extra_server_args": "--page-size 32",
                         "extra_envs": {"EXPLORE": "1"},
@@ -195,14 +200,13 @@ def test_bootstrap_recipe_kb_remote_replays_explore_config(
     persisted = SharedState.load_or_init(tmp_path)
     assert persisted.stack_fingerprint_meta["rocm"] == "6.2"
     assert persisted.stack_fingerprint_meta["image_digest"] == "img@sha"
-    replay = persisted.warm_start_context["recommended_replay"]
-    assert replay["extra_server_args"] == "--page-size 32"
-    assert replay["extra_envs"] == {"EXPLORE": "1"}
-    assert replay.get("patches") in (None, [])
+    assert "recommended_replay" not in persisted.warm_start_context
     assert persisted.warm_start_context["match"]["source"] == "kb-store"
+    assert "best_config" not in persisted.warm_start_recipe["recipe"]
+    assert "patch_timeline" not in persisted.warm_start_recipe["recipe"]
     assert len(reads) == 1
     assert reads[0][1] == tmp_path / "runtime" / "remote_recipe"
-    assert "Explore config warm replay" in capsys.readouterr().out
+    assert "current Recipe warm replay" in capsys.readouterr().out
 
 
 def test_bootstrap_knowledge_plane_validates_remote_without_recipe_dispatcher(

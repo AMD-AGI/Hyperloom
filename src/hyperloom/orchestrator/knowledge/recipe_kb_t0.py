@@ -396,8 +396,9 @@ def _build_warm_start_context(
     """Build the model-facing WarmStartContext from a KB recipe row.
 
     ``status`` is one of ``hit`` / ``seed_only`` / ``miss`` / ``error``.
-    Surfaces a ready-to-replay champion plus the experiential lists so consumers
-    never parse the raw recipe shape.
+    Current remote records expose only match/history/advisory metadata here;
+    PRELUDE reads replay data through the section SDKs. Local legacy records
+    retain their ready-to-replay projection.
 
     Config-donor decoupling: the experiential lists (priors) always come from the
     identity match ``recipe``, while ``recommended_replay`` is sourced from
@@ -405,6 +406,12 @@ def _build_warm_start_context(
     borrowed same-architecture sibling). The donor's transfer confidence governs
     the downstream replay gate, not the identity-match confidence.
     """
+    from .remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE
+
+    current_remote = bool(
+        isinstance(recipe, Mapping)
+        and recipe.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE
+    )
     ctx: dict[str, Any] = {
         "status": status,
         "match": {
@@ -413,7 +420,6 @@ def _build_warm_start_context(
             "source": source,
             "canonical_id": canonical_id,
         },
-        "recommended_replay": {},
         "proven_prior": [],
         "do_not_repeat": [],
         "lessons": [],
@@ -427,8 +433,17 @@ def _build_warm_start_context(
         ctx["pitfalls"] = list(recipe.get("pitfalls") or [])
     # Replay config comes from the donor; fall back to the identity recipe as a
     # self-donor when it owns a replayable config.
-    donor = config_donor if isinstance(config_donor, Mapping) else None
-    if donor is None and isinstance(recipe, Mapping) and _has_replayable_config(recipe):
+    donor = (
+        config_donor
+        if not current_remote and isinstance(config_donor, Mapping)
+        else None
+    )
+    if (
+        not current_remote
+        and donor is None
+        and isinstance(recipe, Mapping)
+        and _has_replayable_config(recipe)
+    ):
         donor = recipe
         config_donor_tier = config_donor_tier or "self"
         config_donor_confidence = config_donor_confidence or confidence
@@ -495,8 +510,10 @@ def _build_warm_start_context(
                 }
             )
             ctx["recommended_replay"] = recommended_replay
-    # Extract replayable code patches from prs_tested (positive + negative).
-    _extract_patches_from_prs_tested(ctx, recipe, model_architectures)
+    if not current_remote:
+        # Local legacy RecipeKB keeps its isolated prs_tested representation.
+        ctx.setdefault("recommended_replay", {})
+        _extract_patches_from_prs_tested(ctx, recipe, model_architectures)
     # KG enhancement (best-effort, degradable).
     _enhance_warm_start_with_kg(
         ctx,
@@ -506,6 +523,10 @@ def _build_warm_start_context(
         precision=precision,
         kg_client=kg_client,
     )
+    if current_remote:
+        # Current replay is owned exclusively by the downloaded section SDKs.
+        ctx["blocked_patches"] = []
+        ctx["advisory_blocked_patches"] = []
     return ctx
 
 
@@ -807,8 +828,6 @@ def _extract_patches_from_prs_tested(
         replay.setdefault("extra_server_args", "")
         replay.setdefault("extra_envs", {})
         replay["patches"] = patches
-        if required_timeline:
-            replay["required_patch_timeline"] = True
     if blocked:
         ctx["blocked_patches"] = blocked
 

@@ -549,8 +549,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Resolved prior-champion kernel columns (gemm/fusion/rewrite) loaded from the
     # KB Store warm-start record at PRELUDE, with local file paths resolved.
     warm_kernel_kb_plan: list = field(default_factory=list)
-    # Structured warm-kernel KB outcome for reports/prompts.
-    warm_kernel_kb_outcome: dict = field(default_factory=dict)
     # Baseline COLD (warmup-round) full boot+bench wall-clock; the hard-cap
     # anchor from which ExploreExecutor derives the overtime-kill deadline.
     baseline_runtime_sec: float = 0.0
@@ -946,10 +944,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # ISO UTC timestamp of the T0 snapshot; empty under --degraded-kb or T0 failure.
     warm_start_ts: str = ""
-    # Model-facing WarmStartContext built by ``recipe_kb_t0`` from the KB recipe
-    # row (parallel to the raw ``warm_start_recipe`` envelope). Carries an
-    # explicit ``status``, a ready-to-replay ``recommended_replay`` champion, and
-    # the experiential lists. Empty dict when T0 was bypassed or failed.
+    # Model-facing advisory context built by ``recipe_kb_t0``. Current remote
+    # records carry match/history/KG data only; local legacy records may also
+    # carry their compatibility replay projection.
     warm_start_context: dict[str, Any] = field(default_factory=dict)
 
     # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only _refresh_gaps; CORE_STATE_FIELDS); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.

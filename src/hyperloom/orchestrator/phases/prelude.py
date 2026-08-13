@@ -10,6 +10,7 @@ import math
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 from . import machine_state as _phase_state
 from ..state.optimization_journal import (
@@ -25,8 +26,88 @@ from .base import PhaseHandler
 log = _logging.getLogger(__name__)
 
 
+def _merge_current_recipe_configs(
+    explore: Mapping[str, Any],
+    framework: Mapping[str, Any],
+    kernel: Mapping[str, Any] | None = None,
+) -> tuple[str, dict[str, str]]:
+    """Merge owner config snapshots, failing on overlapping differences."""
+    owners: list[tuple[str, Mapping[str, Any]]] = [
+        ("explore", explore),
+        ("framework", framework),
+    ]
+    if kernel is not None:
+        owners.append(("kernel", kernel))
+    return _merge_named_current_recipe_configs(owners)
+
+
+def _merge_named_current_recipe_configs(
+    owners: list[tuple[str, Mapping[str, Any]]],
+) -> tuple[str, dict[str, str]]:
+    """Merge named config snapshots with exact duplicate conflict checks."""
+    from ..loop.coordinator_helpers import tokenize_server_args_preserving_json
+
+    pairs: dict[str, tuple[str, ...]] = {}
+    order: list[str] = []
+    positional = 0
+    for owner, config in owners:
+        raw = str(config.get("extra_server_args") or "").strip()
+        if not raw:
+            continue
+        parsed = tokenize_server_args_preserving_json(raw)
+        if parsed is None:
+            raise ValueError(f"{owner} extra_server_args cannot be tokenized safely")
+        _normalized, tokens = parsed
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if token.startswith("--"):
+                key, has_equals, inline = token.partition("=")
+                values: list[str] = [inline] if has_equals else []
+                index += 1
+                while (
+                    not has_equals
+                    and index < len(tokens)
+                    and not tokens[index].startswith("--")
+                ):
+                    values.append(tokens[index])
+                    index += 1
+                rendered = (key, *values)
+                prior = pairs.get(key)
+                if prior is not None and prior != rendered:
+                    raise ValueError(
+                        f"current Recipe config conflict for {key}: "
+                        f"{prior!r} != {rendered!r}"
+                    )
+                if prior is None:
+                    pairs[key] = rendered
+                    order.append(key)
+                continue
+            synthetic = f"__positional_{positional}"
+            positional += 1
+            pairs[synthetic] = (token,)
+            order.append(synthetic)
+            index += 1
+
+    envs: dict[str, str] = {}
+    for owner, config in owners:
+        raw_envs = config.get("extra_envs")
+        if not isinstance(raw_envs, Mapping):
+            continue
+        for raw_key, raw_value in raw_envs.items():
+            key = str(raw_key)
+            value = str(raw_value)
+            if key in envs and envs[key] != value:
+                raise ValueError(
+                    f"current Recipe env conflict for {key}: "
+                    f"{envs[key]!r} != {value!r} ({owner})"
+                )
+            envs[key] = value
+    return " ".join(token for key in order for token in pairs[key]), envs
+
+
 def _warm_kernel_keep_threshold_pct(default: float = 1.0) -> float:
-    """Return the approved combined schema-v3 KEEP threshold."""
+    """Return the approved combined current-contract KEEP threshold."""
     raw = str(os.environ.get("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "") or "").strip()
     if not raw:
         return default
@@ -278,6 +359,9 @@ class PreludePhase(PhaseHandler):
                     if resolved is not None:
                         source_paths.append(str(resolved))
                 entry: dict[str, Any] = {"column": column, "meta": meta}
+                # Preserve the exact Recipe row so CLOSE can carry the validated
+                # kernel content and its refs forward on the same inference page.
+                entry["recipe_row"] = dict(row)
                 patch_ref = str(row.get("patch") or "").strip()
                 if patch_ref:
                     patch_local = kb.prior_file(patch_ref)
@@ -388,9 +472,17 @@ class PreludePhase(PhaseHandler):
 
         def _merge(source: Any) -> None:
             if isinstance(source, dict):
-                envs.update(
-                    {str(k): str(v) for k, v in source.items() if str(k).strip()}
-                )
+                for raw_key, raw_value in source.items():
+                    key = str(raw_key).strip()
+                    if not key:
+                        continue
+                    value = str(raw_value)
+                    if key in envs and envs[key] != value:
+                        raise ValueError(
+                            f"current Recipe kernel env conflict for {key}: "
+                            f"{envs[key]!r} != {value!r}"
+                        )
+                    envs[key] = value
 
         for key in ("extra_envs", "env_flags", "recommended_env"):
             _merge(meta.get(key))
@@ -535,31 +627,6 @@ class PreludePhase(PhaseHandler):
             "mode": path.stat().st_mode & 0o7777 if existed else None,
         }
 
-    def _open_warm_kernel_record(self) -> Any:
-        """Download this run's independent kernel-agent KB record and open a reader.
-
-        The kernel-agent KB is a standalone ``kernel:`` KB Store record (a
-        sibling of the recipe's ``inference:`` record), so PRELUDE reads it
-        directly instead of from the recipe warm-start. Returns ``None`` when
-        remote KB is not configured or the record does not exist yet.
-        """
-        from ..knowledge.agent_kb import KernelRecordReader
-        from ..knowledge.remote_recipe import (
-            kernel_agent_canonical_id,
-            read_remote_recipe,
-        )
-
-        recipe_cid = str(self._workload_canonical_id() or "").strip()
-        if not recipe_cid:
-            return None
-        kernel_cid = kernel_agent_canonical_id(recipe_cid)
-        record_dir = Path(self.session_dir) / "runtime" / "kernel_agent_kb"
-        record_dir.mkdir(parents=True, exist_ok=True)
-        document = read_remote_recipe(kernel_cid, record_dir)
-        if document is None:
-            return None
-        return KernelRecordReader(record_dir)
-
     def _warm_kernel_gate_reason(self) -> str:
         """Why this run must not replay kernel champions, or '' when allowed.
 
@@ -581,8 +648,54 @@ class PreludePhase(PhaseHandler):
             return "local_knowledge_mode"
         return ""
 
-    async def _prepare_warm_kernel_kb(self) -> dict[str, Any]:
-        """Prepare the independent kernel set for the Recipe replay benchmark.
+    @staticmethod
+    def _open_warm_kernel_section() -> Any:
+        """Open ``value.kernel`` from the inference Recipe already downloaded."""
+        from ..knowledge.agent_kb import KernelAgentKB
+
+        return KernelAgentKB.open()
+
+    def _set_warm_kernel_outcome(
+        self,
+        kernel_outcome: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Store kernel diagnostics inside the combined warm replay outcome."""
+        combined = dict(
+            getattr(self.shared_state, "warm_replay_outcome", {}) or {}
+        )
+        combined["kernel"] = dict(kernel_outcome)
+        self.shared_state.warm_replay_outcome = combined
+        return kernel_outcome
+
+    def _preview_current_kernel_config(self, kb: Any) -> dict[str, Any]:
+        """Resolve the kernel launch overlay without mutating target files."""
+        configs: list[tuple[str, Mapping[str, Any]]] = []
+        for index, entry in enumerate(self._collect_warm_kernel_plan(kb)):
+            envs = self._warm_kernel_extra_envs(entry)
+            if entry.get("column") == "gemm":
+                if not envs:
+                    continue
+            elif not self._resolve_kernel_target_path(entry):
+                continue
+            configs.append(
+                (
+                    f"kernel[{index}]",
+                    {
+                        "extra_server_args": str(
+                            (entry.get("meta") or {}).get(
+                                "extra_server_args"
+                            )
+                            or ""
+                        ).strip(),
+                        "extra_envs": envs,
+                    },
+                )
+            )
+        args, envs = _merge_named_current_recipe_configs(configs)
+        return {"extra_server_args": args, "extra_envs": envs}
+
+    async def _prepare_warm_kernel_kb(self, kb: Any = None) -> dict[str, Any]:
+        """Prepare the Recipe's kernel section for the combined replay benchmark.
 
         This method never benchmarks. It stages Fusion/Rewrite files, resolves
         GEMM/env inputs, and returns the merged launch overlay plus rollback
@@ -594,8 +707,9 @@ class PreludePhase(PhaseHandler):
             return {"status": "skipped", "reason": "already_attempted"}
         gated = self._warm_kernel_gate_reason()
         if gated:
-            state.warm_kernel_kb_outcome = {"status": "skipped", "reason": gated}
-            return state.warm_kernel_kb_outcome
+            return self._set_warm_kernel_outcome(
+                {"status": "skipped", "reason": gated}
+            )
         state.warm_kernel_kb_attempted = True
         # Persist the one-shot flag now: a crash mid-replay must not re-run the
         # whole (potentially hour-long) set on resume.
@@ -603,23 +717,26 @@ class PreludePhase(PhaseHandler):
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — best-effort persistence
             log.debug("warm-kernel KB: state save failed", exc_info=True)
-        try:
-            kb = self._open_warm_kernel_record()
-        except Exception as exc:  # noqa: BLE001 — advisory; never block PRELUDE
-            log.warning("warm-kernel KB: opening the record failed", exc_info=True)
-            state.warm_kernel_kb_outcome = {
-                "status": "skipped",
-                "reason": f"record_unavailable:{type(exc).__name__}",
-            }
-            return state.warm_kernel_kb_outcome
+        if kb is None:
+            try:
+                kb = self._open_warm_kernel_section()
+            except Exception as exc:  # noqa: BLE001 — advisory; never block PRELUDE
+                log.warning("warm-kernel KB: opening Recipe section failed", exc_info=True)
+                return self._set_warm_kernel_outcome(
+                    {
+                        "status": "skipped",
+                        "reason": f"recipe_section_unavailable:{type(exc).__name__}",
+                    }
+                )
         if kb is None or not kb.active:
-            state.warm_kernel_kb_outcome = {"status": "skipped", "reason": "no_kernel_record"}
-            return state.warm_kernel_kb_outcome
+            return self._set_warm_kernel_outcome(
+                {"status": "skipped", "reason": "no_kernel_section"}
+            )
         plan = self._collect_warm_kernel_plan(kb)
         state.warm_kernel_kb_plan = plan
         if not plan:
             state.warm_replay_pending = {}
-            state.warm_kernel_kb_outcome = {"status": "empty"}
+            outcome = self._set_warm_kernel_outcome({"status": "empty"})
             try:
                 state.save(self.session_dir)
             except Exception:  # noqa: BLE001
@@ -627,13 +744,42 @@ class PreludePhase(PhaseHandler):
                     "warm-kernel KB: empty-state save failed",
                     exc_info=True,
                 )
-            return state.warm_kernel_kb_outcome
+            return outcome
         deferred = 0
         errors = 0
         applied: list[dict[str, Any]] = []
         kernel_snapshots: list[dict[str, Any]] = []
-        merged_envs: dict[str, str] = {}
-        server_args_parts: list[str] = []
+        prepared_envs: dict[int, dict[str, str]] = {}
+        prepared_targets: dict[int, str] = {}
+        kernel_configs: list[tuple[str, Mapping[str, Any]]] = []
+        for index, entry in enumerate(plan):
+            envs = self._warm_kernel_extra_envs(entry)
+            if entry.get("column") == "gemm":
+                if not envs:
+                    continue
+            else:
+                target = self._resolve_kernel_target_path(entry)
+                if not target:
+                    continue
+                prepared_targets[index] = target
+            prepared_envs[index] = envs
+            kernel_configs.append(
+                (
+                    f"kernel[{index}]",
+                    {
+                        "extra_server_args": str(
+                            (entry.get("meta") or {}).get(
+                                "extra_server_args"
+                            )
+                            or ""
+                        ).strip(),
+                        "extra_envs": envs,
+                    },
+                )
+            )
+        kernel_args, merged_envs = _merge_named_current_recipe_configs(
+            kernel_configs
+        )
         state.warm_replay_pending = {
             **dict(getattr(state, "warm_replay_pending", {}) or {}),
             "status": "preparing_kernel",
@@ -647,22 +793,17 @@ class PreludePhase(PhaseHandler):
                 "status": "error",
                 "reason": f"kernel_pending_state_persist_failed:{type(exc).__name__}",
             }
-            state.warm_kernel_kb_outcome = outcome
-            return outcome
-        for entry in plan:
+            return self._set_warm_kernel_outcome(outcome)
+        for index, entry in enumerate(plan):
             if not (entry.get("source_paths") or entry.get("patch_path")):
                 entry["decision"] = "DEFERRED"
                 deferred += 1
                 continue
             # Every column carries its env bundle: a fusion needs its switches to
             # activate the patched path, and a GEMM is nothing but its bundle.
-            envs = self._warm_kernel_extra_envs(entry)
+            envs = prepared_envs.get(index, {})
             if envs:
                 entry["extra_envs"] = envs
-                merged_envs.update(envs)
-            candidate_args = str((entry.get("meta") or {}).get("extra_server_args") or "").strip()
-            if candidate_args and candidate_args not in server_args_parts:
-                server_args_parts.append(candidate_args)
             # GEMM is parameter-shaped: its env bundle is the whole deliverable,
             # so there is nothing to stage on disk.
             if entry.get("column") == "gemm":
@@ -672,7 +813,7 @@ class PreludePhase(PhaseHandler):
                     continue
                 entry["decision"] = "PENDING"
                 continue
-            target = self._resolve_kernel_target_path(entry)
+            target = prepared_targets.get(index, "")
             if not target:
                 entry["decision"] = "DEFERRED"
                 deferred += 1
@@ -769,12 +910,12 @@ class PreludePhase(PhaseHandler):
             "dirty": bool(errors and not rollback.get("ok")),
             "extra_envs": merged_envs if pending else {},
             "extra_server_args": (
-                " ".join(server_args_parts) if pending else ""
+                kernel_args if pending else ""
             ),
         }
         if status == "loaded" and not applied and not kernel_snapshots:
             state.warm_replay_pending = {}
-        state.warm_kernel_kb_outcome = outcome
+        self._set_warm_kernel_outcome(outcome)
         log.info(
             "PRELUDE warm-kernel KB prepared: columns=%s total=%d pending=%d "
             "deferred=%d errors=%d",
@@ -790,9 +931,106 @@ class PreludePhase(PhaseHandler):
             log.debug("warm-kernel KB: state save failed", exc_info=True)
         return outcome
 
-    async def _maybe_apply_warm_kernel_kb(self) -> dict[str, Any]:
-        """Compatibility entry point: prepare only; never benchmark separately."""
-        return await PreludePhase._prepare_warm_kernel_kb(self)
+    @staticmethod
+    def _is_current_remote_recipe(warm: Any) -> bool:
+        from ..knowledge.remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE
+
+        recipe = warm.get("recipe") if isinstance(warm, Mapping) else None
+        return bool(
+            isinstance(recipe, Mapping)
+            and recipe.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE
+        )
+
+    def _read_current_recipe_replay(self) -> dict[str, Any]:
+        """Load current replay data exclusively through section SDK readers."""
+        from ..knowledge.agent_kb import (
+            ExploreAgentKB,
+            FrameworkAgentKB,
+            KernelAgentKB,
+            RecipeReplayKB,
+        )
+
+        explore = ExploreAgentKB.open()
+        framework = FrameworkAgentKB.open()
+        kernel = KernelAgentKB.open()
+        replay = RecipeReplayKB.open()
+        if not all((explore.active, framework.active, kernel.active, replay.active)):
+            raise ValueError("current Recipe SDK readers are unavailable")
+
+        args, envs = _merge_current_recipe_configs(
+            (explore_config := explore.read_config()),
+            (framework_config := framework.read_config()),
+        )
+        kernel_config = self._preview_current_kernel_config(kernel)
+        combined_args, combined_envs = _merge_current_recipe_configs(
+            explore_config,
+            framework_config,
+            kernel_config,
+        )
+        owner_kbs = {"explore": explore, "framework": framework}
+        owner_ref_lists = {
+            owner: kb.read_patches() for owner, kb in owner_kbs.items()
+        }
+        timeline = replay.read_patch_timeline()
+        all_owner_refs = [
+            ref
+            for refs in owner_ref_lists.values()
+            for ref in refs
+        ]
+        if len(timeline) != len(set(timeline)):
+            raise ValueError("current Recipe patch_timeline contains duplicate refs")
+        if len(all_owner_refs) != len(set(all_owner_refs)):
+            raise ValueError("current Recipe owner patch lists contain duplicate refs")
+        timeline_refs = set(timeline)
+        section_refs = set(all_owner_refs)
+        if timeline_refs != section_refs:
+            missing = sorted(section_refs - timeline_refs)
+            extra = sorted(timeline_refs - section_refs)
+            raise ValueError(
+                "current Recipe patch_timeline must exactly equal owner refs; "
+                f"missing={missing!r} extra={extra!r}"
+            )
+        owner_refs = {
+            owner: set(refs) for owner, refs in owner_ref_lists.items()
+        }
+        patches: list[dict[str, Any]] = []
+        for index, ref in enumerate(timeline):
+            owner = Path(ref).parts[0] if Path(ref).parts else ""
+            kb = owner_kbs.get(owner)
+            if kb is None:
+                raise ValueError(
+                    f"current Recipe timeline has unsupported owner: {ref!r}"
+                )
+            if ref not in owner_refs[owner]:
+                raise ValueError(
+                    f"current Recipe timeline ref is absent from value.{owner}: "
+                    f"{ref!r}"
+                )
+            source = kb.prior_file(ref)
+            if source is None:
+                raise ValueError(
+                    f"current Recipe timeline artifact is unavailable: {ref!r}"
+                )
+            patches.append(
+                {
+                    "patch_file": ref,
+                    "patch_ref": str(source),
+                    "patch_content": "",
+                    "measured_gain_pct": 1e-6,
+                    "required": True,
+                    "timeline_index": index,
+                }
+            )
+        return {
+            "extra_server_args": args,
+            "extra_envs": envs,
+            "combined_extra_server_args": combined_args,
+            "combined_extra_envs": combined_envs,
+            "kernel_config": kernel_config,
+            "timeline": timeline,
+            "patches": patches,
+            "kernel_kb": kernel,
+        }
 
     async def _maybe_enqueue_warm_replay(
         self,
@@ -826,8 +1064,31 @@ class PreludePhase(PhaseHandler):
         if state.warm_replay_attempted:
             # Resume safety: a previous boot already enqueued/ran the replay.
             return None
+        warm = state.warm_start_recipe or {}
+        if not isinstance(warm, dict):
+            warm = {}
+        current_remote = self._is_current_remote_recipe(warm)
+        sdk_replay: dict[str, Any] = {}
+        if current_remote:
+            try:
+                sdk_replay = self._read_current_recipe_replay()
+            except Exception as exc:  # noqa: BLE001 — current replay fails closed
+                state.warm_replay_attempted = True
+                state.warm_replay_outcome = {
+                    "status": "skipped",
+                    "reason": (
+                        "current_recipe_sdk_read_failed:"
+                        f"{type(exc).__name__}:{exc}"
+                    )[:500],
+                }
+                state.save(self.session_dir)
+                return None
         try:
-            kernel = await self._prepare_warm_kernel_kb()
+            kernel = (
+                await self._prepare_warm_kernel_kb(sdk_replay.get("kernel_kb"))
+                if current_remote
+                else await self._prepare_warm_kernel_kb()
+            )
         except Exception as exc:  # noqa: BLE001
             log.warning("PRELUDE: warm-kernel preparation failed", exc_info=True)
             kernel = {
@@ -893,12 +1154,22 @@ class PreludePhase(PhaseHandler):
         kernel_snapshots = (
             list(kernel.get("snapshots") or []) if kernel_pending else []
         )
-        kernel_envs = dict(kernel.get("extra_envs") or {}) if kernel_pending else {}
-        kernel_args = str(kernel.get("extra_server_args") or "") if kernel_pending else ""
+        if current_remote and kernel_pending:
+            kernel_config = sdk_replay.get("kernel_config") or {}
+            kernel_envs = dict(kernel_config.get("extra_envs") or {})
+            kernel_args = str(
+                kernel_config.get("extra_server_args") or ""
+            )
+        else:
+            kernel_envs = (
+                dict(kernel.get("extra_envs") or {}) if kernel_pending else {}
+            )
+            kernel_args = (
+                str(kernel.get("extra_server_args") or "")
+                if kernel_pending
+                else ""
+            )
 
-        warm = state.warm_start_recipe or {}
-        if not isinstance(warm, dict):
-            warm = {}
         if not warm and not kernel_pending:
             if str(kernel.get("status") or "") in {"empty", "loaded"}:
                 state.warm_replay_pending = {}
@@ -923,15 +1194,29 @@ class PreludePhase(PhaseHandler):
             recipe = {}
         # best_config/sessions may be top-level or nested under attrs.
         recipe_attrs = recipe.get("attrs") or recipe
-        # Prefer the WarmStartContext's ready-to-replay champion (config may be
-        # borrowed from a same-arch sibling), gating on the donor's transfer
-        # confidence; fall back to the identity recipe's own best_config.
         wsc = getattr(state, "warm_start_context", None) or {}
-        replay = wsc.get("recommended_replay") if isinstance(wsc, dict) else {}
+        replay = (
+            wsc.get("recommended_replay")
+            if not current_remote and isinstance(wsc, dict)
+            else {}
+        )
         replay = replay if isinstance(replay, dict) else {}
         rep_args = str(replay.get("extra_server_args") or "").strip()
-        rep_envs = replay.get("extra_envs") if isinstance(replay.get("extra_envs"), dict) else {}
-        if rep_args or rep_envs:
+        rep_envs = (
+            replay.get("extra_envs")
+            if isinstance(replay.get("extra_envs"), dict)
+            else {}
+        )
+        if current_remote:
+            bc_args = str(sdk_replay.get("extra_server_args") or "").strip()
+            bc_envs = dict(sdk_replay.get("extra_envs") or {})
+            replay_conf = float(conf or 0.0)
+            config_source = str(recipe.get("canonical_id") or "")
+            config_tier = "self"
+            donor_expected_gain = float(
+                recipe.get("validated_gain_pct") or 0.0
+            )
+        elif rep_args or rep_envs:
             bc_args = rep_args
             bc_envs = dict(rep_envs)
             # Donor transfer confidence (self-donor == identity confidence).
@@ -964,8 +1249,8 @@ class PreludePhase(PhaseHandler):
             if replay.get(field) not in (None, "", [])
         }
         recipe_suppressed = False
-        # Low-confidence Recipe content is suppressed, but an independent
-        # kernel champion still receives its combined (kernel-only) check.
+        # Low-confidence config/patch content is suppressed, but the kernel
+        # section from the same Recipe can still receive a combined check.
         if replay_conf < min_conf:
             if kernel_pending:
                 recipe_suppressed = True
@@ -986,20 +1271,38 @@ class PreludePhase(PhaseHandler):
                 }
                 state.warm_replay_attempted = True
                 return None
-        # Extract code patches from warm_start_context (populated by T0).
-        wsc_patches = (wsc.get("recommended_replay") or {}).get("patches") or [] if isinstance(wsc, dict) else []
-        wsc_blocked = wsc.get("blocked_patches") or [] if isinstance(wsc, dict) else []
-        wsc_advisory = wsc.get("advisory_blocked_patches") or [] if isinstance(wsc, dict) else []
+        # Current records derive fail-closed mode from their exact SDK timeline.
+        wsc_patches = (
+            list(sdk_replay.get("patches") or [])
+            if current_remote
+            else (wsc.get("recommended_replay") or {}).get("patches") or []
+            if isinstance(wsc, dict)
+            else []
+        )
+        wsc_blocked = (
+            []
+            if current_remote
+            else wsc.get("blocked_patches") or []
+            if isinstance(wsc, dict)
+            else []
+        )
+        wsc_advisory = (
+            []
+            if current_remote
+            else wsc.get("advisory_blocked_patches") or []
+            if isinstance(wsc, dict)
+            else []
+        )
         required_patch_timeline = bool(
-            replay.get("required_patch_timeline")
-            or recipe_attrs.get("required_patch_timeline")
+            current_remote and sdk_replay.get("timeline")
+            or (not current_remote and recipe_attrs.get("required_patch_timeline"))
         )
         if recipe_suppressed:
             wsc_patches = []
             wsc_blocked = []
             required_patch_timeline = False
-        # Schema-v3 order is authoritative and fail-closed. Legacy lists retain
-        # advisory filtering and gain-prioritized behavior.
+        # Current-contract order is authoritative and fail-closed. Local legacy
+        # lists retain advisory filtering and gain-prioritized behavior.
         if not required_patch_timeline:
             wsc_patches = self._filter_warm_patches_with_kg(
                 wsc_patches, wsc_advisory, state
@@ -1039,15 +1342,29 @@ class PreludePhase(PhaseHandler):
                 fallback = 0.0
             if fallback > 0:
                 expected_gain = fallback
-        from ..loop.coordinator_helpers import _merge_cumulative_extra_server_args
+        if current_remote:
+            if recipe_suppressed:
+                combined_args = kernel_args
+                combined_envs = dict(kernel_envs)
+            else:
+                combined_args = str(
+                    sdk_replay.get("combined_extra_server_args") or ""
+                )
+                combined_envs = dict(
+                    sdk_replay.get("combined_extra_envs") or {}
+                )
+        else:
+            from ..loop.coordinator_helpers import (
+                _merge_cumulative_extra_server_args,
+            )
 
-        combined_args = _merge_cumulative_extra_server_args(
-            bc_args,
-            kernel_args,
-            "",
-        )
-        combined_envs = dict(bc_envs)
-        combined_envs.update(kernel_envs)
+            combined_args = _merge_cumulative_extra_server_args(
+                bc_args,
+                kernel_args,
+                "",
+            )
+            combined_envs = dict(bc_envs)
+            combined_envs.update(kernel_envs)
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": "warm_replay_prelude",
@@ -1074,8 +1391,8 @@ class PreludePhase(PhaseHandler):
             "warm_kernel_plan": kernel_pending,
             "warm_kernel_apply_results": kernel_applied,
             "warm_kernel_snapshots": kernel_snapshots,
-            "combined_schema_v3": bool(
-                required_patch_timeline or kernel_pending
+            "combined_current_contract": bool(
+                current_remote or kernel_pending
             ),
             "combined_keep_threshold_pct": _warm_kernel_keep_threshold_pct(),
         }
@@ -1130,7 +1447,6 @@ class PreludePhase(PhaseHandler):
             "config_source": config_source,
             "expected_gain_pct": expected_gain,
             "replay_task_id": task.task_id,
-            "required_patch_timeline": required_patch_timeline,
             "kernel_count": len(kernel_pending),
             "recipe_suppressed": recipe_suppressed,
             **donor_metadata,
@@ -1142,7 +1458,6 @@ class PreludePhase(PhaseHandler):
             "kernel_apply_results": kernel_applied,
             "kernel_plan": kernel_pending,
             "kernel_snapshots": kernel_snapshots,
-            "required_patch_timeline": required_patch_timeline,
         }
         try:
             state.save(self.session_dir)
@@ -1313,7 +1628,7 @@ class PreludePhase(PhaseHandler):
             "validation": "combined_recipe_kernel",
         }
         self.shared_state.warm_kernel_kb_plan = plan
-        self.shared_state.warm_kernel_kb_outcome = outcome
+        self._set_warm_kernel_outcome(outcome)
         return outcome
 
     def _require_combined_warm_rollback(
@@ -1329,12 +1644,13 @@ class PreludePhase(PhaseHandler):
         outcome["status"] = "rollback_failed"
         outcome["reason"] = "combined warm replay rollback failed"
         outcome["rollback"] = rollback
-        self.shared_state.warm_replay_outcome = outcome
-        self.shared_state.warm_kernel_kb_outcome = {
+        kernel_outcome = {
             "status": "rollback_failed",
             "validation": "combined_recipe_kernel",
             "errors": list(rollback.get("errors") or []),
         }
+        outcome["kernel"] = kernel_outcome
+        self.shared_state.warm_replay_outcome = outcome
         if hasattr(self.shared_state, "set_stop_reason"):
             self.shared_state.set_stop_reason("warm_replay_rollback_failed")
         self.shared_state.save(self.session_dir)
@@ -1431,9 +1747,11 @@ class PreludePhase(PhaseHandler):
         measured_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
         result["combined_gain_pct"] = round(measured_gain, 3)
         decision_params = (task.params if task is not None else {}) or {}
-        combined_schema_v3 = bool(decision_params.get("combined_schema_v3"))
+        combined_current_contract = bool(
+            decision_params.get("combined_current_contract")
+        )
         keep_threshold = 0.0
-        if combined_schema_v3:
+        if combined_current_contract:
             raw_threshold = decision_params.get("combined_keep_threshold_pct")
             try:
                 keep_threshold = (
@@ -1448,11 +1766,11 @@ class PreludePhase(PhaseHandler):
         min_reproduce = float(
             getattr(self, "_warm_replay_min_reproduce_pct", 0.8) or 0.8,
         )
-        # Legacy v1/v2 keeps any positive gain. Combined schema-v3 must clear
-        # the approved kernel replay threshold.
+        # Local legacy replay keeps any positive gain. The current combined
+        # contract must clear the approved kernel replay threshold.
         reproduced = (
             measured_gain >= keep_threshold
-            if combined_schema_v3
+            if combined_current_contract
             else measured_gain > 0
         )
         outcome["actual_gain_pct"] = round(measured_gain, 3)
@@ -1504,12 +1822,13 @@ class PreludePhase(PhaseHandler):
                         or "canonical required patch persistence failed"
                     )
                     outcome["canonical_patch_result"] = persistence
-                    state.warm_replay_outcome = outcome
-                    state.warm_kernel_kb_outcome = {
+                    kernel_outcome = {
                         "status": "reverted",
                         "reason": "recipe_persistence_failed",
                         "validation": "combined_recipe_kernel",
                     }
+                    outcome["kernel"] = kernel_outcome
+                    state.warm_replay_outcome = outcome
                     state.save(self.session_dir)
                     return
             warm_args = str(
@@ -1589,13 +1908,15 @@ class PreludePhase(PhaseHandler):
             if partial:
                 stack_entry["partial"] = partial
                 state.warm_replay_pending = {}
-                state.warm_kernel_kb_outcome = {
+                kernel_outcome = {
                     "status": "skipped",
                     "reason": "required_recipe_patch_failed",
                     "validation": "combined_recipe_kernel",
                 }
+                outcome["kernel"] = kernel_outcome
             else:
                 kernel_outcome = self._book_combined_kernel_keep(result, task)
+                outcome["kernel"] = dict(kernel_outcome)
                 if kernel_outcome.get("kept"):
                     stack_entry["kernel_replay"] = {
                         "validation": "combined_recipe_kernel",
@@ -1689,13 +2010,14 @@ class PreludePhase(PhaseHandler):
                 if task is not None
                 else []
             )
-            state.warm_kernel_kb_outcome = {
+            kernel_outcome = {
                 "status": "reverted",
                 "total": len(kernel_plan or []),
                 "kept": 0,
                 "reverted": len(kernel_plan or []),
                 "validation": "combined_recipe_kernel",
             }
+            outcome["kernel"] = dict(kernel_outcome)
             outcome["status"] = "drift"
             outcome["reason"] = (
                 f"measured {measured_gain:+.2f}% below keep threshold "

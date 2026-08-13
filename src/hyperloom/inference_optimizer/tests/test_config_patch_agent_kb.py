@@ -17,10 +17,13 @@ from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client impo
     KnowledgeSections,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe.values import (
+    CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+    RECORD_KIND_HYPERLOOM_RECIPE,
     RemoteRecipeValidationError,
     build_remote_knowledge,
-    envelope_to_v1_recipe,
+    knowledge_to_warm_recipe,
 )
+from hyperloom.orchestrator.phases.prelude import _merge_current_recipe_configs
 
 
 def _state(stack: list[dict]) -> SimpleNamespace:
@@ -59,6 +62,7 @@ def test_read_write_and_section_isolation(tmp_path: Path) -> None:
                     "explore": {
                         "extra_server_args": "--prior",
                         "extra_envs": {"VLLM_PRIOR": "1"},
+                        "patches": ["explore/overlays/000000/00-prior.patch"],
                     }
                 }
             }
@@ -73,9 +77,13 @@ def test_read_write_and_section_isolation(tmp_path: Path) -> None:
         "extra_server_args": "--prior",
         "extra_envs": {"VLLM_PRIOR": "1"},
     }
+    assert explore.read_patches() == [
+        "explore/overlays/000000/00-prior.patch"
+    ]
     assert framework.read() == {}
+    assert framework.read_patches() == []
     assert explore.write_config("--page-size 32", {"VLLM_EXPLORE": "1"})
-    assert framework.write_snapshot(
+    assert framework.write_config(
         {"extra_server_args": "--framework", "extra_envs": {"VLLM_FW": "1"}}
     )
 
@@ -197,7 +205,11 @@ def test_close_timeline_orders_patches_across_owners(tmp_path: Path) -> None:
         sections=sections,
     )
 
-    assert bundle.knowledge["knowledge_schema_version"] == 3
+    assert (
+        bundle.knowledge["knowledge_schema_version"]
+        == CURRENT_KNOWLEDGE_SCHEMA_VERSION
+    )
+    assert bundle.knowledge["record_kind"] == RECORD_KIND_HYPERLOOM_RECIPE
     timeline = bundle.knowledge["value"]["patch_timeline"]
     assert timeline == [
         "framework/overlays/000000/00-framework.patch",
@@ -208,7 +220,7 @@ def test_close_timeline_orders_patches_across_owners(tmp_path: Path) -> None:
     bundle.validate()
 
 
-def test_schema_v3_replay_config_uses_authoritative_current_best(
+def test_current_contract_persists_only_owner_configs(
     tmp_path: Path,
 ) -> None:
     state = _state(
@@ -234,17 +246,89 @@ def test_schema_v3_replay_config_uses_authoritative_current_best(
     }
     bundle = build_remote_knowledge(state, tmp_path / "files")
 
-    assert bundle.knowledge["value"]["replay_config"] == {
-        "extra_server_args": "--framework-final",
-        "extra_envs": {"VLLM_OWNER": "framework"},
-    }
-    row = envelope_to_v1_recipe(
+    assert "replay_config" not in bundle.knowledge["value"]
+    assert bundle.knowledge["value"]["explore"]["extra_server_args"] == "--explore-old"
+    assert (
+        bundle.knowledge["value"]["framework"]["extra_server_args"]
+        == "--framework-final"
+    )
+    row = knowledge_to_warm_recipe(
         {
             "canonical_id": "inference:test",
             "knowledge": bundle.knowledge,
         }
     )
-    assert row["best_config"] == bundle.knowledge["value"]["replay_config"]
+    assert "best_config" not in row
+    assert "patch_timeline" not in row
+
+
+def test_current_owner_config_merge_dedupes_identical_values() -> None:
+    args, envs = _merge_current_recipe_configs(
+        {
+            "extra_server_args": "--page-size 32 --shared",
+            "extra_envs": {"SHARED": "1", "EXPLORE": "1"},
+        },
+        {
+            "extra_server_args": "--shared --framework",
+            "extra_envs": {"SHARED": "1", "FRAMEWORK": "1"},
+        },
+        {
+            "extra_server_args": "--shared --kernel",
+            "extra_envs": {"SHARED": "1", "KERNEL": "1"},
+        },
+    )
+    assert args == "--page-size 32 --shared --framework --kernel"
+    assert envs == {
+        "SHARED": "1",
+        "EXPLORE": "1",
+        "FRAMEWORK": "1",
+        "KERNEL": "1",
+    }
+
+
+@pytest.mark.parametrize(
+    ("explore", "framework", "match"),
+    [
+        (
+            {"extra_server_args": "--page-size 32"},
+            {"extra_server_args": "--page-size 64"},
+            "--page-size",
+        ),
+        (
+            {"extra_envs": {"SHARED": "1"}},
+            {"extra_envs": {"SHARED": "2"}},
+            "SHARED",
+        ),
+    ],
+)
+def test_current_owner_config_merge_fails_closed_on_conflict(
+    explore: dict,
+    framework: dict,
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        _merge_current_recipe_configs(explore, framework)
+
+
+@pytest.mark.parametrize(
+    "kernel",
+    [
+        {"extra_server_args": "--page-size 64"},
+        {"extra_envs": {"SHARED": "kernel"}},
+    ],
+)
+def test_current_kernel_config_merge_fails_closed_on_conflict(
+    kernel: dict,
+) -> None:
+    with pytest.raises(ValueError, match="conflict"):
+        _merge_current_recipe_configs(
+            {
+                "extra_server_args": "--page-size 32",
+                "extra_envs": {"SHARED": "recipe"},
+            },
+            {},
+            kernel,
+        )
 
 
 def test_close_fails_with_incomplete_required_section(tmp_path: Path) -> None:
@@ -368,8 +452,10 @@ def test_close_adopts_only_successfully_replayed_prior_overlays(
     (warm / "recipe.json").write_text(
         json.dumps(
             {
-                "knowledge_schema_version": 3,
+                "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+                "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
                 "value": {
+                    "kernel": {},
                     "explore": {
                         "extra_server_args": "--prior-config",
                         "extra_envs": {"VLLM_PRIOR": "1"},
@@ -438,8 +524,11 @@ def test_close_fails_when_replayed_prior_overlay_cannot_be_read(
     (warm / "recipe.json").write_text(
         json.dumps(
             {
-                "knowledge_schema_version": 3,
+                "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+                "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
                 "value": {
+                    "kernel": {},
+                    "explore": {},
                     "framework": {"patches": [old_ref]},
                     "patch_timeline": [old_ref],
                 },
@@ -478,8 +567,11 @@ def test_close_fails_when_replayed_prior_overlay_adoption_fails(
     (warm / "recipe.json").write_text(
         json.dumps(
             {
-                "knowledge_schema_version": 3,
+                "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+                "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
                 "value": {
+                    "kernel": {},
+                    "explore": {},
                     "framework": {"patches": [old_ref]},
                     "patch_timeline": [old_ref],
                 },
@@ -531,8 +623,11 @@ def test_close_adopts_aggregate_timeline_over_100_members(
     (warm / "recipe.json").write_text(
         json.dumps(
             {
-                "knowledge_schema_version": 3,
+                "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+                "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
                 "value": {
+                    "kernel": {},
+                    "explore": {},
                     "framework": {"patches": refs},
                     "patch_timeline": refs,
                 },
@@ -574,8 +669,10 @@ def test_close_drops_already_present_prior_overlay(tmp_path: Path) -> None:
     (warm / "recipe.json").write_text(
         json.dumps(
             {
-                "knowledge_schema_version": 3,
+                "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+                "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
                 "value": {
+                    "kernel": {},
                     "explore": {"patches": []},
                     "framework": {"patches": [old_ref]},
                     "patch_timeline": [old_ref],

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import subprocess
 
@@ -180,6 +181,283 @@ def _warm_recipe_v2_arbor(
             ],
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_current_recipe_replay_uses_sdk_sections_and_global_order(
+    tmp_path,
+    monkeypatch,
+):
+    warm_dir = tmp_path / "runtime" / "remote_recipe"
+    refs = [
+        "framework/overlays/000001/00-framework.patch",
+        "explore/overlays/000002/00-explore.patch",
+    ]
+    for ref in refs:
+        patch = warm_dir / "files" / ref
+        patch.parent.mkdir(parents=True, exist_ok=True)
+        patch.write_text(f"diff --git a/{ref} b/{ref}\n", encoding="utf-8")
+    table_ref = "kernel/gemm/table.json"
+    table = warm_dir / "files" / table_ref
+    table.parent.mkdir(parents=True, exist_ok=True)
+    table.write_text("{}", encoding="utf-8")
+    warm_dir.mkdir(parents=True, exist_ok=True)
+    (warm_dir / "recipe.json").write_text(
+        json.dumps(
+            {
+                "knowledge_schema_version": 1,
+                "record_kind": "hyperloom_recipe",
+                "value": {
+                    "explore": {
+                        "extra_server_args": "--explore --shared",
+                        "extra_envs": {"EXPLORE": "1", "SHARED": "same"},
+                        "patches": [refs[1]],
+                    },
+                    "framework": {
+                        "extra_server_args": "--framework",
+                        "extra_envs": {"FRAMEWORK": "1", "SHARED": "same"},
+                        "patches": [refs[0]],
+                    },
+                    "patch_timeline": refs,
+                    "kernel": {
+                        "gemm": {
+                            "optimizations": [
+                                {
+                                    "tuned_file": table_ref,
+                                    "extra_server_args": "--shared --kernel",
+                                    "extra_envs": {
+                                        "SHARED": "same",
+                                        "KERNEL": "1",
+                                    },
+                                }
+                            ]
+                        },
+                        "fusion": {},
+                        "rewrite": {},
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    monkeypatch.setenv("KB_DRAFT_DIR", str(tmp_path / "runtime" / "draft"))
+    monkeypatch.setenv("KB_WARM_START_DIR", str(warm_dir))
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe={
+            "tier": "exact",
+            "confidence": 1.0,
+            "recipe": {
+                "canonical_id": "inference:test",
+                "record_kind": "hyperloom_recipe",
+                "validated_gain_pct": 12.0,
+            },
+        },
+        warm_start_context={
+            "recommended_replay": {
+                "extra_server_args": "--must-not-be-read",
+                "patches": [{"patch_file": "legacy.patch"}],
+            },
+            "blocked_patches": [{"patch_file": refs[0]}],
+            "advisory_blocked_patches": [{"patch_file": refs[1]}],
+        },
+    )
+
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert task is not None
+    assert (
+        task.params["extra_server_args"]
+        == "--explore --shared --framework --kernel"
+    )
+    assert task.params["extra_envs"] == {
+        "EXPLORE": "1",
+        "SHARED": "same",
+        "FRAMEWORK": "1",
+        "KERNEL": "1",
+    }
+    assert [patch["patch_file"] for patch in task.params["patches"]] == refs
+    assert task.params["blocked_patches"] == []
+    assert task.params["required_patch_timeline"] is True
+
+
+def _patch_current_sdk_readers(
+    monkeypatch,
+    tmp_path,
+    *,
+    timeline,
+    explore_refs,
+    framework_refs,
+    explore_config=None,
+    framework_config=None,
+    gemm=None,
+):
+    from hyperloom.orchestrator.knowledge.agent_kb import (
+        ExploreAgentKB,
+        FrameworkAgentKB,
+        KernelAgentKB,
+        RecipeReplayKB,
+    )
+
+    refs = set(timeline) | set(explore_refs) | set(framework_refs)
+    paths = {}
+    for index, ref in enumerate(refs):
+        path = tmp_path / f"member-{index}.patch"
+        path.write_text("patch", encoding="utf-8")
+        paths[ref] = path
+    if gemm:
+        for row in gemm.get("optimizations") or []:
+            ref = str(row.get("tuned_file") or "")
+            if ref and ref not in paths:
+                path = tmp_path / f"member-{len(paths)}.json"
+                path.write_text("{}", encoding="utf-8")
+                paths[ref] = path
+
+    class _Owner:
+        active = True
+
+        def __init__(self, config, refs):
+            self.config = config
+            self.refs = refs
+
+        def read_config(self):
+            return dict(self.config or {})
+
+        def read_patches(self):
+            return list(self.refs)
+
+        def prior_file(self, ref):
+            return paths.get(ref)
+
+    class _Kernel:
+        active = True
+
+        def read_gemm(self):
+            return dict(gemm or {})
+
+        def read_fusion(self):
+            return {}
+
+        def read_rewrite(self):
+            return {}
+
+        def prior_file(self, ref):
+            return paths.get(ref)
+
+    class _Replay:
+        active = True
+
+        def read_patch_timeline(self):
+            return list(timeline)
+
+    monkeypatch.setattr(
+        ExploreAgentKB,
+        "open",
+        classmethod(
+            lambda cls: _Owner(explore_config or {}, explore_refs)
+        ),
+    )
+    monkeypatch.setattr(
+        FrameworkAgentKB,
+        "open",
+        classmethod(
+            lambda cls: _Owner(framework_config or {}, framework_refs)
+        ),
+    )
+    monkeypatch.setattr(
+        KernelAgentKB,
+        "open",
+        classmethod(lambda cls: _Kernel()),
+    )
+    monkeypatch.setattr(
+        RecipeReplayKB,
+        "open",
+        classmethod(lambda cls: _Replay()),
+    )
+
+
+@pytest.mark.parametrize(
+    ("timeline", "explore_refs", "framework_refs", "match"),
+    [
+        (["explore/a.patch", "explore/a.patch"], ["explore/a.patch"], [], "duplicate"),
+        (["explore/a.patch"], ["explore/a.patch", "explore/a.patch"], [], "duplicate"),
+        (["explore/a.patch"], ["explore/a.patch"], ["framework/b.patch"], "exactly equal"),
+        (
+            ["explore/a.patch", "framework/b.patch"],
+            ["explore/a.patch"],
+            [],
+            "exactly equal",
+        ),
+    ],
+)
+def test_current_recipe_timeline_requires_exact_unique_owner_ref_set(
+    tmp_path,
+    monkeypatch,
+    timeline,
+    explore_refs,
+    framework_refs,
+    match,
+):
+    _patch_current_sdk_readers(
+        monkeypatch,
+        tmp_path,
+        timeline=timeline,
+        explore_refs=explore_refs,
+        framework_refs=framework_refs,
+    )
+    coord = _make_coord(tmp_path)
+
+    with pytest.raises(ValueError, match=match):
+        coord.phase_prelude._read_current_recipe_replay()
+
+
+@pytest.mark.asyncio
+async def test_current_kernel_conflict_fails_before_preparation(
+    tmp_path,
+    monkeypatch,
+):
+    _patch_current_sdk_readers(
+        monkeypatch,
+        tmp_path,
+        timeline=[],
+        explore_refs=[],
+        framework_refs=[],
+        explore_config={"extra_envs": {"SHARED": "recipe"}},
+        gemm={
+            "optimizations": [
+                {
+                    "tuned_file": "kernel/gemm/table.json",
+                    "extra_envs": {"SHARED": "kernel"},
+                }
+            ]
+        },
+    )
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe={
+            "tier": "exact",
+            "confidence": 1.0,
+            "recipe": {
+                "canonical_id": "inference:test",
+                "record_kind": "hyperloom_recipe",
+            },
+        },
+    )
+    prepared = 0
+
+    async def _prepare(*_args, **_kwargs):
+        nonlocal prepared
+        prepared += 1
+        return {"status": "prepared"}
+
+    coord.phase_prelude._prepare_warm_kernel_kb = _prepare
+
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert task is None
+    assert prepared == 0
+    assert "env conflict for SHARED" in coord.shared_state.warm_replay_outcome["reason"]
 
 
 @pytest.mark.asyncio
@@ -520,7 +798,7 @@ def test_all_revert_branches_retain_pending_on_rollback_failure(
     task = _StubTask(
         params={
             "baseline_tput_anchor": 600.0,
-            "combined_schema_v3": True,
+            "combined_current_contract": True,
             "combined_keep_threshold_pct": 1.0,
             "extra_server_args": "--warm",
         }
@@ -1209,7 +1487,7 @@ def test_combined_replay_revert_rolls_back_recipe_and_kernel(
 
     assert recipe_rollbacks == [("/repo", "abc")]
     assert kernel_rollbacks == [[{"manifest_path": "/tmp/m"}]]
-    assert coord.shared_state.warm_kernel_kb_outcome["status"] == "reverted"
+    assert coord.shared_state.warm_replay_outcome["kernel"]["status"] == "reverted"
 
 
 @pytest.mark.asyncio
@@ -1231,7 +1509,7 @@ async def test_kernel_only_replay_enqueues_without_recipe(tmp_path):
     assert task is not None
     assert task.params["recipe_extra_envs"] == {}
     assert task.params["extra_envs"] == {"KERNEL_ONLY": "1"}
-    assert task.params["combined_schema_v3"] is True
+    assert task.params["combined_current_contract"] is True
 
 
 @pytest.mark.asyncio
@@ -1354,7 +1632,7 @@ def test_combined_keep_persists_required_patch_to_canonical(tmp_path):
         params={
             "baseline_tput_anchor": 600.0,
             "required_patch_timeline": True,
-            "combined_schema_v3": True,
+            "combined_current_contract": True,
             "combined_keep_threshold_pct": 1.0,
             "patches": [
                 {
@@ -1413,7 +1691,7 @@ def test_canonical_persistence_failure_rejects_keep_and_rolls_kernel(
         params={
             "baseline_tput_anchor": 600.0,
             "required_patch_timeline": True,
-            "combined_schema_v3": True,
+            "combined_current_contract": True,
             "combined_keep_threshold_pct": 1.0,
             "patches": [{"patch_file": "p.patch", "patch_content": "diff"}],
             "extra_server_args": "--recipe",
@@ -1454,7 +1732,7 @@ def test_persistence_failure_retains_pending_when_rollback_fails(tmp_path):
         params={
             "baseline_tput_anchor": 600.0,
             "required_patch_timeline": True,
-            "combined_schema_v3": True,
+            "combined_current_contract": True,
             "combined_keep_threshold_pct": 1.0,
             "patches": [{"patch_file": "p.patch", "patch_content": "diff"}],
             "extra_server_args": "--recipe",
@@ -1512,22 +1790,25 @@ def test_canonical_rollback_is_not_armed_when_manifest_save_fails(
     assert coord.shared_state.warm_replay_pending == {"task_id": "warm"}
 
 
-def test_schema_v3_threshold_preserves_legacy_positive_gain(tmp_path):
-    schema3 = _make_coord(tmp_path / "v3", warm_start_recipe=_warm_recipe_t1())
-    schema3.shared_state.baseline_tput = 600.0
-    schema3.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
-    schema3._promote_warm_replay(
+def test_current_contract_threshold_preserves_local_legacy_positive_gain(tmp_path):
+    current = _make_coord(
+        tmp_path / "current",
+        warm_start_recipe=_warm_recipe_t1(),
+    )
+    current.shared_state.baseline_tput = 600.0
+    current.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    current._promote_warm_replay(
         {"status": "succeeded", "output_throughput": 603.0},
         task=_StubTask(
             params={
                 "baseline_tput_anchor": 600.0,
-                "combined_schema_v3": True,
+                "combined_current_contract": True,
                 "combined_keep_threshold_pct": 1.0,
-                "extra_server_args": "--v3",
+                "extra_server_args": "--current",
             }
         ),
     )
-    assert schema3.shared_state.warm_replay_outcome["status"] == "drift"
+    assert current.shared_state.warm_replay_outcome["status"] == "drift"
 
     legacy = _make_coord(tmp_path / "legacy", warm_start_recipe=_warm_recipe_t1())
     legacy.shared_state.baseline_tput = 600.0
@@ -1553,7 +1834,7 @@ def test_zero_and_nonfinite_combined_thresholds(tmp_path, monkeypatch):
         task=_StubTask(
             params={
                 "baseline_tput_anchor": 600.0,
-                "combined_schema_v3": True,
+                "combined_current_contract": True,
                 "combined_keep_threshold_pct": 0.0,
                 "extra_server_args": "--zero",
             }
@@ -1574,7 +1855,7 @@ def test_zero_and_nonfinite_combined_thresholds(tmp_path, monkeypatch):
         task=_StubTask(
             params={
                 "baseline_tput_anchor": 600.0,
-                "combined_schema_v3": True,
+                "combined_current_contract": True,
                 "combined_keep_threshold_pct": float("inf"),
                 "extra_server_args": "--nonfinite",
             }
@@ -1591,7 +1872,7 @@ def test_already_present_required_patch_is_not_republished(tmp_path):
     task = _StubTask(
         params={
             "baseline_tput_anchor": 600.0,
-            "combined_schema_v3": True,
+            "combined_current_contract": True,
             "combined_keep_threshold_pct": 1.0,
             "extra_server_args": "--recipe",
             "required_patch_timeline": True,
@@ -1620,7 +1901,7 @@ def test_dirty_worktree_required_patch_is_republished(tmp_path):
     task = _StubTask(
         params={
             "baseline_tput_anchor": 600.0,
-            "combined_schema_v3": True,
+            "combined_current_contract": True,
             "combined_keep_threshold_pct": 1.0,
             "extra_server_args": "--recipe",
             "required_patch_timeline": True,

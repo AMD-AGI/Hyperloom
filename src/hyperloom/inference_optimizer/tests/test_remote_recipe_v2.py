@@ -6,30 +6,31 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-import os
-import shutil
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
 
 import pytest
 
-from hyperloom.orchestrator.knowledge import remote_recipe
-from hyperloom.orchestrator.knowledge.agent_kb import ExploreAgentKB
+from hyperloom.orchestrator.knowledge.agent_kb import (
+    ExploreAgentKB,
+    FrameworkAgentKB,
+    KernelAgentKB,
+    RecipeReplayKB,
+)
 from hyperloom.orchestrator.knowledge.remote_recipe import (
+    CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+    RECORD_KIND_HYPERLOOM_RECIPE,
     HyperloomRemoteKB,
     KBStoreError,
+    KnowledgeSections,
     RemoteRecipeClient,
     RemoteRecipeConfigurationError,
     RemoteWarmRecipeAdapter,
     build_remote_knowledge,
-    convert_v1_recipe_to_knowledge,
-    envelope_to_v1_recipe,
     has_new_keep,
-    read_remote_champion,
+    knowledge_to_warm_recipe,
     read_remote_recipe,
     write_final_remote_recipe,
-    write_kernel_agent_kb,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor import kb_store_client
 from hyperloom.orchestrator.knowledge.remote_recipe.client import (
@@ -44,8 +45,6 @@ from hyperloom.orchestrator.knowledge.remote_recipe.models import (
     Artifact,
     KnowledgeBundle,
     RemoteRecipeValidationError,
-    RemoteWriteResult,
-    extract_knowledge_artifact_refs,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe.sanitize import (
     sanitize_publish_env_mapping,
@@ -163,7 +162,11 @@ def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> 
     bundle = build_remote_knowledge(_state(tmp_path), tmp_path / "files")
 
     assert bundle.knowledge["optimized_throughput"] == 130.0
-    assert bundle.knowledge["knowledge_schema_version"] == 3
+    assert (
+        bundle.knowledge["knowledge_schema_version"]
+        == CURRENT_KNOWLEDGE_SCHEMA_VERSION
+    )
+    assert bundle.knowledge["record_kind"] == RECORD_KIND_HYPERLOOM_RECIPE
     assert bundle.knowledge["validated_e2e_gain"] == 30.0
     value = bundle.knowledge["value"]
     assert value["explore"]["extra_envs"] == {"VLLM_EXPLORE_TEST": "1"}
@@ -858,6 +861,7 @@ class _FakeStore:
         self.metric = metric
         self.calls: list[tuple] = []
         self.published_knowledge: dict | None = None
+        self.uploaded_paths: set[str] = set()
         self.files_listing: dict = {
             "files": [
                 {
@@ -878,15 +882,22 @@ class _FakeStore:
             "canonical_id": "inference:m:h:f:mt:a:v:p",
             "session_id": "champion-session",
             "knowledge": {
+                "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+                "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
                 "optimized_throughput": 125.0,
                 "validated_e2e_gain": 25.0,
                 "value": {
+                    "patch_timeline": [],
+                    "kernel": {
+                        "gemm": {},
+                        "fusion": {},
+                        "rewrite": {},
+                    },
                     "explore": {
-                        "config": {
-                            "extra_server_args": "--page-size 32",
-                            "extra_envs": {"A": "1"},
-                        }
-                    }
+                        "extra_server_args": "--page-size 32",
+                        "extra_envs": {"A": "1"},
+                    },
+                    "framework": {},
                 },
                 "lessons": [{"statement": "x"}],
             },
@@ -906,6 +917,11 @@ class _FakeStore:
     def put_dir(self, canonical_id, session_id, files_dir):
         self.calls.append(("put_dir", canonical_id, session_id, Path(files_dir)))
         root = Path(files_dir)
+        self.uploaded_paths = {
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
         return {
             path.relative_to(root).as_posix(): f"kb://{path.relative_to(root).as_posix()}"
             for path in root.rglob("*")
@@ -968,7 +984,120 @@ def test_write_order_replace_metric_and_409_retry(tmp_path: Path) -> None:
     assert names[-2:] == ["get_rollup", "set_champion"]
     assert store.calls[2][-1] == "replace"
     assert store.calls[3][-2:] == ("optimized_throughput", 130.0)
+    assert len([call for call in store.calls if call[0] == "put_knowledge"]) == 1
+    assert all(
+        not str(call[1]).startswith("kernel:")
+        for call in store.calls
+        if len(call) > 1
+    )
+    assert store.published_knowledge is not None
+    assert "kernel" in store.published_knowledge["value"]
     assert result.status == "written"
+
+
+def test_close_merges_replayed_and_new_staged_rewrite_on_one_page(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    identity = "inference:m:h:f:mt:a:v:p"
+    prior_ref = "kernel/rewrite/prior.py"
+    new_source = tmp_path / "new.py"
+    new_source.write_text("new optimized", encoding="utf-8")
+    warm = tmp_path / "warm"
+    prior_source = warm / "files" / prior_ref
+    prior_source.parent.mkdir(parents=True)
+    prior_source.write_text("prior optimized", encoding="utf-8")
+    prior_row = {
+        "id": "prior",
+        "kernel_name": "prior",
+        "source_files": [prior_ref],
+    }
+    (warm / "recipe.json").write_text(
+        json.dumps(
+            {
+                "value": {
+                    "kernel": {
+                        "rewrite": {
+                            "items": [prior_row],
+                            "files": [prior_ref],
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    draft = tmp_path / "draft"
+    sections = KnowledgeSections(draft, warm_start_dir=warm)
+    kernel = KernelAgentKB(sections)
+    new_ref = kernel.write_rewrite({"items": []}, files=[new_source])[0]
+    new_row = {
+        "id": "new",
+        "kernel_name": "new",
+        "source_files": [new_ref],
+    }
+    kernel.write_rewrite({"items": [new_row]})
+    monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KB_WARM_START_DIR", str(warm))
+    state = SimpleNamespace(
+        optimization_stack=[
+            {
+                "action": "replay_warm_recipe",
+                "kernel_replay": {
+                    "validation": "combined_recipe_kernel",
+                    "count": 1,
+                    "columns": ["rewrite"],
+                },
+            },
+            {"action": "kernel_validated_keep"},
+        ],
+        warm_replay_outcome={
+            "status": "reproduced",
+            "kernel": {
+                "status": "kept",
+                "kept": 1,
+                "validation": "combined_recipe_kernel",
+            },
+        },
+        warm_kernel_kb_plan=[
+            {"column": "rewrite", "recipe_row": prior_row}
+        ],
+        current_best={
+            "tput": 130.0,
+            "extra_server_args": "--combined",
+            "extra_envs": {},
+        },
+        cumulative_gain_validated=30.0,
+        kernel_opt_task_attempts={},
+        last_gemm_tuning={},
+        session_id="session-1",
+        recipe_kb_session_id="session-1",
+    )
+    store = _FakeStore()
+
+    result = write_final_remote_recipe(
+        state,
+        identity,
+        "session-1",
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+
+    assert result.status == "written"
+    assert store.published_knowledge is not None
+    rewrite = store.published_knowledge["value"]["kernel"]["rewrite"]
+    assert [row["id"] for row in rewrite["items"]] == ["prior", "new"]
+    assert rewrite["files"] == sorted([prior_ref, new_ref])
+    assert store.uploaded_paths == {prior_ref, new_ref}
+    assert len([call for call in store.calls if call[0] == "put_knowledge"]) == 1
+    assert all(
+        call[1] == identity
+        for call in store.calls
+        if call[0] in {"put_dir", "put_knowledge", "set_champion"}
+    )
+    champion = [call for call in store.calls if call[0] == "set_champion"]
+    assert champion == [
+        ("set_champion", identity, "session-1", "optimized_throughput", 130.0)
+    ]
 
 
 def test_write_boundary_sanitizes_directly_constructed_bundle(tmp_path: Path) -> None:
@@ -1147,6 +1276,39 @@ def test_read_sequence_writes_flat_recipe_and_files_only(tmp_path: Path) -> None
         tmp_path / "bundle" / "files" / "kernel" / "rewrite" / "verified.bin"
     ).read_bytes() == _DOWNLOAD_BYTES
     assert {path.name for path in destination.iterdir()} == {"recipe.json", "files"}
+
+
+def test_kernel_reads_same_downloaded_inference_recipe_without_second_get(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = _FakeStore()
+    store.envelope["knowledge"]["value"]["kernel"] = {
+        "rewrite": {
+            "items": [
+                {
+                    "kernel_name": "verified",
+                    "source_files": ["kernel/rewrite/verified.bin"],
+                }
+            ]
+        }
+    }
+    destination = tmp_path / "shared-recipe"
+    document = read_remote_recipe(
+        "inference:m:h:f:mt:a:v:p",
+        destination,
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+    assert document is not None
+    monkeypatch.setenv("KB_DRAFT_DIR", str(tmp_path / "draft"))
+    monkeypatch.setenv("KB_WARM_START_DIR", str(destination))
+
+    kernel = KernelAgentKB.open()
+
+    assert kernel.read_rewrite()["items"][0]["kernel_name"] == "verified"
+    assert kernel.prior_file("kernel/rewrite/verified.bin") is not None
+    assert [call[0] for call in store.calls].count("get_best_record") == 1
+    assert not (tmp_path / "runtime" / "kernel_agent_kb").exists()
 
 
 def test_read_pins_manifest_against_download_relisting(tmp_path: Path) -> None:
@@ -1652,174 +1814,105 @@ def test_nonfinite_built_metrics_are_normalized(tmp_path: Path) -> None:
     assert bundle.knowledge["validated_e2e_gain"] == 0.0
 
 
-def test_v1_conversion_helpers_round_trip_reader_fields() -> None:
-    knowledge = convert_v1_recipe_to_knowledge(
-        {
-            "best_config": {"args": "--foo", "envs": {"VLLM_LEGACY_TEST": "1"}},
-            "best_throughput": 10.0,
-            "validated_gain_pct": 2.0,
-            "lessons": [{"statement": "keep foo"}],
-        }
-    )
-    assert knowledge["knowledge_schema_version"] == 1
-    assert knowledge["value"]["legacy_recipe"]["lessons"] == [
-        {"statement": "keep foo"}
-    ]
-    row = envelope_to_v1_recipe(
-        {
-            "schema_version": 2,
-            "canonical_id": "inference:m:h:f:mt:a:v:p",
-            "session_id": "s",
-            "knowledge": knowledge,
-        }
-    )
-    assert row["best_config"] == {
-        "extra_server_args": "--foo",
-        "extra_envs": {"VLLM_LEGACY_TEST": "1"},
+def _current_knowledge(*, timeline: list[str] | None = None) -> dict:
+    return {
+        "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+        "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
+        "optimized_throughput": 10.0,
+        "validated_e2e_gain": 2.0,
+        "value": {
+            "explore": {
+                "extra_server_args": "--page-size 32",
+                "extra_envs": {"CURRENT": "1"},
+            },
+            "framework": {},
+            "patch_timeline": list(timeline or []),
+            "kernel": {"gemm": {}, "fusion": {}, "rewrite": {}},
+        },
     }
-    assert row["best_throughput"] == 10.0
-    assert row["validated_gain_pct"] == 2.0
-    assert row["lessons"] == [{"statement": "keep foo"}]
 
 
-def test_v1_projection_accepts_flat_recipe_document() -> None:
-    row = envelope_to_v1_recipe(
+def test_current_contract_projection_happy_path() -> None:
+    row = knowledge_to_warm_recipe(
         {
             "schema_version": 2,
             "canonical_id": "inference:m:h:f:mt:a:v:p",
             "session_id": "s",
-            "optimized_throughput": 10.0,
-            "validated_e2e_gain": 2.0,
-            "value": {
-                "explore": {
-                    "extra_server_args": "--foo",
-                    "extra_envs": {"A": "1"},
-                    "patches": [],
-                    "artifacts": [],
-                }
-            },
+            "knowledge": _current_knowledge(),
         }
     )
-    assert row["best_config"]["extra_server_args"] == ""
-    assert row["best_config"]["extra_envs"] == {}
+    assert "best_config" not in row
+    assert "patch_timeline" not in row
+    assert row["record_kind"] == RECORD_KIND_HYPERLOOM_RECIPE
 
 
-def test_v2_warm_projection_does_not_replay_legacy_explore_config() -> None:
-    row = envelope_to_v1_recipe(
-        {
-            "schema_version": 2,
-            "knowledge_schema_version": 2,
-            "canonical_id": "inference:m:h:f:mt:a:v:p",
-            "session_id": "s",
-            "optimized_throughput": 10.0,
-            "value": {
-                "explore": {
-                    "extra_server_args": "--page-size 32",
-                    "extra_envs": {"EXPLORE": "1", "SHARED": "explore"},
-                },
-                "framework": {
-                    "extra_server_args": "--enable-foo",
-                    "extra_envs": {"FRAMEWORK": "1", "SHARED": "framework"},
-                },
-            },
-        }
-    )
-    config = row["best_config"]
-    assert config["extra_server_args"] == ""
-    assert config["extra_envs"] == {}
-    assert row["prs_tested"] == []
-
-
-def test_remote_warm_adapter_ignores_legacy_explore_config(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("knowledge_schema_version", None, "knowledge_schema_version"),
+        ("knowledge_schema_version", 2, "knowledge_schema_version"),
+        ("knowledge_schema_version", True, "knowledge_schema_version"),
+        ("knowledge_schema_version", "1", "knowledge_schema_version"),
+        ("record_kind", None, "record_kind"),
+        ("record_kind", "other", "record_kind"),
+    ],
+)
+def test_current_contract_rejects_missing_or_wrong_identity_fields(
+    field: str,
+    value: object,
+    match: str,
 ) -> None:
-    calls: list[tuple[str, Path]] = []
-
-    class _Remote:
-        def read(self, identity: str, destination: Path):
-            calls.append((identity, destination))
-            return {
-                "schema_version": 2,
-                "knowledge_schema_version": 2,
-                "canonical_id": identity,
-                "session_id": "champion",
-                "optimized_throughput": 10.0,
-                "validated_e2e_gain": 2.0,
-                "value": {
-                    "explore": {
-                        "extra_server_args": "--page-size 32",
-                        "extra_envs": {"A": "1"},
-                        "patches": ["ignored.patch"],
-                    },
-                    "framework": {
-                        "extra_server_args": "--framework-flag",
-                        "extra_envs": {"FRAMEWORK": "1"},
-                    },
-                },
-            }
-
-    identity = "inference:m:h:f:mt:a:v:p"
-    destination = tmp_path / "remote-recipe"
-    adapter = RemoteWarmRecipeAdapter(_Remote(), destination)  # type: ignore[arg-type]
-
-    first = adapter.get_authoritative_recipe(canonical_id=identity)
-    second = adapter.get_recipe(canonical_id=identity)
-
-    assert first == second
-    assert first["best_config"] == {
-        "extra_server_args": "",
-        "extra_envs": {},
-    }
-    assert first["prs_tested"] == []
-    assert calls == [(identity, destination)]
-    assert adapter.search(label_match={}, limit=5) == []
+    knowledge = _current_knowledge()
+    if value is None:
+        knowledge.pop(field)
+    else:
+        knowledge[field] = value
+    with pytest.raises(RemoteRecipeValidationError, match=match):
+        knowledge_to_warm_recipe(knowledge)
 
 
-def test_v3_projection_requires_authoritative_replay_config() -> None:
-    with pytest.raises(
-        RemoteRecipeValidationError,
-        match="missing value.replay_config",
-    ):
-        envelope_to_v1_recipe(
-            {
-                "knowledge_schema_version": 3,
-                "canonical_id": "inference:test",
-                "value": {
-                    "explore": {
-                        "extra_server_args": "--legacy-explore",
-                        "extra_envs": {"LEGACY": "1"},
-                    }
-                },
-            }
-        )
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("explore", None, "value.explore"),
+        ("framework", None, "value.framework"),
+        ("patch_timeline", {}, "flat string list"),
+        ("patch_timeline", [{"patch": "x"}], "flat string list"),
+        ("kernel", None, "value.kernel"),
+    ],
+)
+def test_current_contract_rejects_missing_required_value_fields(
+    field: str,
+    value: object,
+    match: str,
+) -> None:
+    knowledge = _current_knowledge()
+    if value is None:
+        knowledge["value"].pop(field)
+    else:
+        knowledge["value"][field] = value
+    with pytest.raises(RemoteRecipeValidationError, match=match):
+        knowledge_to_warm_recipe(knowledge)
 
 
-def test_v3_warm_adapter_hydrates_ordered_patch_bytes(tmp_path: Path) -> None:
+def test_current_warm_adapter_keeps_replay_payload_out_of_t0(tmp_path: Path) -> None:
     ref = "framework/overlays/000002/00-pr-7.patch"
+    second_ref = "explore/overlays/000003/00-followup.patch"
 
     class _Remote:
         def read(self, identity: str, destination: Path):
-            patch = destination / "files" / ref
-            patch.parent.mkdir(parents=True)
-            patch.write_text("diff --git a/a b/a\n", encoding="utf-8")
+            for item, content in (
+                (ref, "diff --git a/a b/a\n"),
+                (second_ref, "diff --git a/b b/b\n"),
+            ):
+                patch = destination / "files" / item
+                patch.parent.mkdir(parents=True, exist_ok=True)
+                patch.write_text(content, encoding="utf-8")
             return {
                 "schema_version": 2,
-                "knowledge_schema_version": 3,
                 "canonical_id": identity,
                 "session_id": "champion",
-                "optimized_throughput": 10.0,
-                "validated_e2e_gain": 2.0,
-                "value": {
-                    "replay_config": {
-                        "extra_server_args": "--page-size 32",
-                        "extra_envs": {},
-                    },
-                    "explore": {
-                        "extra_server_args": "--page-size 32",
-                        "extra_envs": {},
-                    },
-                    "patch_timeline": [ref],
-                },
+                **_current_knowledge(timeline=[ref, second_ref]),
             }
 
     adapter = RemoteWarmRecipeAdapter(  # type: ignore[arg-type]
@@ -1830,41 +1923,43 @@ def test_v3_warm_adapter_hydrates_ordered_patch_bytes(tmp_path: Path) -> None:
         canonical_id="inference:m:h:f:mt:a:v:p"
     )
 
-    assert row["knowledge_schema_version"] == 3
-    assert row["prs_tested"] == [
-        {
-            "outcome": "KEEP",
-            "patch_file": ref,
-            "patch_ref": str(tmp_path / "remote-recipe" / "files" / ref),
-            "patch_content": "diff --git a/a b/a\n",
-            "measured_gain_pct": 2.0,
-            "required": True,
-            "timeline_index": 0,
-        }
+    assert "patch_timeline" not in row
+    assert "best_config" not in row
+    assert "prs_tested" not in row
+    assert "required_patch_timeline" not in row
+
+
+def test_recipe_replay_sdk_returns_exact_global_timeline(tmp_path: Path) -> None:
+    timeline = [
+        "framework/overlays/000002/00-pr-7.patch",
+        "explore/overlays/000003/00-followup.patch",
     ]
-    assert row["required_patch_timeline"] is True
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    (warm / "recipe.json").write_text(
+        json.dumps(_current_knowledge(timeline=timeline)),
+        encoding="utf-8",
+    )
+    kb = RecipeReplayKB(
+        KnowledgeSections(tmp_path / "draft", warm_start_dir=warm)
+    )
+
+    assert kb.read_patch_timeline() == timeline
 
 
 @pytest.mark.parametrize(
     "ref",
     ["/absolute.patch", "../escape.patch", "framework/../../escape.patch"],
 )
-def test_v3_warm_adapter_rejects_unsafe_timeline_refs(
+def test_current_warm_adapter_rejects_unsafe_timeline_refs(
     tmp_path: Path,
     ref: str,
 ) -> None:
     class _Remote:
         def read(self, identity: str, destination: Path):
             return {
-                "knowledge_schema_version": 3,
                 "canonical_id": identity,
-                "value": {
-                    "replay_config": {
-                        "extra_server_args": "",
-                        "extra_envs": {},
-                    },
-                    "patch_timeline": [ref],
-                },
+                **_current_knowledge(timeline=[ref]),
             }
 
     adapter = RemoteWarmRecipeAdapter(  # type: ignore[arg-type]
@@ -1876,76 +1971,20 @@ def test_v3_warm_adapter_rejects_unsafe_timeline_refs(
         adapter.get_authoritative_recipe(canonical_id="inference:test")
 
 
-def test_v3_warm_adapter_rejects_symlink_timeline_ref(
+def test_owner_sdk_rejects_symlink_timeline_ref(
     tmp_path: Path,
 ) -> None:
     ref = "framework/overlays/000000/00-link.patch"
 
-    class _Remote:
-        def read(self, identity: str, destination: Path):
-            outside = tmp_path / "outside.patch"
-            outside.write_text("secret", encoding="utf-8")
-            link = destination / "files" / ref
-            link.parent.mkdir(parents=True)
-            link.symlink_to(outside)
-            return {
-                "knowledge_schema_version": 3,
-                "canonical_id": identity,
-                "value": {
-                    "replay_config": {
-                        "extra_server_args": "",
-                        "extra_envs": {},
-                    },
-                    "patch_timeline": [ref],
-                },
-            }
+    warm = tmp_path / "symlink"
+    outside = tmp_path / "outside.patch"
+    outside.write_text("secret", encoding="utf-8")
+    link = warm / "files" / ref
+    link.parent.mkdir(parents=True)
+    link.symlink_to(outside)
+    sections = KnowledgeSections(tmp_path / "draft", warm_start_dir=warm)
 
-    adapter = RemoteWarmRecipeAdapter(  # type: ignore[arg-type]
-        _Remote(),
-        tmp_path / "symlink",
-    )
-
-    with pytest.raises(
-        RemoteRecipeValidationError,
-        match="symlink",
-    ):
-        adapter.get_authoritative_recipe(canonical_id="inference:test")
-
-
-def test_direct_v1_envelope_replays_legacy_explore_config(tmp_path: Path) -> None:
-    store = _FakeStore()
-    store.envelope["artifacts"] = {"file_count": 0, "files": []}
-    store.envelope["knowledge"] = {
-        "knowledge_schema_version": 1,
-        "optimized_throughput": 111.0,
-        "value": {
-            "legacy_recipe": {
-                "best_config": {
-                    "args": "--legacy-page-size 64",
-                    "envs": {"LEGACY_EXPLORE": "1"},
-                },
-                "best_throughput": 111.0,
-                "prs_tested": [{"number": 123, "patch": "must-not-replay"}],
-            }
-        },
-    }
-    adapter = RemoteWarmRecipeAdapter(
-        RemoteRecipeClient(store),  # type: ignore[arg-type]
-        tmp_path / "direct-v1",
-    )
-
-    row = adapter.get_authoritative_recipe(
-        canonical_id="inference:m:h:f:mt:a:v:p"
-    )
-
-    assert row is not None
-    assert row["best_config"] == {
-        "extra_server_args": "--legacy-page-size 64",
-        "extra_envs": {"LEGACY_EXPLORE": "1"},
-    }
-    assert row["prs_tested"] == []
-    assert [call[0] for call in store.calls] == ["get_best_record"]
-    assert (tmp_path / "direct-v1" / "files").is_dir()
+    assert FrameworkAgentKB(sections).prior_file(ref) is None
 
 
 def test_remote_read_is_wired_into_cli_t0_and_close_write_remains() -> None:
@@ -1961,544 +2000,20 @@ def test_remote_read_is_wired_into_cli_t0_and_close_write_remains() -> None:
     assert "write_final_remote_recipe" not in close_source
 
 
+def test_obsolete_remote_contract_exports_are_removed() -> None:
+    from hyperloom.orchestrator.knowledge import remote_recipe
+
+    for name in (
+        "convert_v1_recipe_to_knowledge",
+        "envelope_to_v1_recipe",
+        "read_remote_champion",
+    ):
+        assert not hasattr(remote_recipe, name)
+    assert not hasattr(ExploreAgentKB, "write_snapshot")
+
+
 def test_vendored_sdk_matches_upstream_git_blob() -> None:
     path = Path(kb_store_client.__file__)
     content = path.read_bytes()
     digest = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
     assert digest == "22d08109fe680cd15c4053ba0ccc5891222eb6cf"
-
-
-def test_read_alias_is_standalone_api() -> None:
-    assert read_remote_champion is read_remote_recipe
-
-
-# --------------------------------------------------------------- kernel-agent KB
-
-
-def _kernel_state(tmp_path: Path, *, gain: float = 12.5):
-    """A session whose only accepted work is one GEMM tuning KEEP."""
-    tuned = tmp_path / "tuned.csv"
-    tuned.write_text("M,N,K\n16,512,7168\n", encoding="utf-8")
-    return SimpleNamespace(
-        optimization_stack=[
-            {
-                "action": "gemm_tuning",
-                "tuned_file": str(tuned),
-                "gain_pct": gain,
-                "tput": 6638.7,
-                "variant_name": "forge_a8w8_blockscale",
-            }
-        ],
-        last_gemm_tuning={"decision": "KEEP", "e2e_gain_pct": gain},
-        kernel_opt_task_attempts={},
-        current_best={"tput": 6638.7},
-        cumulative_gain_validated=84.9,
-        session_id="s1",
-        recipe_kb_session_id="s1",
-    )
-
-
-def _kernel_client(store):
-    """A client for an identity the kernel-agent KB holds nothing for yet.
-
-    The fake store's envelope belongs to a recipe identity, and a read that
-    fails is no longer treated as an empty record, so say "nothing published"
-    the way the store does: an absent best record.
-    """
-    client = RemoteRecipeClient.__new__(RemoteRecipeClient)
-    client.store = store
-    client.read = lambda cid, dest: None  # type: ignore[method-assign]
-    return client
-
-
-def test_kernel_agent_write_publishes_under_the_kernel_metric(tmp_path):
-    store = _FakeStore(champion=0.0, metric="kernel_gain_pct")
-
-    result = write_kernel_agent_kb(
-        _kernel_state(tmp_path),
-        "kernel:hyperloom-m:h:vllm:mt:a:0.1:fp8",
-        client=_kernel_client(store),
-    )
-
-    assert result.status == "written"
-    champion = [c for c in store.calls if c[0] == "set_champion"][0]
-    # Graded on kernel gain, under a metric name that is not serving throughput.
-    assert champion[3] == "kernel_gain_pct"
-    assert champion[4] == 12.5
-    assert store.published_knowledge["kernel_gain_pct"] == 12.5
-
-
-def test_kernel_agent_write_skips_when_it_improves_nothing(tmp_path):
-    """Already published, and better: republishing would only churn the record."""
-    store = _FakeStore(champion=30.0, metric="kernel_gain_pct")
-    client = _kernel_client(store)
-    published = {
-        "value": {
-            "gemm": {
-                "optimizations": [
-                    {"variant_name": "forge_a8w8_blockscale", "e2e_gain_pct": 30.0}
-                ]
-            },
-            "fusion": {"items": []},
-            "rewrite": {"items": []},
-        }
-    }
-    client.read = lambda cid, dest: published  # type: ignore[method-assign]
-
-    result = write_kernel_agent_kb(
-        _kernel_state(tmp_path, gain=12.5), "kernel:hyperloom-m:h", client=client
-    )
-
-    assert result.status == "skipped"
-    assert result.reason == "not_better_than_published"
-    assert not [c for c in store.calls if c[0] == "put_knowledge"]
-
-
-def test_kernel_agent_write_keeps_another_column_it_did_not_touch(tmp_path):
-    """A GEMM-only session must not erase a rewrite an earlier run learned."""
-    store = _FakeStore(champion=5.0, metric="kernel_gain_pct")
-    client = _kernel_client(store)
-    published_dir = tmp_path / "published"
-    carried = published_dir / "files" / "kernel" / "rewrite" / "k1.py"
-    carried.parent.mkdir(parents=True, exist_ok=True)
-    carried.write_text("print('earlier rewrite')", encoding="utf-8")
-    published = {
-        "value": {
-            "gemm": {"optimizations": []},
-            "fusion": {"items": []},
-            "rewrite": {
-                "items": [
-                    {
-                        "kernel_name": "k1",
-                        "e2e_gain_pct": 5.0,
-                        "patch": "kernel/rewrite/k1.py",
-                        "source_files": ["kernel/rewrite/k1.py"],
-                    }
-                ]
-            },
-        }
-    }
-
-    def _read(cid, dest):
-        shutil.copytree(published_dir, dest, dirs_exist_ok=True)
-        return published
-
-    client.read = _read  # type: ignore[method-assign]
-    # The upload directory is temporary, so record what it held at upload time.
-    uploaded_paths: list[str] = []
-    inner_put_dir = store.put_dir
-
-    def _put_dir(canonical_id, session_id, files_dir):
-        uploaded_paths.extend(
-            path.relative_to(files_dir).as_posix()
-            for path in sorted(Path(files_dir).rglob("*"))
-            if path.is_file()
-        )
-        return inner_put_dir(canonical_id, session_id, files_dir)
-
-    store.put_dir = _put_dir  # type: ignore[method-assign]
-
-    result = write_kernel_agent_kb(
-        _kernel_state(tmp_path, gain=12.5), "kernel:hyperloom-m:h", client=client
-    )
-
-    assert result.status == "written"
-    value = store.published_knowledge["value"]
-    # This session's GEMM lands ...
-    assert len(value["gemm"]["optimizations"]) == 1
-    # ... and the rewrite it never touched survives, with its artifact re-uploaded.
-    assert [item["kernel_name"] for item in value["rewrite"]["items"]] == ["k1"]
-    assert "kernel/rewrite/k1.py" in uploaded_paths
-
-
-def test_kernel_agent_write_skips_a_session_without_kernel_work(tmp_path):
-    store = _FakeStore()
-    state = SimpleNamespace(
-        optimization_stack=[{"action": "replay_warm_recipe", "tput": 100.0}],
-        last_gemm_tuning={},
-        kernel_opt_task_attempts={},
-        current_best={"tput": 100.0},
-        cumulative_gain_validated=10.0,
-        session_id="s1",
-        recipe_kb_session_id="s1",
-    )
-
-    result = write_kernel_agent_kb(
-        state, "kernel:hyperloom-m:h", client=_kernel_client(store)
-    )
-
-    assert result.status == "skipped"
-    assert result.reason == "no_kernel_optimization"
-    assert store.calls == []
-
-
-def test_kernel_agent_write_runs_even_when_the_recipe_write_failed(tmp_path):
-    """The kernel record is independent: a recipe transport failure must not
-    take the kernel agent's knowledge down with it."""
-    coordinator = SimpleNamespace(
-        shared_state=_kernel_state(tmp_path),
-        session_dir=tmp_path,
-        recipe_kb=None,
-        knowledge_plane=None,
-        _ensure_journal=lambda: SimpleNamespace(finalize=lambda **_k: None),
-        _workload_canonical_id=lambda: "inference:m:h:vllm:mt:a:0.1:fp8",
-    )
-    written: list[tuple] = []
-
-    def _fake_write(state, kernel_cid):
-        written.append(kernel_cid)
-        return RemoteWriteResult("written", "", kernel_cid, "sid", 12.5)
-
-    with mock.patch.dict(
-        os.environ,
-        {
-            "KNOWLEDGE_STORE_MODE": "remote",
-            "KB_STORE_URL": "https://kb.example",
-            "KB_STORE_TOKEN": "token",
-        },
-    ), mock.patch.object(
-        remote_recipe.HyperloomRemoteKB,
-        "from_env",
-        classmethod(lambda cls: (_ for _ in ()).throw(OSError("transport down"))),
-    ), mock.patch.object(remote_recipe, "write_kernel_agent_kb", _fake_write):
-        WritebackCollaborator(coordinator).finalize_recipe_and_journal()
-
-    assert written == ["kernel:hyperloom-m:h:vllm:mt:a:0.1:fp8"]
-
-
-def _published_kernel_client(store, published: dict, published_dir: Path):
-    """A client whose read() serves ``published`` plus its downloaded files."""
-    client = RemoteRecipeClient.__new__(RemoteRecipeClient)
-    client.store = store
-
-    def _read(cid, dest):
-        shutil.copytree(published_dir, dest, dirs_exist_ok=True)
-        return published
-
-    client.read = _read  # type: ignore[method-assign]
-    return client
-
-
-def _capture_uploads(store) -> dict[str, bytes]:
-    """Record what each write actually uploads; the staging dir is temporary."""
-    uploaded: dict[str, bytes] = {}
-    inner_put_dir = store.put_dir
-
-    def _put_dir(canonical_id, session_id, files_dir):
-        uploaded.clear()
-        uploaded.update(
-            {
-                path.relative_to(files_dir).as_posix(): path.read_bytes()
-                for path in sorted(Path(files_dir).rglob("*"))
-                if path.is_file()
-            }
-        )
-        return inner_put_dir(canonical_id, session_id, files_dir)
-
-    store.put_dir = _put_dir  # type: ignore[method-assign]
-    return uploaded
-
-
-def test_kernel_agent_write_carries_every_ref_an_inherited_record_declares(tmp_path):
-    """A real GEMM record names its report too, not just the tuned table.
-
-    Carrying only a hand-listed subset of ref keys leaves the rest dangling and
-    the whole write dies in validation, silently, at the caller's except.
-    """
-    store = _FakeStore(champion=40.0, metric="kernel_gain_pct")
-    published_dir = tmp_path / "published"
-    files = published_dir / "files" / "kernel" / "gemm" / "artifacts"
-    files.mkdir(parents=True, exist_ok=True)
-    (files / "other.csv").write_text("OLD-TUNED-TABLE\n", encoding="utf-8")
-    (files / "report.md").write_text("# earlier report\n", encoding="utf-8")
-    published = {
-        "value": {
-            "gemm": {
-                "optimizations": [
-                    {
-                        "variant_name": "other_variant",
-                        "e2e_gain_pct": 40.0,
-                        "tuned_file": "kernel/gemm/artifacts/other.csv",
-                        "final_report_path": "kernel/gemm/artifacts/report.md",
-                    }
-                ]
-            },
-            "fusion": {"items": []},
-            "rewrite": {"items": []},
-        }
-    }
-    client = _published_kernel_client(store, published, published_dir)
-    uploaded = _capture_uploads(store)
-
-    result = write_kernel_agent_kb(
-        _kernel_state(tmp_path, gain=12.5), "kernel:hyperloom-m:h", client=client
-    )
-
-    assert result.status == "written"
-    assert "kernel/gemm/artifacts/report.md" in uploaded
-
-
-def test_kernel_agent_write_uploads_nothing_the_merged_record_dropped(tmp_path):
-    """This session stages before the merge rules on it; a losing record's
-    files would otherwise be uploaded with nothing referencing them."""
-    store = _FakeStore(champion=40.0, metric="kernel_gain_pct")
-    published_dir = tmp_path / "published"
-    gemm_files = published_dir / "files" / "kernel" / "gemm" / "artifacts"
-    gemm_files.mkdir(parents=True, exist_ok=True)
-    (gemm_files / "won.csv").write_text("WINNING-TABLE\n", encoding="utf-8")
-    published = {
-        "value": {
-            # Same variant as the session's, and better: the session's GEMM loses.
-            "gemm": {
-                "optimizations": [
-                    {
-                        "variant_name": "forge_a8w8_blockscale",
-                        "e2e_gain_pct": 40.0,
-                        "tuned_file": "kernel/gemm/artifacts/won.csv",
-                    }
-                ]
-            },
-            "fusion": {"items": []},
-            "rewrite": {"items": []},
-        }
-    }
-    client = _published_kernel_client(store, published, published_dir)
-    uploaded = _capture_uploads(store)
-    state = _kernel_state(tmp_path, gain=12.5)
-    # A new rewrite keeps the write alive past the "nothing improved" early exit.
-    rewrite_patch = tmp_path / "k2.patch"
-    rewrite_patch.write_text("--- a/k2.py\n+++ b/k2.py\n", encoding="utf-8")
-    rewrite_source = tmp_path / "k2.py"
-    rewrite_source.write_text("print('new rewrite')", encoding="utf-8")
-    state.optimization_stack.append(
-        {
-            "action": "integrate",
-            "decision": "KEEP",
-            "kernel_id": "k2",
-            "kernel_name": "k2",
-            "gain_pct": 3.0,
-            "tput": 6700.0,
-            "patch_path": str(rewrite_patch),
-            "target_file": str(rewrite_source),
-        }
-    )
-
-    result = write_kernel_agent_kb(state, "kernel:hyperloom-m:h", client=client)
-
-    assert result.status == "written"
-    referenced = extract_knowledge_artifact_refs(store.published_knowledge)
-    assert set(uploaded) <= referenced
-    # The beaten record's tuned table is not carried along as an orphan.
-    assert "kernel/gemm/artifacts/tuned.csv" not in uploaded
-
-
-def test_kernel_agent_write_gives_a_colliding_inherited_file_its_own_ref(tmp_path):
-    """Refs are ``category/kind/<basename>``, so ``tuned.csv`` collides across
-    sessions. Resolving an inherited record to this session's bytes would make
-    PRELUDE replay the wrong table under someone else's measured gain."""
-    store = _FakeStore(champion=40.0, metric="kernel_gain_pct")
-    published_dir = tmp_path / "published"
-    files = published_dir / "files" / "kernel" / "gemm" / "artifacts"
-    files.mkdir(parents=True, exist_ok=True)
-    (files / "tuned.csv").write_text("OLD-TUNED-TABLE\n", encoding="utf-8")
-    published = {
-        "value": {
-            "gemm": {
-                "optimizations": [
-                    {
-                        "variant_name": "other_variant",
-                        "e2e_gain_pct": 40.0,
-                        "tuned_file": "kernel/gemm/artifacts/tuned.csv",
-                    }
-                ]
-            },
-            "fusion": {"items": []},
-            "rewrite": {"items": []},
-        }
-    }
-    client = _published_kernel_client(store, published, published_dir)
-    uploaded = _capture_uploads(store)
-
-    result = write_kernel_agent_kb(
-        _kernel_state(tmp_path, gain=12.5), "kernel:hyperloom-m:h", client=client
-    )
-
-    assert result.status == "written"
-    records = {
-        item["variant_name"]: item
-        for item in store.published_knowledge["value"]["gemm"]["optimizations"]
-    }
-    inherited_ref = records["other_variant"]["tuned_file"]
-    session_ref = records["forge_a8w8_blockscale"]["tuned_file"]
-    assert inherited_ref != session_ref
-    # Each record still resolves to the bytes it was measured on.
-    assert uploaded[inherited_ref] == b"OLD-TUNED-TABLE\n"
-    assert uploaded[session_ref] == b"M,N,K\n16,512,7168\n"
-
-
-def test_kernel_agent_write_accumulates_under_one_session(tmp_path):
-    """Readers resolve an identity through its champion. An accumulating record
-    that adds a kernel without raising the best gain scores no higher than the
-    incumbent, so parking it on a per-run session would hide it forever."""
-    store = _FakeStore(champion=0.0, metric="kernel_gain_pct")
-
-    write_kernel_agent_kb(
-        _kernel_state(tmp_path), "kernel:hyperloom-m:h", client=_kernel_client(store)
-    )
-
-    sessions = {call[2] for call in store.calls if call[0] == "put_knowledge"}
-    assert sessions == {KERNEL_AGENT_SESSION_ID}
-
-
-def test_kernel_agent_write_accepts_a_refused_promotion_it_already_holds(tmp_path):
-    """Re-publishing the accumulated record at an unchanged score need not move
-    the champion: it already points at the session being written."""
-    store = _FakeStore(champion=12.5, conflict=True, metric="kernel_gain_pct")
-    store.champion_session = KERNEL_AGENT_SESSION_ID
-
-    result = write_kernel_agent_kb(
-        _kernel_state(tmp_path), "kernel:hyperloom-m:h", client=_kernel_client(store)
-    )
-
-    assert result.status == "written"
-    # One refused attempt, and no retry: the incumbent is this same record.
-    assert len([c for c in store.calls if c[0] == "set_champion"]) == 1
-
-
-def test_kernel_agent_write_refuses_to_publish_over_an_unreadable_record(tmp_path):
-    """The published record is the base of every merge, and the write replaces
-    the document wholesale: merging against a failed read would publish this
-    run's columns alone and destroy the identity's accumulated kernels."""
-    store = _FakeStore(champion=40.0, metric="kernel_gain_pct")
-    client = _kernel_client(store)
-
-    def _read(cid, dest):
-        raise KBStoreError("GET best-record -> HTTP 500")
-
-    client.read = _read  # type: ignore[method-assign]
-
-    result = write_kernel_agent_kb(
-        _kernel_state(tmp_path), "kernel:hyperloom-m:h", client=client
-    )
-
-    assert result.status == "error"
-    assert "published_record_unreadable" in result.reason
-    assert not [c for c in store.calls if c[0] in ("put_knowledge", "put_dir")]
-    assert store.published_knowledge is None
-
-
-def test_kernel_agent_write_displaces_one_ref_without_touching_its_namesake(tmp_path):
-    """A record can name two files sharing a basename across directories. Moving
-    the colliding one must not repoint the other, whose bytes would then be
-    referenced by nothing, dropped from the upload, and replayed as a patch."""
-    store = _FakeStore(champion=40.0, metric="kernel_gain_pct")
-    published_dir = tmp_path / "published"
-    patches = published_dir / "files" / "kernel" / "rewrite" / "patches"
-    sources = published_dir / "files" / "kernel" / "rewrite" / "source"
-    patches.mkdir(parents=True, exist_ok=True)
-    sources.mkdir(parents=True, exist_ok=True)
-    (patches / "x.py").write_text("OLD-PATCH", encoding="utf-8")
-    (sources / "x.py").write_text("OLD-SOURCE", encoding="utf-8")
-    published = {
-        "value": {
-            "gemm": {"optimizations": []},
-            "fusion": {"items": []},
-            "rewrite": {
-                "items": [
-                    {
-                        "kernel_name": "kOLD",
-                        "e2e_gain_pct": 40.0,
-                        "patch": "kernel/rewrite/patches/x.py",
-                        "source_files": ["kernel/rewrite/source/x.py"],
-                    }
-                ]
-            },
-        }
-    }
-    client = _published_kernel_client(store, published, published_dir)
-    uploaded = _capture_uploads(store)
-    state = _kernel_state(tmp_path, gain=12.5)
-    # This session's own rewrite collides on the patch basename only.
-    session_patch = tmp_path / "x.py"
-    session_patch.write_text("NEW-PATCH", encoding="utf-8")
-    session_source = tmp_path / "target.py"
-    session_source.write_text("print('new')", encoding="utf-8")
-    state.optimization_stack.append(
-        {
-            "action": "integrate",
-            "decision": "KEEP",
-            "kernel_id": "kNEW",
-            "kernel_name": "kNEW",
-            "gain_pct": 3.0,
-            "tput": 6700.0,
-            "patch_path": str(session_patch),
-            "target_file": str(session_source),
-        }
-    )
-
-    result = write_kernel_agent_kb(state, "kernel:hyperloom-m:h", client=client)
-
-    assert result.status == "written"
-    inherited = next(
-        item
-        for item in store.published_knowledge["value"]["rewrite"]["items"]
-        if item["kernel_name"] == "kOLD"
-    )
-    # The displaced patch moved; the same-named source kept its own ref.
-    assert inherited["patch"] != "kernel/rewrite/patches/x.py"
-    assert inherited["source_files"] == ["kernel/rewrite/source/x.py"]
-    assert uploaded[inherited["patch"]] == b"OLD-PATCH"
-    assert uploaded["kernel/rewrite/source/x.py"] == b"OLD-SOURCE"
-
-
-def test_kernel_agent_write_takes_over_an_equally_scored_foreign_champion(tmp_path):
-    """Records written before this scheme sit on per-run sessions. Adding a
-    kernel that does not raise the best gain leaves the score equal, so without
-    an equal-score takeover the accumulated document stays off-champion and no
-    reader ever sees it. The store promotes whatever it is told, so a conflict
-    is worth retrying at an unchanged score."""
-    store = _FakeStore(champion=12.5, conflict=True, metric="kernel_gain_pct")
-    store.champion_session = "old-run-session"
-
-    result = write_kernel_agent_kb(
-        _kernel_state(tmp_path), "kernel:hyperloom-m:h", client=_kernel_client(store)
-    )
-
-    assert result.status == "written"
-    promotions = [c for c in store.calls if c[0] == "set_champion"]
-    assert len(promotions) == 2  # the refused one, then the takeover
-    assert promotions[-1][2] == KERNEL_AGENT_SESSION_ID
-    assert store.champion_session == KERNEL_AGENT_SESSION_ID
-
-
-def test_recipe_write_leaves_an_equally_scored_champion_alone(tmp_path):
-    """The recipe record competes rather than accumulates: an equal throughput
-    is not a reason to displace a concurrent winner and churn the identity."""
-    store = _FakeStore(champion=100.0, conflict=True)
-    store.champion_session = "other-session"
-    client = RemoteRecipeClient(store)  # type: ignore[arg-type]
-    # Gating sees the old champion; the conflict re-read sees a concurrent
-    # winner that landed exactly this run's score.
-    values = [100.0, 130.0]
-
-    def _rollup(canonical_id):
-        store.calls.append(("get_rollup", canonical_id))
-        value = values.pop(0) if len(values) > 1 else values[0]
-        return {
-            "champion": {
-                "session_id": "other-session",
-                "value": value,
-                "metric": "optimized_throughput",
-            }
-        }
-
-    store.get_rollup = _rollup  # type: ignore[method-assign]
-
-    result = write_final_remote_recipe(
-        _state(tmp_path), "inference:m:h:f:mt:a:v:p", "session-1", client=client
-    )
-
-    assert result.status == "written"
-    # One refused promotion, and no retry over the equal-scored incumbent.
-    assert len([c for c in store.calls if c[0] == "set_champion"]) == 1
-    assert store.champion_session == "other-session"

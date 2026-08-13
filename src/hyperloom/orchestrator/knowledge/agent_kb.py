@@ -67,6 +67,39 @@ FRAMEWORK_SECTION = "framework"
 _PATCH_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
+def _prior_member(
+    sections: KnowledgeSections | None,
+    ref: str,
+    *,
+    owner: str = "",
+) -> Path | None:
+    """Resolve one downloaded member without following symlinks."""
+    if sections is None or sections.warm_start_dir is None:
+        return None
+    rel = str(ref or "").strip().lstrip("/")
+    parts = Path(rel).parts if rel else ()
+    if (
+        not parts
+        or (owner and parts[0] != owner)
+        or ".." in parts
+        or Path(rel).is_absolute()
+    ):
+        return None
+    root = sections.warm_start_dir / FILES_MEMBER_ROOT
+    if root.is_symlink():
+        return None
+    cursor = root
+    for part in parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            return None
+    try:
+        cursor.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return None
+    return cursor if cursor.is_file() else None
+
+
 class _ConfigPatchAgentKB:
     """Section facade for one config owner and its ordered source overlays."""
 
@@ -112,6 +145,18 @@ class _ConfigPatchAgentKB:
             ),
         }
 
+    def read_patches(self) -> list[str]:
+        """Return this owner's ordered patch refs from the prior Recipe."""
+        prior = self.read()
+        patches = prior.get("patches")
+        if not isinstance(patches, list):
+            return []
+        return [
+            str(ref)
+            for ref in patches
+            if isinstance(ref, str) and str(ref).strip()
+        ]
+
     def write_config(
         self,
         extra_server_args: str | Mapping[str, Any] = "",
@@ -148,8 +193,6 @@ class _ConfigPatchAgentKB:
             log.warning("%s kb: cannot record config: %s", self.SECTION, exc)
             return False
         return True
-
-    write_snapshot = write_config
 
     def stage_patches(
         self,
@@ -284,19 +327,7 @@ class _ConfigPatchAgentKB:
 
     def prior_file(self, ref: str) -> Path | None:
         """Resolve a prior section ref to its downloaded artifact."""
-        if self._sections is None or self._sections.warm_start_dir is None:
-            return None
-        rel = str(ref or "").strip().lstrip("/")
-        parts = Path(rel).parts if rel else ()
-        if (
-            not parts
-            or parts[0] != self.SECTION
-            or ".." in parts
-            or Path(rel).is_absolute()
-        ):
-            return None
-        candidate = self._sections.warm_start_dir / FILES_MEMBER_ROOT / rel
-        return candidate if candidate.is_file() else None
+        return _prior_member(self._sections, ref, owner=self.SECTION)
 
 
 class ExploreAgentKB(_ConfigPatchAgentKB):
@@ -309,6 +340,72 @@ class FrameworkAgentKB(_ConfigPatchAgentKB):
     """Read/write FRAMEWORK_AGENT's final config and accepted overlays."""
 
     SECTION = FRAMEWORK_SECTION
+
+
+class RecipeReplayKB:
+    """Read global replay ordering from the downloaded current Recipe."""
+
+    def __init__(self, sections: KnowledgeSections | None) -> None:
+        self._sections = sections
+
+    @classmethod
+    def open(cls) -> "RecipeReplayKB":
+        try:
+            sections = KnowledgeSections.from_env()
+        except (KBStoreError, OSError, ValueError) as exc:
+            log.warning("recipe replay kb: unavailable: %s", exc)
+            sections = None
+        return cls(sections)
+
+    @property
+    def active(self) -> bool:
+        return (
+            self._sections is not None
+            and self._sections.warm_start_dir is not None
+        )
+
+    def read_patch_timeline(self) -> list[str]:
+        """Return the exact flat global timeline, rejecting malformed records."""
+        if not self.active:
+            return []
+        from .remote_recipe.models import (
+            RemoteRecipeValidationError,
+            validate_relative_path,
+        )
+        from .remote_recipe.values import (
+            CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+            RECORD_KIND_HYPERLOOM_RECIPE,
+        )
+
+        recipe = self._sections.warm_start_dir / "recipe.json"
+        try:
+            document = json.loads(recipe.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RemoteRecipeValidationError(
+                f"current Recipe is unreadable: {exc}"
+            ) from exc
+        knowledge = (
+            document.get("knowledge")
+            if isinstance(document.get("knowledge"), Mapping)
+            else document
+        )
+        if (
+            knowledge.get("knowledge_schema_version")
+            != CURRENT_KNOWLEDGE_SCHEMA_VERSION
+            or knowledge.get("record_kind") != RECORD_KIND_HYPERLOOM_RECIPE
+        ):
+            raise RemoteRecipeValidationError(
+                "downloaded Recipe does not match the current knowledge contract"
+            )
+        value = knowledge.get("value")
+        timeline = value.get("patch_timeline") if isinstance(value, Mapping) else None
+        if not isinstance(timeline, list) or not all(
+            isinstance(ref, str) for ref in timeline
+        ):
+            raise RemoteRecipeValidationError(
+                "current Recipe value.patch_timeline must be a flat string list"
+            )
+        return [validate_relative_path(ref) for ref in timeline]
 
 
 class KernelAgentKB:
@@ -348,17 +445,7 @@ class KernelAgentKB:
 
     def prior_file(self, ref: str) -> Path | None:
         """Resolve a ref recorded in prior knowledge to its downloaded file."""
-        if self._sections is None:
-            return None
-        warm_start_dir = self._sections.warm_start_dir
-        if warm_start_dir is None:
-            return None
-        rel = str(ref or "").strip().lstrip("/")
-        parts = Path(rel).parts if rel else ()
-        if not parts or ".." in parts or Path(rel).is_absolute():
-            return None
-        candidate = warm_start_dir / FILES_MEMBER_ROOT / rel
-        return candidate if candidate.is_file() else None
+        return _prior_member(self._sections, ref, owner=KERNEL_SECTION)
 
     # -- write ---------------------------------------------------------------
 
@@ -477,65 +564,6 @@ class KernelAgentKB:
         return suffixed if (files_dir / suffixed).is_file() else ""
 
 
-class KernelRecordReader:
-    """Read a downloaded independent kernel-agent KB record (``kernel:`` scheme).
-
-    The recipe warm-start nests kernel columns under ``value.kernel.*`` and is
-    read through :class:`KernelAgentKB`. The independent kernel-agent record
-    instead stores them flat at ``value.gemm``/``value.fusion``/``value.rewrite``
-    with a sibling ``files/`` tree. This reader exposes the same read surface
-    (``active`` + ``read_gemm``/``read_fusion``/``read_rewrite`` + ``prior_file``)
-    so the PRELUDE warm-apply planner can consume either source unchanged.
-
-    ``record_dir`` is a directory populated by ``read_remote_recipe`` — a
-    ``recipe.json`` plus a ``files/`` tree. An absent/empty record leaves the
-    reader inactive and every call a no-op.
-    """
-
-    def __init__(self, record_dir: str | Path | None) -> None:
-        self._dir = Path(record_dir) if record_dir else None
-        self._value: dict[str, Any] | None = None
-        if self._dir is not None:
-            recipe = self._dir / "recipe.json"
-            if recipe.is_file():
-                try:
-                    document = json.loads(recipe.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    document = None
-                if isinstance(document, Mapping):
-                    value = document.get("value")
-                    self._value = dict(value) if isinstance(value, Mapping) else {}
-
-    @property
-    def active(self) -> bool:
-        """True when a record was loaded and its columns can be read."""
-        return isinstance(self._value, Mapping)
-
-    def _column(self, name: str) -> dict[str, Any]:
-        node = (self._value or {}).get(name)
-        return dict(node) if isinstance(node, Mapping) else {}
-
-    def read_gemm(self) -> dict[str, Any]:
-        return self._column("gemm")
-
-    def read_fusion(self) -> dict[str, Any]:
-        return self._column("fusion")
-
-    def read_rewrite(self) -> dict[str, Any]:
-        return self._column("rewrite")
-
-    def prior_file(self, ref: str) -> Path | None:
-        """Resolve a recorded ref to its downloaded file under ``files/``."""
-        if self._dir is None:
-            return None
-        rel = str(ref or "").strip().lstrip("/")
-        parts = Path(rel).parts if rel else ()
-        if not parts or ".." in parts or Path(rel).is_absolute():
-            return None
-        candidate = self._dir / FILES_MEMBER_ROOT / rel
-        return candidate if candidate.is_file() else None
-
-
 __all__ = [
     "EXPLORE_SECTION",
     "ExploreAgentKB",
@@ -544,5 +572,5 @@ __all__ = [
     "KERNEL_COLUMNS",
     "KERNEL_SECTION",
     "KernelAgentKB",
-    "KernelRecordReader",
+    "RecipeReplayKB",
 ]

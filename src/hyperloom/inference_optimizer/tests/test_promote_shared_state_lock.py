@@ -300,6 +300,7 @@ async def test_promote_explore_stages_final_config_after_keep(
 ):
     draft = tmp_path / "kb-draft"
     monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     coord = _coord(session_dir)
     coord.shared_state.baseline_tput = 100.0
     winner = {
@@ -539,6 +540,7 @@ async def test_integrate_keep_stages_patch_for_proposal_owner(
 ):
     draft = tmp_path / "kb-draft"
     monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     patch = tmp_path / f"{section}.diff"
     patch.write_bytes(f"{section} bytes".encode())
     coord = _coord(session_dir)
@@ -575,6 +577,7 @@ async def test_integrate_nonpromotion_never_stages_patch(
 ):
     draft = tmp_path / "kb-draft"
     monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     patch = tmp_path / "not-kept.patch"
     patch.write_bytes(b"do not stage")
     coord = _coord(session_dir)
@@ -702,6 +705,7 @@ async def test_framework_agent_keep_stages_returned_raw_patch(
 ):
     draft = tmp_path / "kb-draft"
     monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     patch = tmp_path / "pr-7.patch"
     patch.write_bytes(b"raw framework diff")
     coord = _coord(session_dir)
@@ -730,6 +734,7 @@ async def test_explicit_empty_patches_applied_never_scans_stale_workspace(
 ):
     draft = tmp_path / "kb-draft"
     monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "rejected.diff").write_bytes(b"rejected stale bytes")
@@ -754,10 +759,11 @@ async def test_explicit_empty_patches_applied_never_scans_stale_workspace(
 
 
 @pytest.mark.asyncio
-async def test_unavailable_draft_retains_keep_outbox_for_retry(
+async def test_local_mode_without_remote_draft_does_not_enqueue_outbox(
     session_dir, tmp_path, monkeypatch
 ):
     monkeypatch.delenv("KB_DRAFT_DIR", raising=False)
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "local")
     patch = tmp_path / "accepted.patch"
     patch.write_bytes(b"accepted")
     coord = _coord(session_dir)
@@ -774,12 +780,8 @@ async def test_unavailable_draft_retains_keep_outbox_for_retry(
         task=_task("framework_agent"),
     )
 
-    assert len(coord.shared_state.kb_stage_outbox) == 1
-    assert coord.shared_state.kb_stage_outbox[0]["owner"] == "FRAMEWORK_AGENT"
-    assert (
-        coord.shared_state.optimization_stack[0]["kb_required_owner"]
-        == "FRAMEWORK_AGENT"
-    )
+    assert coord.shared_state.kb_stage_outbox == []
+    assert "kb_required_owner" not in coord.shared_state.optimization_stack[0]
 
 
 @pytest.mark.asyncio
@@ -787,6 +789,7 @@ async def test_keep_kb_hook_runs_only_after_authoritative_save(
     session_dir, tmp_path, monkeypatch
 ):
     monkeypatch.setenv("KB_DRAFT_DIR", str(tmp_path / "draft"))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     patch = tmp_path / "pr.patch"
     patch.write_bytes(b"raw diff")
     coord = _coord(session_dir)

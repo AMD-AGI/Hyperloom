@@ -71,11 +71,12 @@ for the user-facing summary.
 
 ### Added
 
-- **Remote Recipe knowledge now uses KB Store.** Remote mode reads one
-  identity-addressed best record for T0 Explore config/env replay and publishes
-  one final CLOSE session with verified artifacts. Local Recipe storage and
-  non-Recipe GBrain integrations remain unchanged; agent section staging is an
-  interface surface and is not yet wired by the kernel backends.
+- **Remote Recipe knowledge now uses one current KB Store contract.** Remote
+  mode reads one identity-addressed inference Recipe containing replay config,
+  the ordered patch timeline, and nested kernel columns, then publishes one
+  final CLOSE session with verified artifacts under the same throughput
+  champion. Local Recipe storage and non-Recipe GBrain integrations remain
+  unchanged.
 
 - **`--no-eval` turns the accuracy eval off for a whole run.** Setting
   `RUN_EVAL=false` by hand leaves the baseline with no accuracy reference, which

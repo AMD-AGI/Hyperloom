@@ -77,6 +77,25 @@ def test_kg_recommended_knobs_positive() -> None:
     assert any(r["knob"] == "aiter_backend" and r["expected_gain"] > 0 for r in recs)
 
 
+def test_current_remote_context_discards_kg_patch_blocks() -> None:
+    ctx = _build_warm_start_context(
+        status="hit",
+        tier="exact",
+        confidence=1.0,
+        canonical_id="inference:qwen3",
+        source="kb-store",
+        recipe={"record_kind": "hyperloom_recipe"},
+        model_architectures=["Qwen3MoeForCausalLM"],
+        hardware="mi300x",
+        framework="sglang",
+        kg_client=_kg(),
+    )
+
+    assert ctx["blocked_patches"] == []
+    assert ctx["advisory_blocked_patches"] == []
+    assert ctx.get("recommended_knobs")
+
+
 _KNOB_FACTS_PAGE = """# KG
 
 ## Facts
