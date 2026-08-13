@@ -83,13 +83,19 @@ class SessionMeta(TypedDict, total=False):
         session_id (str): Hyperloom internal id (``manifest.session_id``).
         claw_session_id (str | None): SaFE / Claw session id (env ``CLAW_SESSION_ID``).
         sandbox_user_id (str | None): Sandbox user identifier, if any.
-        created_at_utc (str): ISO UTC timestamp when the session started.
+        created_at_utc (str): ISO UTC timestamp when the session was first
+            created; unchanged by a resume.
+        start_ts (str): ISO UTC timestamp the current session leg started
+            from, reset when a crashed or stopped session is resumed. This is
+            the anchor the wall-clock budget is counted against.
         ended_at_utc (str): ISO UTC timestamp when the session ended.
         stop_reason (str): Why the run stopped (``target_reached`` /
             ``time_exhausted`` / ``global_converged`` / ``max_ticks`` /
             ``baseline_failed`` / ...).
         max_minutes (int): Configured time budget in minutes.
-        elapsed_minutes (float): Wall-clock minutes the session ran.
+        elapsed_minutes (float): Wall-clock minutes the current leg ran
+            (``start_ts`` to the end, or to now while still running), so it
+            stays comparable with ``max_minutes`` across a resume.
         host (str): Hostname the session executed on.
         code_revision (str): Source revision of the optimizer.
         pid (int): Process id of the optimizer.
@@ -107,6 +113,7 @@ class SessionMeta(TypedDict, total=False):
     claw_session_id: str | None  # SaFE / Claw session id (env CLAW_SESSION_ID)
     sandbox_user_id: str | None
     created_at_utc: str
+    start_ts: str  # start of the current leg (reset on resume); anchors elapsed_minutes
     ended_at_utc: str
     stop_reason: str  # target_reached / time_exhausted / global_converged / max_ticks / baseline_failed / ...
     max_minutes: int

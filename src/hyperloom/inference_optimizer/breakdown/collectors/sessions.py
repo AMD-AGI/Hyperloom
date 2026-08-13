@@ -532,6 +532,57 @@ def _session_has_ended(stop_reason: Any) -> bool:
     return bool(str(stop_reason or "").strip())
 
 
+def _measured_duration_seconds(start_ts: Any, ended_at_utc: Any, stop_reason: Any) -> int | None:
+    """Seconds the session ran, or ``None`` when no window can be established.
+
+    A finished session is measured to its recorded end; only one still running
+    may be measured up to now, since extrapolating a finished session grows its
+    duration on every re-export and reads as a plausible number rather than as
+    missing evidence.
+
+    Args:
+        start_ts (Any): Start of the window (see :func:`collect_session` for
+            which start that is across a resume).
+        ended_at_utc (Any): Recorded end of the window, if any.
+        stop_reason (Any): Terminal reason; a non-blank one means the session
+            is no longer running.
+
+    Returns:
+        int | None: Whole seconds between start and end, or ``None``.
+    """
+    start = to_unix(start_ts)
+    if start is None:
+        return None
+    end = to_unix(ended_at_utc)
+    if end is None and not _session_has_ended(stop_reason):
+        end = datetime.now(timezone.utc).timestamp()
+    if end is None or end <= start:
+        return None
+    return int(round(end - start))
+
+
+def session_elapsed_minutes(session_section: dict[str, Any]) -> float:
+    """Wall-clock minutes of the leg described by a resolved ``session`` section.
+
+    Both producers of the section (the live recorder's snapshot and
+    :func:`collect_session`) carry the timestamps this is derived from, so the
+    field can be recomputed from whichever one supplied them and cannot drift
+    from ``session_meta.session_duration_seconds``.
+
+    Args:
+        session_section (dict[str, Any]): A ``session`` section.
+
+    Returns:
+        float: Minutes elapsed, or ``0.0`` when no window can be established.
+    """
+    duration_s = _measured_duration_seconds(
+        session_section.get("start_ts") or session_section.get("created_at_utc"),
+        session_section.get("ended_at_utc"),
+        session_section.get("stop_reason"),
+    )
+    return round(duration_s / 60.0, 2) if duration_s is not None else 0.0
+
+
 def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> bool:
     """Decide whether the CLOSE-phase stop reason should override the session's.
 
@@ -626,11 +677,19 @@ def collect_session(
     """Collect the session-identification + lifecycle section.
 
     Merges identifiers and timing from ``state`` and ``manifest`` (state
-    taking precedence on overlapping fields), computes ``elapsed_minutes``
-    from the start timestamp, resolves the container image, and stamps
-    ``ended_at_utc`` from the recorded stop timestamp only once a
+    taking precedence on overlapping fields), resolves the container image,
+    and stamps ``ended_at_utc`` from the recorded stop timestamp only once a
     ``stop_reason`` is present. When no image can be detected a warning is
     appended.
+
+    ``elapsed_minutes`` measures the current session leg: it runs from
+    ``state.start_ts``, the same anchor ``--max-hours`` is counted against, to
+    the recorded end (or to now while the run is still going). A resume after
+    a crash or a stop resets ``start_ts``, so the elapsed time stays
+    comparable with ``max_minutes`` instead of counting the dead time before
+    the resume; the manifest's ``created_at_utc`` is reported alongside it and
+    still names the first launch. The manifest is the fallback start only for
+    a session that never recorded one.
 
     Args:
         session_dir (Path): Absolute session root.
@@ -653,25 +712,19 @@ def collect_session(
         # of a finished session keeps reporting the same end. The CLOSE
         # transition and the export clock are only next-best guesses.
         ended_at_utc = iso_z(state.get("stop_ts") or close_ts) or now_iso(timespec="seconds")
-    elapsed_min: float | None = None
-    if start_ts:
-        try:
-            start = datetime.fromisoformat(start_ts.replace("Z", "+00:00"))
-            elapsed_min = (datetime.now(timezone.utc) - start).total_seconds() / 60.0
-        except (ValueError, TypeError):
-            pass
     image = _detect_image_for_session(manifest)
     if image is None:
         warnings.append("image: not configured (set HYPERLOOM_IMAGE env var)")
-    return {
+    section = {
         "session_id": str(state.get("session_id") or manifest.get("session_id") or ""),
         "claw_session_id": manifest.get("claw_session_id") or state.get("claw_session_id"),
         "sandbox_user_id": manifest.get("sandbox_user_id") or state.get("sandbox_user_id"),
         "created_at_utc": manifest.get("created_at_utc") or start_ts,
+        "start_ts": start_ts,
         "ended_at_utc": ended_at_utc,
         "stop_reason": stop_reason,
         "max_minutes": int(state.get("max_minutes") or manifest.get("max_minutes") or 0),
-        "elapsed_minutes": round(elapsed_min, 2) if elapsed_min is not None else 0.0,
+        "elapsed_minutes": 0.0,
         "host": str(manifest.get("host") or ""),
         "image": image,
         "code_revision": str(manifest.get("code_revision") or ""),
@@ -686,6 +739,8 @@ def collect_session(
         # Crash / interruption / resume history.
         "recovery": _collect_recovery(state),
     }
+    section["elapsed_minutes"] = session_elapsed_minutes(section)
+    return section
 
 
 def _session_duration_seconds(
@@ -694,11 +749,10 @@ def _session_duration_seconds(
 ) -> int:
     """How long the session ran, in whole seconds.
 
-    Prefers the start / end timestamps because both producers of the
-    ``session`` section carry a start, then falls back to ``elapsed_minutes``
-    for callers that supply it and no usable timestamps. A session that has
-    stopped without leaving an end timestamp is never measured against the
-    export clock.
+    Measures the same window as ``session.elapsed_minutes`` (see
+    :func:`collect_session`) so the machine field and the human-readable one
+    cannot disagree, then falls back to ``elapsed_minutes`` for callers that
+    supply it and no usable timestamps.
 
     Args:
         session_section (dict[str, Any]): The resolved ``session`` dict.
@@ -707,20 +761,15 @@ def _session_duration_seconds(
     Returns:
         int: The duration, or ``0`` when it cannot be established.
     """
-    start = to_unix(
+    duration_s = _measured_duration_seconds(
         session_section.get("start_ts")
         or session_section.get("created_at_utc")
-        or manifest.get("created_at_utc")
+        or manifest.get("created_at_utc"),
+        session_section.get("ended_at_utc"),
+        session_section.get("stop_reason"),
     )
-    if start is not None:
-        end = to_unix(session_section.get("ended_at_utc"))
-        # Only a session that is still running may be measured up to now:
-        # extrapolating a finished one grows its duration on every re-export,
-        # which reads as a plausible number instead of as missing evidence.
-        if end is None and not _session_has_ended(session_section.get("stop_reason")):
-            end = datetime.now(timezone.utc).timestamp()
-        if end is not None and end > start:
-            return int(round(end - start))
+    if duration_s is not None:
+        return duration_s
     elapsed_min = session_section.get("elapsed_minutes")
     if isinstance(elapsed_min, (int, float)) and elapsed_min > 0:
         return int(round(elapsed_min * 60))

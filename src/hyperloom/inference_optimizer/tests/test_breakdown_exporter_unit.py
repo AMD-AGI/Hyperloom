@@ -501,18 +501,66 @@ def test_a_session_with_nothing_to_measure_reports_zero():
     assert collect_session_meta({}, {}, [])["session_duration_seconds"] == 0
 
 
-def test_a_recorded_session_exports_the_time_it_actually_ran(tmp_path):
-    """End to end over the recorder path: state stop time -> exported duration."""
+def _stopped_session(session_dir: Path, *, ran_for: timedelta):
+    """Write a stopped session's state so the recorder fragment is spooled.
+
+    Args:
+        session_dir (Path): The session directory to write into.
+        ran_for (timedelta): How long before now the session started.
+
+    Returns:
+        SharedState: The saved state.
+    """
     from hyperloom.orchestrator.state.shared_state import SharedState
 
-    state = SharedState.load_or_init(tmp_path)
+    state = SharedState.load_or_init(session_dir)
     state.session_id = "sess-1178"
-    state.start_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="microseconds")
+    state.start_ts = (datetime.now(timezone.utc) - ran_for).isoformat(timespec="microseconds")
     state.set_stop_reason("time_exhausted")
-    state.save(tmp_path)
+    state.save(session_dir)
+    return state
+
+
+def test_a_recorded_session_exports_the_time_it_actually_ran(tmp_path):
+    """End to end over the recorder path: state stop time -> exported duration."""
+    state = _stopped_session(tmp_path, ran_for=timedelta(hours=2))
 
     bd = ex.build(tmp_path)
-    # ``start_ts`` is recorder-only, so the fragment won the merge, not the collector.
     assert bd["session"]["start_ts"] == state.start_ts
     assert bd["session"]["ended_at_utc"] != ""
     assert 7150 <= bd["session_meta"]["session_duration_seconds"] <= 7250
+
+
+def test_the_human_report_reads_the_same_elapsed_time_as_the_machine_field(tmp_path):
+    """``elapsed_minutes`` is the key the rendered report prints; the fragment used to drop it."""
+    _stopped_session(tmp_path, ran_for=timedelta(hours=2))
+
+    bd = ex.build(tmp_path)
+    elapsed_minutes = bd["session"]["elapsed_minutes"]
+    assert elapsed_minutes == pytest.approx(bd["session_meta"]["session_duration_seconds"] / 60.0, abs=0.02)
+    assert 119.0 <= elapsed_minutes <= 121.0
+
+
+def test_the_recorder_path_keeps_the_fields_only_the_collector_can_resolve(tmp_path, monkeypatch):
+    """The image comes from the manifest / environment, which the live state never sees."""
+    monkeypatch.setenv("HYPERLOOM_IMAGE", "registry.example/hyperloom:test")
+    _stopped_session(tmp_path, ran_for=timedelta(minutes=5))
+
+    bd = ex.build(tmp_path)
+    assert bd["session"]["image"] == "registry.example/hyperloom:test"
+    assert bd["session_meta"]["image"] == "registry.example/hyperloom:test"
+    assert bd["session"]["session_dir"] == str(tmp_path.resolve())
+
+
+def test_elapsed_time_is_measured_from_the_resumed_start_not_the_first_launch(tmp_path):
+    """A resume resets ``start_ts``, so elapsed stays comparable with ``max_minutes``."""
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"session_id": "sess-1178", "created_at_utc": "2026-08-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    _stopped_session(tmp_path, ran_for=timedelta(minutes=30))
+
+    bd = ex.build(tmp_path)
+    assert 29.0 <= bd["session"]["elapsed_minutes"] <= 31.0
+    # The first launch is still on record, so the gap before the resume is visible.
+    assert bd["session"]["created_at_utc"] == "2026-08-01T00:00:00+00:00"
