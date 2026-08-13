@@ -41,6 +41,7 @@ from .integrate_patch import (
     _accuracy_delta_pct,
     _git_apply_collect_feedback,
     _git_stash_if_dirty,
+    _restore_stash_logged,
     _with_stash_restore,
     _resolve_framework_root,
 )
@@ -857,6 +858,15 @@ class FrameworkAgentExecutor:
                     "workspace": str(output_root),
                 },
             )
+        except BaseException:
+            # A stop, not a verdict: the dispatcher cancels in-flight actions on
+            # shutdown and on a spent wall-clock budget, and ``CancelledError``
+            # is not an ``Exception``, so the REVERT above never sees it. Undo
+            # the candidate here and let the stop through -- graded as a REVERT
+            # it would read as the patch having failed a bench that never ran.
+            self._revert_patches(framework_root, applied, pre_apply_sha=pre_apply_sha)
+            _restore_stash_logged(framework_root, stash_state, stash_note)
+            raise
 
         # KEEP / REVERT decision.
         base_tput = float(params.get("base_tput") or 0.0)
