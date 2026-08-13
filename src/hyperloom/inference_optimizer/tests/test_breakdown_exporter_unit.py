@@ -564,3 +564,65 @@ def test_elapsed_time_is_measured_from_the_resumed_start_not_the_first_launch(tm
     assert 29.0 <= bd["session"]["elapsed_minutes"] <= 31.0
     # The first launch is still on record, so the gap before the resume is visible.
     assert bd["session"]["created_at_utc"] == "2026-08-01T00:00:00+00:00"
+
+
+def test_a_resumed_session_is_not_reported_as_stopped_by_the_previous_legs_close(tmp_path):
+    """A resume clears the reason in state, but the old CLOSE row stays in ``phase_history``."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    now = datetime.now(timezone.utc)
+    state = SharedState.load_or_init(tmp_path)
+    state.session_id = "sess-1178"
+    state.record_phase_transition(
+        to_phase="CLOSE",
+        reason="time_exhausted",
+        ts=(now - timedelta(days=6)).isoformat(timespec="seconds"),
+    )
+    state.start_ts = (now - timedelta(minutes=30)).isoformat(timespec="microseconds")
+    state.record_phase_transition(to_phase="PRELUDE", reason="resumed", ts=state.start_ts)
+    state.save(tmp_path)
+
+    bd = ex.build(tmp_path)
+    assert bd["session"]["stop_reason"] == ""
+    assert bd["session"]["ended_at_utc"] == ""
+    assert 29.0 <= bd["session"]["elapsed_minutes"] <= 31.0
+
+
+def test_a_close_the_state_file_never_recorded_still_supplies_the_end(tmp_path):
+    """The fallback's own case: the run stopped and only ``phase_history`` knows why."""
+    now = datetime.now(timezone.utc)
+    state = {
+        "session_id": "sess-1178",
+        "start_ts": (now - timedelta(hours=2)).isoformat(),
+        "phase_history": [
+            {
+                "to_phase": "CLOSE",
+                "reason": "target_reached",
+                "ts": (now - timedelta(minutes=5)).isoformat(),
+            }
+        ],
+    }
+
+    section = sessions.collect_session(tmp_path, state, {}, [])
+    assert section["stop_reason"] == "target_reached"
+    assert section["ended_at_utc"] != ""
+    assert 114.0 <= section["elapsed_minutes"] <= 116.0
+
+
+@pytest.mark.parametrize(
+    "start_ts, close_ts",
+    [
+        ("", "2026-08-01T00:00:00+00:00"),
+        ("2026-08-01T00:00:00+00:00", ""),
+        ("2026-08-01T00:00:00+00:00", "not-a-timestamp"),
+    ],
+)
+def test_a_close_stands_when_there_is_nothing_comparable_to_disqualify_it(tmp_path, start_ts, close_ts):
+    """Only two parseable timestamps can place a CLOSE in a previous leg."""
+    state = {
+        "session_id": "sess-1178",
+        "start_ts": start_ts,
+        "phase_history": [{"to_phase": "CLOSE", "reason": "target_reached", "ts": close_ts}],
+    }
+
+    assert sessions.collect_session(tmp_path, state, {}, [])["stop_reason"] == "target_reached"

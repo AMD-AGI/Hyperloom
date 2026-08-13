@@ -496,19 +496,34 @@ def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
     return None
 
 
-def _close_phase_stop_reason(state: dict[str, Any]) -> tuple[str, str]:
-    """Recover terminal reason/time from the CLOSE phase transition (next-best when ``state.stop_reason`` wasn't mirrored).
+def _close_phase_stop_reason(state: dict[str, Any], *, leg_start_ts: str) -> tuple[str, str]:
+    """Recover terminal reason/time from the current leg's CLOSE transition (next-best when ``state.stop_reason`` wasn't mirrored).
+
+    A resume clears ``state.stop_reason`` and ``stop_ts`` but cannot clear the
+    previous leg's CLOSE row, and that row is not evidence about the leg
+    running now: honouring it reports a live session as having stopped, for
+    the reason it stopped last time. Both values are dropped together, because
+    the timestamp is stamped as the session's end even when the reason itself
+    is not adopted.
+
+    A row is only disqualified on comparable evidence. When either timestamp
+    is missing or unparseable the row stands, since the whole point of the
+    fallback is a session whose reason never reached the state file.
 
     Args:
         state (dict[str, Any]): Parsed ``state.json``.
+        leg_start_ts (str): Start of the current leg (``state.start_ts``, the
+            same anchor ``elapsed_minutes`` is measured from); ``""`` when the
+            session recorded none.
 
     Returns:
         tuple[str, str]: ``(reason, ts)`` from the most recent CLOSE
-        transition, or ``("", "")`` when no such transition exists.
+        transition of the current leg, or ``("", "")`` when there is none.
     """
     history = state.get("phase_history") or []
     if not isinstance(history, list):
         return "", ""
+    leg_start = to_unix(leg_start_ts)
     for row in reversed(history):
         if not isinstance(row, dict):
             continue
@@ -516,6 +531,9 @@ def _close_phase_stop_reason(state: dict[str, Any]) -> tuple[str, str]:
             continue
         reason = str(row.get("reason") or row.get("stop_reason") or row.get("exit_reason") or "").strip()
         ts = str(row.get("ts") or row.get("entered_ts") or "").strip()
+        closed_at = to_unix(ts)
+        if leg_start is not None and closed_at is not None and closed_at < leg_start:
+            return "", ""
         return reason, ts
     return "", ""
 
@@ -679,8 +697,10 @@ def collect_session(
     Merges identifiers and timing from ``state`` and ``manifest`` (state
     taking precedence on overlapping fields), resolves the container image,
     and stamps ``ended_at_utc`` from the recorded stop timestamp only once a
-    ``stop_reason`` is present. When no image can be detected a warning is
-    appended.
+    ``stop_reason`` is present -- one the state file carries, or one recovered
+    from a CLOSE transition belonging to the current leg (see
+    :func:`_close_phase_stop_reason`). When no image can be detected a warning
+    is appended.
 
     ``elapsed_minutes`` measures the current session leg: it runs from
     ``state.start_ts``, the same anchor ``--max-hours`` is counted against, to
@@ -703,7 +723,7 @@ def collect_session(
     """
     start_ts = str(state.get("start_ts") or manifest.get("created_at_utc") or "")
     stop_reason = str(state.get("stop_reason") or "").strip()
-    close_stop_reason, close_ts = _close_phase_stop_reason(state)
+    close_stop_reason, close_ts = _close_phase_stop_reason(state, leg_start_ts=start_ts)
     if _should_use_close_stop_reason(stop_reason, close_stop_reason):
         stop_reason = close_stop_reason
     ended_at_utc = ""
