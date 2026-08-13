@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from hyperloom.inference_optimizer.breakdown import exporter as ex
+from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_session_meta
 
 
 # ---- _load_session_json ----
@@ -415,3 +417,34 @@ def test_orchestration_context_is_empty_without_a_census_or_db(tmp_path):
     assert section["compactions_per_tick"] == 0.0
     assert section["context_tokens_at_compaction"] == {}
     assert warnings == []
+
+
+# ---- session_meta duration ----
+
+
+def test_session_duration_is_measured_from_the_session_timestamps():
+    """The live recorder's ``session`` snapshot carries no ``elapsed_minutes``."""
+    meta = collect_session_meta(
+        {"code_revision": "abc1234"},
+        {
+            "start_ts": "2026-08-08T00:37:27+00:00",
+            "ended_at_utc": "2026-08-08T02:55:27+00:00",
+        },
+        [],
+    )
+    assert meta["session_duration_seconds"] == 8280
+
+
+def test_a_running_session_is_measured_up_to_now():
+    started = datetime.now(timezone.utc) - timedelta(minutes=10)
+    meta = collect_session_meta({}, {"start_ts": started.isoformat()}, [])
+    assert 590 <= meta["session_duration_seconds"] <= 620
+
+
+def test_elapsed_minutes_still_answers_when_no_timestamp_does():
+    meta = collect_session_meta({}, {"elapsed_minutes": 12.5}, [])
+    assert meta["session_duration_seconds"] == 750
+
+
+def test_a_session_with_nothing_to_measure_reports_zero():
+    assert collect_session_meta({}, {}, [])["session_duration_seconds"] == 0

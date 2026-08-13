@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_unix
 from hyperloom.common.timeutil import iso_z, now_iso
 
 from ._common import (
@@ -671,6 +672,38 @@ def collect_session(
     }
 
 
+def _session_duration_seconds(
+    session_section: dict[str, Any],
+    manifest: dict[str, Any],
+) -> int:
+    """How long the session ran, in whole seconds.
+
+    Prefers the start / end timestamps because both producers of the
+    ``session`` section carry a start, then falls back to ``elapsed_minutes``
+    for callers that supply it and no usable timestamps.
+
+    Args:
+        session_section (dict[str, Any]): The resolved ``session`` dict.
+        manifest (dict[str, Any]): Parsed ``manifest.json``.
+
+    Returns:
+        int: The duration, or ``0`` when it cannot be established.
+    """
+    start = to_unix(
+        session_section.get("start_ts")
+        or session_section.get("created_at_utc")
+        or manifest.get("created_at_utc")
+    )
+    if start is not None:
+        end = to_unix(session_section.get("ended_at_utc")) or datetime.now(timezone.utc).timestamp()
+        if end > start:
+            return int(round(end - start))
+    elapsed_min = session_section.get("elapsed_minutes")
+    if isinstance(elapsed_min, (int, float)) and elapsed_min > 0:
+        return int(round(elapsed_min * 60))
+    return 0
+
+
 # session_meta enrichment
 def collect_session_meta(
     manifest: dict[str, Any],
@@ -681,6 +714,12 @@ def collect_session_meta(
 
     Emitted straight from the manifest + resolved ``session`` section; the CI
     step only gap-fills fields the sandbox could not know (e.g. ``category``).
+
+    The duration is measured from the session's own timestamps rather than
+    read from a sibling key. Two producers fill the ``session`` section -- the
+    live recorder's snapshot and this module's collector -- and only the
+    collector writes ``elapsed_minutes``, so a run recorded live reported a
+    session that lasted zero seconds.
 
     Args:
         manifest (dict[str, Any]): Parsed ``manifest.json``.
@@ -693,8 +732,7 @@ def collect_session_meta(
     """
     image = session_section.get("image")
     image_str = image if isinstance(image, str) and image.strip() else ""
-    elapsed_min = session_section.get("elapsed_minutes")
-    duration_s = int(round(elapsed_min * 60)) if isinstance(elapsed_min, (int, float)) and elapsed_min > 0 else 0
+    duration_s = _session_duration_seconds(session_section, manifest)
     return {
         "code_revision": str(manifest.get("code_revision") or ""),
         "image": image_str or None,
