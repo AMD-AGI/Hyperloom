@@ -36,6 +36,17 @@ _RETRY_KEY_SUFFIX: str = "retry"
 # Fallback registry poll interval, for a caller with no dispatcher poll set.
 _DEFAULT_TASK_POLL_SEC: float = 10.0
 
+# Floor on how long CLOSE waits for a step it found already running, for a step
+# the catalogue prices at almost nothing or does not carry at all. Long enough
+# that a step which is merely slow to be written is not abandoned one poll in.
+_CLOSE_STEP_WAIT_FLOOR_SEC: float = 60.0
+
+# Ceiling on the same wait. The step is the last thing standing between the run
+# and having nothing to show for itself, so the wait is generous -- but a task
+# wedged forever must not hold the process open, and a report that has taken
+# five times its typical runtime is not about to land.
+_CLOSE_STEP_WAIT_CEILING_SEC: float = 600.0
+
 
 def _task_is_dead(task: Task | None) -> bool:
     """True when ``task`` reached a terminal state without producing its artifact.
@@ -512,6 +523,32 @@ class ClosePhase(PhaseHandler):
             idempotency_key=f"internal-session_breakdown-{reason}",
         )
 
+    def _close_step_wait_sec(self, task: Task) -> float:
+        """How long to wait for a close-step task that is already running.
+
+        The bound is the step's own expected runtime, clamped into
+        ``[_CLOSE_STEP_WAIT_FLOOR_SEC, _CLOSE_STEP_WAIT_CEILING_SEC]``. This is
+        deliberately not the closing reserve: the reserve answers "how much of
+        the session do we hold back for CLOSE", which scales with the session
+        and is a handful of seconds for a short one, while this answers "how
+        long is it reasonable to wait for work that is already under way",
+        which scales with the work. Bounding a two-minute report by a
+        twelve-second reserve is a wait only on paper.
+
+        Args:
+            task: The close-step task found in ``running``.
+
+        Returns:
+            The bound in seconds.
+        """
+        from ..loop.coordinator_helpers import expected_action_cost_minutes
+
+        registry = getattr(self, "action_registry", None)
+        kind = str(getattr(task, "kind", "") or "")
+        meta = registry.get(kind) if registry is not None else None
+        typical_sec = expected_action_cost_minutes(meta) * 60.0
+        return min(_CLOSE_STEP_WAIT_CEILING_SEC, max(_CLOSE_STEP_WAIT_FLOOR_SEC, typical_sec))
+
     async def _await_running_close_task(self, task: Task, *, step: str) -> str:
         """Wait for an already-dispatched close-step task to reach a terminal state.
 
@@ -522,9 +559,13 @@ class ClosePhase(PhaseHandler):
         with it — and the session that ran out of time is the session whose
         report is worth the most.
 
-        The wait is bounded by the closing grace window, which is the budget
-        reserved for exactly this work, so a task that never lands costs CLOSE
-        that window and no more.
+        How long to wait is a question about the work, not about the budget:
+        the closing reserve says how much of the session to hold back for
+        CLOSE, which for a short session is a few seconds — less than any
+        report takes to write, so bounding the wait by it is the same as not
+        waiting. :func:`_close_step_wait_sec` bounds it by what the step's own
+        action typically takes instead, so a task that never lands costs CLOSE
+        that bound and no more.
 
         Args:
             task: The close-step task found in ``running``.
@@ -534,7 +575,7 @@ class ClosePhase(PhaseHandler):
             The state the task ended in, or ``running`` when the bound elapsed
             first — which the caller records the same way it records a failure.
         """
-        bound_sec = self.shared_state.closing_reserve_sec()
+        bound_sec = self._close_step_wait_sec(task)
         poll_sec = float(getattr(self, "_dispatcher_poll_sec", _DEFAULT_TASK_POLL_SEC))
         deadline = time.monotonic() + bound_sec
         log.info(
