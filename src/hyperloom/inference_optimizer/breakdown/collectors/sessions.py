@@ -726,14 +726,14 @@ def collect_session(
     :func:`_close_phase_stop_reason`). When no image can be detected a warning
     is appended.
 
-    ``elapsed_minutes`` measures the current session leg: it runs from
-    ``state.start_ts``, the same anchor ``--max-hours`` is counted against, to
-    the recorded end (or to now while the run is still going). A resume after
-    a crash or a stop resets ``start_ts``, so the elapsed time stays
-    comparable with ``max_minutes`` instead of counting the dead time before
-    the resume; the manifest's ``created_at_utc`` is reported alongside it and
-    still names the first launch. The manifest is the fallback start only for
-    a session that never recorded one.
+    ``elapsed_minutes`` runs from ``state.start_ts``, the same anchor
+    ``--max-hours`` is counted against, to the recorded end (or to now while
+    the run is still going), so the two stay comparable. A resume re-anchors
+    ``start_ts`` only when the previous leg crashed or stopped for a recorded
+    reason; after a clean stop it keeps the original start, and the elapsed
+    time then spans the gap between the legs -- as the budget does. The
+    manifest's ``created_at_utc`` names the first launch either way, and is
+    the fallback start only for a session that never recorded one.
 
     Args:
         session_dir (Path): Absolute session root.

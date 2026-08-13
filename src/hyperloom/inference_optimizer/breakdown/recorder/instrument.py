@@ -868,10 +868,12 @@ def _snapshot_session(rec, st: Any) -> None:
 
     A session that has stopped carries ``ended_at_utc``, taken from the state's
     own stop timestamp: without it the exporter has no end to measure against
-    and reports the run as still going. ``start_ts`` is the start of the
-    current leg -- a resume resets it -- and is what the exported elapsed time
-    is measured from; the manifest-derived fields the live state cannot know
-    (image, host, pid) are filled in by the collector at export.
+    and reports the run as still going. ``start_ts`` is what the exported
+    elapsed time is measured from; a resume re-anchors it on the new leg only
+    when the previous one crashed or stopped for a recorded reason, so after a
+    clean stop it still names the original start. The manifest-derived fields
+    the live state cannot know (image, host, pid) are filled in by the
+    collector at export.
 
     Args:
         rec: the recorder used to write the singleton.

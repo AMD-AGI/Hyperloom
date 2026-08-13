@@ -85,17 +85,21 @@ class SessionMeta(TypedDict, total=False):
         sandbox_user_id (str | None): Sandbox user identifier, if any.
         created_at_utc (str): ISO UTC timestamp when the session was first
             created; unchanged by a resume.
-        start_ts (str): ISO UTC timestamp the current session leg started
-            from, reset when a crashed or stopped session is resumed. This is
-            the anchor the wall-clock budget is counted against.
+        start_ts (str): ISO UTC timestamp the wall-clock budget is counted
+            from. A resume re-anchors it on the new leg only when the previous
+            one crashed or stopped for a recorded reason; after a clean stop it
+            stays at the original start, because ``--max-hours`` keeps counting
+            from there.
         ended_at_utc (str): ISO UTC timestamp when the session ended.
         stop_reason (str): Why the run stopped (``target_reached`` /
             ``time_exhausted`` / ``global_converged`` / ``max_ticks`` /
             ``baseline_failed`` / ...).
         max_minutes (int): Configured time budget in minutes.
-        elapsed_minutes (float): Wall-clock minutes the current leg ran
-            (``start_ts`` to the end, or to now while still running), so it
-            stays comparable with ``max_minutes`` across a resume.
+        elapsed_minutes (float): Wall-clock minutes from ``start_ts`` to the
+            end, or to now while still running, so it stays comparable with
+            ``max_minutes``. When a resume kept ``start_ts`` this spans the
+            gap between the legs as well, which is the span the budget is
+            charged for too.
         host (str): Hostname the session executed on.
         code_revision (str): Source revision of the optimizer.
         pid (int): Process id of the optimizer.
@@ -113,7 +117,7 @@ class SessionMeta(TypedDict, total=False):
     claw_session_id: str | None  # SaFE / Claw session id (env CLAW_SESSION_ID)
     sandbox_user_id: str | None
     created_at_utc: str
-    start_ts: str  # start of the current leg (reset on resume); anchors elapsed_minutes
+    start_ts: str  # budget anchor; re-anchored only by a resume after a crash or a recorded stop
     ended_at_utc: str
     stop_reason: str  # target_reached / time_exhausted / global_converged / max_ticks / baseline_failed / ...
     max_minutes: int
