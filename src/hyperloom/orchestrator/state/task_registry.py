@@ -46,6 +46,19 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
 
 TERMINAL_STATES = frozenset({"succeeded", "cancelled"})
 
+# Progress notes a task's ``history`` retains, oldest dropped first.
+# ``record_progress`` re-reads and rewrites the whole blob inside a
+# ``BEGIN IMMEDIATE`` on the one connection every other writer serialises
+# behind, and the robustness probe re-parses it for every running task on every
+# tick, so an uncapped trail makes both costs grow with the session: 12 hours at
+# the 60s heartbeat is 720 notes, a blob measured between 100 and 160 KB
+# depending on the note, and tens of MB of cumulative row rewrites. 120 notes
+# hold two hours of trail — longer than the longest measured single work unit, a
+# 3941s warmup — for a blob under 20 KB, which turns the growth from quadratic
+# in the session's length into linear at a bounded rate. The only consumer that
+# reads the notes wants the newest one.
+_MAX_PROGRESS_NOTES = 120
+
 
 # microseconds + ``+00:00`` (canonical helper; kept importable for callers).
 _now_iso = now_iso
@@ -65,7 +78,9 @@ class Task:
         allowed_tools (list[str]): Tool whitelist for the task.
         side_effects (list[str]): Declared side effects.
         lease_ttl_sec (int): Lease TTL in seconds.
-        history (list[dict]): Recorded state-transition history.
+        history (list[dict]): Recorded state transitions, plus the newest
+            progress notes a running task reported (bounded by
+            :data:`_MAX_PROGRESS_NOTES`).
         created_at (str): ISO creation timestamp.
         updated_at (str): ISO last-update timestamp.
     """
@@ -120,6 +135,49 @@ class TaskNotFound(RuntimeError):
     """Raised when a task lookup by ``task_id`` finds no row."""
 
     pass
+
+
+def _is_progress_note(entry: Any) -> bool:
+    """Report whether a ``history`` entry is a progress note.
+
+    A note carries a ``progress`` payload where a transition carries
+    ``from``/``to``; the robustness probe keys on the same field.
+
+    Args:
+        entry (Any): One decoded ``history`` entry.
+
+    Returns:
+        bool: ``True`` for a progress note.
+    """
+    return isinstance(entry, dict) and "progress" in entry
+
+
+def _drop_oldest_progress_notes(history: list[Any], keep: int) -> list[Any]:
+    """Retain the newest ``keep`` progress notes and every other entry.
+
+    Transitions are never dropped: consumers read them positionally — the last
+    entry for a failure class, the newest ``queued -> cancelled`` for a policy
+    denial — and losing one would make a task's state history lie. Notes are
+    only ever read newest-first, so the oldest are the ones that can go.
+
+    Args:
+        history (list[Any]): The task's decoded ``history``.
+        keep (int): Progress notes to retain.
+
+    Returns:
+        list[Any]: ``history`` itself when it is already within the bound,
+        otherwise a copy with the oldest surplus notes removed.
+    """
+    surplus = sum(1 for entry in history if _is_progress_note(entry)) - keep
+    if surplus <= 0:
+        return history
+    kept: list[Any] = []
+    for entry in history:
+        if surplus > 0 and _is_progress_note(entry):
+            surplus -= 1
+            continue
+        kept.append(entry)
+    return kept
 
 
 class TaskRegistry:
@@ -339,6 +397,12 @@ class TaskRegistry:
         elapsed runtime from it; moving it would turn a cumulative budget into
         an inactivity timeout and make an 80-minute task render as seconds old.
 
+        Only the newest :data:`_MAX_PROGRESS_NOTES` notes are retained. Each
+        note costs a rewrite of the whole ``history`` blob, so an unbounded
+        trail charges a session for its own length in exactly the runs this
+        feature exists for; the notes are read newest-first, and transitions are
+        kept whatever the bound.
+
         Best-effort: a task that vanished under a reaper must not take its
         executor down over a progress note.
 
@@ -354,6 +418,7 @@ class TaskRegistry:
                 return
             history = json.loads(row["history"])
             history.append({"progress": note or {}, "ts": _now_iso()})
+            history = _drop_oldest_progress_notes(history, _MAX_PROGRESS_NOTES)
             cur.execute(
                 "UPDATE tasks SET history=? WHERE task_id=?",
                 (json.dumps(history), task_id),
