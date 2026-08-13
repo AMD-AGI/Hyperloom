@@ -165,6 +165,7 @@ def build_review_verdict_intent(
     alternative_action: str | None = None,
     advice_text: str = "",
     notes: Iterable[str] | None = None,
+    failure_reason_code: str = "",
 ) -> Intent:
     """Build a validated ``review_verdict`` intent.
 
@@ -183,6 +184,9 @@ def build_review_verdict_intent(
         alternative_action (str | None): Suggested alternative action.
         advice_text (str): Devil's-advocate advice text.
         notes (Iterable[str] | None): Additional free-text notes.
+        failure_reason_code (str): The ``failure_reason_code`` of the review
+            rule this verdict rests on, as declared in the judge bundle's
+            ``review_constraints``. Empty when the verdict cites no rule.
 
     Returns:
         Intent: The constructed ``review_verdict`` intent.
@@ -210,6 +214,7 @@ def build_review_verdict_intent(
         "alternative_action": alternative_action,
         "advice_text": advice_text,
         "notes": list(notes or []),
+        "failure_reason_code": failure_reason_code,
     }
     if confidence is not None:
         payload["confidence"] = confidence
