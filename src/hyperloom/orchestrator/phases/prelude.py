@@ -160,6 +160,9 @@ class PreludePhase(PhaseHandler):
             return []
         recipe = warm.get("recipe") or {}
         recipe_attrs = (recipe.get("attrs") or recipe) if isinstance(recipe, dict) else {}
+        exact_history = recipe_attrs.get("exact_history")
+        if isinstance(exact_history, dict):
+            recipe_attrs = exact_history
         what_worked = recipe_attrs.get("what_worked") or []
         if not isinstance(what_worked, list):
             return []
@@ -189,6 +192,9 @@ class PreludePhase(PhaseHandler):
         recipe = warm.get("recipe") or {}
         # what_failed may be top-level or nested under attrs; fall back to the recipe.
         recipe_attrs = (recipe.get("attrs") or recipe) if isinstance(recipe, dict) else {}
+        exact_history = recipe_attrs.get("exact_history")
+        if isinstance(exact_history, dict):
+            recipe_attrs = exact_history
         what_failed = recipe_attrs.get("what_failed") or []
         if not isinstance(what_failed, list) or not what_failed:
             state.warm_history_injected = True
@@ -1070,6 +1076,24 @@ class PreludePhase(PhaseHandler):
         current_remote = self._is_current_remote_recipe(warm)
         sdk_replay: dict[str, Any] = {}
         if current_remote:
+            recipe_metadata = warm.get("recipe") or {}
+            if (
+                isinstance(recipe_metadata, Mapping)
+                and recipe_metadata.get("replayable") is False
+            ):
+                state.warm_replay_attempted = True
+                state.warm_replay_outcome = {
+                    "status": "skipped",
+                    "reason": str(
+                        recipe_metadata.get("replay_disabled_reason")
+                        or "remote_recipe_view_not_replayable"
+                    ),
+                    "view_source": str(
+                        recipe_metadata.get("view_source") or ""
+                    ),
+                }
+                state.save(self.session_dir)
+                return None
             try:
                 sdk_replay = self._read_current_recipe_replay()
             except Exception as exc:  # noqa: BLE001 — current replay fails closed

@@ -21,6 +21,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe import (
     CURRENT_KNOWLEDGE_SCHEMA_VERSION,
     RECORD_KIND_HYPERLOOM_RECIPE,
     HyperloomRemoteKB,
+    KBStoreClient,
     KBStoreError,
     KnowledgeSections,
     RemoteRecipeClient,
@@ -498,11 +499,19 @@ def test_remote_client_internal_validation_error_paths(tmp_path: Path) -> None:
         def __init__(self, envelope=None) -> None:
             self.envelope = envelope
 
-        def get_best_record(self, _canonical_id):
+        def get_hyperloom_recipe_view(self, _canonical_id):
             return self.envelope
 
     identity = "inference:m:h:f:mt:a:v:p"
-    assert RemoteRecipeClient(_ReadStore()).read(identity, tmp_path / "miss") is None  # type: ignore[arg-type]
+    miss = tmp_path / "miss"
+    miss.mkdir()
+    (miss / "stale").write_text("old", encoding="utf-8")
+    stale_generation = tmp_path / ".miss.generation-abandoned"
+    stale_generation.mkdir()
+    (stale_generation / "partial").write_text("old", encoding="utf-8")
+    assert RemoteRecipeClient(_ReadStore()).read(identity, miss) is None  # type: ignore[arg-type]
+    assert not miss.exists()
+    assert not stale_generation.exists()
 
 
 def test_artifact_rejects_symlink_and_oversized_file(tmp_path: Path) -> None:
@@ -881,6 +890,21 @@ class _FakeStore:
             "revision": 7,
             "canonical_id": "inference:m:h:f:mt:a:v:p",
             "session_id": "champion-session",
+            "view": {
+                "source": "current",
+                "replayable": True,
+                "replay_disabled_reason": None,
+            },
+            "artifacts": {
+                "file_count": 1,
+                "files": [
+                    {
+                        "path": "kernel/rewrite/verified.bin",
+                        "size": len(_DOWNLOAD_BYTES),
+                        "sha256": _DOWNLOAD_SHA256,
+                    }
+                ],
+            },
             "knowledge": {
                 "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
                 "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
@@ -910,9 +934,12 @@ class _FakeStore:
             champion["metric"] = self.metric
         return {"champion": champion}
 
-    def get_best_record(self, canonical_id):
-        self.calls.append(("get_best_record", canonical_id))
+    def get_hyperloom_recipe_view(self, canonical_id):
+        self.calls.append(("get_hyperloom_recipe_view", canonical_id))
         return self.envelope
+
+    def get_best_record(self, canonical_id):
+        raise AssertionError(f"raw endpoint used for {canonical_id}")
 
     def put_dir(self, canonical_id, session_id, files_dir):
         self.calls.append(("put_dir", canonical_id, session_id, Path(files_dir)))
@@ -1254,7 +1281,7 @@ def test_read_sequence_writes_flat_recipe_and_files_only(tmp_path: Path) -> None
         client=RemoteRecipeClient(store),  # type: ignore[arg-type]
     )
     assert [call[0] for call in store.calls] == [
-        "get_best_record",
+        "get_hyperloom_recipe_view",
         "list_session_files",
         "download_session",
     ]
@@ -1268,6 +1295,11 @@ def test_read_sequence_writes_flat_recipe_and_files_only(tmp_path: Path) -> None
     assert saved["version"] == 7
     assert saved["session_id"] == "champion-session"
     assert saved["optimized_throughput"] == 125.0
+    assert saved["view"] == {
+        "source": "current",
+        "replayable": True,
+        "replay_disabled_reason": None,
+    }
     assert not (tmp_path / "bundle" / "values.json").exists()
     assert not (tmp_path / "bundle" / "manifest.json").exists()
     assert (tmp_path / "bundle" / "files").is_dir()
@@ -1276,6 +1308,37 @@ def test_read_sequence_writes_flat_recipe_and_files_only(tmp_path: Path) -> None
         tmp_path / "bundle" / "files" / "kernel" / "rewrite" / "verified.bin"
     ).read_bytes() == _DOWNLOAD_BYTES
     assert {path.name for path in destination.iterdir()} == {"recipe.json", "files"}
+
+
+def test_history_only_view_verifies_empty_listing_without_download(
+    tmp_path: Path,
+) -> None:
+    store = _FakeStore()
+    store.envelope["view"] = {
+        "source": "legacy_gbrain",
+        "replayable": False,
+        "replay_disabled_reason": "legacy_history_only",
+    }
+    store.envelope["artifacts"] = {
+        "file_count": 0,
+        "files": [],
+    }
+    store.files_listing = {"files": []}
+    store.envelope["knowledge"]["what_worked"] = [{"description": "old win"}]
+
+    row = read_remote_recipe(
+        "inference:m:h:f:mt:a:v:p",
+        tmp_path / "history-only",
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+
+    assert row["view"]["replayable"] is False
+    assert row["what_worked"] == [{"description": "old win"}]
+    assert [call[0] for call in store.calls] == [
+        "get_hyperloom_recipe_view",
+        "list_session_files",
+    ]
+    assert (tmp_path / "history-only" / "files").is_dir()
 
 
 def test_kernel_reads_same_downloaded_inference_recipe_without_second_get(
@@ -1307,7 +1370,9 @@ def test_kernel_reads_same_downloaded_inference_recipe_without_second_get(
 
     assert kernel.read_rewrite()["items"][0]["kernel_name"] == "verified"
     assert kernel.prior_file("kernel/rewrite/verified.bin") is not None
-    assert [call[0] for call in store.calls].count("get_best_record") == 1
+    assert [call[0] for call in store.calls].count(
+        "get_hyperloom_recipe_view"
+    ) == 1
     assert not (tmp_path / "runtime" / "kernel_agent_kb").exists()
 
 
@@ -1341,7 +1406,32 @@ def test_read_pins_manifest_against_download_relisting(tmp_path: Path) -> None:
     assert ("list_session_files", "other:identity", "champion-session", "patch") in store.calls
 
 
-def test_read_rejects_non_json_knowledge_before_destination_cleanup(
+def test_view_manifest_mismatch_deactivates_without_download(
+    tmp_path: Path,
+) -> None:
+    store = _FakeStore()
+    store.files_listing["files"][0]["sha256"] = "0" * 64
+    destination = tmp_path / "concurrent-mismatch"
+    destination.mkdir()
+    (destination / "recipe.json").write_text("stale", encoding="utf-8")
+
+    with pytest.raises(
+        RemoteRecipeValidationError,
+        match="does not match the selected",
+    ):
+        read_remote_recipe(
+            "inference:m:h:f:mt:a:v:p",
+            destination,
+            client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+        )
+
+    assert not destination.exists()
+    assert not any(
+        call[0] == "download_session" for call in store.calls
+    )
+
+
+def test_read_rejects_non_json_knowledge_and_deactivates_destination(
     tmp_path: Path,
 ) -> None:
     store = _FakeStore()
@@ -1358,39 +1448,43 @@ def test_read_rejects_non_json_knowledge_before_destination_cleanup(
             client=RemoteRecipeClient(store),  # type: ignore[arg-type]
         )
 
-    assert sentinel.read_text(encoding="utf-8") == "unchanged"
-    assert [call[0] for call in store.calls] == ["get_best_record"]
+    assert not destination.exists()
+    assert [call[0] for call in store.calls] == [
+        "get_hyperloom_recipe_view"
+    ]
 
 
-def test_read_rejects_existing_files_symlink(tmp_path: Path) -> None:
+def test_read_replaces_existing_files_symlink_without_following(tmp_path: Path) -> None:
     store = _FakeStore(champion=125.0)
     destination = tmp_path / "bundle-link"
     target = tmp_path / "outside"
     target.mkdir()
     destination.mkdir()
     (destination / "files").symlink_to(target, target_is_directory=True)
-    with pytest.raises(RemoteRecipeValidationError, match="symlink"):
-        read_remote_recipe(
-            "inference:m:h:f:mt:a:v:p",
-            destination,
-            client=RemoteRecipeClient(store),  # type: ignore[arg-type]
-        )
-    assert (destination / "files").is_symlink()
+    read_remote_recipe(
+        "inference:m:h:f:mt:a:v:p",
+        destination,
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+    assert (destination / "files").is_dir()
+    assert not (destination / "files").is_symlink()
+    assert list(target.iterdir()) == []
 
 
-def test_read_rejects_destination_symlink(tmp_path: Path) -> None:
+def test_read_replaces_destination_symlink_without_following(tmp_path: Path) -> None:
     store = _FakeStore(champion=125.0)
     target = tmp_path / "destination-target"
     target.mkdir()
     destination = tmp_path / "destination-link"
     destination.symlink_to(target, target_is_directory=True)
-    with pytest.raises(RemoteRecipeValidationError, match="symlink destination"):
-        read_remote_recipe(
-            "inference:m:h:f:mt:a:v:p",
-            destination,
-            client=RemoteRecipeClient(store),  # type: ignore[arg-type]
-        )
-    assert destination.is_symlink()
+    read_remote_recipe(
+        "inference:m:h:f:mt:a:v:p",
+        destination,
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+    assert destination.is_dir()
+    assert not destination.is_symlink()
+    assert list(target.iterdir()) == []
 
 
 def test_shared_store_reuses_one_rlock() -> None:
@@ -1410,7 +1504,7 @@ def test_read_does_not_consult_rollup_champion_metric(tmp_path: Path) -> None:
     )
     assert row is not None
     assert [call[0] for call in store.calls] == [
-        "get_best_record",
+        "get_hyperloom_recipe_view",
         "list_session_files",
         "download_session",
     ]
@@ -1621,8 +1715,8 @@ def test_a_record_without_a_selection_reason_still_reads(tmp_path: Path) -> None
 @pytest.mark.parametrize(
     "mode,match",
     [
-        ("sha", "sha256 mismatch"),
-        ("size", "size mismatch"),
+        ("sha", "does not match the selected"),
+        ("size", "does not match the selected"),
         ("missing", "artifact set mismatch"),
         ("extra", "artifact set mismatch"),
         ("symlink", "symlink"),
@@ -1646,13 +1740,15 @@ def test_read_verifies_downloaded_manifest_before_recipe(
     elif mode == "symlink":
         store.symlink_download_file = True
     destination = tmp_path / f"verify-{mode}"
+    destination.mkdir()
+    (destination / "recipe.json").write_text("stale", encoding="utf-8")
     with pytest.raises(RemoteRecipeValidationError, match=match):
         read_remote_recipe(
             "inference:m:h:f:mt:a:v:p",
             destination,
             client=RemoteRecipeClient(store),  # type: ignore[arg-type]
         )
-    assert not (destination / "recipe.json").exists()
+    assert not destination.exists()
 
 
 def test_read_rejects_listing_without_required_size(tmp_path: Path) -> None:
@@ -1739,7 +1835,7 @@ def test_read_validates_listing_before_cleanup(
             destination,
             client=RemoteRecipeClient(store),  # type: ignore[arg-type]
         )
-    assert stale.read_text(encoding="utf-8") == "preserve-on-validation-failure"
+    assert not destination.exists()
     assert not any(call[0] == "download_session" for call in store.calls)
 
 
@@ -1755,7 +1851,7 @@ def test_read_validates_listing_before_cleanup(
         ("knowledge", "knowledge"),
     ],
 )
-def test_bad_envelope_does_not_clean_destination(
+def test_bad_envelope_deactivates_destination(
     tmp_path: Path,
     mode: str,
     match: str,
@@ -1785,7 +1881,7 @@ def test_bad_envelope_does_not_clean_destination(
             destination,
             client=RemoteRecipeClient(store),  # type: ignore[arg-type]
         )
-    assert sentinel.read_text(encoding="utf-8") == "unchanged"
+    assert not destination.exists()
     assert not any(call[0] == "list_session_files" for call in store.calls)
 
 
@@ -1908,12 +2004,22 @@ def test_current_warm_adapter_keeps_replay_payload_out_of_t0(tmp_path: Path) -> 
                 patch = destination / "files" / item
                 patch.parent.mkdir(parents=True, exist_ok=True)
                 patch.write_text(content, encoding="utf-8")
-            return {
+            document = {
                 "schema_version": 2,
                 "canonical_id": identity,
                 "session_id": "champion",
                 **_current_knowledge(timeline=[ref, second_ref]),
+                "view": {
+                    "source": "current",
+                    "replayable": True,
+                    "replay_disabled_reason": None,
+                },
             }
+            (destination / "recipe.json").write_text(
+                json.dumps(document),
+                encoding="utf-8",
+            )
+            return document
 
     adapter = RemoteWarmRecipeAdapter(  # type: ignore[arg-type]
         _Remote(),
@@ -1927,6 +2033,284 @@ def test_current_warm_adapter_keeps_replay_payload_out_of_t0(tmp_path: Path) -> 
     assert "best_config" not in row
     assert "prs_tested" not in row
     assert "required_patch_timeline" not in row
+    assert row["replayable"] is True
+    assert row["view_source"] == "current"
+
+
+def test_remote_adapter_pages_history_then_materializes_l2_donor(
+    tmp_path: Path,
+) -> None:
+    from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
+        _cascade_warm_start_search,
+    )
+
+    exact = "inference:target:mi300x:sglang:qwen:qwenarch:1.0:fp8"
+    unproven = "inference:unproven:mi300x:sglang:qwen:qwenarch:1.0:fp8"
+    donor = "inference:donor:mi300x:sglang:qwen:qwenarch:1.0:fp8"
+    patch_ref = "framework/overlays/000001/00-donor.patch"
+
+    class _Remote:
+        def __init__(self):
+            self.search_calls = []
+            self.view_calls = []
+            self.materialized = []
+
+        def search_identities(self, **kwargs):
+            self.search_calls.append(dict(kwargs))
+            if kwargs["offset"] == 0:
+                return {
+                    "items": [
+                        {
+                            "canonical_id": unproven,
+                            "dimensions": {
+                                "architectures": "qwenarch",
+                                "model_type": "qwen",
+                            },
+                        }
+                    ],
+                    "total": 2,
+                    "next_offset": 1,
+                }
+            return {
+                "items": [
+                    {
+                        "canonical_id": donor,
+                        "dimensions": {
+                            "architectures": "qwenarch",
+                            "model_type": "qwen",
+                        },
+                    }
+                ],
+                "total": 2,
+                "next_offset": None,
+            }
+
+        def _document(self, identity: str):
+            replayable = identity in {unproven, donor}
+            source = "current" if replayable else "legacy_gbrain"
+            timeline = [patch_ref] if identity == donor else []
+            knowledge = _current_knowledge(timeline=timeline)
+            knowledge["validated_e2e_gain"] = (
+                7.0 if identity == donor else 0.0 if replayable else 41.0
+            )
+            knowledge["what_worked"] = [
+                {"description": f"history:{identity}"}
+            ]
+            knowledge["value"]["explore"] = {
+                "extra_server_args": "",
+                "extra_envs": {},
+                "patches": [],
+            }
+            knowledge["value"]["framework"] = {
+                "extra_server_args": "--donor" if replayable else "",
+                "extra_envs": {},
+                "patches": timeline,
+            }
+            return {
+                "schema_version": 2,
+                "canonical_id": identity,
+                "session_id": f"session-{identity.split(':')[1]}",
+                **knowledge,
+                "view": {
+                    "source": source,
+                    "replayable": replayable,
+                    "replay_disabled_reason": (
+                        None if replayable else "legacy_history_only"
+                    ),
+                },
+            }
+
+        def get_view(self, identity: str):
+            self.view_calls.append(identity)
+            return self._document(identity)
+
+        def _write(self, identity: str, destination: Path, document: dict):
+            destination.mkdir(parents=True, exist_ok=True)
+            files = destination / "files"
+            files.mkdir(parents=True, exist_ok=True)
+            if identity == donor:
+                patch = files / patch_ref
+                patch.parent.mkdir(parents=True, exist_ok=True)
+                patch.write_text("donor patch", encoding="utf-8")
+            (destination / "recipe.json").write_text(
+                json.dumps(document),
+                encoding="utf-8",
+            )
+            return document
+
+        def read(self, identity: str, destination: Path):
+            return self._write(
+                identity,
+                destination,
+                self._document(identity),
+            )
+
+        def materialize_view(
+            self,
+            identity: str,
+            destination: Path,
+            envelope: dict,
+        ):
+            self.materialized.append(identity)
+            return self._write(identity, destination, envelope)
+
+    remote = _Remote()
+    main = tmp_path / "remote-recipe"
+    adapter = RemoteWarmRecipeAdapter(remote, main)  # type: ignore[arg-type]
+
+    row, tier, confidence = _cascade_warm_start_search(
+        adapter,  # type: ignore[arg-type]
+        cid=exact,
+        hw="mi300x",
+        framework="sglang",
+        model_type_val="qwen",
+        architectures_val=["QwenArch"],
+        arch_slug="qwenarch",
+        fw_version="1.0",
+        precision="fp8",
+        warm_prefer=None,
+    )
+
+    assert row["canonical_id"] == donor
+    assert row["replayable"] is True
+    assert row["what_worked"][0] == {
+        "description": f"history:{donor}"
+    }
+    assert row["validated_gain_pct"] == 7.0
+    assert row["sessions"][0]["gain_pct"] == 7.0
+    assert row["exact_history"]["what_worked"][0] == {
+        "description": f"history:{exact}"
+    }
+    assert row["exact_history"]["sessions"][0]["gain_pct"] == 41.0
+    assert row["exact_history"]["validated_gain_pct"] == 41.0
+    assert tier == "same_arch_class"
+    assert confidence == 0.95
+    assert [call["offset"] for call in remote.search_calls] == [0, 1]
+    assert remote.view_calls == [unproven, donor]
+    assert remote.materialized == [donor]
+    assert remote.search_calls[0]["match"] == {
+        "hardware": "mi300x",
+        "framework_name": "sglang",
+        "model_type": "qwen",
+        "architectures": "qwenarch",
+        "framework_version": "1.0",
+        "precision": "fp8",
+    }
+    selected = json.loads((main / "recipe.json").read_text(encoding="utf-8"))
+    assert selected["canonical_id"] == donor
+    assert (main / "files" / patch_ref).read_text(encoding="utf-8") == "donor patch"
+    replay_kb = RecipeReplayKB(
+        KnowledgeSections(tmp_path / "draft", warm_start_dir=main)
+    )
+    assert replay_kb.read_patch_timeline() == [patch_ref]
+    candidates = main.parent / f".{main.name}-candidates"
+    assert not candidates.exists()
+
+
+def test_remote_adapter_forwards_hardware_in(tmp_path: Path) -> None:
+    class _Remote:
+        def __init__(self) -> None:
+            self.kwargs = {}
+
+        def search_identities(self, **kwargs):
+            self.kwargs = dict(kwargs)
+            return {"items": [], "total": 0, "next_offset": None}
+
+    remote = _Remote()
+    adapter = RemoteWarmRecipeAdapter(  # type: ignore[arg-type]
+        remote,
+        tmp_path / "unused",
+    )
+
+    assert adapter.search(
+        label_match={"framework": "sglang"},
+        hardware_in=["mi300x", "mi325x"],
+    ) == []
+    assert remote.kwargs["hardware_in"] == ["mi300x", "mi325x"]
+    assert remote.kwargs["match"] == {"framework_name": "sglang"}
+
+
+def test_remote_adapter_caps_metadata_scan_without_downloading(
+    tmp_path: Path,
+) -> None:
+    identities = [
+        f"inference:model-{index}:mi300x:sglang:qwen:qwenarch:1.0:bf16"
+        for index in range(6)
+    ]
+
+    class _Remote:
+        def __init__(self) -> None:
+            self.view_calls: list[str] = []
+
+        def search_identities(self, **_kwargs):
+            return {
+                "items": [
+                    {"canonical_id": identity, "dimensions": {}}
+                    for identity in identities
+                ],
+                "total": len(identities),
+                "next_offset": None,
+            }
+
+        def get_view(self, identity: str):
+            self.view_calls.append(identity)
+            return {
+                "schema_version": 2,
+                "canonical_id": identity,
+                "session_id": f"session-{identity}",
+                **_current_knowledge(),
+                "view": {
+                    "source": "current",
+                    "replayable": True,
+                    "replay_disabled_reason": None,
+                },
+            }
+
+        def read(self, *_args, **_kwargs):
+            raise AssertionError("candidate metadata scan downloaded a bundle")
+
+    remote = _Remote()
+    destination = tmp_path / "warm"
+    stale_candidates = tmp_path / ".warm-candidates"
+    stale_candidates.mkdir()
+    (stale_candidates / "stale").write_text("old", encoding="utf-8")
+    adapter = RemoteWarmRecipeAdapter(remote, destination)  # type: ignore[arg-type]
+    adapter.search_candidate_cap = 3
+
+    rows = adapter.search(label_match={"framework": "sglang"}, limit=100)
+
+    assert len(rows) == 3
+    assert remote.view_calls == identities[:3]
+    assert not stale_candidates.exists()
+    assert not destination.exists()
+
+
+def test_remote_adapter_detects_kernel_only_replay_material(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    knowledge = _current_knowledge()
+    knowledge["value"]["explore"] = {}
+    knowledge["value"]["framework"] = {}
+    knowledge["value"]["kernel"]["rewrite"] = {
+        "items": [{"kernel_name": "fused"}]
+    }
+    (candidate / "recipe.json").write_text(
+        json.dumps(knowledge),
+        encoding="utf-8",
+    )
+
+    assert RemoteWarmRecipeAdapter._candidate_has_replay_material(candidate)
+
+    knowledge["value"]["kernel"]["rewrite"] = {}
+    (candidate / "recipe.json").write_text(
+        json.dumps(knowledge),
+        encoding="utf-8",
+    )
+    assert not RemoteWarmRecipeAdapter._candidate_has_replay_material(
+        candidate
+    )
 
 
 def test_recipe_replay_sdk_returns_exact_global_timeline(tmp_path: Path) -> None:
@@ -2012,8 +2396,51 @@ def test_obsolete_remote_contract_exports_are_removed() -> None:
     assert not hasattr(ExploreAgentKB, "write_snapshot")
 
 
-def test_vendored_sdk_matches_upstream_git_blob() -> None:
-    path = Path(kb_store_client.__file__)
-    content = path.read_bytes()
-    digest = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
-    assert digest == "22d08109fe680cd15c4053ba0ccc5891222eb6cf"
+def test_vendored_sdk_exposes_view_and_identity_search() -> None:
+    assert callable(KBStoreClient.get_hyperloom_recipe_view)
+    assert callable(KBStoreClient.search_identities)
+    view_source = inspect.getsource(RemoteRecipeClient.get_view)
+    assert "get_hyperloom_recipe_view" in view_source
+    assert "get_best_record" not in view_source
+
+
+def test_vendored_sdk_uses_new_view_and_search_routes() -> None:
+    client = KBStoreClient.__new__(KBStoreClient)
+    calls = []
+
+    def _request(method, path, payload=None):
+        calls.append((method, path, payload))
+        return {"items": [], "total": 0, "next_offset": None}
+
+    client._request = _request  # type: ignore[method-assign]
+    assert client.get_hyperloom_recipe_view("inference:m:h") == {
+        "items": [],
+        "total": 0,
+        "next_offset": None,
+    }
+    client.search_identities(
+        scheme="inference",
+        match={"framework_name": "sglang"},
+        hardware_in=["mi300x"],
+        offset=10,
+        limit=5,
+    )
+
+    assert calls == [
+        (
+            "GET",
+            "/v1/kb/inference:m:h/views/hyperloom-recipe",
+            None,
+        ),
+        (
+            "POST",
+            "/v1/kb/search",
+            {
+                "scheme": "inference",
+                "match": {"framework_name": "sglang"},
+                "offset": 10,
+                "limit": 5,
+                "hardware_in": ["mi300x"],
+            },
+        ),
+    ]

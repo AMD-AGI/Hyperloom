@@ -14,6 +14,8 @@ from __future__ import annotations
 from typing import Any
 
 from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
+    _build_warm_start_context,
+    _cascade_warm_start_search,
     _donor_is_trustworthy,
     _find_config_donor,
 )
@@ -147,3 +149,88 @@ def test_find_config_donor_skips_self_cid() -> None:
     kb = _StubKB([_donor(gain=20.0)])
     donor, _tier, _conf = _find_config_donor(kb, **_find_kwargs(cid="donor-cid"))
     assert donor is None
+
+
+def test_remote_cascade_skips_unproven_and_wrong_structure() -> None:
+    exact = {
+        "canonical_id": "self-cid",
+        "replayable": False,
+        "what_worked": [{"name": "target-prior"}],
+        "sessions": [{"gain_pct": 80.0}],
+        "validated_gain_pct": 80.0,
+    }
+    unproven = {
+        **_donor(gain=0.0),
+        "canonical_id": "unproven",
+        "replayable": True,
+        "view_source": "current",
+    }
+    empty = {
+        **_donor(gain=25.0, with_config=False),
+        "canonical_id": "empty",
+        "replayable": True,
+        "view_source": "current",
+        "replay_config_available": False,
+    }
+    wrong_structure = {
+        **_donor(arch=["LlamaForCausalLM"], gain=30.0),
+        "canonical_id": "wrong-structure",
+        "replayable": True,
+        "view_source": "current",
+    }
+    selected = {
+        **_donor(gain=12.0),
+        "canonical_id": "selected",
+        "replayable": True,
+        "view_source": "current",
+        "sessions": [{"gain_pct": 12.0}],
+    }
+
+    class _RemoteKB:
+        def __init__(self) -> None:
+            self.selected: list[str] = []
+
+        def get_recipe(self, **_kwargs: Any) -> dict[str, Any]:
+            return exact
+
+        def search(self, **_kwargs: Any) -> list[dict[str, Any]]:
+            return [empty, unproven, wrong_structure, selected]
+
+        def select_candidate(self, row: dict[str, Any]) -> bool:
+            self.selected.append(str(row["canonical_id"]))
+            return True
+
+    kb = _RemoteKB()
+    row, tier, confidence = _cascade_warm_start_search(
+        kb,  # type: ignore[arg-type]
+        cid="self-cid",
+        hw="mi300x",
+        framework="sglang",
+        model_type_val="qwen2",
+        architectures_val=["Qwen2ForCausalLM"],
+        arch_slug="qwen2forcausallm",
+        fw_version="v1",
+        precision="bf16",
+        warm_prefer=None,
+        target_conc=64,
+        target_isl=128,
+        target_osl=128,
+    )
+
+    assert row["canonical_id"] == "selected"
+    assert row["validated_gain_pct"] == 12.0
+    assert row["sessions"][0]["gain_pct"] == 12.0
+    assert row["exact_history"]["validated_gain_pct"] == 80.0
+    assert row["exact_history"]["sessions"][0]["gain_pct"] == 80.0
+    assert tier == "same_arch_class"
+    assert confidence == 0.95
+    assert kb.selected == ["selected"]
+    context = _build_warm_start_context(
+        status="hit",
+        tier=tier,
+        confidence=confidence,
+        canonical_id="self-cid",
+        source="kb-store",
+        recipe=row,
+    )
+    assert context["proven_prior"] == [{"name": "target-prior"}]

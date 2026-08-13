@@ -461,6 +461,42 @@ async def test_current_kernel_conflict_fails_before_preparation(
 
 
 @pytest.mark.asyncio
+async def test_current_history_only_view_never_auto_replays(tmp_path):
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe={
+            "tier": "exact",
+            "confidence": 1.0,
+            "recipe": {
+                "canonical_id": "inference:test",
+                "record_kind": "hyperloom_recipe",
+                "replayable": False,
+                "replay_disabled_reason": "legacy_history_only",
+                "what_worked": [{"description": "old win"}],
+            },
+        },
+    )
+    prepared = 0
+
+    async def _prepare(*_args, **_kwargs):
+        nonlocal prepared
+        prepared += 1
+        return {"status": "prepared"}
+
+    coord.phase_prelude._prepare_warm_kernel_kb = _prepare
+
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert task is None
+    assert prepared == 0
+    assert coord.shared_state.warm_replay_outcome == {
+        "status": "skipped",
+        "reason": "legacy_history_only",
+        "view_source": "",
+    }
+
+
+@pytest.mark.asyncio
 async def test_warm_replay_skips_when_disabled_by_flag(tmp_path):
     """``--no-warm-replay`` → skip + flip the one-shot guard so a flag-less resume can't trigger replay."""
     coord = _make_coord(
