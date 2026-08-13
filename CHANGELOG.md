@@ -7,6 +7,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Removed
 
+- **BREAKING — `kernel_optimization.py` no longer accepts `--test-command` or
+  `--test-harness-path`.** The unittest-harness contract they fed had no
+  reachable caller; an external invoker still passing either flag now fails in
+  argparse rather than being silently ignored.
+
+- **BREAKING — four write-only artifacts are no longer produced**:
+  `agent_transcript.jsonl`, `orchestration_turns.jsonl`,
+  `mn_input_params_*.json`, and the work_dir copy of `semantic_audit.json`.
+  None had a reader. The first three also persisted secrets or raw LLM
+  transcripts past a redactor that inspected values but not keys.
+
+- **BREAKING — Magpie leak salvage no longer defaults to `/workspace/`.** It
+  runs only when `$INFERENCE_OPTIMIZER_RESCUE_PATHS` is set. Note the blast
+  radius: the generic `{framework}_{gpu_type}.sh` scripts respect `$RESULT_DIR`
+  and never needed salvage, but a script pinned through
+  `params.benchmark_script` that hardcodes `/workspace/` was previously rescued
+  and now fails the task with `no_report`. Set the env explicitly to keep the
+  old behaviour.
+
 - **BREAKING — the `vendor_kernel_config`, `operator_tuning` and
   `deep_kernel_analysis` actions are gone.** None of them ever had an executor
   or a `KERNEL_REQUEST_HANDLERS` kind, so every request for them was answered
