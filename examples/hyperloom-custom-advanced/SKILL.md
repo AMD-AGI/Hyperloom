@@ -238,7 +238,11 @@ the host:
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
+# .env fills gaps only; re-exporting the non-empty pre-source snapshot keeps
+# caller values, matching install.sh's restore rule.
+_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
 set -a; . "${REPO_ROOT}/.env"; set +a
+eval "$_dotenv_prev" 2>/dev/null || true; unset _dotenv_prev
 export USER_DATA_PATH="${USER_DATA_PATH:?USER_DATA_PATH missing}"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 ulimit -Sn 65536 || true
