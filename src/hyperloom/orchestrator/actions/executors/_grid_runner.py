@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -33,7 +33,7 @@ from hyperloom.common.env_safety import (
 )
 
 from ...roles.robustness_pulse import pulse as _robustness_pulse
-from ...trace.task_progress import report_progress
+from ...trace.task_progress import heartbeat_while_output_flows, report_progress
 from ._accuracy_gate import materialized_run_eval_disabled
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_RETURNCODE,
@@ -938,6 +938,7 @@ def _run_magpie(
     preclean: bool = True,
     server_already_ready: bool = False,
     serving_lease: Any = None,
+    on_output: Callable[[], None] | None = None,
 ) -> tuple[int, str, str]:
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr).
 
@@ -967,6 +968,10 @@ def _run_magpie(
             runs inside the lease's actor — which holds ``num_gpus`` across every
             round sharing this server — instead of a local subprocess. ``None``
             keeps the existing local ``run_with_session_kill`` path unchanged.
+        on_output: Liveness callback invoked from the reader thread on each
+            line the benchmark emits, so the caller's heartbeat can keep
+            reporting across a run that blocks for hours. Ignored on the
+            ``serving_lease`` path — see the note there.
 
     Returns:
         tuple[int, str, str]: ``(returncode, stdout, stderr)``.
@@ -1062,6 +1067,11 @@ def _run_magpie(
             config_path=ray_config_path,
             output_dir=output_dir,
         )
+        # ``on_output`` cannot follow the round here: the benchmark runs inside a
+        # Ray actor in another process (potentially on another node) and only its
+        # final ``(rc, stdout, stderr)`` comes back, so there is nothing local to
+        # call per line. A Ray-backed variant therefore reports on entry and then
+        # goes quiet until it returns — a known gap, not an oversight.
         return serving_lease.run_session_kill(
             cmd,
             env=env,
@@ -1087,6 +1097,7 @@ def _run_magpie(
         soft_deadline_sec=soft_deadline_sec,
         server_log_path=str(output_dir / "server.log"),
         server_already_ready=server_already_ready,
+        on_output=on_output,
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
@@ -1287,6 +1298,32 @@ async def run_grid(
             total=len(grid),
             status="started",
         )
+
+    async def _reported_magpie(idx: int, label: str, **kwargs: Any) -> tuple[int, str, str]:
+        """Run one Magpie pass, announced on entry and kept alive by its output.
+
+        The entry note covers the wait before the child says anything; the
+        heartbeat covers the hours after it does. Without the second half a
+        benchmark could hold the row silent for a whole variant timeout against
+        a suppression window three orders of magnitude shorter.
+
+        Args:
+            idx (int): Zero-based index of the variant this pass belongs to.
+            label (str): Unit name (``"warmup"``, ``"mn_warmup"``,
+                ``"benchmark"``).
+            **kwargs (Any): Forwarded to :func:`_run_magpie`.
+
+        Returns:
+            tuple[int, str, str]: ``(returncode, stdout, stderr)``.
+        """
+        await _unit_started(idx, label)
+        async with heartbeat_while_output_flows(
+            unit="variant_step",
+            label=f"{grid[idx].name}:{label}",
+            index=idx + 1,
+            total=len(grid),
+        ) as activity:
+            return await asyncio.to_thread(_run_magpie, on_output=activity.note, **kwargs)
 
     # Variant boundary: a bounded robustness tick so a mid-grid leak/crash
     # surfaces between variants, plus a progress heartbeat so a grid that runs
@@ -1513,10 +1550,10 @@ async def run_grid(
 
             warmup_workspaces_before = snapshot_workspaces(warmup_slot)
             warmup_started_unix = time.time()
-            await _unit_started(i, "warmup")
             try:
-                warmup_rc, warmup_stdout, warmup_stderr = await asyncio.to_thread(
-                    _run_magpie,
+                warmup_rc, warmup_stdout, warmup_stderr = await _reported_magpie(
+                    i,
+                    "warmup",
                     magpie_python=magpie_python,
                     config_path=warmup_cfg_path,
                     output_dir=warmup_slot,
@@ -1733,10 +1770,10 @@ async def run_grid(
 
         if _mn_imn() and _mn_warm():
             _mn_warm_slot = slot / "mn_warmup"
-            await _unit_started(i, "mn_warmup")
             try:
-                await asyncio.to_thread(
-                    _run_magpie,
+                await _reported_magpie(
+                    i,
+                    "mn_warmup",
                     magpie_python=magpie_python,
                     config_path=cfg_path,
                     output_dir=_mn_warm_slot,
@@ -1764,10 +1801,10 @@ async def run_grid(
         # leak destinations per-variant.
         slot_workspaces_before = snapshot_workspaces(slot)
         variant_started_unix = time.time()
-        await _unit_started(i, "benchmark")
         try:
-            rc, stdout, stderr = await asyncio.to_thread(
-                _run_magpie,
+            rc, stdout, stderr = await _reported_magpie(
+                i,
+                "benchmark",
                 magpie_python=magpie_python,
                 config_path=cfg_path,
                 output_dir=slot,

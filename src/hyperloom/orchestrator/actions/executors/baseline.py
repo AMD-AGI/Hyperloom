@@ -2792,14 +2792,19 @@ class BaselineExecutor:
                 _mn_warm_env["EVAL_RESULT_DIR"] = str(_mn_warm_dir / "eval_output")
                 _mn_warm_env["SERVER_LOG"] = str(_mn_warm_dir / "server.log")
                 _mn_warm_env["GPU_METRICS_CSV"] = str(_mn_warm_dir / "gpu_metrics.csv")
-                await asyncio.to_thread(
-                    run_with_session_kill,
-                    _mn_warm_cmd,
-                    env=_mn_warm_env,
-                    cwd=str(_mn_warm_dir),
-                    timeout=timeout_sec,
-                    server_log_path=_watchdog_server_log_path(_mn_warm_dir, framework),
-                )
+                async with heartbeat_while_output_flows(
+                    unit="baseline_round",
+                    label="mn_warmup",
+                ) as _mn_warm_activity:
+                    await asyncio.to_thread(
+                        run_with_session_kill,
+                        _mn_warm_cmd,
+                        env=_mn_warm_env,
+                        cwd=str(_mn_warm_dir),
+                        timeout=timeout_sec,
+                        server_log_path=_watchdog_server_log_path(_mn_warm_dir, framework),
+                        on_output=_mn_warm_activity.note,
+                    )
                 log.info("baseline_executor: MN warmup pass done (discarded)")
             except Exception as exc:  # noqa: BLE001 - warmup is best-effort
                 log.warning("baseline_executor: MN warmup pass failed (ignored): %r", exc)
@@ -2840,6 +2845,12 @@ class BaselineExecutor:
                     config_path=ray_config_path,
                     output_dir=output_dir,
                 )
+                # No liveness callback is possible here: the round runs inside a
+                # Ray actor in another process (potentially on another node) and
+                # only its final ``(rc, stdout, stderr)`` crosses back, so there
+                # is nothing local to call per line of child output. A Ray-backed
+                # round reports on entry and then goes quiet until it returns — a
+                # known gap, not an oversight.
                 proc_returncode, proc_stdout, proc_stderr = await asyncio.to_thread(
                     serving_lease.run_session_kill,
                     ray_cmd,
