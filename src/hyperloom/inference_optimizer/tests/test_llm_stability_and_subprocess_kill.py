@@ -57,14 +57,23 @@ async def test_run_subprocess_returns_output_normally():
     assert "hello-stdout" in stdout
 
 
-async def test_run_subprocess_unbuffers_its_child():
+_ECHO_UNBUFFERED = ["python3", "-c", "import os; print(os.environ['PYTHONUNBUFFERED'])"]
+
+
+async def test_run_subprocess_unbuffers_its_child(monkeypatch):
     """A block-buffered child would look dead between flushes."""
-    rc, stdout, _stderr = await _run_subprocess(
-        ["python3", "-c", "import os; print(os.environ['PYTHONUNBUFFERED'])"],
-        timeout_sec=30,
-    )
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
+    rc, stdout, _stderr = await _run_subprocess(_ECHO_UNBUFFERED, timeout_sec=30)
     assert rc == 0
     assert stdout.strip() == "1"
+
+
+async def test_run_subprocess_leaves_an_operator_chosen_buffering_alone(monkeypatch):
+    """Defaulting is help; overriding an explicit setting is a surprise."""
+    monkeypatch.setenv("PYTHONUNBUFFERED", "0")
+    rc, stdout, _stderr = await _run_subprocess(_ECHO_UNBUFFERED, timeout_sec=30)
+    assert rc == 0
+    assert stdout.strip() == "0"
 
 
 async def test_run_subprocess_counts_the_lines_its_child_emits(monkeypatch):

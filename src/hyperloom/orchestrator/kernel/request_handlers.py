@@ -1574,7 +1574,8 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
         # The heartbeat around this call is only as honest as the child's
         # flushing: block-buffered on a pipe, it looks dead between flushes.
-        env["PYTHONUNBUFFERED"] = "1"
+        # ``setdefault`` so an operator who set this deliberately still wins.
+        env.setdefault("PYTHONUNBUFFERED", "1")
         # run_with_session_kill reaps the whole descendant tree on every exit path.
         cp = run_with_session_kill(
             cmd,
