@@ -50,7 +50,6 @@ from ..trace.parse_usage import (
 # Re-exported: callers patch these at ``request_handlers.<name>``.
 from ._kernel_decisions import (
     _honest_flag as _honest_flag,
-    _format_last_kernel_opt as _format_last_kernel_opt,
     _resolve_kernel_patch_identity as _resolve_kernel_patch_identity,
     kernel_patch_key as kernel_patch_key,
     find_rejected_kernel_patch as find_rejected_kernel_patch,
@@ -68,6 +67,7 @@ from ._kernel_decisions import (
     kernel_opt_attempts_count as kernel_opt_attempts_count,
     untried_hot_reusable_kernels as untried_hot_reusable_kernels,
     is_collective_candidate as is_collective_candidate,
+    SUPPORTED_COLLECTIVE_OPS as SUPPORTED_COLLECTIVE_OPS,
 )
 
 
@@ -4402,12 +4402,6 @@ def select_collective_candidate(state: Any) -> dict[str, Any] | None:
     return max(pool, key=_gpu_pct)
 
 
-#: Collective primitives the lane can measure. Each needs an independent
-#: ``torch.distributed`` reference in the generated driver, so widening this set
-#: means adding one there first.
-SUPPORTED_COLLECTIVE_OPS = frozenset({"all_reduce", "reduce_scatter", "all_gather"})
-
-
 def _forge_loop_constant(module: str, name: str, fallback: float) -> float:
     """Read a forge-loop budget bound, falling back when KernelForge is off the path.
 
@@ -7080,12 +7074,12 @@ def _cold_start_rebaseline_timeout(resolved_sec: int) -> int:
     the explicit ``timeout_sec`` integrate passes also suppresses the baseline
     executor's own cold-start branch, leaving the warm budget as the only one.
     """
-    from ..actions.executors.baseline import (
+    from ..actions.executors._aiter_jit import (
         BASELINE_COLD_START_TIMEOUT_SEC,
-        _probe_aiter_jit_cache,
+        probe_aiter_jit_cache,
     )
 
-    cache = _probe_aiter_jit_cache()
+    cache = probe_aiter_jit_cache()
     if cache.get("probe_status") != "found" or not cache.get("is_cold"):
         return resolved_sec
     cold_cap = int(
@@ -7790,6 +7784,4 @@ __all__ = [
     "run_gemm_tuning_handler",
     "run_optimization_handler",
     "trace_analyze_handler",
-    # Re-exported from _kernel_decisions.
-    "_format_last_kernel_opt",
 ]

@@ -42,6 +42,10 @@ from ..trace.trace_env import env_flag
 
 log = logging.getLogger(__name__)
 
+#: Collective primitives the dedicated lane can measure. Each needs an
+#: independent reference implementation in the generated driver.
+SUPPORTED_COLLECTIVE_OPS = frozenset({"all_reduce", "reduce_scatter", "all_gather"})
+
 # "Honest E2E" hardening flags. The umbrella flag ``HL_HONEST_E2E`` turns the
 # whole mode on; each fix also has a per-fix override that wins over the umbrella
 # (set it to an explicit falsey value to opt a single fix out of the umbrella).
@@ -371,44 +375,6 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
             claimed_sources.add(source_file)
         result.append(record)
     return result
-
-
-# ===========================================================================
-# Kernel-decision write-owner functions. SharedState is a passive
-# persisted record; the functions that *own kernel decisions* (recording
-# kernel-opt / integrate / gemm-tuning outcomes, kernel-patch identity,
-# pending-keep bookkeeping, hot-kernel reuse) belong to this kernel domain.
-# They take ``state`` as their first argument and read/mutate it; SharedState
-# keeps thin forwarding shims so existing callers
-# (``state.record_kernel_opt(...)`` etc.) keep working.
-#
-# Retry/default settings are intentionally below both SharedState and kernel
-# decision code to keep the dependency graph one-way.
-# ===========================================================================
-def _format_last_kernel_opt(state) -> str:
-    """Single-line repr of last kernel-opt outcome for prompt injection.
-
-    Returns:
-        str: A compact ``kernel_id=... decision=... speedup=...`` line
-            (with optional per-kernel attempts/retired history), or
-            ``"(none)"`` when no kernel_opt has run.
-    """
-    if not state.last_kernel_opt:
-        return "(none)"
-    ko = state.last_kernel_opt
-    kid = str(ko.get("kernel_id") or "")
-    attempts_entry = state.kernel_opt_attempts.get(kid) or {}
-    history_tag = ""
-    if attempts_entry:
-        history_tag = (
-            f" history=attempts={attempts_entry.get('attempts', 0)}/partial={attempts_entry.get('partial_count', 0)}"
-        )
-        rej_reason = attempts_entry.get("rejected_reason")
-        if rej_reason:
-            history_tag += f"/retired={rej_reason}"
-    return (
-        f"kernel_id={kid or '?'} decision={ko.get('decision', '?')} speedup={ko.get('micro_speedup', '?')}{history_tag}"
-    )
 
 
 def _resolve_kernel_patch_identity(
@@ -1276,8 +1242,6 @@ def is_collective_candidate(candidate: dict[str, Any]) -> bool:
     nccl-summary row whose primitive it can actually measure. So the ownership
     test is the lane's own admission test, not the heuristic.
     """
-    from .request_handlers import SUPPORTED_COLLECTIVE_OPS
-
     contract = candidate.get("kernel_contract")
     if not isinstance(contract, dict):
         return False

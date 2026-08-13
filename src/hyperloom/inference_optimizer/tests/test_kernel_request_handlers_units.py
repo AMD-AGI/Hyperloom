@@ -5142,21 +5142,21 @@ def test_forge_loop_budget_bounds_are_read_not_copied():
 
 def test_a_patched_rebaseline_gets_the_cold_start_budget(monkeypatch):
     """Applying a patch moves the JIT cache aside, so the next boot recompiles."""
-    from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
+    from hyperloom.orchestrator.actions.executors import _aiter_jit as aiter_jit
     from hyperloom.orchestrator.kernel import request_handlers as rh
 
     monkeypatch.setattr(
-        baseline_mod,
-        "_probe_aiter_jit_cache",
+        aiter_jit,
+        "probe_aiter_jit_cache",
         lambda: {"probe_status": "found", "is_cold": True, "kernel_count": 0},
     )
 
-    assert rh._cold_start_rebaseline_timeout(600) == baseline_mod.BASELINE_COLD_START_TIMEOUT_SEC
+    assert rh._cold_start_rebaseline_timeout(600) == aiter_jit.BASELINE_COLD_START_TIMEOUT_SEC
 
 
 def test_a_warm_cache_keeps_the_resolved_timeout(monkeypatch):
     """Only an empty cache justifies the cold cap; a warm boot keeps its budget."""
-    from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
+    from hyperloom.orchestrator.actions.executors import _aiter_jit as aiter_jit
     from hyperloom.orchestrator.kernel import request_handlers as rh
 
     for probe in (
@@ -5164,20 +5164,20 @@ def test_a_warm_cache_keeps_the_resolved_timeout(monkeypatch):
         {"probe_status": "not_found", "is_cold": None, "kernel_count": 0},
         {"probe_status": "error", "is_cold": None, "kernel_count": 0},
     ):
-        monkeypatch.setattr(baseline_mod, "_probe_aiter_jit_cache", lambda p=probe: p)
+        monkeypatch.setattr(aiter_jit, "probe_aiter_jit_cache", lambda p=probe: p)
         assert rh._cold_start_rebaseline_timeout(600) == 600
 
 
 def test_a_longer_explicit_budget_is_never_shortened(monkeypatch):
     """The cap is a floor for a cold boot, not a ceiling on the operator's budget."""
-    from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
+    from hyperloom.orchestrator.actions.executors import _aiter_jit as aiter_jit
     from hyperloom.orchestrator.kernel import request_handlers as rh
 
     monkeypatch.setattr(
-        baseline_mod,
-        "_probe_aiter_jit_cache",
+        aiter_jit,
+        "probe_aiter_jit_cache",
         lambda: {"probe_status": "found", "is_cold": True, "kernel_count": 0},
     )
-    generous = baseline_mod.BASELINE_COLD_START_TIMEOUT_SEC + 1200
+    generous = aiter_jit.BASELINE_COLD_START_TIMEOUT_SEC + 1200
 
     assert rh._cold_start_rebaseline_timeout(generous) == generous
