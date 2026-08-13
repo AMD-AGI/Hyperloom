@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import shlex
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -587,6 +588,29 @@ def cited_advisory_reason_code(entry: dict[str, Any]) -> str:
     # about which one the audit trail names.
     cited = sorted(code for code in advisory if re.search(rf"(?<![\w-]){re.escape(code)}(?![\w-])", text))
     return cited[0] if cited else ""
+
+
+# Priority a batch of per-variant verdicts collapses by: one approved variant
+# carries the proposal, otherwise one reject sinks it, and advice outranks a
+# request for more review.
+_VERDICT_COLLAPSE_ORDER: tuple[str, ...] = ("approve", _REJECT_VERDICT, ADVISE_VERDICT, "needs_review")
+
+
+def collapse_verdicts(verdicts: Iterable[str]) -> str:
+    """Collapse per-variant verdicts into the one the proposal is decided on.
+
+    Args:
+        verdicts: The per-variant verdicts of one ``verdict_map``.
+
+    Returns:
+        The highest-priority verdict present, or ``needs_review`` when none of
+        the known verdicts appears.
+    """
+    present = set(verdicts)
+    for candidate in _VERDICT_COLLAPSE_ORDER:
+        if candidate in present:
+            return candidate
+    return "needs_review"
 
 
 def verdict_rests_on_one_ground(entry: dict[str, Any]) -> bool:

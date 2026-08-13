@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from .coordinator_helpers import (
     _parse_iso_unix,
     coerce_needs_gpu,
+    collapse_verdicts,
     format_exc_brief,
     serialize_verdict_advisory,
     verdict_held_to_its_rule,
@@ -213,6 +214,7 @@ class IntentRouter:
             )
             return
         verdict = await self._verdict_held_to_its_rule(intent.payload, target=target)
+        authored = str(single_verdict or "").strip()
         if not verdict and isinstance(verdict_map, dict) and verdict_map:
             # Per entry before the collapse below: a variant rejected on an
             # advisory-only rule must not out-rank its siblings' advice.
@@ -220,14 +222,9 @@ class IntentRouter:
                 await self._verdict_held_to_its_rule(entry or {}, target=target, variant=str(name))
                 for name, entry in verdict_map.items()
             ]
-            verdict = (
-                "approve"
-                if "approve" in sub_verdicts
-                else "reject"
-                if "reject" in sub_verdicts
-                else "advise"
-                if "advise" in sub_verdicts
-                else "needs_review"
+            verdict = collapse_verdicts(sub_verdicts)
+            authored = collapse_verdicts(
+                str((entry or {}).get("verdict") or "").strip() for entry in verdict_map.values()
             )
 
             # Defensive audit (log-only): record verdict_map collapse
@@ -246,6 +243,7 @@ class IntentRouter:
             source=source,
             pending=pending,
             verdict=verdict,
+            authored_verdict=authored,
             reasoning=str(intent.payload.get("reasoning") or ""),
             advisory=serialize_verdict_advisory(intent.payload),
         )
@@ -305,6 +303,7 @@ class IntentRouter:
         pending: "PendingProposal",  # noqa: F821 - deferred ref; imported lazily in handlers to avoid import cycle.
         verdict: str,
         reasoning: str,
+        authored_verdict: str = "",
         advisory: dict[str, Any] | None = None,
     ) -> None:
         """Single-verdict handler (approve/advise materialises proposal as-is); mirrors integrate_patch/specialist verdicts onto specialist_patch_verdicts for PolicyGate.
@@ -314,6 +313,9 @@ class IntentRouter:
             pending: The pending proposal the verdict targets.
             verdict: The collapsed verdict (approve / advise / reject / needs_review).
             reasoning: Free-text reasoning recorded with the verdict.
+            authored_verdict: The verdict the Critic itself wrote, before any
+                hold to a cited rule. Mirrored onto ``specialist_patch_verdicts``
+                in place of ``verdict``; defaults to ``verdict``.
             advisory: Pre-serialised advisory fields (``required_evidence`` /
                 ``risks`` / ``advice_text`` / ``alternative_action`` /
                 ``notes`` / ``kb_evidence`` / ``packet_evidence``) to carry on
@@ -352,6 +354,13 @@ class IntentRouter:
         )
         # Mirror specialist / integrate_patch verdicts onto SharedState so
         # PolicyGate's integrate_patch gate can consult them on the next tick.
+        # What gets mirrored is what the Critic wrote, never what the hold made
+        # of it: ``advise`` is a landing permit there, and holding a reject to a
+        # formatting rule is meant to save the round's ideas from being thrown
+        # away, not to land a patch the Critic refused. A held proposal that
+        # still deserves to land gets there through a fresh Critic verdict,
+        # which overwrites this one.
+        patch_verdict = str(authored_verdict or verdict).strip()
         try:
             pa_params = pending.payload.get("params") or {}
         except AttributeError:
@@ -362,11 +371,11 @@ class IntentRouter:
         elif pending.action_name == "specialist":
             # Critic verdict on the specialist proposal counts as the verdict on its patches; task_id is the key.
             sid_candidate = str(pa_params.get("task_id") or "").strip()
-        if sid_candidate and verdict:
+        if sid_candidate and patch_verdict:
             try:
                 self.shared_state.record_specialist_patch_verdict(
                     sid_candidate,
-                    verdict,
+                    patch_verdict,
                 )
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 — best-effort mirror

@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 from hyperloom.orchestrator.loop.coordinator_helpers import verdict_held_to_its_rule
 from hyperloom.orchestrator.policy.gate import (
+    INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
     PolicyDenied,
     PolicyGate,
     REVIEW_VERDICTS,
@@ -650,6 +651,67 @@ async def test_a_declared_reject_code_outranks_an_advisory_one_in_prose(coord):
     await coord._handle_review_verdict("critic", intent)
     assert pending.verdict == "reject"
     assert coord._materialise_calls == []
+
+
+@dataclass
+class _PatchVerdictSharedState(_BareSharedState):
+    """Adds the patch-verdict mirror the integrate_patch gate reads."""
+
+    patch_verdicts: dict[str, str] = field(default_factory=dict)
+
+    def record_specialist_patch_verdict(self, specialist_task_id: str, verdict: str) -> None:
+        self.patch_verdicts[specialist_task_id] = verdict.strip().lower()
+
+
+@pytest.mark.asyncio
+async def test_a_held_reject_is_not_a_landing_permit(coord):
+    """``advise`` is an integrate_patch permit, so mirroring the held verdict
+    turned "the Critic rejected this patch" into "the Critic waved it through"
+    -- over a formatting rule, and irreversibly."""
+    coord.shared_state = _PatchVerdictSharedState()
+    pending = PendingProposal(
+        proposal_msg_id="msg-permit",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-permit"}},
+    )
+    coord.state.pending_proposals["msg-permit"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-permit",
+            "verdict": "reject",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "advise"
+    assert len(coord._materialise_calls) == 1
+    assert coord.shared_state.patch_verdicts["t-permit"] == "reject"
+    assert coord.shared_state.patch_verdicts["t-permit"] not in INTEGRATE_PATCH_PERMISSIVE_VERDICTS
+
+
+@pytest.mark.asyncio
+async def test_an_unheld_verdict_still_mirrors_itself(coord):
+    """The mirror only diverges from the acted-on verdict when a hold moved it."""
+    coord.shared_state = _PatchVerdictSharedState()
+    pending = PendingProposal(
+        proposal_msg_id="msg-plain-permit",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-plain"}},
+    )
+    coord.state.pending_proposals["msg-plain-permit"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={"target_proposal_msg_id": "msg-plain-permit", "verdict": "advise"},
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert coord.shared_state.patch_verdicts["t-plain"] == "advise"
 
 
 @pytest.mark.asyncio
