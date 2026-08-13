@@ -79,6 +79,30 @@ def test_a_refused_port_with_no_server_behind_it_is_not_a_fault():
     assert all(s.name != "local_server_unreachable" for s in out)
 
 
+def test_a_server_that_died_under_a_running_benchmark_is_still_a_fault():
+    """A benchmark client hammering the port proves a server was meant to answer it.
+
+    "Probed successfully, saw no server" is the gap between two variants, but it
+    is also a server that crashed while its own client kept sending requests —
+    the one snapshot where suppressing the alert hides the outage.
+    """
+    data = SourceData(
+        local_processes=[
+            {"pid": 7, "rss_mb": 12.0, "cmd": "python -m Magpie.bench", "is_server": False},
+            {"pid": 8, "rss_mb": 96.0, "cmd": "python benchmark_serving.py --port 30000", "is_server": False},
+        ],
+        local_server_health=[
+            {"url": "http://localhost:30000/health", "reachable": False, "status": "error", "error": "connect"},
+        ],
+    )
+    out = evaluate_local_health_signals(_ctx(), data)
+    matched = [s for s in out if s.name == "local_server_unreachable"]
+    assert len(matched) == 1
+    assert matched[0].severity is SymptomSeverity.HIGH
+    assert matched[0].evidence["server_process_seen"] is False
+    assert matched[0].evidence["benchmark_client_seen"] is True
+
+
 def test_a_refused_port_is_still_a_fault_when_nobody_could_look_for_the_server():
     """A broken ``ps`` must not mute a finding that has nothing to do with it."""
     data = SourceData(
@@ -92,6 +116,7 @@ def test_a_refused_port_is_still_a_fault_when_nobody_could_look_for_the_server()
     matched = [s for s in out if s.name == "local_server_unreachable"]
     assert len(matched) == 1
     assert matched[0].evidence["server_process_seen"] is None
+    assert matched[0].evidence["benchmark_client_seen"] is None
 
 
 def test_a_seen_server_is_recorded_in_the_evidence():

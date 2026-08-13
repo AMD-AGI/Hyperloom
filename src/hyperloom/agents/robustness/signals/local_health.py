@@ -19,6 +19,14 @@ from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
 
 
+# Load generators that only run while an inference server is expected to answer,
+# so their presence turns "no server process" from an idle stretch into an
+# outage. Deliberately narrower than the harness patterns the process probe
+# matches: the outer Magpie/InferenceX harness is also up while it launches a
+# server and while it tears one down, when a refused port is the correct reading.
+_BENCHMARK_CLIENT_PATTERNS: tuple[str, ...] = ("benchmark_serving",)
+
+
 @dataclass
 class LocalHealthConfig:
     """Thresholds for the LocalProbe-derived health rules.
@@ -40,6 +48,8 @@ class LocalHealthConfig:
             symptom.
         fd_crit_used_pct (float): File-descriptor used-percent for a HIGH
             symptom.
+        benchmark_client_patterns (tuple[str, ...]): Commands whose presence
+            means a server is supposed to be answering right now.
     """
 
     gpu_temp_warn_c: float = 90.0
@@ -53,6 +63,7 @@ class LocalHealthConfig:
     shm_used_crit_pct: float = 90.0
     fd_warn_used_pct: float = 80.0
     fd_crit_used_pct: float = 95.0
+    benchmark_client_patterns: tuple[str, ...] = _BENCHMARK_CLIENT_PATTERNS
 
 
 # HIGH-severity log patterns; anything else from ``local_log_errors`` falls back to MEDIUM.
@@ -111,7 +122,7 @@ def evaluate_local_health_signals(
     """
     cfg = config or LocalHealthConfig()
     out: list[Symptom] = []
-    out.extend(_server_unreachable(data))
+    out.extend(_server_unreachable(data, cfg))
     out.extend(_log_error_symptoms(data))
     out.extend(_gpu_thermal_symptoms(data, cfg))
     out.extend(_disk_pressure_symptoms(data, cfg))
@@ -121,7 +132,7 @@ def evaluate_local_health_signals(
     return out
 
 
-def _server_unreachable(data: SourceData) -> list[Symptom]:
+def _server_unreachable(data: SourceData, cfg: LocalHealthConfig) -> list[Symptom]:
     """Emit ``local_server_unreachable`` for each failed local HTTP probe.
 
     The probe detects "process is alive but the server is wedged", so a refusal
@@ -135,12 +146,20 @@ def _server_unreachable(data: SourceData) -> list[Symptom]:
     symptom is emitted with the uncertainty recorded in its evidence, so a
     broken ``ps`` cannot mute an unrelated finding.
 
+    "No server process" also does not always mean no server was wanted. A
+    server that died mid-benchmark leaves that exact snapshot while its own
+    load generator keeps sending requests into a closed port, so a matching
+    benchmark client is treated as proof that something was supposed to be
+    answering and the alert stands.
+
     Severity is HIGH when every probed target is unreachable, otherwise MEDIUM.
 
     Args:
         data (SourceData): Collected source data including
             ``local_server_health``, ``local_processes`` and
             ``local_processes_known``.
+        cfg (LocalHealthConfig): Thresholds; provides the benchmark-client
+            patterns.
 
     Returns:
         list[Symptom]: One symptom per unreachable probe target, possibly empty.
@@ -148,7 +167,8 @@ def _server_unreachable(data: SourceData) -> list[Symptom]:
     if not data.local_server_health:
         return []
     server_seen = any(proc.get("is_server") for proc in data.local_processes)
-    if data.local_processes_known and not server_seen:
+    client_seen = _benchmark_client_seen(data, cfg)
+    if data.local_processes_known and not server_seen and not client_seen:
         return []
     bad = [entry for entry in data.local_server_health if not entry.get("reachable")]
     if not bad:
@@ -169,6 +189,7 @@ def _server_unreachable(data: SourceData) -> list[Symptom]:
                     "status_code": entry.get("status_code"),
                     "error": entry.get("error"),
                     "server_process_seen": server_seen if data.local_processes_known else None,
+                    "benchmark_client_seen": client_seen if data.local_processes_known else None,
                 },
                 subject={"url": url},
                 source="local",
@@ -180,6 +201,27 @@ def _server_unreachable(data: SourceData) -> list[Symptom]:
             )
         )
     return out
+
+
+def _benchmark_client_seen(data: SourceData, cfg: LocalHealthConfig) -> bool:
+    """Report whether a load generator that needs a server is running.
+
+    Args:
+        data (SourceData): Collected source data including ``local_processes``.
+        cfg (LocalHealthConfig): Thresholds; provides the benchmark-client
+            patterns.
+
+    Returns:
+        bool: ``True`` when any probed process command matches a configured
+            benchmark-client pattern.
+    """
+    for proc in data.local_processes:
+        if not isinstance(proc, dict):
+            continue
+        cmd = str(proc.get("cmd") or "")
+        if any(pattern in cmd for pattern in cfg.benchmark_client_patterns):
+            return True
+    return False
 
 
 def _log_error_symptoms(data: SourceData) -> list[Symptom]:

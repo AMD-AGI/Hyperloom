@@ -143,6 +143,7 @@ host -> subprocess -> envelope -> upstream PolicyGate path.
 | `pod_not_running` (other non-Running) | medium | `alert(medium)` | M1 |
 | `pod_no_metrics` (≥ no_metrics_warn_s) | low | `send_message(observation)` | M1 |
 | `local_server_unreachable` (any target down) | medium / high (all down) | `alert(medium)` / `alert(high)` | M1.5 |
+| `local_server_unreachable`, no server process and no benchmark client | — | suppressed (an idle stretch, not an outage) | M1.5 |
 | `log_error_pattern` (CUDA OOM / NCCL / segfault) | high | `alert(high)` | M1.5 |
 | `log_error_pattern` (RuntimeError / generic) | medium | `alert(medium)` | M1.5 |
 | `gpu_thermal_high` (≥ warn_c) | medium | `alert(medium)` | M1.5 |
