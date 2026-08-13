@@ -274,6 +274,22 @@ def test_a_skip_with_no_recorded_reason_still_says_it_was_skipped():
     assert "did not run" in rp._explain_stop_reason("conc_sweep_done", state)
 
 
+def test_a_sweep_that_spent_its_budget_is_not_reported_as_one_that_never_ran():
+    """The budget path records was_skipped for a sweep that ran its whole ladder."""
+    state = _SweepState(
+        {
+            "status": "skipped",
+            "was_skipped": True,
+            "budget_exhausted": True,
+            "skip_reason": "budget_exhausted_no_successful_pairs",
+        }
+    )
+    msg = rp._explain_stop_reason("conc_sweep_done", state)
+    assert "did not run" not in msg
+    assert "budget" in msg
+    assert "budget_exhausted_no_successful_pairs" in msg
+
+
 def test_format_md_renders_stop_explanation():
     md = rp._format_md(
         {

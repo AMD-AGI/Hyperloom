@@ -31,6 +31,7 @@ from hyperloom.common import io as _common_io
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
+from ...kernel.conc_sweep import conc_sweep_declined_to_run
 from ...state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import db_path_for
 
@@ -410,35 +411,44 @@ def _explain_stop_reason(stop_reason, state=None):
     """Return a human-readable explanation for a terminal ``stop_reason``.
 
     ``conc_sweep_done`` is the SWEEP exit for a concurrency sweep that reached
-    a terminal result, which includes one that declined to run at all. The
-    generic wording then tells the reader a sweep finished when none happened,
-    so a skip is named when ``state`` is available to say so.
+    a terminal result, which includes one that declined to run at all and one
+    that spent its budget without a comparable pair. The generic wording then
+    tells the reader a sweep finished when none happened, so a skip is named
+    when ``state`` is available to say so.
 
     Returns ``""`` for unknown/empty reasons so callers can omit the line.
     """
     reason = str(stop_reason or "").strip()
     text = _STOP_REASON_EXPLANATIONS.get(reason, "")
     if reason == "conc_sweep_done" and text:
-        skip_reason = _conc_sweep_skip_reason(state)
-        if skip_reason:
-            return f"Post-sweep concurrency sweep did not run ({skip_reason}); the phase settled and the run closed."
+        return _explain_conc_sweep_skip(state) or text
     return text
 
 
-def _conc_sweep_skip_reason(state) -> str:
-    """The reason the concurrency sweep declined to run, or ``""`` if it ran.
+def _explain_conc_sweep_skip(state) -> str:
+    """Name a skipped concurrency sweep, or ``""`` when one ran to a result.
+
+    A sweep that consumed its whole budget without reaching a comparable pair
+    is recorded as skipped too, and telling the reader it never ran is the
+    more expensive claim to believe in exactly the sessions where the budget
+    is the thing under investigation.
 
     Args:
         state: The session's shared state, or ``None``.
 
     Returns:
-        str: The recorded ``skip_reason``, a placeholder when a skip carries
-        none, or ``""`` when no skip is on record.
+        str: The explanation line, or ``""`` when nothing was skipped.
     """
     last = getattr(state, "last_conc_sweep", None)
     if not isinstance(last, dict) or not last.get("was_skipped"):
         return ""
-    return str(last.get("skip_reason") or "").strip() or "no reason recorded"
+    detail = str(last.get("skip_reason") or "").strip() or "no reason recorded"
+    if conc_sweep_declined_to_run(last):
+        return f"Post-sweep concurrency sweep did not run ({detail}); the phase settled and the run closed."
+    return (
+        f"Post-sweep concurrency sweep exhausted its budget without a comparable "
+        f"baseline/optimized pair ({detail}); the phase settled and the run closed."
+    )
 
 
 def _build_summary_dict(
