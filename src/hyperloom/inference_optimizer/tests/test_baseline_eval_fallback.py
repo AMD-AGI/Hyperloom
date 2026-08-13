@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,8 @@ from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
 )
+
+_BASELINE_LOGGER = "hyperloom.orchestrator.actions.executors.baseline"
 
 
 @pytest.fixture(autouse=True)
@@ -749,6 +752,46 @@ def test_salvage_uses_a_warmup_score_when_it_is_the_only_one(tmp_path):
         {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)},
     )
     assert reason == ""
+
+
+def test_the_double_run_handoff_is_not_reported_as_a_recovery(tmp_path, caplog):
+    """Every healthy double-run baseline reads its accuracy from the warmup round.
+
+    The measured round runs ``RUN_EVAL=false``, so it has no accuracy of its
+    own by construction. Logging that handoff as a salvage made a normal run
+    look like it survived a fault.
+    """
+    attempt = tmp_path / "runs" / "baseline" / "786a793e"
+    _write_gsm8k_results(attempt / "warmup_round", 0.9128)
+    deciding = attempt / "measure_round"
+    deciding.mkdir(parents=True, exist_ok=True)
+
+    executor = BaselineExecutor()
+    rec = _StopRecorder()
+    result = {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)}
+    with caplog.at_level(logging.INFO, logger=_BASELINE_LOGGER):
+        executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
+
+    assert rec.stop_reason == ""
+    assert result["accuracy"] == pytest.approx(0.9128)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING and "salvag" in r.getMessage()]
+    assert any("cold-start guard" in r.getMessage() for r in caplog.records)
+
+
+def test_an_unexpected_gap_is_still_reported_as_a_salvage(tmp_path, caplog):
+    """A retry attempt reading another attempt's score is a recovery, and says so."""
+    runs_baseline = tmp_path / "runs" / "baseline"
+    _write_gsm8k_results(runs_baseline / "786a793e" / "measure_round", 0.9128)
+    deciding = runs_baseline / "retry2_bootsafe"
+    deciding.mkdir(parents=True, exist_ok=True)
+
+    executor = BaselineExecutor()
+    rec = _StopRecorder()
+    result = {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)}
+    with caplog.at_level(logging.INFO, logger=_BASELINE_LOGGER):
+        executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
+
+    assert any(r.levelno == logging.WARNING and "salvaged" in r.getMessage() for r in caplog.records)
 
 
 def test_salvage_prefers_a_measured_round_over_a_warmup(tmp_path):
