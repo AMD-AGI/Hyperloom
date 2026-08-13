@@ -52,8 +52,11 @@ from ._subprocess_kill import (
     run_with_session_kill,
     server_log_death_excerpt,
 )
-from ._workload_envs import (
+from ._accuracy_gate import (
     _RUN_EVAL_FALSE_VALUES,
+    materialized_run_eval_disabled,
+)
+from ._workload_envs import (
     _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -324,29 +327,6 @@ BASELINE_COLD_START_TIMEOUT_SEC = 9000  # COLD-start cap, 150 min (includes ~20 
 # names live in `_workload_envs`.
 _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
-
-
-def _materialized_run_eval_disabled(config_path: Path) -> bool:
-    """Report whether lm-eval is disabled in the materialized benchmark config.
-
-    ``materialize_config_with_envs`` writes the effective ``RUN_EVAL`` (folded
-    from the base YAML ``benchmark.envs``, ``reference_envs``, ``extra_envs`` and
-    process ``$RUN_EVAL``, defaulting to "true") into ``benchmark.envs.RUN_EVAL``
-    -- the value the benchmark subprocess actually consumes. Reading it back is
-    the single source of truth for "did eval run this round", reusing the shared
-    ``_RUN_EVAL_FALSE_VALUES`` present-and-falsey semantics.
-
-    Args:
-        config_path (Path): The materialized benchmark YAML config path.
-
-    Returns:
-        bool: ``True`` when the config's ``RUN_EVAL`` is present and falsey.
-            A missing key reads as enabled (matches the materialize default).
-    """
-    cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
-    envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
-    val = envs.get("RUN_EVAL")
-    return val is not None and str(val).strip().lower() in _RUN_EVAL_FALSE_VALUES
 
 
 def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
@@ -1148,7 +1128,7 @@ class BaselineExecutor:
         if ix_root:
             ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
             ensure_benchmark_lib_eval_start_patched(Path(ix_root))
-        if not _materialized_run_eval_disabled(config_path):
+        if not materialized_run_eval_disabled(config_path):
             # Target present but unpatchable is a hard stop; target absent is an
             # unrecognized layout, which warns rather than failing every eval run.
             probe_root = Path(ix_root) if ix_root else None
@@ -2137,7 +2117,7 @@ class BaselineExecutor:
                 materialized_config_path,
                 enabled=False,
             )
-        run_eval_disabled = _materialized_run_eval_disabled(
+        run_eval_disabled = materialized_run_eval_disabled(
             materialized_config_path
         )
 
