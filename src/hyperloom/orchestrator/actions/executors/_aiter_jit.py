@@ -167,7 +167,14 @@ def _dedupe_existing_dirs(candidates: list[Path]) -> list[Path]:
         except OSError:
             normalized = candidate.expanduser().absolute()
         key = str(normalized)
-        if key in seen or not normalized.is_dir():
+        if key in seen:
+            continue
+        try:
+            if not normalized.is_dir():
+                continue
+        except OSError:
+            # is_dir() re-raises EACCES (not in pathlib's ignored errnos), so a
+            # fallback under an unreadable root is skipped rather than fatal.
             continue
         seen.add(key)
         resolved.append(normalized)
