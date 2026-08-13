@@ -136,9 +136,11 @@ and asks the search for an increment on existing work; pinning none of them
 makes the baseline the stock path, so every switch the search finds is its own
 discovery.
 
-The CLI serializes these pins into `INFERENCE_OPTIMIZER_EXTRA_ENV` as a JSON
-object. **Forward every pin as its own `--extra-env` flag** — a dropped pin is
-lost silently.
+The CLI persists these pins in `state.json` and serializes them into
+`INFERENCE_OPTIMIZER_EXTRA_ENV` as a JSON object for the executors.
+**Forward every pin as its own `--extra-env` flag** — a dropped pin is lost
+silently. On `--resume` the persisted pins are re-exported, so they only need
+re-passing when you want to change them.
 
 ## The FRAMEWORK_AGENT phase
 

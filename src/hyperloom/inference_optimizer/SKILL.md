@@ -1028,6 +1028,16 @@ Reuse the Launch template above with these diffs: drop `--model`, add
 baseline, current best, params-search state, event history, and kernel-agent
 artifacts; the CLI clears stale `stop_reason` and `crash_count` before retrying.
 
+**The launch shape does not need re-passing.** `state.json` is the authority for
+it, so a bare `--resume` keeps `--server-args`, every `--extra-env` pin,
+`--reference-script`, `--nodes`, the robustness flags (including
+`--robustness-disable-server-probe`) and the warm-replay gates from the original
+launch — the CLI re-exports the derived env from the persisted state and prints
+each one it restored. Re-pass a flag only to *change* it: an explicit flag on
+the resume still wins and is persisted as the new value for later resumes. This
+is what lets `robustness_monitor.sh` auto-resume a crashed run without knowing
+the original command line.
+
 ## Robustness Monitor for Long Runs
 
 For runs > 5 min, start a monitor in its own `setsid nohup` process. It polls

@@ -35,10 +35,10 @@ from .kb import (
 from .backends import (
     _build_backends,
     _build_proposal_scorer,
-    _build_robustness_options,
     _official_anthropic_only,
     _official_openai_only,
     _robustness_server_configured,
+    resolve_robustness_options,
 )
 from .model_gate import (
     _autodetect_gpu_type,
@@ -58,6 +58,7 @@ from .bootstrap import (
     _reconcile_crash_count,
     _seed_shared_state,
     _snapshot_system_prompts,
+    parse_operator_extra_env,
     resolve_model_display_name,
 )
 from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
@@ -465,79 +466,6 @@ def _acquire_session_lock_or_exit(session_dir: Path) -> SessionLock:
         )
         sys.exit(SESSION_BUSY_EXIT_CODE)
     return lock
-
-
-def _resume_safe_flag(
-    args: argparse.Namespace,
-    arg_name: str,
-    manifest: dict | None,
-    manifest_key: str,
-    *,
-    default: bool,
-    invert: bool = False,
-) -> bool:
-    """Resolve a boolean CLI flag with resume-safe manifest fallback: explicit arg → manifest → default.
-
-    ``invert=True`` handles the ``--no-*`` pattern (args.no_X True == disable; manifest stores positive form).
-    Lets robustness_monitor.sh resume preserve original intent without re-passing the flag.
-
-    Args:
-        args (argparse.Namespace): The parsed CLI namespace.
-        arg_name (str): The attribute name to read from ``args``.
-        manifest (dict | None): The resume manifest, or ``None``.
-        manifest_key (str): The manifest key holding the persisted value.
-        default (bool): The fallback value when neither arg nor manifest
-            supplies one.
-        invert (bool): When ``True`` apply the ``--no-*`` inversion to the
-            explicit arg.
-
-    Returns:
-        bool: The resolved boolean flag value.
-    """
-    raw_arg = getattr(args, arg_name, None)
-    if isinstance(raw_arg, bool) and raw_arg:
-        return (not raw_arg) if invert else raw_arg
-    if manifest is not None and manifest_key in manifest:
-        stored = manifest.get(manifest_key)
-        if isinstance(stored, bool):
-            return stored
-    return default
-
-
-def _resume_safe_numeric(
-    args: argparse.Namespace,
-    arg_name: str,
-    manifest: dict | None,
-    manifest_key: str,
-    *,
-    default: float,
-) -> float:
-    """Float-valued analog of :func:`_resume_safe_flag`: explicit non-default arg → manifest → default.
-
-    Args:
-        args (argparse.Namespace): The parsed CLI namespace.
-        arg_name (str): The attribute name to read from ``args``.
-        manifest (dict | None): The resume manifest, or ``None``.
-        manifest_key (str): The manifest key holding the persisted value.
-        default (float): The fallback value when neither source supplies one.
-
-    Returns:
-        float: The resolved numeric value.
-    """
-    raw_arg = getattr(args, arg_name, None)
-    if raw_arg is not None:
-        try:
-            v = float(raw_arg)
-        except (TypeError, ValueError):
-            v = None
-        if v is not None and v != default:
-            return v
-    if manifest is not None and manifest_key in manifest:
-        try:
-            return float(manifest.get(manifest_key) or default)
-        except (TypeError, ValueError):
-            pass
-    return default
 
 
 # Sentinel returned by _probe_llm_catalog when the gateway has no /models route
@@ -1412,6 +1340,36 @@ def _export_workload_envs_for_optimize(
     os.environ["EP"] = str(max(1, int(ep_resolved or 1)))
 
 
+def _export_operator_launch_shape(
+    *,
+    server_args: str,
+    extra_env: dict[str, str],
+) -> None:
+    """Project the operator's ``--server-args`` / ``--extra-env`` into env.
+
+    These are internal handoffs for the in-process executors (e.g. the explore
+    aiter-MoE filter honours a pinned ``SGLANG_USE_AITER=0`` against variants
+    that would flip it back on), not a public config API. The env is derived
+    state: a fresh launch feeds it from argv and a resume feeds it from the
+    persisted SharedState, so the two paths serve the same contract.
+
+    Empty inputs clear the variables rather than leaving a stale value behind,
+    which matters when one shell launches several sessions in sequence.
+
+    Args:
+        server_args: The resolved ``--server-args`` string, possibly empty.
+        extra_env: The resolved ``--extra-env`` pins, possibly empty.
+    """
+    if server_args:
+        os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = server_args
+    else:
+        os.environ.pop("INFERENCE_OPTIMIZER_SERVER_ARGS", None)
+    if extra_env:
+        os.environ["INFERENCE_OPTIMIZER_EXTRA_ENV"] = json.dumps(extra_env)
+    else:
+        os.environ.pop("INFERENCE_OPTIMIZER_EXTRA_ENV", None)
+
+
 # Terminal stop_reasons that represent a clean, successful optimizer run (exit 0).
 # Anything else (baseline / preflight failures, crashes, enablement stalls) exits
 # non-zero so CI surfaces genuine problems.
@@ -1492,19 +1450,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if nodes_resolved >= 2:
         os.environ["INFERENCE_OPTIMIZER_GPUS_PER_NODE"] = str(gpus_per_node_resolved)
         os.environ["INFERENCE_OPTIMIZER_MN_BACKEND"] = _resolve_mn_backend(args)
-    operator_server_args = str(getattr(args, "server_args", "") or "").strip()
-    if operator_server_args:
-        os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = operator_server_args
-    # Operator --extra-env pins, serialized for downstream executors (e.g. the
-    # explore aiter-MoE filter honours a pinned SGLANG_USE_AITER=0 against
-    # variants that would flip it back on). Internal handoff, not a public API.
-    _operator_extra_env: dict[str, str] = {}
-    for _item in getattr(args, "extra_env", None) or []:
-        _k, _sep, _v = str(_item).partition("=")
-        if _sep and _k.strip():
-            _operator_extra_env[_k.strip()] = _v
-    if _operator_extra_env:
-        os.environ["INFERENCE_OPTIMIZER_EXTRA_ENV"] = json.dumps(_operator_extra_env)
+    _export_operator_launch_shape(
+        server_args=str(getattr(args, "server_args", "") or "").strip(),
+        extra_env=parse_operator_extra_env(args),
+    )
     # Project resolved workload knobs into env for the fresh-launch path only.
     # A resume must NOT export here: ``args.tp``/etc. are still unresolved
     # (``None`` -> 1) because the persisted SharedState is loaded later; the
@@ -1724,6 +1673,50 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if getattr(state, "framework_version", ""):
             os.environ["FRAMEWORK_VERSION"] = state.framework_version
             print(f"  re-exported FRAMEWORK_VERSION: {state.framework_version}")
+        # Operator launch shape. An explicit flag on this resume still wins;
+        # otherwise the persisted value is re-exported so a resume that only
+        # passes --resume (the robustness monitor's auto-restart, and the
+        # hand-typed form the SKILL documents) keeps serving the same flags and
+        # env pins the original launch did.
+        _resume_server_args = str(getattr(args, "server_args", "") or "").strip() or str(
+            getattr(state, "operator_server_args", "") or ""
+        ).strip()
+        _resume_extra_env = parse_operator_extra_env(args) or dict(getattr(state, "operator_extra_env", {}) or {})
+        _export_operator_launch_shape(
+            server_args=_resume_server_args,
+            extra_env=_resume_extra_env,
+        )
+        state.operator_server_args = _resume_server_args
+        state.operator_extra_env = _resume_extra_env
+        if _resume_server_args:
+            print(f"  re-exported server_args   : {_resume_server_args}")
+        if _resume_extra_env:
+            print(f"  re-exported extra_env     : {','.join(sorted(_resume_extra_env))}")
+        # --nodes is not re-passed by the monitor's resume. The multi-node
+        # executors prefer multi_node_state.json, but the CLI-level policy
+        # derived from the count (robustness multi-node defaults, IR-8) reads
+        # args/env, so restore both from the persisted value.
+        _resume_nodes = max(1, int(getattr(state, "nodes", 1) or 1))
+        if _resume_nodes > 1 and int(getattr(args, "nodes", 1) or 1) <= 1:
+            args.nodes = _resume_nodes
+            os.environ["INFERENCE_OPTIMIZER_NODES"] = str(_resume_nodes)
+            print(f"  re-exported nodes         : {_resume_nodes}")
+        # Warm-replay gates: an explicit flag on this resume overrides the
+        # persisted value, otherwise the persisted one stands. A non-default
+        # numeric is the only available "operator set this" signal — the parser
+        # gives these flags real defaults rather than None.
+        if bool(getattr(args, "no_warm_replay", False)):
+            state.warm_replay_enabled = False
+        for _wr_attr, _wr_default in (
+            ("warm_replay_min_confidence", 0.7),
+            ("warm_replay_min_reproduce_pct", 0.8),
+        ):
+            try:
+                _wr_value = float(getattr(args, _wr_attr, None))
+            except (TypeError, ValueError):
+                continue
+            if _wr_value != _wr_default:
+                setattr(state, _wr_attr, _wr_value)
         # Honour persisted kernel_enabled on resume; CLI --no-kernel can still override.
         if not state.kernel_enabled:
             args.no_kernel = True
@@ -2016,7 +2009,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             model=str(args.model) if args.model else "",
             launch_info_file=getattr(args, "launch_info_file", None),
         )
-        _seed_shared_state(
+        state = _seed_shared_state(
             session_dir,
             args,
             session_id=manifest["session_id"],
@@ -2157,7 +2150,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Resolve robustness backend choice + runtime root, mirroring critic.
     robustness_choice = _resolve_robustness_choice(args)
     robustness_agent_root: Path | None = None
-    robustness_options = _build_robustness_options(args)
+    robustness_options = resolve_robustness_options(args, state)
+    state.robustness_options = dict(robustness_options)
+    # Persist the launch shape resolved above (and, on resume, the flags the
+    # resume block folded back in) before the Coordinator reads SharedState off
+    # disk — otherwise these stay in-memory only and the *next* resume falls
+    # back to defaults all over again.
+    state.save(session_dir)
     if robustness_choice == "agent":
         robustness_agent_root = _resolve_agent_root("robustness")
         if robustness_agent_root is None:
@@ -2224,30 +2223,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         proposal_scorer=_build_proposal_scorer(args, session_dir),
         # Warm-recipe replay controls. Default ON; fires when
         # warm_start_recipe.confidence >= min_confidence and the measured gain
-        # reproduces at least min_reproduce_pct of the recipe's claim. Manifest
-        # is the persistent authority across restarts.
-        warm_replay_enabled=_resume_safe_flag(
-            args,
-            "no_warm_replay",
-            manifest,
-            "warm_replay_enabled",
-            default=True,
-            invert=True,
-        ),
-        warm_replay_min_confidence=_resume_safe_numeric(
-            args,
-            "warm_replay_min_confidence",
-            manifest,
-            "warm_replay_min_confidence",
-            default=0.7,
-        ),
-        warm_replay_min_reproduce_pct=_resume_safe_numeric(
-            args,
-            "warm_replay_min_reproduce_pct",
-            manifest,
-            "warm_replay_min_reproduce_pct",
-            default=0.8,
-        ),
+        # reproduces at least min_reproduce_pct of the recipe's claim.
+        # SharedState is the persistent authority across restarts.
+        warm_replay_enabled=bool(getattr(state, "warm_replay_enabled", True)),
+        warm_replay_min_confidence=float(getattr(state, "warm_replay_min_confidence", 0.7) or 0.7),
+        warm_replay_min_reproduce_pct=float(getattr(state, "warm_replay_min_reproduce_pct", 0.8) or 0.8),
     )
     framework_for_prompt = os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
     max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
