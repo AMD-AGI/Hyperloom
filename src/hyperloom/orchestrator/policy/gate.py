@@ -523,6 +523,10 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
     {
         "current_best",
         "stop_reason",
+        # Paired with stop_reason and written by the same setter: locking one
+        # without the other lets an update_state move the session's end time
+        # away from the reason it was stamped for.
+        "stop_ts",
         "last_tick_exception",
         "cumulative_gain",
         "cumulative_gain_validated",
