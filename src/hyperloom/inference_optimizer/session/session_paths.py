@@ -71,10 +71,6 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset(
 )
 
 
-# Suffix probes before unique_runs_dir gives up; a task retried this often has
-# a problem the next suffix will not solve.
-_MAX_RUNS_DIR_ATTEMPTS: int = 200
-
 # Action names that own a ``runs/<kind>/<task_id>/`` workspace.
 _RUNS_ACTIONS: frozenset[str] = frozenset(
     a.name for a in ACTION_CATALOGUE.values() if a.pipeline_phase in _RUNS_WORKSPACE_PHASES
@@ -152,6 +148,10 @@ def runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
     return runs_root(session_dir) / a / tid
 
 
+# Suffix probes before unique_runs_dir gives up.
+_MAX_RUNS_DIR_ATTEMPTS: int = 200
+
+
 def unique_runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
     """Create a fresh :func:`runs_dir` workspace, suffixing ``-2``, ``-3``, …
     when earlier attempts already claimed the name. ``mkdir(exist_ok=False)``
@@ -172,13 +172,13 @@ def unique_runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
         RuntimeError: If every suffix up to ``_MAX_RUNS_DIR_ATTEMPTS`` is taken.
     """
     base = runs_dir(session_dir, action, task_id)
-    candidate = base
-    for attempt in range(2, _MAX_RUNS_DIR_ATTEMPTS + 2):
+    for suffix in range(1, _MAX_RUNS_DIR_ATTEMPTS + 1):
+        candidate = base if suffix == 1 else base.with_name(f"{base.name}-{suffix}")
         try:
             candidate.mkdir(parents=True, exist_ok=False)
             return candidate
         except FileExistsError:
-            candidate = base.with_name(f"{base.name}-{attempt}")
+            continue
     raise RuntimeError(f"unique_runs_dir: {base} still taken after {_MAX_RUNS_DIR_ATTEMPTS} suffixes")
 
 

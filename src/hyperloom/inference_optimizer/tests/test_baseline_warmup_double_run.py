@@ -61,8 +61,8 @@ def _write_yaml(path: Path, *, framework: str = "vllm") -> None:
         yaml.safe_dump(cfg, f)
 
 
-def _fake_workspace(slot: Path, *, tput: float, name: str = "benchmark_vllm_20260602_010101") -> Path:
-    ws = slot / name
+def _fake_workspace(slot: Path, *, tput: float) -> Path:
+    ws = slot / "benchmark_vllm_20260602_010101"
     ws.mkdir(parents=True)
     (ws / "benchmark_report.json").write_text(
         json.dumps(
@@ -907,9 +907,8 @@ def test_baseline_rejects_stale_workspace_when_the_run_produced_none(tmp_path, m
 def test_baseline_picks_fresh_workspace_sorting_before_a_stale_one(tmp_path, monkeypatch):
     """The fresh workspace wins even when the stale one sorts last.
 
-    This is the case the lexicographic-last glob got wrong: every other test
-    here happens to create a fresh name that also sorts last, so it would pass
-    against the old code too.
+    Every other case here creates a fresh name that also sorts last, so they
+    pass against the lexicographic-last glob this replaced.
     """
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
@@ -929,11 +928,7 @@ def test_baseline_picks_fresh_workspace_sorting_before_a_stale_one(tmp_path, mon
     os.utime(stale, (old, old))
 
     def fake_run(cmd, *args, **kwargs):
-        _fake_workspace(
-            Path(cmd[cmd.index("--output-dir") + 1]),
-            tput=4000.0,
-            name="benchmark_vllm_20260602_010101",
-        )
+        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]), tput=4000.0)
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     executor = _executor(base, tmp_path, baseline_double_run=False)

@@ -2841,9 +2841,7 @@ class BaselineExecutor:
                 proc_stdout = proc.stdout
                 proc_stderr = proc.stderr
         except subprocess.TimeoutExpired as exc:
-            timeout_destination = (
-                select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
-            )
+            timeout_destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
             timeout_harvested = harvest_leaked_artifacts(
                 timeout_destination,
                 subprocess_started_unix=subprocess_started_unix,
@@ -2863,9 +2861,7 @@ class BaselineExecutor:
         # A stall reap leaves no benchmark_* workspace; a distinct error_class
         # lets the coordinator fast-fail instead of burning the full timeout.
         if proc_returncode == DETOKENIZER_STALL_RETURNCODE:
-            stall_destination = (
-                select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
-            )
+            stall_destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
             stall_harvested = harvest_leaked_artifacts(
                 stall_destination,
                 subprocess_started_unix=subprocess_started_unix,

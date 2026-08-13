@@ -1717,9 +1717,7 @@ async def run_grid(
             )
         except subprocess.TimeoutExpired as exc:
             # Harvest pre-timeout leaks.
-            to_destination = (
-                select_run_workspace(slot, known_before=slot_workspaces_before) or slot
-            )
+            to_destination = select_run_workspace(slot, known_before=slot_workspaces_before) or slot
             to_harvested = harvest_leaked_artifacts(
                 to_destination,
                 subprocess_started_unix=variant_started_unix,
@@ -1778,9 +1776,7 @@ async def run_grid(
                 max(0.0, time.time() - variant_started_unix),
                 2,
             )
-            sd_destination = (
-                select_run_workspace(slot, known_before=slot_workspaces_before) or slot
-            )
+            sd_destination = select_run_workspace(slot, known_before=slot_workspaces_before) or slot
             sd_harvested = harvest_leaked_artifacts(
                 sd_destination,
                 subprocess_started_unix=variant_started_unix,
@@ -1832,9 +1828,7 @@ async def run_grid(
                 max(0.0, time.time() - variant_started_unix),
                 2,
             )
-            ds_destination = (
-                select_run_workspace(slot, known_before=slot_workspaces_before) or slot
-            )
+            ds_destination = select_run_workspace(slot, known_before=slot_workspaces_before) or slot
             ds_harvested = harvest_leaked_artifacts(
                 ds_destination,
                 subprocess_started_unix=variant_started_unix,
@@ -1885,9 +1879,7 @@ async def run_grid(
                 max(0.0, time.time() - variant_started_unix),
                 2,
             )
-            ok_destination = (
-                select_run_workspace(slot, known_before=slot_workspaces_before) or slot
-            )
+            ok_destination = select_run_workspace(slot, known_before=slot_workspaces_before) or slot
             ok_harvested = harvest_leaked_artifacts(
                 ok_destination,
                 subprocess_started_unix=variant_started_unix,

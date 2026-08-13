@@ -18,8 +18,8 @@ action-name lists.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from collections.abc import Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
 
 
@@ -44,7 +44,6 @@ KERNEL_ACTION_REQUEST_KINDS: Mapping[str, str] = MappingProxyType(
     }
 )
 
-# A kernel-owned action with no kind would reach the prompt and fail there.
 assert set(KERNEL_ACTION_REQUEST_KINDS) == KERNEL_AGENT_OWNED_ACTIONS
 
 
@@ -139,7 +138,7 @@ class ActionMetadata:
     requires_lanes: tuple[str, ...] = ()
 
 
-_CATALOGUE: dict[str, ActionMetadata] = {
+ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType({
     "baseline": ActionMetadata(
         name="baseline",
         family="prep",
@@ -454,11 +453,7 @@ _CATALOGUE: dict[str, ActionMetadata] = {
             "'no_target_gpu_configured' marker. Advisory only."
         ),
     ),
-}
-
-# Read-only: the Coordinator shares this mapping as a class attribute, so a
-# stray item assignment would reach every session in the process.
-ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(_CATALOGUE)
+})
 
 
 __all__ = [
