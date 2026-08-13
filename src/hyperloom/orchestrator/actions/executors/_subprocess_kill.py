@@ -33,8 +33,35 @@ from ..cancel_channel import CancelScope, cancel_scope_listener
 log = logging.getLogger(__name__)
 
 
-# Grace window between SIGTERM and SIGKILL.
-_TERM_GRACE_SECONDS = 5.0
+# Grace window between SIGTERM and SIGKILL, here and for a driver-side teardown
+# of a server a round left behind: the same signal, the same thing being waited
+# for.
+TERM_GRACE_SECONDS: float = 5.0
+
+# How long the reaper waits to collect the SIGKILL'd child before giving up on it.
+_REAP_COLLECT_SECONDS: float = 1.0
+
+# How long draining a reaped child's capture threads is given.
+_CAPTURE_DRAIN_SECONDS: float = 2.0
+
+# How often the blocking side looks up from the child to check its stop gates --
+# the session deadline and the cancel scope among them. Short enough that the
+# check costs a stop almost nothing on top of the reap, long enough not to spin.
+STOP_GATE_POLL_SECONDS: float = 0.5
+
+# What stopping a running round costs, end to end, from the moment something asks
+# it to: noticing at the poll, SIGTERM'ing the tree, waiting out the grace before
+# SIGKILL, collecting the child, and draining its pipes.
+#
+# Every window that waits for a round to stop itself is derived from this rather
+# than picked next to it -- the Ray submitter's grace and the dispatcher's
+# cooperative window both are. A window shorter than what stopping costs looks
+# generous in isolation and still expires every time, and what it discards is the
+# honest sentinel the round was about to return, replacing it with a hard kill
+# and an unattributed failure.
+COOPERATIVE_REAP_BUDGET_SEC: float = (
+    STOP_GATE_POLL_SECONDS + TERM_GRACE_SECONDS + _REAP_COLLECT_SECONDS + _CAPTURE_DRAIN_SECONDS
+)
 
 
 def new_session_kwargs() -> dict:
@@ -99,7 +126,7 @@ def _signal_group(pgid: int, sig: int) -> None:
 def kill_my_spawned_server(
     proc: subprocess.Popen | None,
     *,
-    grace_seconds: float = _TERM_GRACE_SECONDS,
+    grace_seconds: float = TERM_GRACE_SECONDS,
 ) -> None:
     """Tear down the entire process tree rooted at ``proc``.
 
@@ -171,12 +198,13 @@ def kill_my_spawned_server(
         _signal_group(pgid, signal.SIGKILL)
 
     try:
-        proc.wait(timeout=1.0)
+        proc.wait(timeout=_REAP_COLLECT_SECONDS)
     except subprocess.TimeoutExpired:
         log.warning(
-            "_subprocess_kill: proc.wait() did not return within 1s "
+            "_subprocess_kill: proc.wait() did not return within %.0fs "
             "after SIGKILL'ing pgid=%d (pid=%d). The reaper may be "
             "wedged; leaving the zombie for init to collect.",
+            _REAP_COLLECT_SECONDS,
             pgid,
             proc.pid,
         )
@@ -830,7 +858,7 @@ def run_with_session_kill(
             except subprocess.TimeoutExpired:
                 kill_my_spawned_server(proc)
                 if capture is not None:
-                    capture.finish(timeout=2.0)
+                    capture.finish(timeout=_CAPTURE_DRAIN_SECONDS)
                 raise
             except _ReapedByWatchdog as exc:
                 kill_my_spawned_server(proc)
@@ -873,7 +901,7 @@ def _finish_capture(capture: _StreamCapture | None, *, text: bool) -> tuple[str 
     empty: str | bytes = "" if text else b""
     if capture is None:
         return empty, empty
-    stdout, stderr = capture.finish(timeout=2.0)
+    stdout, stderr = capture.finish(timeout=_CAPTURE_DRAIN_SECONDS)
     return (
         stdout if stdout is not None else empty,
         stderr if stderr is not None else empty,
@@ -1068,7 +1096,7 @@ def _communicate_with_soft_deadline(
     # any soft deadline with a log present scans.
     soft_watches_log = soft_active and bool(server_log_path)
     scan_active = stall_active or soft_watches_log
-    poll_interval = 0.5
+    poll_interval = STOP_GATE_POLL_SECONDS
     start = time.monotonic()
     dead_marker_since: float | None = None
     # Detokenizer-stall watchdog state: per-log byte offsets consumed so far,
@@ -1201,12 +1229,15 @@ def _communicate_with_soft_deadline(
 
 __all__ = [
     "AGENTX_PREFLIGHT_RETURNCODE",
+    "COOPERATIVE_REAP_BUDGET_SEC",
     "DETOKENIZER_STALL_RETURNCODE",
     "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
     "OVERTIME_KILL_RETURNCODE",
     "SERVER_DEAD_RETURNCODE",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
+    "STOP_GATE_POLL_SECONDS",
+    "TERM_GRACE_SECONDS",
     "kill_my_spawned_server",
     "new_session_kwargs",
     "run_with_session_kill",

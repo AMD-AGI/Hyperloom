@@ -14,6 +14,8 @@ from typing import Any
 
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 
+from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
+
 log = logging.getLogger(__name__)
 
 # Ray-side sentinel returncodes, allocated out of the same space as
@@ -34,18 +36,19 @@ _LEASE_PROBE_TIMEOUT_SEC: float = 30.0
 _CANCEL_POLL_SEC: float = 0.25
 
 # How long the submitter waits for a cancelled round to come back on its own
-# before killing the actor out from under it. The round stops itself the same
-# way the local path does -- notice the scope at its poll, SIGTERM the tree,
-# wait out the grace, drain the pipes -- and that is what this is sized on. It
-# stays under the dispatcher's cooperative window so the honest stop is the one
-# that usually happens, and the kill is what a wedged actor gets.
-_CANCEL_ROUND_GRACE_SEC: float = 8.0
+# before killing the actor out from under it. The round in the actor stops itself
+# exactly the way a local child does, so this is that cost plus the poll the
+# answer is seen at -- derived, not picked, because a grace even slightly short of
+# the reap expires every single time and throws away the sentinel the round was
+# about to hand back. The kill is what a wedged actor gets, not what a working one
+# gets for being ordinary.
+CANCEL_ROUND_GRACE_SEC: float = COOPERATIVE_REAP_BUDGET_SEC + _CANCEL_POLL_SEC
 
 # How long releasing a lease waits for the actor to reap its served process
 # before killing the actor anyway. Sized on what that reap costs -- SIGTERM, the
 # grace, SIGKILL -- and deliberately short: teardown often runs inside the
 # closing window, which is reserved for the report, not for waiting on a server.
-_CLOSE_STOP_TIMEOUT_SEC: float = 10.0
+CLOSE_STOP_TIMEOUT_SEC: float = 10.0
 
 # Method slots the serving actor runs at once: the round, plus room for the
 # cancel that has to reach it. A single-slot actor would queue the cancel behind
@@ -596,7 +599,7 @@ class ServingLease:
         The round attributes its own stop, exactly as the local path does, so
         the sentinel this returns is the actor's whenever the actor answers.
         Only a wedged actor -- one that has not come back within
-        ``_CANCEL_ROUND_GRACE_SEC`` of being asked -- is killed, and only then
+        ``CANCEL_ROUND_GRACE_SEC`` of being asked -- is killed, and only then
         does the submitter attribute the stop on its behalf, because otherwise
         an unattributed failure is what the ledger would read.
 
@@ -631,12 +634,12 @@ class ServingLease:
                     # The actor never took the round, or cannot be reached to be
                     # told about it. Either way nothing in there will stop on its
                     # own, so go straight to the kill.
-                    asked_at -= _CANCEL_ROUND_GRACE_SEC
-            elif time.monotonic() - asked_at >= _CANCEL_ROUND_GRACE_SEC:
+                    asked_at -= CANCEL_ROUND_GRACE_SEC
+            elif time.monotonic() - asked_at >= CANCEL_ROUND_GRACE_SEC:
                 log.warning(
                     "ServingLease: the actor did not return its cancelled round within %.0fs; "
                     "killing it to release the lease",
-                    _CANCEL_ROUND_GRACE_SEC,
+                    CANCEL_ROUND_GRACE_SEC,
                 )
                 # Straight to the kill: an actor that has not answered is not
                 # going to answer a graceful stop either, and waiting for one
@@ -646,7 +649,7 @@ class ServingLease:
                     ORCHESTRATOR_CANCELLED_RETURNCODE,
                     "",
                     "the orchestrator cancelled this action; its Ray actor was killed after "
-                    f"{_CANCEL_ROUND_GRACE_SEC:.0f}s without returning the round",
+                    f"{CANCEL_ROUND_GRACE_SEC:.0f}s without returning the round",
                 )
 
     def _ask_actor_to_cancel(self, reason: str) -> bool:
@@ -683,7 +686,7 @@ class ServingLease:
         try:
             import ray  # noqa: PLC0415
 
-            ray.get(self._actor.stop.remote(), timeout=_CLOSE_STOP_TIMEOUT_SEC)
+            ray.get(self._actor.stop.remote(), timeout=CLOSE_STOP_TIMEOUT_SEC)
         except Exception as exc:  # noqa: BLE001 — the kill below is the backstop
             log.warning("ServingLease.close: the actor did not stop its server: %r", exc)
         self._kill_actor()

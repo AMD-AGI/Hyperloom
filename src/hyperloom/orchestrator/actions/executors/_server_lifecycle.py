@@ -24,7 +24,7 @@ from typing import Any
 
 import yaml
 
-from ._subprocess_kill import _process_group_alive, _signal_group
+from ._subprocess_kill import TERM_GRACE_SECONDS, _process_group_alive, _signal_group
 
 
 log = logging.getLogger(__name__)
@@ -278,7 +278,7 @@ def teardown_lifecycle_server(
         # Server is setsid'd, so pgid == pid unless the pid file gave one.
         pgid = server_pgid if server_pgid is not None else server_pid
         _signal_group(pgid, signal.SIGTERM)
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + TERM_GRACE_SECONDS
         while time.monotonic() < deadline:
             if not _process_group_alive(pgid):
                 break

@@ -41,12 +41,18 @@ from hyperloom.orchestrator.actions.cancel_channel import (
     current_cancel_scope,
     use_cancel_scope,
 )
+from hyperloom.orchestrator.actions.executors._ray_serving import CANCEL_ROUND_GRACE_SEC
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+    COOPERATIVE_REAP_BUDGET_SEC,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
+    STOP_GATE_POLL_SECONDS,
     run_with_session_kill,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.dispatcher import _COOPERATIVE_CANCEL_GRACE_SEC
+from hyperloom.orchestrator.loop.dispatcher import (
+    _CANCEL_NOTICE_SEC,
+    _COOPERATIVE_CANCEL_GRACE_SEC,
+)
 from hyperloom.orchestrator.loop.coordinator_helpers import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
@@ -678,6 +684,40 @@ def _sleeps_in_a_thread(started: asyncio.Event, *, seconds: float = 2.0):
     return _run
 
 
+class TestTheCooperativeStopWindowsCompose:
+    """Three waits on the same stop, which only mean anything together.
+
+    Each was picked to look reasonable beside the others -- ten seconds at the
+    dispatcher, eight for a round in a Ray actor, five for the SIGTERM grace --
+    and composed they said the dispatcher gives up before the work it is waiting
+    for can finish. A window a hair short of what stopping costs does not expire
+    occasionally: it expires every time, and what it discards is the attributed
+    sentinel the round was about to return.
+
+    The components are spelled out here rather than re-derived from the constants
+    under test, so a change to one of them has to be argued for.
+    """
+
+    def test_the_reap_budget_is_what_stopping_a_round_costs(self):
+        # Notice at the 0.5s poll, SIGTERM and wait out the 5s grace, collect the
+        # SIGKILL'd child for 1s, drain its pipes for 2s.
+        assert COOPERATIVE_REAP_BUDGET_SEC == 0.5 + 5.0 + 1.0 + 2.0
+
+    def test_the_ray_grace_outlasts_a_round_stopping_itself(self):
+        """A round in an actor stops the same way; the grace has to cover it."""
+        assert CANCEL_ROUND_GRACE_SEC >= COOPERATIVE_REAP_BUDGET_SEC
+
+    def test_the_dispatcher_outlasts_the_slowest_honest_stop(self):
+        # The Ray path is the long one: 8.5s for the round to stop itself, 0.25s
+        # for the answer to be seen, then up to 10s to release the lease it held.
+        assert _COOPERATIVE_CANCEL_GRACE_SEC >= 8.5 + 0.25 + 10.0
+
+    def test_the_notice_window_is_the_poll_the_scope_is_checked_at(self):
+        """Nothing is listening yet is a claim about the poll, not about the work."""
+        assert _CANCEL_NOTICE_SEC >= STOP_GATE_POLL_SECONDS
+        assert _CANCEL_NOTICE_SEC < COOPERATIVE_REAP_BUDGET_SEC
+
+
 class TestTheCancelChannel:
     """The channel itself: what it carries, and how far it reaches."""
 
@@ -850,7 +890,7 @@ class TestCancellingARoundInsideARayLease:
         """A wedged actor must not hold the lease open, and must not go unattributed."""
         from hyperloom.orchestrator.actions.executors import _ray_serving as rs
 
-        monkeypatch.setattr(rs, "_CANCEL_ROUND_GRACE_SEC", 0.5)
+        monkeypatch.setattr(rs, "CANCEL_ROUND_GRACE_SEC", 0.5)
         monkeypatch.setattr(rs.ServingLease, "_ask_actor_to_cancel", lambda _self, _reason: False)
         outcome: dict[str, Any] = {}
         await _start_action(
