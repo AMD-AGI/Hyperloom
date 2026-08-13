@@ -609,10 +609,12 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append(f"- pruned_families: {summary['pruned_families'] or '(none)'}")
     plat = summary.get("platform") or {}
     if plat.get("status") != "ok":
-        # Say why it is missing rather than omitting the line: a silent absence
-        # is indistinguishable from a host that was never checked.
-        if plat.get("reason"):
-            lines.append(f"- platform       : not recorded — {plat['reason']}")
+        # Always emit the line, with the reason when there is one: a silent
+        # absence is indistinguishable from a host that was never checked, and
+        # the no-reason case is the one that needs saying -- it is a summary
+        # written before this field existed, not a probe that failed.
+        why = str(plat.get("reason") or "").strip()
+        lines.append(f"- platform       : not recorded{f' — {why}' if why else ''}")
     else:
         if plat.get("multi_node_session"):
             lines.append(
