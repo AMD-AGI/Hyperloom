@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from types import SimpleNamespace
@@ -442,6 +443,53 @@ def test_a_resume_after_a_stop_re_anchors_the_budget_on_the_new_leg() -> None:
     assert state.stop_ts == ""
     assert state.closing_phase is False
     assert state.crash_count == 0
+
+
+def test_a_resume_banks_what_the_stopped_leg_spent_in_its_phase() -> None:
+    """A phase segment is only durable once banked, and stopping never banks it."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
+    state.phase = "PRELUDE"
+    state.phase_started_ts = "2026-08-01T00:00:00+00:00"
+    state.phase_started_unix = 1785_542_400.0
+    state.set_stop_reason("time_exhausted")
+    # Pin where the leg ended so the banked segment is a checkable number.
+    state.stop_ts = "2026-08-01T00:30:00+00:00"
+
+    cb._begin_resume_leg(state, reanchor_budget=True)
+
+    assert state.phase_elapsed_totals["PRELUDE"] == 1800.0
+    assert state.stop_ts == ""
+
+
+def test_a_second_resume_banks_only_the_leg_that_just_stopped() -> None:
+    """The first leg's segment is already durable; re-banking it would double-charge the phase."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
+    state.phase = "PRELUDE"
+    state.phase_started_ts = "2026-08-01T00:00:00+00:00"
+    state.phase_started_unix = 1785_542_400.0
+    state.set_stop_reason("time_exhausted")
+    state.stop_ts = "2026-08-01T00:30:00+00:00"
+    cb._begin_resume_leg(state, reanchor_budget=True)
+
+    # A second leg runs an hour from where it picked up, still in PRELUDE.
+    leg_two_start = datetime.fromisoformat(state.resumed_ts)
+    state.set_stop_reason("time_exhausted")
+    state.stop_ts = (leg_two_start + timedelta(hours=1)).isoformat()
+    cb._begin_resume_leg(state, reanchor_budget=True)
+
+    assert state.phase_elapsed_totals["PRELUDE"] == 1800.0 + 3600.0
+
+
+def test_a_resume_with_no_recorded_stop_leaves_the_segment_unbanked() -> None:
+    """A clean stop records no end time; under-charge the phase rather than guess one."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
+    state.phase = "PRELUDE"
+    state.phase_started_ts = "2026-08-01T00:00:00+00:00"
+    state.phase_started_unix = 1785_542_400.0
+
+    cb._begin_resume_leg(state, reanchor_budget=False)
+
+    assert state.phase_elapsed_totals == {}
 
 
 def test_reconcile_crash_count_updates_state_and_final_json(tmp_path: Path) -> None:

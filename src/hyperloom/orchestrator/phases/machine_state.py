@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from hyperloom.common.coerce import to_unix
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
@@ -845,6 +846,19 @@ def _phase_started_unix(state: Any) -> float:
         return 0.0
 
 
+def _resume_boundary_unix(state: Any) -> float:
+    """Return when the current run leg began, i.e. the most recent ``--resume``.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``resumed_ts``.
+
+    Returns:
+        float: Leg start in seconds since the epoch, or ``0.0`` for a session
+        that has only ever run once (or an unparseable stamp).
+    """
+    return max(0.0, to_unix(getattr(state, "resumed_ts", ""), 0.0) or 0.0)
+
+
 def _kernel_idle_since_unix(state: Any) -> float:
     """Return when the current KERNEL idle streak opened, defensively coerced.
 
@@ -933,6 +947,18 @@ def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float
     Returns ``0.0`` when the phase start timestamp is unset (phase not yet
     entered) so callers can treat "not started" as zero elapsed.
 
+    Exiting the process is not a phase transition, so ``phase_started_unix``
+    survives a ``--resume`` and the entry it stamps spans both run legs. The
+    current leg's boundary (:func:`_resume_boundary_unix`) therefore floors the
+    segment: the phase was not executing while nothing was, and a session
+    resumed days later would otherwise read as having overspent every phase
+    ceiling before it did any work. The floor only applies to the entry the
+    stop interrupted — a later entry stamps a newer ``phase_started_unix``.
+
+    The previous leg's own share of that entry is not measured here; a resume
+    banks it into ``phase_elapsed_totals`` when the stopped leg recorded when
+    it ended.
+
     Args:
         state (Any): Frozen SharedState view exposing ``phase_started_unix``.
         now_unix (float | None): Override for the current time; defaults to
@@ -944,6 +970,7 @@ def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float
     started = _phase_started_unix(state)
     if started <= 0:
         return 0.0
+    started = max(started, _resume_boundary_unix(state))
     now = float(now_unix if now_unix is not None else _now_unix(state))
     return max(0.0, now - started)
 
@@ -2827,6 +2854,51 @@ def make_lifecycle_event(
 # Phase-transition / lifecycle write-owner functions (take ``state`` first and
 # own the phase_history / lifecycle bookkeeping). ``SharedState`` exposes
 # forwarding shims so existing callers reach these.
+def bank_phase_segment(state, *, until_unix: float) -> float:
+    """Bank the current phase's live segment, ending at ``until_unix``, into the durable totals.
+
+    ``phase_started_unix`` holds the live segment and is overwritten by the next
+    phase entry, so a phase's spend only survives once it is banked here. Called
+    at every transition out of a phase, and by a resume for the segment the
+    stopped leg never transitioned out of.
+
+    Args:
+        state: The live SharedState; ``phase_elapsed_totals`` (and the EXPLORE
+            accumulator) are mutated in place.
+        until_unix (float): When the segment ended, in seconds since the epoch.
+
+    Returns:
+        float: Seconds banked. ``0.0`` when no phase is set, which is the very
+        first transition of a fresh session — it has no segment to bank.
+    """
+    phase = (getattr(state, "phase", "") or "").strip().upper()
+    if not phase:
+        return 0.0
+    segment = phase_elapsed_seconds(state, now_unix=until_unix)
+    totals = getattr(state, "phase_elapsed_totals", None)
+    totals = dict(totals) if isinstance(totals, dict) else {}
+    try:
+        banked = max(0.0, float(totals.get(phase, 0.0) or 0.0))
+    except (TypeError, ValueError):
+        banked = 0.0
+    totals[phase] = banked + segment
+    state.phase_elapsed_totals = totals
+    # EXPLORE keeps its own accumulator: it carries a tri-state "unknown" for
+    # legacy resumes that status telemetry reports as absent, whereas
+    # ``phase_elapsed_totals`` must never report "unknown" — a budget guard
+    # would read that as "no cap". The two answer different questions.
+    if phase == PHASE_EXPLORE:
+        raw_accumulated = getattr(state, "explore_elapsed_accum_s", 0.0)
+        if raw_accumulated is not None:
+            try:
+                accumulated = float(raw_accumulated or 0.0)
+            except (TypeError, ValueError):
+                state.explore_elapsed_accum_s = None
+            else:
+                state.explore_elapsed_accum_s = accumulated + segment
+    return segment
+
+
 def record_phase_transition(
     state,
     *,
@@ -2857,35 +2929,9 @@ def record_phase_transition(
     now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
     now_unix = float(ts_unix if ts_unix is not None else _time.time())
     from_phase = (state.phase or "").strip().upper()
-    if from_phase:
-        # Bank the finished segment for EVERY phase so the budget guards can
-        # charge a phase for the whole run instead of the current entry. Empty
-        # ``from_phase`` is the very first transition of a fresh session, which
-        # has no segment to bank.
-        totals = getattr(state, "phase_elapsed_totals", None)
-        totals = dict(totals) if isinstance(totals, dict) else {}
-        try:
-            banked = max(0.0, float(totals.get(from_phase, 0.0) or 0.0))
-        except (TypeError, ValueError):
-            banked = 0.0
-        totals[from_phase] = banked + phase_elapsed_seconds(state, now_unix=now_unix)
-        state.phase_elapsed_totals = totals
-    # EXPLORE keeps its own accumulator: it carries a tri-state "unknown" for
-    # legacy resumes that status telemetry reports as absent, whereas
-    # ``phase_elapsed_totals`` must never report "unknown" — a budget guard
-    # would read that as "no cap". The two answer different questions.
-    if from_phase == PHASE_EXPLORE:
-        raw_accumulated = getattr(state, "explore_elapsed_accum_s", 0.0)
-        if raw_accumulated is not None:
-            try:
-                accumulated = float(raw_accumulated or 0.0)
-            except (TypeError, ValueError):
-                state.explore_elapsed_accum_s = None
-            else:
-                state.explore_elapsed_accum_s = accumulated + phase_elapsed_seconds(
-                    state,
-                    now_unix=now_unix,
-                )
+    # Bank the finished segment for EVERY phase so the budget guards can charge
+    # a phase for the whole run instead of the current entry.
+    bank_phase_segment(state, until_unix=now_unix)
     row = make_history_row(
         from_phase=from_phase,
         to_phase=to_phase,
@@ -3071,6 +3117,7 @@ __all__ = [
     "compute_kernel_progress_fingerprint",
     "kernel_work_pending",
     "make_history_row",
+    "bank_phase_segment",
     "explore_elapsed_seconds",
     "normalize_budget_pct",
     "phase_budget_remaining_seconds",
