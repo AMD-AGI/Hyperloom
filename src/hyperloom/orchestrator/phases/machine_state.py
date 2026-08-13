@@ -352,6 +352,26 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_CLOSE: 0.02,
 }
 
+# Share of the session PRELUDE may spend before its optional arms are dropped,
+# and the share held for the phases that actually produce a result.
+#
+# PRELUDE's ``DEFAULT_PHASE_BUDGET_PCT`` entry is 3%, but nothing enforced it:
+# :func:`exit_normal_prelude` tests only whether a baseline landed, so the phase
+# ran to whatever its contents cost. Two sessions on unrelated models (different
+# quantization, different PRELUDE composition -- one baseline-dominated, one
+# split with a TraceLens roofline) spent 73.8% and 72.8% of a three-hour budget
+# in it, and both reached FRAMEWORK_AGENT with ~47 minutes left against its
+# 108-minute entry threshold. Both budgets were honoured; both sessions produced
+# nothing. Stopping the run on time is necessary and not sufficient -- the
+# phases that spend the budget have to be the ones that produce the result.
+#
+# These bound the preparation rather than the session. They are deliberately
+# looser than 3%: a baseline that legitimately takes an hour should still run,
+# it just cannot also buy an 80-minute roofline out of the optimization phases'
+# time.
+PRELUDE_SPEND_CEILING_PCT: float = 0.40
+OPTIMIZATION_RESERVE_PCT: float = 0.50
+
 # Wall-clock ceiling for an unbounded run (``max_minutes`` == 0): the container
 # lifetime. Used both as the global deadline and as the basis for the absolute
 # per-phase cap so an unbounded run still forces phase rotation.
@@ -1961,8 +1981,185 @@ def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     except (TypeError, ValueError):
         return None
     if tput > 0.0:
-        return "prelude_done", {"baseline_tput": tput}
+        return "prelude_done", {"baseline_tput": tput, **prelude_exit_viability(state)}
     return None
+
+
+def prelude_exit_viability(state: Any) -> dict[str, Any]:
+    """Report whether the budget PRELUDE leaves behind can still fund one optimization round.
+
+    A session can honour its wall clock and still be over: both field sessions
+    left FRAMEWORK_AGENT ~47 minutes against a 108-minute threshold, and every
+    later phase then declined in turn, each for its own local reason. Nothing
+    said the plain thing — preparation had spent the run.
+
+    Stated here, on the exit that caused it, because this is the last moment
+    the answer is actionable and the first moment it is knowable: the baseline
+    is measured, so one benchmark round has a price rather than an estimate.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        dict[str, Any]: Evidence for the phase record; empty when the budget is
+        unbounded or no round has been measured.
+    """
+    usable = _session_usable_seconds(state)
+    try:
+        round_sec = float(getattr(state, "baseline_runtime_sec", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        round_sec = 0.0
+    if usable is None or round_sec <= 0.0:
+        return {}
+    return {
+        "session_usable_sec": round(usable, 1),
+        "measured_round_sec": round(round_sec, 1),
+        "affordable_rounds": round(usable / round_sec, 2),
+        "fits_one_optimization_round": usable >= round_sec,
+    }
+
+
+def append_phase_evidence_row(history: Any, *, key: str, row: dict[str, Any]) -> bool:
+    """Append ``row`` to the current phase's ``evidence[key]`` list.
+
+    Phases record what happened inside them on the newest ``phase_history``
+    row, which the session breakdown exports verbatim. Creates the ``evidence``
+    dict and the list under ``key`` when absent, and replaces a non-list value
+    rather than raising — a malformed row must not take a phase down.
+
+    Args:
+        history (Any): The ``phase_history`` list.
+        key (str): Evidence key holding the list of rows.
+        row (dict[str, Any]): The row to append.
+
+    Returns:
+        bool: ``True`` when the row landed; ``False`` when there was no usable
+        history row to attach it to.
+    """
+    if not isinstance(history, list) or not history:
+        return False
+    current = history[-1]
+    if not isinstance(current, dict):
+        return False
+    evidence = current.get("evidence")
+    if not isinstance(evidence, dict):
+        evidence = {}
+        current["evidence"] = evidence
+    rows = evidence.get(key)
+    if not isinstance(rows, list):
+        rows = []
+        evidence[key] = rows
+    rows.append(row)
+    return True
+
+
+def _session_usable_seconds(state: Any) -> float | None:
+    """Seconds a unit of work may still claim, from the session's own accounting.
+
+    Prefers ``SharedState.session_budget_usable_sec`` — the single number
+    admission control and the grid deadline both read — so this policy cannot
+    disagree with them about how much budget is left. Falls back to the raw
+    remaining time for the frozen views and test doubles that expose attributes
+    only. Called rather than imported because ``shared_state`` imports this
+    module.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        float | None: Usable seconds, or ``None`` when the budget is unbounded.
+    """
+    getter = getattr(state, "session_budget_usable_sec", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:  # noqa: BLE001 — fall back to the attribute path
+            pass
+    return session_remaining_seconds(state)
+
+
+def prelude_can_afford(
+    state: Any,
+    *,
+    expected_cost_sec: float,
+    now_unix: float | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """Decide whether PRELUDE can still buy an optional arm costing ``expected_cost_sec``.
+
+    Two bounds apply and the tighter wins: what is left of PRELUDE's own share
+    (:data:`PRELUDE_SPEND_CEILING_PCT`), and what is left of the session once
+    the optimization phases' reserve (:data:`OPTIMIZATION_RESERVE_PCT`) is held
+    back. An arm that fits neither is not refused work the session needed — it
+    is refused work the session could not have used the result of.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        expected_cost_sec (float): What the arm is expected to cost. Callers
+            should anchor this on something this session measured; the static
+            per-action estimates are calibrated on small models and understate
+            a large one by an order of magnitude.
+        now_unix (float | None): Override for the current time.
+
+    Returns:
+        tuple[bool, dict[str, Any]]: ``(affordable, evidence)``. Evidence
+        carries the numbers behind the decision so a skip is legible in the log
+        and the phase record.
+    """
+    cost = max(0.0, float(expected_cost_sec or 0.0))
+    max_sec = _max_minutes(state) * 60.0
+    usable = _session_usable_seconds(state)
+    if max_sec <= 0.0 or usable is None:
+        return True, {"reason": "unbounded_budget", "expected_cost_sec": round(cost, 1)}
+    spent = phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix)
+    phase_headroom = max_sec * PRELUDE_SPEND_CEILING_PCT - spent
+    session_headroom = usable - max_sec * OPTIMIZATION_RESERVE_PCT
+    affordable_sec = min(phase_headroom, session_headroom)
+    evidence: dict[str, Any] = {
+        "expected_cost_sec": round(cost, 1),
+        "prelude_spent_sec": round(spent, 1),
+        "prelude_ceiling_sec": round(max_sec * PRELUDE_SPEND_CEILING_PCT, 1),
+        "optimization_reserve_sec": round(max_sec * OPTIMIZATION_RESERVE_PCT, 1),
+        "session_usable_sec": round(usable, 1),
+        "affordable_sec": round(affordable_sec, 1),
+        "bound": "prelude_ceiling" if phase_headroom <= session_headroom else "optimization_reserve",
+    }
+    return affordable_sec >= cost, evidence
+
+
+def exit_time_exhausted_prelude(
+    state: Any,
+    *,
+    now_unix: float | None = None,
+) -> tuple[str, dict[str, Any]] | None:
+    """Route to CLOSE when the session clock runs out before PRELUDE lands a baseline.
+
+    ``time_exhausted_during_prelude`` was in the terminal-reason vocabulary and
+    in the report's reason glossary, but no code ever assigned it: the state
+    machine had a word for this failure and no way to reach it. A session that
+    burns its whole budget preparing then read as an ordinary exit.
+
+    Only fires while PRELUDE is still incomplete. Once a baseline exists the
+    later phases have their own force-exits, and reporting the run as "never
+    began optimizing" would be false.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        now_unix (float | None): Override for the current time.
+
+    Returns:
+        tuple[str, dict[str, Any]] | None: ``("time_exhausted_during_prelude",
+        evidence)`` when the budget is gone, else ``None``.
+    """
+    usable = _session_usable_seconds(state)
+    if usable is None or usable > 0.0:
+        return None
+    return "time_exhausted_during_prelude", {
+        "session_usable_sec": round(usable, 1),
+        "prelude_spent_sec": round(
+            phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
+            1,
+        ),
+    }
 
 
 def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
@@ -2593,6 +2790,12 @@ def compute_next_phase(
         if term is not None:
             return PHASE_CLOSE, term[0], {"terminal": True, **term[1]}
         norm = exit_normal_prelude(state)
+        if norm is None:
+            # No baseline and no clock left: name the failure instead of
+            # letting the run read as an ordinary exit.
+            exhausted = exit_time_exhausted_prelude(state, now_unix=now_unix)
+            if exhausted is not None:
+                return PHASE_CLOSE, exhausted[0], {"terminal": True, **exhausted[1]}
         if norm is not None:
             if framework_agent_phase_enabled:
                 return PHASE_FRAMEWORK_AGENT, norm[0], norm[1]
@@ -3102,6 +3305,8 @@ __all__ = [
     "DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT",
     "DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING",
     "DEFAULT_PHASE_BUDGET_PCT",
+    "OPTIMIZATION_RESERVE_PCT",
+    "PRELUDE_SPEND_CEILING_PCT",
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
     "DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT",
     "DEFAULT_PLATEAU_EXPLORE_LOOKBACK",
@@ -3161,6 +3366,10 @@ __all__ = [
     "exit_normal_prelude",
     "exit_normal_sweep",
     "exit_terminal_prelude",
+    "exit_time_exhausted_prelude",
+    "append_phase_evidence_row",
+    "prelude_can_afford",
+    "prelude_exit_viability",
     "is_action_allowed_in_phase",
     "is_action_llm_proposable_in_phase",
     "llm_proposable_actions_for",

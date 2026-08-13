@@ -220,6 +220,93 @@ def test_exit_normal_prelude_blocked_while_warm_replay_in_flight():
     assert out is not None and out[0] == "prelude_done"
 
 
+def _prelude_state(
+    *,
+    max_minutes: int = 180,
+    spent_sec: float = 0.0,
+    usable_sec: float | None = None,
+    baseline_tput: float = 0.0,
+    baseline_runtime_sec: float = 0.0,
+) -> SimpleNamespace:
+    """A PRELUDE-phase state with an explicit clock, as the budget policy reads it."""
+    return SimpleNamespace(
+        phase="PRELUDE",
+        max_minutes=max_minutes,
+        phase_elapsed_totals={"PRELUDE": spent_sec},
+        phase_started_unix=0.0,
+        baseline_tput=baseline_tput,
+        baseline_runtime_sec=baseline_runtime_sec,
+        session_budget_usable_sec=lambda: usable_sec,
+    )
+
+
+def test_prelude_can_afford_an_arm_the_budget_still_covers():
+    """The normal case must be untouched: a cheap arm early in a session runs."""
+    state = _prelude_state(spent_sec=600.0, usable_sec=10_000.0)
+    affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=300.0)
+    assert affordable is True
+    assert evidence["prelude_spent_sec"] == 600.0
+
+
+def test_prelude_refuses_an_arm_past_its_own_ceiling():
+    """The Qwen3.5-397B shape: 51 minutes of baseline, then a roofline that costs another 45+."""
+    state = _prelude_state(spent_sec=3090.0, usable_sec=7700.0)
+    affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=2706.0)
+    assert affordable is False
+    assert evidence["bound"] == "prelude_ceiling"
+    # 40% of 180 minutes is 4320s; 3090 spent leaves 1230s, well under the arm.
+    assert evidence["affordable_sec"] == pytest.approx(1230.0)
+
+
+def test_prelude_refuses_an_arm_that_would_eat_the_optimization_reserve():
+    """Under the phase ceiling but over the session reserve: the tighter bound wins."""
+    state = _prelude_state(spent_sec=60.0, usable_sec=6000.0)
+    affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=3000.0)
+    assert affordable is False
+    assert evidence["bound"] == "optimization_reserve"
+
+
+def test_prelude_budget_policy_is_inert_without_a_clock():
+    """An unbounded run has no budget to protect, so nothing is refused."""
+    state = _prelude_state(max_minutes=0, usable_sec=None)
+    affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=99_999.0)
+    assert affordable is True
+    assert evidence["reason"] == "unbounded_budget"
+
+
+def test_time_exhausted_during_prelude_finally_has_a_producer():
+    """The reason was in the vocabulary and in the report glossary with no code path to it."""
+    state = _prelude_state(spent_sec=10_800.0, usable_sec=0.0)
+    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    assert out is not None
+    next_phase, reason, evidence = out
+    assert (next_phase, reason) == ("CLOSE", "time_exhausted_during_prelude")
+    assert evidence["terminal"] is True
+    assert phase_state.is_valid_stop_reason(reason)
+
+
+def test_a_landed_baseline_outranks_the_exhausted_clock():
+    """With a baseline in hand the run has something to optimize; the later phases judge for themselves."""
+    state = _prelude_state(spent_sec=10_800.0, usable_sec=0.0, baseline_tput=1074.7)
+    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    assert out is not None
+    assert out[1] == "prelude_done"
+
+
+def test_prelude_exit_states_whether_one_optimization_round_still_fits():
+    """The plain statement neither field session ever got: preparation spent the run."""
+    state = _prelude_state(baseline_tput=1074.7, baseline_runtime_sec=2705.7, usable_sec=2796.0)
+    out = phase_state.exit_normal_prelude(state)
+    assert out is not None
+    evidence = out[1]
+    assert evidence["fits_one_optimization_round"] is True
+    assert evidence["affordable_rounds"] == pytest.approx(1.03, abs=0.01)
+
+    state.session_budget_usable_sec = lambda: 1200.0
+    evidence = phase_state.exit_normal_prelude(state)[1]
+    assert evidence["fits_one_optimization_round"] is False
+
+
 def test_exit_terminal_prelude_after_three_baseline_failures():
     state = SimpleNamespace(baseline_failure_streak=2)
     assert phase_state.exit_terminal_prelude(state) is None

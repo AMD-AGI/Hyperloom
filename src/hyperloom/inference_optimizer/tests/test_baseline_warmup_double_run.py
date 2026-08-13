@@ -329,6 +329,70 @@ def test_a_failing_warmup_round_still_reported_that_it_started(tmp_path):
     assert [(n["label"], n["status"]) for n in notes] == [("warmup", "started")]
 
 
+def _prelude_shared_state(*, spent_sec: float, usable_sec: float) -> SimpleNamespace:
+    """A PRELUDE session state with an explicit clock, as the budget policy reads it."""
+    return SimpleNamespace(
+        baseline_double_run=True,
+        phase="PRELUDE",
+        max_minutes=180,
+        phase_elapsed_totals={"PRELUDE": spent_sec},
+        phase_started_unix=0.0,
+        session_budget_usable_sec=lambda: usable_sec,
+    )
+
+
+def _run_double_run_baseline(tmp_path, shared_state) -> dict:
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    fake_run, state = _cold_then_hot_fake_run()
+    executor = BaselineExecutor(
+        magpie_python=sys.executable,
+        default_config_path=base,
+        session_dir=tmp_path,
+        shared_state=shared_state,
+    )
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+    result["_rounds_run"] = state["calls"]
+    return result
+
+
+def test_measured_round_is_dropped_when_preparation_has_spent_the_budget(tmp_path):
+    """The MiniMax-M2 shape: a 66-minute warmup, then a second round the session cannot use.
+
+    The warmup already carries accuracy and a throughput figure, so dropping
+    the measured round leaves the single-round baseline the codebase supports
+    rather than a half-measured state.
+    """
+    result = _run_double_run_baseline(
+        tmp_path,
+        _prelude_shared_state(spent_sec=10_000.0, usable_sec=500.0),
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["_rounds_run"] == 1
+    assert result["output_throughput"] == pytest.approx(_COLD_TPUT)
+    assert "baseline_measure_round_dropped_low_budget" in result["nonfatal_warnings"]
+    assert result["measure_round_dropped"]["bound"] == "prelude_ceiling"
+
+
+def test_measured_round_survives_a_budget_that_still_covers_it(tmp_path):
+    """The guard must not turn every double-run into a single one."""
+    result = _run_double_run_baseline(
+        tmp_path,
+        _prelude_shared_state(spent_sec=300.0, usable_sec=10_000.0),
+    )
+
+    assert result["_rounds_run"] == 2
+    assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
+    assert "measure_round_dropped" not in result
+
+
 def test_deferred_accuracy_skips_eval_when_hot_throughput_regresses(
     tmp_path,
 ):
