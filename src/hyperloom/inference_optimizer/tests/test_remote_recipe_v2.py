@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -1883,19 +1884,87 @@ def test_kernel_agent_write_publishes_under_the_kernel_metric(tmp_path):
     assert store.published_knowledge["kernel_gain_pct"] == 12.5
 
 
-def test_kernel_agent_write_skips_a_weaker_champion(tmp_path):
+def test_kernel_agent_write_skips_when_it_improves_nothing(tmp_path):
+    """Already published, and better: republishing would only churn the record."""
     store = _FakeStore(champion=30.0, metric="kernel_gain_pct")
+    client = _kernel_client(store)
+    published = {
+        "value": {
+            "gemm": {
+                "optimizations": [
+                    {"variant_name": "forge_a8w8_blockscale", "e2e_gain_pct": 30.0}
+                ]
+            },
+            "fusion": {"items": []},
+            "rewrite": {"items": []},
+        }
+    }
+    client.read = lambda cid, dest: published  # type: ignore[method-assign]
 
     result = write_kernel_agent_kb(
-        _kernel_state(tmp_path, gain=12.5),
-        "kernel:hyperloom-m:h",
-        "sess-1",
-        client=_kernel_client(store),
+        _kernel_state(tmp_path, gain=12.5), "kernel:hyperloom-m:h", "sess-1", client=client
     )
 
     assert result.status == "skipped"
-    assert result.reason == "not_better_than_champion"
+    assert result.reason == "not_better_than_published"
     assert not [c for c in store.calls if c[0] == "put_knowledge"]
+
+
+def test_kernel_agent_write_keeps_another_column_it_did_not_touch(tmp_path):
+    """A GEMM-only session must not erase a rewrite an earlier run learned."""
+    store = _FakeStore(champion=5.0, metric="kernel_gain_pct")
+    client = _kernel_client(store)
+    published_dir = tmp_path / "published"
+    carried = published_dir / "files" / "kernel" / "rewrite" / "k1.py"
+    carried.parent.mkdir(parents=True, exist_ok=True)
+    carried.write_text("print('earlier rewrite')", encoding="utf-8")
+    published = {
+        "value": {
+            "gemm": {"optimizations": []},
+            "fusion": {"items": []},
+            "rewrite": {
+                "items": [
+                    {
+                        "kernel_name": "k1",
+                        "e2e_gain_pct": 5.0,
+                        "patch": "kernel/rewrite/k1.py",
+                        "source_files": ["kernel/rewrite/k1.py"],
+                    }
+                ]
+            },
+        }
+    }
+
+    def _read(cid, dest):
+        shutil.copytree(published_dir, dest, dirs_exist_ok=True)
+        return published
+
+    client.read = _read  # type: ignore[method-assign]
+    # The upload directory is temporary, so record what it held at upload time.
+    uploaded_paths: list[str] = []
+    inner_put_dir = store.put_dir
+
+    def _put_dir(canonical_id, session_id, files_dir):
+        uploaded_paths.extend(
+            path.relative_to(files_dir).as_posix()
+            for path in sorted(Path(files_dir).rglob("*"))
+            if path.is_file()
+        )
+        return inner_put_dir(canonical_id, session_id, files_dir)
+
+    store.put_dir = _put_dir  # type: ignore[method-assign]
+
+    result = write_kernel_agent_kb(
+        _kernel_state(tmp_path, gain=12.5), "kernel:hyperloom-m:h", "sess-1", client=client
+    )
+
+    assert result.status == "written"
+    value = store.published_knowledge["value"]
+    # This session's GEMM lands ...
+    assert len(value["gemm"]["optimizations"]) == 1
+    # ... and the rewrite it never touched survives, with its artifact re-uploaded.
+    assert [item["kernel_name"] for item in value["rewrite"]["items"]] == ["k1"]
+    assert "kernel/rewrite/k1.py" in uploaded_paths
 
 
 def test_kernel_agent_write_skips_a_session_without_kernel_work(tmp_path):

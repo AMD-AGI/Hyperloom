@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import logging
+import logging
 import math
+import shutil
 import tempfile
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -18,16 +21,21 @@ from .client import (
     RemoteRecipeClient,
     RemoteRecipeConfigurationError,
 )
-from .models import RemoteRecipeValidationError, RemoteWriteResult
+from .models import Artifact, KnowledgeBundle, RemoteRecipeValidationError, RemoteWriteResult
+from .sanitize import sanitize_shared_knowledge
 from .values import (
     KERNEL_AGENT_METRIC,
+    _kernel_agent_score,
     build_kernel_agent_knowledge,
     build_remote_knowledge,
     convert_v1_recipe_to_knowledge,
     envelope_to_v1_recipe,
     has_new_keep,
     kernel_agent_canonical_id,
+    merge_kernel_columns,
 )
+
+log = logging.getLogger(__name__)
 
 log = logging.getLogger(__name__)
 
@@ -68,31 +76,105 @@ def write_kernel_agent_kb(
     if resolved is None:
         return RemoteWriteResult("disabled", "KB_STORE_URL/TOKEN not configured")
     with tempfile.TemporaryDirectory(prefix="hyperloom-kernel-agent-") as temporary:
-        files_dir = Path(temporary) / "files"
-        bundle, score = build_kernel_agent_knowledge(
+        root = Path(temporary)
+        files_dir = root / "files"
+        bundle, _score = build_kernel_agent_knowledge(
             state, files_dir, sections=KnowledgeSections.from_env()
         )
         value = bundle.knowledge.get("value") or {}
-        has_opt = bool(
-            (value.get("gemm") or {}).get("optimizations")
-            or (value.get("fusion") or {}).get("items")
-            or (value.get("rewrite") or {}).get("items")
-        )
-        if not has_opt:
+        if not _has_kernel_optimization(value):
             return RemoteWriteResult(
                 "skipped", "no_kernel_optimization", kernel_canonical_id, session_id
             )
-        # Ensure a first kernel optimization always lands even if its gain field
-        # is missing; real KEEPs carry a positive gain that drives keep-if-better.
-        score_value = score if score > 0 else 1e-6
-        return resolved.write_if_better(
+        published, published_dir = _published_kernel_record(
+            resolved, kernel_canonical_id, root / "published"
+        )
+        merged, carried = merge_kernel_columns(published, value)
+        if merged == published:
+            # Every optimization this session recorded is already published at
+            # least as good; republishing would only churn the record.
+            return RemoteWriteResult(
+                "skipped", "not_better_than_published", kernel_canonical_id, session_id
+            )
+        if carried and published_dir is not None:
+            _carry_published_artifacts(published_dir, files_dir, carried)
+        bundle = _rebuild_kernel_bundle(bundle, merged, files_dir)
+        score = _kernel_agent_score(merged)
+        return resolved.write_record(
             kernel_canonical_id,
             session_id,
             bundle,
-            optimized_throughput=score_value,
+            # A first optimization must land even if its gain field is missing;
+            # real KEEPs carry a positive gain that drives keep-if-better.
+            score=score if score > 0 else 1e-6,
             files_dir=files_dir,
             metric=KERNEL_AGENT_METRIC,
         )
+
+
+def _has_kernel_optimization(value: Mapping[str, Any]) -> bool:
+    return bool(
+        (value.get("gemm") or {}).get("optimizations")
+        or (value.get("fusion") or {}).get("items")
+        or (value.get("rewrite") or {}).get("items")
+    )
+
+
+def _published_kernel_record(
+    client: RemoteRecipeClient,
+    canonical_id: str,
+    destination: Path,
+) -> tuple[dict[str, Any] | None, Path | None]:
+    """Download what the kernel-agent KB already holds for this identity.
+
+    Best-effort: a record that cannot be read is treated as absent, so a
+    transport failure degrades to publishing this session's own columns rather
+    than losing them.
+    """
+    try:
+        document = client.read(canonical_id, destination)
+    except Exception:  # noqa: BLE001 — an unreadable incumbent must not block
+        log.warning("kernel-agent KB: cannot read the published record", exc_info=True)
+        return None, None
+    if not isinstance(document, dict):
+        return None, None
+    value = document.get("value")
+    return (dict(value) if isinstance(value, Mapping) else None), destination
+
+
+def _carry_published_artifacts(
+    published_dir: Path, files_dir: Path, refs: Iterable[str]
+) -> None:
+    """Re-stage the files of records inherited from the published document.
+
+    The record is replaced wholesale on write, so an inherited entry's artifact
+    has to be uploaded again for its ref to keep resolving.
+    """
+    source_root = published_dir / "files"
+    for ref in dict.fromkeys(refs):
+        source = source_root / ref
+        target = files_dir / ref
+        if not source.is_file() or target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
+def _rebuild_kernel_bundle(
+    bundle: KnowledgeBundle, merged: dict[str, Any], files_dir: Path
+) -> KnowledgeBundle:
+    """Re-describe the bundle around the merged columns and the files on disk."""
+    knowledge = dict(bundle.knowledge)
+    knowledge["value"] = merged
+    knowledge[KERNEL_AGENT_METRIC] = _kernel_agent_score(merged)
+    artifacts = [
+        Artifact(path=path.relative_to(files_dir).as_posix(), source=path)
+        for path in sorted(files_dir.rglob("*"))
+        if path.is_file()
+    ]
+    rebuilt = KnowledgeBundle(knowledge=sanitize_shared_knowledge(knowledge), artifacts=artifacts)
+    rebuilt.validate()
+    return rebuilt
 
 
 def write_final_remote_recipe(
@@ -267,6 +349,7 @@ __all__ = [
     "envelope_to_v1_recipe",
     "has_new_keep",
     "kernel_agent_canonical_id",
+    "merge_kernel_columns",
     "read_remote_champion",
     "read_remote_recipe",
     "write_final_remote_recipe",

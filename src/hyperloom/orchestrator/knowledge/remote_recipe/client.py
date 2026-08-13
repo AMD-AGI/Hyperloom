@@ -404,6 +404,56 @@ class RemoteRecipeClient:
                 session_id,
                 optimized_throughput,
             )
+        return self._publish(
+            canonical_id,
+            session_id,
+            bundle,
+            score=optimized_throughput,
+            files_dir=files_dir,
+            metric=metric,
+        )
+
+    def write_record(
+        self,
+        canonical_id: str,
+        session_id: str,
+        bundle: KnowledgeBundle,
+        *,
+        score: float,
+        files_dir: Path,
+        metric: str,
+    ) -> RemoteWriteResult:
+        """Publish a record whose contents were already reconciled by the caller.
+
+        An identity that accumulates — where a session contributes some entries
+        and inherits the rest — cannot be gated on a single document score:
+        adding a second kernel does not raise the best gain, yet still has to be
+        published. Such a caller decides what survives and hands the result
+        here.
+        """
+        if not math.isfinite(score):
+            raise RemoteRecipeValidationError(f"score must be finite, got {score!r}")
+        bundle.knowledge = sanitize_shared_knowledge(bundle.knowledge)
+        return self._publish(
+            canonical_id,
+            session_id,
+            bundle,
+            score=score,
+            files_dir=files_dir,
+            metric=metric,
+        )
+
+    def _publish(
+        self,
+        canonical_id: str,
+        session_id: str,
+        bundle: KnowledgeBundle,
+        *,
+        score: float,
+        files_dir: Path,
+        metric: str,
+    ) -> RemoteWriteResult:
+        """Upload the files, replace the knowledge, then move the champion."""
         expected = {artifact.path for artifact in bundle.artifacts}
         if expected:
             refs = self.store.put_dir(canonical_id, session_id, files_dir)
@@ -425,7 +475,7 @@ class RemoteRecipeClient:
                 canonical_id,
                 session_id,
                 metric=metric,
-                value=optimized_throughput,
+                value=score,
             )
         except KBStoreError as exc:
             if "HTTP 409" not in str(exc):
@@ -435,20 +485,14 @@ class RemoteRecipeClient:
                 validate_metric=True,
                 expected_metric=metric,
             )
-            if winner < optimized_throughput:
+            if winner < score:
                 self.store.set_champion(
                     canonical_id,
                     session_id,
                     metric=metric,
-                    value=optimized_throughput,
+                    value=score,
                 )
-        return RemoteWriteResult(
-            "written",
-            "",
-            canonical_id,
-            session_id,
-            optimized_throughput,
-        )
+        return RemoteWriteResult("written", "", canonical_id, session_id, score)
 
 
 __all__ = [
