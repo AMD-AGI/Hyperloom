@@ -153,13 +153,13 @@ Every proposal in `judge_bundle.proposals` is classified into one of:
 |---|---|---|
 | `patch_landing` | `integrate`, `integrate_patch`, `apply_patch` (production promotion) | Strict — comparable before/after benchmark + accuracy gate + active-path proof + rollback. Critic is the last gate before `optimization_stack` / `framework_source_roots` mutates. |
 | `enablement_landing` | `integrate` / `integrate_patch` / `apply_patch` tagged `params.enablement` or `params.framework_agent_authoring` | Structural — same bar as `evidence_producer` (provenance + in-phase + no contradicting KB prior). The patch makes the model **run correctly** (runnability, or the accuracy floor for eval-origin — not throughput): boot-origin is dispatched *before* any usable baseline, and eval-origin booted but missed the accuracy floor. A throughput before/after is impossible/irrelevant by construction; rollback is guaranteed by the enablement integrate executor (`git apply` + `git reset --hard` on REVERT) plus the downstream runnable-decision gate (which additionally re-runs the accuracy eval for eval-origin). **Default approve when KB priors are silent.** |
-| `evidence_producer` | `explore`, `specialist`, `sweep`, `profile`, `roofline`, `kernel_opt`, `deep_kernel_analysis`, `operator_tuning`, `vendor_kernel_config` | Structural — provenance non-empty (specialist or default_grid), action in current phase's allowed set, no contradicting KB prior. **Default approve when KB priors are silent.** |
+| `evidence_producer` | `explore`, `specialist`, `sweep`, `profile`, `roofline`, `kernel_opt` | Structural — provenance non-empty (specialist or default_grid), action in current phase's allowed set, no contradicting KB prior. **Default approve when KB priors are silent.** |
 | `framework_op` | `baseline`, `target_analysis`, `recover`, `report`, `session_breakdown`, `framework_agent` | None — approve by default; Critic is not a useful gatekeeper here. (`framework_agent` = FRAMEWORK_AGENT candidate pre-screen; landing is re-reviewed strictly as `integrate_patch`.) |
 
 Unknown action names fall through to `evidence_producer` (cold-start
 safe). The exact list lives in
 `runtime.decision_reviewer._PATCH_LANDING_ACTIONS` /
-`_EVIDENCE_PRODUCER_ACTIONS` / `_FRAMEWORK_OP_ACTIONS`, and the
+`_FRAMEWORK_OP_ACTIONS`, and the
 enablement split in `_is_enablement_patch`; the runtime
 also exports the per-class checklists in
 `review_constraints.approve_requires_by_class`.

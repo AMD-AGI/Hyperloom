@@ -2144,18 +2144,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             log.debug("kernel kb: per-round staging failed", exc_info=True)
 
     # Multi-KEEP integrate queue helpers.
-    def _kernel_ids_in_optimization_stack(self) -> set[str]:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m._kernel_ids_in_optimization_stack(self)
-
-    def _source_files_in_optimization_stack(self) -> set[str]:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m._source_files_in_optimization_stack(self)
-
     def _kernel_ids_with_integrate_attempts(self) -> set[str]:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
@@ -2179,12 +2167,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             self,
             integration_id,
         )
-
-    def _kernel_trace_impact_pct(self, kernel_id: str) -> float:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m._kernel_trace_impact_pct(self, kernel_id)
 
     def next_pending_keep_kernel_id(self) -> str:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""

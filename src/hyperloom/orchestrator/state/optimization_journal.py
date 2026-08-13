@@ -403,7 +403,7 @@ def classify_change_kind(task_kind: str, variant: dict[str, Any] | None = None) 
         The matching ``KIND_*`` constant.
     """
     kind = (task_kind or "").lower()
-    if kind in ("kernel_opt", "deep_kernel_analysis", "operator_tuning"):
+    if kind == "kernel_opt":
         return KIND_KERNEL_FILE
     if kind == "integrate":
         return KIND_INTEGRATE
@@ -449,7 +449,7 @@ def operation_kind_for(action: str, kind: str = "") -> str:
     if k and k != KIND_OTHER:
         return _OP_KIND_RENAME.get(k, k)
     a = (action or "").lower()
-    if a in ("kernel_opt", "deep_kernel_analysis", "operator_tuning"):
+    if a == "kernel_opt":
         return "kernel_opt"
     if a == "integrate":
         return "kernel_integrate"

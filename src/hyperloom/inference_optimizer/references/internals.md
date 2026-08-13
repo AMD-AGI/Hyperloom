@@ -59,9 +59,10 @@ launcher only chooses whether the phase runs (`--no-framework-agent`).
 
 ## Retired modules and rules (do not re-introduce)
 
-The live runtime uses `actions/_meta/*.yaml`, `_grid_runner.py`, and the unified
-specialist-informed `explore` flow. Do not recreate the retired `backends` /
-`params` / `validate_stack` / scoring modules.
+The live runtime uses `protocol/action_surfaces.ACTION_CATALOGUE`,
+`_grid_runner.py`, and the unified specialist-informed `explore` flow. Do not
+recreate the retired `backends` / `params` / `validate_stack` / scoring
+modules, nor the `actions/_meta/*.yaml` catalogue and its loader.
 
 Rules that look reasonable but break the current flow:
 

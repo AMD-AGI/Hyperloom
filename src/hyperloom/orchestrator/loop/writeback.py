@@ -4778,7 +4778,7 @@ class WritebackCollaborator:
             osl = int(reg.get("osl") or 1024)
         except (TypeError, ValueError):
             conc, isl, osl = 64, 1024, 1024
-        from hyperloom.inference_optimizer.session.session_paths import runs_dir
+        from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
         from ..actions.executors._geak_sweep import sweep_via_geak
 
         try:
@@ -4789,7 +4789,7 @@ class WritebackCollaborator:
             result=ps,
             conc_values=[conc],
             isl_osl_configs=[f"{isl}:{osl}"],
-            output_root=runs_dir(self.session_dir, "sweep", "revalidate_geak"),
+            output_root=unique_runs_dir(self.session_dir, "sweep", "revalidate_geak"),
             variant_timeout_sec=timeout,
             repeats=3,
             # Single-point validated replay pins the headline protocol (num_prompts

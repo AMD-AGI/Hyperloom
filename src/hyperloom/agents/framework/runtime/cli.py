@@ -544,7 +544,7 @@ def _cmd_phase_audit(args: argparse.Namespace) -> None:
          "diff_text" | "patches_path" | "primus_cortex_url" (optional patch source),
          "use_llm": bool (optional, default false), "model": str (optional)}
 
-    Output shape (``semantic_audit.json``):
+    Output shape (stdout / ``--out``):
         {"candidate_id", "semantic_status", "applicability", "confidence",
          "evidence": [...], "risks": [...], "recommended_next_step",
          "layer", "metrics", "ts"}

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
 from hyperloom.common import codex_session, llm_config
-from hyperloom.common.env import env_bool, is_truthy
+from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.kernel_shape_contract import (
     ALLOWED_SHAPE_PROVENANCE as _ALLOWED_SHAPE_PROVENANCE,
@@ -44,27 +44,10 @@ from ..trace.parse_usage import (
     parse_forge_usage,
 )
 
-# Cohesive clusters live in sibling modules; re-exported here so the module
-# namespace + monkeypatch surface is intact.
+# Re-exported: callers patch these at ``request_handlers.<name>``.
 from ._kernel_decisions import (
     _honest_flag as _honest_flag,
     _format_last_kernel_opt as _format_last_kernel_opt,
-    _resolve_kernel_patch_identity as _resolve_kernel_patch_identity,
-    kernel_patch_key as kernel_patch_key,
-    find_rejected_kernel_patch as find_rejected_kernel_patch,
-    record_kernel_integrate_result as record_kernel_integrate_result,
-    record_kernel_opt as record_kernel_opt,
-    record_gemm_tuning as record_gemm_tuning,
-    _kernel_ids_in_optimization_stack as _kernel_ids_in_optimization_stack,
-    _source_files_in_optimization_stack as _source_files_in_optimization_stack,
-    _kernel_ids_with_integrate_attempts as _kernel_ids_with_integrate_attempts,
-    integrate_attempt_count_for_kernel as integrate_attempt_count_for_kernel,
-    _kernel_trace_impact_pct as _kernel_trace_impact_pct,
-    next_pending_keep_kernel_id as next_pending_keep_kernel_id,
-    pending_keep_kernel_ids as pending_keep_kernel_ids,
-    has_keep_pending_integrate as has_keep_pending_integrate,
-    kernel_opt_attempts_count as kernel_opt_attempts_count,
-    untried_hot_reusable_kernels as untried_hot_reusable_kernels,
 )
 
 
@@ -1716,19 +1699,9 @@ exec {shlex.quote(runner)}
     return path
 
 
-def _forge_explicitly_enabled() -> bool:
-    """Return true only for the single supported forge opt-in switch.
-
-    KernelForge is private infrastructure, so forge must never be selected by
-    request payloads, legacy aliases, or GEMM_TUNING_BACKEND.  The only runtime
-    contract that enables forge is an exact KERNEL_OPT_BACKEND_ORDER=forge.
-    """
-    return str(os.environ.get("KERNEL_OPT_BACKEND_ORDER") or "").strip().lower() == "forge"
-
-
 def _resolve_gemm_tuning_backend(payload: dict) -> str:
     """Resolve GEMM tuning backend under the forge-explicit-only invariant."""
-    return "forge" if _forge_explicitly_enabled() else "geak"
+    return "forge" if forge_explicitly_enabled() else "geak"
 
 
 def _parse_forge_gemm_sentinel(stdout: str) -> dict[str, Any] | None:
@@ -2553,6 +2526,81 @@ def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
         return ""
 
 
+# Forge tuner families whose deliverable is an aiter tuned-GEMM CSV, i.e. the
+# ones whose rows are resolved through aiter's padded (M, N, K) lookup.
+_AITER_CSV_TUNER_FRAMEWORKS = ("sglang", "vllm-aiter")
+
+
+#: Wall-clock the aiter CK tuner needs per shape, measured on gfx950 at
+#: ``--mp 1`` (12 shapes / 1462s in production, ~135s each). Used to size the
+#: shape budget so a wider ladder cannot push the tuner past its timeout and
+#: return nothing at all.
+_AITER_TUNE_SEC_PER_SHAPE = 150
+
+
+def _align_forge_shapes_for_aiter(
+    shapes_json: str,
+    *,
+    forge_framework: str,
+    workspace: Path,
+    budget_sec: int = 0,
+    mp: int = 1,
+) -> tuple[str, dict[str, Any] | None]:
+    """Re-key profiled GEMM shapes onto the M values aiter actually looks up.
+
+    Captured shapes carry the raw runtime M, which for prefill is the
+    data-dependent scheduled-token count and so never recurs between runs. aiter
+    resolves a tuned row by trying the raw M and then two padded M variants, so a
+    CSV keyed on raw M is unreachable and the tuner's micro win never reaches the
+    server. Padding the shapes first makes each tuned row serve the whole bucket
+    that pads onto it.
+
+    Returns the shapes-JSON path to hand forge plus an alignment report, or the
+    input path and ``None`` when alignment does not apply.
+    """
+    if forge_framework not in _AITER_CSV_TUNER_FRAMEWORKS:
+        return shapes_json, None
+    if not env_bool("HYPERLOOM_GEMM_ALIGN_SHAPES", True):
+        return shapes_json, None
+
+    from .gemm_shape_coverage import align_shapes_to_aiter_keys, load_shapes_json, write_shapes_json
+
+    observed = load_shapes_json(shapes_json)
+    if not observed:
+        return shapes_json, None
+    try:
+        max_shapes = int(os.environ.get("HYPERLOOM_GEMM_ALIGN_MAX_SHAPES") or 64)
+    except (TypeError, ValueError):
+        max_shapes = 64
+    max_shapes = max(1, max_shapes)
+    if budget_sec > 0:
+        try:
+            per_shape = int(
+                os.environ.get("HYPERLOOM_GEMM_TUNE_SEC_PER_SHAPE") or _AITER_TUNE_SEC_PER_SHAPE
+            )
+        except (TypeError, ValueError):
+            per_shape = _AITER_TUNE_SEC_PER_SHAPE
+        # Reserve a third of the window for JIT builds and the report step.
+        affordable = int(budget_sec * 0.66 * max(1, mp) // max(1, per_shape))
+        max_shapes = min(max_shapes, max(len(observed), affordable))
+    aligned, report = align_shapes_to_aiter_keys(observed, max_shapes=max_shapes)
+    if not aligned or report.get("unchanged"):
+        return shapes_json, {**report, "applied": False, "source_shapes_json": shapes_json}
+    try:
+        out = write_shapes_json(aligned, workspace / "forge_shapes.aiter_aligned.json")
+    except OSError:
+        return shapes_json, {**report, "applied": False, "source_shapes_json": shapes_json}
+    log.info(
+        "Forge GEMM shapes: re-keyed %d observed shape(s) onto %d aiter lookup key(s) "
+        "(observed M=%s -> aligned M=%s)",
+        report.get("observed"),
+        report.get("aligned"),
+        report.get("observed_m"),
+        report.get("aligned_m"),
+    )
+    return out, {**report, "applied": True, "source_shapes_json": shapes_json}
+
+
 _VLLM_BLOCK_FP8_TRACE_OPS = (
     "w8a8_triton_block_scaled_mm",
     "rocm_aiter_gemm_a8w8_blockscale",
@@ -2570,17 +2618,136 @@ def _is_vllm_block_fp8(precision: str, quant_type: str) -> bool:
     }
 
 
+#: Markers that identify which kernels aiter is serving, read off a server log.
+#: ``bf16_tuned_gemm.csv`` means dense linears resolve through
+#: ``aiter/tuned_gemm.py`` (Forge's ``sglang_dense_bf16`` writes that table via
+#: ``AITER_CONFIG_GEMM_BF16``); the fused-MoE markers mean the MoE layers run on
+#: aiter's CK kernels (Forge's ``fmoe_ck``, via ``AITER_CONFIG_FMOE``) rather
+#: than vLLM's Triton ``fused_moe``.
+_AITER_SERVING_MARKERS = {
+    "bf16_dense": ("bf16_tuned_gemm.csv",),
+    "fused_moe": ("[aiter] [fused_moe]", "Mxfp4 MoE backend"),
+}
+
+#: aiter logs the fused-MoE problem it dispatched as
+#: ``[fused_moe] using ... (cu, token, dim, inter, experts, topk, act, dtype,
+#: q_dtype_a, q_dtype_w, q_type, ...)``.
+_AITER_FUSED_MOE_TUPLE_RE = re.compile(
+    r"\[fused_moe\] using \S+ \S+ for \(\d+, \d+, \d+, \d+, \d+, \d+, "
+    r"'[^']*', '[^']*', '([^']*)', '([^']*)'"
+)
+
+
+def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
+    """Return whether aiter's CK MoE tuner can tune what the server dispatched.
+
+    The tuner builds its kernel candidates from the activation/weight dtype pair
+    and rejects some combinations the serving path happily runs. Measured on
+    gpt-oss-120b at TP=1, a BF16-activation / FP4-weight MoE (the
+    ``AITER_MXFP4_BF16`` backend) benchmarks fine but fails candidate generation
+    with ``Unsupported data type combination: b16, fp4x2``, so routing it to
+    ``fmoe_ck`` would only trade silent no-op for a hard tuner error.
+    """
+    if not server_log:
+        return False
+    try:
+        text = Path(server_log).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    combos = {
+        (q_a.replace("torch.", ""), q_w.replace("torch.", ""))
+        for q_a, q_w in _AITER_FUSED_MOE_TUPLE_RE.findall(text)
+    }
+    if not combos:
+        # MoE evidence without a parseable problem tuple: let Forge decide.
+        return True
+    return not any(
+        act.startswith("bfloat") and weight.startswith("float4") for act, weight in combos
+    )
+
+
+def _aiter_serving_evidence(server_log: str) -> set[str]:
+    """Return which aiter kernel families a server log shows in use.
+
+    Routing is driven by the log rather than by precision alone because only the
+    log says which backend the model actually got: the same checkpoint runs on
+    aiter or on the native path depending on the recipe's env.
+    """
+    found: set[str] = set()
+    if not server_log:
+        return found
+    try:
+        with open(server_log, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                for family, markers in _AITER_SERVING_MARKERS.items():
+                    if family not in found and any(marker in line for marker in markers):
+                        found.add(family)
+                if len(found) == len(_AITER_SERVING_MARKERS):
+                    break
+    except OSError:
+        return set()
+    return found
+
+
 def _forge_framework_for_vllm(
     *,
     framework: str,
     precision: str,
     quant_type: str,
     tunableop_input: str,
+    aiter_bf16_dense: bool = False,
+    aiter_fused_moe: bool = False,
 ) -> str:
-    """Route block-FP8 vLLM to Forge's AITER dense tuner family."""
-    if framework == "vllm" and not tunableop_input and _is_vllm_block_fp8(precision, quant_type):
+    """Route vLLM runs served by aiter to Forge's AITER tuner family.
+
+    Forge's vLLM branch only offers ``vllm_moe_triton`` and
+    ``vllm_dense_tunableop``, which target kernels an aiter-served model never
+    executes. Its sglang branch carries the tuners that do write the tables aiter
+    reads, and the router already accepts ``vllm-aiter`` as an alias for it.
+    """
+    if framework != "vllm" or tunableop_input:
+        return framework
+    if _is_vllm_block_fp8(precision, quant_type):
+        return "vllm-aiter"
+    if aiter_bf16_dense and precision in ("bf16", "fp16"):
+        return "vllm-aiter"
+    if aiter_fused_moe:
         return "vllm-aiter"
     return framework
+
+
+def _resolve_vllm_aiter_routing(
+    *,
+    model_path: str,
+    server_log: str,
+    tp: int,
+) -> dict[str, bool]:
+    """Resolve the aiter-routing flags for a vLLM run from runtime evidence."""
+    flags = {"aiter_bf16_dense": False, "aiter_fused_moe": False}
+    evidence = _aiter_serving_evidence(server_log)
+    if not evidence:
+        return flags
+
+    from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
+
+    summary = summarize_model_config(model_path) or {}
+    if not summary:
+        return flags
+    is_moe = bool(summary.get("is_moe"))
+
+    # Dense BF16 routing is for dense checkpoints; a MoE model's dense side
+    # rides along with its MoE routing instead.
+    flags["aiter_bf16_dense"] = "bf16_dense" in evidence and not is_moe
+
+    if "fused_moe" in evidence and is_moe and _aiter_ck_moe_tuner_supports(server_log):
+        # Only route MoE when aiter's CK fused-MoE can actually serve this
+        # checkpoint at this TP -- otherwise the tuner has no reachable target.
+        from hyperloom.inference_optimizer.cli.model_gate import (
+            model_supports_aiter_ck_fused_moe,
+        )
+
+        flags["aiter_fused_moe"] = model_supports_aiter_ck_fused_moe(model_path, tp)
+    return flags
 
 
 def _vllm_block_fp8_profile_capture_required(
@@ -3224,6 +3391,7 @@ async def _run_forge_gemm_tuning(
         precision=precision,
         quant_type=quant_type,
         tunableop_input=tunableop_input,
+        **_resolve_vllm_aiter_routing(model_path=model_path, server_log=kernel_sig_log, tp=tp),
     )
     shape_capture: HandlerResult | None = None
     block_fp8_profile_capture = _vllm_block_fp8_profile_capture_required(
@@ -3266,8 +3434,11 @@ async def _run_forge_gemm_tuning(
             untuned_csv = ""
             block_fp8_profile_capture = False
     tunableop_capture = (
+        # Keyed on the routed framework: a run handed to the AITER tuner family
+        # has no use for a TunableOp recording pass, and paying for one costs a
+        # full extra server boot.
         _vllm_dense_shape_capture_required(
-            framework=framework,
+            framework=forge_framework,
             model_path=model_path,
             shapes_json=shapes_json,
             tunableop_input=tunableop_input,
@@ -3304,6 +3475,16 @@ async def _run_forge_gemm_tuning(
 
     timeout = _gemm_tuning_timeout_sec(payload)
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)
+    shape_alignment: dict[str, Any] | None = None
+    if shapes_json:
+        shapes_json, shape_alignment = _align_forge_shapes_for_aiter(
+            shapes_json,
+            forge_framework=forge_framework,
+            workspace=workspace,
+            budget_sec=timeout,
+            mp=mp,
+        )
+
     input_payload = {
         "model_path": model_path,
         "framework": forge_framework,
@@ -3361,6 +3542,8 @@ async def _run_forge_gemm_tuning(
     result.setdefault("framework", framework)
     result.setdefault("tuning_framework", forge_framework)
     result.setdefault("model_path", model_path)
+    if shape_alignment is not None:
+        result.setdefault("shape_alignment", shape_alignment)
     if shape_capture is not None:
         result.setdefault(
             "shape_capture",
@@ -4619,7 +4802,7 @@ def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
     missing value, legacy alias, or payload override stays on the GEAK
     whole-phase backend.
     """
-    if _forge_explicitly_enabled():
+    if forge_explicitly_enabled():
         return ["forge"]
     return list(_DEFAULT_KERNEL_PHASE_BACKEND_ORDER)
 
@@ -5733,8 +5916,6 @@ async def _run_optimization_single(
         cmd += ["--candidates-path", str(payload["candidates_path"])]
     if payload.get("benchmark_file"):
         cmd += ["--benchmark-file", str(payload["benchmark_file"])]
-    if payload.get("test_harness_path"):
-        cmd += ["--test-harness-path", str(payload["test_harness_path"])]
     if payload.get("micro_speedup") is not None:
         cmd += ["--micro-speedup", str(payload["micro_speedup"])]
     if payload.get("e2e_gain_pct") is not None:
@@ -5749,8 +5930,6 @@ async def _run_optimization_single(
             "--accuracy-passed",
             "true" if bool(payload["accuracy_passed"]) else "false",
         ]
-    if payload.get("test_command"):
-        cmd += ["--test-command", str(payload["test_command"])]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     if payload.get("budget_minutes") is not None:
@@ -6447,11 +6626,10 @@ async def integrate_handler(
     extra_args = _vram_guarded_server_args(extra_args)
 
     # Wrap BaselineExecutor in a Task/RunnerContext.
-    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+    from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
 
     fake_task_id = f"integrate-{kernel_id or 'anon'}"
-    workspace = runs_dir(session_dir, "integrate", fake_task_id)
-    workspace.mkdir(parents=True, exist_ok=True)
+    workspace = unique_runs_dir(session_dir, "integrate", fake_task_id)
     baseline_executor = BaselineExecutor(session_dir=session_dir)
     rebaseline_timeout_sec = _integrate_rebaseline_timeout_sec(
         payload,
@@ -6716,8 +6894,7 @@ async def integrate_handler(
         paired_ab = {"status": "attempted"}
         try:
             paired_pristine_revert = _maybe_revert_kernel_patch(apply_result)
-            paired_ws = runs_dir(session_dir, "integrate", f"{fake_task_id}-pairedbase")
-            paired_ws.mkdir(parents=True, exist_ok=True)
+            paired_ws = unique_runs_dir(session_dir, "integrate", f"{fake_task_id}-pairedbase")
             paired_task = Task(
                 task_id=f"{fake_task_id}-pairedbase",
                 kind="baseline",
@@ -6883,7 +7060,7 @@ async def integrate_handler(
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
     "trace_analyze": trace_analyze_handler,
     "run_gemm_tuning": run_gemm_tuning_handler,
-    "run_fusion": run_fusion_handler,
+    # No run_fusion entry: KernelPhase awaits run_fusion_handler directly.
     "run_optimization": run_optimization_handler,
     "integrate": integrate_handler,
     "apply_patch": integrate_handler,  # alias — same flow
@@ -6923,24 +7100,6 @@ __all__ = [
     "run_gemm_tuning_handler",
     "run_optimization_handler",
     "trace_analyze_handler",
-    # Re-exported from sibling modules for backward compat and the test
-    # monkeypatch surface (referenced via ``request_handlers.<name>``).
-    # Declared so the re-exports are intentional, not flagged imports.
+    # Re-exported from _kernel_decisions.
     "_format_last_kernel_opt",
-    "_resolve_kernel_patch_identity",
-    "kernel_patch_key",
-    "find_rejected_kernel_patch",
-    "record_kernel_integrate_result",
-    "record_kernel_opt",
-    "record_gemm_tuning",
-    "_kernel_ids_in_optimization_stack",
-    "_source_files_in_optimization_stack",
-    "_kernel_ids_with_integrate_attempts",
-    "integrate_attempt_count_for_kernel",
-    "_kernel_trace_impact_pct",
-    "next_pending_keep_kernel_id",
-    "pending_keep_kernel_ids",
-    "has_keep_pending_integrate",
-    "kernel_opt_attempts_count",
-    "untried_hot_reusable_kernels",
 ]
