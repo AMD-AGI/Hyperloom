@@ -222,6 +222,12 @@ def _build_cmd(
             calibrate_noise_floor,
             "--calibrate-noise-floor",
         )
+    else:
+        log.warning(
+            "installed forge-loop declares no --calibrate-noise-floor; the "
+            "campaign judges speedups against a fixed threshold instead of a "
+            "measured noise floor"
+        )
     target_functions = args.get("target_functions")
     if not isinstance(target_functions, list) or not target_functions:
         raise ValueError("target_functions must be a non-empty list")
@@ -254,6 +260,12 @@ def _build_cmd(
             raise ValueError(f"e2e_pct must be a positive finite share: {e2e_pct!r}")
         if _forge_loop_accepts("--e2e-pct"):
             _add_opt(cmd, float(e2e_pct), "--e2e-pct")
+        else:
+            log.warning(
+                "installed forge-loop declares no --e2e-pct; the campaign runs "
+                "without an Amdahl ceiling on the %.3f%% share it was given",
+                float(e2e_pct),
+            )
     spec_file = str(args.get("invocation_spec_file") or "").strip()
     if spec_file and Path(spec_file).is_file():
         _add_opt(cmd, str(Path(spec_file).resolve()), "--invocation-spec-file")

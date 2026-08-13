@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import fcntl
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -40,6 +41,18 @@ def _isolate_environ():
     finally:
         os.environ.clear()
         os.environ.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _declare_every_forge_loop_option(monkeypatch):
+    """Pin option probing so argv assertions do not read the installed CLI.
+
+    ``_forge_loop_accepts`` imports the real ``kernel_agents.cli`` to ask which
+    options it declares, which would make every argv expectation here depend on
+    which KernelForge the machine happens to have. Tests that exercise the
+    probe itself override this.
+    """
+    monkeypatch.setattr(fc, "_forge_loop_accepts", lambda option: True)
 
 
 _CANDIDATE = {
@@ -2568,15 +2581,21 @@ def test_a_loop_result_without_bandwidth_reports_none(tmp_path):
 # --- Optional campaign inputs ---------------------------------------------------
 
 
-def test_an_option_the_installed_forge_loop_lacks_is_dropped(monkeypatch, tmp_path):
+def test_an_option_the_installed_forge_loop_lacks_is_dropped(monkeypatch, caplog, tmp_path):
     """An undeclared option aborts the campaign before it starts."""
     monkeypatch.setattr(fc, "_forge_loop_accepts", lambda option: False)
     payload = _payload(tmp_path, e2e_pct=29.5)
 
-    cmd = fc._build_cmd(payload, _rig(tmp_path), tmp_path, deadline_unix=9_999_999_999)
+    with caplog.at_level(logging.WARNING, logger=fc.log.name):
+        cmd = fc._build_cmd(payload, _rig(tmp_path), tmp_path, deadline_unix=9_999_999_999)
 
     assert "--e2e-pct" not in cmd
     assert "--calibrate-noise-floor" not in cmd
+    # Both inputs are what the lane's verdict is trusted on, so a build that
+    # cannot take them must say so rather than quietly judging on less.
+    dropped = "\n".join(r.message % r.args for r in caplog.records)
+    assert "--e2e-pct" in dropped
+    assert "--calibrate-noise-floor" in dropped
 
 
 def test_a_forge_loop_that_declares_them_still_receives_them(monkeypatch, tmp_path):
