@@ -18,7 +18,9 @@ action-name lists.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 
 # Actions owned by the Kernel role; requested via request{target_agent="kernel_agent"}.
@@ -34,11 +36,15 @@ KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
 # Kernel-owned action name -> the request ``kind`` its handler is registered
 # under in ``request_handlers.KERNEL_REQUEST_HANDLERS``. The two differ, so the
 # prompt must advertise the kind.
-KERNEL_ACTION_REQUEST_KINDS: dict[str, str] = {
-    "kernel_opt": "run_optimization",
-    "gemm_tuning": "run_gemm_tuning",
-    "integrate": "integrate",
-}
+KERNEL_ACTION_REQUEST_KINDS: Mapping[str, str] = MappingProxyType(
+    {
+        "kernel_opt": "run_optimization",
+        "gemm_tuning": "run_gemm_tuning",
+        "integrate": "integrate",
+    }
+)
+
+assert set(KERNEL_ACTION_REQUEST_KINDS) == KERNEL_AGENT_OWNED_ACTIONS
 
 
 # Request-kind aliases that route to a kernel-owned handler. apply_patch is
@@ -132,7 +138,7 @@ class ActionMetadata:
     requires_lanes: tuple[str, ...] = ()
 
 
-ACTION_CATALOGUE: dict[str, ActionMetadata] = {
+ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType({
     "baseline": ActionMetadata(
         name="baseline",
         family="prep",
@@ -447,7 +453,7 @@ ACTION_CATALOGUE: dict[str, ActionMetadata] = {
             "'no_target_gpu_configured' marker. Advisory only."
         ),
     ),
-}
+})
 
 
 __all__ = [

@@ -864,9 +864,8 @@ def test_baseline_rejects_stale_workspace_on_silent_exit(tmp_path, monkeypatch):
     assert result.get("output_throughput") is None
 
 
-def test_baseline_accepts_new_workspace_ignores_older_stale(tmp_path, monkeypatch):
-    """When the subprocess produces a new benchmark_* workspace, that workspace
-    is selected even when a stale one with a larger name exists."""
+def test_baseline_rejects_stale_workspace_when_the_run_produced_none(tmp_path, monkeypatch):
+    """A crashed run adopts no workspace, however high the stale one sorts."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -903,6 +902,46 @@ def test_baseline_accepts_new_workspace_ignores_older_stale(tmp_path, monkeypatc
 
     assert result["status"] == "failed", result
     assert result.get("output_throughput") is None
+
+
+def test_baseline_picks_fresh_workspace_sorting_before_a_stale_one(tmp_path, monkeypatch):
+    """The fresh workspace wins even when the stale one sorts last.
+
+    Every other case here creates a fresh name that also sorts last, so they
+    pass against the lexicographic-last glob this replaced.
+    """
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    stale = output_dir / "benchmark_vllm_29991231_235959"
+    stale.mkdir(parents=True)
+    (stale / "benchmark_report.json").write_text(
+        json.dumps({
+            "success": True,
+            "framework": "vllm",
+            "throughput": {"output_throughput": 9999.0, "completed_requests": 64},
+        }),
+        encoding="utf-8",
+    )
+    old = 1735689600.0
+    os.utime(stale / "benchmark_report.json", (old, old))
+    os.utime(stale, (old, old))
+
+    def fake_run(cmd, *args, **kwargs):
+        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]), tput=4000.0)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    executor = _executor(base, tmp_path, baseline_double_run=False)
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded", result
+    assert result.get("output_throughput") == pytest.approx(4000.0)
 
 
 def test_baseline_fresh_workspace_succeeds_despite_stale_peer(tmp_path, monkeypatch):
