@@ -168,6 +168,20 @@ _canonicalize_path() {
   [ -z "$p" ] && return 0
   readlink -f -- "$p" 2>/dev/null || printf '%s' "${p%/}"
 }
+# Mirror Path.home() (posixpath.expanduser) so paths written here land where the
+# Python readers look: a *present* HOME wins even when empty, else the uid's passwd entry.
+_home_dir() {
+  local h
+  if [ -n "${HOME+x}" ]; then
+    h="${HOME}"
+  else
+    h="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
+    # Nothing left to resolve; Path.home() raises on this same input.
+    [ -n "$h" ] || return 1
+  fi
+  while [ -n "$h" ] && [ "${h%/}" != "$h" ]; do h="${h%/}"; done
+  printf '%s' "${h:-/}"
+}
 # Resolve a git ref to a commit SHA (7-40 hex passes through; branch/tag via
 # ls-remote, falling back to the raw ref). The SHA keys the per-revision cache.
 _resolve_ref_sha() {
@@ -1135,7 +1149,9 @@ write_env_file() {
     # Pin the claude binary the GEAK SDK path uses (else claude_agent_sdk may
     # fall back to its older bundled CLI). run_e2e.py maps this to cli_path.
     _geak_claude_bin=""
-    for _c in "${HOME}/.local/bin/claude" "/usr/local/bin/claude" "$(command -v claude 2>/dev/null || true)"; do
+    local _probe_home
+    _probe_home="$(_home_dir || true)"
+    for _c in "${_probe_home:+${_probe_home}/.local/bin/claude}" "/usr/local/bin/claude" "$(command -v claude 2>/dev/null || true)"; do
       if [ -n "${_c}" ] && [ -x "${_c}" ]; then _geak_claude_bin="${_c}"; break; fi
     done
     [ -n "${_geak_claude_bin}" ] && echo "export GEAK_CLAUDE_BIN='${_geak_claude_bin}'"
@@ -1315,13 +1331,20 @@ ensure_forge_claude_cli() {
     fi
   fi
   # ~/.claude authenticates the Claude Code CLI for Anthropic-compatible flows.
+  # Its readers resolve Path.home(), so ~ must come from _home_dir here too.
   local _claude_key="${_ANTHROPIC_KEY_VAL:-}"
   if [ -n "$_claude_key" ]; then
-    mkdir -p /root/.claude
+    local _claude_home
+    _claude_home="$(_home_dir || true)"
+    if [ -z "$_claude_home" ]; then
+      warn "no home directory for uid $(id -u) (HOME unset, no passwd entry); ~/.claude/config.json not written"
+      return 0
+    fi
+    mkdir -p "${_claude_home}/.claude"
     local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-}"
     _anthropic_url="${_anthropic_url%/}"
     _anthropic_url="${_anthropic_url%/v1}"
-    cat > /root/.claude/config.json <<EOF
+    cat > "${_claude_home}/.claude/config.json" <<EOF
 {
   "theme": "dark",
   "hasCompletedOnboarding": true,
@@ -1329,7 +1352,8 @@ ensure_forge_claude_cli() {
   "customApiUrl": "${_anthropic_url}"
 }
 EOF
-    chmod 600 /root/.claude/config.json
+    chmod 600 "${_claude_home}/.claude/config.json"
+    log "wrote ${_claude_home}/.claude/config.json"
   elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     log "subscription token in use; ~/.claude/config.json left alone (primaryApiKey would override it)"
   else
