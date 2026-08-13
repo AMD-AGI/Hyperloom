@@ -1832,6 +1832,90 @@ async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
 
 
 @pytest.mark.asyncio
+async def test_explore_leaves_a_variant_out_when_the_run_reaped_its_grid_warmup(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """The stop has to survive ``run_grid``'s own discarded warmup round.
+
+    With server-lifecycle reuse ineligible, explore's decision round is a plain
+    ``run_grid`` call, and ``run_grid`` runs its own warmup pass before it (on by
+    default outside pytest). Explore reads the stop off the result's
+    ``error_class``, so a warmup reap graded as ``warmup_round_failed`` reaches
+    this ledger as a measured verdict about the variant.
+    """
+    _force_cold_decision(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+        lambda _config_path: {
+            "eligible": True,
+            "framework": "sglang",
+            "port": 30000,
+            "reason": "",
+        },
+    )
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.max_minutes = 600.0
+    state.baseline_runtime_sec = 20.0
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    ran: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        if "--output-dir" not in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        ran.append(slot.name)
+        if slot.name == "warmup_round":
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=SESSION_TIME_EXHAUSTED_RETURNCODE,
+                stdout="",
+                stderr="reaped",
+            )
+        _fake_workspace(slot, tput=840.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-warmup-reaped"),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "v_warmup_reaped",
+                    "extra_args": "--max-num-seqs 256",
+                    "extra_envs": {},
+                    "provenance": "default_grid",
+                }
+            ],
+            "variant_timeout_sec": 3600,
+            "baseline_runtime_sec": 20.0,
+        },
+        idempotency_key="ex-budget-warmup-reaped",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    assert ran == ["warmup_round"], f"the decision round ran after the warmup was reaped: {ran}"
+    assert res.result["explore_search_update"]["tested"] == {}
+    assert res.result["losers"] == []
+    assert res.result["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
+    assert res.result["session_budget_untested"] == 1
+
+
+@pytest.mark.asyncio
 async def test_explore_does_not_call_a_variant_unstable_when_the_run_reaped_its_rebench(
     sub_agent_runner,
     tmp_path,

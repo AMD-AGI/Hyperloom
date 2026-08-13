@@ -1946,6 +1946,58 @@ class TestTheSessionBudgetReachesTheBaselineRound:
 
         assert result["error_class"] == ORCHESTRATOR_CANCELLED_CLASS
 
+    def test_a_cancelled_multi_node_warmup_does_not_go_on_to_the_measured_round(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """The discarded warmup is a full pass, so a cancel there ends the round.
+
+        Running the measured round anyway spends a second pass of GPU time the
+        run has already been told to stop spending -- and grades the baseline on
+        a round started after the stop.
+        """
+        from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl
+
+        base = tmp_path / "base.yaml"
+        _write_yaml(base, framework="vllm")
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+
+        async def fake_restart_server_for_round(*_args, **_kwargs):
+            return None
+
+        monkeypatch.setattr(mnl, "restart_server_for_round", fake_restart_server_for_round)
+        launched: list[str] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            slot = Path(cmd[cmd.index("--output-dir") + 1])
+            launched.append(slot.name)
+            if slot.name == "mn_warmup":
+                return subprocess.CompletedProcess(cmd, ORCHESTRATOR_CANCELLED_RETURNCODE, "", "")
+            _fake_workspace(slot, tput=_HOT_TPUT)
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        executor = BaselineExecutor(
+            magpie_python=sys.executable,
+            default_config_path=base,
+            session_dir=tmp_path,
+        )
+        ctx = _make_ctx(
+            {
+                "output_dir": str(tmp_path / "ws"),
+                "timeout_sec": 600,
+                "gpu_type": "mi300x",
+            }
+        )
+        with patch(
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            side_effect=fake_run,
+        ):
+            result = _run(executor(ctx))
+
+        assert launched == ["mn_warmup"], f"the measured round ran after the cancel: {launched}"
+        assert result["error_class"] == ORCHESTRATOR_CANCELLED_CLASS
+
     def test_the_profile_arm_gets_all_of_it(self, tmp_path):
         """Profile is the same executor with a four-hour default -- longer than
         any session budget it could be given."""
