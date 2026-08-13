@@ -80,21 +80,6 @@ _PATCH_LANDING_ACTIONS: frozenset[str] = frozenset(
     }
 )
 
-# Actions that produce the evidence patch_landing expects.
-_EVIDENCE_PRODUCER_ACTIONS: frozenset[str] = frozenset(
-    {
-        "explore",
-        "specialist",
-        "sweep",
-        "profile",
-        "roofline",
-        "kernel_opt",
-        "deep_kernel_analysis",
-        "operator_tuning",
-        "vendor_kernel_config",
-    }
-)
-
 _FRAMEWORK_OP_ACTIONS: frozenset[str] = frozenset(
     {
         "baseline",

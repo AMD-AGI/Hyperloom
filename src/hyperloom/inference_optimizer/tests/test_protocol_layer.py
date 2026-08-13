@@ -348,10 +348,10 @@ async def test_task_registry_illegal_transition_rejected(db):
 @pytest.mark.asyncio
 async def test_task_registry_cancel_family_bulk(db):
     tr = TaskRegistry(db)
-    a = await tr.create(kind="deep_kernel_analysis", params={}, idempotency_key="ka")
-    b = await tr.create(kind="deep_kernel_analysis", params={}, idempotency_key="kb")
+    a = await tr.create(kind="kernel_opt", params={}, idempotency_key="ka")
+    b = await tr.create(kind="kernel_opt", params={}, idempotency_key="kb")
     c = await tr.create(kind="bench_runner", params={}, idempotency_key="kc")
-    cancelled = await tr.cancel_family(["deep_kernel_analysis"])
+    cancelled = await tr.cancel_family(["kernel_opt"])
     assert set(cancelled) == {a.task_id, b.task_id}
     bench_after = await tr.get(c.task_id)
     assert bench_after.state == "queued"  # untouched

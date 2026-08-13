@@ -138,7 +138,6 @@ class CodexSessionResult:
 
     Attributes:
         text: The agent's final response.
-        items: One JSON-ready mapping per typed SDK thread item, in order.
         usage: Token accounting for the turn (empty when the SDK reported none).
         thread_id: The SDK thread handle.
         error: The in-band SDK error message, or ``""`` when the turn was clean.
@@ -147,7 +146,6 @@ class CodexSessionResult:
     """
 
     text: str = ""
-    items: tuple[dict[str, Any], ...] = ()
     usage: dict[str, int] = field(default_factory=dict)
     thread_id: str = ""
     error: str = ""
@@ -771,71 +769,6 @@ def _private_codex_home(
         _cleanup_codex_home(temporary)
 
 
-def _item_dict(item: Any) -> dict[str, Any]:
-    """Convert one typed SDK thread item into a JSON-ready mapping."""
-    root = getattr(item, "root", item)
-    if hasattr(root, "model_dump"):
-        dumped = root.model_dump(by_alias=True, mode="json")
-        return dumped if isinstance(dumped, dict) else {}
-    return dict(root) if isinstance(root, dict) else {}
-
-
-def normalize_codex_items(result: Any) -> tuple[dict[str, Any], ...]:
-    """Normalize the typed thread items of one turn into JSON-ready mappings.
-
-    Args:
-        result (Any): A ``TurnResult`` (or a stand-in exposing ``items``).
-
-    Returns:
-        tuple[dict[str, Any], ...]: One mapping per item, in stream order.
-    """
-    return tuple(_item_dict(item) for item in (getattr(result, "items", None) or ()))
-
-
-def codex_item_type(item: dict[str, Any]) -> str:
-    """Return an item's SDK type folded to a separator-insensitive key.
-
-    The SDK emits camelCase (``commandExecution``); folding to ``commandexecution``
-    keeps callers independent of that spelling.
-    """
-    return str(item.get("type") or "").replace("_", "").lower()
-
-
-def describe_codex_item(item: dict[str, Any]) -> str:
-    """Summarize one normalized thread item as a single log line.
-
-    Args:
-        item (dict[str, Any]): A mapping from :func:`normalize_codex_items`.
-
-    Returns:
-        str: A one-line summary, or ``""`` for items with nothing to report.
-    """
-    kind = codex_item_type(item)
-    if kind == "agentmessage":
-        return str(item.get("text") or "").strip()
-    if kind == "commandexecution":
-        command = str(item.get("command") or "").strip()
-        if not command:
-            return ""
-        exit_code = item.get("exitCode")
-        suffix = "" if exit_code is None else f" (exit {exit_code})"
-        return f"$ {command}{suffix}"
-    if kind == "filechange":
-        paths = codex_file_changes(item)
-        return f"wrote {', '.join(paths)}" if paths else ""
-    return ""
-
-
-def codex_file_changes(item: dict[str, Any]) -> tuple[str, ...]:
-    """Return the paths a ``fileChange`` item reports, in order."""
-    changes = item.get("changes")
-    if not isinstance(changes, (list, tuple)):
-        return ()
-    return tuple(
-        change["path"] for change in changes if isinstance(change, dict) and isinstance(change.get("path"), str)
-    )
-
-
 def _usage_int(payload: dict[str, Any], key: str) -> int:
     """Read one non-negative token count, treating unusable values as 0.
 
@@ -853,7 +786,7 @@ def _usage_int(payload: dict[str, Any], key: str) -> int:
 
 
 def normalize_codex_usage(usage: Any) -> dict[str, int]:
-    """Normalize ``ThreadTokenUsage`` into Hyperloom's transcript usage fields.
+    """Normalize ``ThreadTokenUsage`` into Hyperloom's token usage fields.
 
     Only the ``last`` breakdown is read for the counts: it covers the turn that
     just ran, whereas ``total`` accumulates across the whole thread. Reasoning
@@ -914,7 +847,6 @@ def normalize_codex_result(result: Any, thread_id: str) -> CodexSessionResult:
     """
     return CodexSessionResult(
         text=str(getattr(result, "final_response", "") or "").strip(),
-        items=normalize_codex_items(result),
         usage=normalize_codex_usage(getattr(result, "usage", None)),
         thread_id=thread_id,
         error=_turn_error_message(result),
@@ -1294,13 +1226,9 @@ __all__ = [
     "DEFAULT_CODEX_SANDBOX_MODE",
     "HYPERLOOM_RUNTIME_DIR_ENV",
     "api_key_env_name",
-    "codex_file_changes",
-    "codex_item_type",
     "codex_provider_overrides",
     "codex_sandbox",
-    "describe_codex_item",
     "load_codex_sdk",
-    "normalize_codex_items",
     "normalize_codex_result",
     "normalize_codex_usage",
     "probe_codex_sandbox_capability",

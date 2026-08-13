@@ -713,13 +713,13 @@ def test_R2_max_turns_negative_allowed(gate):
 
 
 def test_R2_specialist_action_skips_unknown_action_registry_path(gate):
-    """The synthetic ``specialist`` action_name bypasses the ActionRegistry lookup that would deny it as ``unknown_action``."""
-    # Even with an ActionRegistry wired, the specialist branch is checked before the unknown_action gate.
-    from hyperloom.orchestrator.actions.registry import ActionRegistry
+    """The synthetic ``specialist`` action_name bypasses the action-catalogue lookup that would deny it as ``unknown_action``."""
+    # Even with a catalogue wired, the specialist branch is checked before the unknown_action gate.
+    from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 
     gate_with_registry = PolicyGate(
         role_registry=default_role_registry(),
-        action_registry=ActionRegistry().load(),
+        action_registry=ACTION_CATALOGUE,
     )
     gate_with_registry.validate_intent(
         "orchestration",

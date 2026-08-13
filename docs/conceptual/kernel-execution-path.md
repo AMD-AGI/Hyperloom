@@ -31,7 +31,6 @@ No PolicyGate path runs for the RESPONSE because it is written directly via
 |---|---|---|
 | `trace_analyze` | `trace_analyze_handler` | TraceLens `tracelens_analysis.py` |
 | `run_gemm_tuning` | `run_gemm_tuning_handler` | GEAK or forge-gemm-tune |
-| `run_fusion` | `run_fusion_handler` | forge-fusion |
 | `run_optimization` | `run_optimization_handler` | GEAK or Forge per-kernel |
 | `integrate` | `integrate_handler` | patch → re-baseline → KEEP/REVERT |
 | `apply_patch` | `integrate_handler` (alias) | same as `integrate` |
@@ -39,6 +38,9 @@ No PolicyGate path runs for the RESPONSE because it is written directly via
 Any other kind, including the action-name `kernel_opt`, yields an immediate
 `unknown_kernel_kind` rejection. PolicyGate validates the REQUEST payload from
 orchestration (path-sandbox, phase-action gate) but never sees the RESPONSE.
+
+`run_fusion_handler` is absent from the table on purpose: `KernelPhase` awaits
+it directly, so no request ever carries that kind.
 
 ## KERNEL phase entry: Coordinator-direct calls
 
@@ -64,7 +66,7 @@ The seven rules from the retired `kernel_agent.md` live in executable Python:
 | IR-1 submit all candidates in parallel | `_batch_kernel_candidates` + `_DEFAULT_KERNEL_BATCH_PARALLEL=8` in `request_handlers.py` |
 | IR-2 never modify source before GEAK submission | `_is_runtime_generated_kernel` gate in `request_handlers.py` |
 | IR-3 integration is mandatory after every KEEP | `phases/kernel_stack.py::KernelStackPhase._auto_enqueue_pending_integrations` (called by `intent_router.py`) |
-| IR-4 kill_server + check_gpu_memory before server restart | `apply_and_bench.py` subprocess tool; `_multi_node_server_lifecycle.py::restart_server_for_round` for multi-node |
+| IR-4 kill stale servers before restart | `_multi_node_server_lifecycle.py::restart_server_for_round` |
 | IR-5 safe process management | `orchestrator/actions/executors/_subprocess_kill.py` |
 | IR-6 use apply_kernel_patch.py --target-file | `request_handlers.py::_maybe_apply_kernel_patch` → `agents/kernel/tools/apply_kernel_patch.py::apply_kernel_patch` |
 | IR-7 never modify GEAK config | GEAK invocation wrappers in `request_handlers.py` / `geak_runner.py` |

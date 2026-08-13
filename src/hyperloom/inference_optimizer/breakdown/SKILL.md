@@ -71,9 +71,8 @@ watching this session live:
    observing this session.
 4. **Never** mid-action — collectors expect a coherent state snapshot.
 
-Dispatch action `session_breakdown` (yaml meta lives at
-`actions/_meta/session_breakdown.yaml`) — it's a single 1-minute action,
-no inputs required.
+Dispatch action `session_breakdown` — a single 1-minute action, no inputs
+required.
 
 ## How to invoke
 

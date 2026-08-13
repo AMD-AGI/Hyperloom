@@ -48,7 +48,6 @@
 
 # Benchmarking / profiling
 /src/hyperloom/agents/kernel/tools/tracelens_arch_benchmark.py  @devalshahamd @AMD-AGI/SaFE
-/src/hyperloom/agents/kernel/tools/apply_and_bench.py           @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/actions/executors/profile.py        @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/actions/executors/roofline.py       @devalshahamd @AMD-AGI/SaFE
 

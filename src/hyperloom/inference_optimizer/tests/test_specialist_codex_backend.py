@@ -1511,7 +1511,6 @@ async def test_codex_agent_backend_preserves_roles_and_returns_validated_usage(
                     ]
                 }
             ),
-            items=({"type": "commandExecution", "command": "pwd", "exitCode": 0},),
             usage={
                 "input_tokens": 11,
                 "output_tokens": 7,
