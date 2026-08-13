@@ -888,6 +888,24 @@ def test_a_citation_opening_the_verdict_still_holds_it():
     )
 
 
+def test_a_citation_in_either_field_the_entry_states_its_grounds_in_is_read():
+    """The two prose keys are the same speaker's grounds for the same verdict --
+    ``reasoning`` is how a single verdict spells them and ``rationale`` how a
+    variant does -- and nothing establishes a priority between them. Stopping at
+    the first key that says anything let a one-line pointer decide whether the
+    citation beside it was read at all."""
+    entry = {
+        "verdict": "reject",
+        "reasoning": "See the per-variant notes.",
+        "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: the variant carries a self-reported gain.",
+    }
+
+    assert verdict_held_to_its_rule(entry, action_name="specialist") == (
+        "advise",
+        QUANTITATIVE_CLAIM_REASON_CODE,
+    )
+
+
 def test_a_rule_named_in_a_remediation_note_is_not_a_citation():
     """``notes`` is where a model writes what to do next, including "this is not
     a <code> problem"; grounds are stated in ``reasoning``."""

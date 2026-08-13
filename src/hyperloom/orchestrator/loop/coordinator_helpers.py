@@ -553,13 +553,18 @@ def serialize_verdict_advisory(payload: dict[str, Any]) -> dict[str, Any]:
 # documents and every fixture uses. ``notes`` is remediation text and
 # ``risks[*].summary`` describes the risk, so a rule named in either is being
 # discussed rather than invoked; both stay out.
+#
+# Every key an entry fills is read. They are one speaker's grounds for one
+# verdict and nothing ranks them, so trying them in order would let whichever
+# happens to come first decide whether the citation in the other is seen.
 _VERDICT_PROSE_KEYS: tuple[str, ...] = ("reasoning", "rationale")
 
 # What a citation looks like: the code opens the verdict's grounds and a colon
 # introduces the finding, the shape the field verdict used --
 # ``"specialist_quantitative_claim_violation: the proposal payload carries the
 # forbidden predicted_gain_pct field."`` Nothing may precede the code but
-# whitespace or a backtick, and only the opening line of the prose is read.
+# whitespace or a backtick, and only the opening line of each prose field is
+# read.
 #
 # The two mistakes cost different amounts. Missing a citation costs the round
 # its proposals, which the next round can re-propose; reading one that was not
@@ -572,21 +577,26 @@ _VERDICT_PROSE_KEYS: tuple[str, ...] = ("reasoning", "rationale")
 _CITATION_OPENER: str = r"[ \t]*`?"
 
 
-def _opening_prose_line(entry: dict[str, Any]) -> str:
-    """Return the first non-blank line of the grounds ``entry`` states in prose.
+def _opening_prose_lines(entry: dict[str, Any]) -> list[str]:
+    """Return the opening line of each prose field ``entry`` states grounds in.
 
     Args:
         entry: A ``review_verdict`` payload or one ``verdict_map`` entry; the
-            two spell the field differently (:data:`_VERDICT_PROSE_KEYS`).
+            two spell the field differently (:data:`_VERDICT_PROSE_KEYS`), and
+            an entry filling both states grounds in both.
 
     Returns:
-        The opening line, or ``""`` when the entry states no grounds in prose.
+        The first non-blank line of each field present, in
+        :data:`_VERDICT_PROSE_KEYS` order; empty when the entry states no
+        grounds in prose.
     """
+    openings: list[str] = []
     for key in _VERDICT_PROSE_KEYS:
         for line in str(entry.get(key) or "").splitlines():
             if line.strip():
-                return line
-    return ""
+                openings.append(line)
+                break
+    return openings
 
 
 def cited_advisory_reason_code(entry: dict[str, Any]) -> str:
@@ -614,14 +624,12 @@ def cited_advisory_reason_code(entry: dict[str, Any]) -> str:
     explicit = str(entry.get("failure_reason_code") or "").strip()
     if explicit:
         return explicit if explicit in advisory else ""
-    opening = _opening_prose_line(entry)
-    if not opening:
-        return ""
     # At most one code can open one line, so the sort only fixes the order the
     # candidates are tried in.
-    for code in sorted(advisory):
-        if re.match(rf"{_CITATION_OPENER}{re.escape(code)}`?[ \t]*:", opening):
-            return code
+    for opening in _opening_prose_lines(entry):
+        for code in sorted(advisory):
+            if re.match(rf"{_CITATION_OPENER}{re.escape(code)}`?[ \t]*:", opening):
+                return code
     return ""
 
 
