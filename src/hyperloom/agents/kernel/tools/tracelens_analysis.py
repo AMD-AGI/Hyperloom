@@ -2016,11 +2016,15 @@ def _inject_collective_candidates(
         aiter_csrc = _aiter_csrc_root().rstrip("/")
         if aiter_csrc and Path(aiter_csrc).is_dir():
             roots.append(aiter_csrc)
-    def _skip(code: str, detail: str) -> list[dict[str, Any]]:
+    def _skip(code: str, detail: str, notes: list[str] | None = None) -> list[dict[str, Any]]:
         """Record a visible reason the collective lane got no candidate."""
         message = f"nccl_summary: {detail}; skipping injection"
         log.warning(message)
         if log_path is not None:
+            # The per-symbol notes are the only record of WHICH symbol failed and
+            # they are normally flushed at the end, which a skip never reaches.
+            for note in notes or []:
+                append_log(log_path, note)
             append_log(log_path, message)
         if health_warnings is not None:
             health_warnings.append(
@@ -2058,6 +2062,7 @@ def _inject_collective_candidates(
             "collective_symbols_unresolved",
             "no summary row resolved to a device source under "
             + ", ".join(roots),
+            notes=messages,
         )
 
     def _name(item: dict[str, Any]) -> str:

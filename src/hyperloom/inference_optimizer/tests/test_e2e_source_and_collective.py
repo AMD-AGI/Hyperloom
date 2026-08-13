@@ -317,6 +317,7 @@ def test_collective_lane_gate_opens_on_this_analysis(analysis_md, trace_file):
             last_trace_analyze={"hot_kernels_top15": []},
         ),
         COLLECTIVE_COMM_PCT_FLOOR=KernelPhase.COLLECTIVE_COMM_PCT_FLOOR,
+        COLLECTIVE_CANDIDATE_GPU_PCT_FLOOR=KernelPhase.COLLECTIVE_CANDIDATE_GPU_PCT_FLOOR,
     )
     assert KernelPhase._collective_required_before_kernel_opt(fake) is True
 

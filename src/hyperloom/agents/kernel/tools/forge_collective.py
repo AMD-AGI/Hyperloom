@@ -108,11 +108,18 @@ def _add_opt(cmd: list[str], value: Any, flag: str) -> None:
         cmd.extend([flag, str(value)])
 
 
+class CollectiveInvocationSpecUnavailable(RuntimeError):
+    """The evidence forge-loop needs to author ``run_candidate`` is missing."""
+
+
 def _write_invocation_evidence(candidate: dict[str, Any], output_dir: Path) -> str:
     """Record how the traced collective is called, for forge-loop task prep.
 
-    Returns ``""`` when the evidence cannot be written; the campaign still runs,
-    with driver authoring falling back to the trace alone.
+    The spec carries the argument order, dtypes and case ids that the generated
+    driver leaves as ``NotImplementedError`` for the author to fill in. Starting
+    a multi-hour campaign without it only defers the failure to task
+    preparation, so this raises rather than degrading -- the same call the
+    rewrite lane makes when its own spec is absent.
     """
     try:
         path = output_dir / invocation_spec_filename(candidate)
@@ -124,8 +131,10 @@ def _write_invocation_evidence(candidate: dict[str, Any], output_dir: Path) -> s
             ),
         )
     except (OSError, TypeError, ValueError) as exc:
-        log.warning("collective invocation spec unavailable: %s", exc)
-        return ""
+        raise CollectiveInvocationSpecUnavailable(
+            f"cannot record how {candidate.get('source_function') or 'the collective'} "
+            f"is invoked: {exc}"
+        ) from exc
     return str(path)
 
 

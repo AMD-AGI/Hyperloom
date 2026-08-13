@@ -63,14 +63,31 @@ def _iter_device_sources(roots: Iterable[str]) -> Iterable[Path]:
                 yield path
 
 
-def locate_device_symbol(symbol: str, roots: Sequence[str]) -> tuple[str, int, str] | None:
+def collect_device_sources(roots: Sequence[str]) -> tuple[list[Path], bool]:
+    """Return the device sources to scan, and whether the cap truncated them.
+
+    Every symbol scans the same tree, so walking it once turns the lookup from
+    ``O(symbols x files)`` into one pass. The truncation flag matters because a
+    capped scan and a genuinely absent symbol both end in ``None``.
+    """
+    sources = list(_iter_device_sources(roots))
+    return sources, len(sources) >= _MAX_SCANNED_FILES
+
+
+def locate_device_symbol(
+    symbol: str,
+    roots: Sequence[str],
+    *,
+    sources: Sequence[Path] | None = None,
+) -> tuple[str, int, str] | None:
     """Locate the ``__global__`` definition of a device symbol."""
     if not symbol:
         return None
     pattern = re.compile(r"\b" + re.escape(symbol) + r"\s*\(")
-    for path in _iter_device_sources(roots):
+    scanned = sources if sources is not None else _iter_device_sources(roots)
+    for path in scanned:
         try:
-            lines = path.read_text(errors="ignore").splitlines()
+            lines = Path(path).read_text(errors="ignore").splitlines()
         except OSError:
             continue
         for idx, line in enumerate(lines):
@@ -185,10 +202,17 @@ def extract_collective_candidates(
     total_time_ms = float(total_time_raw)
 
     roots = [r for r in source_roots if r]
+    sources, truncated = collect_device_sources(roots)
+    if truncated and log_fn is not None:
+        log_fn(
+            f"nccl_summary: device-source scan stopped at {_MAX_SCANNED_FILES} "
+            f"files under {', '.join(roots)}; a symbol reported missing below "
+            "may simply lie past the cap"
+        )
     candidates: list[dict[str, Any]] = []
     for name, (duration_us, call_count, stream) in prorated.items():
         symbol = collective_symbol(name)
-        located = locate_device_symbol(symbol, roots)
+        located = locate_device_symbol(symbol, roots, sources=sources)
         if located is None:
             if log_fn is not None:
                 log_fn(

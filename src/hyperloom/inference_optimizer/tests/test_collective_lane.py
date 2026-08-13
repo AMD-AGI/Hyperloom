@@ -369,6 +369,7 @@ def _gate(*, tp=8, comm_pct=5.0, last_collective=None, skip_env=None, monkeypatc
     fake = SimpleNamespace(
         shared_state=state,
         COLLECTIVE_COMM_PCT_FLOOR=KernelPhase.COLLECTIVE_COMM_PCT_FLOOR,
+        COLLECTIVE_CANDIDATE_GPU_PCT_FLOOR=KernelPhase.COLLECTIVE_CANDIDATE_GPU_PCT_FLOOR,
     )
     return KernelPhase._collective_required_before_kernel_opt(fake)
 
@@ -419,6 +420,27 @@ def test_candidate_fallback_still_respects_the_floor(monkeypatch):
     assert _gate(comm_pct=None) is False
 
 
+def test_the_fallback_share_is_judged_on_its_own_floor(monkeypatch):
+    """The two shares are not the same measurement.
+
+    The roofline value is the exposed part of all communication; the fallback is
+    one kernel's whole GPU time, which a compute overlap can hide entirely. A
+    share that clears the roofline floor must not therefore clear the fallback's.
+    """
+    between = (
+        KernelPhase.COLLECTIVE_COMM_PCT_FLOOR
+        + KernelPhase.COLLECTIVE_CANDIDATE_GPU_PCT_FLOOR
+    ) / 2
+    monkeypatch.setattr(
+        krh,
+        "select_collective_candidate",
+        lambda _state: {"kernel_id": "k007", "gpu_pct": between},
+    )
+
+    assert _gate(comm_pct=between) is True
+    assert _gate(comm_pct=None) is False
+
+
 def test_candidate_fallback_survives_an_unreadable_artifact(monkeypatch):
     """A broken candidates artifact closes the gate instead of raising."""
     def _raise(_state):
@@ -451,6 +473,7 @@ def _gate_with_analysis(candidates_path: str, last_collective: dict) -> bool:
     fake = SimpleNamespace(
         shared_state=state,
         COLLECTIVE_COMM_PCT_FLOOR=KernelPhase.COLLECTIVE_COMM_PCT_FLOOR,
+        COLLECTIVE_CANDIDATE_GPU_PCT_FLOOR=KernelPhase.COLLECTIVE_CANDIDATE_GPU_PCT_FLOOR,
     )
     return KernelPhase._collective_required_before_kernel_opt(fake)
 

@@ -2635,6 +2635,10 @@ class KernelPhase(PhaseHandler):
 
     #: Exposed communication below this share of E2E is not worth a tuning round.
     COLLECTIVE_COMM_PCT_FLOOR = 1.0
+    #: Floor for the fallback share, which counts one kernel's whole GPU time
+    #: rather than the exposed part of all communication. A collective the
+    #: compute overlaps entirely still scores here, so the bar is higher.
+    COLLECTIVE_CANDIDATE_GPU_PCT_FLOOR = 3.0
 
     def _collective_only_mode(self) -> bool:
         """Return whether KERNEL should run only the Collective lane."""
@@ -2676,12 +2680,17 @@ class KernelPhase(PhaseHandler):
                 "source-resolved collective candidate to fall back on)",
             )
             return False
-        if comm_pct < self.COLLECTIVE_COMM_PCT_FLOOR:
+        floor = (
+            self.COLLECTIVE_CANDIDATE_GPU_PCT_FLOOR
+            if comm_source == "candidate_gpu_pct"
+            else self.COLLECTIVE_COMM_PCT_FLOOR
+        )
+        if comm_pct < floor:
             log.info(
                 "KERNEL entry: skip collective (comm share %.2f%% from %s < %.2f%% floor)",
                 comm_pct,
                 comm_source,
-                self.COLLECTIVE_COMM_PCT_FLOOR,
+                floor,
             )
             return False
         last = getattr(self.shared_state, "last_collective", None)
