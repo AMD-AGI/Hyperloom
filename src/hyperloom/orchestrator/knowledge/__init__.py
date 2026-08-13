@@ -3,3 +3,7 @@
 
 """Knowledge plane: PR monitor, Recipe KB writeback, research hints, static
 recon, trajectory review."""
+
+from .agent_kb import ExploreAgentKB, FrameworkAgentKB, KernelAgentKB
+
+__all__ = ["ExploreAgentKB", "FrameworkAgentKB", "KernelAgentKB"]

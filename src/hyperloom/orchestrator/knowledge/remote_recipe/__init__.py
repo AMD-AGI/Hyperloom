@@ -22,13 +22,10 @@ from .client import (
     RemoteRecipeConfigurationError,
 )
 from .models import (
-    Artifact,
-    KnowledgeBundle,
     RemoteRecipeValidationError,
     RemoteWriteResult,
-    extract_knowledge_artifact_refs,
+    validate_relative_path,
 )
-from .sanitize import sanitize_shared_knowledge
 from .values import (
     KERNEL_AGENT_METRIC,
     KERNEL_AGENT_SESSION_ID,
@@ -394,9 +391,82 @@ class RemoteWarmRecipeAdapter:
     def _read(self, canonical_id: str) -> dict[str, Any] | None:
         if canonical_id not in self._cache:
             document = self._remote_kb.read(canonical_id, self._destination)
-            self._cache[canonical_id] = (
-                envelope_to_v1_recipe(document) if document is not None else None
-            )
+            if document is None:
+                self._cache[canonical_id] = None
+            else:
+                row = envelope_to_v1_recipe(document)
+                # Schema 3 restores the exact flat timeline as required
+                # ``prs_tested`` rows. Missing artifacts remain represented so
+                # PRELUDE fails closed instead of silently shortening the set.
+                if int(row.get("knowledge_schema_version") or 0) >= 3:
+                    knowledge = document.get("knowledge")
+                    value = (
+                        (knowledge or {}).get("value")
+                        if isinstance(knowledge, dict)
+                        else document.get("value")
+                    )
+                    timeline = (
+                        (value or {}).get("patch_timeline")
+                        if isinstance(value, dict)
+                        else None
+                    )
+                    gain = float(row.get("validated_gain_pct") or 0.0)
+                    replayable: list[dict[str, Any]] = []
+                    if isinstance(timeline, list):
+                        files_root = self._destination / "files"
+                        if files_root.is_symlink():
+                            raise RemoteRecipeValidationError(
+                                "schema-v3 files root must not be a symlink"
+                            )
+                        resolved_root = files_root.resolve()
+                        for index, item in enumerate(timeline):
+                            ref = validate_relative_path(
+                                str(item or "").strip()
+                            )
+                            source = files_root / ref
+                            cursor = files_root
+                            for part in Path(ref).parts:
+                                cursor = cursor / part
+                                if cursor.is_symlink():
+                                    raise RemoteRecipeValidationError(
+                                        "schema-v3 timeline ref resolves through "
+                                        f"a symlink: {ref!r}"
+                                    )
+                            try:
+                                source.resolve().relative_to(resolved_root)
+                            except ValueError as exc:
+                                raise RemoteRecipeValidationError(
+                                    "schema-v3 timeline ref escapes files root: "
+                                    f"{ref!r}"
+                                ) from exc
+                            patch_content = ""
+                            if (
+                                ref
+                                and source.is_file()
+                                and not source.is_symlink()
+                                and source.stat().st_size <= 50_000
+                            ):
+                                patch_content = source.read_text(
+                                        encoding="utf-8",
+                                        errors="replace",
+                                    )
+                            replayable.append(
+                                {
+                                    "outcome": "KEEP",
+                                    "patch_file": ref,
+                                    "patch_ref": str(source),
+                                    "patch_content": patch_content,
+                                    "measured_gain_pct": gain if gain > 0 else 1e-6,
+                                    "required": True,
+                                    "timeline_index": index,
+                                }
+                            )
+                    row["prs_tested"] = replayable
+                    row["patch_timeline"] = [
+                        str(item or "") for item in (timeline or [])
+                    ]
+                    row["required_patch_timeline"] = True
+                self._cache[canonical_id] = row
         return self._cache[canonical_id]
 
     def get_authoritative_recipe(

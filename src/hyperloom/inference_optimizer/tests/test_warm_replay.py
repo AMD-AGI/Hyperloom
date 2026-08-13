@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -52,6 +53,9 @@ class _StubSharedState:
 
     def save(self, *args, **kwargs):  # noqa: D401 — stub
         pass
+
+    def set_stop_reason(self, reason: str) -> None:
+        self.stop_reason = reason
 
 
 class _StubTaskRegistry:
@@ -487,6 +491,46 @@ def test_promote_warm_replay_rejected_by_failed_quality_gate(tmp_path):
     assert coord.shared_state.optimization_stack == []
     assert coord.shared_state.current_best == {}
     assert coord.shared_state.cumulative_gain == 0.0
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"status": "failed", "error": "launch failed"},
+        {"status": "succeeded", "output_throughput": 0.0},
+        {
+            "status": "succeeded",
+            "output_throughput": 700.0,
+            "quality_gate": {"passed": False},
+        },
+        {"status": "succeeded", "output_throughput": 600.0},
+    ],
+)
+def test_all_revert_branches_retain_pending_on_rollback_failure(
+    tmp_path,
+    result,
+):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_pending = {"task_id": "warm"}
+    coord.shared_state.warm_replay_outcome = {"status": "in_flight"}
+    coord.phase_prelude._rollback_combined_warm = (  # type: ignore[method-assign]
+        lambda *_args: {"ok": False, "errors": ["restore failed"]}
+    )
+    task = _StubTask(
+        params={
+            "baseline_tput_anchor": 600.0,
+            "combined_schema_v3": True,
+            "combined_keep_threshold_pct": 1.0,
+            "extra_server_args": "--warm",
+        }
+    )
+
+    coord._promote_warm_replay(result, task=task)
+
+    assert coord.shared_state.warm_replay_outcome["status"] == "rollback_failed"
+    assert coord.shared_state.warm_replay_pending == {"task_id": "warm"}
+    assert coord.shared_state.stop_reason == "warm_replay_rollback_failed"
 
 
 def test_promote_warm_replay_passes_quality_gate_is_promoted(tmp_path):
@@ -975,3 +1019,631 @@ def test_promote_warm_replay_zero_baseline_tput_is_failure(tmp_path):
     coord._promote_warm_replay(result, task=_StubTask())
     assert coord.shared_state.warm_replay_outcome["status"] == "failed"
     assert "invalid_tput" in coord.shared_state.warm_replay_outcome["reason"]
+
+
+@pytest.mark.asyncio
+async def test_combined_replay_prepares_kernel_without_separate_validation(
+    tmp_path,
+):
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe=_warm_recipe_t1(
+            extra_server_args="--recipe",
+            extra_envs={"RECIPE": "1"},
+        ),
+    )
+    prepared_calls = 0
+
+    async def _prepare():
+        nonlocal prepared_calls
+        prepared_calls += 1
+        return {
+            "status": "prepared",
+            "pending": [{"column": "gemm", "decision": "PENDING"}],
+            "applied": [{"status": "ok", "manifest_path": "/tmp/m"}],
+            "extra_envs": {"KERNEL": "1"},
+            "extra_server_args": "--kernel",
+        }
+
+    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
+
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert prepared_calls == 1
+    assert len(coord.tasks.calls) == 1
+    assert task.params["extra_envs"] == {"RECIPE": "1", "KERNEL": "1"}
+    assert "--recipe" in task.params["extra_server_args"]
+    assert "--kernel" in task.params["extra_server_args"]
+    assert len(task.params["warm_kernel_plan"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_dirty_kernel_preparation_stops_recipe_enqueue(tmp_path):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_pending = {
+        "kernel_snapshots": [{"target": "/tmp/kernel.py"}]
+    }
+
+    async def _prepare():
+        return {
+            "status": "rollback_failed",
+            "dirty": True,
+            "reason": "restore failed",
+            "rollback": {"ok": False, "errors": ["restore failed"]},
+        }
+
+    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
+
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert task is None
+    assert coord.tasks.calls == []
+    assert coord.shared_state.warm_replay_outcome["status"] == "rollback_failed"
+    assert coord.shared_state.warm_replay_pending["status"] == "rollback_failed"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_failure_rolls_back_prepared_kernel(tmp_path):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    applied = [{"manifest_path": "/tmp/m"}]
+    snapshots = [{"target": "/tmp/kernel.py"}]
+    coord.shared_state.warm_replay_pending = {
+        "kernel_apply_results": applied,
+        "kernel_snapshots": snapshots,
+    }
+
+    async def _prepare():
+        return {
+            "status": "prepared",
+            "pending": [{"column": "rewrite"}],
+            "applied": applied,
+            "snapshots": snapshots,
+        }
+
+    async def _raise(**_kwargs):
+        raise RuntimeError("registry unavailable")
+
+    rollbacks: list[tuple[list[dict], list[dict]]] = []
+    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
+    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+        lambda got_applied, got_snapshots=None: (
+            rollbacks.append((got_applied, got_snapshots or []))
+            or {"ok": True, "errors": []}
+        )
+    )
+    coord.tasks.create_or_return_existing = _raise  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="registry unavailable"):
+        await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert rollbacks == [(applied, snapshots)]
+    assert coord.shared_state.warm_replay_pending == {}
+    assert coord.shared_state.warm_replay_outcome["status"] == "enqueue_failed"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_failure_retains_pending_when_kernel_restore_fails(
+    tmp_path,
+):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_pending = {
+        "kernel_apply_results": [{"manifest_path": "/tmp/m"}],
+        "kernel_snapshots": [{"target": "/tmp/kernel.py"}],
+    }
+
+    async def _prepare():
+        return {
+            "status": "prepared",
+            "pending": [{"column": "rewrite"}],
+            "applied": [{"manifest_path": "/tmp/m"}],
+            "snapshots": [{"target": "/tmp/kernel.py"}],
+        }
+
+    async def _raise(**_kwargs):
+        raise RuntimeError("registry unavailable")
+
+    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
+    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+        lambda *_args: {"ok": False, "errors": ["restore failed"]}
+    )
+    coord.tasks.create_or_return_existing = _raise  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="registry unavailable"):
+        await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert coord.shared_state.warm_replay_pending["status"] == "rollback_failed"
+    assert coord.shared_state.warm_replay_outcome["status"] == "rollback_failed"
+
+
+def test_combined_replay_revert_rolls_back_recipe_and_kernel(
+    tmp_path, monkeypatch
+):
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe=_warm_recipe_t1(),
+    )
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 5.0}
+    recipe_rollbacks: list[tuple[str, str]] = []
+    kernel_rollbacks: list[list[dict]] = []
+
+    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+
+    monkeypatch.setattr(
+        baseline_module,
+        "_revert_patches",
+        lambda target, sha, manifest=None: (
+            recipe_rollbacks.append((target, sha))
+            or {"ok": True, "errors": []}
+        ),
+    )
+    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+        lambda applied, snapshots=None: (
+            kernel_rollbacks.append(applied)
+            or {"ok": True, "errors": []}
+        )
+    )
+    task = _StubTask(
+        task_id="combined",
+        params={
+            "baseline_tput_anchor": 600.0,
+            "extra_server_args": "--recipe --kernel",
+            "extra_envs": {"RECIPE": "1", "KERNEL": "1"},
+            "warm_kernel_plan": [{"column": "rewrite"}],
+            "warm_kernel_apply_results": [{"manifest_path": "/tmp/m"}],
+        },
+    )
+
+    coord._promote_warm_replay(
+        {
+            "status": "succeeded",
+            "output_throughput": 500.0,
+            "warm_patch_target": "/repo",
+            "warm_patch_pre_sha": "abc",
+            "warm_patch_snapshot_manifest": {
+                "manifest_path": "/repo.json"
+            },
+        },
+        task=task,
+    )
+
+    assert recipe_rollbacks == [("/repo", "abc")]
+    assert kernel_rollbacks == [[{"manifest_path": "/tmp/m"}]]
+    assert coord.shared_state.warm_kernel_kb_outcome["status"] == "reverted"
+
+
+@pytest.mark.asyncio
+async def test_kernel_only_replay_enqueues_without_recipe(tmp_path):
+    coord = _make_coord(tmp_path, warm_start_recipe={})
+
+    async def _prepare():
+        return {
+            "status": "prepared",
+            "pending": [{"column": "gemm"}],
+            "applied": [],
+            "extra_envs": {"KERNEL_ONLY": "1"},
+            "extra_server_args": "",
+        }
+
+    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert task is not None
+    assert task.params["recipe_extra_envs"] == {}
+    assert task.params["extra_envs"] == {"KERNEL_ONLY": "1"}
+    assert task.params["combined_schema_v3"] is True
+
+
+@pytest.mark.asyncio
+async def test_no_recipe_after_loaded_kernel_clears_stale_pending(tmp_path):
+    coord = _make_coord(tmp_path, warm_start_recipe={})
+    coord.shared_state.warm_replay_pending = {"status": "preparing_kernel"}
+
+    async def _prepare():
+        return {
+            "status": "loaded",
+            "pending": [],
+            "applied": [],
+            "snapshots": [],
+        }
+
+    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
+
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert task is None
+    assert coord.shared_state.warm_replay_pending == {}
+
+
+@pytest.mark.asyncio
+async def test_combined_threshold_uses_environment_override(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "2.5")
+    coord = _make_coord(tmp_path, warm_start_recipe={})
+
+    async def _prepare():
+        return {
+            "status": "prepared",
+            "pending": [{"column": "gemm"}],
+            "applied": [],
+            "extra_envs": {"KERNEL_ONLY": "1"},
+            "extra_server_args": "",
+        }
+
+    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert task.params["combined_keep_threshold_pct"] == 2.5
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_recipe_does_not_suppress_kernel(tmp_path):
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe=_warm_recipe_t1(
+            confidence=0.1,
+            extra_server_args="--untrusted-recipe",
+            extra_envs={"UNTRUSTED": "1"},
+        ),
+    )
+
+    async def _prepare():
+        return {
+            "status": "prepared",
+            "pending": [{"column": "fusion"}],
+            "applied": [{"manifest_path": "/tmp/m"}],
+            "extra_envs": {"KERNEL": "1"},
+            "extra_server_args": "--kernel",
+        }
+
+    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert task is not None
+    assert task.params["recipe_extra_server_args"] == ""
+    assert task.params["recipe_extra_envs"] == {}
+    assert task.params["extra_server_args"] == "--kernel"
+    assert coord.shared_state.warm_replay_outcome["recipe_suppressed"] is True
+
+
+def _git_repo_for_required_patch(tmp_path: Path) -> tuple[Path, str]:
+    repo = tmp_path / "canonical-ix"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    target = repo / "vllm" / "fp8.py"
+    target.parent.mkdir()
+    target.write_text("# fp8 module\noriginal = True\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "base"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    patch = (
+        "diff --git a/vllm/fp8.py b/vllm/fp8.py\n"
+        "--- a/vllm/fp8.py\n"
+        "+++ b/vllm/fp8.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        " # fp8 module\n"
+        " original = True\n"
+        "+persisted = True\n"
+    )
+    return repo, patch
+
+
+def test_combined_keep_persists_required_patch_to_canonical(tmp_path):
+    canonical, patch_content = _git_repo_for_required_patch(tmp_path)
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    task = _StubTask(
+        params={
+            "baseline_tput_anchor": 600.0,
+            "required_patch_timeline": True,
+            "combined_schema_v3": True,
+            "combined_keep_threshold_pct": 1.0,
+            "patches": [
+                {
+                    "patch_file": "explore/overlays/000000/00-p.patch",
+                    "patch_content": patch_content,
+                }
+            ],
+            "extra_server_args": "",
+            "extra_envs": {},
+            "warm_kernel_plan": [],
+            "warm_kernel_apply_results": [],
+        }
+    )
+
+    coord._promote_warm_replay(
+        {
+            "status": "succeeded",
+            "output_throughput": 612.0,
+            "warm_patch_canonical_target": str(canonical),
+            "warm_patches_applied": [
+                {
+                    "patch_file": "explore/overlays/000000/00-p.patch",
+                    "status": "applied",
+                }
+            ],
+        },
+        task=task,
+    )
+
+    assert "persisted = True" in (canonical / "vllm" / "fp8.py").read_text()
+    assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
+    assert coord.shared_state.warm_replay_pending == {}
+
+
+def test_canonical_persistence_failure_rejects_keep_and_rolls_kernel(
+    tmp_path, monkeypatch
+):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    kernel_rollbacks: list[list[dict]] = []
+    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+        lambda applied, snapshots=None: (
+            kernel_rollbacks.append(applied)
+            or {"ok": True, "errors": []}
+        )
+    )
+    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+
+    monkeypatch.setattr(
+        baseline_module,
+        "_revert_patches",
+        lambda *_args: {"ok": True, "errors": []},
+    )
+    task = _StubTask(
+        params={
+            "baseline_tput_anchor": 600.0,
+            "required_patch_timeline": True,
+            "combined_schema_v3": True,
+            "combined_keep_threshold_pct": 1.0,
+            "patches": [{"patch_file": "p.patch", "patch_content": "diff"}],
+            "extra_server_args": "--recipe",
+            "extra_envs": {},
+            "warm_kernel_plan": [{"column": "rewrite"}],
+            "warm_kernel_apply_results": [{"manifest_path": "/tmp/m"}],
+        }
+    )
+
+    coord._promote_warm_replay(
+        {
+            "status": "succeeded",
+            "output_throughput": 612.0,
+            "warm_patch_target": "/mirror",
+            "warm_patch_pre_sha": "abc",
+            "warm_patch_canonical_target": str(tmp_path / "not-a-repo"),
+        },
+        task=task,
+    )
+
+    assert coord.shared_state.warm_replay_outcome["status"] == "persistence_failed"
+    assert coord.shared_state.optimization_stack == []
+    assert kernel_rollbacks == [[{"manifest_path": "/tmp/m"}]]
+
+
+def test_persistence_failure_retains_pending_when_rollback_fails(tmp_path):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    coord.shared_state.warm_replay_pending = {"task_id": "warm"}
+    coord.phase_prelude._persist_required_recipe_keep = (  # type: ignore[method-assign]
+        lambda *_args: (False, {"failure": "persist failed"})
+    )
+    coord.phase_prelude._rollback_combined_warm = (  # type: ignore[method-assign]
+        lambda *_args: {"ok": False, "errors": ["restore failed"]}
+    )
+    task = _StubTask(
+        params={
+            "baseline_tput_anchor": 600.0,
+            "required_patch_timeline": True,
+            "combined_schema_v3": True,
+            "combined_keep_threshold_pct": 1.0,
+            "patches": [{"patch_file": "p.patch", "patch_content": "diff"}],
+            "extra_server_args": "--recipe",
+        }
+    )
+
+    coord._promote_warm_replay(
+        {"status": "succeeded", "output_throughput": 612.0},
+        task=task,
+    )
+
+    assert coord.shared_state.warm_replay_outcome["status"] == "rollback_failed"
+    assert coord.shared_state.warm_replay_pending == {"task_id": "warm"}
+
+
+def test_canonical_rollback_is_not_armed_when_manifest_save_fails(
+    tmp_path,
+    monkeypatch,
+):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_pending = {"task_id": "warm"}
+
+    def _save(*_args, **_kwargs):
+        if coord.shared_state.warm_replay_pending.get(
+            "canonical_patch_target"
+        ):
+            raise OSError("durability failed")
+
+    coord.shared_state.save = _save
+    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+
+    monkeypatch.setattr(baseline_module, "_git_head_sha", lambda _path: "sha")
+
+    def _apply(_params, _target, _output, *, before_mutation=None):
+        manifest = {"manifest_path": "/tmp/canonical-manifest.json"}
+        assert before_mutation is not None
+        assert before_mutation(manifest) is False
+        return {"status": "failed", "failure": "pending_state_persist_failed"}
+
+    monkeypatch.setattr(baseline_module, "_apply_warm_patches", _apply)
+    task = _StubTask(
+        params={
+            "required_patch_timeline": True,
+            "patches": [{"patch_file": "p.patch"}],
+        }
+    )
+
+    persisted, failure = coord.phase_prelude._persist_required_recipe_keep(
+        {"warm_patch_canonical_target": str(tmp_path)},
+        task,
+    )
+
+    assert persisted is False
+    assert failure["failure"] == "pending_state_persist_failed"
+    assert coord.shared_state.warm_replay_pending == {"task_id": "warm"}
+
+
+def test_schema_v3_threshold_preserves_legacy_positive_gain(tmp_path):
+    schema3 = _make_coord(tmp_path / "v3", warm_start_recipe=_warm_recipe_t1())
+    schema3.shared_state.baseline_tput = 600.0
+    schema3.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    schema3._promote_warm_replay(
+        {"status": "succeeded", "output_throughput": 603.0},
+        task=_StubTask(
+            params={
+                "baseline_tput_anchor": 600.0,
+                "combined_schema_v3": True,
+                "combined_keep_threshold_pct": 1.0,
+                "extra_server_args": "--v3",
+            }
+        ),
+    )
+    assert schema3.shared_state.warm_replay_outcome["status"] == "drift"
+
+    legacy = _make_coord(tmp_path / "legacy", warm_start_recipe=_warm_recipe_t1())
+    legacy.shared_state.baseline_tput = 600.0
+    legacy.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    legacy._promote_warm_replay(
+        {"status": "succeeded", "output_throughput": 603.0},
+        task=_StubTask(
+            params={
+                "baseline_tput_anchor": 600.0,
+                "extra_server_args": "--legacy",
+            }
+        ),
+    )
+    assert legacy.shared_state.warm_replay_outcome["status"] == "reproduced"
+
+
+def test_zero_and_nonfinite_combined_thresholds(tmp_path, monkeypatch):
+    zero = _make_coord(tmp_path / "zero", warm_start_recipe=_warm_recipe_t1())
+    zero.shared_state.baseline_tput = 600.0
+    zero.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    zero._promote_warm_replay(
+        {"status": "succeeded", "output_throughput": 600.0},
+        task=_StubTask(
+            params={
+                "baseline_tput_anchor": 600.0,
+                "combined_schema_v3": True,
+                "combined_keep_threshold_pct": 0.0,
+                "extra_server_args": "--zero",
+            }
+        ),
+    )
+    assert zero.shared_state.warm_replay_outcome["status"] == "reproduced"
+    assert zero.shared_state.warm_replay_outcome["keep_threshold_pct"] == 0.0
+
+    monkeypatch.setenv("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "nan")
+    nonfinite = _make_coord(
+        tmp_path / "nan",
+        warm_start_recipe=_warm_recipe_t1(),
+    )
+    nonfinite.shared_state.baseline_tput = 600.0
+    nonfinite.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    nonfinite._promote_warm_replay(
+        {"status": "succeeded", "output_throughput": 603.0},
+        task=_StubTask(
+            params={
+                "baseline_tput_anchor": 600.0,
+                "combined_schema_v3": True,
+                "combined_keep_threshold_pct": float("inf"),
+                "extra_server_args": "--nonfinite",
+            }
+        ),
+    )
+    assert nonfinite.shared_state.warm_replay_outcome["status"] == "drift"
+    assert nonfinite.shared_state.warm_replay_outcome["keep_threshold_pct"] == 1.0
+
+
+def test_already_present_required_patch_is_not_republished(tmp_path):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    task = _StubTask(
+        params={
+            "baseline_tput_anchor": 600.0,
+            "combined_schema_v3": True,
+            "combined_keep_threshold_pct": 1.0,
+            "extra_server_args": "--recipe",
+            "required_patch_timeline": True,
+            "patches": [],
+        }
+    )
+    coord._promote_warm_replay(
+        {
+            "status": "succeeded",
+            "output_throughput": 612.0,
+            "warm_patches_applied": [
+                {"patch_file": "old.patch", "status": "already_present"}
+            ],
+        },
+        task=task,
+    )
+
+    assert "replayed_patch_refs" not in coord.shared_state.warm_replay_outcome
+    assert "replayed_patch_refs" not in coord.shared_state.optimization_stack[-1]
+
+
+def test_dirty_worktree_required_patch_is_republished(tmp_path):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    task = _StubTask(
+        params={
+            "baseline_tput_anchor": 600.0,
+            "combined_schema_v3": True,
+            "combined_keep_threshold_pct": 1.0,
+            "extra_server_args": "--recipe",
+            "required_patch_timeline": True,
+            "patches": [],
+        }
+    )
+    coord._promote_warm_replay(
+        {
+            "status": "succeeded",
+            "output_throughput": 612.0,
+            "warm_patches_applied": [
+                {
+                    "patch_file": "old.patch",
+                    "status": "present_in_dirty_worktree",
+                }
+            ],
+        },
+        task=task,
+    )
+
+    assert coord.shared_state.warm_replay_outcome["replayed_patch_refs"] == [
+        "old.patch"
+    ]
+    assert coord.shared_state.optimization_stack[-1]["replayed_patch_refs"] == [
+        "old.patch"
+    ]

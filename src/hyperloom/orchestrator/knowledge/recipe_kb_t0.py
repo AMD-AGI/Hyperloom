@@ -746,6 +746,7 @@ def _extract_patches_from_prs_tested(
     prs = recipe.get("prs_tested")
     if not isinstance(prs, list) or not prs:
         return
+    required_timeline = bool(recipe.get("required_patch_timeline"))
 
     patches: list[dict] = []
     blocked: list[dict] = []
@@ -755,7 +756,8 @@ def _extract_patches_from_prs_tested(
         if not isinstance(pr, dict):
             continue
         patch_content = pr.get("patch_content", "")
-        if not patch_content:
+        required = required_timeline or bool(pr.get("required"))
+        if not patch_content and not required:
             continue
         outcome = str(pr.get("outcome", "")).upper()
         applicable_arch = pr.get("applicable_arch") or []
@@ -770,7 +772,7 @@ def _extract_patches_from_prs_tested(
                 gain = float(pr.get("measured_gain_pct") or 0.0)
             except (TypeError, ValueError):
                 gain = 0.0
-            if gain > 0:
+            if gain > 0 or required:
                 # Cap patch_content at 50KB to avoid state.json bloat.
                 pc = patch_content if len(patch_content) <= 50_000 else ""
                 patches.append(
@@ -780,6 +782,8 @@ def _extract_patches_from_prs_tested(
                         "patch_ref": str(pr.get("patch_ref") or ""),
                         "measured_gain_pct": gain,
                         "repo": str(pr.get("repo") or ""),
+                        "required": required,
+                        "timeline_index": pr.get("timeline_index"),
                     }
                 )
         elif outcome in ("REVERT", "FAILED"):
@@ -797,11 +801,14 @@ def _extract_patches_from_prs_tested(
             )
 
     if patches:
-        patches.sort(key=lambda p: -(p.get("measured_gain_pct") or 0))
+        if not required_timeline:
+            patches.sort(key=lambda p: -(p.get("measured_gain_pct") or 0))
         replay = ctx.setdefault("recommended_replay", {})
         replay.setdefault("extra_server_args", "")
         replay.setdefault("extra_envs", {})
         replay["patches"] = patches
+        if required_timeline:
+            replay["required_patch_timeline"] = True
     if blocked:
         ctx["blocked_patches"] = blocked
 

@@ -538,6 +538,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     warm_history_injected: bool = False
     # Structured warm-replay outcome for reports/prompts (status reproduced|drift|failed|skipped, etc.).
     warm_replay_outcome: dict = field(default_factory=dict)
+    # Crash-safe rollback/bookkeeping state for the combined Recipe + Kernel
+    # PRELUDE validation. Cleared only after KEEP/REVERT/fallback settles.
+    warm_replay_pending: dict = field(default_factory=dict)
+    # Durable post-save handoffs for section KB staging. Rows are removed only
+    # after the idempotent draft write succeeds.
+    kb_stage_outbox: list = field(default_factory=list)
     # One-shot guard for PRELUDE warm-kernel KB read/apply (resume can't re-fire).
     warm_kernel_kb_attempted: bool = False
     # Resolved prior-champion kernel columns (gemm/fusion/rewrite) loaded from the

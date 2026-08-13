@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import subprocess
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from hyperloom.orchestrator.actions.executors.baseline import (
+    BaselineExecutor,
     _apply_warm_patches,
 )
 
@@ -294,3 +296,491 @@ def test_tree_escaping_patch_content_is_skipped(fake_repo, output_dir):
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
     assert result == []
+
+
+def test_required_patch_present_only_in_dirty_index_is_republished(
+    fake_repo, output_dir
+):
+    params = {
+        "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
+        "required_patch_timeline": True,
+    }
+    first = _apply_warm_patches(params, str(fake_repo), output_dir)
+    subprocess.run(
+        ["git", "add", "vllm/fp8.py"],
+        cwd=fake_repo,
+        capture_output=True,
+        check=True,
+    )
+    second = _apply_warm_patches(params, str(fake_repo), output_dir)
+
+    assert first["status"] == "prepared"
+    assert second["status"] == "prepared"
+    assert (
+        second["patches"][0]["status"]
+        == "present_in_dirty_worktree"
+    )
+
+
+def test_required_patch_contained_in_committed_head_is_already_present(
+    fake_repo, output_dir
+):
+    target = fake_repo / "vllm" / "fp8.py"
+    target.write_text("# fp8 module\noriginal = True\npatched = True\n")
+    subprocess.run(
+        ["git", "add", "vllm/fp8.py"],
+        cwd=fake_repo,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "patch in base"],
+        cwd=fake_repo,
+        capture_output=True,
+        check=True,
+    )
+
+    result = _apply_warm_patches(
+        {
+            "patches": [
+                {"patch_file": "p.patch", "patch_content": VALID_PATCH}
+            ],
+            "required_patch_timeline": True,
+        },
+        str(fake_repo),
+        output_dir,
+    )
+
+    assert result["status"] == "prepared"
+    assert result["patches"][0]["status"] == "already_present"
+
+
+def test_required_patch_uses_three_way_after_checks_fail(
+    fake_repo, output_dir, monkeypatch
+):
+    calls: list[list[str]] = []
+
+    def _run(command, **_kwargs):
+        calls.append(command)
+        if "rev-parse" in command:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=b"0123456789abcdef\n",
+                stderr=b"",
+            )
+        if "ls-files" in command or "diff" in command:
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if "--3way" in command:
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if "--check" in command:
+            return SimpleNamespace(returncode=1, stdout=b"", stderr=b"no")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    result = _apply_warm_patches(
+        {
+            "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
+            "required_patch_timeline": True,
+        },
+        str(fake_repo),
+        output_dir,
+    )
+
+    assert result["status"] == "prepared"
+    assert result["patches"][0]["status"] == "applied_3way"
+    assert any("-R" in command for command in calls)
+    assert any("--3way" in command for command in calls)
+
+
+def test_required_patch_failure_rolls_back_and_stops(
+    fake_repo, output_dir
+):
+    later = VALID_PATCH.replace("patched = True", "later = True")
+    result = _apply_warm_patches(
+        {
+            "patches": [
+                {"patch_file": "first.patch", "patch_content": VALID_PATCH},
+                {"patch_file": "bad.patch", "patch_content": "not a diff"},
+                {"patch_file": "later.patch", "patch_content": later},
+            ],
+            "required_patch_timeline": True,
+        },
+        str(fake_repo),
+        output_dir,
+    )
+
+    assert result["status"] == "failed"
+    assert result["failed_ref"] == "bad.patch"
+    assert len(result["patches"]) == 1
+    content = (fake_repo / "vllm" / "fp8.py").read_text()
+    assert "patched = True" not in content
+    assert "later = True" not in content
+
+
+def test_required_patch_refuses_repo_without_head(tmp_path, output_dir):
+    repo = tmp_path / "unborn"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    target = repo / "vllm" / "fp8.py"
+    target.parent.mkdir()
+    target.write_text("# fp8 module\noriginal = True\n")
+
+    result = _apply_warm_patches(
+        {
+            "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
+            "required_patch_timeline": True,
+        },
+        str(repo),
+        output_dir,
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure"] == "missing_git_head"
+    assert "patched = True" not in target.read_text()
+
+
+def test_legacy_patch_skips_when_rollback_snapshot_fails(
+    fake_repo,
+    output_dir,
+    monkeypatch,
+):
+    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+
+    def _fail_snapshot(*_args, **_kwargs):
+        raise OSError("snapshot unavailable")
+
+    monkeypatch.setattr(
+        baseline_module,
+        "_create_patch_snapshot",
+        _fail_snapshot,
+    )
+
+    result = _apply_warm_patches(
+        {
+            "patches": [
+                {
+                    "patch_file": "vllm/fp8.py",
+                    "patch_content": VALID_PATCH,
+                }
+            ]
+        },
+        str(fake_repo),
+        output_dir,
+    )
+
+    assert result == []
+    assert "patched = True" not in (
+        fake_repo / "vllm" / "fp8.py"
+    ).read_text()
+
+
+def test_three_way_residue_fails_and_rolls_back(
+    fake_repo, output_dir, monkeypatch
+):
+    real_run = subprocess.run
+    residue_checks = 0
+
+    def _run(command, **kwargs):
+        nonlocal residue_checks
+        if command[:3] == ["git", "apply", "--check"]:
+            return SimpleNamespace(returncode=1, stdout=b"", stderr=b"no")
+        if command[:4] == ["git", "apply", "-R", "--check"]:
+            return SimpleNamespace(returncode=1, stdout=b"", stderr=b"no")
+        if command[:3] == ["git", "apply", "--3way"]:
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if command[:3] == ["git", "ls-files", "-u"]:
+            residue_checks += 1
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    b""
+                    if residue_checks == 1
+                    else b"100644 deadbeef 1\tvllm/fp8.py\n"
+                ),
+                stderr=b"",
+            )
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    result = _apply_warm_patches(
+        {
+            "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
+            "required_patch_timeline": True,
+        },
+        str(fake_repo),
+        output_dir,
+    )
+
+    assert result["status"] == "failed"
+    assert result["failed_ref"] == "p.patch"
+    assert result["rolled_back"] is True
+
+
+def test_required_rollback_preserves_unrelated_dirty_checkout(
+    fake_repo, output_dir
+):
+    unrelated = fake_repo / "notes.txt"
+    unrelated.write_text("committed\n")
+    subprocess.run(
+        ["git", "add", "notes.txt"],
+        cwd=fake_repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "notes"],
+        cwd=fake_repo,
+        check=True,
+        capture_output=True,
+    )
+    unrelated.write_text("user dirty work\n")
+    missing_target_patch = """\
+diff --git a/missing.py b/missing.py
+--- a/missing.py
++++ b/missing.py
+@@ -1 +1 @@
+-old
++new
+"""
+    result = _apply_warm_patches(
+        {
+            "patches": [
+                {"patch_file": "first.patch", "patch_content": VALID_PATCH},
+                {
+                    "patch_file": "second.patch",
+                    "patch_content": missing_target_patch,
+                },
+            ],
+            "required_patch_timeline": True,
+        },
+        str(fake_repo),
+        output_dir,
+    )
+
+    assert result["status"] == "failed"
+    assert result["rolled_back"] is True
+    assert unrelated.read_text() == "user dirty work\n"
+    assert "patched = True" not in (
+        fake_repo / "vllm" / "fp8.py"
+    ).read_text()
+
+
+def test_rollback_does_not_erase_already_present_patch(
+    fake_repo, output_dir
+):
+    target = fake_repo / "vllm" / "fp8.py"
+    target.write_text("# fp8 module\noriginal = True\npatched = True\n")
+    subprocess.run(
+        ["git", "add", "vllm/fp8.py"],
+        cwd=fake_repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "patch landed upstream"],
+        cwd=fake_repo,
+        check=True,
+        capture_output=True,
+    )
+    missing_target_patch = """\
+diff --git a/missing.py b/missing.py
+--- a/missing.py
++++ b/missing.py
+@@ -1 +1 @@
+-old
++new
+"""
+    result = _apply_warm_patches(
+        {
+            "patches": [
+                {"patch_file": "upstream.patch", "patch_content": VALID_PATCH},
+                {
+                    "patch_file": "missing.patch",
+                    "patch_content": missing_target_patch,
+                },
+            ],
+            "required_patch_timeline": True,
+        },
+        str(fake_repo),
+        output_dir,
+    )
+
+    assert result["status"] == "failed"
+    assert target.read_text() == "# fp8 module\noriginal = True\npatched = True\n"
+
+
+def test_real_git_three_way_merge_succeeds(tmp_path, output_dir):
+    repo = tmp_path / "threeway"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    target = repo / "file.txt"
+    base_lines = [f"line-{index}" for index in range(20)]
+    target.write_text("\n".join(base_lines) + "\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "base"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    patched_lines = list(base_lines)
+    patched_lines[10] = "PATCHED"
+    target.write_text("\n".join(patched_lines) + "\n")
+    patch_content = subprocess.run(
+        ["git", "diff", "--binary"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    ).stdout.decode()
+    subprocess.run(
+        ["git", "checkout", "--", "file.txt"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    current_lines = list(base_lines)
+    current_lines[7] = "CURRENT"
+    target.write_text("\n".join(current_lines) + "\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "context drift"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    result = _apply_warm_patches(
+        {
+            "patches": [{"patch_file": "real.patch", "patch_content": patch_content}],
+            "required_patch_timeline": True,
+        },
+        str(repo),
+        output_dir,
+    )
+
+    assert result["status"] == "prepared"
+    assert result["patches"][0]["status"] == "applied_3way"
+    expected = list(current_lines)
+    expected[10] = "PATCHED"
+    assert target.read_text() == "\n".join(expected) + "\n"
+
+
+@pytest.mark.asyncio
+async def test_required_failure_runs_one_config_only_fallback(monkeypatch):
+    executor = object.__new__(BaselineExecutor)
+    calls: list[dict] = []
+
+    async def _run_once(ctx, **_kwargs):
+        calls.append(dict(ctx.task.params))
+        if len(calls) == 1:
+            return {
+                "status": "required_patch_failed",
+                "failed_patch_ref": "bad.patch",
+                "required_patch_failure": {"patches": [{"status": "failed"}]},
+                "warm_replay_rollback": {"ok": True, "errors": []},
+            }
+        return {"status": "succeeded", "output_throughput": 10.0}
+
+    executor._run_once = _run_once  # type: ignore[method-assign]
+    executor._maybe_stop_on_missing_baseline_accuracy = lambda *_a: None  # type: ignore[method-assign]
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(
+            kind="replay_warm_recipe",
+            params={
+                "patches": [{"patch_file": "bad.patch"}],
+                "required_patch_timeline": True,
+                "extra_server_args": "--recipe --kernel",
+                "extra_envs": {"RECIPE": "1", "KERNEL": "1"},
+                "recipe_extra_server_args": "--recipe",
+                "recipe_extra_envs": {"RECIPE": "1"},
+                "warm_kernel_apply_results": [{"status": "ok"}],
+            },
+        )
+    )
+
+    result = await executor(ctx)
+
+    assert len(calls) == 2
+    assert calls[1]["patches"] == []
+    assert calls[1]["extra_server_args"] == "--recipe"
+    assert calls[1]["extra_envs"] == {"RECIPE": "1"}
+    assert result["warm_replay_partial"]["kernel_skipped"] is True
+
+
+@pytest.mark.asyncio
+async def test_empty_recipe_config_skips_fallback_benchmark():
+    executor = object.__new__(BaselineExecutor)
+    calls = 0
+
+    async def _run_once(_ctx, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "required_patch_failed",
+            "failed_patch_ref": "bad.patch",
+            "warm_replay_rollback": {"ok": True, "errors": []},
+        }
+
+    executor._run_once = _run_once  # type: ignore[method-assign]
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(
+            kind="replay_warm_recipe",
+            params={
+                "recipe_extra_server_args": "",
+                "recipe_extra_envs": {},
+                "warm_kernel_apply_results": [{"manifest_path": "/tmp/m"}],
+            },
+        )
+    )
+
+    result = await executor(ctx)
+
+    assert calls == 1
+    assert result["status"] == "required_patch_failed"
+    assert result["warm_replay_partial"]["reason"] == "empty_recipe_config"
+
+
+@pytest.mark.asyncio
+async def test_config_fallback_aborts_when_rollback_is_not_verified():
+    executor = object.__new__(BaselineExecutor)
+    calls = 0
+
+    async def _run_once(_ctx, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "required_patch_rollback_failed",
+            "warm_replay_rollback": {
+                "ok": False,
+                "errors": ["kernel restore failed"],
+            },
+        }
+
+    executor._run_once = _run_once  # type: ignore[method-assign]
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(
+            kind="replay_warm_recipe",
+            params={
+                "recipe_extra_server_args": "--safe-only",
+                "recipe_extra_envs": {"VLLM_SAFE": "1"},
+            },
+        )
+    )
+
+    result = await executor(ctx)
+
+    assert calls == 1
+    assert result["warm_replay_partial"]["status"] == "aborted"
+    assert result["warm_replay_partial"]["reason"] == "rollback_not_verified"

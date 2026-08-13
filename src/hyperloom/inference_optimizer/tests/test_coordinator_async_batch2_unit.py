@@ -59,14 +59,137 @@ def test_delegated_missing_attr_raises_attribute_error_not_recursion(monkeypatch
         getattr(coord, "_deleted_delegate")
 
 
-def test_collective_resume_gate_is_delegated_to_kernel_phase() -> None:
-    """Writeback resume must resolve the Collective gate."""
-    assert (
-        Coordinator._DELEGATED.get(
-            "_collective_required_before_kernel_opt"
-        )
-        == "phase_kernel"
+@pytest.mark.asyncio
+async def test_resume_rolls_back_local_canonical_and_kernel(
+    coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    restores: list[tuple[str, str]] = []
+    kernel_restores: list[dict] = []
+    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+    import hyperloom.orchestrator.kernel.request_handlers as kernel_handlers
+
+    monkeypatch.setattr(
+        baseline_module,
+        "_revert_patches",
+        lambda target, sha, manifest=None: (
+            restores.append((target, sha))
+            or {"ok": True, "errors": []}
+        ),
     )
+    monkeypatch.setattr(
+        kernel_handlers,
+        "_maybe_revert_kernel_patch",
+        lambda result: (
+            kernel_restores.append(result)
+            or {"status": "ok"}
+        ),
+    )
+    coord.shared_state.warm_replay_pending = {
+        "task_id": "warm-1",
+        "recipe_patch_target": "/mirror",
+        "recipe_patch_pre_sha": "mirror-sha",
+        "recipe_patch_snapshot_manifest": {"manifest_path": "/mirror.json"},
+        "canonical_patch_target": "/canonical",
+        "canonical_patch_pre_sha": "canonical-sha",
+        "canonical_patch_snapshot_manifest": {
+            "manifest_path": "/canonical.json"
+        },
+        "kernel_apply_results": [{"manifest_path": "/tmp/m"}],
+    }
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_warm_replay(report)
+
+    assert set(restores) == {
+        ("/mirror", "mirror-sha"),
+        ("/canonical", "canonical-sha"),
+    }
+    assert kernel_restores == [{"manifest_path": "/tmp/m"}]
+    assert coord.shared_state.warm_replay_pending == {}
+    assert report["fixes"][0]["kind"] == "recovered_pending_warm_replay"
+
+
+@pytest.mark.asyncio
+async def test_resume_ignores_unarmed_canonical_target_without_manifest(
+    coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    restores: list[tuple[str, str]] = []
+    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+
+    monkeypatch.setattr(
+        baseline_module,
+        "_revert_patches",
+        lambda target, sha, manifest=None: (
+            restores.append((target, sha))
+            or {"ok": True, "errors": []}
+        ),
+    )
+    coord.shared_state.warm_replay_pending = {
+        "task_id": "warm-unarmed",
+        "canonical_patch_target": "/canonical",
+        "canonical_patch_pre_sha": "sha",
+    }
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_warm_replay(report)
+
+    assert restores == []
+    assert coord.shared_state.warm_replay_pending == {}
+    assert report["warnings"] == []
+
+
+@pytest.mark.asyncio
+async def test_resume_retains_pending_recipe_target_without_manifest(
+    coord: Coordinator,
+) -> None:
+    coord.shared_state.warm_replay_pending = {
+        "task_id": "warm-recipe-unarmed",
+        "recipe_patch_target": "/mirror",
+        "recipe_patch_pre_sha": "sha",
+    }
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_warm_replay(report)
+
+    assert coord.shared_state.warm_replay_pending["status"] == "rollback_failed"
+    assert coord.shared_state.warm_replay_pending["rollback_errors"] == [
+        "recipe:missing_snapshot_manifest"
+    ]
+    assert report["warnings"][0]["kind"] == "resume_warm_rollback_failed"
+    assert report["fixes"] == []
+
+
+@pytest.mark.asyncio
+async def test_resume_retains_pending_when_any_restore_fails(
+    coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+
+    monkeypatch.setattr(
+        baseline_module,
+        "_revert_patches",
+        lambda *_args: {"ok": False, "errors": ["restore failed"]},
+    )
+    coord.shared_state.warm_replay_pending = {
+        "task_id": "warm-failed",
+        "recipe_patch_target": "/mirror",
+        "recipe_patch_pre_sha": "sha",
+        "recipe_patch_snapshot_manifest": {"manifest_path": "/mirror.json"},
+        "kernel_apply_results": [],
+    }
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_warm_replay(report)
+
+    assert coord.shared_state.warm_replay_pending["status"] == "rollback_failed"
+    assert coord.shared_state.warm_replay_pending["rollback_errors"] == [
+        "restore failed"
+    ]
+    assert report["warnings"][0]["kind"] == "resume_warm_rollback_failed"
+    assert report["fixes"] == []
 
 
 @pytest.fixture

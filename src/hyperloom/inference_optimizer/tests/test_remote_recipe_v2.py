@@ -15,6 +15,7 @@ from unittest import mock
 import pytest
 
 from hyperloom.orchestrator.knowledge import remote_recipe
+from hyperloom.orchestrator.knowledge.agent_kb import ExploreAgentKB
 from hyperloom.orchestrator.knowledge.remote_recipe import (
     HyperloomRemoteKB,
     KBStoreError,
@@ -162,15 +163,15 @@ def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> 
     bundle = build_remote_knowledge(_state(tmp_path), tmp_path / "files")
 
     assert bundle.knowledge["optimized_throughput"] == 130.0
-    assert bundle.knowledge["knowledge_schema_version"] == 2
+    assert bundle.knowledge["knowledge_schema_version"] == 3
     assert bundle.knowledge["validated_e2e_gain"] == 30.0
     value = bundle.knowledge["value"]
     assert value["explore"]["extra_envs"] == {"VLLM_EXPLORE_TEST": "1"}
     assert value["framework"]["extra_envs"] == {"VLLM_FRAMEWORK_TEST": "1"}
     assert "config" not in value["explore"]
     assert "phase" not in value["framework"]
-    assert value["explore"]["patches"][0].startswith("explore/patches/")
-    assert value["framework"]["patches"][0].startswith("framework/patches/")
+    assert value["explore"]["patches"][0].startswith("explore/overlays/000000/")
+    assert value["framework"]["patches"][0].startswith("framework/overlays/000001/")
     assert not any(item.path.startswith("files/") for item in bundle.artifacts)
     assert isinstance(value["kernel"]["gemm"], dict)
     assert len(value["kernel"]["gemm"]["optimizations"]) == 1
@@ -1383,48 +1384,43 @@ def test_agent_column_free_text_is_not_treated_as_an_artifact_ref(
     assert gemm["patch"] == "inlined the epilogue"
 
 
-def test_orphaned_staged_file_falls_back_to_stack_scrape(tmp_path: Path) -> None:
+def test_orphaned_required_staged_file_fails_close(tmp_path: Path) -> None:
     patch = tmp_path / "orphan.patch"
     patch.write_text("orphan", encoding="utf-8")
     sections = _sections(tmp_path)
     sections.write("framework", {"note": "no ref"}, files=[patch], kind="patches")
+    state = _state(tmp_path)
+    state.optimization_stack[0]["kb_required_owner"] = "FRAMEWORK_AGENT"
 
-    bundle = build_remote_knowledge(
-        _state(tmp_path),
-        tmp_path / "files-orphan",
-        sections=sections,
-    )
-
-    framework = bundle.knowledge["value"]["framework"]
-    assert framework["extra_server_args"] == "--page-size 32 --enable-foo"
-    assert "framework" not in bundle.knowledge["provenance"]["staged_sections"]
-    assert "framework/patches/orphan.patch" not in {
-        artifact.path for artifact in bundle.artifacts
-    }
+    with pytest.raises(
+        RemoteRecipeValidationError,
+        match="staged section 'framework' file mismatch",
+    ):
+        build_remote_knowledge(
+            state,
+            tmp_path / "files-orphan",
+            sections=sections,
+        )
 
 
-def test_conflicting_staged_artifact_falls_back_to_stack_scrape(tmp_path: Path) -> None:
+def test_conflicting_required_staged_artifact_fails_close(tmp_path: Path) -> None:
     staged_patch = tmp_path / "staged" / "explore.patch"
     staged_patch.parent.mkdir()
     staged_patch.write_text("different", encoding="utf-8")
     sections = _sections(tmp_path)
-    sections.write(
-        "explore",
-        {"patches": ["explore/patches/explore.patch"]},
-        files=[staged_patch],
-        kind="patches",
-    )
+    ExploreAgentKB(sections).stage_patches([staged_patch], stack_index=0)
+    state = _state(tmp_path)
+    state.optimization_stack[0]["kb_required_owner"] = "EXPLORE"
 
-    bundle = build_remote_knowledge(
-        _state(tmp_path),
-        tmp_path / "files-conflict",
-        sections=sections,
-    )
-
-    assert "explore" not in bundle.knowledge["provenance"]["staged_sections"]
-    assert bundle.knowledge["value"]["explore"]["patches"] == [
-        "explore/patches/explore.patch"
-    ]
+    with pytest.raises(
+        RemoteRecipeValidationError,
+        match="conflicting artifact content",
+    ):
+        build_remote_knowledge(
+            state,
+            tmp_path / "files-conflict",
+            sections=sections,
+        )
 
 
 def test_the_kernel_column_keeps_the_sub_columns_the_agent_left_alone(
@@ -1704,11 +1700,11 @@ def test_v1_projection_accepts_flat_recipe_document() -> None:
             },
         }
     )
-    assert row["best_config"]["extra_server_args"] == "--foo"
-    assert row["best_config"]["extra_envs"] == {"A": "1"}
+    assert row["best_config"]["extra_server_args"] == ""
+    assert row["best_config"]["extra_envs"] == {}
 
 
-def test_v2_warm_projection_replays_only_explore_config() -> None:
+def test_v2_warm_projection_does_not_replay_legacy_explore_config() -> None:
     row = envelope_to_v1_recipe(
         {
             "schema_version": 2,
@@ -1729,15 +1725,12 @@ def test_v2_warm_projection_replays_only_explore_config() -> None:
         }
     )
     config = row["best_config"]
-    assert config["extra_server_args"] == "--page-size 32"
-    assert config["extra_envs"] == {
-        "EXPLORE": "1",
-        "SHARED": "explore",
-    }
+    assert config["extra_server_args"] == ""
+    assert config["extra_envs"] == {}
     assert row["prs_tested"] == []
 
 
-def test_remote_warm_adapter_projects_and_caches_explore_config(
+def test_remote_warm_adapter_ignores_legacy_explore_config(
     tmp_path: Path,
 ) -> None:
     calls: list[tuple[str, Path]] = []
@@ -1774,12 +1767,149 @@ def test_remote_warm_adapter_projects_and_caches_explore_config(
 
     assert first == second
     assert first["best_config"] == {
-        "extra_server_args": "--page-size 32",
-        "extra_envs": {"A": "1"},
+        "extra_server_args": "",
+        "extra_envs": {},
     }
     assert first["prs_tested"] == []
     assert calls == [(identity, destination)]
     assert adapter.search(label_match={}, limit=5) == []
+
+
+def test_v3_projection_requires_authoritative_replay_config() -> None:
+    with pytest.raises(
+        RemoteRecipeValidationError,
+        match="missing value.replay_config",
+    ):
+        envelope_to_v1_recipe(
+            {
+                "knowledge_schema_version": 3,
+                "canonical_id": "inference:test",
+                "value": {
+                    "explore": {
+                        "extra_server_args": "--legacy-explore",
+                        "extra_envs": {"LEGACY": "1"},
+                    }
+                },
+            }
+        )
+
+
+def test_v3_warm_adapter_hydrates_ordered_patch_bytes(tmp_path: Path) -> None:
+    ref = "framework/overlays/000002/00-pr-7.patch"
+
+    class _Remote:
+        def read(self, identity: str, destination: Path):
+            patch = destination / "files" / ref
+            patch.parent.mkdir(parents=True)
+            patch.write_text("diff --git a/a b/a\n", encoding="utf-8")
+            return {
+                "schema_version": 2,
+                "knowledge_schema_version": 3,
+                "canonical_id": identity,
+                "session_id": "champion",
+                "optimized_throughput": 10.0,
+                "validated_e2e_gain": 2.0,
+                "value": {
+                    "replay_config": {
+                        "extra_server_args": "--page-size 32",
+                        "extra_envs": {},
+                    },
+                    "explore": {
+                        "extra_server_args": "--page-size 32",
+                        "extra_envs": {},
+                    },
+                    "patch_timeline": [ref],
+                },
+            }
+
+    adapter = RemoteWarmRecipeAdapter(  # type: ignore[arg-type]
+        _Remote(),
+        tmp_path / "remote-recipe",
+    )
+    row = adapter.get_authoritative_recipe(
+        canonical_id="inference:m:h:f:mt:a:v:p"
+    )
+
+    assert row["knowledge_schema_version"] == 3
+    assert row["prs_tested"] == [
+        {
+            "outcome": "KEEP",
+            "patch_file": ref,
+            "patch_ref": str(tmp_path / "remote-recipe" / "files" / ref),
+            "patch_content": "diff --git a/a b/a\n",
+            "measured_gain_pct": 2.0,
+            "required": True,
+            "timeline_index": 0,
+        }
+    ]
+    assert row["required_patch_timeline"] is True
+
+
+@pytest.mark.parametrize(
+    "ref",
+    ["/absolute.patch", "../escape.patch", "framework/../../escape.patch"],
+)
+def test_v3_warm_adapter_rejects_unsafe_timeline_refs(
+    tmp_path: Path,
+    ref: str,
+) -> None:
+    class _Remote:
+        def read(self, identity: str, destination: Path):
+            return {
+                "knowledge_schema_version": 3,
+                "canonical_id": identity,
+                "value": {
+                    "replay_config": {
+                        "extra_server_args": "",
+                        "extra_envs": {},
+                    },
+                    "patch_timeline": [ref],
+                },
+            }
+
+    adapter = RemoteWarmRecipeAdapter(  # type: ignore[arg-type]
+        _Remote(),
+        tmp_path / "unsafe",
+    )
+
+    with pytest.raises(RemoteRecipeValidationError):
+        adapter.get_authoritative_recipe(canonical_id="inference:test")
+
+
+def test_v3_warm_adapter_rejects_symlink_timeline_ref(
+    tmp_path: Path,
+) -> None:
+    ref = "framework/overlays/000000/00-link.patch"
+
+    class _Remote:
+        def read(self, identity: str, destination: Path):
+            outside = tmp_path / "outside.patch"
+            outside.write_text("secret", encoding="utf-8")
+            link = destination / "files" / ref
+            link.parent.mkdir(parents=True)
+            link.symlink_to(outside)
+            return {
+                "knowledge_schema_version": 3,
+                "canonical_id": identity,
+                "value": {
+                    "replay_config": {
+                        "extra_server_args": "",
+                        "extra_envs": {},
+                    },
+                    "patch_timeline": [ref],
+                },
+            }
+
+    adapter = RemoteWarmRecipeAdapter(  # type: ignore[arg-type]
+        _Remote(),
+        tmp_path / "symlink",
+    )
+
+    with pytest.raises(
+        RemoteRecipeValidationError,
+        match="symlink",
+    ):
+        adapter.get_authoritative_recipe(canonical_id="inference:test")
 
 
 def test_direct_v1_envelope_replays_legacy_explore_config(tmp_path: Path) -> None:
