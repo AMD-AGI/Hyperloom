@@ -54,5 +54,7 @@
 
 # Post-TraceLens -> GEAK processing layer + glue
 /src/hyperloom/agents/kernel/tools/kernel_optimization.py       @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
-/src/hyperloom/agents/kernel/tools/data/op_to_source.json       @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/agents/kernel/tools/source_resolver.py           @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/agents/kernel/tools/kernel_source_index.py       @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/agents/kernel/tools/source_env.py                @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 /docs/components/tracelens.md                                   @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE

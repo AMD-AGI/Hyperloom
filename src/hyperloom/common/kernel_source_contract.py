@@ -40,6 +40,14 @@ SOURCE_RESOLUTION_FILENAME = "kernel_source_resolution.json"
 #: deterministic tiers only because it runs last and sees their output; it is
 #: not more trusted, which is why the tier it overrode is kept in
 #: ``previous_method``.
+#:
+#: ``active_finder`` runs *before* the curated map: it demangles the device
+#: kernel symbol and looks it up in the currently-installed framework source
+#: tree, so it self-heals across file moves/renames and version drift. The
+#: curated map remains the fallback when the symbol is absent from the live
+#: index. ``symbol_index`` is the same resolution surfaced by the bypass route.
+METHOD_ACTIVE_FINDER = "active_finder"
+METHOD_SYMBOL_INDEX = "symbol_index"
 METHOD_CURATED = "op_to_source"
 METHOD_TRACE = "trace_python_stack"
 METHOD_GREP = "name_grep"
@@ -50,6 +58,8 @@ METHOD_UNRESOLVED = "unresolved"
 
 KNOWN_METHODS = frozenset(
     {
+        METHOD_ACTIVE_FINDER,
+        METHOD_SYMBOL_INDEX,
         METHOD_CURATED,
         METHOD_TRACE,
         METHOD_GREP,
