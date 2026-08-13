@@ -980,6 +980,27 @@ def _git_restore_stash_if_needed(
     return f"git stash pop {ref} rc={cp.returncode}: {detail}; user changes remain in git stash"
 
 
+def _restore_stash_logged(
+    framework_root: Path,
+    stash_state: str,
+    stash_ref: str,
+) -> str:
+    """Restore a pre-candidate stash, reporting a failure to do so.
+
+    Args:
+        framework_root (Path): The tree the stash was taken from.
+        stash_state (str): The state :func:`_git_stash_if_dirty` returned.
+        stash_ref (str): The stash ref to pop.
+
+    Returns:
+        str: The failure note, or ``""`` when nothing was left in the stash.
+    """
+    note = _git_restore_stash_if_needed(framework_root, stash_state, stash_ref)
+    if note:
+        log.warning("integrate_patch: user-change stash restore failed: %s", note)
+    return note
+
+
 def _with_stash_restore(
     framework_root: Path,
     stash_state: str,
@@ -987,10 +1008,9 @@ def _with_stash_restore(
     result: dict[str, Any],
 ) -> dict[str, Any]:
     """Restore a pre-candidate stash before returning an executor result."""
-    note = _git_restore_stash_if_needed(framework_root, stash_state, stash_ref)
+    note = _restore_stash_logged(framework_root, stash_state, stash_ref)
     if not note:
         return result
-    log.warning("integrate_patch: user-change stash restore failed: %s", note)
     out = dict(result)
     out["stash_restore_error"] = note
     return out
@@ -1668,24 +1688,37 @@ class IntegratePatchExecutor:
         extra_envs_applied: dict[str, str] = ctx._ip_extra_envs_applied  # type: ignore[attr-defined]
         setup_result: dict[str, Any] = ctx._ip_setup_result  # type: ignore[attr-defined]
 
-        return await self._stage_gate(
-            ctx,
-            params,
-            extra,
-            specialist_task_id=specialist_task_id,
-            shared_state=shared_state,
-            done_payload=done_payload,
-            output_root=output_root,
-            framework_root=framework_root,
-            stash_state=stash_state,
-            stash_note=stash_note,
-            applied=applied,
-            applied_artifacts=applied_artifacts,
-            config_changes_applied=config_changes_applied,
-            extra_server_args_applied=extra_server_args_applied,
-            extra_envs_applied=extra_envs_applied,
-            setup_result=setup_result,
-        )
+        try:
+            return await self._stage_gate(
+                ctx,
+                params,
+                extra,
+                specialist_task_id=specialist_task_id,
+                shared_state=shared_state,
+                done_payload=done_payload,
+                output_root=output_root,
+                framework_root=framework_root,
+                stash_state=stash_state,
+                stash_note=stash_note,
+                applied=applied,
+                applied_artifacts=applied_artifacts,
+                config_changes_applied=config_changes_applied,
+                extra_server_args_applied=extra_server_args_applied,
+                extra_envs_applied=extra_envs_applied,
+                setup_result=setup_result,
+            )
+        except BaseException:
+            # The gate either returns a verdict or leaves the tree as it found
+            # it; there is no third outcome where the candidate stays applied
+            # with nothing having graded it.
+            self._undo_ungraded_candidate(
+                framework_root=framework_root,
+                stash_state=stash_state,
+                stash_note=stash_note,
+                applied=applied,
+                applied_artifacts=applied_artifacts,
+            )
+            raise
 
     # ---------------------------------------------------------------------------
     # Stage helpers (called sequentially by __call__)
@@ -3756,6 +3789,43 @@ class IntegratePatchExecutor:
                 "integrate_patch: framework KB writeback failed: %r",
                 exc,
             )
+
+    def _undo_ungraded_candidate(
+        self,
+        *,
+        framework_root: Path | None,
+        stash_state: str,
+        stash_note: str,
+        applied: list[Path],
+        applied_artifacts: list[dict[str, Any]],
+    ) -> None:
+        """Take the candidate back out when the gate unwound instead of returning.
+
+        Every REVERT the gate itself decides hangs off an ``except Exception``,
+        and the stop that matters most here is not one of those: the dispatcher
+        cancels in-flight actions on shutdown and on a spent wall-clock budget,
+        and ``CancelledError`` derives from ``BaseException``. Unhandled, it
+        leaves the patch in the framework tree and the operator's auto-stash on
+        the stack — and the budget case does not end the process, so CLOSE would
+        report against a tree carrying a patch nothing ever graded.
+
+        The cancel itself is re-raised by the caller rather than turned into a
+        REVERT verdict, so the run records it the way
+        :mod:`..stop_attribution` requires: work the run stopped, not work that
+        failed. Every step here is synchronous, so no second cancel can be
+        delivered part-way through the undo.
+
+        Args:
+            framework_root: The source root the candidate was applied to.
+            stash_state: The state :func:`_git_stash_if_dirty` returned.
+            stash_note: The auto-stash ref to restore.
+            applied: The patches applied to the tree.
+            applied_artifacts: The artifact records to undo.
+        """
+        self._revert_artifacts(applied_artifacts)
+        self._revert_patches(framework_root, applied)
+        if framework_root is not None:
+            _restore_stash_logged(framework_root, stash_state, stash_note)
 
     def _revert_patches(
         self,

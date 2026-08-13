@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -1209,3 +1210,54 @@ async def test_artifact_install_failed_restores_user_stash(tmp_path, monkeypatch
     # in the stash. This is the regression the fix guards against.
     assert scratch.exists(), "user auto-stash was not restored after artifact_install_failed"
     assert scratch.read_text(encoding="utf-8") == "user work in progress\n"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_gate_reverts_the_patch_and_re_raises(tmp_path, monkeypatch):
+    """A cancel unwinds the gate, so the tree it mutated must not outlive it.
+
+    The dispatcher cancels in-flight actions when the run is shutting down or
+    the session wall-clock budget is spent. ``CancelledError`` is not an
+    ``Exception``, so the gate's own revert handlers never see it: the patch
+    would stay in the framework tree, the operator's auto-stash would stay
+    unpopped, and the session would run its CLOSE phase against a tree carrying
+    an ungraded patch.
+
+    The cancel is re-raised rather than graded as a REVERT: SubAgentRunner
+    records a cancelled executor as ``cancelled``, and work the run stopped is
+    not work that failed.
+    """
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    scratch = repo / "user_scratch.txt"
+    scratch.write_text("user work in progress\n", encoding="utf-8")
+
+    async def _cancel(self, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(IntegratePatchExecutor, "_bench_patch", _cancel)
+    ex = IntegratePatchExecutor(session_dir=session)
+    with pytest.raises(asyncio.CancelledError):
+        await ex(
+            _make_ctx(
+                "t",
+                {"specialist_task_id": "spec", "framework_source_root": str(repo)},
+            )
+        )
+
+    assert (repo / "src.py").read_text(encoding="utf-8").endswith("return 1\n"), (
+        "the cancelled candidate was left applied in the framework tree"
+    )
+    assert scratch.exists(), "user auto-stash was not restored after the cancel"
+    assert scratch.read_text(encoding="utf-8") == "user work in progress\n"
+    stash_list = subprocess.run(
+        ["git", "-C", str(repo), "stash", "list"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert stash_list.stdout.strip() == "", "the auto-stash was left on the stack"
