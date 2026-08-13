@@ -1777,8 +1777,14 @@ class BaselineExecutor:
         # should reach enablement.
         salvaged = self._salvage_sibling_baseline_accuracy(result, framework)
         if salvaged is not None:
-            acc_val = self._apply_salvaged_accuracy(result, salvaged, shared_state)
-            if _is_double_run_accuracy_handoff(result, salvaged):
+            expected_handoff = _is_double_run_accuracy_handoff(result, salvaged)
+            acc_val = self._apply_salvaged_accuracy(
+                result,
+                salvaged,
+                shared_state,
+                expected_handoff=expected_handoff,
+            )
+            if expected_handoff:
                 log.info(
                     "baseline_executor: cold-start guard — reading accuracy=%.4f from "
                     "the warmup round (%s), the only round that measures it",
@@ -1839,6 +1845,8 @@ class BaselineExecutor:
         result: dict[str, Any],
         salvaged: dict[str, Any],
         shared_state: Any,
+        *,
+        expected_handoff: bool = False,
     ) -> float:
         """Record a salvaged sibling accuracy, publishing it as the gate
         reference only when it can serve as one.
@@ -1854,6 +1862,11 @@ class BaselineExecutor:
             salvaged: The parsed eval dict from
                 :meth:`_salvage_sibling_baseline_accuracy`.
             shared_state: The live SharedState, or ``None``.
+            expected_handoff: Whether this read is the double-run design
+                (see :func:`_is_double_run_accuracy_handoff`) rather than a
+                recovery. The structured warning is for the recovery only;
+                raising it on every healthy double-run baseline leaves the
+                record claiming a fault the run never hit.
 
         Returns:
             float: The salvaged accuracy.
@@ -1865,8 +1878,9 @@ class BaselineExecutor:
         result["accuracy_task"] = salvaged.get("task", "gsm8k")
         result["accuracy_metric"] = salvaged.get("metric", "")
         result["accuracy_source"] = salvaged.get("source_file", "")
-        result.setdefault("nonfatal_warnings", [])
-        result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
+        if not expected_handoff:
+            result.setdefault("nonfatal_warnings", [])
+            result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
         if shared_state is not None and accuracy_meets_floor(acc_val, 0.0):
             try:
                 shared_state.baseline_accuracy = acc_val
