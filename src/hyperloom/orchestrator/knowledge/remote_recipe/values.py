@@ -718,6 +718,17 @@ _KERNEL_SECTION = "kernel"
 _KERNEL_ID_PREFIX = "hyperloom-"
 # Champion metric for the kernel-agent record: a percentage, not a throughput.
 KERNEL_AGENT_METRIC = "kernel_gain_pct"
+# Storage session the accumulating kernel-agent record lives under.
+#
+# Readers resolve an identity through its champion session, but this record
+# accumulates instead of competing: a run that adds a second kernel without
+# raising the best gain scores no higher than the incumbent, so a per-run
+# session would leave the merged document on a session the champion never moves
+# to, invisible to every later read. Writing every merge back to one session
+# keeps the champion pointing at the accumulated document whatever the server
+# does with an equal-valued promotion. The contributing run stays recorded in
+# the document's provenance.
+KERNEL_AGENT_SESSION_ID = "hyperloom-kernel-agent"
 
 
 def kernel_agent_canonical_id(recipe_canonical_id: str) -> str:
@@ -821,7 +832,7 @@ def _kernel_record_score(record: Mapping[str, Any]) -> float:
 def merge_kernel_columns(
     published: Mapping[str, Any] | None,
     incoming: Mapping[str, Any],
-) -> tuple[dict[str, Any], list[str]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Keep the better recording of each optimization, not the better document.
 
     The kernel-agent record accumulates across sessions: a run that only tuned
@@ -829,11 +840,13 @@ def merge_kernel_columns(
     per column by the optimization they describe and the higher end-to-end gain
     wins, so a session contributes exactly what it improved.
 
-    Returns the merged columns and the refs carried over from the published
-    record, which the caller has to re-upload for those refs to keep resolving.
+    Returns the merged columns and the records inherited from the published
+    document. The caller has to re-upload those records' artifacts for their
+    refs to keep resolving, and the returned dicts are the ones inside
+    ``merged``, so rewriting a ref on one updates the document.
     """
     merged: dict[str, Any] = {}
-    carried: list[str] = []
+    inherited: list[dict[str, Any]] = []
     published = published if isinstance(published, Mapping) else {}
     for column, list_key in _KERNEL_COLUMN_LISTS:
         prior_node = published.get(column)
@@ -862,24 +875,22 @@ def merge_kernel_columns(
         rows = []
         for key in order:
             record, from_published = by_key[key]
-            rows.append(dict(record))
+            row = dict(record)
+            rows.append(row)
             if from_published:
-                carried.extend(_kernel_record_refs(record))
+                inherited.append(row)
         merged[column] = {list_key: rows}
-    return merged, carried
+    return merged, inherited
 
 
-def _kernel_record_refs(record: Mapping[str, Any]) -> list[str]:
-    """Artifact refs one record depends on, so a carried record keeps its files."""
-    refs: list[str] = []
-    for key in ("patch", "source_file", "tuned_file", "experience_document"):
-        value = str(record.get(key) or "").strip()
-        if value:
-            refs.append(value)
-    sources = record.get("source_files")
-    if isinstance(sources, list):
-        refs.extend(str(ref).strip() for ref in sources if str(ref or "").strip())
-    return refs
+def kernel_record_refs(record: Mapping[str, Any]) -> set[str]:
+    """Artifact refs one record depends on.
+
+    Delegates to the same extractor the bundle validates with, so a record
+    cannot depend on a ref the caller forgot to carry: hand-listing key names
+    missed nested sections and the report/artifact paths a real record carries.
+    """
+    return extract_knowledge_artifact_refs(record)
 
 
 def build_kernel_agent_knowledge(
@@ -1063,6 +1074,7 @@ __all__ = [
     "envelope_to_v1_recipe",
     "has_new_keep",
     "kernel_agent_canonical_id",
+    "kernel_record_refs",
     "merge_kernel_columns",
     "match_rewrite_attempt",
     "merge_staged_sections",
