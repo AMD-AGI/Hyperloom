@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
     validate_envelope,
 )
+from hyperloom.orchestrator.loop.coordinator_helpers import verdict_held_to_its_rule
 from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
     PolicyGate,
@@ -557,6 +558,107 @@ async def test_a_held_reject_is_recorded_not_silently_corrected(coord, caplog):
     assert any("held to its rule" in r.getMessage() for r in caplog.records)
     kinds = [call.args[2].get("kind") for call in coord._record_observation.await_args_list]
     assert "verdict_downgraded_to_rule_verdict" in kinds
+
+
+@pytest.mark.asyncio
+async def test_a_rule_named_only_in_prose_still_holds_the_verdict(coord):
+    """Field shape: the Critic names its rule in ``reasoning``, never in ``failure_reason_code``.
+
+    ``failure_reason_code`` is an input descriptor — nothing on the output side
+    requires it — so a verdict that cites the rule in prose is in contract and
+    must move the same way one carrying the field does.
+    """
+    pending = PendingProposal(
+        proposal_msg_id="msg-prose",
+        from_agent="orchestration",
+        action_name="framework_agent",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "framework_agent", "params": {}},
+    )
+    coord.state.pending_proposals["msg-prose"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-prose",
+            "verdict": "reject",
+            "reasoning": (
+                f"{QUANTITATIVE_CLAIM_REASON_CODE}: the proposal payload carries "
+                "the forbidden predicted_gain_pct field."
+            ),
+            "risks": [
+                {
+                    "severity": "blocker",
+                    "summary": "Specialist proposal payload contains a prohibited quantitative claim field.",
+                }
+            ],
+            "notes": ["Resubmit without predicted_gain_pct or other prohibited quantitative ranking fields."],
+            "packet_evidence": ["payload.predicted_gain_pct"],
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "advise"
+    assert len(coord._materialise_calls) == 1
+    kinds = [call.args[2].get("kind") for call in coord._record_observation.await_args_list]
+    assert "verdict_downgraded_to_rule_verdict" in kinds
+
+
+@pytest.mark.asyncio
+async def test_prose_that_cites_no_rule_leaves_the_reject_alone(coord):
+    """Prose is scanned for a rule citation, not read for sentiment; an ordinary reject stands."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-prose-plain",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-4"}},
+    )
+    coord.state.pending_proposals["msg-prose-plain"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-prose-plain",
+            "verdict": "reject",
+            "reasoning": "the patch rewrites a kernel with no before/after benchmark to stand on.",
+            "notes": ["predicted_gain_pct was not the problem here."],
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_declared_reject_code_outranks_an_advisory_one_in_prose(coord):
+    """The field is the Critic's explicit citation; prose cannot soften a rule it declared ``reject``."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-both",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-5"}},
+    )
+    coord.state.pending_proposals["msg-both"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-both",
+            "verdict": "reject",
+            "failure_reason_code": "specialist_patch_not_grounded",
+            "reasoning": f"unrelated aside about {QUANTITATIVE_CLAIM_REASON_CODE}",
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+def test_a_reason_code_inside_a_longer_token_is_not_a_citation():
+    """The prose scan is word-bounded, so a code embedded in another identifier does not move a verdict."""
+    entry = {
+        "verdict": "reject",
+        "reasoning": f"see log key x_{QUANTITATIVE_CLAIM_REASON_CODE}_v2 for the trace",
+    }
+    assert verdict_held_to_its_rule(entry) == ("reject", "")
 
 
 @pytest.mark.asyncio

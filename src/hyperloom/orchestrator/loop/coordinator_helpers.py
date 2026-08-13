@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shlex
 from datetime import datetime, timezone
 from pathlib import Path
@@ -542,6 +543,52 @@ def serialize_verdict_advisory(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# The verdict fields a Critic writes its own prose into. Scanned for a rule
+# citation when ``failure_reason_code`` is absent; ``risks[*].summary``
+# describes the risk rather than naming the rule, so it stays out.
+_VERDICT_PROSE_KEYS: tuple[str, ...] = ("reasoning", "notes")
+
+
+def cited_advisory_reason_code(entry: dict[str, Any]) -> str:
+    """Return the advisory-only rule ``entry`` cites, from the field or its prose.
+
+    ``failure_reason_code`` is an input descriptor: the Critic prompt hands the
+    code to the model, but nothing on the output side requires it back, so a
+    Critic that names its rule inside ``reasoning`` — the observed shape — is
+    within contract. Recovering the citation from prose is therefore part of
+    reading the verdict, not a workaround. Reason codes are ``snake_case``
+    identifiers, so the scan is word-bounded and cannot fire on a substring of
+    some longer token.
+
+    Args:
+        entry: A ``review_verdict`` payload or one ``verdict_map`` entry.
+
+    Returns:
+        The cited advisory-only reason code, or ``""`` when the entry cites
+        none. A code outside the advisory set yields ``""`` too: only rules
+        that declared ``advise`` can move a verdict.
+    """
+    advisory = advisory_only_reason_codes()
+    explicit = str(entry.get("failure_reason_code") or "").strip()
+    if explicit:
+        return explicit if explicit in advisory else ""
+    prose: list[str] = []
+    for key in _VERDICT_PROSE_KEYS:
+        raw = entry.get(key)
+        if isinstance(raw, (list, tuple)):
+            prose.extend(str(item) for item in raw if item)
+        elif raw:
+            prose.append(str(raw))
+    if not prose:
+        return ""
+    text = "\n".join(prose)
+    # Sorted so a verdict citing several advisory rules still records one
+    # deterministic code; every candidate is advisory, so the choice is only
+    # about which one the audit trail names.
+    cited = sorted(code for code in advisory if re.search(rf"(?<![\w-]){re.escape(code)}(?![\w-])", text))
+    return cited[0] if cited else ""
+
+
 def verdict_held_to_its_rule(entry: dict[str, Any]) -> tuple[str, str]:
     """Return the verdict a ``review_verdict`` entry carries, and why it moved.
 
@@ -553,7 +600,8 @@ def verdict_held_to_its_rule(entry: dict[str, Any]) -> tuple[str, str]:
 
     Args:
         entry: A ``review_verdict`` payload or one ``verdict_map`` entry, with
-            a ``verdict`` and optionally the ``failure_reason_code`` it cites.
+            a ``verdict`` and the rule it cites — in ``failure_reason_code`` or
+            in its own prose (see :func:`cited_advisory_reason_code`).
 
     Returns:
         A ``(verdict, reason_code)`` pair: the verdict to act on, and the cited
@@ -564,8 +612,8 @@ def verdict_held_to_its_rule(entry: dict[str, Any]) -> tuple[str, str]:
     verdict = str(entry.get("verdict") or "").strip()
     if verdict != _REJECT_VERDICT:
         return verdict, ""
-    reason_code = str(entry.get("failure_reason_code") or "").strip()
-    if reason_code and reason_code in advisory_only_reason_codes():
+    reason_code = cited_advisory_reason_code(entry)
+    if reason_code:
         return ADVISE_VERDICT, reason_code
     return verdict, ""
 
