@@ -105,8 +105,15 @@ def detect_gfx_arch(
     2. ``gpu_type`` -- the session's ``--gpu-type``, mapped through
        :mod:`hyperloom.common.gpu_identity`. It is fixed for the session and is
        already the recipe KB's hardware dimension, so it is a stronger source
-       than a probe of whatever binary happens to be on ``PATH``.
-    3. ``rocminfo`` -- a guarded subprocess, only when ``probe`` is set.
+       than a probe of whatever binary happens to be on ``PATH``. This does not
+       contradict ``--gpu-type``'s own rule that the probe wins: callers pass
+       ``args.gpu_type`` after the CLI has already overwritten a mistyped hint
+       with the ``rocm-smi`` answer, so what arrives here is the probed board.
+       The probe that loses in step 3 is a different one -- ``rocminfo``, which
+       reports an arch string and needs ``/opt/rocm/bin`` on ``PATH``.
+    3. ``GPU_TYPE`` in ``env`` -- the same board identity as step 2, exported
+       for child processes, which is where it usually does the work.
+    4. ``rocminfo`` -- a guarded subprocess, only when ``probe`` is set.
 
     Returns ``None`` when none resolve (never raises).
 
