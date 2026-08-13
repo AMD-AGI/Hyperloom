@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -47,6 +50,11 @@ def _runner(tmp_path: Path, monkeypatch) -> SubAgentRunner:
 
 def _progress_notes(task) -> list[dict]:
     return [row["progress"] for row in task.history if "progress" in row]
+
+
+def _iso_ago(seconds: float) -> str:
+    """Build the ISO timestamp a task that started ``seconds`` ago would carry."""
+    return datetime.fromtimestamp(time.time() - seconds, tz=timezone.utc).isoformat()
 
 
 @pytest.mark.asyncio
@@ -86,17 +94,25 @@ async def test_every_note_names_the_agent_it_vouches_for(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_row_looks_alive_while_the_task_still_runs(tmp_path, monkeypatch):
-    """``updated_at`` must move on a heartbeat: it is the field stall detection reads."""
+async def test_a_heartbeat_leaves_the_running_mark_where_it_was(tmp_path, monkeypatch):
+    """``updated_at`` says when the task started running, not when it last spoke.
+
+    The lease watchdog, the ``extend_lease`` budget math and the in-flight
+    projection all measure elapsed runtime from it.
+    """
     sub = _runner(tmp_path, monkeypatch)
-    seen: dict[str, str] = {}
+    started_iso = _iso_ago(3600)
+    seen: dict[str, Any] = {}
 
     async def _slow(ctx) -> dict:
-        mid_run = await sub.tasks.get(ctx.task.task_id)
-        seen["before"] = mid_run.updated_at
+        await sub.tasks.db.execute(
+            "UPDATE tasks SET updated_at=? WHERE task_id=?",
+            (started_iso, ctx.task.task_id),
+        )
         await report_progress(unit="baseline_round", label="warmup")
         beating = await sub.tasks.get(ctx.task.task_id)
-        seen["after"] = beating.updated_at
+        seen["updated_at"] = beating.updated_at
+        seen["notes"] = len(_progress_notes(beating))
         assert beating.state == "running"
         return {"status": "ok"}
 
@@ -104,7 +120,36 @@ async def test_the_row_looks_alive_while_the_task_still_runs(tmp_path, monkeypat
     task = await sub.tasks.create(kind="baseline", params={}, idempotency_key="baseline-0")
     await sub.run_task(task)
 
-    assert seen["after"] > seen["before"]
+    assert seen["updated_at"] == started_iso
+    assert seen["notes"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_task_that_heartbeats_all_along_is_still_reclaimed_at_its_lease(tmp_path, monkeypatch):
+    """The R6 watchdog is a runtime budget, not an inactivity timeout.
+
+    A heartbeat that reset its clock would make the backstop unreachable for
+    exactly the long-running rows that hold lanes and read as live work.
+    """
+    sub = _runner(tmp_path, monkeypatch)
+    task = await sub.tasks.create(
+        kind="roofline",
+        params={},
+        idempotency_key="roofline-lease",
+        lease_ttl_sec=2700,
+    )
+    await sub.tasks.transition(task.task_id, "running")
+    await sub.tasks.db.execute(
+        "UPDATE tasks SET updated_at=? WHERE task_id=?",
+        (_iso_ago(3106), task.task_id),
+    )
+    for unit in range(3):
+        await sub.tasks.record_progress(task.task_id, {"unit": "roofline_step", "index": unit})
+
+    reclaimed = await sub.tasks.reclaim_expired_running(reason="test_watchdog")
+
+    assert reclaimed == [task.task_id]
+    assert (await sub.tasks.get(task.task_id)).state == "failed"
 
 
 @pytest.mark.asyncio

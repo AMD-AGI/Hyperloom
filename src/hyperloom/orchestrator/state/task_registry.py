@@ -328,14 +328,16 @@ class TaskRegistry:
         A composite action — an explore grid, a baseline double-run, a profile
         and its analysis — is one task that internally completes many units of
         work over hours. Until it returns, its row looks identical to a task
-        that hung at second one: same state, same ``updated_at``. Every
-        consumer downstream inherits that blindness, which is why a healthy
-        80-minute analysis and a wedged Coordinator produce the same stall
-        evidence.
+        that hung at second one, which is why a healthy 80-minute analysis and
+        a wedged Coordinator produce the same stall evidence. The note carries
+        the difference: it lands on ``history`` with its own timestamp, and a
+        consumer that wants freshness reads the notes.
 
-        Bumping ``updated_at`` is the point. ``MAX(updated_at)`` over running
-        tasks then answers "when did anything last happen", which is the
-        question the stall detector is actually asking.
+        ``updated_at`` is deliberately left alone. It marks when the task
+        entered ``running``, and the R6 lease watchdog, the ``extend_lease``
+        remaining-budget math and the "Tasks in flight" projection all measure
+        elapsed runtime from it; moving it would turn a cumulative budget into
+        an inactivity timeout and make an 80-minute task render as seconds old.
 
         Best-effort: a task that vanished under a reaper must not take its
         executor down over a progress note.
@@ -350,12 +352,11 @@ class TaskRegistry:
             row = cur.fetchone()
             if row is None:
                 return
-            now = _now_iso()
             history = json.loads(row["history"])
-            history.append({"progress": note or {}, "ts": now})
+            history.append({"progress": note or {}, "ts": _now_iso()})
             cur.execute(
-                "UPDATE tasks SET history=?, updated_at=? WHERE task_id=?",
-                (json.dumps(history), now, task_id),
+                "UPDATE tasks SET history=? WHERE task_id=?",
+                (json.dumps(history), task_id),
             )
 
     async def queued(self) -> list[Task]:
