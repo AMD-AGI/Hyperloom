@@ -676,6 +676,55 @@ def verdict_rests_on_one_ground(entry: dict[str, Any]) -> bool:
     return len([risk for risk in (entry.get("risks") or []) if risk]) <= 1
 
 
+# The grounds a verdict states outside its prose: the evidence it still wants,
+# the further findings it lists, and the rule it declares it rests on. A
+# ``verdict_map`` entry is ``{verdict, rationale?, failure_reason_code?}`` --
+# the shape PolicyGate documents -- so the first two have nowhere to live but
+# the payload, where they are stated once for the whole batch.
+_VERDICT_STATED_GROUNDS_KEYS: tuple[str, ...] = (
+    "required_evidence",
+    "risks",
+    "failure_reason_code",
+)
+
+
+def verdict_map_entry_grounds(entry: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the grounds one ``verdict_map`` entry rests on.
+
+    Reading the entry alone left the hold's safeguards looking for keys the
+    per-variant shape has no slot for, so both answered "nothing further
+    stated" whatever the Critic wrote: a reject listing blockers and asking for
+    evidence was held to a rule its rationale merely mentioned. The payload is
+    where those grounds are stated, and it states them for every variant --
+    which is also how the same verdict is serialised downstream
+    (:func:`serialize_verdict_advisory`).
+
+    Prose is deliberately not inherited. Grounds stated once bind every
+    variant, but a citation is a claim about the verdict making it: reading the
+    batch's prose as one variant's grounds would downgrade a reject whose own
+    rationale refuses on something else. The two mistakes cost different
+    amounts (see :data:`_CITATION_OPENER`), so only the narrower reading is
+    taken.
+
+    Args:
+        entry: One ``verdict_map`` entry.
+        payload: The ``review_verdict`` payload that entry arrived in.
+
+    Returns:
+        The entry's own keys, plus each ground the entry states none of and the
+        payload does; ``{}`` when ``entry`` is not a dict.
+    """
+    if not isinstance(entry, dict):
+        return {}
+    grounds = dict(entry)
+    if not isinstance(payload, dict):
+        return grounds
+    for key in _VERDICT_STATED_GROUNDS_KEYS:
+        if not grounds.get(key) and payload.get(key):
+            grounds[key] = payload[key]
+    return grounds
+
+
 def verdict_held_to_its_rule(entry: dict[str, Any], *, action_name: str) -> tuple[str, str]:
     """Return the verdict a ``review_verdict`` entry carries, and why it moved.
 

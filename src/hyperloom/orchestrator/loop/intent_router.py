@@ -30,6 +30,7 @@ from .coordinator_helpers import (
     format_exc_brief,
     serialize_verdict_advisory,
     verdict_held_to_its_rule,
+    verdict_map_entry_grounds,
 )
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -221,10 +222,12 @@ class IntentRouter:
         authored = str(single_verdict or "").strip()
         if not verdict and isinstance(verdict_map, dict) and verdict_map:
             # Per entry before the collapse below: a variant rejected on an
-            # advisory-only rule must not out-rank its siblings' advice.
+            # advisory-only rule must not out-rank its siblings' advice. Each
+            # entry is read together with the grounds the payload states for the
+            # batch, which is where a per-variant shape can carry none.
             sub_verdicts = [
                 await self._verdict_held_to_its_rule(
-                    entry or {},
+                    verdict_map_entry_grounds(entry, intent.payload),
                     target=target,
                     action_name=pending.action_name,
                     variant=str(name),
@@ -274,7 +277,8 @@ class IntentRouter:
         drift is visible rather than silently corrected.
 
         Args:
-            entry: The ``review_verdict`` payload, or one ``verdict_map`` entry.
+            entry: The ``review_verdict`` payload, or one ``verdict_map``
+                entry's grounds (:func:`verdict_map_entry_grounds`).
             target: The target proposal msg_id, for the audit record.
             action_name: The reviewed proposal's action name; only the kinds
                 those rules are about can be held (see
