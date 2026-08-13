@@ -13,8 +13,9 @@ Two of the four layers are here, the ones outside the executors:
 * In-flight cancellation -- the backstop for work already running when the
   budget goes or the process is asked to stop. Covers the handles the dispatcher
   keeps, the cancellation itself, the closing-action carve-out, the task row
-  landing terminal instead of stranding at ``running``, and the pump and
-  ``Coordinator.stop`` paths that trigger it.
+  landing terminal instead of stranding at ``running``, which of those handles
+  the pump owns on its way out, and the pump and ``Coordinator.stop`` paths that
+  trigger it.
 
 The remaining two layers are enforced inside the executors and tested next to
 them: the timeout clamp in ``test_explore_executor``, and the subprocess session
@@ -470,16 +471,17 @@ class TestTheRunnerRecordsACancellation:
         assert atask.cancelled()
 
 
+def _quick_poll(coord: Coordinator) -> None:
+    """Shorten the pump's re-scan interval so a pump test is not a wall-clock test."""
+    coord._dispatcher_poll_sec = 0.05
+
+
 class TestThePumpStopsWorkItCannotWaitFor:
     """The trigger side: a spent budget, and a shutdown request."""
 
-    @staticmethod
-    def _quick_poll(coord: Coordinator) -> None:
-        coord._dispatcher_poll_sec = 0.05
-
     @pytest.mark.asyncio
     async def test_a_budget_that_runs_out_stops_the_action(self, coord: Coordinator):
-        self._quick_poll(coord)
+        _quick_poll(coord)
         _set_budget(coord, minutes=600)
         task, atask, pump = await _start_action_under_pump(coord, kind=_CHEAP_ACTION, key="p-budget")
         _set_budget(coord, minutes=600, elapsed_min=600.0)
@@ -492,7 +494,7 @@ class TestThePumpStopsWorkItCannotWaitFor:
     @pytest.mark.asyncio
     async def test_the_closing_actions_keep_their_reserve(self, coord: Coordinator):
         """The budget hits zero with the closing window still to spend."""
-        self._quick_poll(coord)
+        _quick_poll(coord)
         _set_budget(coord, minutes=600, elapsed_min=600.0)
         _task, atask, pump = await _start_action_under_pump(coord, kind=_CLOSING_ACTION, key="p-closing")
         await asyncio.sleep(0.3)
@@ -505,7 +507,7 @@ class TestThePumpStopsWorkItCannotWaitFor:
     @pytest.mark.asyncio
     async def test_a_shutdown_request_stops_the_action(self, coord: Coordinator):
         """SIGTERM sets the stop event; before this it only stopped the tick."""
-        self._quick_poll(coord)
+        _quick_poll(coord)
         _set_budget(coord, minutes=600)
         _task, atask, pump = await _start_action_under_pump(coord, kind=_CHEAP_ACTION, key="p-signal")
         coord._stop.set()
@@ -517,7 +519,7 @@ class TestThePumpStopsWorkItCannotWaitFor:
     @pytest.mark.asyncio
     async def test_a_cancelled_pump_does_not_orphan_its_actions(self, coord: Coordinator):
         """The handles live in the pump's frame; leaving must not drop them."""
-        self._quick_poll(coord)
+        _quick_poll(coord)
         _set_budget(coord, minutes=600)
         _task, atask, pump = await _start_action_under_pump(coord, kind=_CHEAP_ACTION, key="p-orphan")
 
@@ -528,17 +530,25 @@ class TestThePumpStopsWorkItCannotWaitFor:
         assert coord.dispatcher._inflight_actions == {}
 
 
+def _allow_inline(coord: Coordinator, monkeypatch) -> asyncio.Event:
+    """Register a never-finishing executor and clear the gates around it."""
+    started = asyncio.Event()
+    coord.sub.register_executor(_CHEAP_ACTION, _never_finishes(started))
+    monkeypatch.setattr(coord.policy, "validate_intent", lambda *a, **k: None)
+    _set_budget(coord, minutes=600)
+    return started
+
+
+async def _start_inline_action(coord: Coordinator, monkeypatch) -> asyncio.Task:
+    """Run an inline action and wait until it is registered and under way."""
+    started = _allow_inline(coord, monkeypatch)
+    inline = asyncio.create_task(coord.dispatcher._run_action_now(_CHEAP_ACTION, {}))
+    await asyncio.wait_for(started.wait(), timeout=5.0)
+    return inline
+
+
 class TestInlineActionsAreReachableToo:
     """The inline path abandons its future, so it needs the same handle."""
-
-    @staticmethod
-    def _allow_inline(coord: Coordinator, monkeypatch) -> asyncio.Event:
-        """Register a never-finishing executor and clear the gates around it."""
-        started = asyncio.Event()
-        coord.sub.register_executor(_CHEAP_ACTION, _never_finishes(started))
-        monkeypatch.setattr(coord.policy, "validate_intent", lambda *a, **k: None)
-        _set_budget(coord, minutes=600)
-        return started
 
     @pytest.mark.asyncio
     async def test_an_inline_action_that_outlived_its_caller_can_be_stopped(
@@ -547,9 +557,7 @@ class TestInlineActionsAreReachableToo:
         monkeypatch,
     ):
         """Before this, the only thing that ended it was the action itself."""
-        started = self._allow_inline(coord, monkeypatch)
-        inline = asyncio.create_task(coord.dispatcher._run_action_now(_CHEAP_ACTION, {}))
-        await asyncio.wait_for(started.wait(), timeout=5.0)
+        inline = await _start_inline_action(coord, monkeypatch)
         task_id = next(iter(coord.dispatcher._inflight_actions))
 
         assert await coord.dispatcher.cancel_inflight_actions(reason="test") == [task_id]
@@ -580,7 +588,7 @@ class TestInlineActionsAreReachableToo:
         monkeypatch,
     ):
         """It runs on an agent's turn thread, which a ``CancelledError`` would end."""
-        started = self._allow_inline(coord, monkeypatch)
+        started = _allow_inline(coord, monkeypatch)
         monkeypatch.setattr(
             coord.dispatcher,
             "_inline_action_whitelist",
@@ -603,6 +611,67 @@ class TestInlineActionsAreReachableToo:
             caller.join(5.0)
 
         assert outcome and "was cancelled" in outcome[0]
+
+
+class TestThePumpOnlyCancelsWhatItSpawned:
+    """The registry is dispatcher-wide; the pump's exit sweep is not.
+
+    An inline action is registered by whoever ran it, not by the pump, and is
+    designed to keep going after that caller stops waiting. A tick with nothing
+    queued returns immediately, so an exit sweep over the whole registry would
+    make the emptiest possible pump the thing that kills it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_tick_with_nothing_queued_leaves_an_inline_action_running(
+        self,
+        coord: Coordinator,
+        monkeypatch,
+    ):
+        inline = await _start_inline_action(coord, monkeypatch)
+        try:
+            await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=10.0)
+
+            assert not inline.done()
+            assert coord.dispatcher._inflight_actions
+        finally:
+            inline.cancel()
+            await _settle(inline)
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_pump_takes_its_own_and_only_its_own(
+        self,
+        coord: Coordinator,
+        monkeypatch,
+    ):
+        """Narrowing the sweep must not cost the pump the actions it does own."""
+        _quick_poll(coord)
+        inline = await _start_inline_action(coord, monkeypatch)
+        _task, spawned, pump = await _start_action_under_pump(coord, kind=_CLOSING_ACTION, key="own-spawn")
+        try:
+            pump.cancel()
+            await _settle(pump)
+
+            assert spawned.cancelled()
+            assert not inline.done()
+        finally:
+            inline.cancel()
+            await _settle(inline)
+
+    @pytest.mark.asyncio
+    async def test_a_shutdown_still_reaches_an_inline_action(
+        self,
+        coord: Coordinator,
+        monkeypatch,
+    ):
+        """The narrower sweep must not blunt the trigger that has to reach everything."""
+        inline = await _start_inline_action(coord, monkeypatch)
+        coord._stop.set()
+
+        await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=10.0)
+
+        await _settle(inline)
+        assert inline.cancelled()
 
 
 class TestCoordinatorStop:

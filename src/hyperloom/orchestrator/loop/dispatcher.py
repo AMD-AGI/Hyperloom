@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import os
+from collections.abc import Collection
 from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
@@ -133,6 +134,7 @@ class DispatcherCollaborator:
         *,
         reason: str,
         exempt: frozenset[str] = frozenset(),
+        only_task_ids: Collection[str] | None = None,
     ) -> list[str]:
         """Cancel the running dispatched actions and wait for them to unwind.
 
@@ -151,6 +153,10 @@ class DispatcherCollaborator:
             reason: Short cause, logged and used as evidence.
             exempt: Action kinds to leave running -- the closing actions, when
                 the trigger is a budget that already reserved time for them.
+            only_task_ids: Restrict the cancel to these ids, for a caller that
+                owns part of the registry rather than all of it. ``None`` reaches
+                every action that is not exempt, which is what a shutdown or a
+                spent budget needs.
 
         Returns:
             list[str]: Task ids that were cancelled (empty when nothing ran).
@@ -158,7 +164,7 @@ class DispatcherCollaborator:
         victims = [
             (task_id, kind, atask)
             for task_id, (kind, atask) in self._inflight_actions.items()
-            if kind not in exempt and not atask.done()
+            if kind not in exempt and not atask.done() and (only_task_ids is None or task_id in only_task_ids)
         ]
         if not victims:
             return []
@@ -296,12 +302,16 @@ class DispatcherCollaborator:
                 for task, maybe_result, gpu_lease in completed:
                     await self._reap_dispatched_task(task, maybe_result, gpu_lease)
         finally:
-            # The pump is the only owner of the actions it spawned. Leaving by
-            # any door other than the drained one -- cancelled at shutdown, or a
-            # raise from the bookkeeping -- would otherwise leave them running
-            # with every handle on them gone. A drained pump has nothing left to
-            # cancel, so the normal exit pays nothing for this.
-            await self.cancel_inflight_actions(reason="dispatcher_pump_exit")
+            # ``_inflight_actions`` is dispatcher-wide: the inline path registers
+            # a handle there too, and that action is meant to outlive the caller
+            # that started it. The pump owns exactly the entries still in its own
+            # ``inflight``, so leaving by any door other than the drained one --
+            # cancelled at shutdown, or a raise from the bookkeeping -- takes
+            # those and nothing else. A drained pump has nothing left to cancel.
+            await self.cancel_inflight_actions(
+                reason="dispatcher_pump_exit",
+                only_task_ids={task.task_id for task, _atask, _gpu_lease in inflight},
+            )
 
     async def _reconcile_cancelled_policy_denied_integrate_tasks(self) -> list[str]:
         """Re-queue integrate_patch rows cancelled at dispatch when policy now passes.
