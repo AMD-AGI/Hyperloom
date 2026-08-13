@@ -234,7 +234,6 @@ def test_grouped_multi_shape_task_requires_one_prepared_driver(monkeypatch, tmp_
 
     assert result["returncode"] == 0
     _assert_staged_placeholder(captured["driver"], tmp_path / "repo")
-    assert captured["shapes"]["validation"] == selectors
 
 
 def test_grouped_multi_shape_task_rejects_incomplete_invocation_spec(tmp_path):

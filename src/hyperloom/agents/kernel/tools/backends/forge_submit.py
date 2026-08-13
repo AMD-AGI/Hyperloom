@@ -3299,8 +3299,13 @@ def _validated_forge_checkpoint(
                 and shape not in expected_coverage
             ):
                 expected_coverage.append(shape)
+    # forge-loop stopped reporting case coverage once drivers took over suite
+    # evaluation, so silence here says nothing about what was measured -- an
+    # older loop reports an empty list for the same reason. Only a coverage that
+    # is reported and disagrees is evidence the checkpoint measured something
+    # else; vetoing on absence discards every salvageable best from a timeout.
     actual_coverage = checkpoint.get("case_coverage")
-    if expected_coverage and actual_coverage != expected_coverage:
+    if actual_coverage and expected_coverage and actual_coverage != expected_coverage:
         return None
     normalized = dict(checkpoint)
     normalized["best_commit"] = best_commit
@@ -3407,7 +3412,6 @@ def _run_loop_via_cli(
     worktree_kernel: str,
     driver: str,
     workspace: str,
-    shapes: dict,
     snr_threshold: float,
     max_iters: int,
     max_hours: float,
@@ -3421,7 +3425,6 @@ def _run_loop_via_cli(
     forge_log: Path,
     timeout_s: int,
     deadline_unix: float = 0.0,
-    e2e_pct: float | None = None,
     operator_name: str = "",
     experience_id: str = "",
     framework: str = "",
@@ -3484,8 +3487,6 @@ def _run_loop_via_cli(
         driver,
         "--workspace",
         workspace,
-        "--shapes-json",
-        _json.dumps(shapes),
         "--snr-threshold",
         str(snr_threshold),
         "--max-iters",
@@ -3531,10 +3532,6 @@ def _run_loop_via_cli(
         cmd += ["--program-md-file", str(program_md_file)]
     if invocation_spec_file and Path(invocation_spec_file).is_file():
         cmd += ["--invocation-spec-file", str(Path(invocation_spec_file).resolve())]
-    # Forward the kernel's E2E time share so forge-loop's baseline profile can
-    # project a per-kernel end-to-end optimization potential.
-    if e2e_pct is not None:
-        cmd += ["--e2e-pct", str(e2e_pct)]
     if operator_name:
         cmd += ["--operator-name", operator_name]
     if target_functions:
@@ -4641,7 +4638,6 @@ def submit(
             worktree_kernel=worktree_kernel,
             driver=driver,
             workspace=workspace,
-            shapes=shapes,
             snr_threshold=snr_threshold,
             max_iters=max_iters,
             max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),
@@ -4658,7 +4654,6 @@ def submit(
                 time.time() + 1.0,
                 started + timeout_s,
             ),
-            e2e_pct=e2e_pct,
             operator_name=logical_operator,
             experience_id=output_dir.name,
             framework=source_framework,

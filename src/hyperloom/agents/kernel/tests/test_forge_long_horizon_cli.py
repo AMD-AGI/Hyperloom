@@ -641,6 +641,62 @@ def test_inplace_restore_returns_the_original_working_tree_bytes(tmp_path):
     assert _git(repo, "diff", "--cached") == ""
 
 
+def test_the_invocation_omits_options_kernelforge_no_longer_has(tmp_path, monkeypatch):
+    """click rejects an unknown option before running anything, exit code 2.
+
+    KernelForge dropped --shapes-json when drivers took over suite evaluation and
+    --e2e-pct with its unreachable profiling surface, so passing either costs the
+    whole attempt against a current KernelForge.
+    """
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    kernel = workspace / "kernel.py"
+    driver = workspace / "driver.py"
+    kernel.write_text("pass\n")
+    driver.write_text("pass\n")
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
+    captured = {}
+
+    class FakeProcess:
+        pid = 43213
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        return FakeProcess()
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "/forge/src")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
+
+    forge_submit._run_loop_via_cli(
+        worktree_kernel=str(kernel),
+        driver=str(driver),
+        workspace=str(workspace),
+        snr_threshold=30.0,
+        max_iters=8,
+        max_hours=1.0,
+        branch="forge/session/kernel",
+        gpu_target="gfx950",
+        gpu_type="mi355x",
+        fellow="triton-fellow",
+        program_md_file="",
+        invocation_spec_file="",
+        experiments_dir=experiments,
+        forge_log=tmp_path / "forge.log",
+        timeout_s=120,
+        deadline_unix=time.time() + 120.0,
+        experience_id="attempt-1",
+    )
+
+    assert "--shapes-json" not in captured["command"]
+    assert "--e2e-pct" not in captured["command"]
+
+
 def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     workspace = tmp_path / "worktree"
     workspace.mkdir()
@@ -685,7 +741,6 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         worktree_kernel=str(kernel),
         driver=str(driver),
         workspace=str(workspace),
-        shapes={"primary": {"M": 128}},
         snr_threshold=30.0,
         max_iters=8,
         max_hours=1.0,
@@ -743,7 +798,6 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         "--kernel": str(kernel),
         "--driver": str(driver),
         "--workspace": str(workspace),
-        "--shapes-json": json.dumps({"primary": {"M": 128}}),
         "--snr-threshold": "30.0",
         "--max-iters": "8",
         "--max-hours": "1.0",
@@ -904,7 +958,6 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             worktree_kernel=str(case["kernel"]),
             driver=str(driver),
             workspace=str(workspace),
-            shapes={},
             snr_threshold=30.0,
             max_iters=1,
             max_hours=1.0,
@@ -998,7 +1051,6 @@ def test_cli_timeout_recovers_only_this_run_s_checkpoint(tmp_path, monkeypatch):
         worktree_kernel=str(kernel),
         driver=str(driver),
         workspace=str(workspace),
-        shapes={},
         snr_threshold=30.0,
         max_iters=8,
         max_hours=1.0,
@@ -1940,7 +1992,6 @@ def test_unclearable_stale_artifact_aborts_before_starting_a_campaign(
             worktree_kernel=str(kernel),
             driver=str(driver),
             workspace=str(workspace),
-            shapes={},
             snr_threshold=30.0,
             max_iters=8,
             max_hours=1.0,
