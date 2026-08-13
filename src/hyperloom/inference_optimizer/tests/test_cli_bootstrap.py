@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timedelta
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from types import SimpleNamespace
@@ -471,13 +472,28 @@ def test_a_second_resume_banks_only_the_leg_that_just_stopped() -> None:
     state.stop_ts = "2026-08-01T00:30:00+00:00"
     cb._begin_resume_leg(state, reanchor_budget=True)
 
-    # A second leg runs an hour from where it picked up, still in PRELUDE.
-    leg_two_start = datetime.fromisoformat(state.resumed_ts)
+    # A second leg picked up a day later and ran an hour, still in PRELUDE.
+    state.resumed_ts = "2026-08-02T00:00:00+00:00"
     state.set_stop_reason("time_exhausted")
-    state.stop_ts = (leg_two_start + timedelta(hours=1)).isoformat()
+    state.stop_ts = "2026-08-02T01:00:00+00:00"
     cb._begin_resume_leg(state, reanchor_budget=True)
 
     assert state.phase_elapsed_totals["PRELUDE"] == 1800.0 + 3600.0
+
+
+def test_a_resume_does_not_bank_a_stop_stamped_after_the_present() -> None:
+    """Banking past now charges the phase for time no leg ran, which ends it early."""
+    started = time.time() - 60.0
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
+    state.phase = "PRELUDE"
+    state.phase_started_ts = datetime.fromtimestamp(started, tz=timezone.utc).isoformat()
+    state.phase_started_unix = started
+    state.set_stop_reason("time_exhausted")
+    state.stop_ts = datetime.fromtimestamp(started + 10 * 86400.0, tz=timezone.utc).isoformat()
+
+    cb._begin_resume_leg(state, reanchor_budget=True)
+
+    assert 60.0 <= state.phase_elapsed_totals["PRELUDE"] < 120.0
 
 
 def test_a_resume_with_no_recorded_stop_leaves_the_segment_unbanked() -> None:

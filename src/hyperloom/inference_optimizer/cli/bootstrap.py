@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -421,13 +422,17 @@ def _bank_previous_leg_phase_segment(state: SharedState) -> None:
     unbanked. That under-charges the phase, which is the direction the phase
     clock tolerates: over-charging ends a phase early.
 
+    The end is clamped to the present for the same reason: no leg can have run
+    past the moment it is being resumed, so a ``stop_ts`` stamped ahead of now
+    would bank the difference as spend the phase never had.
+
     Must run before ``resumed_ts`` is restamped, which would floor the segment
     to nothing.
 
     Args:
         state (SharedState): The loaded session state, mutated in place.
     """
-    stop_unix = to_unix(state.stop_ts, 0.0) or 0.0
+    stop_unix = min(to_unix(state.stop_ts, 0.0) or 0.0, time.time())
     if stop_unix <= 0.0:
         return
     bank_phase_segment(state, until_unix=stop_unix)
