@@ -406,12 +406,39 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
 }
 
 
-def _explain_stop_reason(stop_reason):
+def _explain_stop_reason(stop_reason, state=None):
     """Return a human-readable explanation for a terminal ``stop_reason``.
+
+    ``conc_sweep_done`` is the SWEEP exit for a concurrency sweep that reached
+    a terminal result, which includes one that declined to run at all. The
+    generic wording then tells the reader a sweep finished when none happened,
+    so a skip is named when ``state`` is available to say so.
 
     Returns ``""`` for unknown/empty reasons so callers can omit the line.
     """
-    return _STOP_REASON_EXPLANATIONS.get(str(stop_reason or "").strip(), "")
+    reason = str(stop_reason or "").strip()
+    text = _STOP_REASON_EXPLANATIONS.get(reason, "")
+    if reason == "conc_sweep_done" and text:
+        skip_reason = _conc_sweep_skip_reason(state)
+        if skip_reason:
+            return f"Post-sweep concurrency sweep did not run ({skip_reason}); the phase settled and the run closed."
+    return text
+
+
+def _conc_sweep_skip_reason(state) -> str:
+    """The reason the concurrency sweep declined to run, or ``""`` if it ran.
+
+    Args:
+        state: The session's shared state, or ``None``.
+
+    Returns:
+        str: The recorded ``skip_reason``, a placeholder when a skip carries
+        none, or ``""`` when no skip is on record.
+    """
+    last = getattr(state, "last_conc_sweep", None)
+    if not isinstance(last, dict) or not last.get("was_skipped"):
+        return ""
+    return str(last.get("skip_reason") or "").strip() or "no reason recorded"
 
 
 def _build_summary_dict(
@@ -450,7 +477,7 @@ def _build_summary_dict(
         "model_class": state.model_class,
         "framework": getattr(state, "framework", "") or "",
         "stop_reason": stop_reason,
-        "stop_reason_explanation": _explain_stop_reason(stop_reason),
+        "stop_reason_explanation": _explain_stop_reason(stop_reason, state),
         "baseline_tput": state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
         "current_best": state.current_best,

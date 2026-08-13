@@ -2144,7 +2144,13 @@ def exit_normal_sweep(
         if cs_status == "failed":
             return "conc_sweep_failed", {"conc_sweep_status": cs_status}
         if cs_status in ("succeeded", "partial", "completed", "skipped"):
-            return "conc_sweep_done", {"conc_sweep_status": cs_status}
+            evidence: dict[str, Any] = {"conc_sweep_status": cs_status}
+            # A sweep that declined to run is also terminal, and the exit
+            # reason alone cannot tell the two apart afterwards.
+            if last_conc.get("was_skipped"):
+                evidence["conc_sweep_was_skipped"] = True
+                evidence["conc_sweep_skip_reason"] = str(last_conc.get("skip_reason") or "")
+            return "conc_sweep_done", evidence
     remaining = phase_budget_remaining_seconds(
         state,
         budget_pct=budget_pct,
