@@ -13,6 +13,7 @@ from typing import Any
 import logging as _logging
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
+from ..loop.coordinator_helpers import effective_closing_grace_sec
 from ..state.task_registry import Task
 from .base import PhaseHandler
 
@@ -26,10 +27,15 @@ log = _logging.getLogger(__name__)
 # a fresh row (re-enqueue under a distinct idempotency key).
 _TASK_STATE_DONE: str = "succeeded"
 _DEAD_TASK_STATES: frozenset[str] = frozenset({"cancelled", "failed"})
+# A row the wall-clock deadline path already dispatched. Not terminal, and not
+# runnable either: the registry allows ``running`` only into a terminal state.
+_TASK_STATE_RUNNING: str = "running"
 # Appended to a close step's idempotency key when its first row is dead, so
 # ``create_or_return_existing`` mints a new task instead of returning the
 # corpse.
 _RETRY_KEY_SUFFIX: str = "retry"
+# Fallback registry poll interval, for a caller with no dispatcher poll set.
+_DEFAULT_TASK_POLL_SEC: float = 10.0
 
 
 def _task_is_dead(task: Task | None) -> bool:
@@ -507,21 +513,89 @@ class ClosePhase(PhaseHandler):
             idempotency_key=f"internal-session_breakdown-{reason}",
         )
 
+    async def _await_running_close_task(self, task: Task, *, step: str) -> str:
+        """Wait for an already-dispatched close-step task to reach a terminal state.
+
+        The wall-clock deadline path enqueues the report and dispatches it
+        before CLOSE is entered, so the sequencer can find its own step already
+        under way. Handing that row to ``run_task`` asks the registry for
+        ``running -> running``, which it refuses, taking the close step down
+        with it — and the session that ran out of time is the session whose
+        report is worth the most.
+
+        The wait is bounded by the closing grace window, which is the budget
+        reserved for exactly this work, so a task that never lands costs CLOSE
+        that window and no more.
+
+        Args:
+            task: The close-step task found in ``running``.
+            step: Close-step label, for logging.
+
+        Returns:
+            The state the task ended in, or ``running`` when the bound elapsed
+            first — which the caller records the same way it records a failure.
+        """
+        bound_sec = max(
+            0.0,
+            effective_closing_grace_sec(
+                float(getattr(self.shared_state, "max_minutes", 0) or 0),
+                None,
+            ),
+        )
+        poll_sec = float(getattr(self, "_dispatcher_poll_sec", _DEFAULT_TASK_POLL_SEC))
+        deadline = time.monotonic() + bound_sec
+        log.info(
+            "CLOSE step %s: task_id=%s is already running; waiting up to %.0fs for it",
+            step,
+            task.task_id,
+            bound_sec,
+        )
+        state = _TASK_STATE_RUNNING
+        while True:
+            try:
+                state = str(getattr(await self.tasks.get(task.task_id), "state", "") or "")
+            except Exception:  # noqa: BLE001 — TaskNotFound + friends
+                log.warning(
+                    "CLOSE step %s: task_id=%s vanished while the sequencer waited for it",
+                    step,
+                    task.task_id,
+                )
+                return state
+            if state != _TASK_STATE_RUNNING:
+                log.info(
+                    "CLOSE step %s: task_id=%s finished as %s while the sequencer waited",
+                    step,
+                    task.task_id,
+                    state,
+                )
+                return state
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                log.warning(
+                    "CLOSE step %s: task_id=%s still running after %.0fs; recording the step as failed",
+                    step,
+                    task.task_id,
+                    bound_sec,
+                )
+                return state
+            await asyncio.sleep(min(poll_sec, remaining))
+
     async def _run_close_task(self, task: Task, *, step: str) -> str | None:
-        """Run one close-step task and return its terminal state.
+        """Run one close-step task and return the state it ended in.
 
         ``run_task`` transitions ``queued -> running``, which the registry
-        refuses for a row that is already terminal — and refuses correctly:
-        the rejection is the double-spawn guard. So a terminal row is reported
-        here instead of run, which keeps one dead task from taking down the
-        step that was supposed to salvage the session.
+        refuses for a row that is already terminal or already running — and
+        refuses correctly: the rejection is the double-spawn guard. So such a
+        row is reported or waited on here instead of run, which keeps one row
+        the sequencer did not create from taking down the step that was
+        supposed to salvage the session.
 
         Args:
             task: The task to run.
             step: Close-step label, for logging.
 
         Returns:
-            The task's terminal state.
+            The state the task ended in.
         """
         state = str(getattr(task, "state", "") or "")
         if state == _TASK_STATE_DONE:
@@ -539,6 +613,8 @@ class ClosePhase(PhaseHandler):
                 state,
             )
             return state
+        if state == _TASK_STATE_RUNNING:
+            return await self._await_running_close_task(task, step=step)
         result = await self.sub.run_task(task)
         return result.state
 
