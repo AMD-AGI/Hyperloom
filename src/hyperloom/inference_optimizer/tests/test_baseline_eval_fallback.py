@@ -758,8 +758,9 @@ def test_the_double_run_handoff_is_not_reported_as_a_recovery(tmp_path, caplog):
     """Every healthy double-run baseline reads its accuracy from the warmup round.
 
     The measured round runs ``RUN_EVAL=false``, so it has no accuracy of its
-    own by construction. Logging that handoff as a salvage made a normal run
-    look like it survived a fault.
+    own by construction. Reporting that handoff as a salvage -- in the log or
+    in the structured warnings the report and the specialists read -- made a
+    normal run look like it survived a fault.
     """
     attempt = tmp_path / "runs" / "baseline" / "786a793e"
     _write_gsm8k_results(attempt / "warmup_round", 0.9128)
@@ -776,6 +777,7 @@ def test_the_double_run_handoff_is_not_reported_as_a_recovery(tmp_path, caplog):
     assert result["accuracy"] == pytest.approx(0.9128)
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING and "salvag" in r.getMessage()]
     assert any("cold-start guard" in r.getMessage() for r in caplog.records)
+    assert "baseline_accuracy_salvaged_from_sibling_attempt" not in result.get("nonfatal_warnings", [])
 
 
 def test_an_unexpected_gap_is_still_reported_as_a_salvage(tmp_path, caplog):
@@ -792,6 +794,7 @@ def test_an_unexpected_gap_is_still_reported_as_a_salvage(tmp_path, caplog):
         executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
 
     assert any(r.levelno == logging.WARNING and "salvaged" in r.getMessage() for r in caplog.records)
+    assert "baseline_accuracy_salvaged_from_sibling_attempt" in result.get("nonfatal_warnings", [])
 
 
 def test_salvage_prefers_a_measured_round_over_a_warmup(tmp_path):
