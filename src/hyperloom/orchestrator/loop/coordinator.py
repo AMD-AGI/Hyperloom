@@ -1398,15 +1398,24 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     # Lifecycle
     async def stop(self) -> None:
-        """Signal shutdown, cancel reactor tasks, finalize, and close the DB.
+        """Signal shutdown, cancel in-flight work, finalize, and close the DB.
 
-        Sets the stop event, cancels and awaits every running reactor task,
-        runs the Recipe KB T4 safety-net finalize hook when CLOSE never reached
-        a terminal publication status or its earlier attempt failed, then closes
-        the SQLite connection. Exceptions raised by reactor tasks during
-        teardown are logged, not propagated.
+        Sets the stop event, cancels and awaits the dispatched actions still
+        running plus every running reactor task, runs the Recipe KB T4
+        safety-net finalize hook when CLOSE never reached a terminal
+        publication status or its earlier attempt failed, then closes the
+        SQLite connection. Exceptions raised by reactor tasks during teardown
+        are logged, not propagated.
+
+        Dispatched actions are cancelled first and awaited: the stop event alone
+        only asks the loop to stop between ticks, so a teardown that skipped
+        them would close the database out from under work still using it.
         """
         self._stop.set()
+        try:
+            await self.dispatcher.cancel_inflight_actions(reason="coordinator_stop")
+        except Exception:  # noqa: BLE001 — teardown proceeds even if cancellation misbehaves
+            log.exception("Coordinator.stop: cancelling in-flight actions raised")
         for t in self._tasks_running:
             if not t.done():
                 t.cancel()

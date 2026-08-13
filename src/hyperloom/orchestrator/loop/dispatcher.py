@@ -53,6 +53,13 @@ class DispatcherCollaborator:
         # Task ids already charged a failure by the dead-holder reclaim path, so
         # a late normal result for the same task cannot double-count it.
         self._dead_holder_accounted: set[str] = set()
+        # Handles on the actions currently running, ``task_id -> (kind, task)``.
+        # Kept on the collaborator and not only in the pump's frame: an action
+        # whose handle lives in a frame can only be stopped by the frame that is
+        # already blocked awaiting it, which is precisely the situation shutdown
+        # and an exhausted wall-clock budget have to break. Entries remove
+        # themselves in :meth:`_run_dispatched_with_gpu_release`.
+        self._inflight_actions: dict[str, tuple[str, asyncio.Task[SubAgentResult]]] = {}
 
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
@@ -120,6 +127,77 @@ class DispatcherCollaborator:
             return False
         return remaining is not None and remaining <= 0.0
 
+    async def cancel_inflight_actions(
+        self,
+        *,
+        reason: str,
+        exempt: frozenset[str] = frozenset(),
+    ) -> list[str]:
+        """Cancel the running dispatched actions and wait for them to unwind.
+
+        The last of the wall-clock defences, and the only one that reaches work
+        already under way: admission refuses what cannot fit, the timeout clamp
+        bounds what does, and the subprocess reaper stops the child trees that
+        were handed a session deadline -- an executor that never takes that
+        argument, or that is not spending its time in a subprocess at all, has
+        nothing stopping it before it finishes.
+
+        Cancellation is cooperative: every cancel is delivered before the first
+        await, so a caller that is itself being cancelled still leaves no action
+        running unattended.
+
+        Args:
+            reason: Short cause, logged and used as evidence.
+            exempt: Action kinds to leave running -- the closing actions, when
+                the trigger is a budget that already reserved time for them.
+
+        Returns:
+            list[str]: Task ids that were cancelled (empty when nothing ran).
+        """
+        victims = [
+            (task_id, kind, atask)
+            for task_id, (kind, atask) in self._inflight_actions.items()
+            if kind not in exempt and not atask.done()
+        ]
+        if not victims:
+            return []
+        log.warning(
+            "dispatcher: cancelling %d in-flight action(s) [%s]: %s",
+            len(victims),
+            reason,
+            ", ".join(f"{kind}/{task_id[:12]}" for task_id, kind, _ in victims),
+        )
+        for _task_id, _kind, atask in victims:
+            atask.cancel()
+        await asyncio.gather(*(atask for _tid, _kind, atask in victims), return_exceptions=True)
+        return [task_id for task_id, _kind, _atask in victims]
+
+    async def _cancel_inflight_that_outlived_the_session(self) -> bool:
+        """Stop in-flight actions the session can no longer wait for.
+
+        Two causes, both of which mean no result is coming: the process was
+        asked to shut down, or the wall-clock budget is spent. The budget case
+        spares :data:`TIME_BUDGET_EXEMPT_ACTIONS` because the closing reserve
+        this gate trips on exists precisely so those actions can run.
+
+        Returns:
+            bool: ``True`` when the pump must not start anything new. Only a
+            shutdown says that; a spent budget does not, because the queue scan
+            is what cancels the rows it can no longer fit, and the closing
+            actions it exempts still have their reserve to run in.
+        """
+        stop_event = getattr(self, "_stop", None)
+        if stop_event is not None and stop_event.is_set():
+            await self.cancel_inflight_actions(reason="shutdown_requested")
+            return True
+        usable_sec = self.shared_state.session_budget_usable_sec()
+        if usable_sec is not None and usable_sec <= 0.0:
+            await self.cancel_inflight_actions(
+                reason="session_time_exhausted",
+                exempt=TIME_BUDGET_EXEMPT_ACTIONS,
+            )
+        return False
+
     async def _pump_dispatcher_once(self) -> None:
         """Dispatch queued tasks respecting per-lane capacity, re-scanning for
         newly-fittable tasks while in-flight tasks run.
@@ -179,38 +257,50 @@ class DispatcherCollaborator:
         # fast task reaped before its queued->running transition is visible is
         # not re-dispatched. A task is dispatched at most once per pump.
         dispatched_ids: set[str] = set()
-        while True:
-            # Budget guard: stop launching NEW phase-scoped variants once the
-            # phase's cyclic budget is spent; drain in-flight then return.
-            if not self._dispatch_paused_for_phase_budget():
-                spawned = await self._spawn_fitting_queued(exclude_ids=dispatched_ids)
-                dispatched_ids.update(t.task_id for t, _, _ in spawned)
-                inflight.extend(spawned)
-            if not inflight:
-                return
-            done, _pending = await asyncio.wait(
-                [atask for _, atask, _ in inflight],
-                timeout=self._dispatcher_poll_sec,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if not done:
-                # Poll elapsed with no completion; re-scan in case a lane freed.
-                continue
-            remaining: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
-            completed: list[tuple[Task, Any, Any]] = []
-            for entry in inflight:
-                task, atask, gpu_lease = entry
-                if atask in done:
-                    try:
-                        maybe_result: Any = atask.result()
-                    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 — mirror gather(return_exceptions=True); capture task error + cancellation, never KeyboardInterrupt/SystemExit
-                        maybe_result = exc
-                    completed.append((task, maybe_result, gpu_lease))
-                else:
-                    remaining.append(entry)
-            inflight = remaining
-            for task, maybe_result, gpu_lease in completed:
-                await self._reap_dispatched_task(task, maybe_result, gpu_lease)
+        try:
+            while True:
+                # Wall-clock guard: a spent session budget (or a shutdown
+                # request) stops the actions already running, because waiting
+                # for them is what the budget no longer allows.
+                shutting_down = await self._cancel_inflight_that_outlived_the_session()
+                # Budget guard: stop launching NEW phase-scoped variants once the
+                # phase's cyclic budget is spent; drain in-flight then return.
+                if not shutting_down and not self._dispatch_paused_for_phase_budget():
+                    spawned = await self._spawn_fitting_queued(exclude_ids=dispatched_ids)
+                    dispatched_ids.update(t.task_id for t, _, _ in spawned)
+                    inflight.extend(spawned)
+                if not inflight:
+                    return
+                done, _pending = await asyncio.wait(
+                    [atask for _, atask, _ in inflight],
+                    timeout=self._dispatcher_poll_sec,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    # Poll elapsed with no completion; re-scan in case a lane freed.
+                    continue
+                remaining: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
+                completed: list[tuple[Task, Any, Any]] = []
+                for entry in inflight:
+                    task, atask, gpu_lease = entry
+                    if atask in done:
+                        try:
+                            maybe_result: Any = atask.result()
+                        except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 — mirror gather(return_exceptions=True); capture task error + cancellation, never KeyboardInterrupt/SystemExit
+                            maybe_result = exc
+                        completed.append((task, maybe_result, gpu_lease))
+                    else:
+                        remaining.append(entry)
+                inflight = remaining
+                for task, maybe_result, gpu_lease in completed:
+                    await self._reap_dispatched_task(task, maybe_result, gpu_lease)
+        finally:
+            # The pump is the only owner of the actions it spawned. Leaving by
+            # any door other than the drained one -- cancelled at shutdown, or a
+            # raise from the bookkeeping -- would otherwise leave them running
+            # with every handle on them gone. A drained pump has nothing left to
+            # cancel, so the normal exit pays nothing for this.
+            await self.cancel_inflight_actions(reason="dispatcher_pump_exit")
 
     async def _reconcile_cancelled_policy_denied_integrate_tasks(self) -> list[str]:
         """Re-queue integrate_patch rows cancelled at dispatch when policy now passes.
@@ -572,21 +662,17 @@ class DispatcherCollaborator:
                     )
             except Exception:  # noqa: BLE001 - audit must never affect dispatch
                 pass
-            spawned.append(
-                (
+            atask = asyncio.create_task(
+                self._run_dispatched_with_gpu_release(
                     task,
-                    asyncio.create_task(
-                        self._run_dispatched_with_gpu_release(
-                            task,
-                            prebound_lease=lease,
-                            extra_context=extra_context,
-                            gpu_lease=gpu_lease,
-                            gpu_specialist_lease=gpu_specialist_lease,
-                        ),
-                    ),
-                    gpu_lease,
-                )
+                    prebound_lease=lease,
+                    extra_context=extra_context,
+                    gpu_lease=gpu_lease,
+                    gpu_specialist_lease=gpu_specialist_lease,
+                ),
             )
+            self._inflight_actions[task.task_id] = (task.kind, atask)
+            spawned.append((task, atask, gpu_lease))
         return spawned
 
     async def _run_dispatched_with_gpu_release(
@@ -606,7 +692,9 @@ class DispatcherCollaborator:
         ``release`` is idempotent, so the release in
         :meth:`_reap_dispatched_task` remains harmless. When a Ray
         ``GpuSpecialistLease`` was acquired it is closed here too so
-        the ``num_gpus`` lease is released on every exit path.
+        the ``num_gpus`` lease is released on every exit path. The same finally
+        retires this task's ``_inflight_actions`` handle, so the set cannot
+        outlive the work it points at.
 
         Args:
             task: The dispatched task.
@@ -628,6 +716,7 @@ class DispatcherCollaborator:
                 extra_context=extra_context,
             )
         finally:
+            self._inflight_actions.pop(task.task_id, None)
             if gpu_lease is not None:
                 try:
                     await self.gpu_specialist_pool.release(gpu_lease)
@@ -864,6 +953,16 @@ class DispatcherCollaborator:
                         "dispatcher: failed to release GPU specialist lease for task=%s",
                         task.task_id,
                     )
+            if isinstance(maybe_result, asyncio.CancelledError):
+                # Asked for, not gone wrong: the wall-clock defences stop
+                # in-flight actions on purpose. Logged as the deliberate act it
+                # is so a shutdown does not read as a crash.
+                log.warning(
+                    "dispatcher: in-flight action task=%s kind=%s was cancelled",
+                    task.task_id,
+                    task.kind,
+                )
+                continue
             if isinstance(maybe_result, BaseException):
                 log.exception(
                     "dispatcher: spawned task %s raised: %r",
