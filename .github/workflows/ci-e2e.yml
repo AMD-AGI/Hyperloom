@@ -31,8 +31,21 @@ on:
 
 # A newer commit / retest on the same PR cancels the in-flight run; the cleanup step
 # below cancels the workload so no GPU is leaked.
+#
+# A comment that is NOT a `/retest` command must stay OUT of that group. GitHub
+# evaluates `concurrency` when the run is created -- before the `resolve` job's `if`
+# below -- so an ordinary review comment on a PR would otherwise cancel that PR's
+# in-flight run and then skip itself, losing a multi-hour GPU run to a comment. Such
+# comments get a group of their own (keyed by comment id) so they cancel nothing. The
+# `/retest` predicate is kept identical to the one in `resolve.if`, so exactly the
+# comments that can start a run are the comments that can cancel one.
 concurrency:
-  group: ci-e2e-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  group: >-
+    ci-e2e-${{
+      (github.event_name == 'issue_comment' && !contains(github.event.comment.body, '/retest'))
+      && format('noop-comment-{0}', github.event.comment.id)
+      || (github.event.pull_request.number || github.event.issue.number || github.ref)
+    }}
   cancel-in-progress: true
 
 # The workflow token writes the live commit status, the sticky PR report comment, and

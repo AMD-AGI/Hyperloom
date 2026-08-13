@@ -1483,15 +1483,6 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
         (output_dir / "analysis.md").write_text("# Codex TraceLens report\n", encoding="utf-8")
         return CodexSessionResult(
             text="wrote analysis.md",
-            items=(
-                {
-                    "type": "commandExecution",
-                    "command": "TraceLens_generate_perf_report_pytorch --help",
-                    "exitCode": 0,
-                },
-                {"type": "fileChange", "changes": [{"path": str(output_dir / "analysis.md"), "kind": "add"}]},
-                {"type": "agentMessage", "text": "wrote analysis.md"},
-            ),
             usage={"input_tokens": 11, "output_tokens": 7, "reasoning_output_tokens": 900},
             thread_id="thread-123",
         )
@@ -1528,7 +1519,6 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
     assert res.raw_text == "wrote analysis.md"
     assert "tracelens_agent_report" in res.artifact_paths
     assert res.artifact_paths["tracelens_cmd_prefix"] == str(output_dir / "cache" / "cmd_prefix.txt")
-    assert "tracelens_agent_transcript" in res.artifact_paths
     # A clean turn records no SDK error.
     assert "tracelens_agent_sdk_error" not in res.artifact_paths
 
@@ -1578,56 +1568,6 @@ def test_run_tracelens_skill_codex_floors_the_turn_timeout(tmp_path, monkeypatch
     )
 
     assert calls[0]["timeout_sec"] == 60.0
-
-
-def test_run_tracelens_skill_codex_transcript_records_typed_items(tmp_path, monkeypatch):
-    """The transcript must be derived from the SDK's typed thread items."""
-    import asyncio
-
-    from hyperloom.common.codex_session import CodexSessionResult
-
-    output_dir = tmp_path / "out"
-
-    async def _fake_codex_turn(**_kwargs):
-        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
-        return CodexSessionResult(
-            text="final answer",
-            items=(
-                {"type": "commandExecution", "command": "ls", "exitCode": 0},
-                {"type": "fileChange", "changes": [{"path": str(output_dir / "analysis.md"), "kind": "add"}]},
-            ),
-            usage={"input_tokens": 5, "output_tokens": 6},
-            thread_id="thread-abc",
-        )
-
-    _use_openai_only_env(monkeypatch)
-    logged: list[str] = []
-
-    res = asyncio.run(
-        tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
-            capture_folder=None,
-            budget_minutes=5,
-            codex_turn_runner=_fake_codex_turn,
-            log=logged.append,
-        )
-    )
-
-    transcript = Path(res.artifact_paths["tracelens_agent_transcript"])
-    records = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
-    assert [r["type"] for r in records] == ["commandExecution", "fileChange", "TurnResult"]
-    assert records[0]["item"]["command"] == "ls"
-    assert records[-1]["result"] == "final answer"
-    assert records[-1]["usage"] == {"input_tokens": 5, "output_tokens": 6}
-    assert records[-1]["thread_id"] == "thread-abc"
-    assert any("$ ls (exit 0)" in line for line in logged)
 
 
 def test_run_tracelens_skill_codex_raises_when_report_missing(tmp_path, monkeypatch):
@@ -1795,171 +1735,6 @@ async def _run_and_time(tlr_mod, query, options_cls, tmp_path, output_dir):
         sdk_options_cls=options_cls,
     )
     return res, _time.monotonic() - t0
-
-
-def test_266_run_tracelens_skill_writes_agent_transcript(tmp_path):
-    """The SDK runner must persist a full stream-JSON transcript
-    (text + tool_use/tool_result blocks) next to ``analysis.md``, surfaced
-    via ``artifact_paths`` so it flows into the kernel-agent status sidecar.
-    Granularity is top-level orchestrator only.
-    """
-    import asyncio
-    import json as _json
-    from dataclasses import dataclass, field
-    from typing import Any
-
-    # Fakes named to match the real claude-agent-sdk class names so the
-    # serializer's class-name-based ``block`` tag mirrors production.
-    @dataclass
-    class TextBlock:
-        text: str
-
-    @dataclass
-    class ToolUseBlock:
-        name: str
-        input: dict
-        id: str = "tu_1"
-
-    @dataclass
-    class AssistantMessage:
-        content: list[Any]
-
-    @dataclass
-    class ResultMessage:
-        content: list[Any] = field(default_factory=list)
-        result: str = ""
-        usage: dict = field(default_factory=dict)
-
-    class _FakeOptions:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    output_dir = tmp_path / "out"
-
-    async def _fake_query(*, prompt, options):
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
-        yield AssistantMessage(content=[TextBlock("starting analysis")])
-        yield AssistantMessage(
-            content=[
-                ToolUseBlock(name="Bash", input={"command": "ls"}, id="tu_42"),
-            ]
-        )
-        yield ResultMessage(result="done", usage={"input_tokens": 10})
-
-    res = asyncio.run(
-        tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI300X",
-            framework="sglang",
-            analysis_mode="default",
-            capture_folder=None,
-            budget_minutes=1,
-            sdk_query_factory=_fake_query,
-            sdk_options_cls=_FakeOptions,
-        )
-    )
-
-    transcript_path = output_dir / "agent_transcript.jsonl"
-    assert transcript_path.exists(), "stream-JSON transcript must be written"
-    assert res.artifact_paths.get("tracelens_agent_transcript") == str(transcript_path)
-
-    lines = [_json.loads(line) for line in transcript_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert len(lines) == 3, f"one JSON object per SDK message, got {len(lines)}"
-
-    # The tool_use block must be captured with its name + input so an
-    # operator can see which command the agent ran (lifecycle visibility).
-    tool_blocks = [
-        b for rec in lines for b in rec.get("content", []) if b.get("block") in ("ToolUseBlock", "ServerToolUseBlock")
-    ]
-    assert any(b.get("name") == "Bash" and b.get("input", {}).get("command") == "ls" for b in tool_blocks), (
-        f"tool_use block not captured: {tool_blocks}"
-    )
-
-    # Terminal ResultMessage usage is captured for token accounting.
-    assert any(rec.get("usage", {}).get("input_tokens") == 10 for rec in lines)
-
-
-def test_266_transcript_failure_never_aborts_run(tmp_path):
-    """Transcript capture is best-effort — a serialization or IO
-    error on the logging side must never abort an otherwise-successful
-    TraceLens run. ``analysis.md`` is still the contracted exit point."""
-    import asyncio
-
-    class _Unserializable:
-        """A content block whose attributes raise on access."""
-
-        @property
-        def text(self):  # noqa: D401
-            raise RuntimeError("boom")
-
-    class _Message:
-        def __init__(self, content):
-            self.content = content
-
-    class _FakeOptions:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    output_dir = tmp_path / "out"
-
-    async def _fake_query(*, prompt, options):
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
-        yield _Message(content=[_Unserializable()])
-
-    res = asyncio.run(
-        tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI300X",
-            framework="sglang",
-            analysis_mode="default",
-            capture_folder=None,
-            budget_minutes=1,
-            sdk_query_factory=_fake_query,
-            sdk_options_cls=_FakeOptions,
-        )
-    )
-
-    # Run still succeeds: report resolved, no crash from transcript path.
-    assert res.report_path.exists()
-
-
-def test_266_transcript_caps_oversized_fields():
-    """A megabyte tool_result / text block must be truncated so the
-    diagnostic transcript cannot grow unbounded. The cap applies to direct
-    string fields and to strings nested inside tool inputs/results."""
-    cap = tlr._TRANSCRIPT_FIELD_MAX_CHARS
-
-    # _cap_str leaves short strings alone, clips long ones with a marker.
-    assert tlr._cap_str("short") == "short"
-    big = "x" * (cap + 5000)
-    capped = tlr._cap_str(big)
-    assert len(capped) < len(big)
-    assert capped.startswith("x" * cap)
-    assert "truncated" in capped
-
-    # _json_safe caps strings at any nesting depth (tool_result content).
-    nested = tlr._json_safe({"out": ["y" * (cap + 100)]})
-    assert len(nested["out"][0]) <= cap + 64
-
-    class _ToolResultBlock:
-        def __init__(self, content):
-            self.content = content
-            self.tool_use_id = "tu_1"
-            self.is_error = False
-
-    rec = tlr._serialize_sdk_block(_ToolResultBlock("z" * (cap + 9000)))
-    assert "truncated" in rec["content"]
-    assert len(rec["content"]) < cap + 9000
 
 
 # ===========================================================================

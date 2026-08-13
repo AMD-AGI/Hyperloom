@@ -7,7 +7,7 @@
 Takes a pre-generated trace (``--trace-path``), picks a hot kernel, launches
 backend optimization attempts in parallel (backend x replicas), and summarizes.
 Does not fabricate patch effectiveness; records absence of patchable source /
-benchmark harness as the outcome.
+benchmark file as the outcome.
 """
 
 from __future__ import annotations
@@ -163,7 +163,7 @@ def run_one_attempt(
     env: dict[str, str],
     kernel_id: str,
     source_file: str,
-    harness_path: str,
+    benchmark_file: str,
     num_gpus: int = 1,
 ) -> dict[str, Any]:
     """Run a single backend/replica kernel-optimization attempt.
@@ -178,7 +178,7 @@ def run_one_attempt(
         env: Base environment to extend for the child process.
         kernel_id: Identifier of the kernel being optimized.
         source_file: Path to the kernel source file.
-        harness_path: Path to the benchmark/validation harness.
+        benchmark_file: Path to the benchmark file used for patch validation.
         num_gpus: Number of GPUs allotted to this attempt.
 
     Returns:
@@ -208,8 +208,8 @@ def run_one_attempt(
     ]
     if source_file:
         cmd.extend(["--source-file", source_file])
-    if harness_path:
-        cmd.extend(["--test-harness-path", harness_path])
+    if benchmark_file:
+        cmd.extend(["--benchmark-file", benchmark_file])
     started = time.time()
     _effective_budget_min = args.backend_budget_min
     try:
@@ -414,16 +414,16 @@ def main() -> int:
             summary["multigpu_inferred_from_name"] = (
                 f"is_multigpu inferred from kernel name {selected_name!r} (TraceLens did not flag is_multigpu=True)"
             )
-        harness_path = ""
+        benchmark_file = ""
         if bench_files:
             preferred = [b for b in bench_files if "bench" in Path(b).name.lower()]
             if not preferred and not is_multigpu:
                 preferred = [b for b in bench_files if Path(b).name.startswith("test_")]
-            harness_path = (preferred or bench_files)[0]
+            benchmark_file = (preferred or bench_files)[0]
         if not source_file:
             summary["source_resolution"] = "no source_file in trace/TraceLens output; optimization will run prompt-only"
-        if not harness_path:
-            summary["benchmark_resolution"] = "no benchmark/test harness resolved; GEAK may be slower or fail"
+        if not benchmark_file:
+            summary["benchmark_resolution"] = "no benchmark resolved; GEAK may be slower or fail"
 
         # GPU budgeting: collectives need >=2 GPUs; compute kernels run on 1.
         if args.num_gpus_override > 0:
@@ -474,7 +474,7 @@ def main() -> int:
                             env=env,
                             kernel_id=selected["kernel_id"],
                             source_file=source_file,
-                            harness_path=harness_path,
+                            benchmark_file=benchmark_file,
                             num_gpus=per_task_gpus,
                         )
                     )
@@ -484,9 +484,9 @@ def main() -> int:
         summary["parallel_results"] = parallel_results
         if not source_file:
             summary["patch_retest_status"] = "not attempted: no patchable source resolved from real trace"
-        elif not harness_path:
+        elif not benchmark_file:
             summary["patch_retest_status"] = (
-                "not attempted: source resolved but no benchmark/test harness was resolved for safe patch validation"
+                "not attempted: source resolved but no benchmark was resolved for safe patch validation"
             )
         else:
             summary["patch_retest_status"] = (
