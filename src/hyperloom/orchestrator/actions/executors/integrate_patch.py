@@ -55,6 +55,7 @@ from ._grid_runner import (
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
+    session_grid_bounds,
 )
 from . import _framework_switch_manifest as _switch_manifest
 from ._grid_server_args import compose_server_args
@@ -2505,6 +2506,13 @@ class IntegratePatchExecutor:
             params = dict(params)
             params["runtime_override"] = provision_result.runtime.to_runtime_override()
 
+        # Bound both bench legs by the session wall-clock, as the sweep and explore
+        # arms already are: the declared cap answers "how long before this counts
+        # as hung", not "how much budget is left", so without this a patch benched
+        # near the end of a run could outlive the run itself. Resolved once here
+        # and reused by the parity leg -- the deadline is an absolute monotonic
+        # timestamp, so it stays correct as the gate progresses.
+        session_deadline_sec, variant_expected_sec = session_grid_bounds(shared_state)
         try:
             bench_result, gate_evidence = await self._bench_patch(
                 params=params,
@@ -2512,6 +2520,8 @@ class IntegratePatchExecutor:
                 extra_server_args_applied=extra_server_args_applied,
                 extra_envs_applied=extra_envs_applied,
                 specialist_task_id=specialist_task_id,
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
             )
         except FrameworkScriptMismatchError as exc:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
@@ -2988,6 +2998,13 @@ class IntegratePatchExecutor:
         # is genuinely unchanged with every switch unset, which is exactly what this
         # leg measures. An unswitched patch has no "off" state to fall back to, so
         # it still reverts without spending the leg.
+        # Both the parity leg and the stack rebench below are additional full
+        # benches, so they need the same session bound the first bench got.
+        # Resolved here rather than threaded from the caller because the deadline
+        # is an absolute monotonic timestamp: the budget the first bench spent is
+        # already reflected in it.
+        session_deadline_sec, variant_expected_sec = session_grid_bounds(shared_state)
+
         parity: dict[str, Any] = {"ran": False, "ok": True, "reason": ""}
         if switch_manifest:
             parity = await self._switch_off_parity(
@@ -2996,6 +3013,8 @@ class IntegratePatchExecutor:
                 specialist_task_id=specialist_task_id,
                 switch_manifest=switch_manifest,
                 base_tput=base_tput,
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
             )
             if not parity.get("ok"):
                 # An unmeasurable parity leg reverts under its own verdict: the patch
@@ -3149,6 +3168,8 @@ class IntegratePatchExecutor:
                 extra_envs_applied=extra_envs_applied,
                 specialist_task_id=specialist_task_id,
                 base_tput=base_tput,
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
             )
             rb_acc_block, rb_acc_reason, _rb_degraded = accuracy_keep_block(
                 confirm["accuracy_pass"],
@@ -3340,6 +3361,8 @@ class IntegratePatchExecutor:
         specialist_task_id: str,
         switch_manifest: list[dict[str, Any]],
         base_tput: float,
+        session_deadline_sec: float | None = None,
+        variant_expected_sec: float | None = None,
     ) -> dict[str, Any]:
         """Verify the patch is genuinely inert with every rewrite switch unset.
 
@@ -3363,6 +3386,10 @@ class IntegratePatchExecutor:
             specialist_task_id: The originating specialist.
             switch_manifest: Parsed switch manifest.
             base_tput: Pre-patch throughput to compare against.
+            session_deadline_sec: Monotonic-clock session budget deadline for the
+                parity bench, or ``None`` when unbounded.
+            variant_expected_sec: Expected bench runtime, used to decide whether
+                the remaining budget can fit the parity leg at all.
 
         Returns:
             ``{"ran", "ok", "tput", "delta_pct", "band_pct", "accuracy_pass",
@@ -3389,6 +3416,8 @@ class IntegratePatchExecutor:
                 specialist_task_id=specialist_task_id,
                 unset_envs=switch_names,
                 variant_suffix="-parity",
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
             )
         except Exception as exc:  # noqa: BLE001 — a failed probe must not read as a pass
             return {
@@ -3865,6 +3894,8 @@ class IntegratePatchExecutor:
         specialist_task_id: str,
         unset_envs: "list[str] | None" = None,
         variant_suffix: str = "",
+        session_deadline_sec: float | None = None,
+        variant_expected_sec: float | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run a 1-variant Magpie bench under the patched server + accuracy gate.
 
@@ -3881,6 +3912,11 @@ class IntegratePatchExecutor:
                 an earlier KEEP put them into the base configuration.
             variant_suffix: Appended to the variant name so a second leg does not
                 collide with the first one's grid slot.
+            session_deadline_sec: Monotonic-clock session budget deadline, or
+                ``None`` when unbounded. Resolved by the caller, which owns the
+                session context.
+            variant_expected_sec: Expected bench runtime used to decide whether
+                the remaining budget can fit this bench at all.
 
         Returns:
             A ``(bench_result_dict, gate_evidence)`` tuple where
@@ -3969,6 +4005,8 @@ class IntegratePatchExecutor:
                 result_dir=override_result_dir,
                 base_args_mode=str(params.get("base_args_mode") or "append"),
                 serving_lease=serving_lease,
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
             )
         finally:
             if serving_lease is not None:
@@ -4141,12 +4179,18 @@ class IntegratePatchExecutor:
         extra_envs_applied: dict[str, str],
         specialist_task_id: str,
         base_tput: float,
+        session_deadline_sec: float | None = None,
+        variant_expected_sec: float | None = None,
     ) -> dict[str, Any]:
         """Re-bench the patched stack once more and re-grade throughput + accuracy.
 
         Mirrors the explore ledger's post-KEEP confirmation: a patch only KEEPs
         if a second full-stack run still clears the stability floor and the
         accuracy gate. Returns ``stable`` / ``tput`` / ``accuracy_pass`` / etc.
+
+        ``session_deadline_sec`` / ``variant_expected_sec`` bound the
+        confirmation round by the session wall-clock, so it cannot outlive the
+        run it is confirming for.
         """
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         resolved_model = str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
@@ -4206,6 +4250,8 @@ class IntegratePatchExecutor:
             result_dir=override_result_dir,
             magpie_python=params.get("magpie_python") or None,
             base_args_mode=str(params.get("base_args_mode") or "append"),
+            session_deadline_sec=session_deadline_sec,
+            variant_expected_sec=variant_expected_sec,
         )
         # See ``_bench_patch``: lm-eval writes to the grid slot (the parent of
         # ``rebench.workspace``), so grade from there, honoring ``result_dir``.

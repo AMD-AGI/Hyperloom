@@ -41,6 +41,7 @@ from ._subprocess_kill import (
     EVAL_PROBE_UNPATCHABLE_RETURNCODE,
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
+    SESSION_TIME_EXHAUSTED_RETURNCODE,
     run_with_session_kill,
     server_log_death_excerpt,
 )
@@ -938,6 +939,7 @@ def _run_magpie(
     server_already_ready: bool = False,
     serving_lease: Any = None,
     on_output: Callable[[], None] | None = None,
+    session_deadline_sec: float | None = None,
 ) -> tuple[int, str, str]:
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr).
 
@@ -971,6 +973,10 @@ def _run_magpie(
             line the benchmark emits, so the caller's heartbeat can keep
             reporting across a run that blocks for hours. Ignored on the
             ``serving_lease`` path — see the note there.
+        session_deadline_sec (float | None): Absolute ``time.monotonic()`` instant
+            at which the session budget expires. Reaps the tree and returns
+            ``SESSION_TIME_EXHAUSTED_RETURNCODE``. Enforced in every phase,
+            including the accuracy eval that retires ``soft_deadline_sec``.
 
     Returns:
         tuple[int, str, str]: ``(returncode, stdout, stderr)``.
@@ -1097,6 +1103,7 @@ def _run_magpie(
         server_log_path=str(output_dir / "server.log"),
         server_already_ready=server_already_ready,
         on_output=on_output,
+        session_deadline_sec=session_deadline_sec,
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
@@ -1224,6 +1231,53 @@ def _variant_progress_note(
     }
 
 
+# Seconds by which a round's hard cap is allowed to sit past the session deadline,
+# so the in-process session watchdog (which attributes the kill correctly) trips
+# before the hard cap (which the ledger reads as a variant timeout). Small enough
+# that it cannot meaningfully eat the close-window reserve.
+_SESSION_KILL_GRACE_SEC: int = 15
+
+# Labels a round that never ran because the session wall-clock budget was spent.
+# Distinct from any measurement failure: a round that was not run is not evidence
+# about the variant, and the ledger must not read it as one.
+SESSION_TIME_EXHAUSTED_CLASS = "session_time_exhausted"
+
+
+def session_grid_bounds(shared_state: Any) -> tuple[float | None, float | None]:
+    """Resolve ``(session_deadline_sec, variant_expected_sec)`` for a :func:`run_grid` call.
+
+    Every arm that benches on the GPU needs the same two numbers, and they have
+    to agree: a deadline derived one way in one executor and another way in the
+    next produces arms that abandon different amounts of the tail budget. Both
+    are read here so there is one definition.
+
+    ``variant_expected_sec`` is the measured baseline runtime -- what a
+    normally-behaving variant needs -- and is deliberately not the declared
+    timeout, which is a catastrophic-hang backstop roughly twice as large.
+    Admitting on the backstop would refuse to start a 20-minute round with 30
+    minutes left.
+
+    Args:
+        shared_state: The session ``SharedState``, or ``None`` when the caller
+            has no session context (direct executor invocation, tests).
+
+    Returns:
+        tuple[float | None, float | None]: The monotonic-clock session deadline
+            and the expected per-variant runtime. Either is ``None`` when
+            unknown, which leaves the corresponding check disabled rather than
+            guessing a bound.
+    """
+    if shared_state is None:
+        return (None, None)
+    deadline_fn = getattr(shared_state, "grid_session_deadline_sec", None)
+    deadline = deadline_fn() if callable(deadline_fn) else None
+    try:
+        baseline_sec = float(getattr(shared_state, "baseline_runtime_sec", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        baseline_sec = 0.0
+    return (deadline, baseline_sec if baseline_sec > 0 else None)
+
+
 async def run_grid(
     *,
     base_yaml_path: Path,
@@ -1245,6 +1299,7 @@ async def run_grid(
     server_already_ready: bool = False,
     serving_lease: Any = None,
     session_deadline_sec: float | None = None,
+    variant_expected_sec: float | None = None,
 ) -> list[VariantResult]:
     """Execute each grid variant and return all per-variant results.
 
@@ -1257,9 +1312,22 @@ async def run_grid(
     decision).
 
     ``session_deadline_sec`` is a ``time.monotonic()`` deadline for the whole
-    session budget; a variant is skipped once the remaining budget cannot fit
-    another ``variant_timeout_sec`` worst-case run, so a wall-clock timeout stops
-    the grid mid-way and the last variant never overruns the close window.
+    session budget, already excluding the close-window reserve. It does two
+    things, deliberately split:
+
+    * **Whether to start.** A variant is skipped, and every variant after it,
+      once the remaining budget cannot fit ``variant_expected_sec`` -- what a
+      normally-behaving variant needs. Judging by ``variant_timeout_sec``
+      instead means judging by the catastrophic backstop (``baseline x 2`` for
+      explore), which abandons the tail of the budget to variants that would
+      have finished comfortably. ``None`` falls back to ``variant_timeout_sec``,
+      preserving the stricter behaviour for callers that cannot estimate.
+    * **How long it may run.** The cap handed to each round is clamped to what
+      the session can still pay for, recomputed per round because a warmup
+      consumes budget too. Without this a variant admitted near the end can
+      outlive the whole session: explore derives caps up to 4h from the measured
+      baseline and never consulted the budget, so a 3h run could grant one
+      variant more time than the run was given.
 
     Every pass runs with ``output_root`` as its working directory, the way the
     baseline arm anchors Magpie to its own output dir. That is what marks the
@@ -1388,19 +1456,96 @@ async def run_grid(
         except Exception as exc:  # noqa: BLE001
             log.debug("robustness pulse swallowed: %r", exc)
 
+    def _round_timeout_sec(idx: int, name: str, *, round_label: str, reserve_sec: float = 0.0) -> int:
+        """``variant_timeout_sec`` capped at what the session can still pay for.
+
+        Recomputed per round rather than once per variant: a warmup round spends
+        budget the measure round would otherwise still count on.
+
+        ``reserve_sec`` holds back what the variant's remaining rounds still
+        need, so a slow warmup cannot consume the budget belonging to the
+        measured round. The measured round is the only one that yields a usable
+        data point, so it is the round the budget is kept for; a discarded
+        warmup that overruns is the cheaper thing to cut short.
+
+        ``session_deadline_sec`` already excludes the close-window reserve, so
+        no further margin is taken for the session itself. Never returns less
+        than 1 -- a non-positive cap would read as "no timeout" to the
+        subprocess layer, which is the opposite of what an exhausted budget
+        means. Deciding whether the round should start at all belongs to the
+        caller's fit check.
+
+        A small grace is added past the session deadline so the in-process
+        session watchdog trips first: both fire at the same instant, and the hard
+        cap raises ``TimeoutExpired``, which the ledger records as a variant
+        timeout -- a claim about the variant. The watchdog's sentinel says the run
+        ran out of time, which is what actually happened.
+
+        Args:
+            idx (int): Zero-based variant index, for the log line.
+            name (str): Variant name, for the log line.
+            round_label (str): Which round is being capped (warmup / measure).
+            reserve_sec (float): Seconds held back for this variant's later
+                rounds. Zero for the last round.
+
+        Returns:
+            int: The hard timeout to grant this round, in seconds.
+        """
+        cap = int(variant_timeout_sec)
+        if session_deadline_sec is None:
+            return cap
+        usable = int(session_deadline_sec - time.monotonic() - max(0.0, reserve_sec)) + _SESSION_KILL_GRACE_SEC
+        if usable >= cap:
+            return cap
+        clamped = max(1, usable)
+        log.info(
+            "grid_runner: variant %d/%d name=%s %s cap clamped %ds -> %ds by the session budget",
+            idx + 1,
+            len(grid),
+            name,
+            round_label,
+            cap,
+            clamped,
+        )
+        return clamped
+
+    # How many full benchmark passes one variant costs. Both warmups run the same
+    # workload as the measured pass -- neither is a reduced one -- so a variant
+    # that warms up costs twice what its measured round does. Admitting on a
+    # single round's estimate would systematically let in variants that then get
+    # their measured round clamped to nothing, turning a budget shortfall into a
+    # ledger full of spurious timeouts. Both flags are run-level, so this is known
+    # before the loop; the per-variant ``auto_warmup`` is only ever narrower.
+    _mn_warmup_rounds = 0
+    if variant_expected_sec is not None:
+        from ._multi_node_env import (
+            is_multi_node as _mn_is_multi_node,
+            mn_bench_warmup_enabled as _mn_bench_warmup_enabled,
+        )
+
+        _mn_warmup_rounds = 1 if (_mn_is_multi_node() and _mn_bench_warmup_enabled()) else 0
+    variant_rounds = 1 + (1 if auto_warmup_requested else 0) + _mn_warmup_rounds
+
     for i, variant in enumerate(grid):
         # Session-budget stop: skip the remaining variants once the wall-clock
-        # deadline is reached or the remaining budget cannot fit another
-        # variant's worst-case runtime, so a timeout halts the grid instead of
-        # draining it (and the last variant cannot overrun the close window).
+        # deadline is reached or the remaining budget cannot fit another variant,
+        # so a timeout halts the grid instead of draining it (and the last variant
+        # cannot overrun the close window).
         if session_deadline_sec is not None:
             remaining_sec = session_deadline_sec - time.monotonic()
-            if remaining_sec < float(variant_timeout_sec):
+            # Falls back to a single ``variant_timeout_sec`` when no estimate was
+            # given, which is what callers that cannot estimate already got.
+            required_sec = (
+                float(variant_expected_sec) * variant_rounds
+                if variant_expected_sec is not None
+                else float(variant_timeout_sec)
+            )
+            if remaining_sec < required_sec:
                 log.warning(
-                    "grid_runner: session budget exhausted (%.0fs left < variant cap %ds); "
+                    "grid_runner: session budget exhausted (%.0fs left < %.0fs needed); "
                     "skipping %d remaining variant(s)",
                     max(0.0, remaining_sec),
-                    variant_timeout_sec,
+                    required_sec,
                     len(grid) - i,
                 )
                 for skipped_variant in grid[i:]:
@@ -1591,12 +1736,18 @@ async def run_grid(
                     magpie_python=magpie_python,
                     config_path=warmup_cfg_path,
                     output_dir=warmup_slot,
-                    timeout_sec=variant_timeout_sec,
+                    timeout_sec=_round_timeout_sec(
+                        i,
+                        variant.name,
+                        round_label="warmup",
+                        reserve_sec=float(variant_expected_sec or 0.0) * (1 + _mn_warmup_rounds),
+                    ),
                     cwd=cwd,
                     result_dir=result_dir,
                     soft_deadline_sec=None,
                     preclean=True,
                     serving_lease=serving_lease,
+                    session_deadline_sec=session_deadline_sec,
                 )
             except subprocess.TimeoutExpired as exc:
                 from ._server_lifecycle import teardown_lifecycle_server
@@ -1812,12 +1963,18 @@ async def run_grid(
                     magpie_python=magpie_python,
                     config_path=cfg_path,
                     output_dir=_mn_warm_slot,
-                    timeout_sec=variant_timeout_sec,
+                    timeout_sec=_round_timeout_sec(
+                        i,
+                        variant.name,
+                        round_label="mn_warmup",
+                        reserve_sec=float(variant_expected_sec or 0.0),
+                    ),
                     cwd=cwd,
                     result_dir=None,
                     soft_deadline_sec=None,
                     preclean=False,
                     serving_lease=serving_lease,
+                    session_deadline_sec=session_deadline_sec,
                 )
                 log.info(
                     "grid_runner: MN warmup pass done (discarded) %d/%d name=%s",
@@ -1843,13 +2000,14 @@ async def run_grid(
                 magpie_python=magpie_python,
                 config_path=cfg_path,
                 output_dir=slot,
-                timeout_sec=variant_timeout_sec,
+                timeout_sec=_round_timeout_sec(i, variant.name, round_label="measure"),
                 cwd=cwd,
                 result_dir=result_dir,
                 soft_deadline_sec=soft_deadline_sec,
                 preclean=(False if auto_warmup else preclean_before_run),
                 server_already_ready=(server_already_ready or auto_warmup),
                 serving_lease=serving_lease,
+                session_deadline_sec=session_deadline_sec,
             )
         except subprocess.TimeoutExpired as exc:
             # Harvest pre-timeout leaks.
@@ -2041,6 +2199,52 @@ async def run_grid(
                     server_log_path=_existing_log_path(server_log),
                     note=variant.note,
                     nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in ds_harvested],
+                )
+            )
+            await _pulse_after_variant(i)
+            if not keep_going_on_failure:
+                break
+            continue
+
+        # Session budget ran out mid-round and the tree was reaped. Recorded as
+        # ``skipped``, exactly like a variant the budget refused to start: in both
+        # cases nothing was measured, so there is no verdict to record about the
+        # variant. Grading it as a failure -- or worse as ``killed_overtime``,
+        # which asserts the variant is abnormally slow -- would put a conclusion
+        # the run never reached into the ledger and the KB.
+        #
+        # The remaining variants are left to the fit check at the top of the loop,
+        # which now sees a deadline in the past and skips them all under the same
+        # label rather than duplicating that decision here.
+        if rc == SESSION_TIME_EXHAUSTED_RETURNCODE:
+            variant_runtime_sec = round(max(0.0, time.time() - variant_started_unix), 2)
+            log.warning(
+                "grid_runner: variant %d/%d name=%s reaped after %.1fs: the session "
+                "wall-clock budget ran out mid-round; recorded as skipped, not failed",
+                i + 1,
+                len(grid),
+                variant.name,
+                variant_runtime_sec,
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class=SESSION_TIME_EXHAUSTED_CLASS,
+                error_summary="session wall-clock budget exhausted mid-round; tree reaped",
+                extra_args=variant.extra_server_args,
+            )
+            results.append(
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="skipped",
+                    returncode=rc,
+                    runtime_sec=variant_runtime_sec,
+                    error="session wall-clock budget exhausted while this variant was running",
+                    error_class=SESSION_TIME_EXHAUSTED_CLASS,
+                    server_log_path=_existing_log_path(server_log),
+                    note=variant.note,
                 )
             )
             await _pulse_after_variant(i)
@@ -2275,7 +2479,7 @@ def _session_deadline_skip_result(variant: GridVariant) -> VariantResult:
         extra_envs=dict(variant.extra_envs),
         status="skipped",
         error="session wall-clock budget exhausted before this variant ran",
-        error_class="session_time_exhausted",
+        error_class=SESSION_TIME_EXHAUSTED_CLASS,
         note=variant.note,
     )
 
@@ -2412,6 +2616,7 @@ __all__ = [
     "DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC",
     "GridVariant",
     "MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
+    "SESSION_TIME_EXHAUSTED_CLASS",
     "SGLANG_WATCHDOG_TIMEOUT_ENV",
     "SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
     "VariantResult",
@@ -2429,6 +2634,7 @@ __all__ = [
     "sanitize_result_dir",
     "sanitize_script_name",
     "server_args_env_name",
+    "session_grid_bounds",
     # Re-exported from the sibling modules to keep the namespace intact.
     "coerce_extra_envs",
     "compact_json_server_args",

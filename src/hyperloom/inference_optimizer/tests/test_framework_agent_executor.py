@@ -76,7 +76,7 @@ def _make_candidate(
     }
 
 
-def _make_ctx(task_id: str, params: dict[str, Any]) -> RunnerContext:
+def _make_ctx(task_id: str, params: dict[str, Any], extra: dict[str, Any] | None = None) -> RunnerContext:
     task = Task(
         task_id=task_id,
         kind="framework_agent",
@@ -85,7 +85,7 @@ def _make_ctx(task_id: str, params: dict[str, Any]) -> RunnerContext:
         idempotency_key=task_id,
         requires_lanes=tuple(),
     )
-    return RunnerContext(task=task, lease=None, extra={})
+    return RunnerContext(task=task, lease=None, extra=extra if extra is not None else {})
 
 
 def test_candidate_slug_prefers_repo_and_pr_number():
@@ -333,7 +333,7 @@ async def test_executor_keep_when_delta_above_threshold(tmp_path: Path):
     executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
 
-    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+    async def fake_bench(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
         return (
             {"status": "succeeded", "output_throughput": 1100.0},
             {"accuracy_pass": None},
@@ -361,6 +361,128 @@ async def test_executor_keep_when_delta_above_threshold(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_bench_is_bounded_by_the_session_budget(tmp_path: Path):
+    """The candidate bench is handed the session budget, as the other arms are.
+
+    Its declared cap answers "how long before this counts as hung", not "how much
+    budget is left", so without the session deadline a candidate benched near the
+    end of a run outlives the run itself.
+    """
+    from unittest.mock import MagicMock
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    patch_path = tmp_path / "p.patch"
+    patch_path.write_text(_VALID_PATCH, encoding="utf-8")
+
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
+    captured: dict[str, Any] = {}
+
+    async def fake_bench(self, *, params, output_root, slug, **kwargs):  # noqa: ARG001
+        captured.update(kwargs)
+        return (
+            {"status": "succeeded", "output_throughput": 1100.0},
+            {"accuracy_pass": None},
+        )
+
+    shared_state = MagicMock()
+    shared_state.grid_session_deadline_sec.return_value = 4242.0
+    shared_state.baseline_runtime_sec = 600.0
+
+    ctx = _make_ctx(
+        "t-fp-budget",
+        {
+            "candidate": _make_candidate(),
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+        },
+        extra={"shared_state": shared_state},
+    )
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=fake_bench):
+        result = await executor(ctx)
+
+    assert result["status"] == "kept"
+    assert captured["session_deadline_sec"] == 4242.0
+    # The expected runtime, not the backstop cap: admitting on the backstop
+    # abandons the tail of the budget.
+    assert captured["variant_expected_sec"] == 600.0
+
+
+@pytest.mark.asyncio
+async def test_bench_budget_is_unbounded_without_a_session(tmp_path: Path):
+    """No session context means no deadline, not a deadline of zero."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    patch_path = tmp_path / "p.patch"
+    patch_path.write_text(_VALID_PATCH, encoding="utf-8")
+
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
+    captured: dict[str, Any] = {}
+
+    async def fake_bench(self, *, params, output_root, slug, **kwargs):  # noqa: ARG001
+        captured.update(kwargs)
+        return (
+            {"status": "succeeded", "output_throughput": 1100.0},
+            {"accuracy_pass": None},
+        )
+
+    ctx = _make_ctx(
+        "t-fp-nobudget",
+        {
+            "candidate": _make_candidate(),
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+        },
+    )
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=fake_bench):
+        result = await executor(ctx)
+
+    assert result["status"] == "kept"
+    assert captured["session_deadline_sec"] is None
+    assert captured["variant_expected_sec"] is None
+
+
+@pytest.mark.asyncio
+async def test_bench_candidate_forwards_the_session_budget_to_the_grid(tmp_path: Path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
+    captured: dict[str, Any] = {}
+
+    async def fake_run_grid(*args, **kwargs):  # noqa: ARG001
+        captured.update(kwargs)
+        return [_mk_variant_result(tput=1100.0, status="succeeded")]
+
+    from hyperloom.orchestrator.actions.executors import framework_agent as fp_mod
+
+    with (
+        patch.object(fp_mod, "run_grid", new=fake_run_grid),
+        patch.object(fp_mod, "materialize_config_with_envs", return_value=config_path),
+    ):
+        await executor._bench_candidate(
+            params={"config_path": str(config_path)},
+            output_root=tmp_path / "out",
+            slug="budget",
+            session_deadline_sec=4242.0,
+            variant_expected_sec=600.0,
+        )
+
+    assert captured["session_deadline_sec"] == 4242.0
+    assert captured["variant_expected_sec"] == 600.0
+
+
+@pytest.mark.asyncio
 async def test_executor_reverts_when_live_anchor_exceeds_queued_baseline(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -372,7 +494,7 @@ async def test_executor_reverts_when_live_anchor_exceeds_queued_baseline(tmp_pat
     state.baseline_tput = 1000.0
     state.current_best = {"tput": 1150.0}
 
-    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+    async def fake_bench(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
         return {"status": "succeeded", "output_throughput": 1100.0}, {"accuracy_pass": None}
 
     ctx = _make_ctx(
@@ -412,7 +534,7 @@ async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
     cand = _make_candidate()
     cand["pr_url"] = "https://github.com/sgl-project/sglang/pull/1234"
 
-    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+    async def fake_bench(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
         return (
             {"status": "succeeded", "output_throughput": 1100.0},
             {"accuracy_pass": None},
@@ -458,7 +580,7 @@ async def test_executor_revert_writes_kb_lessons(tmp_path: Path, monkeypatch):
     cand = _make_candidate()
     cand["pr_url"] = "https://github.com/sgl-project/sglang/pull/1234"
 
-    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+    async def fake_bench(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
         return (
             {"status": "succeeded", "output_throughput": 980.0},
             {"accuracy_pass": None},
@@ -500,7 +622,7 @@ async def test_executor_revert_when_delta_below_threshold(tmp_path: Path):
     executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
 
-    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+    async def fake_bench(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
         return (
             {"status": "succeeded", "output_throughput": 980.0},
             {"accuracy_pass": None},
@@ -539,7 +661,7 @@ async def test_executor_revert_on_accuracy_regression(tmp_path: Path):
     executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
 
-    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+    async def fake_bench(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
         return (
             {"status": "succeeded", "output_throughput": 1100.0},
             {"accuracy_pass": False},
@@ -576,7 +698,7 @@ async def test_executor_bench_exception_triggers_revert(tmp_path: Path):
     executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
 
-    async def boom(self, *, params, output_root, slug):  # noqa: ARG001
+    async def boom(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
         raise RuntimeError("simulated bench crash")
 
     ctx = _make_ctx(
@@ -623,13 +745,13 @@ async def test_reject_after_keep_preserves_kept_changes(tmp_path: Path):
 
     executor = FrameworkAgentExecutor(session_dir=session_dir)
 
-    async def keep_bench(self, *, params, output_root, slug):  # noqa: ARG001
+    async def keep_bench(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
         return (
             {"status": "succeeded", "output_throughput": 1100.0},
             {"accuracy_pass": None},
         )
 
-    async def reject_bench(self, *, params, output_root, slug):  # noqa: ARG001
+    async def reject_bench(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
         return (
             {"status": "succeeded", "output_throughput": 980.0},
             {"accuracy_pass": None},
@@ -684,7 +806,7 @@ async def test_apply_failure_after_keep_preserves_kept_changes(tmp_path: Path):
 
     executor = FrameworkAgentExecutor(session_dir=session_dir)
 
-    async def keep_bench(self, *, params, output_root, slug):  # noqa: ARG001
+    async def keep_bench(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
         return (
             {"status": "succeeded", "output_throughput": 1100.0},
             {"accuracy_pass": None},
@@ -810,7 +932,7 @@ async def test_executor_checkout_head_mode_applies_and_keeps(tmp_path: Path, mon
         "apply_mode": "checkout_head",
     }
 
-    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+    async def fake_bench(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
         return (
             {"status": "succeeded", "output_throughput": 1100.0},
             {"accuracy_pass": None},
@@ -877,7 +999,7 @@ async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
     executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
 
-    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+    async def fake_bench(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
         return (
             {"status": "succeeded", "output_throughput": 1100.0},
             {"accuracy_pass": None},
@@ -1078,7 +1200,7 @@ async def test_executor_require_accuracy_blocks_keep_when_unevaluated(tmp_path: 
     executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
 
-    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+    async def fake_bench(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
         return (
             {"status": "succeeded", "output_throughput": 1100.0},
             {"accuracy_pass": None},
@@ -1117,7 +1239,7 @@ async def test_executor_require_accuracy_degrades_without_baseline(tmp_path: Pat
     executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
 
-    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+    async def fake_bench(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
         return (
             {"status": "succeeded", "output_throughput": 1100.0},
             {"accuracy_pass": None},

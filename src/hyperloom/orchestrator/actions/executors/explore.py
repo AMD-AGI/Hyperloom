@@ -63,9 +63,11 @@ from ._grid_runner import (
     apply_aiter_moe_pin_filter,
     apply_multi_node_invalid_variants,
     reorder_grid_for_multi_node,
+    SESSION_TIME_EXHAUSTED_CLASS,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
+    session_grid_bounds,
 )
 from ._grid_server_args import compose_server_args, server_args_env_name
 from ._ray_serving import maybe_serving_lease
@@ -1112,13 +1114,47 @@ class ExploreExecutor:
         round_serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path)) if runnable else None
         # Stop testing further variants once the session wall-clock budget runs
         # out; untested variants stay out of the ledger so a resume can retry them.
-        _ss = extra.get("shared_state") or extra.get("state")
-        session_deadline_sec = _ss.grid_session_deadline_sec() if _ss is not None else None
+        #
+        # What a normally-behaving round needs, as opposed to ``timeout_sec``,
+        # which is the catastrophic backstop (``baseline x (kill_ratio + margin)``
+        # ~= baseline x 2). Gating on the backstop abandons the tail of the budget
+        # to variants that would have finished comfortably: with a 20-min baseline
+        # it refuses to start with 30 min left, for a round that needs ~20. The
+        # params values win over the session's because an operator may override
+        # them per task; ``None`` when neither is known, which leaves the stricter
+        # backstop check in place rather than guessing.
+        #
+        # The two rounds are estimated separately because they cost different
+        # amounts: the warmup pass pays a cold server boot and is discarded, while
+        # the decision round is client-only against the hot server -- which is
+        # exactly the split ``decision_anchor_sec`` already draws for the overtime
+        # kill.
+        session_deadline_sec, session_expected_sec = session_grid_bounds(
+            extra.get("shared_state") or extra.get("state")
+        )
+        warmup_expected_sec = (baseline_runtime_sec if baseline_runtime_sec > 0 else None) or session_expected_sec
+        decision_expected_sec = (decision_anchor_sec if decision_anchor_sec > 0 else None) or session_expected_sec
+        # Set when the loop stops early for lack of budget, so the round can say
+        # so instead of reporting a bare, unattributed failure: a variant that
+        # never ran is not a variant that failed.
+        session_budget_untested = 0
         try:
             for idx, gv in enumerate(runnable):
-                if session_deadline_sec is not None and (session_deadline_sec - time.monotonic()) < float(timeout_sec):
+                # A warm-decision variant pays for both rounds, so admitting it on
+                # the decision round alone would let it in and then strand it
+                # mid-variant with a discarded warmup and no measurement.
+                if decision_expected_sec is not None:
+                    fit_required_sec = float(decision_expected_sec) + (
+                        float(warmup_expected_sec or 0.0) if use_warm_decision else 0.0
+                    )
+                else:
+                    fit_required_sec = float(timeout_sec)
+                if session_deadline_sec is not None and (session_deadline_sec - time.monotonic()) < fit_required_sec:
+                    session_budget_untested = len(runnable) - idx
                     log.warning(
-                        "explore: session budget cannot fit another variant; stopping after %d/%d variant(s)",
+                        "explore: session budget cannot fit another variant "
+                        "(needs %.0fs); stopping after %d/%d variant(s)",
+                        fit_required_sec,
                         idx,
                         len(runnable),
                     )
@@ -1205,6 +1241,8 @@ class ExploreExecutor:
                             server_lifecycle=round1_lifecycle,
                             base_args_mode=stack_base_args_mode,
                             serving_lease=variant_lease,
+                            session_deadline_sec=session_deadline_sec,
+                            variant_expected_sec=warmup_expected_sec,
                         )
                         w = warmup_results[0] if warmup_results else None
                         if w is None or getattr(w, "status", "") != "succeeded":
@@ -1296,6 +1334,8 @@ class ExploreExecutor:
                         preclean_before_run=not use_warm_decision,
                         server_already_ready=use_warm_decision,
                         serving_lease=variant_lease,
+                        session_deadline_sec=session_deadline_sec,
+                        variant_expected_sec=decision_expected_sec,
                     )
                     if not results:
                         # run_grid returns one result per grid entry.
@@ -1606,6 +1646,8 @@ class ExploreExecutor:
                                 soft_deadline_sec=decision_deadline_sec,
                                 server_already_ready=lifecycle_eligible,
                                 serving_lease=variant_lease,
+                                session_deadline_sec=session_deadline_sec,
+                                variant_expected_sec=decision_expected_sec,
                             )
                             stack_rebench_tput = rebench.tput
                             stack_rebench_workspace = rebench.workspace
@@ -1914,9 +1956,24 @@ class ExploreExecutor:
             if t.get("round_id") == round_id
         )
         status = "succeeded" if produced_measurement or winners else "failed"
+        # A round that measured nothing because the budget ran out is not the same
+        # as one whose variants failed, and it used to be reported as a bare
+        # ``failed`` with no error_class at all -- nothing downstream could tell
+        # the two apart, so the KB could learn that these variants are bad.
+        budget_error: dict[str, Any] = {}
+        if status == "failed" and session_budget_untested > 0:
+            budget_error = {
+                "error_class": SESSION_TIME_EXHAUSTED_CLASS,
+                "error": (
+                    f"session wall-clock budget exhausted; {session_budget_untested} variant(s) never ran "
+                    "and stay out of the ledger so a resume can retry them"
+                ),
+            }
 
         return {
             "status": status,
+            **budget_error,
+            "session_budget_untested": session_budget_untested,
             "base_tput": base_tput,
             "running_base_tput": running_base_tput,
             "output_throughput": output_throughput,
