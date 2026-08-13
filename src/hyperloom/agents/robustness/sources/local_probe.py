@@ -57,8 +57,10 @@ _OTHER_PROCESS_PATTERNS: tuple[str, ...] = (
     # Magpie / InferenceX benchmark harness
     "Magpie",
     "inferencex",
-    # Ray + per-task workers
+    # Ray + per-task workers. ``ray::IDLE`` is the parked worker name only;
+    # a worker running a serving actor renames itself after the actor class.
     "ray::IDLE",
+    "ray::ServingActor",
     "raylet",
     # hipcc stuck mid-build holds GPU locks.
     "hipcc",

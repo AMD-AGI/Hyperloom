@@ -1450,6 +1450,23 @@ def test_task_progress_is_empty_when_nothing_is_running(tmp_path):
     assert local_probe._read_task_progress(db) == {}
 
 
+def test_a_ray_serving_actor_is_a_process_the_probe_can_see(monkeypatch):
+    """``ray::IDLE`` only names a parked worker; a busy one is renamed."""
+    ps_out = (
+        "  1 1048576 ray::ServingActor.__call__\n"
+        "  2 2097152 python -m sglang.launch_server --model x\n"
+    )
+    monkeypatch.setattr(
+        local_probe.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, ps_out, ""),
+    )
+
+    found = local_probe._sample_processes(local_probe._DEFAULT_PROCESS_PATTERNS)
+
+    assert [(p["pid"], p["is_server"]) for p in found] == [(1, False), (2, True)]
+
+
 def test_task_progress_survives_a_db_without_the_expected_columns(tmp_path):
     """An older or foreign schema degrades to "no evidence", never to an exception."""
     conn = sqlite3.connect(str(tmp_path / "coordinator.db"))
