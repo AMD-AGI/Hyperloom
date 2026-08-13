@@ -643,7 +643,7 @@ async def test_prose_that_cites_no_rule_leaves_the_reject_alone(coord):
 
 @pytest.mark.asyncio
 async def test_a_declared_reject_code_outranks_an_advisory_one_in_prose(coord):
-    """The field is the Critic's explicit citation; prose cannot soften a rule it declared ``reject``."""
+    """The field is the Critic's explicit citation; a citation in prose cannot soften a rule it declared ``reject``."""
     pending = PendingProposal(
         proposal_msg_id="msg-both",
         from_agent="orchestration",
@@ -658,7 +658,7 @@ async def test_a_declared_reject_code_outranks_an_advisory_one_in_prose(coord):
             "target_proposal_msg_id": "msg-both",
             "verdict": "reject",
             "failure_reason_code": "specialist_patch_not_grounded",
-            "reasoning": f"unrelated aside about {QUANTITATIVE_CLAIM_REASON_CODE}",
+            "reasoning": f"{QUANTITATIVE_CLAIM_REASON_CODE}: the payload carries predicted_gain_pct.",
         },
     )
     await coord._handle_review_verdict("critic", intent)
