@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.framework import paths as fp
-from hyperloom.orchestrator.actions.registry import ActionRegistry
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.framework.paths import (
     probe_framework_source_roots_for_env,
     resolve_source_file_allowlist,
@@ -610,7 +610,7 @@ def test_resolve_source_file_allowlist_unions_env_override(monkeypatch):
 
 
 def test_prompt_renders_framework_source_roots(registry=None):
-    registry = registry or ActionRegistry().load()
+    registry = registry or ACTION_CATALOGUE
     custom = ("/custom/sglang/", "/opt/venv/lib/python3.12/site-packages/vllm/")
     text = build_orchestration_prompt(
         action_registry=registry,

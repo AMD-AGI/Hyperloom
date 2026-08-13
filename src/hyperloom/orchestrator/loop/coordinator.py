@@ -55,7 +55,7 @@ from ..phases import machine_state as _phase_state
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.optimization_journal import Journal
 from hyperloom.inference_optimizer.session.paths import db_path_for
-from ..actions.registry import ActionRegistry
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from ..roles.agent_role import AgentRole, default_role_registry
 from ..roles.base import Backend, BackendError, BackendTurnResult, LLMCallFailed
 from ..bus.cursor_store import CursorStore
@@ -845,12 +845,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         _CANONICAL_ORDER = ("orchestration", "critic", "robustness")
         self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
-        # Action registry — yaml catalogue mapping action_name -> metadata.
-        try:
-            self.action_registry: ActionRegistry | None = ActionRegistry().load()
-        except Exception:  # noqa: BLE001 — defensive; missing yaml shouldn't kill the run.
-            log.exception("Coordinator: failed to load ActionRegistry.")
-            self.action_registry = None
+        # Action catalogue mapping action_name -> metadata.
+        self.action_registry: dict[str, ActionMetadata] = ACTION_CATALOGUE
         # Inline fast-action execution: run cheap lane-light action in-turn. Default ON.
         _inline_raw = (
             os.environ.get(

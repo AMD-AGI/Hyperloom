@@ -54,7 +54,7 @@ class DispatcherCollaborator:
         return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
-        """Resolve ``(requires_lanes, lease_ttl_sec)`` from the ActionRegistry; lanes filtered to KNOWN_LANES, returns ([], 0) for unknown actions.
+        """Resolve ``(requires_lanes, lease_ttl_sec)`` from the action catalogue; lanes filtered to KNOWN_LANES, returns ([], 0) for unknown actions.
 
         Args:
             kind: The action name to resolve.

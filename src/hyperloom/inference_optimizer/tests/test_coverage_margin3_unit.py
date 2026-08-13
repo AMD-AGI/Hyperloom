@@ -172,39 +172,6 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch) -> None:
     assert gpu_types._autodetect_gpu_type() is None
 
 
-def test_action_registry_names_all_and_lazy_load(tmp_path) -> None:
-    from hyperloom.orchestrator.actions.registry import ActionRegistry
-
-    meta_dir = tmp_path / "_meta"
-    meta_dir.mkdir()
-    (meta_dir / "_ignored.yaml").write_text("name: ignored\n", encoding="utf-8")
-    (meta_dir / "target_analysis.yaml").write_text(
-        "\n".join(
-            [
-                "name: target_analysis",
-                "family: prep",
-                "cost_minutes_p50: 0.1",
-                "cost_minutes_p75: 0.2",
-                "expected_gain_pct: [0, 0]",
-                "accuracy_risk: 0",
-                "crash_risk: 0",
-                "requires_lanes: []",
-                "allowed_tools: [Read]",
-                "side_effects: [writes_state]",
-                "pipeline_phase: prep",
-                "verdict_class: archival",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    reg = ActionRegistry(tmp_path)
-    assert reg.names() == ["target_analysis"]
-    assert [meta.name for meta in reg.all()] == ["target_analysis"]
-    meta = reg.get("target_analysis")
-    assert meta is not None
-    assert meta.description == "target_analysis"
-    assert reg.get("missing") is None
 
 
 def test_kernel_decision_retry_budget_env(monkeypatch) -> None:

@@ -1,16 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Optimization action catalogue.
+"""Optimization action playbooks.
 
-Layout:
+``<name>.md`` holds the human/agent-facing playbook for a subset of actions
+(4 of the current set); shipped as package data and read ad hoc by agents,
+but never loaded by Python runtime code.
 
-* ``_meta/<name>.yaml`` — machine-readable action metadata loaded by
-  :class:`hyperloom.orchestrator.actions.registry.ActionRegistry`
-* ``<name>.md`` — human/agent-facing playbook for a subset of actions (4 of
-  the current set); shipped as package data and read ad hoc by agents, but
-  never loaded by Python runtime code — PolicyGate and ActionRegistry read
-  only ``_meta/*.yaml``
+Action metadata lives in
+:data:`hyperloom.inference_optimizer.protocol.action_surfaces.ACTION_CATALOGUE`.
 
 The 3 "kernel_agent-owned" actions (kernel_opt / integrate / gemm_tuning)
 are reachable only via REQUEST(target_agent="kernel_agent") — PolicyGate

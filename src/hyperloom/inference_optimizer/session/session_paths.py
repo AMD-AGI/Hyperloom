@@ -10,8 +10,9 @@ module; no ad-hoc string concatenation elsewhere.
 
 from __future__ import annotations
 
-from functools import lru_cache
 from pathlib import Path
+
+from ..protocol.action_surfaces import ACTION_CATALOGUE
 
 
 # Top-level files
@@ -56,7 +57,7 @@ def optimizer_lock_path(session_dir: Path) -> Path:
     return Path(session_dir) / "runtime" / "optimizer.lock"
 
 
-# Phases (from the ActionRegistry ``pipeline_phase`` field) whose executors own
+# Phases (from the catalogue ``pipeline_phase`` field) whose executors own
 # a per-task ``runs/<action>/<task_id>/`` workspace.
 _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset(
     {
@@ -69,45 +70,14 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset(
     }
 )
 
-# Fallback used only when ActionRegistry can't load. Must be kept in sync BY HAND
-# with the registry actions whose _meta pipeline_phase is in
-# _RUNS_WORKSPACE_PHASES (see _runs_actions below) — no test enforces this.
-_RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset(
-    {
-        "baseline",
-        "replay_warm_recipe",
-        "roofline",
-        "profile",
-        "sweep",
-        "conc_sweep",
-        "explore",
-        "specialist",
-        "integrate_patch",
-        "framework_agent",
-        "integrate",
-        "kernel_opt",
-        "gemm_tuning",
-        "recover",
-    }
-)
 
-
-@lru_cache(maxsize=1)
 def _runs_actions() -> frozenset[str]:
-    """Action names that own a ``runs/<kind>/<task_id>/`` workspace, from
-    action metadata. Lazy + cached; falls back to ``_RUNS_ACTIONS_FALLBACK``
-    when the registry can't load.
+    """Action names that own a ``runs/<kind>/<task_id>/`` workspace.
 
     Returns:
         The set of action names that own a runs-workspace.
     """
-    try:
-        from hyperloom.orchestrator.actions.registry import ActionRegistry  # local: avoid import cycle
-
-        registry = ActionRegistry().load()
-    except Exception:
-        return _RUNS_ACTIONS_FALLBACK
-    return frozenset(a.name for a in registry.all() if a.pipeline_phase in _RUNS_WORKSPACE_PHASES)
+    return frozenset(a.name for a in ACTION_CATALOGUE.values() if a.pipeline_phase in _RUNS_WORKSPACE_PHASES)
 
 
 def _validate_action(action: str) -> str:

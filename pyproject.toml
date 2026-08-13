@@ -144,7 +144,6 @@ hyperloom = [
     "SKILL.md",
     "README.md",
     "actions/*.md",
-    "actions/_meta/*.yaml",
     # Release-contract shell installers + configs.
     "assets/*.sh",
     "assets/*.example",

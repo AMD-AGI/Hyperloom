@@ -85,7 +85,7 @@ from .recover import (
 __all__ = ["main"]
 from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
-from hyperloom.orchestrator.actions.registry import ActionRegistry
+from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
 from hyperloom.orchestrator.state.objective import Objective, build_objective
@@ -263,7 +263,7 @@ def _build_orchestration_prompt(
     cycle_directive: str = "",
     phase: str = "",
     transport: str = TRANSPORT_TOOLS,
-    action_registry: ActionRegistry | None = None,
+    action_registry: dict[str, ActionMetadata] | None = None,
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides).
 
@@ -280,13 +280,13 @@ def _build_orchestration_prompt(
             behaviour that phase cannot reach. Empty renders every module.
         transport (str): How the orchestration backend carries an intent; omits
             the prompt modules describing a tool surface it does not mount.
-        action_registry (ActionRegistry | None): The action registry to use;
-            a fresh loaded registry is built when ``None``.
+        action_registry (dict[str, ActionMetadata] | None): The action
+            catalogue to use; defaults to :data:`ACTION_CATALOGUE`.
 
     Returns:
         str: The composed Orchestration system prompt.
     """
-    registry = action_registry or ActionRegistry().load()
+    registry = action_registry or ACTION_CATALOGUE
     enabled = default_enabled_actions(no_kernel=no_kernel, no_explore=no_explore)
     kind, value = _objective_summary_for_prompt(objective)
     return build_orchestration_prompt(

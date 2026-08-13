@@ -51,20 +51,3 @@ def test_prune_old_workdirs_noop_when_under_keep(tmp_path):
     assert (root / "000000").is_dir()
 
 
-def test_runs_actions_fallback_on_import_failure(monkeypatch):
-    import hyperloom.inference_optimizer.session.session_paths as sp
-
-    # Force registry construction to raise so the fallback is used.
-    import hyperloom.orchestrator.actions.registry as ar
-
-    class _Boom:
-        def load(self):
-            raise RuntimeError("boom")
-
-    monkeypatch.setattr(ar, "ActionRegistry", _Boom)
-    sp._runs_actions.cache_clear()
-    try:
-        result = sp._runs_actions()
-        assert result == sp._RUNS_ACTIONS_FALLBACK
-    finally:
-        sp._runs_actions.cache_clear()

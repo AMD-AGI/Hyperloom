@@ -233,10 +233,10 @@ def test_no_executor_is_registered_under_an_unknown_action_name():
     A registration whose name is not in the action catalogue can never be
     enqueued, so it is dead weight that also makes the real gap harder to see.
     """
-    from hyperloom.orchestrator.actions.registry import ActionRegistry
+    from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 
     registry = _fully_wired_registry()
-    catalogue = {meta.name for meta in ActionRegistry().load().all()}
+    catalogue = {meta.name for meta in ACTION_CATALOGUE.values()}
 
     phantom = sorted(set(registry) - catalogue)
     assert not phantom, f"executor keys with no actions/_meta/*.yaml: {phantom}"
