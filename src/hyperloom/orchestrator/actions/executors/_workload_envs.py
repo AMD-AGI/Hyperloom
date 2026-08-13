@@ -32,6 +32,7 @@ import yaml
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
+    BLOCKED_EXTERNAL_ENV_NAMES,
     filter_untrusted_env_mapping,
     valid_env_key,
 )
@@ -1502,6 +1503,11 @@ def materialize_config_with_envs(
     if remove_list:
         envs[framework_env] = remove_server_args(envs.get(framework_env, ""), remove_list)
     for key in unset_list:
+        # Unsetting a workload pin retargets the benchmark instead of toggling a
+        # knob, so the same names that may not be set may not be removed either.
+        if str(key).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
+            log.warning("Refusing to unset pinned benchmark env %s", key)
+            continue
         envs.pop(str(key), None)
     for key in unset_list:
         if isinstance(extra_envs, dict) and key in extra_envs:

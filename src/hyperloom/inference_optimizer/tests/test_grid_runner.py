@@ -719,6 +719,31 @@ def test_build_variant_yaml_can_remove_base_args_and_unset_envs(tmp_path):
     assert "SGLANG_ENABLE_FOO" not in envs
 
 
+def test_build_variant_yaml_refuses_to_unset_pinned_envs(tmp_path):
+    """A variant that unsets TP would silently shrink the Ray lease to one GPU."""
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+    cfg = yaml.safe_load(base.read_text())
+    cfg["benchmark"]["envs"].update({"TP": 8, "CONC": 64, "SGLANG_ENABLE_FOO": "1"})
+    base.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    out = _build_variant_yaml(
+        base,
+        base_extra_args="",
+        variant=GridVariant(
+            "unset_the_world",
+            unset_envs=["TP", "CONC", "ROCR_VISIBLE_DEVICES", "SGLANG_ENABLE_FOO"],
+        ),
+        output_subdir=tmp_path / "unset_the_world",
+    )
+
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert envs["TP"] == 8
+    assert envs["CONC"] == 64
+    # A plain tuning knob is still removable; only the pins are protected.
+    assert "SGLANG_ENABLE_FOO" not in envs
+
+
 def test_run_magpie_default_result_dir_is_output_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
     captured: dict = {}

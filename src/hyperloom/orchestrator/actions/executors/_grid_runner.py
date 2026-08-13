@@ -26,6 +26,7 @@ import yaml
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
+    BLOCKED_EXTERNAL_ENV_NAMES,
     _ENV_KEY_RE,
     is_python_package_root,
     redact_secret_values,
@@ -635,6 +636,11 @@ def _build_variant_yaml(
     elif extra_args_env in envs:
         envs.pop(extra_args_env, None)
     for k in getattr(variant, "unset_envs", []) or []:
+        # Unsetting a workload pin retargets the benchmark instead of toggling a
+        # knob, so the same names that may not be set may not be removed either.
+        if str(k).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
+            log.warning("grid: refusing to unset pinned env %s for variant %s", k, variant.name)
+            continue
         envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
