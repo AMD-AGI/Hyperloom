@@ -931,12 +931,12 @@ class PolicyGate:
         if action_name == BASELINE_ACTION_NAME and not skip_baseline_singleton:
             self._validate_baseline_singleton(payload)
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
-        # Refuse delegate for unknown action names when a catalogue is wired (no catalogue → fall through).
+        # Unwired in production: coordinator.py builds the gate without
+        # action_registry, so this is None there.
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
             raise PolicyDenied(
                 f"unknown action_name={action_name!r} (not in the action catalogue)",
                 rule="unknown_action",
-                hint="add the action to protocol/action_surfaces.ACTION_CATALOGUE",
             )
         # Per-action source allowlist (e.g. ``recover`` is robustness-only).
         allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
@@ -1010,7 +1010,7 @@ class PolicyGate:
                 f"of propose_action(action_name={action_name!r})",
                 rule="kernel_owned_by_kernel_agent",
             )
-        # Soft check — reject only if registry is wired AND name is unknown.
+        # Soft check — same unwired catalogue as the delegate twin above.
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
             raise PolicyDenied(
                 f"propose_action: unknown action_name={action_name!r} (not in the action catalogue)",

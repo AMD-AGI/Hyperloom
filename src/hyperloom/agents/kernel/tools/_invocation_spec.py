@@ -959,10 +959,6 @@ def build_invocation_spec(
         "tests": {
             "primary_benchmark": primary_benchmark,
             "related_files": benchmark_files,
-            "test_harness_path": _absolute_path(
-                candidate.get("test_harness_path"),
-                base_dir=repo_root,
-            ),
             "driver_contract": _driver_contract(task_group_contract),
         },
         "workload": {
