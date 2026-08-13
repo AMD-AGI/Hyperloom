@@ -277,9 +277,12 @@ under **Framework Selection** below.
 
 ## Retired modules and rules (do not re-introduce)
 
-The live runtime uses `actions/_meta/*.yaml`, `_grid_runner.py`, and the
-unified specialist-informed `explore` flow. Do not recreate the retired
-`backends` / `params` / `validate_stack` / scoring modules.
+The live runtime uses `protocol/action_surfaces.ACTION_CATALOGUE`,
+`_grid_runner.py`, and the unified specialist-informed `explore` flow. Do not
+recreate the retired `backends` / `params` / `validate_stack` / scoring
+modules, nor the `actions/_meta/*.yaml` catalogue and its ActionRegistry
+loader, nor the `vendor_kernel_config` / `operator_tuning` /
+`deep_kernel_analysis` actions (they never had an implementation).
 
 Rules that look reasonable but break the current flow:
 
@@ -709,8 +712,8 @@ scan roots via `$INFERENCE_OPTIMIZER_LEAK_ROOTS` if a script leaks
 elsewhere; the default `{framework}_{runner_type}.sh` already respects
 `$RESULT_DIR` so salvage normally never fires.
 
-Operators only interact through two `task.params` knobs (full schema in
-each `actions/_meta/<action>.yaml`): `params.benchmark_script` (bare
+Operators only interact through two `task.params` knobs:
+`params.benchmark_script` (bare
 sanitized `*.sh` name; overrides the gpu_type auto-pick) and
 `params.result_dir` (forwarded as `$RESULT_DIR`). A baseline retry after a
 failure MUST change at least one of `params.benchmark_script` /

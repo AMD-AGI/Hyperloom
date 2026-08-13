@@ -5,6 +5,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING — the `vendor_kernel_config`, `operator_tuning` and
+  `deep_kernel_analysis` actions are gone.** None of them ever had an executor
+  or a `KERNEL_REQUEST_HANDLERS` kind, so every request for them was answered
+  with `unknown_kernel_kind`; they were authored for the `kernel_agent` LLM
+  role that PR #1095 retired. Sessions recorded under the old build may carry
+  these names in `state.json` / `coordinator.db`; they are no longer resumable
+  and no migration is provided.
+
+- **BREAKING — `actions/_meta/*.yaml` and `orchestrator/actions/registry.py`
+  are removed.** Action metadata is now `ACTION_CATALOGUE` in
+  `inference_optimizer/protocol/action_surfaces.py`. Editing a yaml no longer
+  changes anything because there is no yaml. The `preferred_backend`,
+  `preferred_model` and `max_turns` fields are dropped outright: no runtime
+  code ever read them, so changing them never had an effect. The
+  `params_schema` blocks are dropped for the same reason. `verdict_class`,
+  which the old docs described as advisory, is genuinely operational and is
+  kept.
+
+- Kernel-owned actions no longer get a no-op executor. A delegate or
+  `propose_action` naming one was already denied by PolicyGate
+  (`rule=kernel_owned_by_kernel_agent`); the stub only stood ready to report an
+  unexecuted action as `succeeded`.
+
+- `run_fusion` is no longer registered in `KERNEL_REQUEST_HANDLERS`. It is
+  invoked directly by `KernelPhase`, so no request ever carried that kind.
+
+- The `KERNEL_OPT_BACKENDS` environment variable is gone. No production code
+  read it; `KERNEL_OPT_BACKEND_ORDER` is the sole backend switch, and only an
+  exact `forge` opts out of the default GEAK phase.
+
+### Changed
+
+- `_geak_enabled` no longer falls back to the persisted
+  `shared_state.kernel_optimizer` field, so `KERNEL_OPT_BACKEND_ORDER` is the
+  single source of truth for the kernel backend on a resume as well. The field
+  itself is unchanged and still feeds the session breakdown.
+
 ## [v1.0.0b1] - 2026-08-11
 Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) and the
