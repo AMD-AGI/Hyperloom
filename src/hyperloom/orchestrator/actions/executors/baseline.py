@@ -33,6 +33,7 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
+from ...trace.task_progress import report_progress
 from . import _server_lifecycle as _lifecycle
 from ._file_lock import best_effort_file_lock
 from ._aiter_jit import (
@@ -2206,6 +2207,15 @@ class BaselineExecutor:
                 return warmup_result
             warmup_tput = warmup_result.get("output_throughput")
             warmup_runtime = warmup_result.get("subprocess_runtime_sec")
+            await report_progress(
+                unit="baseline_round",
+                label="warmup",
+                index=1,
+                total=2,
+                status="succeeded",
+                output_throughput=warmup_tput,
+                runtime_sec=warmup_runtime,
+            )
 
             # Round 2 (measured): re-attach to the hot server (client only).
             # Warm re-attach is intentional — all comparison points (baseline,

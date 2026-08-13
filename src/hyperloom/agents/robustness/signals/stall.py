@@ -7,6 +7,13 @@ Computes each agent's last-activity timestamp from
 :attr:`SourceData.coordinator_events` (plus inbox tail) and alerts when
 idle past the threshold. Any event counts as activity, including
 heartbeats.
+
+Silence is only evidence of a stall when nothing else is moving. A phase whose
+work is one multi-hour deterministic task — a baseline pair, a profile and its
+roofline, an explore grid — has no LLM turn to emit, so agent silence there is
+the design rather than a fault, and alerting on it trains operators to ignore
+the signal. :attr:`SourceData.local_task_progress` carries the counter-evidence:
+while dispatched work is still reporting units, the accusation is withheld.
 """
 
 from __future__ import annotations
@@ -63,6 +70,11 @@ def evaluate_stall_signals(
     """
     cfg = config or StallConfig()
     last_seen = _collect_last_seen(ctx.inbox, data.coordinator_events)
+    work_idle_s = _in_flight_work_idle_s(data.local_task_progress, now_unix=ctx.now_unix)
+    if work_idle_s is not None and work_idle_s < cfg.stall_timeout_s:
+        # Dispatched work reported a unit more recently than the threshold: the
+        # session is progressing and quiet agents are waiting on it, not stuck.
+        return []
     out: list[Symptom] = []
     for agent in _TRACKED_AGENTS:
         ts = last_seen.get(agent)
@@ -73,23 +85,51 @@ def evaluate_stall_signals(
         if idle_s < cfg.stall_timeout_s:
             continue
         severity = SymptomSeverity.HIGH if idle_s >= cfg.severity_high_after_s else SymptomSeverity.MEDIUM
+        evidence: dict[str, Any] = {
+            "agent": agent,
+            "idle_seconds": int(idle_s),
+            "last_seen_unix": int(ts),
+            "threshold_s": int(cfg.stall_timeout_s),
+        }
+        if work_idle_s is not None:
+            evidence["in_flight_work_idle_seconds"] = int(work_idle_s)
+            evidence["in_flight_work"] = data.local_task_progress.get("last_progress_task")
         out.append(
             Symptom(
                 name="agent_stall",
                 severity=severity,
                 summary=(f"agent {agent} silent for {int(idle_s)}s (threshold={int(cfg.stall_timeout_s)}s)"),
-                evidence={
-                    "agent": agent,
-                    "idle_seconds": int(idle_s),
-                    "last_seen_unix": int(ts),
-                    "threshold_s": int(cfg.stall_timeout_s),
-                },
+                evidence=evidence,
                 subject={"agent": agent},
                 source="local" if data.coordinator_events else "inbox",
                 suggestion=("escalate strategy if agent remains silent"),
             )
         )
     return out
+
+
+def _in_flight_work_idle_s(
+    task_progress: dict[str, Any],
+    *,
+    now_unix: float,
+) -> float | None:
+    """Seconds since dispatched work last reported a completed unit.
+
+    Args:
+        task_progress (dict[str, Any]): :attr:`SourceData.local_task_progress`.
+        now_unix (float): Current time.
+
+    Returns:
+        float | None: Idle seconds, or ``None`` when nothing is running or the
+        running work has never reported (no heartbeat means no evidence either
+        way, so the caller must fall back to agent silence).
+    """
+    if not task_progress:
+        return None
+    ts = to_unix(task_progress.get("last_progress_unix"))
+    if ts is None:
+        return None
+    return max(0.0, now_unix - ts)
 
 
 def _collect_last_seen(

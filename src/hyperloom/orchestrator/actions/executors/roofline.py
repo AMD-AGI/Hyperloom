@@ -32,6 +32,7 @@ from typing import Any
 
 from hyperloom.common.timeutil import now_iso
 from ...loop.sub_agent_runner import RunnerContext
+from ...trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
 
 log = logging.getLogger(__name__)
@@ -309,6 +310,15 @@ class RooflineExecutor:
                 disable_cuda_graph=disable_cuda_graph,
                 framework=framework,
             )
+            # Reported on entry, not on completion: an attempt that never
+            # returns is exactly the case the heartbeat has to be able to show.
+            await report_progress(
+                unit="roofline_step",
+                label="profile",
+                index=attempt,
+                total=_PROFILE_MAX_ATTEMPTS,
+                status="started",
+            )
             try:
                 profile_result = await profile_executor(profile_ctx)
             except Exception as exc:  # noqa: BLE001
@@ -492,6 +502,11 @@ class RooflineExecutor:
             ta_payload["roofline_arm"] = roofline_arm
         if roofline_output_name:
             ta_payload["roofline_output_name"] = roofline_output_name
+        await report_progress(
+            unit="roofline_step",
+            label="trace_analyze",
+            status="started",
+        )
         try:
             ta_result = await trace_analyze_handler(
                 ta_payload,

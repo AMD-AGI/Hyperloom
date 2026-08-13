@@ -33,12 +33,18 @@ def _ctx() -> ReactorContext:
     )
 
 
+def _live_server() -> list[dict]:
+    """A server process the probe can hold accountable for answering."""
+    return [{"pid": 4242, "rss_mb": 1024.0, "cmd": "python -m sglang.launch_server", "is_server": True}]
+
+
 def test_one_target_down_emits_medium_alert():
     data = SourceData(
+        local_processes=_live_server(),
         local_server_health=[
             {"url": "http://localhost:30000", "reachable": True, "status": "ok"},
             {"url": "http://localhost:30001", "reachable": False, "status": "error", "error": "connect"},
-        ]
+        ],
     )
     out = evaluate_local_health_signals(_ctx(), data)
     matched = [s for s in out if s.name == "local_server_unreachable"]
@@ -49,15 +55,28 @@ def test_one_target_down_emits_medium_alert():
 
 def test_all_targets_down_promotes_severity_to_high():
     data = SourceData(
+        local_processes=_live_server(),
         local_server_health=[
             {"url": "http://localhost:30000", "reachable": False, "status": "error"},
             {"url": "http://localhost:30001", "reachable": False, "status": "http_error"},
-        ]
+        ],
     )
     out = evaluate_local_health_signals(_ctx(), data)
     matched = [s for s in out if s.name == "local_server_unreachable"]
     assert len(matched) == 2
     assert all(s.severity is SymptomSeverity.HIGH for s in matched)
+
+
+def test_a_refused_port_with_no_server_behind_it_is_not_a_fault():
+    """Preparation, analysis and the gap between variants all run with no server up."""
+    data = SourceData(
+        local_processes=[{"pid": 7, "rss_mb": 12.0, "cmd": "python -m Magpie.bench", "is_server": False}],
+        local_server_health=[
+            {"url": "http://localhost:8888/health", "reachable": False, "status": "error", "error": "connect"},
+        ],
+    )
+    out = evaluate_local_health_signals(_ctx(), data)
+    assert all(s.name != "local_server_unreachable" for s in out)
 
 
 def test_no_unreachable_targets_is_silent():
@@ -123,6 +142,7 @@ def test_classifier_includes_local_health_rule():
 
     data = SourceData(
         local_log_errors=[{"pattern": "CUDA out of memory", "line": "..."}],
+        local_processes=_live_server(),
         local_server_health=[{"url": "u", "reachable": False, "status": "error"}],
         local_gpu={"gpus": [{"gpu_id": 0, "temperature_c": 99.5}]},
     )

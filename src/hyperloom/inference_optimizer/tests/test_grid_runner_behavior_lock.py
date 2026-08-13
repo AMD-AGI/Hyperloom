@@ -27,6 +27,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     run_grid,
 )
+from hyperloom.orchestrator.trace.task_progress import progress_scope
 
 
 @pytest.fixture(autouse=True)
@@ -105,7 +106,7 @@ def _invalid_rc0_workspace(slot: Path) -> Path:
 
 
 class TestPulseMatrix:
-    """``_pulse_after_variant`` (delegating to ``_robustness_pulse``) fires on
+    """``_after_variant`` (delegating to ``_robustness_pulse``) fires on
     every failure path EXCEPT the multi-node ``mn_server_restart_failed`` path,
     which returns/continues before the pulse call."""
 
@@ -573,3 +574,74 @@ class TestResolveMnEffectiveServerArgs:
         # replace mode drops the inherited base env args.
         assert "--tp 8" not in out
         assert "--chunked-prefill 2048" in out
+
+
+# ---------------------------------------------------------------------------
+# Per-variant progress heartbeat
+# ---------------------------------------------------------------------------
+
+
+class TestVariantHeartbeat:
+    """A grid that runs for hours must be distinguishable from one that hung."""
+
+    def _run_capture_progress(self, run_side_effect, base, out, *, grid_n=2):
+        notes: list[dict] = []
+
+        async def _sink(**note):
+            notes.append(note)
+
+        async def _no_pulse(**_kwargs):
+            return None
+
+        with (
+            progress_scope(_sink),
+            patch.object(gr, "_robustness_pulse", side_effect=_no_pulse),
+            patch(
+                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                side_effect=run_side_effect,
+            ),
+        ):
+            results = asyncio.run(
+                run_grid(
+                    base_yaml_path=base,
+                    base_extra_args="",
+                    grid=[GridVariant(name=f"c{i}") for i in range(grid_n)],
+                    output_root=out,
+                    magpie_python=sys.executable,
+                    variant_timeout_sec=10,
+                    gpu_type="mi300x",
+                )
+            )
+        return results, notes
+
+    def test_each_variant_reports_as_it_lands(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+
+        def _ok(cmd, *a, **k):
+            out_idx = cmd.index("--output-dir")
+            _valid_workspace(Path(cmd[out_idx + 1]))
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        results, notes = self._run_capture_progress(_ok, base, tmp_path / "out")
+
+        assert [r.status for r in results] == ["succeeded", "succeeded"]
+        assert [(n["label"], n["index"], n["total"]) for n in notes] == [("c0", 1, 2), ("c1", 2, 2)]
+        assert all(n["status"] == "succeeded" for n in notes)
+        assert notes[0]["output_throughput"] == 800.0
+
+    def test_a_failed_variant_reports_too(self, tmp_path, monkeypatch):
+        """Progress means "a unit finished", not "a unit worked"."""
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+
+        _, notes = self._run_capture_progress(
+            lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 1, "stdout", "boom"),
+            base,
+            tmp_path / "out",
+            grid_n=1,
+        )
+
+        assert [n["status"] for n in notes] == ["failed"]

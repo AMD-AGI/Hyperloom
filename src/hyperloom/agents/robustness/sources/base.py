@@ -93,6 +93,11 @@ class SourceData:
     # TRACELENS_ROOT / TRACELENS_INTERNAL_ROOT / INFERENCEX_PATH), ``tracelens_cli``.
     local_external_deps: dict[str, Any] = field(default_factory=dict)
     coordinator_events: list[dict[str, Any]] = field(default_factory=list)
+    # In-flight work: ``{running, last_progress_unix, last_progress_task}``. A
+    # composite task reports a heartbeat per internal unit, so this answers
+    # "is dispatched work still moving" for agents that are legitimately quiet
+    # while they wait on it.
+    local_task_progress: dict[str, Any] = field(default_factory=dict)
     sources_used: list[str] = field(default_factory=list)
     degraded_reason: str | None = None
 

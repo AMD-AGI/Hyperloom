@@ -447,6 +447,8 @@ import subprocess  # noqa: E402
 from typing import Any  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 
+from hyperloom.common.coerce import to_unix  # noqa: E402
+
 from hyperloom.agents.robustness.sources import local_probe  # noqa: E402
 from hyperloom.agents.robustness.sources.local_probe import (  # noqa: E402
     _is_pid_alive,
@@ -1365,3 +1367,48 @@ async def test_fetch_populates_state_and_deps(tmp_path, monkeypatch):
     data = await LocalProbeSource(cfg).fetch(ctx=None)
     assert data.local_state_integrity["state_json"]["valid"] is True
     assert isinstance(data.local_external_deps.get("mounts"), list)
+
+
+# ---------------------------------------------------------------------------
+# In-flight task progress (``_read_task_progress``).
+
+
+def _tasks_db(path: Path, rows: list[tuple[str, str, str, str]]) -> Path:
+    """Write a ``tasks`` table holding ``(task_id, kind, state, updated_at)`` rows."""
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE tasks (task_id TEXT PRIMARY KEY, kind TEXT, state TEXT, updated_at TEXT)")
+    conn.executemany("INSERT INTO tasks VALUES (?,?,?,?)", rows)
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_task_progress_reports_the_freshest_running_heartbeat(tmp_path):
+    """The newest ``updated_at`` among running rows is when work last moved."""
+    db = _tasks_db(
+        tmp_path / "coordinator.db",
+        [
+            ("t1", "explore", "running", "2026-08-13T10:00:00+00:00"),
+            ("t2", "roofline", "running", "2026-08-13T10:42:00+00:00"),
+            ("t3", "baseline", "succeeded", "2026-08-13T11:00:00+00:00"),
+        ],
+    )
+    out = local_probe._read_task_progress(db)
+    assert out["running"] == 2
+    assert out["last_progress_task"] == "roofline"
+    assert out["last_progress_unix"] == to_unix("2026-08-13T10:42:00+00:00")
+
+
+def test_task_progress_is_empty_when_nothing_is_running(tmp_path):
+    db = _tasks_db(tmp_path / "coordinator.db", [("t1", "explore", "succeeded", "2026-08-13T10:00:00+00:00")])
+    assert local_probe._read_task_progress(db) == {}
+
+
+def test_task_progress_survives_a_db_without_the_expected_columns(tmp_path):
+    """An older or foreign schema degrades to "no evidence", never to an exception."""
+    conn = sqlite3.connect(str(tmp_path / "coordinator.db"))
+    conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT)")
+    conn.commit()
+    conn.close()
+    assert local_probe._read_task_progress(tmp_path / "coordinator.db") == {}
+    assert local_probe._read_task_progress(tmp_path / "missing.db") == {}

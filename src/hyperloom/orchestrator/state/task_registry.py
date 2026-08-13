@@ -318,6 +318,46 @@ class TaskRegistry:
             )
         return await self.get(task_id)
 
+    async def record_progress(
+        self,
+        task_id: str,
+        note: dict[str, Any] | None = None,
+    ) -> None:
+        """Record that a running task made progress, without changing its state.
+
+        A composite action — an explore grid, a baseline double-run, a profile
+        and its analysis — is one task that internally completes many units of
+        work over hours. Until it returns, its row looks identical to a task
+        that hung at second one: same state, same ``updated_at``. Every
+        consumer downstream inherits that blindness, which is why a healthy
+        80-minute analysis and a wedged Coordinator produce the same stall
+        evidence.
+
+        Bumping ``updated_at`` is the point. ``MAX(updated_at)`` over running
+        tasks then answers "when did anything last happen", which is the
+        question the stall detector is actually asking.
+
+        Best-effort: a task that vanished under a reaper must not take its
+        executor down over a progress note.
+
+        Args:
+            task_id (str): The running task reporting progress.
+            note (dict[str, Any] | None): Structured detail (unit name, index,
+                outcome) recorded on the task's history.
+        """
+        async with self.db.transaction() as cur:
+            cur.execute("SELECT history FROM tasks WHERE task_id=?", (task_id,))
+            row = cur.fetchone()
+            if row is None:
+                return
+            now = _now_iso()
+            history = json.loads(row["history"])
+            history.append({"progress": note or {}, "ts": now})
+            cur.execute(
+                "UPDATE tasks SET history=?, updated_at=? WHERE task_id=?",
+                (json.dumps(history), now, task_id),
+            )
+
     async def queued(self) -> list[Task]:
         """Return all queued tasks ordered oldest-first.
 

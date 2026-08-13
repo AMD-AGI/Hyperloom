@@ -28,7 +28,7 @@ from typing import Any, Iterable
 
 import httpx
 
-from hyperloom.common.coerce import to_float
+from hyperloom.common.coerce import to_float, to_unix
 from hyperloom.common.llm_config import LLMConfigError, resolve_openai_client_config
 
 from .base import SourceData, SourceUnavailable
@@ -37,8 +37,11 @@ from .base import SourceData, SourceUnavailable
 log = logging.getLogger(__name__)
 
 
-# Process patterns for ``local_processes``: owners that may legitimately hold GPU VRAM.
-_DEFAULT_PROCESS_PATTERNS: tuple[str, ...] = (
+# Inference-server commands, kept apart from the rest because "is a server
+# supposed to be answering right now" is a different question from "what is
+# running": a health probe against a port with no server behind it is an
+# expected refusal, not a wedged server.
+_SERVER_PROCESS_PATTERNS: tuple[str, ...] = (
     # SGLang
     "sglang.srt",
     "sglang.launch_server",
@@ -48,6 +51,9 @@ _DEFAULT_PROCESS_PATTERNS: tuple[str, ...] = (
     "vllm.v1.engine.core",
     "vllm.engine.async_llm_engine",
     "EngineCore",  # covers ``EngineCore-`` child PIDs
+)
+
+_OTHER_PROCESS_PATTERNS: tuple[str, ...] = (
     # Magpie / InferenceX benchmark harness
     "Magpie",
     "inferencex",
@@ -59,6 +65,9 @@ _DEFAULT_PROCESS_PATTERNS: tuple[str, ...] = (
     # Generic benchmark serving client (Magpie sub-process)
     "benchmark_serving",
 )
+
+# Process patterns for ``local_processes``: owners that may legitimately hold GPU VRAM.
+_DEFAULT_PROCESS_PATTERNS: tuple[str, ...] = _SERVER_PROCESS_PATTERNS + _OTHER_PROCESS_PATTERNS
 
 
 # Log error markers. Order matters: first matching pattern per line wins, so
@@ -201,6 +210,10 @@ class LocalProbeSource:
             cfg.coordinator_db_path,
             cfg.coordinator_event_limit,
         )
+        local_task_progress = await asyncio.to_thread(
+            _read_task_progress,
+            cfg.coordinator_db_path,
+        )
         local_disk = await asyncio.to_thread(_sample_disk, cfg.disk_mountpoints)
         local_processes = await asyncio.to_thread(_sample_processes, cfg.process_patterns)
         local_gpu = await asyncio.to_thread(_sample_gpu)
@@ -273,6 +286,7 @@ class LocalProbeSource:
 
         any_signal = bool(
             coordinator_events
+            or local_task_progress
             or local_disk
             or local_processes
             or local_gpu
@@ -308,6 +322,7 @@ class LocalProbeSource:
             local_state_integrity=local_state_integrity,
             local_external_deps=local_external_deps,
             coordinator_events=coordinator_events,
+            local_task_progress=local_task_progress,
             sources_used=[self.name],
         )
 
@@ -315,6 +330,49 @@ class LocalProbeSource:
 # ---------------------------------------------------------------------------
 # Sub-probes (all sync; called via asyncio.to_thread)
 # ---------------------------------------------------------------------------
+
+
+def _read_task_progress(db_path: Path | None) -> dict[str, Any]:
+    """Summarize in-flight task progress from the session SQLite DB.
+
+    ``updated_at`` on a running row is bumped by every heartbeat a composite
+    action reports, so its maximum over running rows is the freshest evidence
+    that dispatched work is still moving — the counter-evidence a stall
+    accusation needs before it fires at an agent that is simply waiting.
+
+    Args:
+        db_path (Path | None): Path to ``coordinator.db``; ``None`` or a
+            missing file short-circuits to ``{}``.
+
+    Returns:
+        dict[str, Any]: ``{running, last_progress_unix, last_progress_task}``,
+        or ``{}`` when the DB is unreadable or nothing is running.
+    """
+    if db_path is None or not db_path.exists():
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+    except sqlite3.Error as exc:
+        log.debug("local_probe: cannot open %s: %s", db_path, exc)
+        return {}
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = _try_select(
+            conn,
+            ["SELECT task_id, kind, updated_at FROM tasks WHERE state='running' ORDER BY updated_at DESC"],
+            (),
+        )
+        if not rows:
+            return {}
+        newest = rows[0]
+        out: dict[str, Any] = {"running": len(rows)}
+        ts = to_unix(newest["updated_at"] if "updated_at" in newest.keys() else None)
+        if ts is not None:
+            out["last_progress_unix"] = ts
+            out["last_progress_task"] = newest["kind"] if "kind" in newest.keys() else newest["task_id"]
+        return out
+    finally:
+        conn.close()
 
 
 def _read_coordinator_events(
@@ -473,8 +531,9 @@ def _sample_processes(patterns: tuple[str, ...]) -> list[dict[str, Any]]:
             process command line; empty disables the probe.
 
     Returns:
-        list[dict[str, Any]]: One ``{pid, rss_mb, cmd}`` entry per
-        matching process.
+        list[dict[str, Any]]: One ``{pid, rss_mb, cmd, is_server}`` entry per
+        matching process, where ``is_server`` marks an inference server as
+        opposed to a harness, Ray, or build process.
     """
     if not patterns:
         return []
@@ -507,7 +566,14 @@ def _sample_processes(patterns: tuple[str, ...]) -> list[dict[str, Any]]:
             rss_kb = int(rss_str)
         except ValueError:
             continue
-        out.append({"pid": pid, "rss_mb": round(rss_kb / 1024.0, 1), "cmd": cmd})
+        out.append(
+            {
+                "pid": pid,
+                "rss_mb": round(rss_kb / 1024.0, 1),
+                "cmd": cmd,
+                "is_server": any(pat in cmd for pat in _SERVER_PROCESS_PATTERNS),
+            }
+        )
     return out
 
 

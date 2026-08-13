@@ -58,3 +58,33 @@ def test_evaluate_stall_no_activity_no_symptom() -> None:
     ctx = ReactorContext(inbox=[], now_unix=10_000.0)
     data = SourceData(coordinator_events=[])
     assert evaluate_stall_signals(ctx, data) == []
+
+
+def test_work_still_reporting_units_withholds_the_accusation() -> None:
+    """A phase whose work is one long deterministic task has no turn to emit."""
+    ctx = ReactorContext(inbox=[_item("orchestration", ts=100.0)], now_unix=10_000.0)
+    data = SourceData(
+        local_task_progress={"running": 1, "last_progress_unix": 9_950.0, "last_progress_task": "roofline"},
+    )
+    assert evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=300.0)) == []
+
+
+def test_work_that_has_gone_quiet_too_lets_the_stall_through() -> None:
+    """Silent agents plus silent work is the case the signal exists for."""
+    ctx = ReactorContext(inbox=[_item("orchestration", ts=100.0)], now_unix=10_000.0)
+    data = SourceData(
+        local_task_progress={"running": 1, "last_progress_unix": 1_000.0, "last_progress_task": "explore"},
+    )
+    out = evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=300.0))
+    assert [s.name for s in out] == ["agent_stall"]
+    assert out[0].evidence["in_flight_work"] == "explore"
+    assert out[0].evidence["in_flight_work_idle_seconds"] == 9_000
+
+
+def test_running_work_that_never_reported_is_no_evidence_either_way() -> None:
+    """Absent a heartbeat the signal must fall back to agent silence, not trust."""
+    ctx = ReactorContext(inbox=[_item("orchestration", ts=100.0)], now_unix=10_000.0)
+    data = SourceData(local_task_progress={"running": 1})
+    out = evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=300.0))
+    assert [s.name for s in out] == ["agent_stall"]
+    assert "in_flight_work_idle_seconds" not in out[0].evidence
