@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.breakdown import exporter as ex
+from hyperloom.inference_optimizer.breakdown.collectors import sessions
 from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_session_meta
 
 
@@ -422,6 +423,22 @@ def test_orchestration_context_is_empty_without_a_census_or_db(tmp_path):
 # ---- session_meta duration ----
 
 
+def _freeze_now(monkeypatch, instant: datetime) -> None:
+    """Pin the session collector's clock to *instant*.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        instant (datetime): The UTC instant every ``datetime.now`` call returns.
+    """
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz) if tz else instant
+
+    monkeypatch.setattr(sessions, "datetime", _FrozenDatetime)
+
+
 def test_session_duration_is_measured_from_the_session_timestamps():
     """The live recorder's ``session`` snapshot carries no ``elapsed_minutes``."""
     meta = collect_session_meta(
@@ -441,6 +458,40 @@ def test_a_running_session_is_measured_up_to_now():
     assert 590 <= meta["session_duration_seconds"] <= 620
 
 
+def test_a_session_that_has_not_stopped_yet_is_still_measured_up_to_now(monkeypatch):
+    _freeze_now(monkeypatch, datetime(2026, 8, 8, 1, 37, 27, tzinfo=timezone.utc))
+    meta = collect_session_meta(
+        {},
+        {"start_ts": "2026-08-08T00:37:27+00:00", "stop_reason": ""},
+        [],
+    )
+    assert meta["session_duration_seconds"] == 3600
+
+
+def test_a_stopped_session_without_an_end_timestamp_is_not_measured_up_to_now(monkeypatch):
+    """The live recorder's ``session`` snapshot of a crashed run has no end."""
+    _freeze_now(monkeypatch, datetime(2026, 10, 20, 0, 37, 27, tzinfo=timezone.utc))
+    meta = collect_session_meta(
+        {},
+        {"start_ts": "2026-08-08T00:37:27+00:00", "stop_reason": "coordinator_exception"},
+        [],
+    )
+    assert meta["session_duration_seconds"] == 0
+
+
+def test_a_stopped_session_measures_the_same_however_late_it_is_exported(monkeypatch):
+    section = {
+        "start_ts": "2026-08-08T00:37:27+00:00",
+        "stop_reason": "time_exhausted",
+        "elapsed_minutes": 138.0,
+    }
+    _freeze_now(monkeypatch, datetime(2026, 8, 8, 3, 0, 0, tzinfo=timezone.utc))
+    first = collect_session_meta({}, section, [])["session_duration_seconds"]
+    _freeze_now(monkeypatch, datetime(2026, 10, 20, 3, 0, 0, tzinfo=timezone.utc))
+    second = collect_session_meta({}, section, [])["session_duration_seconds"]
+    assert first == second == 8280
+
+
 def test_elapsed_minutes_still_answers_when_no_timestamp_does():
     meta = collect_session_meta({}, {"elapsed_minutes": 12.5}, [])
     assert meta["session_duration_seconds"] == 750
@@ -448,3 +499,20 @@ def test_elapsed_minutes_still_answers_when_no_timestamp_does():
 
 def test_a_session_with_nothing_to_measure_reports_zero():
     assert collect_session_meta({}, {}, [])["session_duration_seconds"] == 0
+
+
+def test_a_recorded_session_exports_the_time_it_actually_ran(tmp_path):
+    """End to end over the recorder path: state stop time -> exported duration."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState.load_or_init(tmp_path)
+    state.session_id = "sess-1178"
+    state.start_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="microseconds")
+    state.set_stop_reason("time_exhausted")
+    state.save(tmp_path)
+
+    bd = ex.build(tmp_path)
+    # ``start_ts`` is recorder-only, so the fragment won the merge, not the collector.
+    assert bd["session"]["start_ts"] == state.start_ts
+    assert bd["session"]["ended_at_utc"] != ""
+    assert 7150 <= bd["session_meta"]["session_duration_seconds"] <= 7250

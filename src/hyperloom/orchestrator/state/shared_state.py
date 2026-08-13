@@ -27,6 +27,7 @@ Fields::
                                 extra_envs, workspace, latency means)
     cumulative_gain     float — % over baseline
     stop_reason         str   — set when graceful stop fires
+    stop_ts             str   — ISO timestamp of the latest stop_reason write
     current_action      str   — what's running right now (set by Orchestration)
     crash_count         int   — incremented by the Coordinator when a tick/agent
                                 exception is recorded; also appends to
@@ -581,6 +582,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Tput watermark for gain-driven roofline refresh; Coordinator re-enqueues at a compound 10% step.
     last_roofline_tput: float = 0.0
     stop_reason: str = ""
+    # When :attr:`stop_reason` was written, and therefore the session's end
+    # time for consumers. Re-stamped by every ``set_stop_reason`` call so the
+    # Coordinator's final write wins over the one CLOSE makes on entry, while
+    # ordinary saves leave a finished session's end time alone.
+    stop_ts: str = ""
     # Closing phase — set when wall-clock deadline fires; Coordinator only drains a ``report`` task. Cleared on resume.
     closing_phase: bool = False
     closing_started_unix: float = 0.0
@@ -1702,9 +1708,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     ) -> str:
         """Validated writer for :attr:`stop_reason` (Inv-8.3 closed vocab): values outside ``STOP_REASON_VOCAB`` map to ``"unknown"`` (lenient) or raise (``strict=True``, default env ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON``). Returns value written.
 
+        Every write also stamps :attr:`stop_ts` with the current time, so the
+        session's end is recorded once by its producer instead of being guessed
+        by whoever reads the state later.
+
         Args:
             value (str): The proposed stop reason; blank clears
-                :attr:`stop_reason`.
+                :attr:`stop_reason` and :attr:`stop_ts`.
             strict (bool | None): When ``True`` an out-of-vocab value raises;
                 when ``None`` the mode is read from
                 ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON``.
@@ -1722,10 +1732,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         text = str(value or "").strip()
         if not text:
             self.stop_reason = ""
+            self.stop_ts = ""
             return ""
         if is_valid_stop_reason(text):
-            self.stop_reason = text
-            return text
+            return self._commit_stop_reason(text)
         if strict is None:
             strict_env = (
                 os.environ.get(
@@ -1747,8 +1757,20 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "INFERENCE_OPTIMIZER_STRICT_STOP_REASON=1 to fail-fast.",
             text,
         )
-        self.stop_reason = "unknown"
-        return "unknown"
+        return self._commit_stop_reason("unknown")
+
+    def _commit_stop_reason(self, reason: str) -> str:
+        """Write a validated stop reason together with the time it was written.
+
+        Args:
+            reason (str): The validated, non-blank reason to record.
+
+        Returns:
+            str: ``reason``, so callers can return it unchanged.
+        """
+        self.stop_reason = reason
+        self.stop_ts = _now_iso()
+        return reason
 
     # escalate hint plumbing
     def set_pending_escalate_hint(self, hint: str) -> str:

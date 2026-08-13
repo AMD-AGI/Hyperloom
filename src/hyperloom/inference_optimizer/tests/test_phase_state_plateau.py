@@ -32,6 +32,7 @@ from hyperloom.orchestrator.phases.machine_state import (
     is_valid_stop_reason,
     kernel_work_pending,
 )
+from hyperloom.orchestrator.state import shared_state
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -578,6 +579,7 @@ def test_set_stop_reason_accepts_vocab():
     s = SharedState()
     assert s.set_stop_reason("target_reached") == "target_reached"
     assert s.stop_reason == "target_reached"
+    assert s.stop_ts != ""
 
 
 def test_set_stop_reason_lenient_maps_unknown_to_unknown(caplog):
@@ -600,6 +602,27 @@ def test_set_stop_reason_empty_string_clears():
     assert s.stop_reason == "target_reached"
     s.set_stop_reason("")
     assert s.stop_reason == ""
+    assert s.stop_ts == ""
+
+
+def test_a_later_stop_reason_restamps_the_stop_time(monkeypatch):
+    """CLOSE stops the session on entry; the Coordinator's final word must win."""
+    s = SharedState()
+    monkeypatch.setattr(shared_state, "_now_iso", lambda: "2026-08-08T00:00:00.000000+00:00")
+    s.set_stop_reason("time_exhausted")
+    monkeypatch.setattr(shared_state, "_now_iso", lambda: "2026-08-08T02:00:00.000000+00:00")
+    s.set_stop_reason("target_reached")
+    assert s.stop_ts == "2026-08-08T02:00:00.000000+00:00"
+
+
+def test_saving_a_stopped_session_again_does_not_move_its_stop_time(tmp_path):
+    s = SharedState()
+    s.set_stop_reason("target_reached")
+    pinned = s.stop_ts
+    s.save(tmp_path)
+    s.save(tmp_path)
+    assert s.stop_ts == pinned
+    assert SharedState.load_or_init(tmp_path).stop_ts == pinned
 
 
 def test_stop_reason_vocab_has_v08_additions():

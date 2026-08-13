@@ -1815,6 +1815,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
         if prior_stop or prior_crash >= 3:
             state.stop_reason = ""
+            state.stop_ts = ""
             state.closing_phase = False
             state.closing_started_unix = 0.0
             state.closing_report_task_id = ""
