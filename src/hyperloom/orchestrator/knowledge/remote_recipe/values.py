@@ -1185,6 +1185,38 @@ def build_remote_knowledge(
     return bundle
 
 
+def has_replay_material(document: Mapping[str, Any]) -> bool:
+    """Report nonempty config, patch, or kernel material from a View."""
+    knowledge = _mapping(document.get("knowledge")) or dict(document)
+    value = _mapping(knowledge.get("value"))
+    if not value:
+        return False
+    for section_name in ("explore", "framework"):
+        section = _mapping(value.get(section_name))
+        if not section:
+            continue
+        if str(section.get("extra_server_args") or "").strip():
+            return True
+        envs = section.get("extra_envs")
+        if isinstance(envs, Mapping) and envs:
+            return True
+        patches = section.get("patches")
+        if isinstance(patches, list) and patches:
+            return True
+    timeline = value.get("patch_timeline")
+    if isinstance(timeline, list) and timeline:
+        return True
+
+    def _nonempty(raw: Any) -> bool:
+        if isinstance(raw, Mapping):
+            return any(_nonempty(item) for item in raw.values())
+        if isinstance(raw, (list, tuple, set)):
+            return any(_nonempty(item) for item in raw)
+        return bool(raw)
+
+    return _nonempty(value.get("kernel"))
+
+
 def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and project the current Hyperloom Recipe contract for PRELUDE."""
     knowledge = _mapping(document.get("knowledge")) or dict(document)
@@ -1222,6 +1254,12 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         validate_relative_path(ref)
     session_id = str(document.get("session_id") or "")
     validated_gain = _number(knowledge.get("validated_e2e_gain"))
+    view = _mapping(document.get("view"))
+    replayable = (
+        bool(view.get("replayable"))
+        if isinstance(view.get("replayable"), bool)
+        else True
+    )
     return {
         "canonical_id": str(document.get("canonical_id") or ""),
         "best_throughput": _number(knowledge.get("optimized_throughput")),
@@ -1241,6 +1279,15 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         "remote_schema_version": int(document.get("schema_version") or 2),
         "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
         "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
+        "view": view,
+        "view_source": str(view.get("source") or "current"),
+        "replayable": replayable,
+        "replay_material_available": (
+            replayable and has_replay_material(document)
+        ),
+        "replay_disabled_reason": str(
+            view.get("replay_disabled_reason") or ""
+        ),
     }
 
 
@@ -1253,6 +1300,7 @@ __all__ = [
     "build_kernel_gemm_value",
     "build_kernel_rewrite_value",
     "build_remote_knowledge",
+    "has_replay_material",
     "knowledge_to_warm_recipe",
     "has_new_keep",
     "match_rewrite_attempt",

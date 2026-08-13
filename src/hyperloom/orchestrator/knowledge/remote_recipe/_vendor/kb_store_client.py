@@ -220,6 +220,41 @@ class KBStoreClient:
                 return None
             raise
 
+    def get_hyperloom_recipe_view(
+        self, canonical_id: str
+    ) -> dict[str, Any] | None:
+        """Read the selected record normalized for Hyperloom replay."""
+        try:
+            return self._request(
+                "GET",
+                f"/v1/kb/{self._quote(canonical_id)}/views/hyperloom-recipe",
+            )
+        except KBStoreError as exc:
+            if "HTTP 404" in str(exc):
+                return None
+            raise
+
+    def search_identities(
+        self,
+        *,
+        scheme: str,
+        match: dict[str, str] | None = None,
+        hardware_in: list[str] | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Discover exact canonical identities without fuzzy matching."""
+        payload: dict[str, Any] = {
+            "scheme": str(scheme),
+            "match": dict(match or {}),
+            "offset": int(offset),
+            "limit": int(limit),
+        }
+        if hardware_in is not None:
+            payload["hardware_in"] = [str(value) for value in hardware_in]
+        result = self._request("POST", "/v1/kb/search", payload)
+        return dict(result or {})
+
     def get_rollup(self, canonical_id: str) -> dict[str, Any] | None:
         """Read the candidate index, or ``None`` when nothing is recorded."""
         try:

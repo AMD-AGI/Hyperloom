@@ -8,11 +8,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB, recipe_canonical_id
+from hyperloom.orchestrator.knowledge.recipe_kb import (
+    RecipeKB,
+    cid_to_path_components,
+    recipe_canonical_id,
+)
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version, kb_hardware_slug
 from hyperloom.inference_optimizer.session.session_paths import (
     recipe_kb_lessons_json,
@@ -107,6 +112,13 @@ def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
     """
     if not isinstance(row, Mapping):
         return False
+    if isinstance(row.get("replay_material_available"), bool):
+        return bool(
+            row.get("replayable")
+            and row.get("replay_material_available")
+        )
+    if isinstance(row.get("replayable"), bool):
+        return bool(row.get("replayable"))
     best_config = row.get("best_config")
     if isinstance(best_config, Mapping) and best_config:
         # An env-only or args-only config is still actionable.
@@ -123,6 +135,34 @@ def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
         if row.get(key):
             return True
     return False
+
+
+def _with_exact_history(
+    candidate: Mapping[str, Any],
+    exact: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Attach exact-identity priors without changing donor replay metrics."""
+    merged = dict(candidate)
+    if not isinstance(exact, Mapping):
+        return merged
+    merged["exact_history"] = {
+        "canonical_id": str(exact.get("canonical_id") or ""),
+        "view": dict(exact.get("view") or {}),
+        **{
+            key: list(exact.get(key) or [])
+            for key in (
+                "what_worked",
+                "what_failed",
+                "remaining_gaps",
+                "lessons",
+                "pitfalls",
+                "sessions",
+            )
+        },
+        "validated_gain_pct": exact.get("validated_gain_pct"),
+        "gain_pct": exact.get("gain_pct"),
+    }
+    return merged
 
 
 def _config_replay_args_envs(row: Mapping[str, Any]) -> tuple[str, dict[str, str]]:
@@ -144,6 +184,12 @@ def _has_replayable_config(row: Mapping[str, Any]) -> bool:
     """True when ``row`` carries a non-empty champion config (args OR envs)."""
     if not isinstance(row, Mapping):
         return False
+    if isinstance(row.get("replay_material_available"), bool):
+        # Remote candidate material is inspected by its owning AgentKB SDKs
+        # while isolated; T0 receives only this capability bit.
+        return bool(row.get("replay_material_available"))
+    if isinstance(row.get("replay_config_available"), bool):
+        return bool(row.get("replay_config_available"))
     args, envs = _config_replay_args_envs(row)
     return bool(args or envs)
 
@@ -206,6 +252,10 @@ def _donor_is_trustworthy(
     """
     if not isinstance(donor, Mapping):
         return False
+    if isinstance(donor.get("replayable"), bool) and not donor.get(
+        "replayable"
+    ):
+        return False
     if not _has_replayable_config(donor):
         return False
     # Require evidence of a real positive gain.
@@ -239,6 +289,22 @@ def _donor_is_trustworthy(
     if _shape_conflict(target_conc, "conc") or _shape_conflict(target_isl, "isl") or _shape_conflict(target_osl, "osl"):
         return False
     return True
+
+
+def _select_remote_candidate(kb: Any, row: Mapping[str, Any]) -> bool:
+    """Ask remote adapters to materialize T0's accepted candidate."""
+    select = getattr(kb, "select_candidate", None)
+    if not callable(select):
+        return True
+    try:
+        return bool(select(row))
+    except Exception as exc:  # noqa: BLE001 — reject and continue cascade
+        log.warning(
+            "warm-start candidate materialization failed for %s: %s",
+            row.get("canonical_id"),
+            exc,
+        )
+        return False
 
 
 def _kg_native_config_donor(
@@ -427,10 +493,12 @@ def _build_warm_start_context(
     }
     # Priors ride the identity match even when it carries no replayable config.
     if isinstance(recipe, Mapping):
-        ctx["proven_prior"] = list(recipe.get("what_worked") or [])
-        ctx["do_not_repeat"] = list(recipe.get("what_failed") or [])
-        ctx["lessons"] = list(recipe.get("lessons") or [])
-        ctx["pitfalls"] = list(recipe.get("pitfalls") or [])
+        history = recipe.get("exact_history")
+        prior_source = history if isinstance(history, Mapping) else recipe
+        ctx["proven_prior"] = list(prior_source.get("what_worked") or [])
+        ctx["do_not_repeat"] = list(prior_source.get("what_failed") or [])
+        ctx["lessons"] = list(prior_source.get("lessons") or [])
+        ctx["pitfalls"] = list(prior_source.get("pitfalls") or [])
     # Replay config comes from the donor; fall back to the identity recipe as a
     # self-donor when it owns a replayable config.
     donor = (
@@ -893,6 +961,208 @@ def _build_t0_trace_extras(
     return _extras
 
 
+_GPU_ISA_BY_SKU = {
+    "mi300x": "gfx942",
+    "mi308x": "gfx942",
+    "mi325x": "gfx942",
+    "mi355x": "gfx950",
+}
+_TOPOLOGY_SUFFIX_RE = re.compile(
+    r"_ws[1-9]\d*(?:_pd[1-9]\d*p[1-9]\d*d)?"
+    r"(?:_tp[1-9]\d*)?(?:_ep[1-9]\d*)?(?:_[a-z0-9-]+)?$"
+)
+_SEMVER_RE = re.compile(
+    r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-([0-9a-z.-]+))?(?:\+[0-9a-z.-]+)?$",
+    re.IGNORECASE,
+)
+
+
+def _parse_hardware_topology(hardware: str) -> tuple[str, str, str] | None:
+    """Return ``(SKU, ISA family, topology suffix)`` for a known GPU."""
+    value = str(hardware or "").strip().lower()
+    for sku, family in _GPU_ISA_BY_SKU.items():
+        if value == sku:
+            return sku, family, ""
+        if value.startswith(f"{sku}_"):
+            suffix = value[len(sku) :]
+            if _TOPOLOGY_SUFFIX_RE.fullmatch(suffix):
+                return sku, family, suffix
+    return None
+
+
+def _hardware_fallback_values(hardware: str) -> list[str]:
+    """List same-ISA SKUs carrying the target's exact topology suffix."""
+    parsed = _parse_hardware_topology(hardware)
+    if parsed is None:
+        value = str(hardware or "").strip().lower()
+        return [value] if value else []
+    _sku, family, suffix = parsed
+    return [
+        f"{sku}{suffix}"
+        for sku, sku_family in _GPU_ISA_BY_SKU.items()
+        if sku_family == family
+    ]
+
+
+def _hardware_is_compatible(target: str, candidate: str) -> bool:
+    """Accept exact hardware or a known same-ISA SKU with exact topology."""
+    target_value = str(target or "").strip().lower()
+    candidate_value = str(candidate or "").strip().lower()
+    if candidate_value == target_value:
+        return bool(target_value)
+    target_parsed = _parse_hardware_topology(target_value)
+    candidate_parsed = _parse_hardware_topology(candidate_value)
+    return bool(
+        target_parsed
+        and candidate_parsed
+        and target_parsed[1] == candidate_parsed[1]
+        and target_parsed[2] == candidate_parsed[2]
+    )
+
+
+def _precision_is_compatible(target: str, candidate: str) -> bool:
+    """Allow exact precision plus the first bf16/fp16 compatibility pair."""
+    target_value = str(target or "").strip().lower()
+    candidate_value = str(candidate or "").strip().lower()
+    if candidate_value == target_value:
+        return bool(target_value)
+    return {target_value, candidate_value} == {"bf16", "fp16"}
+
+
+def _framework_semver(
+    version: str,
+) -> tuple[int, int, int, int, tuple[tuple[int, int | str], ...]] | None:
+    """Parse strict semver into a comparison key."""
+    match = _SEMVER_RE.fullmatch(str(version or "").strip())
+    if match is None:
+        return None
+    major, minor, patch = (int(match.group(index)) for index in range(1, 4))
+    prerelease = match.group(4)
+    tokens: list[tuple[int, int | str]] = []
+    if prerelease:
+        for token in prerelease.split("."):
+            if token.isdigit():
+                if len(token) > 1 and token.startswith("0"):
+                    return None
+                tokens.append((0, int(token)))
+            else:
+                tokens.append((1, token.lower()))
+    stable = 0 if prerelease else 1
+    return major, minor, patch, stable, tuple(tokens)
+
+
+def _framework_version_is_compatible(target: str, candidate: str) -> bool:
+    """Accept exact or nearest-not-newer semver in the same major/minor."""
+    target_value = str(target or "").strip().lower()
+    candidate_value = str(candidate or "").strip().lower()
+    if candidate_value == target_value:
+        return bool(target_value)
+    target_key = _framework_semver(target_value)
+    candidate_key = _framework_semver(candidate_value)
+    return bool(
+        target_key
+        and candidate_key
+        and candidate_key[:2] == target_key[:2]
+        and candidate_key <= target_key
+    )
+
+
+def _candidate_dimension(row: Mapping[str, Any], key: str) -> str:
+    """Read one seven-tuple dimension from metadata or canonical id."""
+    alias = "framework_name" if key == "framework" else key
+    value = row.get(key)
+    if value in (None, ""):
+        value = row.get(alias)
+    if value not in (None, ""):
+        return str(value).strip().lower()
+    try:
+        dimensions = cid_to_path_components(
+            str(row.get("canonical_id") or "")
+        )
+    except ValueError:
+        return ""
+    names = (
+        "model",
+        "hardware",
+        "framework_name",
+        "model_type",
+        "architectures",
+        "framework_version",
+        "precision",
+    )
+    return str(dict(zip(names, dimensions)).get(alias) or "").strip().lower()
+
+
+def _rank_warm_candidates(
+    rows: list[Mapping[str, Any]],
+    *,
+    target_framework_version: str,
+) -> list[Mapping[str, Any]]:
+    """Rank framework proximity, validated gain, then recency."""
+    target_version = str(target_framework_version or "")
+    ranked = list(rows)
+    ranked.sort(
+        key=lambda row: str(row.get("updated_at") or ""),
+        reverse=True,
+    )
+    ranked.sort(key=_max_session_gain, reverse=True)
+    ranked.sort(
+        key=lambda row: (
+            _framework_semver(
+                _candidate_dimension(row, "framework_version")
+            )
+            if _framework_version_is_compatible(
+                target_version,
+                _candidate_dimension(row, "framework_version"),
+            )
+            else None
+        )
+        or (-1, -1, -1, -1, ()),
+        reverse=True,
+    )
+    return ranked
+
+
+def _search_warm_candidates(
+    kb: Any,
+    *,
+    labels: dict[str, str],
+    hardware_in: list[str] | None = None,
+) -> list[Mapping[str, Any]]:
+    """Run exact identity search and fail soft on backend errors."""
+    kwargs: dict[str, Any] = {"label_match": labels, "limit": 100}
+    if hardware_in is not None and getattr(kb, "mode", "") == "remote":
+        kwargs["hardware_in"] = hardware_in
+    try:
+        rows = kb.search(**kwargs)
+    except Exception as exc:  # noqa: BLE001
+        log.info("warm-start exact candidate search failed: %s", exc)
+        return []
+    return [row for row in (rows or []) if isinstance(row, Mapping)]
+
+
+def _remote_candidate_matches(
+    kb: Any,
+    row: Mapping[str, Any],
+    *,
+    labels: Mapping[str, str],
+) -> bool:
+    """Validate exact server dimensions and current replay metadata."""
+    if getattr(kb, "mode", "") != "remote":
+        return True
+    if (
+        row.get("replayable") is not True
+        or str(row.get("view_source") or "") != "current"
+        or row.get("replay_material_available") is not True
+    ):
+        return False
+    return all(
+        _candidate_dimension(row, key) == str(value).strip().lower()
+        for key, value in labels.items()
+    )
+
+
 def _cascade_warm_start_search(
     kb: "RecipeKB",
     *,
@@ -905,65 +1175,163 @@ def _cascade_warm_start_search(
     fw_version: str,
     precision: str,
     warm_prefer: Any,
+    target_conc: Any = None,
+    target_isl: Any = None,
+    target_osl: Any = None,
 ) -> "tuple[dict[str, Any], str, float]":
-    """Resolve the warm-start recipe via the L1-L4 cascade (exact 1.0 / same-arch
-    0.95 / any-version 0.5 / relative 0.3); returns ``(warm_point, tier, conf)``."""
-    warm_point: dict[str, Any] = {}
-    warm_tier = "miss"
-    warm_conf = 0.0
-    # L1: full 7-tuple exact
+    """Resolve exact plus cumulative four-tier seven-tuple fallbacks."""
+    del architectures_val
+    exact_history: Mapping[str, Any] | None = None
     try:
-        row = kb.get_recipe(canonical_id=cid, prefer=warm_prefer or None)
+        exact = kb.get_recipe(
+            canonical_id=cid,
+            prefer=warm_prefer or None,
+        )
     except Exception as exc:  # noqa: BLE001
-        log.info("warm-start L1 get_recipe non-fatal failure: %s", exc)
-        row = None
-    if isinstance(row, dict) and row and str(row.get("canonical_id") or "") == cid:
-        return row, "exact", 1.0
-    # L2: drop model — same (hw+fw+model_type+arch+fwv+prec)
-    if model_type_val or architectures_val:
-        l2_labels = {
-            "hardware": hw,
-            "framework": framework or "",
-            "model_type": model_type_val,
-            "architectures": arch_slug,
-            "framework_version": fw_version or "",
-            "precision": precision or "",
-        }
-        l2_labels = {k: v for k, v in l2_labels.items() if v and v not in ("unknown_model_type", "unknown_arch")}
-        try:
-            l2_rows = kb.search(label_match=l2_labels, limit=5)
-        except Exception:  # noqa: BLE001
-            l2_rows = []
-        for r in l2_rows or []:
-            if str(r.get("canonical_id") or "") == cid:
-                continue
-            if _recipe_is_actionable(r):
-                return r, "same_arch_class", 0.95
+        log.info("warm-start exact get non-fatal failure: %s", exc)
+        exact = None
+    if (
+        isinstance(exact, Mapping)
+        and exact
+        and str(exact.get("canonical_id") or "") == cid
+    ):
+        if _recipe_is_actionable(exact):
+            return dict(exact), "exact", 1.0
+        exact_history = exact
 
-    # L3: drop model + framework_version → (hw+fw+model_type+arch+prec)
-    if not warm_point and (model_type_val or architectures_val):
-        l3_labels = {
-            "hardware": hw,
-            "framework": framework or "",
-            "model_type": model_type_val,
-            "architectures": arch_slug,
-            "precision": precision or "",
-        }
-        l3_labels = {k: v for k, v in l3_labels.items() if v and v not in ("unknown_model_type", "unknown_arch")}
-        try:
-            l3_rows = kb.search(label_match=l3_labels, limit=5)
-        except Exception:  # noqa: BLE001
-            l3_rows = []
-        for r in l3_rows or []:
-            if str(r.get("canonical_id") or "") == cid:
+    try:
+        (
+            _target_model,
+            target_hardware,
+            target_framework,
+            target_model_type,
+            target_architecture,
+            target_framework_version,
+            target_precision,
+        ) = cid_to_path_components(cid)
+    except ValueError:
+        _target_model = ""
+        target_hardware = str(hw or "")
+        target_framework = str(framework or "")
+        target_model_type = str(model_type_val or "")
+        target_architecture = str(arch_slug or "")
+        target_framework_version = str(fw_version or "")
+        target_precision = str(precision or "")
+    common = {
+        "framework": target_framework,
+        "model_type": target_model_type,
+        "architectures": target_architecture,
+    }
+    hardware_values = _hardware_fallback_values(target_hardware)
+    tiers: tuple[
+        tuple[str, float, dict[str, str], list[str] | None, bool, bool],
+        ...,
+    ] = (
+        (
+            "same_arch_class",
+            0.95,
+            {
+                **common,
+                "hardware": target_hardware,
+                "framework_version": target_framework_version,
+                "precision": target_precision,
+            },
+            None,
+            False,
+            False,
+        ),
+        (
+            "same_gpu_isa",
+            0.85,
+            {
+                **common,
+                "framework_version": target_framework_version,
+                "precision": target_precision,
+            },
+            hardware_values,
+            False,
+            False,
+        ),
+        (
+            "compatible_precision",
+            0.78,
+            {**common, "framework_version": target_framework_version},
+            hardware_values,
+            True,
+            False,
+        ),
+        (
+            "compatible_framework_version",
+            0.72,
+            common,
+            hardware_values,
+            True,
+            True,
+        ),
+    )
+    seen = {cid}
+    for (
+        tier,
+        confidence,
+        labels,
+        hardware_in,
+        relax_precision,
+        relax_framework_version,
+    ) in tiers:
+        rows = _search_warm_candidates(
+            kb,
+            labels=labels,
+            hardware_in=hardware_in,
+        )
+        usable: list[Mapping[str, Any]] = []
+        for candidate in rows:
+            candidate_id = str(candidate.get("canonical_id") or "")
+            if not candidate_id or candidate_id in seen:
                 continue
-            if _recipe_is_actionable(r):
-                return r, "same_arch_any_version", 0.5
-
-    # L4: if L1 returned a non-exact row (dispatcher relative match)
-    if not warm_point and isinstance(row, dict) and row:
-        return row, "relative", 0.3
-    return warm_point, warm_tier, warm_conf
+            seen.add(candidate_id)
+            if not _remote_candidate_matches(kb, candidate, labels=labels):
+                continue
+            if hardware_in is not None and not _hardware_is_compatible(
+                target_hardware,
+                _candidate_dimension(candidate, "hardware"),
+            ):
+                continue
+            if relax_precision and not _precision_is_compatible(
+                target_precision,
+                _candidate_dimension(candidate, "precision"),
+            ):
+                continue
+            if (
+                relax_framework_version
+                and not _framework_version_is_compatible(
+                    target_framework_version,
+                    _candidate_dimension(candidate, "framework_version"),
+                )
+            ):
+                continue
+            if not _donor_is_trustworthy(
+                candidate,
+                target_arch_slug=target_architecture,
+                target_model_type=target_model_type,
+                target_conc=target_conc,
+                target_isl=target_isl,
+                target_osl=target_osl,
+            ):
+                continue
+            usable.append(candidate)
+        for candidate in _rank_warm_candidates(
+            usable,
+            target_framework_version=target_framework_version,
+        ):
+            if _select_remote_candidate(kb, candidate):
+                return (
+                    _with_exact_history(candidate, exact_history),
+                    tier,
+                    confidence,
+                )
+    if exact_history is not None:
+        return dict(exact_history), "exact", 1.0
+    return {}, "miss", 0.0
 
 
 def run_t0_anchor(
@@ -1175,17 +1543,10 @@ def run_t0_anchor(
     except Exception:  # noqa: BLE001 — defensive
         log.exception("T0 anchor put_recipe raised unexpectedly")
 
-    # warm_start_recipe — 4-level cascading fallback:
-    #   L1: 7-tuple exact → conf=1.0
-    #   L2: drop model → conf=0.95
-    #   L3: drop model+fwv → conf=0.5
-    #   L4: relative tier fallback → conf=0.3
-    warm_point: dict[str, Any] = {}
-    warm_tier: str = "miss"
-    warm_conf: float = 0.0
+    # Exact seven-tuple, then cumulative model/hardware/precision/version relaxations.
     warm_prefer = _build_warm_prefer(shared_state, _fw_version)
 
-    # Architectures slug reused by L2/L3.
+    # Architecture remains exact at every fallback tier.
     from hyperloom.inference_optimizer.recipe_snapshot_constants import _architectures_slug
 
     _arch_slug = _architectures_slug(_architectures_val)
@@ -1201,6 +1562,9 @@ def run_t0_anchor(
         fw_version=_fw_version,
         precision=_precision,
         warm_prefer=warm_prefer,
+        target_conc=getattr(shared_state, "conc", None),
+        target_isl=getattr(shared_state, "isl", None),
+        target_osl=getattr(shared_state, "osl", None),
     )
 
     # A bare T0 anchor (no best_config) demotes to seed_only.
@@ -1213,13 +1577,20 @@ def run_t0_anchor(
     config_donor: Mapping[str, Any] | None = None
     config_donor_tier = ""
     config_donor_conf = 0.0
+    from .remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE
+
+    current_remote_point = bool(
+        isinstance(warm_point, Mapping)
+        and warm_point.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE
+    )
     _tgt_conc = getattr(shared_state, "conc", None)
     _tgt_isl = getattr(shared_state, "isl", None)
     _tgt_osl = getattr(shared_state, "osl", None)
     # A true-self (identity ``exact``) champion always replays; a cross-model
     # borrow must clear the trustworthiness gate before it becomes the donor.
     if (
-        warm_point
+        not current_remote_point
+        and warm_point
         and _has_replayable_config(warm_point)
         and (
             warm_tier == "exact"
@@ -1238,7 +1609,7 @@ def run_t0_anchor(
         config_donor_conf = warm_conf
     # KG-native cross-model donor (automatic locally, GBRAIN_KG_NATIVE-gated
     # remotely): prefer the strongest edge; degrade to recipe-KB search.
-    if config_donor is None and warm_point:
+    if config_donor is None and warm_point and not current_remote_point:
         kg_donor = _kg_native_config_donor(
             architectures=_architectures_val if isinstance(_architectures_val, list) else None,
             precision=_precision or "",
@@ -1250,7 +1621,7 @@ def run_t0_anchor(
             config_donor = kg_donor
             config_donor_tier = "kg_cross_model"
             config_donor_conf = float(kg_donor.get("confidence") or 0.0)
-    if config_donor is None and warm_point:
+    if config_donor is None and warm_point and not current_remote_point:
         donor, dtier, dconf = _find_config_donor(
             kb,
             cid=cid,
@@ -1333,8 +1704,16 @@ def run_t0_anchor(
         log.exception("warm_start_context build failed")
 
     # warm_start_pitfalls / warm_start_lessons are embedded recipe-row fields.
-    pitfalls_list: list[dict[str, Any]] = list(warm_point.get("pitfalls") or [])
-    lessons_list: list[dict[str, Any]] = list(warm_point.get("lessons") or [])
+    exact_history = warm_point.get("exact_history")
+    history_source = (
+        exact_history if isinstance(exact_history, Mapping) else warm_point
+    )
+    pitfalls_list: list[dict[str, Any]] = list(
+        history_source.get("pitfalls") or []
+    )
+    lessons_list: list[dict[str, Any]] = list(
+        history_source.get("lessons") or []
+    )
     try:
         pit_path = recipe_kb_pitfalls_json(sd)
         pit_path.parent.mkdir(parents=True, exist_ok=True)
