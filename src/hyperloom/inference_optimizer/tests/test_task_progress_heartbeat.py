@@ -28,6 +28,7 @@ from hyperloom.orchestrator.loop.sub_agent_runner import (
     _format_progress,
 )
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.trace import task_progress
 from hyperloom.orchestrator.trace.task_progress import (
     OutputActivity,
     heartbeat_while_output_flows,
@@ -272,6 +273,86 @@ async def test_the_driver_stops_with_the_step_it_watches() -> None:
 
     assert reported_during == 1
     assert len(notes) == reported_during
+
+
+@pytest.mark.asyncio
+async def test_teardown_lets_the_note_in_flight_finish_before_giving_up() -> None:
+    """A note is a ``tasks`` write; cancelling one mid-write wedges the connection."""
+    events: list[str] = []
+
+    async def _slow_sink(**_note) -> None:
+        events.append("begin")
+        try:
+            await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            events.append("cancelled")
+            raise
+        events.append("end")
+
+    interval = 0.01
+    with progress_scope(_slow_sink):
+        async with heartbeat_while_output_flows(label="t", interval_s=interval) as activity:
+            activity.note()
+            await asyncio.sleep(interval * 3)
+
+    assert events == ["begin", "end"]
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_sink_cannot_hold_the_step_open(monkeypatch) -> None:
+    """Cooperative shutdown is bounded: past the grace the driver is cancelled."""
+    monkeypatch.setattr(task_progress, "_DRIVER_STOP_GRACE_S", 0.05)
+    events: list[str] = []
+    entered = asyncio.Event()
+
+    async def _wedged_sink(**_note) -> None:
+        entered.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            events.append("cancelled")
+            raise
+
+    interval = 0.01
+    started = time.monotonic()
+    with progress_scope(_wedged_sink):
+        async with heartbeat_while_output_flows(label="t", interval_s=interval) as activity:
+            activity.note()
+            await entered.wait()
+    elapsed = time.monotonic() - started
+
+    await asyncio.sleep(0)
+    assert events == ["cancelled"]
+    assert elapsed < 1.0
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_landing_in_teardown_still_cancels_the_step() -> None:
+    """Suppressing the driver's cancellation used to absorb the caller's too."""
+    entered = asyncio.Event()
+
+    async def _slow_to_die_sink(**_note) -> None:
+        entered.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)
+            raise
+
+    async def _step() -> str:
+        with progress_scope(_slow_to_die_sink):
+            async with heartbeat_while_output_flows(label="t", interval_s=0.01) as activity:
+                activity.note()
+                await entered.wait()
+        return "finished"
+
+    step = asyncio.create_task(_step())
+    await entered.wait()
+    await asyncio.sleep(0.02)  # the body has returned; teardown is waiting
+    step.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await step
 
 
 @pytest.mark.asyncio

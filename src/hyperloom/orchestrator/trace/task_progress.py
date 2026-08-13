@@ -39,6 +39,11 @@ log = logging.getLogger(__name__)
 # accusation.
 _OUTPUT_HEARTBEAT_INTERVAL_S: float = 60.0
 
+# How long teardown waits for the driver to finish the note it is in. A note is
+# one small SQLite write, so anything near this bound means the sink is wedged
+# — at which point the executor's own exit matters more than the last heartbeat.
+_DRIVER_STOP_GRACE_S: float = 5.0
+
 ProgressReporter = Callable[..., Awaitable[None]]
 
 _REPORTER: ContextVar[ProgressReporter | None] = ContextVar(
@@ -116,7 +121,7 @@ class OutputActivity:
 @asynccontextmanager
 async def heartbeat_while_output_flows(
     *,
-    interval_s: float = _OUTPUT_HEARTBEAT_INTERVAL_S,
+    interval_s: float | None = None,
     **note: Any,
 ) -> AsyncIterator[OutputActivity]:
     """Keep reporting a long step alive for as long as its child keeps talking.
@@ -126,7 +131,8 @@ async def heartbeat_while_output_flows(
     heartbeat would disarm the very signal it feeds.
 
     Args:
-        interval_s (float): Seconds between ticks.
+        interval_s (float | None): Seconds between ticks;
+            :data:`_OUTPUT_HEARTBEAT_INTERVAL_S` when ``None``.
         **note (Any): Fields stamped on every heartbeat, e.g. ``unit`` and
             ``label``.
 
@@ -134,18 +140,48 @@ async def heartbeat_while_output_flows(
         OutputActivity: Handle the subprocess reader calls :meth:`note` on.
     """
     activity = OutputActivity()
-    driver = asyncio.create_task(_report_new_output(activity, interval_s, note))
+    stop = asyncio.Event()
+    tick_s = _OUTPUT_HEARTBEAT_INTERVAL_S if interval_s is None else interval_s
+    driver = asyncio.create_task(_report_new_output(activity, tick_s, stop, note))
     try:
         yield activity
     finally:
+        await _stop_driver(driver, stop)
+
+
+async def _stop_driver(driver: asyncio.Task, stop: asyncio.Event) -> None:
+    """Stop the heartbeat driver cooperatively, cancelling only if it overruns.
+
+    A hard cancel is the wrong first move: the driver spends its ticks inside a
+    ``tasks`` row write, and a cancel landing mid-write used to leave the shared
+    connection inside an open transaction. Setting the flag lets the driver
+    finish the note it is in. The wait is bounded so a wedged sink delays the
+    executor by the grace window and no more.
+
+    Nothing here catches :class:`asyncio.CancelledError`: an outer cancel
+    arriving during teardown belongs to the enclosing task, and swallowing it
+    would let a cancelled step return as though it had finished.
+
+    Args:
+        driver (asyncio.Task): The running :func:`_report_new_output` task.
+        stop (asyncio.Event): The flag it polls between ticks.
+    """
+    stop.set()
+    try:
+        done, _pending = await asyncio.wait({driver}, timeout=_DRIVER_STOP_GRACE_S)
+    except asyncio.CancelledError:
         driver.cancel()
-        with suppress(asyncio.CancelledError):
-            await driver
+        raise
+    if not done:
+        # Deliberately not awaited: the driver is stuck in a sink that already
+        # overran its grace, and the step it was reporting for has returned.
+        driver.cancel()
 
 
 async def _report_new_output(
     activity: OutputActivity,
     interval_s: float,
+    stop: asyncio.Event,
     note: dict[str, Any],
 ) -> None:
     """Report one heartbeat per interval in which new output arrived.
@@ -153,11 +189,16 @@ async def _report_new_output(
     Args:
         activity (OutputActivity): Counter the reader thread advances.
         interval_s (float): Seconds between ticks.
+        stop (asyncio.Event): Set by teardown; ends the loop at the next tick
+            boundary instead of the driver being cancelled mid-write.
         note (dict[str, Any]): Fields stamped on every heartbeat.
     """
     seen = 0
     while True:
-        await asyncio.sleep(interval_s)
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=interval_s)
+        if stop.is_set():
+            return
         current = activity.count()
         if current == seen:
             continue
