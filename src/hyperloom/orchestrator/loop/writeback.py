@@ -762,6 +762,66 @@ class WritebackCollaborator:
             state.enablement.baseline_eval_evidence = evidence[:4000]
             state.enablement.launch_log = evidence
 
+    def _record_revalidation_not_promoted(
+        self,
+        *,
+        task: Task,
+        result_payload: dict[str, Any],
+        err_class: str,
+        stopped_by_the_run: bool,
+    ) -> None:
+        """Close out an enablement revalidation baseline that did not promote.
+
+        A genuine failure -- boot, OOM, timeout, eval -- is a no-progress round:
+        it closes the revalidation window, reopens the authoring loop, and counts
+        toward the ``enablement_stalled`` cap so repeated KEEP-then-fail cycles
+        terminate.
+
+        A round the run stopped is none of those things. It measured nothing, so
+        it is no evidence that the KEEP'd patch fails to revalidate, and charging
+        it to the stall streak reaches the cap on the evidence of a clock -- the
+        same round the baseline failure streak deliberately exempts. The window
+        therefore stays open, because only an eval-origin KEEP ever opens one and
+        closing it here would strand a patch nothing revalidated. The generation
+        advances for the same reason opening a window does: the next enqueue's
+        idempotency key must not resolve to the row the run just stopped.
+
+        Args:
+            task: The revalidation baseline task that came back unpromotable.
+            result_payload: Its result, read for the launch/traceback text.
+            err_class: Its ``error_class``, for the log line.
+            stopped_by_the_run: Whether the run stopped the round rather than the
+                round saying anything about the baseline.
+        """
+        state = self.shared_state
+        state.enablement.revalidation_task_id = ""
+        if stopped_by_the_run:
+            state.enablement.revalidation_generation = int(state.enablement.revalidation_generation or 0) + 1
+            state.enablement.inflight_task_id = ""
+        else:
+            state.enablement.validation_pending = False
+            state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
+            try:
+                from ..phases.framework import _ENABLEMENT_MAX_STALL as _max_stall
+            except ImportError:
+                _max_stall = 5
+            if state.enablement.stall_streak >= _max_stall and not state.stop_reason:
+                state.set_stop_reason("enablement_stalled")
+            else:
+                state.enablement.inflight_task_id = ""
+        launch_log = _extract_enablement_launch_log(result_payload)
+        if launch_log:
+            state.enablement.launch_log = launch_log
+        log.warning(
+            "enablement revalidation task %s %s (error_class=%s); stall_streak=%d pending=%s rearm=%s",
+            task.task_id,
+            "was stopped by the run" if stopped_by_the_run else "failed",
+            err_class,
+            int(state.enablement.stall_streak or 0),
+            bool(state.enablement.validation_pending),
+            not bool(state.stop_reason),
+        )
+
     async def _handle_unpromotable_result(
         self,
         task: Task,
@@ -916,29 +976,11 @@ class WritebackCollaborator:
                 or (reval_tid and reval_tid == str(task.task_id or ""))
             )
             if is_revalidation and bool(getattr(self.shared_state.enablement, "validation_pending", False)):
-                self.shared_state.enablement.validation_pending = False
-                self.shared_state.enablement.revalidation_task_id = ""
-                self.shared_state.enablement.stall_streak = (
-                    int(getattr(self.shared_state.enablement, "stall_streak", 0) or 0) + 1
-                )
-                try:
-                    from ..phases.framework import _ENABLEMENT_MAX_STALL as _max_stall
-                except ImportError:
-                    _max_stall = 5
-                if self.shared_state.enablement.stall_streak >= _max_stall and not self.shared_state.stop_reason:
-                    self.shared_state.set_stop_reason("enablement_stalled")
-                else:
-                    self.shared_state.enablement.inflight_task_id = ""
-                launch_log = _extract_enablement_launch_log(result_payload)
-                if launch_log:
-                    self.shared_state.enablement.launch_log = launch_log
-                log.warning(
-                    "enablement revalidation task %s failed (error_class=%s); "
-                    "stall_streak=%d rearm=%s",
-                    task.task_id,
-                    err_class,
-                    self.shared_state.enablement.stall_streak,
-                    not bool(self.shared_state.stop_reason),
+                self._record_revalidation_not_promoted(
+                    task=task,
+                    result_payload=result_payload,
+                    err_class=err_class,
+                    stopped_by_the_run=stopped_by_the_run,
                 )
                 any_changed = True
             from ..actions.executors._accuracy_gate import eval_enablement_allowed  # noqa: PLC0415
