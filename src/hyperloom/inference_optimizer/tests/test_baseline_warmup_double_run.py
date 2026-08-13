@@ -31,6 +31,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     run_grid,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.trace.task_progress import progress_scope
 
 
 @pytest.fixture(autouse=True)
@@ -172,6 +173,88 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
     assert warmup_lc["pid_dir"] == measure_lc["pid_dir"] == str(output_dir)
     assert captured[0]["benchmark"]["envs"]["PORT"] == (captured[1]["benchmark"]["envs"]["PORT"])
     assert captured[0]["benchmark"]["benchmark_script"] == "vllm_mi300x.sh"
+
+
+def _run_capturing_rounds(executor, ctx, notes):
+    """Run ``executor`` and record which round notes existed at each launch."""
+    at_launch: list[list[str]] = []
+    inner, _state = _cold_then_hot_fake_run()
+
+    def fake_run(cmd, *args, **kwargs):
+        at_launch.append([n["label"] for n in notes])
+        return inner(cmd, *args, **kwargs)
+
+    with (
+        progress_scope(_sink_into(notes)),
+        patch(
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            side_effect=fake_run,
+        ),
+    ):
+        return _run(executor(ctx)), at_launch
+
+
+def _sink_into(notes: list):
+    """Build an ambient progress sink that appends every note to ``notes``."""
+
+    async def _sink(**note):
+        notes.append(note)
+
+    return _sink
+
+
+def test_each_double_run_round_reports_before_it_blocks(tmp_path):
+    """A round that boots a server and never returns must still have said it started."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    notes: list[dict] = []
+    executor = _executor(base, tmp_path, baseline_double_run=True)
+    ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
+
+    result, at_launch = _run_capturing_rounds(executor, ctx, notes)
+
+    assert result["status"] == "succeeded"
+    assert at_launch == [["warmup"], ["warmup", "warmup", "measure"]]
+    assert [(n["label"], n["status"]) for n in notes] == [
+        ("warmup", "started"),
+        ("warmup", "succeeded"),
+        ("measure", "started"),
+    ]
+
+
+def test_the_single_round_path_reports_too(tmp_path):
+    """The non-double-run baseline used to report nothing at all."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    notes: list[dict] = []
+    executor = _executor(base, tmp_path, baseline_double_run=False)
+    ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
+
+    result, at_launch = _run_capturing_rounds(executor, ctx, notes)
+
+    assert result["status"] == "succeeded"
+    assert at_launch == [["single"]]
+
+
+def test_a_failing_warmup_round_still_reported_that_it_started(tmp_path):
+    """The failure path returns early; only the entry report covers it."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    notes: list[dict] = []
+    executor = _executor(base, tmp_path, baseline_double_run=True)
+    ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
+
+    with (
+        progress_scope(_sink_into(notes)),
+        patch(
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 1, "", "boom"),
+        ),
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed"
+    assert [(n["label"], n["status"]) for n in notes] == [("warmup", "started")]
 
 
 def test_deferred_accuracy_skips_eval_when_hot_throughput_regresses(

@@ -2154,7 +2154,8 @@ class BaselineExecutor:
                     lifecycle["reason"],
                 )
             try:
-                return await self._run_single_benchmark(
+                return await self._run_reported_round(
+                    label="single",
                     config_path=config_path,
                     output_dir=output_dir,
                     **common,
@@ -2190,7 +2191,8 @@ class BaselineExecutor:
                 "baseline_executor: cold-start guard — warmup round (discarded, boots persistent server) in %s",
                 warmup_dir,
             )
-            warmup_result = await self._run_single_benchmark(
+            warmup_result = await self._run_reported_round(
+                label="warmup",
                 config_path=warmup_cfg,
                 output_dir=warmup_dir,
                 **common,
@@ -2244,7 +2246,8 @@ class BaselineExecutor:
                 measure_dir,
                 warmup_tput or 0.0,
             )
-            result = await self._run_single_benchmark(
+            result = await self._run_reported_round(
+                label="measure",
                 config_path=measure_cfg,
                 output_dir=measure_dir,
                 **common,
@@ -2305,7 +2308,8 @@ class BaselineExecutor:
                             )
                         except (TypeError, ValueError):
                             accuracy_timeout_sec = timeout_sec
-                        accuracy_result = await self._run_single_benchmark(
+                        accuracy_result = await self._run_reported_round(
+                            label="accuracy",
                             config_path=accuracy_cfg,
                             output_dir=accuracy_dir,
                             **{
@@ -2562,6 +2566,37 @@ class BaselineExecutor:
             pid_dir=pid_dir,
             framework=framework,
             port=port,
+        )
+
+    async def _run_reported_round(
+        self,
+        *,
+        label: str,
+        config_path: Path,
+        output_dir: Path,
+        **common: Any,
+    ) -> dict[str, Any]:
+        """Announce a benchmark round before it blocks, then run it.
+
+        Reported on entry, not on completion: a round can boot a server, warm
+        JIT and bench for the better part of an hour, and one that never
+        returns is exactly the case the heartbeat has to be able to show.
+
+        Args:
+            label (str): Round name carried on the progress note
+                (``"single"``, ``"warmup"``, ``"measure"``, ``"accuracy"``).
+            config_path (Path): The materialized Magpie YAML for this round.
+            output_dir (Path): The per-round workspace slot.
+            **common (Any): Remaining :meth:`_run_single_benchmark` arguments.
+
+        Returns:
+            dict[str, Any]: The round's benchmark result, unchanged.
+        """
+        await report_progress(unit="baseline_round", label=label, status="started")
+        return await self._run_single_benchmark(
+            config_path=config_path,
+            output_dir=output_dir,
+            **common,
         )
 
     async def _run_single_benchmark(

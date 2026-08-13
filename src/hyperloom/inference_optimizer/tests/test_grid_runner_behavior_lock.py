@@ -584,8 +584,8 @@ class TestResolveMnEffectiveServerArgs:
 class TestVariantHeartbeat:
     """A grid that runs for hours must be distinguishable from one that hung."""
 
-    def _run_capture_progress(self, run_side_effect, base, out, *, grid_n=2):
-        notes: list[dict] = []
+    def _run_capture_progress(self, run_side_effect, base, out, *, grid_n=2, notes=None):
+        notes = [] if notes is None else notes
 
         async def _sink(**note):
             notes.append(note)
@@ -626,10 +626,11 @@ class TestVariantHeartbeat:
 
         results, notes = self._run_capture_progress(_ok, base, tmp_path / "out")
 
+        landed = [n for n in notes if n["unit"] == "variant"]
         assert [r.status for r in results] == ["succeeded", "succeeded"]
-        assert [(n["label"], n["index"], n["total"]) for n in notes] == [("c0", 1, 2), ("c1", 2, 2)]
-        assert all(n["status"] == "succeeded" for n in notes)
-        assert notes[0]["output_throughput"] == 800.0
+        assert [(n["label"], n["index"], n["total"]) for n in landed] == [("c0", 1, 2), ("c1", 2, 2)]
+        assert all(n["status"] == "succeeded" for n in landed)
+        assert landed[0]["output_throughput"] == 800.0
 
     def test_a_failed_variant_reports_too(self, tmp_path, monkeypatch):
         """Progress means "a unit finished", not "a unit worked"."""
@@ -644,4 +645,29 @@ class TestVariantHeartbeat:
             grid_n=1,
         )
 
-        assert [n["status"] for n in notes] == ["failed"]
+        assert [n["status"] for n in notes if n["unit"] == "variant"] == ["failed"]
+
+    def test_a_variant_reports_before_it_blocks(self, tmp_path, monkeypatch):
+        """A first variant that hangs inside the benchmark used to emit nothing at all."""
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+        notes: list[dict] = []
+        at_launch: list[dict] = []
+
+        def _capture_then_fail(cmd, *a, **k):
+            at_launch.extend(notes)
+            return subprocess.CompletedProcess(cmd, 1, "", "boom")
+
+        self._run_capture_progress(
+            _capture_then_fail,
+            base,
+            tmp_path / "out",
+            grid_n=1,
+            notes=notes,
+        )
+
+        assert [(n["label"], n["status"]) for n in at_launch] == [
+            ("c0:variant", "started"),
+            ("c0:benchmark", "started"),
+        ]

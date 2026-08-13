@@ -1269,6 +1269,25 @@ async def run_grid(
         except Exception as exc:  # noqa: BLE001 - reference base is additive; never block the grid
             log.debug("grid_runner: reference env resolve swallowed: %r", exc)
 
+    # Reported on entry, not on completion: ``_after_variant`` only runs once a
+    # result has been appended, so a first variant that hangs — or a branch that
+    # raises before reaching it — would emit nothing at all, which is exactly
+    # the silence the heartbeat exists to break.
+    async def _unit_started(idx: int, label: str) -> None:
+        """Report that a unit of variant ``idx`` is about to start.
+
+        Args:
+            idx (int): Zero-based index of the variant the unit belongs to.
+            label (str): Unit name (``"variant"``, ``"warmup"``, ...).
+        """
+        await report_progress(
+            unit="variant_step",
+            label=f"{grid[idx].name}:{label}",
+            index=idx + 1,
+            total=len(grid),
+            status="started",
+        )
+
     # Variant boundary: a bounded robustness tick so a mid-grid leak/crash
     # surfaces between variants, plus a progress heartbeat so a grid that runs
     # for hours is distinguishable from one that hung on its first variant.
@@ -1315,6 +1334,7 @@ async def run_grid(
                 for skipped_variant in grid[i:]:
                     results.append(_session_deadline_skip_result(skipped_variant))
                 break
+        await _unit_started(i, "variant")
         slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
         server_log = slot / "server.log"
         # Capability fast-fail: drop a variant whose env flag the build cannot
@@ -1492,6 +1512,7 @@ async def run_grid(
 
             warmup_workspaces_before = snapshot_workspaces(warmup_slot)
             warmup_started_unix = time.time()
+            await _unit_started(i, "warmup")
             try:
                 warmup_rc, warmup_stdout, warmup_stderr = await asyncio.to_thread(
                     _run_magpie,
@@ -1711,6 +1732,7 @@ async def run_grid(
 
         if _mn_imn() and _mn_warm():
             _mn_warm_slot = slot / "mn_warmup"
+            await _unit_started(i, "mn_warmup")
             try:
                 await asyncio.to_thread(
                     _run_magpie,
@@ -1741,6 +1763,7 @@ async def run_grid(
         # leak destinations per-variant.
         slot_workspaces_before = snapshot_workspaces(slot)
         variant_started_unix = time.time()
+        await _unit_started(i, "benchmark")
         try:
             rc, stdout, stderr = await asyncio.to_thread(
                 _run_magpie,
