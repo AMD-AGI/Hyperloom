@@ -1384,6 +1384,106 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#: Integrate-gate evidence copied verbatim onto every collective record. The
+#: E2E verdict, not the microbenchmark, decides whether a campaign is adopted.
+_COLLECTIVE_INTEGRATION_FIELDS = (
+    "integration_id",
+    "integration_decision",
+    "integration_status",
+    "integration_result_status",
+    "integration_revert_status",
+    "integration_finalize_status",
+    "integration_recovery_action",
+    "integration_error_class",
+    "integration_error",
+    "integration_report_path",
+    "integration_workspace",
+    "integration_ts",
+)
+
+
+def _normalize_collective_record(raw: dict[str, Any]) -> dict[str, Any]:
+    """Coerce one collective campaign record into the exported shape."""
+    world_size_raw = raw.get("world_size")
+    try:
+        world_size = int(world_size_raw) if world_size_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        world_size = None
+
+    out: dict[str, Any] = {
+        "collective_attempt_id": str(raw.get("collective_attempt_id") or ""),
+        "experiment_id": str(raw.get("experiment_id") or ""),
+        "kernel_id": str(raw.get("kernel_id") or ""),
+        "kernel_name": str(raw.get("kernel_name") or ""),
+        "collective_op": str(raw.get("collective_op") or ""),
+        "world_size": world_size,
+        "engine": str(raw.get("engine") or raw.get("backend") or ""),
+        "status": str(raw.get("status") or ""),
+        "decision": str(raw.get("decision") or ""),
+        "kept": bool(raw.get("kept")),
+        "salvaged": bool(raw.get("salvaged")),
+        "requires_e2e_validation": bool(raw.get("requires_e2e_validation")),
+        "iterations": raw.get("iterations"),
+        "kernel_speedup": _to_float(raw.get("kernel_speedup")),
+        "gpu_pct": _to_float(raw.get("gpu_pct")),
+        "duration_sec": _to_float(raw.get("duration_sec")),
+        "ts": str(raw.get("ts") or ""),
+        "source_file": str(raw.get("source_file") or ""),
+        "kernel_repo": str(raw.get("kernel_repo") or ""),
+        "workspace": str(raw.get("workspace") or ""),
+        "patch_path": str(raw.get("patch_path") or raw.get("patch") or ""),
+        "error_class": str(raw.get("error_class") or ""),
+        "error": str(raw.get("error") or ""),
+        "integration_gain_pct": _to_float(raw.get("integration_gain_pct")),
+        "integration_base_tput": _to_float(raw.get("integration_base_tput")),
+        "integration_new_tput": _to_float(raw.get("integration_new_tput")),
+    }
+    for field in _COLLECTIVE_INTEGRATION_FIELDS:
+        out[field] = str(raw.get(field) or "")
+    if isinstance(raw.get("bandwidth"), dict):
+        out["bandwidth"] = raw["bandwidth"]
+    if isinstance(raw.get("artifact_files"), list):
+        out["artifact_files"] = [str(item) for item in raw["artifact_files"]]
+    return out
+
+
+def collect_collective(state: dict[str, Any]) -> dict[str, Any]:
+    """Build the top-level ``collective`` section from session state; never raises.
+
+    Mirrors the SharedState collective lane fields so a campaign stays auditable
+    even when it never reaches ``optimizations`` — a lane that wins its
+    microbenchmark but loses the E2E gate leaves no trace there.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        dict[str, Any]: A ``Collective`` envelope (``only_mode`` / ``attempts``
+        / ``last``), or ``{}`` when the lane never ran.
+    """
+    raw_attempts = state.get("collective_attempts")
+    if not isinstance(raw_attempts, list):
+        raw_attempts = []
+    last_raw = state.get("last_collective")
+    if not isinstance(last_raw, dict):
+        last_raw = {}
+    if not raw_attempts and not last_raw:
+        return {}
+
+    attempts = [
+        _normalize_collective_record(item)
+        for item in raw_attempts
+        if isinstance(item, dict)
+    ]
+    envelope: dict[str, Any] = {
+        "only_mode": bool(state.get("collective_only_mode")),
+        "attempts": attempts,
+    }
+    if last_raw:
+        envelope["last"] = _normalize_collective_record(last_raw)
+    return envelope
+
+
 def collect_source_files(
     session_dir: Path,
     baseline_path: str | None,

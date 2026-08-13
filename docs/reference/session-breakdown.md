@@ -108,6 +108,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "token_usage":                 { /* LLM token spend rollup (see below) */ },
   "langfuse":                    { /* Langfuse push receipt */ },
   "kernel_journey":              { /* kernel lifecycle journey */ },
+  "collective":                  { /* §11a collective-lane campaigns */ },
   "versions":                    { /* component/version stamps */ },
   "enablement":                  { /* enablement / targeted-build subsystem summary */ }
 }
@@ -374,6 +375,30 @@ The 4+1-stage kernel pipeline:
 * `rejected`: Kernels considered then dropped, with `reason`.
 
 The same `kernel_id` appears in multiple lists as it progresses.
+
+---
+
+## `collective` — `Collective`
+
+Multi-rank communication campaigns run at KERNEL entry, mirroring the
+`collective_only_mode`, `collective_attempts` and `last_collective` SharedState
+fields. Absent (`{}`) when the lane never ran.
+
+* `only_mode`: mirrors `HYPERLOOM_COLLECTIVE_ONLY`, so a reader can tell a
+  collective-only session from one where the lane merely happened to run.
+* `attempts`: one `CollectiveAttempt` per logical campaign, deduplicated by
+  `collective_attempt_id` so a resumed or salvaged run is not double-counted.
+* `last`: the most recent campaign record, which additionally carries the
+  measurement evidence the ledger rows omit — `bandwidth` (per case: `bytes`,
+  `algbw_gbps`, `busbw_gbps`) and `artifact_files`.
+
+This section is deliberately separate from `optimizations`. Adoption is decided
+by `integration_decision` (the E2E gate), not by `decision` (the
+microbenchmark), so a campaign that wins its micro run and then loses the gate
+never reaches `optimizations` — and without this section would leave no trace
+in the breakdown at all. Read `integration_gain_pct` against
+`integration_base_tput` / `integration_new_tput` for the throughput delta that
+actually decided the outcome; `kernel_speedup` is microbenchmark-only.
 
 ---
 
