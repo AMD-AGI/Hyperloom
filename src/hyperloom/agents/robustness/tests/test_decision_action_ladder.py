@@ -137,6 +137,25 @@ async def test_high_agent_stall_emits_alert_only():
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
 
 
+async def test_a_withheld_stall_is_observed_not_alerted():
+    """The LOW tier documented in SKILL.md: visible to an operator, no alert."""
+    ladder = ActionLadder()
+    out = await ladder.decide(
+        [
+            _sym(
+                "agent_stall",
+                SymptomSeverity.LOW,
+                summary="agent orchestration silent for 400s but its dispatched work reported 10s ago",
+                subject={"agent": "orchestration"},
+            )
+        ],
+        tick_index=0,
+        now_unix=1.0,
+    )
+    assert [i.type for i in out.intents] == [IntentType.SEND_MESSAGE]
+    assert out.intents[0].payload["topic"] == "observation"
+
+
 async def test_repeated_failure_high_emits_alert_plus_prune_branch():
     """Sustained repeated_failure (HIGH) prunes the offending family."""
     ladder = ActionLadder()

@@ -132,6 +132,7 @@ host -> subprocess -> envelope -> upstream PolicyGate path.
 |---------|----------|-----------------|--------|
 | `agent_stall` (≥ stall_timeout_s) | medium | `alert(medium)` | M1 |
 | `agent_stall` (≥ severity_high_after_s) | high | `alert(high)` | M1 |
+| `agent_stall`, own dispatched work still reporting (below `severity_high_after_s`) | low | `send_message(observation)` | M1.5 |
 | `crash_count_rising` (≥ 2) | medium | `alert(medium)` | M1 |
 | `crash_count_high` (≥ 5) | high | `alert(high)` | M1 |
 | `crash_count_emergency` (≥ 10) | high | `alert(high)` | M1 |
