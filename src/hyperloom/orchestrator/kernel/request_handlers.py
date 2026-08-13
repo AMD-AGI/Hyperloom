@@ -2645,41 +2645,39 @@ def _is_vllm_block_fp8(precision: str, quant_type: str) -> bool:
     }
 
 
-#: aiter's BF16/FP16 dense GEMM table. Its presence in a server log means the
-#: model's dense linears resolve through ``aiter/tuned_gemm.py``, which Forge's
-#: ``sglang_dense_bf16`` tuner writes via ``AITER_CONFIG_GEMM_BF16``.
-_AITER_BF16_DENSE_TABLE = "bf16_tuned_gemm.csv"
+#: Markers that identify which kernels aiter is serving, read off a server log.
+#: ``bf16_tuned_gemm.csv`` means dense linears resolve through
+#: ``aiter/tuned_gemm.py`` (Forge's ``sglang_dense_bf16`` writes that table via
+#: ``AITER_CONFIG_GEMM_BF16``); the fused-MoE markers mean the MoE layers run on
+#: aiter's CK kernels (Forge's ``fmoe_ck``, via ``AITER_CONFIG_FMOE``) rather
+#: than vLLM's Triton ``fused_moe``.
+_AITER_SERVING_MARKERS = {
+    "bf16_dense": ("bf16_tuned_gemm.csv",),
+    "fused_moe": ("[aiter] [fused_moe]", "Mxfp4 MoE backend"),
+}
 
 
-def _vllm_dense_bf16_serves_through_aiter(model_path: str, server_log: str) -> bool:
-    """Return whether a BF16 vLLM model's dense GEMMs resolve through aiter.
+def _aiter_serving_evidence(server_log: str) -> set[str]:
+    """Return which aiter kernel families a server log shows in use.
 
-    Forge only offers a real dense tuner for this path (``sglang_dense_bf16``,
-    writing ``AITER_CONFIG_GEMM_BF16``); the vLLM branch instead hands BF16
-    models to TunableOp, which across the 8/03-8/10 top-model sessions reported
-    ``improved_shapes=0`` on all 24 attempts while every one of those servers was
-    logging aiter BF16 lookups that fell back to ``using torch solution:0``.
-    Routing needs log evidence rather than the precision alone, because only the
-    log says which backend the model actually got.
+    Routing is driven by the log rather than by precision alone because only the
+    log says which backend the model actually got: the same checkpoint runs on
+    aiter or on the native path depending on the recipe's env.
     """
+    found: set[str] = set()
     if not server_log:
-        return False
+        return found
     try:
         with open(server_log, encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                if _AITER_BF16_DENSE_TABLE in line:
+                for family, markers in _AITER_SERVING_MARKERS.items():
+                    if family not in found and any(marker in line for marker in markers):
+                        found.add(family)
+                if len(found) == len(_AITER_SERVING_MARKERS):
                     break
-            else:
-                return False
     except OSError:
-        return False
-
-    from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
-
-    summary = summarize_model_config(model_path)
-    # MoE routing has its own target (fmoe_ck) and its own preflight gate; keep
-    # this to the dense case the evidence covers.
-    return bool(summary) and not bool(summary.get("is_moe"))
+        return set()
+    return found
 
 
 def _forge_framework_for_vllm(
@@ -2689,15 +2687,58 @@ def _forge_framework_for_vllm(
     quant_type: str,
     tunableop_input: str,
     aiter_bf16_dense: bool = False,
+    aiter_fused_moe: bool = False,
 ) -> str:
-    """Route vLLM runs served by aiter to Forge's AITER dense tuner family."""
+    """Route vLLM runs served by aiter to Forge's AITER tuner family.
+
+    Forge's vLLM branch only offers ``vllm_moe_triton`` and
+    ``vllm_dense_tunableop``, which target kernels an aiter-served model never
+    executes. Its sglang branch carries the tuners that do write the tables aiter
+    reads, and the router already accepts ``vllm-aiter`` as an alias for it.
+    """
     if framework != "vllm" or tunableop_input:
         return framework
     if _is_vllm_block_fp8(precision, quant_type):
         return "vllm-aiter"
     if aiter_bf16_dense and precision in ("bf16", "fp16"):
         return "vllm-aiter"
+    if aiter_fused_moe:
+        return "vllm-aiter"
     return framework
+
+
+def _resolve_vllm_aiter_routing(
+    *,
+    model_path: str,
+    server_log: str,
+    tp: int,
+) -> dict[str, bool]:
+    """Resolve the aiter-routing flags for a vLLM run from runtime evidence."""
+    flags = {"aiter_bf16_dense": False, "aiter_fused_moe": False}
+    evidence = _aiter_serving_evidence(server_log)
+    if not evidence:
+        return flags
+
+    from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
+
+    summary = summarize_model_config(model_path) or {}
+    if not summary:
+        return flags
+    is_moe = bool(summary.get("is_moe"))
+
+    # Dense BF16 routing is for dense checkpoints; a MoE model's dense side
+    # rides along with its MoE routing instead.
+    flags["aiter_bf16_dense"] = "bf16_dense" in evidence and not is_moe
+
+    if "fused_moe" in evidence and is_moe:
+        # Only route MoE when aiter's CK fused-MoE can actually serve this
+        # checkpoint at this TP -- otherwise the tuner has no reachable target.
+        from hyperloom.inference_optimizer.cli.model_gate import (
+            model_supports_aiter_ck_fused_moe,
+        )
+
+        flags["aiter_fused_moe"] = model_supports_aiter_ck_fused_moe(model_path, tp)
+    return flags
 
 
 def _vllm_block_fp8_profile_capture_required(
@@ -3341,7 +3382,7 @@ async def _run_forge_gemm_tuning(
         precision=precision,
         quant_type=quant_type,
         tunableop_input=tunableop_input,
-        aiter_bf16_dense=_vllm_dense_bf16_serves_through_aiter(model_path, kernel_sig_log),
+        **_resolve_vllm_aiter_routing(model_path=model_path, server_log=kernel_sig_log, tp=tp),
     )
     shape_capture: HandlerResult | None = None
     block_fp8_profile_capture = _vllm_block_fp8_profile_capture_required(

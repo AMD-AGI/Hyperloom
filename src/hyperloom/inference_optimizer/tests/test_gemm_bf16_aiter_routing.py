@@ -38,27 +38,63 @@ def _log(tmp_path, text: str) -> str:
     return str(path)
 
 
-class TestDenseBf16ServesThroughAiter:
-    def test_detects_aiter_bf16_lookup_on_a_dense_model(self, tmp_path):
-        assert krh._vllm_dense_bf16_serves_through_aiter(
-            _model(tmp_path), _log(tmp_path, AITER_BF16_MISS)
-        )
+AITER_FUSED_MOE = (
+    "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage default for "
+    "(256, 8192, 3072, 1536, 128, 4, 'ActivationType.Swiglu', 'torch.bfloat16', "
+    "'torch.float8_e4m3fn', 'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False)"
+)
 
-    def test_moe_models_are_left_to_their_own_routing(self, tmp_path):
-        assert not krh._vllm_dense_bf16_serves_through_aiter(
-            _model(tmp_path, moe=True), _log(tmp_path, AITER_BF16_MISS)
-        )
 
-    def test_no_aiter_evidence_in_log(self, tmp_path):
-        assert not krh._vllm_dense_bf16_serves_through_aiter(
-            _model(tmp_path), _log(tmp_path, "INFO server started\n")
-        )
+class TestAiterServingEvidence:
+    def test_detects_bf16_dense(self, tmp_path):
+        assert krh._aiter_serving_evidence(_log(tmp_path, AITER_BF16_MISS)) == {"bf16_dense"}
 
-    def test_missing_log_is_not_evidence(self, tmp_path):
-        assert not krh._vllm_dense_bf16_serves_through_aiter(_model(tmp_path), "")
-        assert not krh._vllm_dense_bf16_serves_through_aiter(
-            _model(tmp_path), str(tmp_path / "absent.log")
+    def test_detects_fused_moe(self, tmp_path):
+        assert krh._aiter_serving_evidence(_log(tmp_path, AITER_FUSED_MOE)) == {"fused_moe"}
+
+    def test_detects_mxfp4_moe_backend_line(self, tmp_path):
+        line = "INFO [mxfp4.py:513] Using 'AITER_MXFP4_BF16' Mxfp4 MoE backend."
+        assert krh._aiter_serving_evidence(_log(tmp_path, line)) == {"fused_moe"}
+
+    def test_no_evidence(self, tmp_path):
+        assert krh._aiter_serving_evidence(_log(tmp_path, "INFO server started\n")) == set()
+
+    def test_missing_log(self, tmp_path):
+        assert krh._aiter_serving_evidence("") == set()
+        assert krh._aiter_serving_evidence(str(tmp_path / "absent.log")) == set()
+
+
+class TestResolveVllmAiterRouting:
+    def test_dense_bf16_model(self, tmp_path):
+        flags = krh._resolve_vllm_aiter_routing(
+            model_path=_model(tmp_path), server_log=_log(tmp_path, AITER_BF16_MISS), tp=1
         )
+        assert flags == {"aiter_bf16_dense": True, "aiter_fused_moe": False}
+
+    def test_moe_model_on_aiter_fused_moe(self, tmp_path):
+        flags = krh._resolve_vllm_aiter_routing(
+            model_path=_model(tmp_path, moe=True),
+            server_log=_log(tmp_path, AITER_FUSED_MOE),
+            tp=1,
+        )
+        assert flags["aiter_fused_moe"] is True
+        # A MoE checkpoint's dense side rides along with its MoE routing.
+        assert flags["aiter_bf16_dense"] is False
+
+    def test_moe_blocked_when_ck_cannot_serve_the_shard(self, tmp_path):
+        """moe_intermediate_size=1536 shards to 192 at tp=8, which CK rejects."""
+        flags = krh._resolve_vllm_aiter_routing(
+            model_path=_model(tmp_path, moe=True),
+            server_log=_log(tmp_path, AITER_FUSED_MOE),
+            tp=8,
+        )
+        assert flags["aiter_fused_moe"] is False
+
+    def test_no_evidence_routes_nothing(self, tmp_path):
+        flags = krh._resolve_vllm_aiter_routing(
+            model_path=_model(tmp_path), server_log=_log(tmp_path, "INFO up\n"), tp=1
+        )
+        assert flags == {"aiter_bf16_dense": False, "aiter_fused_moe": False}
 
 
 class TestForgeFrameworkRouting:
@@ -121,7 +157,7 @@ class TestForgeFrameworkRouting:
             == "sglang"
         )
 
-    def test_fp8_per_token_still_uses_the_vllm_branch(self):
+    def test_fp8_per_token_dense_still_uses_the_vllm_branch(self):
         assert (
             krh._forge_framework_for_vllm(
                 framework="vllm",
@@ -129,6 +165,31 @@ class TestForgeFrameworkRouting:
                 quant_type="per_token",
                 tunableop_input="",
                 aiter_bf16_dense=False,
+            )
+            == "vllm"
+        )
+
+    def test_aiter_fused_moe_routes_regardless_of_precision(self):
+        for precision in ("mxfp4", "fp8", "bf16"):
+            assert (
+                krh._forge_framework_for_vllm(
+                    framework="vllm",
+                    precision=precision,
+                    quant_type="auto",
+                    tunableop_input="",
+                    aiter_fused_moe=True,
+                )
+                == "vllm-aiter"
+            ), precision
+
+    def test_triton_moe_runtime_keeps_the_vllm_branch(self):
+        assert (
+            krh._forge_framework_for_vllm(
+                framework="vllm",
+                precision="mxfp4",
+                quant_type="auto",
+                tunableop_input="",
+                aiter_fused_moe=False,
             )
             == "vllm"
         )
