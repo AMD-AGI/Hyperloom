@@ -295,7 +295,7 @@ def test_canonical_forge_artifacts_rejects_files_symlink_escape(
     assert str(outside) in caplog.text
 
 
-def test_validated_checkpoint_requires_commit_metrics_and_coverage(tmp_path):
+def test_validated_checkpoint_requires_commit_metrics_and_coverage(tmp_path, caplog):
     env = _make_repo(tmp_path)
     repo = env["repo"]
     kernel = env["kernel_agent"]
@@ -337,15 +337,19 @@ def test_validated_checkpoint_requires_commit_metrics_and_coverage(tmp_path):
     assert recovered["best_commit"] == best_commit
     assert recovered["improved"] is True
     checkpoint["case_coverage"] = [{"CASE_ID": "case_001"}]
-    assert (
-        forge_submit._validated_forge_checkpoint(
-            checkpoint,
-            workspace=repo,
-            base_commit=base_commit,
-            shapes=shapes,
+    with caplog.at_level(logging.WARNING):
+        assert (
+            forge_submit._validated_forge_checkpoint(
+                checkpoint,
+                workspace=repo,
+                base_commit=base_commit,
+                shapes=shapes,
+            )
+            is None
         )
-        is None
-    )
+    # Discarding a KEEP the producer already published is the expensive outcome
+    # here, so it may not be inferred from a return value alone.
+    assert "case coverage mismatch" in caplog.text
 
 
 def test_a_checkpoint_that_reports_no_coverage_is_still_recoverable(tmp_path):
