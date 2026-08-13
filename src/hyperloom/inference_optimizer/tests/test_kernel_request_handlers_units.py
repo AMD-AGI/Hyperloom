@@ -1076,6 +1076,50 @@ class TestForgeGemmHelperCoverage:
         assert result["error_class"] == "model_path_missing"
 
     @pytest.mark.asyncio
+    async def test_run_forge_gemm_tuning_resolves_hf_repo_for_subprocess(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from hyperloom.inference_optimizer import model_config_utils
+
+        snapshot = tmp_path / "models--amd--DeepSeek-V4-Pro-MXFP4" / "snapshots" / "abc123"
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text(
+            json.dumps({"model_type": "deepseek_v3"}),
+            encoding="utf-8",
+        )
+        state = SharedState(
+            precision="mxfp4",
+            framework="vllm",
+            model_path="amd/DeepSeek-V4-Pro-MXFP4",
+            gpu_type="mi355x",
+            tp=8,
+            conc=64,
+        )
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(
+            model_config_utils,
+            "resolve_local_model_dir",
+            lambda _model_path: snapshot,
+        )
+
+        async def _fake_subprocess(_cmd, *, timeout_sec):
+            return 1, "", ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        payload = {"task_id": "deepseek-gemm"}
+
+        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        written = json.loads(
+            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
+        )
+        assert written["model_path"] == str(snapshot)
+
+    @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_maps_failed_micro_decision(self, tmp_path, monkeypatch):
         state = SharedState(
             precision="bf16",
