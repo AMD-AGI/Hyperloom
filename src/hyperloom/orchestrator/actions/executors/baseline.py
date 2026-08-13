@@ -1936,62 +1936,10 @@ class BaselineExecutor:
         """
         result = await self._run_once(ctx)
         params = ctx.task.params or {}
-        if result.get("status") in {
-            "required_patch_failed",
-            "required_patch_rollback_failed",
-        }:
-            rollback = result.get("warm_replay_rollback")
-            rollback_ok = bool(
-                isinstance(rollback, dict) and rollback.get("ok") is True
-            )
-            if not rollback_ok:
-                result["warm_replay_partial"] = {
-                    "status": "aborted",
-                    "reason": "rollback_not_verified",
-                    "kernel_skipped": True,
-                    "rollback": rollback or {},
-                }
-                return result
-            # Required Recipe timeline preparation is all-or-nothing. The first
-            # run did no benchmark and restored Recipe + Kernel changes, so run
-            # exactly one Config/Env-only fallback from the clean tree.
-            original = dict(params)
-            recipe_args = str(
-                original.get("recipe_extra_server_args") or ""
-            ).strip()
-            recipe_envs = dict(original.get("recipe_extra_envs") or {})
-            if not recipe_args and not recipe_envs:
-                result["warm_replay_partial"] = {
-                    "status": "skipped",
-                    "reason": "empty_recipe_config",
-                    "kernel_skipped": True,
-                }
-                return result
-            try:
-                params["patches"] = []
-                params["required_patch_timeline"] = False
-                params["warm_kernel_apply_results"] = []
-                params["extra_server_args"] = recipe_args
-                params["extra_envs"] = recipe_envs
-                fallback = await self._run_once(ctx)
-            finally:
-                params.clear()
-                params.update(original)
-            fallback["warm_replay_partial"] = {
-                "status": "config_env_only",
-                "reason": "required_patch_preparation_failed",
-                "failed_patch_ref": result.get("failed_patch_ref"),
-                "patch_statuses": (
-                    (result.get("required_patch_failure") or {}).get("patches")
-                    or []
-                ),
-                "kernel_skipped": True,
-                "rollback": rollback,
-            }
-            fallback["promoted_extra_server_args"] = recipe_args
-            fallback["promoted_extra_envs"] = recipe_envs
-            self._maybe_stop_on_missing_baseline_accuracy(ctx, fallback)
-            return fallback
+        # A failed required patch timeline means the donor is incompatible with
+        # the current tree. The run restored Recipe + Kernel changes and the
+        # result is returned as a failed warm replay; PRELUDE marks it failed
+        # and the session optimizes from the clean baseline.
         # "Already off" only when the operator explicitly disabled eval — via
         # ``--no-eval``, the param, or an extra_envs RUN_EVAL that is PRESENT and
         # falsey. An absent RUN_EVAL must NOT count.
