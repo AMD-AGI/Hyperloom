@@ -421,6 +421,23 @@ def test_derive_journal_outcome_other_kinds_keep_binary_behaviour():
     assert derive_journal_outcome("profile", {"status": "reverted"}, promotable=True) == OUTCOME_KEEP
 
 
+def test_a_step_that_declined_to_run_is_not_a_keep():
+    """A conc_sweep with nothing to compare succeeds without doing anything."""
+    out = derive_journal_outcome(
+        "conc_sweep",
+        {"status": "succeeded", "was_skipped": True, "skip_reason": "no_optimization_to_compare"},
+        promotable=True,
+    )
+    assert out == OUTCOME_NO_PROMOTE
+
+
+def test_the_skip_rule_outranks_the_per_status_verdict_too():
+    assert (
+        derive_journal_outcome("integrate_patch", {"status": "kept", "was_skipped": True}, promotable=True)
+        == OUTCOME_NO_PROMOTE
+    )
+
+
 def test_operation_kind_for_maps_kind_and_action():
     from hyperloom.orchestrator.state.optimization_journal import (
         operation_kind_for,

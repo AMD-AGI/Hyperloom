@@ -365,6 +365,11 @@ def derive_journal_outcome(
     For every other task kind the binary behaviour applies (``promotable`` →
     KEEP, else REVERT).
 
+    A result declaring ``was_skipped`` outranks both rules. A skip succeeds by
+    design -- a concurrency sweep with no optimization to compare has nothing
+    to do and says so -- but a success that changed nothing is not a KEEP, and
+    recording it as one leaves the session claiming a step it never took.
+
     Args:
         task_kind: The settled task's kind.
         result_dict: The task result dict (``status`` drives the patch kinds).
@@ -374,6 +379,8 @@ def derive_journal_outcome(
         One of :data:`OUTCOME_KEEP` / :data:`OUTCOME_REVERT` /
         :data:`OUTCOME_NO_PROMOTE`.
     """
+    if (result_dict or {}).get("was_skipped"):
+        return OUTCOME_NO_PROMOTE
     if (task_kind or "").lower() in _STATUS_DRIVEN_JOURNAL_KINDS:
         status = str((result_dict or {}).get("status") or "").strip().lower()
         if status in _JOURNAL_KEEP_STATUSES:
