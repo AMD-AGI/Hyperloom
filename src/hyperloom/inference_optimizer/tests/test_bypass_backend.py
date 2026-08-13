@@ -1293,14 +1293,56 @@ def test_num_prompts_warmups_passthrough(tmp_path, monkeypatch):
     assert captured.get("num_warmups") == "3"
 
 
-def test_server_env_injects_rocr_visible_devices(monkeypatch):
+def test_server_env_exports_every_materialized_env(monkeypatch):
+    """A candidate that differs only by an env must reach the server as such.
+
+    Dropping these silently reruns the baseline and scores the noise.
+    """
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
-    env = bypass_runner._server_env(False, None, {"ROCR_VISIBLE_DEVICES": "0,1,2,3"})
+
+    env = bypass_runner._server_env(
+        False,
+        None,
+        {
+            "SGLANG_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "PYTORCH_TUNABLEOP_ENABLED": "1",
+            "ROCR_VISIBLE_DEVICES": "0,1,2,3",
+            "TP": 8,
+            "RANDOM_RANGE_RATIO": 0.8,
+        },
+    )
+
+    assert env["SGLANG_USE_AITER"] == "1"
+    assert env["VLLM_ROCM_USE_AITER_MHA"] == "0"
+    assert env["PYTORCH_TUNABLEOP_ENABLED"] == "1"
     assert env["ROCR_VISIBLE_DEVICES"] == "0,1,2,3"
+    # YAML scalars arrive as int/float and must not reach putenv unstringified.
+    assert env["TP"] == "8"
+    assert env["RANDOM_RANGE_RATIO"] == "0.8"
     assert "OPENAI_API_KEY" not in env
+
     env2 = bypass_runner._server_env(False, None, {})
     # No pin in bench_envs: whatever the parent env had (may be unset).
     assert env2.get("ROCR_VISIBLE_DEVICES") == os.environ.get("ROCR_VISIBLE_DEVICES")
+
+
+def test_server_env_lets_config_path_win_like_magpie(monkeypatch):
+    """Magpie exports the YAML PATH to the server; bypass matches it."""
+    monkeypatch.setenv("PATH", "/inherited/bin")
+
+    env = bypass_runner._server_env(False, None, {"PATH": "/opt/venv/bin:/usr/bin"})
+
+    assert env["PATH"] == "/opt/venv/bin:/usr/bin"
+
+
+def test_server_env_pins_profiler_dirs_when_profiling(tmp_path):
+    env = bypass_runner._server_env(True, str(tmp_path), {"SGLANG_USE_AITER": "1"})
+
+    assert env["VLLM_TORCH_PROFILER_DIR"] == str(tmp_path)
+    assert env["SGLANG_TORCH_PROFILER_DIR"] == str(tmp_path)
+    assert env["ATOM_TORCH_PROFILER_DIR"] == str(tmp_path)
+    assert env["SGLANG_USE_AITER"] == "1"
 
 
 def _eval_client_run(monkeypatch, *, client_rc=0, eval_rc=1):

@@ -34,7 +34,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.env_safety import scrub_benchmark_process_env
+from hyperloom.common.env_safety import build_benchmark_env
 
 from . import bypass_analysis
 from . import bypass_engine
@@ -837,19 +837,20 @@ def _server_env(
     profile_dir: str | None,
     bench_envs: dict | None = None,
 ) -> dict[str, str]:
-    """Build the server subprocess env (parent + profiler dirs + GPU pin)."""
-    env = scrub_benchmark_process_env(os.environ.copy())
-    # GPU pin: the materializer writes ROCR_VISIBLE_DEVICES into benchmark.envs
-    # (reconciled against TP). Inject it so the server binds the same cards
-    # Magpie would; missing on single-GPU pods (harmless).
-    rocr = str((bench_envs or {}).get("ROCR_VISIBLE_DEVICES") or "").strip()
-    if rocr:
-        env["ROCR_VISIBLE_DEVICES"] = rocr
+    """Build the server subprocess env from the materialized benchmark envs.
+
+    Magpie exports the whole ``benchmark.envs`` mapping to the server, so a
+    candidate that differs from the baseline only by an env is only a real
+    experiment if bypass does the same.
+    """
+    profiler_dirs: dict[str, str] = {}
     if profile and profile_dir:
-        env["VLLM_TORCH_PROFILER_DIR"] = profile_dir
-        env["SGLANG_TORCH_PROFILER_DIR"] = profile_dir
-        env["ATOM_TORCH_PROFILER_DIR"] = profile_dir
-    return env
+        profiler_dirs = {
+            "VLLM_TORCH_PROFILER_DIR": profile_dir,
+            "SGLANG_TORCH_PROFILER_DIR": profile_dir,
+            "ATOM_TORCH_PROFILER_DIR": profile_dir,
+        }
+    return build_benchmark_env(bench_envs, profiler_dirs)
 
 
 def _launch_server(cmd: list[str], env: dict[str, str], server_log: Path) -> subprocess.Popen:
@@ -904,7 +905,7 @@ def _run_subprocess(cmd: list[str], timeout_s: float, workspace: Path, tag: str)
             capture_output=True,
             text=True,
             timeout=timeout_s,
-            env=scrub_benchmark_process_env(os.environ.copy()),
+            env=build_benchmark_env(),
         )
     except subprocess.TimeoutExpired:
         _append_log(workspace, tag, "", f"{tag} timed out after {timeout_s}s")

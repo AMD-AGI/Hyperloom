@@ -154,6 +154,27 @@ def test_variant_env_key_allows_workload_pins_and_blocks_hijacks():
     assert not common_env_safety.is_allowed_variant_env_key("")
 
 
+def test_build_benchmark_env_layers_over_parent_and_normalizes(monkeypatch):
+    monkeypatch.setenv("INHERITED_KNOB", "from-parent")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
+    monkeypatch.setenv("SGLANG_USE_AITER", "0")
+
+    env = common_env_safety.build_benchmark_env(
+        {"SGLANG_USE_AITER": "1", "TP": 8, "RANDOM_RANGE_RATIO": 0.8},
+        None,
+        {"TP": 4, "lowercase_knob": "on"},
+    )
+
+    assert env["INHERITED_KNOB"] == "from-parent"
+    assert env["SGLANG_USE_AITER"] == "1"
+    # Later layers win, and YAML scalars are stringified for putenv.
+    assert env["TP"] == "4"
+    assert env["RANDOM_RANGE_RATIO"] == "0.8"
+    # Env names are conventionally upper case; a lower-case key would be inert.
+    assert env["LOWERCASE_KNOB"] == "on"
+    assert "OPENAI_API_KEY" not in env
+
+
 def test_redact_secret_values_masks_assignments_and_bearer_tokens():
     text = "OPENAI_API_KEY=ak-sensitive-value Authorization: Bearer sensitive-token"
 

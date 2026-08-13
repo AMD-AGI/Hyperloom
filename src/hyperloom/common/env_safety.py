@@ -10,6 +10,7 @@ package import cycles.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Mapping
 
@@ -368,6 +369,18 @@ def scrub_benchmark_process_env(env: dict[str, str]) -> dict[str, str]:
     return env
 
 
+def build_benchmark_env(*layers: Mapping[str, object] | None) -> dict[str, str]:
+    """Build a benchmark subprocess env: parent env under each layer, in order.
+
+    Later layers win. Keys are upper-cased and values stringified, because the
+    materialized YAML carries them as plain scalars (``TP: 1``).
+    """
+    env = os.environ.copy()
+    for layer in layers:
+        env.update({str(key).upper(): str(value) for key, value in (layer or {}).items()})
+    return scrub_benchmark_process_env(env)
+
+
 def redact_secret_values(text: str) -> str:
     """Mask recognizable credential values before diagnostic text is persisted."""
     out = str(text or "")
@@ -383,6 +396,7 @@ __all__ = [
     "BLOCKED_UNTRUSTED_ENV_NAMES",
     "BLOCKED_VARIANT_ENV_NAMES",
     "GPU_MASK_ENV_NAMES",
+    "build_benchmark_env",
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",
     "is_allowed_external_env_key",

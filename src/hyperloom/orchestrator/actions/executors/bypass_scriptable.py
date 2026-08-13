@@ -26,7 +26,7 @@ from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env_safety import scrub_benchmark_process_env
+from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.inference_optimizer.session.paths import asset_root
 
 
@@ -97,25 +97,24 @@ def build_scriptable_env(
     Returns:
         The environment mapping for the scriptable subprocess.
     """
-    env = scrub_benchmark_process_env(os.environ.copy())
-    env["MODEL"] = str(bench.get("model") or env.get("MODEL", ""))
+    # Defaults sit under the YAML envs so a config can override them; the
+    # run-scoped values sit above so a stale config cannot redirect the run.
+    defaults: dict[str, str] = {"MODEL": str(bench.get("model") or os.environ.get("MODEL", ""))}
     if bench.get("precision"):
-        env["PRECISION"] = str(bench["precision"])
-    for key, value in (bench.get("envs") or {}).items():
-        env[str(key).upper()] = str(value)
-    env["RUNNER_TYPE"] = runner_type
-    env["RESULT_FILENAME"] = "inferencex_result"
-    env["RESULT_DIR"] = str(workspace)
-    # Profiler: scriptable scripts (e.g. xDiT) gate tracing on PROFILE=1 and
-    # read the trace dir from VLLM/SGLANG_TORCH_PROFILER_DIR (mirrors the
-    # serving path's _server_env). Only set when enabled so default runs are
-    # untouched.
+        defaults["PRECISION"] = str(bench["precision"])
+    run_scoped: dict[str, str] = {
+        "RUNNER_TYPE": runner_type,
+        "RESULT_FILENAME": "inferencex_result",
+        "RESULT_DIR": str(workspace),
+    }
+    # Scriptable scripts (e.g. xDiT) gate tracing on PROFILE=1 and read the
+    # trace dir from VLLM/SGLANG_TORCH_PROFILER_DIR.
     if profile:
-        env["PROFILE"] = "1"
+        run_scoped["PROFILE"] = "1"
         if profile_dir:
-            env["VLLM_TORCH_PROFILER_DIR"] = profile_dir
-            env["SGLANG_TORCH_PROFILER_DIR"] = profile_dir
-    return scrub_benchmark_process_env(env)
+            run_scoped["VLLM_TORCH_PROFILER_DIR"] = profile_dir
+            run_scoped["SGLANG_TORCH_PROFILER_DIR"] = profile_dir
+    return build_benchmark_env(defaults, bench.get("envs"), run_scoped)
 
 
 def run_scriptable(
