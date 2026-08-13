@@ -685,7 +685,6 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         worktree_kernel=str(kernel),
         driver=str(driver),
         workspace=str(workspace),
-        shapes={"primary": {"M": 128}},
         snr_threshold=30.0,
         max_iters=8,
         max_hours=1.0,
@@ -743,7 +742,6 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         "--kernel": str(kernel),
         "--driver": str(driver),
         "--workspace": str(workspace),
-        "--shapes-json": json.dumps({"primary": {"M": 128}}),
         "--snr-threshold": "30.0",
         "--max-iters": "8",
         "--max-hours": "1.0",
@@ -764,7 +762,11 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     for flag, value in expected_flags.items():
         assert flag in command, flag
         assert command[command.index(flag) + 1] == value, flag
-    assert "--kernel-kind" not in command
+    # forge-loop parses with click and has no ignore_unknown_options, so any
+    # option it does not declare aborts the child at exit 2 before the campaign
+    # starts. Shapes reach it through the invocation spec instead.
+    for unsupported in ("--kernel-kind", "--shapes-json", "--e2e-pct"):
+        assert unsupported not in command, unsupported
 
     assert captured["env"]["GPU_TARGET"] == "gfx950"
     # The card, alongside the target it builds for: KernelForge addresses a
@@ -904,7 +906,6 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             worktree_kernel=str(case["kernel"]),
             driver=str(driver),
             workspace=str(workspace),
-            shapes={},
             snr_threshold=30.0,
             max_iters=1,
             max_hours=1.0,
@@ -998,7 +999,6 @@ def test_cli_timeout_recovers_only_this_run_s_checkpoint(tmp_path, monkeypatch):
         worktree_kernel=str(kernel),
         driver=str(driver),
         workspace=str(workspace),
-        shapes={},
         snr_threshold=30.0,
         max_iters=8,
         max_hours=1.0,
@@ -1940,7 +1940,6 @@ def test_unclearable_stale_artifact_aborts_before_starting_a_campaign(
             worktree_kernel=str(kernel),
             driver=str(driver),
             workspace=str(workspace),
-            shapes={},
             snr_threshold=30.0,
             max_iters=8,
             max_hours=1.0,
@@ -3271,7 +3270,6 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         "--fellow",
         "--experiment-id",
         "--experience-id",
-        "--e2e-pct",
         "--operator-name",
         "--source-files",
         "--program-md-file",

@@ -105,29 +105,6 @@ _FORGE_MIN_BUDGET_SEC = 3600
 _FORGE_SHUTDOWN_GRACE_SEC = 30
 
 
-def _forge_e2e_pct(candidate: dict) -> float | None:
-    """Return a finite 0..100 GPU-time share for Forge's E2E projection.
-
-    A task group represents every traced row affected by one source-level patch,
-    so its aggregate share is authoritative. The primary row is only a fallback
-    for legacy candidates without task-group metadata.
-    """
-    group = candidate.get("task_group")
-    if isinstance(group, dict) and group.get("aggregate_gpu_pct") is not None:
-        raw_value = group.get("aggregate_gpu_pct")
-    else:
-        raw_value = candidate.get("gpu_pct")
-    if raw_value is None:
-        return None
-    try:
-        value = float(raw_value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(value) or not 0.0 <= value <= 100.0:
-        return None
-    return value
-
-
 class ForgeLoopOutcome(NamedTuple):
     """Result and recovery evidence from one forge-loop subprocess."""
 
@@ -3407,7 +3384,6 @@ def _run_loop_via_cli(
     worktree_kernel: str,
     driver: str,
     workspace: str,
-    shapes: dict,
     snr_threshold: float,
     max_iters: int,
     max_hours: float,
@@ -3421,7 +3397,6 @@ def _run_loop_via_cli(
     forge_log: Path,
     timeout_s: int,
     deadline_unix: float = 0.0,
-    e2e_pct: float | None = None,
     operator_name: str = "",
     experience_id: str = "",
     framework: str = "",
@@ -3484,8 +3459,6 @@ def _run_loop_via_cli(
         driver,
         "--workspace",
         workspace,
-        "--shapes-json",
-        _json.dumps(shapes),
         "--snr-threshold",
         str(snr_threshold),
         "--max-iters",
@@ -3531,10 +3504,6 @@ def _run_loop_via_cli(
         cmd += ["--program-md-file", str(program_md_file)]
     if invocation_spec_file and Path(invocation_spec_file).is_file():
         cmd += ["--invocation-spec-file", str(Path(invocation_spec_file).resolve())]
-    # Forward the kernel's E2E time share so forge-loop's baseline profile can
-    # project a per-kernel end-to-end optimization potential.
-    if e2e_pct is not None:
-        cmd += ["--e2e-pct", str(e2e_pct)]
     if operator_name:
         cmd += ["--operator-name", operator_name]
     if target_functions:
@@ -3702,9 +3671,9 @@ def _run_rewrite_via_cli(
     builds the producer's own argv rather than stripping options off the
     generic one, and reads only the caller-chosen result file.
 
-    ``shapes`` is a list of per-case dimension mappings, not the generic
-    forge-loop selector dict: the rewrite producer coerces this argument with
-    ``list()``, so a mapping would degrade into a list of its keys.
+    ``shapes`` is a list of per-case dimension mappings, not the selector dict
+    Hyperloom carries internally: the rewrite producer coerces this argument
+    with ``list()``, so a mapping would degrade into a list of its keys.
 
     ``invocation_spec_file`` is the evidence the producer's driver-preparation
     stage reads when the handed-over driver does not conform. A synthesized
@@ -4572,28 +4541,6 @@ def submit(
                 max_iters = _compiled_cap
         snr_threshold = float((candidate.get("targets") or {}).get("snr_db", 30.0))
 
-        # Forward the task group's aggregate trace GPU-time share as the best
-        # available Amdahl approximation. Absent/invalid -> leave the optional
-        # E2E projection unavailable.
-        e2e_pct = _forge_e2e_pct(candidate)
-        task_group = candidate.get("task_group")
-        aggregate_gpu_pct = (
-            task_group.get("aggregate_gpu_pct")
-            if isinstance(task_group, dict)
-            else None
-        )
-        if (
-            candidate.get("gpu_pct") is not None
-            or aggregate_gpu_pct is not None
-        ) and e2e_pct is None:
-            log.warning(
-                "forge: ignoring invalid GPU-time share for optional E2E "
-                "projection: kernel_id=%s gpu_pct=%r aggregate_gpu_pct=%r",
-                candidate.get("kernel_id", ""),
-                candidate.get("gpu_pct"),
-                aggregate_gpu_pct,
-            )
-
         # Run the loop in an isolated, hard-killable subprocess so a hung fellow
         # can never freeze the orchestrator. Fellow stability env defaults are
         # applied inside _run_loop_via_cli, scoped to the child env only.
@@ -4641,7 +4588,6 @@ def submit(
             worktree_kernel=worktree_kernel,
             driver=driver,
             workspace=workspace,
-            shapes=shapes,
             snr_threshold=snr_threshold,
             max_iters=max_iters,
             max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),
@@ -4658,7 +4604,6 @@ def submit(
                 time.time() + 1.0,
                 started + timeout_s,
             ),
-            e2e_pct=e2e_pct,
             operator_name=logical_operator,
             experience_id=output_dir.name,
             framework=source_framework,

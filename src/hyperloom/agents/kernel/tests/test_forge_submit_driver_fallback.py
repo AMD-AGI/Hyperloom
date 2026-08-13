@@ -234,7 +234,10 @@ def test_grouped_multi_shape_task_requires_one_prepared_driver(monkeypatch, tmp_
 
     assert result["returncode"] == 0
     _assert_staged_placeholder(captured["driver"], tmp_path / "repo")
-    assert captured["shapes"]["validation"] == selectors
+    # The grouped selectors no longer reach forge-loop as an argument; they stay
+    # on this side as the case coverage a recovered checkpoint is validated
+    # against, so the resolution itself is what has to hold.
+    assert forge_submit._shapes_from_candidate(candidate)["validation"] == selectors
 
 
 def test_grouped_multi_shape_task_rejects_incomplete_invocation_spec(tmp_path):
