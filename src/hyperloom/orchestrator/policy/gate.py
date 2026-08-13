@@ -556,6 +556,11 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # leg's CLOSE transition back the right to speak for this one.
         "resumed_ts",
         "max_minutes",
+        # Sizes the closing reserve, so it decides how much of ``max_minutes``
+        # is still usable: locking the budget without locking this one leaves
+        # the same forgery one field over -- a large value spends the session
+        # outright, a zero one erases the window the CLOSE report needs.
+        "closing_grace_sec",
         # fact-layer KEEP ledger; Coordinator is the sole writer.
         "optimization_stack",
         "gain_per_stack_entry",
