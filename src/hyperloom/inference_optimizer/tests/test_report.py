@@ -274,9 +274,12 @@ def test_a_skip_with_no_recorded_reason_still_says_it_was_skipped():
     assert "did not run" in rp._explain_stop_reason("conc_sweep_done", state)
 
 
-def test_a_sweep_that_spent_its_budget_is_not_reported_as_one_that_never_ran():
+def test_a_sweep_that_spent_its_budget_is_not_reported_as_one_that_never_ran(tmp_path):
     """The budget path records was_skipped for a sweep that ran its whole ladder."""
-    state = _SweepState(
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    live = SharedState()
+    live.record_conc_sweep(
         {
             "status": "skipped",
             "was_skipped": True,
@@ -284,6 +287,11 @@ def test_a_sweep_that_spent_its_budget_is_not_reported_as_one_that_never_ran():
             "skip_reason": "budget_exhausted_no_successful_pairs",
         }
     )
+    live.save(tmp_path)
+    # The report is written from a reloaded state, so the flag that separates
+    # the two skips has to survive the round trip to be readable at all.
+    state = SharedState.load_or_init(tmp_path)
+
     msg = rp._explain_stop_reason("conc_sweep_done", state)
     assert "did not run" not in msg
     assert "budget" in msg

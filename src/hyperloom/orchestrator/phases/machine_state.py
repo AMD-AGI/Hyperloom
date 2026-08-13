@@ -2143,9 +2143,13 @@ def exit_normal_sweep(
         if cs_status in ("succeeded", "partial", "completed", "skipped"):
             evidence: dict[str, Any] = {"conc_sweep_status": cs_status}
             # A sweep that declined to run is also terminal, and the exit
-            # reason alone cannot tell the two apart afterwards.
+            # reason alone cannot tell the two apart afterwards. was_skipped
+            # covers both declining and spending the whole budget without a
+            # comparable pair, so it is only carried with the flag that
+            # separates them (see kernel.conc_sweep.conc_sweep_declined_to_run).
             if last_conc.get("was_skipped"):
                 evidence["conc_sweep_was_skipped"] = True
+                evidence["conc_sweep_budget_exhausted"] = bool(last_conc.get("budget_exhausted"))
                 evidence["conc_sweep_skip_reason"] = str(last_conc.get("skip_reason") or "")
             return "conc_sweep_done", evidence
     remaining = phase_budget_remaining_seconds(
