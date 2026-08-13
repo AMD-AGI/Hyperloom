@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import signal
 import time
+from typing import Callable
 
 import pytest
 
@@ -17,7 +18,7 @@ from hyperloom.orchestrator.roles._llm_stability_env import (
     DEFAULT_API_TIMEOUT_MS,
     apply_llm_stability_env,
 )
-from hyperloom.orchestrator.kernel.request_handlers import _run_subprocess
+from hyperloom.orchestrator.kernel.request_handlers import _run_subprocess, _tool_label
 
 
 def test_apply_llm_stability_env_sets_defaults():
@@ -52,6 +53,44 @@ async def test_run_subprocess_returns_output_normally():
     )
     assert rc == 0
     assert "hello-stdout" in stdout
+
+
+async def test_run_subprocess_unbuffers_its_child():
+    """A block-buffered child would look dead between flushes."""
+    rc, stdout, _stderr = await _run_subprocess(
+        ["python3", "-c", "import os; print(os.environ['PYTHONUNBUFFERED'])"],
+        timeout_sec=30,
+    )
+    assert rc == 0
+    assert stdout.strip() == "1"
+
+
+async def test_run_subprocess_counts_the_lines_its_child_emits(monkeypatch):
+    """The heartbeat above it reports only when this tally moves."""
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill
+
+    seen: list[Callable[[], None]] = []
+    real = _subprocess_kill.run_with_session_kill
+
+    def _spy(cmd, **kwargs):
+        seen.append(kwargs.get("on_output"))
+        return real(cmd, **kwargs)
+
+    monkeypatch.setattr(_subprocess_kill, "run_with_session_kill", _spy)
+    await _run_subprocess(
+        ["python3", "-c", "print('a')\nprint('b')"],
+        timeout_sec=30,
+    )
+
+    assert len(seen) == 1
+    assert callable(seen[0])
+
+
+def test_a_tool_is_named_after_the_script_it_runs():
+    """``kernel_tool:tracelens_analysis`` is what an operator has to recognize."""
+    assert _tool_label(["python3", "/opt/tools/tracelens_analysis.py", "--x"]) == "tracelens_analysis"
+    assert _tool_label(["ls", "-l"]) == "ls"
+    assert _tool_label([]) == "subprocess"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process-group kill is POSIX-only")

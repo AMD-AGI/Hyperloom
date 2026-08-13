@@ -33,7 +33,7 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
-from ...trace.task_progress import report_progress
+from ...trace.task_progress import heartbeat_while_output_flows, report_progress
 from . import _server_lifecycle as _lifecycle
 from ._file_lock import best_effort_file_lock
 from ._aiter_jit import (
@@ -2850,14 +2850,19 @@ class BaselineExecutor:
                 )
                 subprocess_runtime_sec = max(0.0, time.time() - subprocess_started_unix)
             else:
-                proc = await asyncio.to_thread(
-                    run_with_session_kill,
-                    cmd,
-                    env=env,
-                    cwd=str(output_dir),
-                    timeout=timeout_sec,
-                    server_log_path=watchdog_server_log,
-                )
+                async with heartbeat_while_output_flows(
+                    unit="baseline_round",
+                    label="benchmark",
+                ) as activity:
+                    proc = await asyncio.to_thread(
+                        run_with_session_kill,
+                        cmd,
+                        env=env,
+                        cwd=str(output_dir),
+                        timeout=timeout_sec,
+                        server_log_path=watchdog_server_log,
+                        on_output=activity.note,
+                    )
                 subprocess_runtime_sec = max(
                     0.0,
                     time.time() - subprocess_started_unix,

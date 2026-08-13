@@ -236,6 +236,29 @@ def test_the_single_round_path_reports_too(tmp_path):
     assert at_launch == [["single"]]
 
 
+def test_a_round_is_handed_the_liveness_callback_its_heartbeat_needs(tmp_path):
+    """A round outlives its start report; only child output can extend it."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    seen: list = []
+    inner, _state = _cold_then_hot_fake_run()
+
+    def fake_run(cmd, *args, **kwargs):
+        seen.append(kwargs.get("on_output"))
+        return inner(cmd, *args, **kwargs)
+
+    executor = _executor(base, tmp_path, baseline_double_run=False)
+    ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert [callable(cb) for cb in seen] == [True]
+
+
 def test_a_failing_warmup_round_still_reported_that_it_started(tmp_path):
     """The failure path returns early; only the entry report covers it."""
     base = tmp_path / "base.yaml"

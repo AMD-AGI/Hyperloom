@@ -310,6 +310,37 @@ def test_run_with_session_kill_streams_child_output_to_parent(capsys):
     assert "child-err" in captured.err
 
 
+def test_run_with_session_kill_reports_each_line_of_child_output():
+    """The liveness callback fires while the child runs, once per line it emits."""
+    code = "import sys, time\nfor i in range(3):\n    print(i, flush=True)\n    time.sleep(0.05)\n"
+    lines: list[float] = []
+
+    cp = run_with_session_kill(
+        [sys.executable, "-c", code],
+        timeout=10,
+        on_output=lambda: lines.append(time.monotonic()),
+    )
+
+    assert cp.returncode == 0
+    assert len(lines) == 3
+
+
+def test_run_with_session_kill_survives_a_broken_liveness_callback():
+    """Reporting is best-effort; a raising callback must not eat child output."""
+
+    def _boom() -> None:
+        raise RuntimeError("callback is broken")
+
+    cp = run_with_session_kill(
+        [sys.executable, "-c", "print('still-captured', flush=True)"],
+        timeout=10,
+        on_output=_boom,
+    )
+
+    assert cp.returncode == 0
+    assert "still-captured" in (cp.stdout or "")
+
+
 def test_run_with_session_kill_legacy_timeout_still_raises():
     """With ``soft_deadline_sec`` None, a child exceeding the hard ``timeout`` still raises ``TimeoutExpired``."""
     with pytest.raises(subprocess.TimeoutExpired):

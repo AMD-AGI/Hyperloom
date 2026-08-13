@@ -24,13 +24,20 @@ unit test, a CLI entry point driving an executor directly — it is a no-op.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+import asyncio
+import threading
+from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
-from typing import Any, Awaitable, Callable, Iterator
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterator
 
 import logging
 
 log = logging.getLogger(__name__)
+
+# Well below the 300s a consumer waits before calling an agent silent, so a
+# step that is genuinely working is never one missed tick away from an
+# accusation.
+_OUTPUT_HEARTBEAT_INTERVAL_S: float = 60.0
 
 ProgressReporter = Callable[..., Awaitable[None]]
 
@@ -80,4 +87,88 @@ async def report_progress(**note: Any) -> None:
         log.debug("task progress note dropped: %r", exc)
 
 
-__all__ = ["ProgressReporter", "progress_scope", "report_progress"]
+class OutputActivity:
+    """Thread-safe tally of the output a child process has produced.
+
+    The reader lives in a subprocess pump thread while the heartbeat lives on
+    the event loop, so the two sides share nothing but this counter.
+    """
+
+    def __init__(self) -> None:
+        self._lines = 0
+        self._lock = threading.Lock()
+
+    def note(self) -> None:
+        """Record one more line of child output. Callable from any thread."""
+        with self._lock:
+            self._lines += 1
+
+    def count(self) -> int:
+        """Read the tally.
+
+        Returns:
+            int: Lines recorded so far; never decreases.
+        """
+        with self._lock:
+            return self._lines
+
+
+@asynccontextmanager
+async def heartbeat_while_output_flows(
+    *,
+    interval_s: float = _OUTPUT_HEARTBEAT_INTERVAL_S,
+    **note: Any,
+) -> AsyncIterator[OutputActivity]:
+    """Keep reporting a long step alive for as long as its child keeps talking.
+
+    Never a bare timer: a tick that saw no new output reports nothing, so a
+    wedged child falls silent here too and stays accusable. Faking the
+    heartbeat would disarm the very signal it feeds.
+
+    Args:
+        interval_s (float): Seconds between ticks.
+        **note (Any): Fields stamped on every heartbeat, e.g. ``unit`` and
+            ``label``.
+
+    Yields:
+        OutputActivity: Handle the subprocess reader calls :meth:`note` on.
+    """
+    activity = OutputActivity()
+    driver = asyncio.create_task(_report_new_output(activity, interval_s, note))
+    try:
+        yield activity
+    finally:
+        driver.cancel()
+        with suppress(asyncio.CancelledError):
+            await driver
+
+
+async def _report_new_output(
+    activity: OutputActivity,
+    interval_s: float,
+    note: dict[str, Any],
+) -> None:
+    """Report one heartbeat per interval in which new output arrived.
+
+    Args:
+        activity (OutputActivity): Counter the reader thread advances.
+        interval_s (float): Seconds between ticks.
+        note (dict[str, Any]): Fields stamped on every heartbeat.
+    """
+    seen = 0
+    while True:
+        await asyncio.sleep(interval_s)
+        current = activity.count()
+        if current == seen:
+            continue
+        seen = current
+        await report_progress(status="running", output_lines=current, **note)
+
+
+__all__ = [
+    "OutputActivity",
+    "ProgressReporter",
+    "heartbeat_while_output_flows",
+    "progress_scope",
+    "report_progress",
+]

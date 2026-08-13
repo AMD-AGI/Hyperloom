@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 log = logging.getLogger(__name__)
 
@@ -293,14 +294,24 @@ _DETOK_STALL_GRACE_SEC_DEFAULT: float = 1800.0
 class _StreamCapture:
     """Capture child output while mirroring each line to the parent stream."""
 
-    def __init__(self, proc: subprocess.Popen, *, text: bool) -> None:
+    def __init__(
+        self,
+        proc: subprocess.Popen,
+        *,
+        text: bool,
+        on_output: Callable[[], None] | None = None,
+    ) -> None:
         """Set up capture/mirror threads for a child's stdout and stderr.
 
         Args:
             proc: The child process whose pipes should be captured.
             text: Whether the pipes are in text (``str``) or bytes mode.
+            on_output: Called once per observed unit of child output, from the
+                pump thread. Used as liveness evidence by callers that report
+                progress for a long step.
         """
         self._text = text
+        self._on_output = on_output
         self._stdout_chunks: list[str | bytes] = []
         self._stderr_chunks: list[str | bytes] = []
         self._threads: list[threading.Thread] = []
@@ -344,6 +355,15 @@ class _StreamCapture:
             self._join(self._stderr_chunks) if self._stderr_chunks else empty,
         )
 
+    def note_output(self) -> None:
+        """Report one unit of child output to the caller's liveness callback."""
+        if self._on_output is None:
+            return
+        try:
+            self._on_output()
+        except Exception:  # noqa: BLE001 - liveness reporting never breaks capture
+            pass
+
     def _join(self, chunks: list[str | bytes]) -> str | bytes:
         """Concatenate captured chunks using the appropriate empty separator.
 
@@ -370,6 +390,7 @@ class _StreamCapture:
                     break
                 chunks.append(chunk)
                 self._mirror(chunk, mirror)
+                self.note_output()
         finally:
             try:
                 pipe.close()
@@ -626,8 +647,15 @@ def run_with_session_kill(
     server_dead_grace_sec: float | None = None,
     detok_stall_grace_sec: float | None = None,
     server_already_ready: bool = False,
+    on_output: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run a subprocess in its own session and reap descendants on every exit path."""
+    """Run a subprocess in its own session and reap descendants on every exit path.
+
+    Args:
+        on_output: Called from a reader thread each time the child produces
+            output, so a caller can report a long step alive on the child's own
+            activity rather than on a timer.
+    """
     if server_dead_grace_sec is None:
         try:
             server_dead_grace_sec = float(
@@ -660,7 +688,7 @@ def run_with_session_kill(
             cwd=cwd,
             **new_session_kwargs(),
         )
-        capture = _StreamCapture(proc, text=text)
+        capture = _StreamCapture(proc, text=text, on_output=on_output)
         capture.start()
         try:
             stdout, stderr = _communicate_with_soft_deadline(
@@ -905,6 +933,8 @@ def _communicate_with_soft_deadline(
             # stall gate.
             if grew:
                 last_activity_at = now
+                if capture is not None:
+                    capture.note_output()
         # Soft deadline. With ``soft_from_ready`` the overtime clock is measured
         # from the server-ready marker and stays dormant until ready; otherwise
         # it is the from-spawn elapsed.
