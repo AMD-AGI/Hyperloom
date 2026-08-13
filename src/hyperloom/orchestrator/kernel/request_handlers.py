@@ -3344,6 +3344,29 @@ async def _run_forge_gemm_tuning(
     model_path = str(payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
     if not model_path:
         return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
+    model_path_obj = Path(model_path).expanduser()
+    is_hf_repo_id = (
+        model_path.count("/") == 1
+        and not model_path.startswith(("/", ".", "\\"))
+        and "\\" not in model_path
+    )
+    if not model_path_obj.is_dir() and is_hf_repo_id:
+        from hyperloom.inference_optimizer.model_config_utils import (
+            resolve_local_model_dir,
+        )
+
+        resolved_model_dir = resolve_local_model_dir(model_path)
+        if resolved_model_dir is None:
+            return {
+                "status": "failed",
+                "error_class": "model_cache_unavailable",
+                "error": (
+                    f"HF model repo {model_path!r} is not available in the "
+                    "shared local cache required by Forge GEMM tuning"
+                ),
+                "backend": "forge",
+            }
+        model_path = str(resolved_model_dir)
 
     tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
     conc = int(payload.get("conc") or state.conc or os.environ.get("CONC") or 64)
