@@ -130,7 +130,7 @@ class TestTimeBudgetGate:
         denied = coord._time_budget_denial_for_action(_EXPENSIVE_ACTION)
         assert isinstance(denied, PolicyDenied)
         assert denied.rule == "time_budget"
-        assert "60 min" in str(denied)
+        assert f"{_EXPENSIVE_COST_MIN:.0f} min" in str(denied)
         assert "report" in str(getattr(denied, "hint", ""))
 
     def test_an_action_that_fits_is_admitted(self, coord: Coordinator):

@@ -31,8 +31,10 @@ log = logging.getLogger(__name__)
 # Constants below are read from other modules; listed here to mark them as
 # intentionally exported.
 __all__ = [
+    "TIME_BUDGET_EXEMPT_ACTIONS",
     "_GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT",
     "_MIN_KERNEL_ENGAGED_GAIN_PCT",
+    "action_fits_time_budget",
     "coerce_needs_gpu",
 ]
 
