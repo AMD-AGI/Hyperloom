@@ -189,8 +189,10 @@ def _read_recovery_source(
             patch,
             target_file,
         )
+    # The manifest's own status is the only evidence here; stamping an
+    # apply_result "ok" over it would report an outcome nothing measured.
     return (
-        {**manifest, "status": "ok", "manifest_path": str(manifests[0])},
+        {**manifest, "manifest_path": str(manifests[0])},
         str(manifest.get("status") or ""),
         None,
     )
@@ -295,7 +297,11 @@ async def recover_apply_state(
             False,
         )
 
-    if manifest_status in _RESUMABLE_MANIFEST_STATES and recovered.get("status") == "ok":
+    # Two state machines meet here: a checkpoint carries the applier's own
+    # apply_result ("ok"), a lone manifest carries only the manifest state.
+    if manifest_status in _RESUMABLE_MANIFEST_STATES and str(
+        recovered.get("status") or ""
+    ) in {"ok", manifest_status}:
         return RecoveredApply(recovered, None, False)
 
     if manifest_status == "reverted":

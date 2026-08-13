@@ -408,14 +408,14 @@ def test_session_kernel_opt_outcome_rollup():
 def test_collective_attempt_identity_normalizes_and_tolerates_absence():
     """A blank identity degrades to ``""`` instead of aborting the report."""
     assert (
-        kas._collective_attempt_identity(
+        kas._stored_collective_attempt_id(
             {"collective_attempt_id": " collective-attempt-1 "}
         )
         == "collective-attempt-1"
     )
 
     for record in ({}, {"collective_attempt_id": "   "}):
-        assert kas._collective_attempt_identity(record) == ""
+        assert kas._stored_collective_attempt_id(record) == ""
 
 
 def test_collective_attempt_records_drops_unusable_history():

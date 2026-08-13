@@ -633,8 +633,11 @@ def _summary_one_line(
     return handling.summary(entry, backend_ladder, artifact_error)
 
 
-def _collective_attempt_identity(record: dict[str, Any]) -> str:
-    """Return the stable identity for a collective campaign (``""`` if absent)."""
+def _stored_collective_attempt_id(record: dict[str, Any]) -> str:
+    """Read the identity a campaign was already stamped with (``""`` if absent).
+
+    The phase derives that value; this only reports it.
+    """
     return str(record.get("collective_attempt_id") or "").strip()
 
 
@@ -661,7 +664,7 @@ def _collective_attempt_records(state: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             log.warning("kernel summary: dropping non-mapping collective campaign")
             continue
-        identity = _collective_attempt_identity(item)
+        identity = _stored_collective_attempt_id(item)
         if not identity:
             log.warning(
                 "kernel summary: dropping collective campaign with no collective_attempt_id",
@@ -755,7 +758,7 @@ def _render_collective_attempt_row(
         "status": backend_status,
         "attempt_id": str(
             record.get("experiment_id")
-            or _collective_attempt_identity(record)
+            or _stored_collective_attempt_id(record)
         ),
         "produced_artifact": _is_real_artifact_path(patch_path),
     }
@@ -813,7 +816,7 @@ def _render_collective_attempt_row(
     return {
         "kernel_id": str(
             record.get("kernel_id")
-            or f"collective:{_collective_attempt_identity(record)}"
+            or f"collective:{_stored_collective_attempt_id(record)}"
         ),
         "kernel_name": str(record.get("kernel_name") or ""),
         "kernel_category": "collective",
@@ -858,7 +861,7 @@ def _render_collective_attempt_row(
         "backend_ladder": backend_ladder,
         "backend_ladder_unavailable_reason": "",
         "kernel_agent_result_path": "",
-        "collective_attempt_id": _collective_attempt_identity(record),
+        "collective_attempt_id": _stored_collective_attempt_id(record),
         "integration_id": str(record.get("integration_id") or ""),
         "experiment_id": str(record.get("experiment_id") or ""),
         "collective_op": str(record.get("collective_op") or ""),

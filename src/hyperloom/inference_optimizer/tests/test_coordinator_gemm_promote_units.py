@@ -1120,7 +1120,7 @@ class TestCollectiveIntegratePromotion:
         )
 
         recovered, status = (
-            kernel_phase_mod._load_collective_apply_checkpoint(
+            kernel_phase_mod._collective_recovery.load_apply_checkpoint(
                 checkpoint,
                 backup_root,
             )
@@ -1170,7 +1170,7 @@ class TestCollectiveIntegratePromotion:
             )
 
         with pytest.raises(ValueError):
-            kernel_phase_mod._load_collective_apply_checkpoint(
+            kernel_phase_mod._collective_recovery.load_apply_checkpoint(
                 checkpoint,
                 backup_root,
             )

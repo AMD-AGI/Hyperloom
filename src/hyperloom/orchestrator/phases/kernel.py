@@ -52,10 +52,6 @@ _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
 _GEAK_REVALIDATE_IDEMPOTENCY_KEY = "geak-revalidate"
 
 
-_load_collective_apply_checkpoint = _collective_recovery.load_apply_checkpoint
-_patch_lifecycle_complete = _collective_recovery.patch_lifecycle_complete
-
-
 def _collective_comm_share(state: Any) -> tuple[float | None, str]:
     """Return the communication share gating the lane, and its provenance.
 
@@ -82,8 +78,10 @@ def _collective_comm_share(state: Any) -> tuple[float | None, str]:
     return float(candidate["gpu_pct"]), "candidate_gpu_pct"
 
 
-def _collective_attempt_identity(result: dict[str, Any]) -> str:
-    """Return a stable identity for one logical Collective campaign.
+def _derive_collective_attempt_id(result: dict[str, Any]) -> str:
+    """Compute the stable identity for one logical Collective campaign.
+
+    This mints the value; readers take it off the record instead of recomputing.
 
     ``workspace`` is deliberately excluded: every attempt gets a fresh
     ``attempt-<time_ns>`` directory, so hashing it would make the identity a
@@ -2759,7 +2757,7 @@ class KernelPhase(PhaseHandler):
             raise ValueError("Collective handler E2E flags are inconsistent")
         if not str(recorded.get("collective_attempt_id") or "").strip():
             recorded["collective_attempt_id"] = (
-                _collective_attempt_identity(recorded)
+                _derive_collective_attempt_id(recorded)
             )
         if kept:
             recorded["integration_status"] = "pending"
@@ -2916,7 +2914,7 @@ class KernelPhase(PhaseHandler):
         )
         if not manifest_path and apply_checkpoint.is_file():
             try:
-                apply_result, _manifest_status = _load_collective_apply_checkpoint(
+                apply_result, _manifest_status = _collective_recovery.load_apply_checkpoint(
                     apply_checkpoint,
                     backup_root,
                 )
@@ -2955,12 +2953,12 @@ class KernelPhase(PhaseHandler):
             return decision
 
         revert_result = integ.get("revert_result")
-        if manifest_path and not _patch_lifecycle_complete(revert_result):
+        if manifest_path and not _collective_recovery.patch_lifecycle_complete(revert_result):
             integ["revert_result"] = await asyncio.to_thread(
                 _maybe_revert_kernel_patch,
                 apply_result,
             )
-        revert_complete = not manifest_path or _patch_lifecycle_complete(
+        revert_complete = not manifest_path or _collective_recovery.patch_lifecycle_complete(
             integ.get("revert_result")
         )
         integration_complete = revert_complete and not recovery_uncertain
@@ -3052,7 +3050,7 @@ class KernelPhase(PhaseHandler):
                     _maybe_revert_kernel_patch,
                     apply_result,
                 )
-                revert_complete = _patch_lifecycle_complete(
+                revert_complete = _collective_recovery.patch_lifecycle_complete(
                     revert_result
                 )
                 integ.update(
@@ -3097,13 +3095,13 @@ class KernelPhase(PhaseHandler):
 
         if decision == "KEEP":
             finalize_result = integ.get("finalize_result")
-            if not _patch_lifecycle_complete(finalize_result):
+            if not _collective_recovery.patch_lifecycle_complete(finalize_result):
                 finalize_result = await asyncio.to_thread(
                     _maybe_finalize_kernel_patch,
                     apply_result,
                 )
                 integ["finalize_result"] = finalize_result
-            finalize_complete = _patch_lifecycle_complete(
+            finalize_complete = _collective_recovery.patch_lifecycle_complete(
                 finalize_result
             )
             integ["integration_status"] = (
