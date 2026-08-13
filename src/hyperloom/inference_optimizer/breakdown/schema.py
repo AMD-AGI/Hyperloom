@@ -376,8 +376,8 @@ class PhaseEvent(TypedDict, total=False):
         kernel_id (str | None): Kernel id for kernel_agent-owned actions, else None.
         status (str): Outcome (``succeeded`` / ``failed``).
         decision (str): Decision label (``promoted`` / ``discarded`` /
-            ``salvaged`` / ``no_promote`` / ``error`` / ``KEEP`` / ``PARTIAL`` /
-            ``REVERT``).
+            ``salvaged`` / ``no_promote`` / ``skipped`` / ``error`` / ``KEEP`` /
+            ``PARTIAL`` / ``REVERT``).
         key_metric (float | None): Headline metric value, or None.
         key_metric_kind (str | None): Type/label of the key metric, or None.
         workspace (str | None): Benchmark workspace path, or None.
@@ -398,7 +398,7 @@ class PhaseEvent(TypedDict, total=False):
     task_id: str
     kernel_id: str | None  # only for kernel_agent-owned actions
     status: str  # succeeded / failed
-    decision: str  # promoted / discarded / salvaged / no_promote / error / KEEP / PARTIAL / REVERT
+    decision: str  # promoted / discarded / salvaged / no_promote / skipped / error / KEEP / PARTIAL / REVERT
     key_metric: float | None
     key_metric_kind: str | None
     workspace: str | None
