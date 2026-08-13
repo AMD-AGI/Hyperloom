@@ -310,7 +310,12 @@ class WritebackCollaborator:
         task: "Task | None",
         include_patches: bool,
     ) -> bool:
-        """Best-effort per-KEEP handoff to the owner section."""
+        """Stage one KEEP into its owner section.
+
+        Returns ``False`` (row retained) when the facade is inactive, referenced
+        patch members are missing, or staging fails. A config-only KEEP with no
+        patches writes config and drains normally.
+        """
         normalized = str(owner or "").strip().upper()
         facade = (
             ExploreAgentKB.open()
@@ -322,15 +327,15 @@ class WritebackCollaborator:
         if facade is None or not facade.active:
             return False
         sources, missing = self._keep_patch_sources(result, task)
-        if include_patches and (missing or not sources):
+        if include_patches and missing:
             log.warning(
-                "%s kb: KEEP at stack index %d has incomplete patch members: %s",
+                "%s kb: KEEP at stack index %d references missing patch members: %s",
                 normalized,
                 stack_index,
-                missing or ["<none-discovered>"],
+                missing,
             )
             return False
-        if include_patches:
+        if include_patches and sources:
             refs = facade.stage_patches(sources, stack_index=stack_index)
             if len(refs) != len(sources) or any(not ref for ref in refs):
                 return False
@@ -380,7 +385,7 @@ class WritebackCollaborator:
             for existing in outbox
         ):
             outbox.append(row)
-        if include_patches:
+        if include_patches and (sources or missing):
             stack = list(self.shared_state.optimization_stack or [])
             if 0 <= int(stack_index) < len(stack) and isinstance(
                 stack[int(stack_index)],

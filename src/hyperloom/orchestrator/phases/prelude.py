@@ -1686,7 +1686,12 @@ class PreludePhase(PhaseHandler):
         *,
         task: "Task | None" = None,
     ) -> None:
-        """Interpret a ``replay_warm_recipe`` result: any measured uplift pushes warm config onto optimization_stack + current_best; failures set status and never propagate.
+        """Interpret a combined Recipe+Kernel ``replay_warm_recipe`` result.
+
+        Measured uplift promotes the warm config (or, for a partial replay, the
+        Config/Env-only subset) onto ``optimization_stack`` and ``current_best``.
+        Failures roll back both halves fail-closed, set an outcome status, and
+        never propagate.
 
         Args:
             result: The ``replay_warm_recipe`` task result dict (status,
@@ -1809,7 +1814,6 @@ class PreludePhase(PhaseHandler):
                     3,
                 )
         if reproduced:
-            # Degrade gracefully when task is None (empty stack entry corrupts attribution).
             params = (task.params if task is not None else {}) or {}
             partial = (
                 dict(result.get("warm_replay_partial") or {})

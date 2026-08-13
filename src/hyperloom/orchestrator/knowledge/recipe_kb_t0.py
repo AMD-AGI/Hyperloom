@@ -96,19 +96,19 @@ def _warm_recipe_source(row: Mapping[str, Any] | None, kb: Any) -> str:
 
 
 def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
-    """True when a warm recipe carries something worth replaying / priors.
+    """True when a warm recipe carries something worth replaying or priors.
 
-    A bare local draft anchor (T0 ``put_recipe`` stamps identity + tracing
-    tags but no champion / experiential lists) is NOT actionable: treating
-    it as a confident hit would let warm-replay apply an empty config and
-    starve the specialist prompt of real priors.
+    A View that reports ``replayable`` / ``replay_material_available`` is
+    trusted verbatim. Otherwise a bare draft anchor (identity + tracing tags
+    but no champion / experiential lists) is NOT actionable, so warm-replay
+    never applies an empty config or starves the specialist prompt.
 
     Args:
         row: A warm recipe row to inspect.
 
     Returns:
-        ``True`` when the row carries a usable config, positive throughput, or
-        any experiential list worth replaying.
+        ``True`` when the row is replayable, or carries a usable config,
+        positive throughput, or any experiential list worth replaying.
     """
     if not isinstance(row, Mapping):
         return False
@@ -491,7 +491,7 @@ def _build_warm_start_context(
         "lessons": [],
         "pitfalls": [],
     }
-    # Priors ride the identity match even when it carries no replayable config.
+    # Priors ride the identity match independent of replay config.
     if isinstance(recipe, Mapping):
         history = recipe.get("exact_history")
         prior_source = history if isinstance(history, Mapping) else recipe
@@ -499,8 +499,7 @@ def _build_warm_start_context(
         ctx["do_not_repeat"] = list(prior_source.get("what_failed") or [])
         ctx["lessons"] = list(prior_source.get("lessons") or [])
         ctx["pitfalls"] = list(prior_source.get("pitfalls") or [])
-    # Replay config comes from the donor; fall back to the identity recipe as a
-    # self-donor when it owns a replayable config.
+    # Replay config comes from the donor, or the identity recipe as self-donor.
     donor = (
         config_donor
         if not current_remote and isinstance(config_donor, Mapping)
@@ -1348,8 +1347,10 @@ def run_t0_anchor(
     session_dir: Path | None = None,
     save_state: bool = True,
 ) -> None:
-    """Run the T0 recipe-snapshot anchor.
+    """Run the T0 recipe-snapshot anchor and seven-tuple warm-start search.
 
+    Anchors identity, then cascades exact/model/hardware/framework tiers; in
+    remote mode a selected donor is materialized via ``select_candidate``.
     Mutates ``shared_state`` in place (warm_start_* fields) and persists when
     ``save_state=True``. ``session_dir`` is required.
 
@@ -1382,12 +1383,9 @@ def run_t0_anchor(
 
     workload = (workload or "").strip() or "unknown_model"
     hw = (hw or "").strip() or "unknown_gpu"
-    # Topology-aware KB hardware dim: single-node leaves ``hw`` unchanged;
-    # multi-node appends ``_ws{world_size}`` so the cluster reads/writes an
-    # isolated recipe key and never overwrites (or warm-replays) the single-node
-    # recipe stored under the bare gpu_type. Applied ONCE here so the cid, the
-    # put_recipe ``hardware`` field, and every L1/L2/L3 warm-start search below
-    # all use the identical slug.
+    # Topology-aware hardware slug (multi-node appends ``_ws{world_size}``),
+    # resolved once so the cid, the stored ``hardware`` field, and every
+    # warm-start tier below share an identical, isolated key.
     from hyperloom.orchestrator.actions.executors._multi_node_env import resolve_kb_topology
 
     hw = kb_hardware_slug(hw, **resolve_kb_topology())
@@ -1663,8 +1661,6 @@ def run_t0_anchor(
             ),
             encoding="utf-8",
         )
-        # ``raw`` is omitted here (duplicates ``recipe``); the disk snapshot
-        # keeps it for envelope-shape compatibility.
         shared_state.warm_start_recipe = {
             "workload": workload,
             "hw": hw,

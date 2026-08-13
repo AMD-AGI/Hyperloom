@@ -753,9 +753,15 @@ async def test_explicit_empty_patches_applied_never_scans_stale_workspace(
         task=_task("framework_agent"),
     )
 
-    assert KnowledgeSections(draft).staged("framework") is None
-    assert coord.shared_state.kb_stage_outbox[0]["missing_patch_sources"] == []
-    assert coord.shared_state.kb_stage_outbox[0]["patch_sources"] == []
+    # A config-only KEEP drains: config is written with no patches, and the
+    # explicit empty patches_applied never scans the stale workspace .diff.
+    staged = KnowledgeSections(draft).staged("framework")
+    assert staged is not None
+    assert staged.knowledge.get("patches", []) == []
+    assert coord.shared_state.kb_stage_outbox == []
+    # A config-only KEEP must not mark a required patch owner; otherwise CLOSE
+    # would reject the record for missing required section staging.
+    assert "kb_required_owner" not in coord.shared_state.optimization_stack[-1]
 
 
 @pytest.mark.asyncio

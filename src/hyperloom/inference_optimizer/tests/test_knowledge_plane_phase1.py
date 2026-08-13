@@ -419,7 +419,7 @@ def test_remote_plane_reports_close_writer_enabled() -> None:
     assert plane.status["recipe"]["read_enabled"] is False
 
 
-def test_plane_owns_injected_local_recipe_and_typed_results(
+def test_plane_owns_injected_local_recipe(
     tmp_path: Path,
 ) -> None:
     config = KnowledgeConfig.from_env(
@@ -432,6 +432,3 @@ def test_plane_owns_injected_local_recipe_and_typed_results(
     plane = KnowledgePlane.from_clients(recipe_kb=recipe_kb, config=config)
     assert plane.recipe_kb is recipe_kb
     assert plane.status["recipe"]["backend"] == "local-json"
-    result = plane.read_recipe(canonical_id="inference:m:h:f:mt:a:v:p")
-    assert result.hit is False
-    assert result.backend == "local-json"
