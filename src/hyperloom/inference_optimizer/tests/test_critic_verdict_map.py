@@ -898,12 +898,26 @@ def test_a_rule_named_in_a_remediation_note_is_not_a_citation():
     assert verdict_held_to_its_rule(entry, action_name="specialist") == ("reject", "")
 
 
-def test_a_reason_code_inside_a_longer_token_is_not_a_citation():
-    """The prose scan is word-bounded, so a code embedded in another identifier does not move a verdict."""
-    entry = {
-        "verdict": "reject",
-        "reasoning": f"see log key x_{QUANTITATIVE_CLAIM_REASON_CODE}_v2 for the trace",
-    }
+@pytest.mark.parametrize(
+    "reasoning",
+    [
+        pytest.param(
+            f"x_{QUANTITATIVE_CLAIM_REASON_CODE}: the log key the trace is under.",
+            id="the_code_does_not_open_the_line",
+        ),
+        pytest.param(
+            f"{QUANTITATIVE_CLAIM_REASON_CODE}_v2: a successor rule, not this one.",
+            id="the_colon_does_not_follow_the_code",
+        ),
+    ],
+)
+def test_a_code_that_neither_opens_the_line_nor_meets_the_colon_is_not_a_citation(reasoning):
+    """The scan anchors the code at the start of the grounds and requires the
+    colon to follow the code itself: nothing but whitespace or a backtick may
+    precede it, and nothing may sit between it and the colon. An identifier
+    that merely contains the code fails one end or the other."""
+    entry = {"verdict": "reject", "reasoning": reasoning}
+
     assert verdict_held_to_its_rule(entry, action_name="specialist") == ("reject", "")
 
 
