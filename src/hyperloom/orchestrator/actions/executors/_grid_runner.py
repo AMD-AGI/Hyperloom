@@ -1190,6 +1190,41 @@ def _resolve_mn_effective_server_args(
         )
 
 
+def _variant_progress_note(
+    grid: list[GridVariant],
+    results: list[VariantResult],
+    idx: int,
+) -> dict[str, Any]:
+    """Build the progress note for the variant at ``idx`` from that variant's own row.
+
+    The row is located by index and never taken from the tail of ``results``: a
+    stop cause that ends the batch records the round it stopped and then a
+    not-run row for every later variant, so the tail is the last variant in the
+    grid rather than the one that just ran. Each variant contributes exactly one
+    row, in order, before it reports, which is what makes ``idx`` where its row
+    is. The log line beside this note derives from ``idx`` already; the note is
+    the artefact the heartbeat exists to make honest, and the one a stall signal
+    reads, so it cannot be the one that names the wrong variant.
+
+    Args:
+        grid (list[GridVariant]): The variants being run.
+        results (list[VariantResult]): Rows recorded so far.
+        idx (int): Zero-based index of the variant being reported.
+
+    Returns:
+        dict[str, Any]: Keyword note for :func:`report_progress`.
+    """
+    landed = results[idx] if idx < len(results) else None
+    return {
+        "unit": "variant",
+        "label": grid[idx].name,
+        "index": idx + 1,
+        "total": len(grid),
+        "status": getattr(landed, "status", None),
+        "output_throughput": getattr(landed, "output_throughput", None),
+    }
+
+
 async def run_grid(
     *,
     base_yaml_path: Path,
@@ -1340,15 +1375,7 @@ async def run_grid(
             idx (int): Zero-based index of the just-finished variant, passed
                 through as the pulse ``tick_index``.
         """
-        landed = results[-1] if results else None
-        await report_progress(
-            unit="variant",
-            label=getattr(landed, "name", grid[idx].name),
-            index=idx + 1,
-            total=len(grid),
-            status=getattr(landed, "status", None),
-            output_throughput=getattr(landed, "output_throughput", None),
-        )
+        await report_progress(**_variant_progress_note(grid, results, idx))
         try:
             await _robustness_pulse(tick_index=idx)
         except Exception as exc:  # noqa: BLE001

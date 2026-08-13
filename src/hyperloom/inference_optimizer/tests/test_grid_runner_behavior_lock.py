@@ -634,6 +634,44 @@ class TestVariantHeartbeat:
         assert all(n["status"] == "succeeded" for n in landed)
         assert landed[0]["output_throughput"] == 800.0
 
+    def test_the_note_names_the_variant_that_ran_not_the_last_row(self):
+        """The tail of ``results`` is not always the variant that just reported.
+
+        A stop cause that ends the batch — a session budget spent, an
+        orchestrator cancel — records the round it stopped and then a not-run row
+        for every later variant, so the tail becomes the last variant in the grid
+        while the one that ran is still where it was appended. Taking the note
+        off the tail renames the round in the only durable per-variant artefact
+        the run leaves while it is in flight, and the log line one frame away
+        keeps saying the right thing.
+        """
+        grid = [GridVariant(name=f"c{i}") for i in range(3)]
+        stopped = gr.VariantResult(
+            name="c0",
+            extra_server_args="",
+            extra_envs={},
+            status="skipped",
+            error_class="orchestrator_cancelled",
+        )
+        never_ran = [
+            gr.VariantResult(
+                name=variant.name,
+                extra_server_args="",
+                extra_envs={},
+                status="not_run",
+            )
+            for variant in grid[1:]
+        ]
+
+        assert gr._variant_progress_note(grid, [stopped, *never_ran], 0) == {
+            "unit": "variant",
+            "label": "c0",
+            "index": 1,
+            "total": 3,
+            "status": "skipped",
+            "output_throughput": None,
+        }
+
     def test_a_failed_variant_reports_too(self, tmp_path, monkeypatch):
         """Progress means "a unit finished", not "a unit worked"."""
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
