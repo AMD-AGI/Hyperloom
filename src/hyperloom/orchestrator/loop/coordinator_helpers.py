@@ -218,28 +218,6 @@ _DEFAULT_ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 _MAX_ROOFLINE_FAILURE_RETRIES: int = 3
 
 
-def effective_closing_grace_sec(
-    max_minutes: float | None,
-    closing_grace_sec: float | None,
-) -> float:
-    """Resolve the closing-phase grace window after the wall-clock deadline.
-
-    Explicit ``closing_grace_sec`` (including ``0`` to disable) wins;
-    otherwise default to ``min(120, max_minutes * 60 * 0.02)``.
-
-    Args:
-        max_minutes: The wall-clock budget in minutes (used for the default).
-        closing_grace_sec: Explicit grace window in seconds; when not
-            ``None`` it is used verbatim.
-
-    Returns:
-        The closing-phase grace window in seconds.
-    """
-    if closing_grace_sec is not None:
-        return float(closing_grace_sec)
-    return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
-
-
 # Actions that must stay startable no matter how little budget is left: they are
 # how a session ends cleanly (report/breakdown) or unsticks itself (recover), so
 # a time gate that refused them would strand the run with nothing to show.

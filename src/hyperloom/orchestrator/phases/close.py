@@ -13,7 +13,6 @@ from typing import Any
 import logging as _logging
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
-from ..loop.coordinator_helpers import effective_closing_grace_sec
 from ..state.task_registry import Task
 from .base import PhaseHandler
 
@@ -535,13 +534,7 @@ class ClosePhase(PhaseHandler):
             The state the task ended in, or ``running`` when the bound elapsed
             first — which the caller records the same way it records a failure.
         """
-        bound_sec = max(
-            0.0,
-            effective_closing_grace_sec(
-                float(getattr(self.shared_state, "max_minutes", 0) or 0),
-                None,
-            ),
-        )
+        bound_sec = self.shared_state.closing_reserve_sec()
         poll_sec = float(getattr(self, "_dispatcher_poll_sec", _DEFAULT_TASK_POLL_SEC))
         deadline = time.monotonic() + bound_sec
         log.info(

@@ -260,10 +260,6 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
 # summary (matches the ``*_top15`` field names).
 _TRACE_HOT_KERNEL_TOP_N = 15
 
-# Wall-clock budget held back from every unit of work so the CLOSE phase can
-# still write its report. Matches the default closing grace window.
-CLOSING_RESERVE_SEC = 120.0
-
 # Session-level kernel-roofline report the analyzer writes for a non-close run;
 # read back when the trace_analyze envelope arrives without its payload keys.
 _DEFAULT_ROOFLINE_REPORT_NAME = "kernel_roofline_current.json"
@@ -342,6 +338,33 @@ _FRAMEWORK_FIELD_RENAMES_V5: dict[str, str] = {
 #: misses the ``(action, variant_name)`` dedup that stops a second append.
 _FRAMEWORK_STACK_ACTION_V5: str = "framework"
 _FRAMEWORK_VARIANT_PREFIX_V5: str = "framework:"
+
+
+def effective_closing_grace_sec(
+    max_minutes: float | None,
+    closing_grace_sec: float | None,
+) -> float:
+    """Resolve the closing-phase grace window after the wall-clock deadline.
+
+    Explicit ``closing_grace_sec`` (including ``0`` to disable the closing
+    phase) wins; otherwise default to ``min(120, max_minutes * 60 * 0.02)``.
+
+    Lives beside the budget accessors rather than next to its Coordinator
+    caller because the window is also the reserve those accessors hold back,
+    and this module is the leaf both sides can import.
+
+    Args:
+        max_minutes (float | None): The wall-clock budget in minutes, used for
+            the default.
+        closing_grace_sec (float | None): Explicit grace window in seconds;
+            when not ``None`` it is used verbatim.
+
+    Returns:
+        float: The closing-phase grace window in seconds.
+    """
+    if closing_grace_sec is not None:
+        return float(closing_grace_sec)
+    return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
 
 
 def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
@@ -651,6 +674,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     pruned_families: list[str] = field(default_factory=list)
     start_ts: str = field(default_factory=_now_iso)
     max_minutes: int = 0
+    # Operator's ``--closing-grace-sec``; ``None`` derives it from max_minutes.
+    closing_grace_sec: float | None = None
     last_profile_trace: str = ""
     # ``succeeded``/``failed`` for most recent profile; failed allows re-run even when last_profile_trace is non-empty.
     last_profile_status: str = ""
@@ -3607,10 +3632,26 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             return None
         return max(0.0, float(self.max_minutes) - self.elapsed_minutes(now=now))
 
+    def closing_reserve_sec(self) -> float:
+        """Seconds held back from every unit of work so CLOSE can still report.
+
+        Resolved through :func:`effective_closing_grace_sec`, the same function
+        the Coordinator uses to size the closing phase itself, so the budget
+        reserved for that phase and the budget it actually gets are one number.
+        A hardcoded reserve told the truth only for sessions of at least 100
+        minutes, and charged 120 seconds even to an operator who had disabled
+        the closing phase outright.
+
+        Returns:
+            float: The closing reserve in seconds; ``0.0`` when the operator
+                disabled the closing phase.
+        """
+        return max(0.0, effective_closing_grace_sec(float(self.max_minutes or 0), self.closing_grace_sec))
+
     def session_budget_usable_sec(
         self,
         *,
-        reserve_sec: float = CLOSING_RESERVE_SEC,
+        reserve_sec: float | None = None,
     ) -> float | None:
         """Seconds of wall-clock budget left once the closing reserve is held back.
 
@@ -3620,8 +3661,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         much budget exists.
 
         Args:
-            reserve_sec (float): Seconds held back for the CLOSE phase and its
-                report.
+            reserve_sec (float | None): Seconds held back for the CLOSE phase
+                and its report; ``None`` takes :meth:`closing_reserve_sec`. An
+                explicit ``0`` is honoured as "reserve nothing".
 
         Returns:
             float | None: Usable seconds (clamped at 0.0), or ``None`` when
@@ -3630,12 +3672,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         remaining = self.remaining_minutes()
         if remaining is None:
             return None
-        return max(0.0, remaining * 60.0 - reserve_sec)
+        reserve = self.closing_reserve_sec() if reserve_sec is None else float(reserve_sec)
+        return max(0.0, remaining * 60.0 - reserve)
 
     def grid_session_deadline_sec(
         self,
         *,
-        reserve_sec: float = CLOSING_RESERVE_SEC,
+        reserve_sec: float | None = None,
     ) -> float | None:
         """``time.monotonic()`` deadline for grid variant loops, or ``None`` when the budget is unbounded.
 
@@ -3645,7 +3688,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         the whole grid.
 
         Args:
-            reserve_sec (float): Seconds held back from the raw remaining budget.
+            reserve_sec (float | None): Seconds held back from the raw remaining
+                budget; ``None`` takes :meth:`closing_reserve_sec`.
 
         Returns:
             float | None: A monotonic-clock deadline, or ``None`` when unbounded;

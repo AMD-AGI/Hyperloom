@@ -21,6 +21,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
+from hyperloom.orchestrator.state.shared_state import effective_closing_grace_sec
 
 
 @dataclass
@@ -37,6 +38,7 @@ class _BareState:
     recipe_finalize_outcome: dict[str, Any] = field(default_factory=dict)
     phase_history: list[dict[str, Any]] = field(default_factory=list)
     max_minutes: int = 0
+    closing_grace_sec: float | None = None
     save_count: int = 0
 
     def save(self, _session_dir: Path | None) -> None:
@@ -44,6 +46,9 @@ class _BareState:
 
     def set_stop_reason(self, reason: str) -> None:
         self.stop_reason = reason
+
+    def closing_reserve_sec(self) -> float:
+        return effective_closing_grace_sec(self.max_minutes, self.closing_grace_sec)
 
 
 @dataclass
