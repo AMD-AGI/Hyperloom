@@ -1647,6 +1647,27 @@ def test_serving_lease_close_swallows_kill_error(monkeypatch: pytest.MonkeyPatch
     assert lease._actor is None
 
 
+def test_releasing_a_lease_reaps_the_served_process(serving_lease_on_a_ray_double):
+    """``ray.kill`` skips ``__ray_terminate__``, so the actor must be asked first.
+
+    The served process is deliberately started in its own POSIX session, which
+    is exactly what a process-group teardown does not reach, so a lease released
+    without asking can leave a GPU held by a process nothing owns any more.
+    """
+    lease = serving_lease_on_a_ray_double
+    lease.ensure()
+    pid = lease._actor.start.remote(["sleep", "60"]).result(timeout=10)
+    assert _pid_alive(pid)
+
+    lease.close()
+
+    deadline = time.time() + 10.0
+    while time.time() < deadline and _pid_alive(pid):
+        time.sleep(0.05)
+    assert not _pid_alive(pid), "the served process outlived the lease that owned it"
+    assert lease._actor is None
+
+
 def test_managed_process_start_with_log_path(tmp_path: Path):
     """start(log_path=...) opens the log file (covers the log_path branch)."""
     log = tmp_path / "nested" / "server.log"

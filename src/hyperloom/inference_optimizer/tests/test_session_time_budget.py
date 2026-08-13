@@ -25,6 +25,7 @@ reaper in ``test_kill_spawned_server``.
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -751,6 +752,100 @@ class TestCancellingWorkThatBlocksInAThread:
 
         assert time.monotonic() - began < _COOPERATIVE_CANCEL_GRACE_SEC
         assert atask.cancelled()
+
+
+def _runs_a_round_in_a_lease(started: asyncio.Event, *, outcome: dict[str, Any], lease: Any):
+    """An executor shaped like the production default: a round inside a Ray lease.
+
+    ``_should_use_ray_backend`` is off under pytest and on by default on a single
+    node, so this is the branch every real run takes and no test did.
+    """
+
+    async def _run(_ctx) -> dict:
+        started.set()
+        rc, _out, _err = await asyncio.to_thread(
+            lease.run_session_kill,
+            [sys.executable, "-c", f"import time; time.sleep({_BLOCKING_SEC})"],
+            timeout=_BLOCKING_SEC * 4,
+        )
+        outcome["returncode"] = rc
+        return {"returncode": rc}
+
+    return _run
+
+
+class TestCancellingARoundInsideARayLease:
+    """The production default routes rounds through a Ray actor, not a local child.
+
+    The scope is a ContextVar, so it does not exist in the actor's process: the
+    lease has to notice the cancel on this side and forward it, or the four-layer
+    defence has no reach at all on the path every real single-node run takes.
+    """
+
+    @pytest.fixture
+    def lease(self, serving_lease_on_a_ray_double: Any) -> Any:
+        return serving_lease_on_a_ray_double
+
+    @pytest.mark.asyncio
+    async def test_the_round_in_the_actor_stops_before_the_cancel_returns(
+        self,
+        coord: Coordinator,
+        lease: Any,
+    ):
+        outcome: dict[str, Any] = {}
+        task, atask = await _start_action(
+            coord,
+            kind=_CHEAP_ACTION,
+            key="c-ray",
+            make_executor=lambda started: _runs_a_round_in_a_lease(started, outcome=outcome, lease=lease),
+        )
+        began = time.monotonic()
+
+        assert await coord.dispatcher.cancel_inflight_actions(reason="test") == [task.task_id]
+
+        assert outcome, "the cancel returned while the round was still running in the actor"
+        assert time.monotonic() - began < _BLOCKING_SEC
+        await _settle(atask)
+
+    @pytest.mark.asyncio
+    async def test_the_stop_is_attributed_to_the_orchestrator(self, coord: Coordinator, lease: Any):
+        """The actor reaps its own tree, so the sentinel is the same one the local path returns."""
+        outcome: dict[str, Any] = {}
+        await _start_action(
+            coord,
+            kind=_CHEAP_ACTION,
+            key="c-ray-rc",
+            make_executor=lambda started: _runs_a_round_in_a_lease(started, outcome=outcome, lease=lease),
+        )
+
+        await coord.dispatcher.cancel_inflight_actions(reason="test_reason")
+
+        assert outcome["returncode"] == ORCHESTRATOR_CANCELLED_RETURNCODE
+
+    @pytest.mark.asyncio
+    async def test_an_actor_that_will_not_answer_is_killed_and_the_stop_still_named(
+        self,
+        coord: Coordinator,
+        lease: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A wedged actor must not hold the lease open, and must not go unattributed."""
+        from hyperloom.orchestrator.actions.executors import _ray_serving as rs
+
+        monkeypatch.setattr(rs, "_CANCEL_ROUND_GRACE_SEC", 0.5)
+        monkeypatch.setattr(rs.ServingLease, "_ask_actor_to_cancel", lambda _self, _reason: False)
+        outcome: dict[str, Any] = {}
+        await _start_action(
+            coord,
+            kind=_CHEAP_ACTION,
+            key="c-ray-wedged",
+            make_executor=lambda started: _runs_a_round_in_a_lease(started, outcome=outcome, lease=lease),
+        )
+
+        await coord.dispatcher.cancel_inflight_actions(reason="test_reason")
+
+        assert outcome["returncode"] == ORCHESTRATOR_CANCELLED_RETURNCODE
+        assert lease._actor is None, "the lease must be released when its actor is killed"
 
 
 class TestTheRunnerRecordsACancellation:
