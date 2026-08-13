@@ -245,6 +245,13 @@ omit = [
     "*/tests/*",
     "*/__init__.py",
     "*/__main__.py",
+    # Operator scripts that ship outside the package. They exist to run on
+    # hosts with no Hyperloom install, so most of each one is argv handling,
+    # terminal rendering and hardware probing that only a real EPYC node
+    # exercises -- the same reason the CLI drivers below are omitted. Their
+    # tests do run (``scripts/tests`` is in ``testpaths``); it is the measured
+    # denominator they stay out of, not the suite.
+    "scripts/*",
     # Byte-identical upstream KB Store SDK; guarded by a blob checksum test.
     "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/*",
     # CLI drivers.
