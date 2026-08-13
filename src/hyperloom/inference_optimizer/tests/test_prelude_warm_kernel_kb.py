@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PRELUDE read-apply of the independent kernel-agent KB record (validated).
+"""PRELUDE preparation of the independent kernel-agent KB record.
 
 PRELUDE reads the standalone ``kernel:`` KB Store record (flat
 ``value.gemm``/``value.fusion``/``value.rewrite`` + a ``files/`` tree) through
 :class:`KernelRecordReader`, stages the whole champion set — every patch on disk
-and every env bundle merged — then grades it with a single re-baseline, rolling
-the set back when it does not win.
+and every env bundle merged — without a separate benchmark. The Recipe replay
+task later grades the combined set.
 """
 from __future__ import annotations
 
@@ -29,6 +29,8 @@ class _StubPrelude:
     _resolve_kernel_target_path = PreludePhase._resolve_kernel_target_path
     _warm_kernel_extra_envs = staticmethod(PreludePhase._warm_kernel_extra_envs)
     _revert_warm_kernel_patches = staticmethod(PreludePhase._revert_warm_kernel_patches)
+    _snapshot_warm_kernel_target = PreludePhase._snapshot_warm_kernel_target
+    _prepare_warm_kernel_kb = PreludePhase._prepare_warm_kernel_kb
     _maybe_apply_warm_kernel_kb = PreludePhase._maybe_apply_warm_kernel_kb
 
     def _warm_kernel_gate_reason(self) -> str:
@@ -182,15 +184,15 @@ async def test_unresolvable_target_defers(tmp_path: Path) -> None:
     outcome = await stub._maybe_apply_warm_kernel_kb()
 
     assert outcome["status"] == "loaded"
-    assert outcome["kept"] == 0 and outcome["reverted"] == 0
+    assert outcome["pending"] == []
     assert outcome["deferred"] == outcome["total"]
     # Nothing was staged, so nothing was measured.
     assert stub.validations == []
 
 
 @pytest.mark.asyncio
-async def test_set_is_staged_then_graded_by_a_single_rebaseline(tmp_path: Path) -> None:
-    # Three champions, one measurement: the whole set is applied first.
+async def test_set_is_staged_without_a_separate_rebaseline(tmp_path: Path) -> None:
+    # Three champions are prepared for the combined Recipe replay task.
     targets = []
     items = []
     for name in ("k1", "k2"):
@@ -224,17 +226,15 @@ async def test_set_is_staged_then_graded_by_a_single_rebaseline(tmp_path: Path) 
     outcome = await stub._maybe_apply_warm_kernel_kb()
 
     assert sorted(stub.applied) == sorted(targets)
-    assert len(stub.validations) == 1
-    assert outcome["kept"] == 3 and outcome["reverted"] == 0
-    # A win must be booked, or the env switches die with the measurement.
-    assert len(stub.booked) == 1
-    assert stub.booked[0]["envs"] == stub.validations[0]["extra_envs"]
-    # The one measurement carries the merged bundle of the whole set.
-    assert stub.validations[0]["extra_envs"]["AITER_CONFIG"].endswith("kernel/gemm/t.csv")
+    assert stub.validations == []
+    assert stub.booked == []
+    assert outcome["status"] == "prepared"
+    assert len(outcome["pending"]) == 3
+    assert outcome["extra_envs"]["AITER_CONFIG"].endswith("kernel/gemm/t.csv")
 
 
 @pytest.mark.asyncio
-async def test_losing_set_is_rolled_back_together(tmp_path: Path) -> None:
+async def test_prepared_set_waits_for_combined_verdict(tmp_path: Path) -> None:
     target = tmp_path / "serving" / "kernel.py"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("old", encoding="utf-8")
@@ -244,16 +244,132 @@ async def test_losing_set_is_rolled_back_together(tmp_path: Path) -> None:
         {"kernel/rewrite/k1.py": "print('new')"},
     )
     stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
-    stub._validate_warm_kernel_set = _grading(stub, "REVERT", gain=-2.0)  # type: ignore[method-assign]
     reverted: list[list[dict]] = []
-    stub._revert_warm_kernel_patches = lambda applied: reverted.append(applied)  # type: ignore[method-assign]
+    stub._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+        lambda applied, snapshots=None: {
+            "ok": not bool(reverted.append(applied)),
+            "errors": [],
+        }
+    )
 
     outcome = await stub._maybe_apply_warm_kernel_kb()
 
-    assert outcome["status"] == "reverted"
-    assert outcome["reverted"] == 1 and outcome["kept"] == 0
-    assert len(stub.validations) == 1
-    assert reverted and reverted[0][0]["manifest_path"].endswith(".manifest")
+    assert outcome["status"] == "prepared"
+    assert len(outcome["pending"]) == 1
+    assert stub.validations == []
+    assert reverted == []
+
+
+@pytest.mark.asyncio
+async def test_kernel_snapshot_is_durable_before_first_mutation(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "serving" / "kernel.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("old")
+    record = _kernel_record(
+        tmp_path,
+        {"rewrite": {"items": [_rewrite_item(target)]}},
+        {"kernel/rewrite/k1.py": "new"},
+    )
+    stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
+
+    def _crash(_entry: dict, live_target: str) -> dict:
+        pending = stub.shared_state.warm_replay_pending
+        assert pending["kernel_snapshots"][0]["target"] == live_target
+        Path(live_target).write_text("partially mutated")
+        raise SystemExit("crash window")
+
+    stub._apply_warm_kernel_patch = _crash  # type: ignore[method-assign]
+    with pytest.raises(SystemExit, match="crash window"):
+        await stub._maybe_apply_warm_kernel_kb()
+
+    restored = PreludePhase._restore_warm_kernel_snapshots(
+        stub.shared_state.warm_replay_pending["kernel_snapshots"]
+    )
+    assert restored["ok"] is True
+    assert target.read_text() == "old"
+
+
+@pytest.mark.asyncio
+async def test_symlink_kernel_target_is_rejected_and_prior_mutation_rolls_back(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "serving" / "first.py"
+    real = tmp_path / "serving" / "real.py"
+    link = tmp_path / "serving" / "link.py"
+    first.parent.mkdir(parents=True)
+    first.write_text("first-old")
+    real.write_text("real-old")
+    link.symlink_to(real)
+    record = _kernel_record(
+        tmp_path,
+        {
+            "rewrite": {
+                "items": [
+                    _rewrite_item(first, "k1"),
+                    _rewrite_item(link, "k2"),
+                ]
+            }
+        },
+        {
+            "kernel/rewrite/k1.py": "first-new",
+            "kernel/rewrite/k2.py": "link-new",
+        },
+    )
+    stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
+
+    def _apply(_entry: dict, target: str) -> dict:
+        Path(target).write_text("mutated")
+        stub.applied.append(target)
+        return {"status": "ok", "manifest_path": f"{target}.manifest"}
+
+    stub._apply_warm_kernel_patch = _apply  # type: ignore[method-assign]
+
+    outcome = await stub._maybe_apply_warm_kernel_kb()
+
+    assert outcome["status"] == "error"
+    assert outcome["rollback"]["ok"] is True
+    assert stub.applied == [str(first)]
+    assert first.read_text() == "first-old"
+    assert link.is_symlink()
+    assert real.read_text() == "real-old"
+    assert stub.shared_state.warm_replay_pending == {}
+
+
+@pytest.mark.asyncio
+async def test_empty_kernel_plan_clears_stale_warm_pending(
+    tmp_path: Path,
+) -> None:
+    record = _kernel_record(tmp_path, {"rewrite": {"items": []}}, {})
+    stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
+    stub.shared_state.warm_replay_pending = {"status": "preparing_kernel"}
+
+    outcome = await stub._maybe_apply_warm_kernel_kb()
+
+    assert outcome["status"] == "empty"
+    assert stub.shared_state.warm_replay_pending == {}
+
+
+@pytest.mark.asyncio
+async def test_loaded_zero_mutation_plan_clears_warm_pending(
+    tmp_path: Path,
+) -> None:
+    missing_target = tmp_path / "missing" / "kernel.py"
+    record = _kernel_record(
+        tmp_path,
+        {"rewrite": {"items": [_rewrite_item(missing_target)]}},
+        {"kernel/rewrite/k1.py": "replacement"},
+    )
+    stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
+    stub.shared_state.warm_replay_pending = {"status": "old"}
+
+    outcome = await stub._maybe_apply_warm_kernel_kb()
+
+    assert outcome["status"] == "loaded"
+    assert outcome["pending"] == []
+    assert outcome["applied"] == []
+    assert stub.shared_state.warm_replay_pending == {}
 
 
 @pytest.mark.asyncio
@@ -286,8 +402,8 @@ async def test_fusion_env_switches_reach_the_measurement(tmp_path: Path) -> None
 
     outcome = await stub._maybe_apply_warm_kernel_kb()
 
-    assert outcome["kept"] == 1
-    assert stub.validations[0]["extra_envs"] == {
+    assert outcome["status"] == "prepared"
+    assert outcome["extra_envs"] == {
         "SGLANG_USE_AITER": "1",
         "ZAYA_FUSED_HYBRID_RESIDUAL": "1",
     }
@@ -308,7 +424,7 @@ async def test_gemm_without_env_var_is_deferred(tmp_path: Path) -> None:
     outcome = await stub._maybe_apply_warm_kernel_kb()
 
     assert outcome["status"] == "loaded"
-    assert outcome["deferred"] == 1 and outcome["kept"] == 0
+    assert outcome["deferred"] == 1 and outcome["pending"] == []
     assert stub.validations == []
 
 

@@ -44,6 +44,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -59,6 +61,254 @@ log = logging.getLogger(__name__)
 
 KERNEL_SECTION = "kernel"
 KERNEL_COLUMNS = ("gemm", "fusion", "rewrite")
+EXPLORE_SECTION = "explore"
+FRAMEWORK_SECTION = "framework"
+
+_PATCH_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+class _ConfigPatchAgentKB:
+    """Section facade for one config owner and its ordered source overlays."""
+
+    SECTION = ""
+
+    def __init__(self, sections: KnowledgeSections | None) -> None:
+        self._sections = sections
+
+    @classmethod
+    def open(cls):
+        """Open this run's draft, staying inactive when there is none."""
+        try:
+            sections = KnowledgeSections.from_env()
+        except (KBStoreError, OSError, ValueError) as exc:
+            log.warning("%s kb: draft unavailable: %s", cls.SECTION, exc)
+            sections = None
+        return cls(sections)
+
+    @property
+    def active(self) -> bool:
+        return self._sections is not None
+
+    def read(self) -> dict[str, Any]:
+        """Return the prior complete section, or ``{}`` on a cold start."""
+        if self._sections is None:
+            return {}
+        try:
+            content = self._sections.read(self.SECTION)
+        except (KBStoreError, OSError, ValueError) as exc:
+            log.warning("%s kb: cannot read section: %s", self.SECTION, exc)
+            return {}
+        return dict(content.knowledge) if content is not None else {}
+
+    def read_config(self) -> dict[str, Any]:
+        """Return the prior replay config using the stable public field names."""
+        prior = self.read()
+        return {
+            "extra_server_args": str(prior.get("extra_server_args") or ""),
+            "extra_envs": (
+                dict(prior.get("extra_envs") or {})
+                if isinstance(prior.get("extra_envs"), Mapping)
+                else {}
+            ),
+        }
+
+    def write_config(
+        self,
+        extra_server_args: str | Mapping[str, Any] = "",
+        extra_envs: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Replace this owner's final config/env snapshot, preserving patches.
+
+        A current-best-like mapping is accepted as a convenience for writeback;
+        callers may also pass the two fields directly.
+        """
+        if self._sections is None:
+            return False
+        if isinstance(extra_server_args, Mapping):
+            snapshot = extra_server_args
+            args = str(
+                snapshot.get("effective_extra_server_args")
+                or snapshot.get("extra_server_args")
+                or ""
+            )
+            raw_envs = snapshot.get("extra_envs")
+            envs = dict(raw_envs) if isinstance(raw_envs, Mapping) else {}
+        else:
+            args = str(extra_server_args or "")
+            envs = dict(extra_envs or {})
+        try:
+            staged = self._sections.staged(self.SECTION)
+            document = dict(staged.knowledge) if staged is not None else {}
+            document["extra_server_args"] = args
+            document["extra_envs"] = {
+                str(key): str(value) for key, value in envs.items()
+            }
+            self._sections.write(self.SECTION, document, mode="replace")
+        except (KBStoreError, OSError, TypeError, ValueError) as exc:
+            log.warning("%s kb: cannot record config: %s", self.SECTION, exc)
+            return False
+        return True
+
+    write_snapshot = write_config
+
+    def stage_patches(
+        self,
+        patches: Iterable[str | Path],
+        *,
+        stack_index: int,
+    ) -> list[str]:
+        """Stage one KEEP's patch members in caller order.
+
+        Repeating the same call returns the same refs and leaves one physical
+        copy. The complete set is rejected when any member cannot be staged.
+        """
+        if self._sections is None:
+            return []
+        try:
+            index = int(stack_index)
+        except (TypeError, ValueError):
+            log.warning("%s kb: invalid stack index %r", self.SECTION, stack_index)
+            return []
+        if index < 0:
+            log.warning("%s kb: negative stack index %r", self.SECTION, stack_index)
+            return []
+
+        requested = list(patches)
+        if len(requested) > 100:
+            log.warning(
+                "%s kb: refusing %d patch members; maximum is 100",
+                self.SECTION,
+                len(requested),
+            )
+            return []
+        prepared: list[tuple[Path, str, bytes]] = []
+        for member_index, source in enumerate(requested):
+            src = Path(str(source or ""))
+            stem = src.name
+            for suffix in (".patch", ".diff"):
+                if stem.lower().endswith(suffix):
+                    stem = stem[: -len(suffix)]
+                    break
+            safe_name = _PATCH_NAME_RE.sub("-", stem).strip("._-") or "patch"
+            ref = (
+                f"{self.SECTION}/overlays/{index:06d}/"
+                f"{member_index:02d}-{safe_name}.patch"
+            )
+            try:
+                if src.is_symlink() or not src.is_file():
+                    raise KBStoreError(
+                        f"artifact is not a readable regular file: {src}"
+                    )
+                content = src.read_bytes()
+                destination = self._sections.files_dir / ref
+                if destination.exists() and destination.read_bytes() != content:
+                    raise KBStoreError(
+                        f"artifact ref already has different bytes: {ref}"
+                    )
+                prepared.append((src, ref, content))
+            except (KBStoreError, OSError, ValueError) as exc:
+                log.warning(
+                    "%s kb: atomic patch staging rejected %s: %s",
+                    self.SECTION,
+                    source,
+                    exc,
+                )
+                return []
+        refs = [ref for _src, ref, _content in prepared]
+        if not refs:
+            return []
+        created: list[Path] = []
+        try:
+            staged = self._sections.staged(self.SECTION)
+            document = dict(staged.knowledge) if staged is not None else {}
+            recorded = [
+                str(ref)
+                for ref in (document.get("patches") or [])
+                if str(ref).strip()
+            ]
+            for ref in refs:
+                if ref not in recorded:
+                    recorded.append(ref)
+            document["patches"] = sorted(
+                recorded,
+                key=lambda ref: (
+                    0 if "/overlays/" in ref else 1,
+                    ref,
+                ),
+            )
+            existing_files = (
+                [
+                    path.relative_to(self._sections.files_dir).as_posix()
+                    for path in staged.files
+                ]
+                if staged is not None
+                else []
+            )
+            all_files = list(dict.fromkeys([*existing_files, *refs]))
+            for _src, ref, content in prepared:
+                destination = self._sections.files_dir / ref
+                if destination.exists():
+                    continue
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                temp = destination.with_name(f".{destination.name}.tmp")
+                temp.write_bytes(content)
+                os.replace(temp, destination)
+                created.append(destination)
+            target = (
+                self._sections.root
+                / "sections"
+                / f"{self.SECTION}.json"
+            )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temp_section = target.with_name(f".{target.name}.tmp")
+            temp_section.write_text(
+                json.dumps(
+                    {"knowledge": document, "files": all_files},
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            os.replace(temp_section, target)
+        except (KBStoreError, OSError, ValueError) as exc:
+            for destination in created:
+                destination.unlink(missing_ok=True)
+            log.warning(
+                "%s kb: cannot atomically record patch set: %s",
+                self.SECTION,
+                exc,
+            )
+            return []
+        return refs
+
+    def prior_file(self, ref: str) -> Path | None:
+        """Resolve a prior section ref to its downloaded artifact."""
+        if self._sections is None or self._sections.warm_start_dir is None:
+            return None
+        rel = str(ref or "").strip().lstrip("/")
+        parts = Path(rel).parts if rel else ()
+        if (
+            not parts
+            or parts[0] != self.SECTION
+            or ".." in parts
+            or Path(rel).is_absolute()
+        ):
+            return None
+        candidate = self._sections.warm_start_dir / FILES_MEMBER_ROOT / rel
+        return candidate if candidate.is_file() else None
+
+
+class ExploreAgentKB(_ConfigPatchAgentKB):
+    """Read/write EXPLORE's final config and accepted source overlays."""
+
+    SECTION = EXPLORE_SECTION
+
+
+class FrameworkAgentKB(_ConfigPatchAgentKB):
+    """Read/write FRAMEWORK_AGENT's final config and accepted overlays."""
+
+    SECTION = FRAMEWORK_SECTION
 
 
 class KernelAgentKB:
@@ -287,6 +537,10 @@ class KernelRecordReader:
 
 
 __all__ = [
+    "EXPLORE_SECTION",
+    "ExploreAgentKB",
+    "FRAMEWORK_SECTION",
+    "FrameworkAgentKB",
     "KERNEL_COLUMNS",
     "KERNEL_SECTION",
     "KernelAgentKB",

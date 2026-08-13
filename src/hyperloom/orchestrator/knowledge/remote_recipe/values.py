@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from .models import (
     KnowledgeBundle,
     RemoteRecipeValidationError,
     extract_knowledge_artifact_refs,
+    validate_relative_path,
 )
 from .sanitize import (
     sanitize_publish_env_mapping,
@@ -28,7 +30,7 @@ from .sanitize import (
 
 log = logging.getLogger(__name__)
 
-_PATH_KEYS = {
+_PATH_KEYS = (
     "artifact_path",
     "final_report_path",
     "patch",
@@ -37,8 +39,8 @@ _PATH_KEYS = {
     "source_file",
     "target_file",
     "tuned_file",
-}
-_PATH_LIST_KEYS = {
+)
+_PATH_LIST_KEYS = (
     "artifact_files",
     "artifacts",
     "changed_files",
@@ -46,8 +48,12 @@ _PATH_LIST_KEYS = {
     "patches_applied",
     "source_files",
     "target_files",
-}
+)
 _IGNORED_ACTIONS = {"replay_warm_recipe", "profile", "roofline", "conc_sweep", "sweep"}
+_OVERLAY_REF_RE = re.compile(
+    r"^(explore|framework)/overlays/(\d{6})/(\d+)-([^/]+)\.patch$"
+)
+_OVERLAY_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -254,16 +260,64 @@ def _config_from(entries: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _replay_config_from_current_best(state: Any) -> dict[str, Any]:
+    """Publish the single authoritative relaunch config, independent of owner."""
+    current = _mapping(getattr(state, "current_best", {}))
+    return {
+        "extra_server_args": sanitize_publish_server_args(
+            str(
+                current.get("effective_extra_server_args")
+                or current.get("extra_server_args")
+                or ""
+            )
+        ),
+        "extra_envs": sanitize_publish_env_mapping(
+            _mapping(current.get("extra_envs"))
+        ),
+    }
+
+
 def _entry_files(entries: list[dict[str, Any]], files: _Files, category: str) -> tuple[list[str], list[str]]:
     patches: list[str] = []
     artifacts: list[str] = []
     for entry in entries:
+        try:
+            stack_index = int(entry.get("__stack_index", -1))
+        except (TypeError, ValueError):
+            stack_index = -1
+        patch_member = 0
+        seen_patch_sources: set[str] = set()
+
+        def add_value(raw: Any, *, kind: str) -> str:
+            nonlocal patch_member
+            if kind != "patches" or stack_index < 0:
+                return files.add(raw, category=category, kind=kind)
+            source = Path(str(raw or ""))
+            if not source.is_file():
+                return ""
+            source_key = str(source.resolve())
+            if source_key in seen_patch_sources:
+                return ""
+            seen_patch_sources.add(source_key)
+            stem = source.name
+            for suffix in (".patch", ".diff"):
+                if stem.lower().endswith(suffix):
+                    stem = stem[: -len(suffix)]
+                    break
+            safe_name = _OVERLAY_NAME_RE.sub("-", stem).strip("._-") or "patch"
+            rel = (
+                f"{category}/overlays/{stack_index:06d}/"
+                f"{patch_member:02d}-{safe_name}.patch"
+            )
+            patch_member += 1
+            return files.adopt(source, rel)
+
         for key in _PATH_KEYS:
             raw = entry.get(key)
             if not raw:
                 continue
             kind = "patches" if "patch" in key else "artifacts"
-            ref = files.add(raw, category=category, kind=kind)
+            ref = add_value(raw, kind=kind)
             if ref:
                 (patches if kind == "patches" else artifacts).append(ref)
         for key in _PATH_LIST_KEYS:
@@ -274,7 +328,7 @@ def _entry_files(entries: list[dict[str, Any]], files: _Files, category: str) ->
                 continue
             kind = "patches" if "patch" in key else "artifacts"
             for raw in raw_values:
-                ref = files.add(raw, category=category, kind=kind)
+                ref = add_value(raw, kind=kind)
                 if ref:
                     (patches if kind == "patches" else artifacts).append(ref)
     return list(dict.fromkeys(patches)), list(dict.fromkeys(artifacts))
@@ -585,12 +639,183 @@ def has_new_keep(state: Any) -> bool:
     return False
 
 
+def _adopt_replayed_prior(
+    state: Any,
+    sections: Any,
+    value: dict[str, Any],
+    files: _Files,
+    stack: list[dict[str, Any]],
+) -> None:
+    """Carry forward the exact prior overlays only after replay reproduced."""
+    outcome = _mapping(getattr(state, "warm_replay_outcome", {}))
+    if str(outcome.get("status") or "") != "reproduced":
+        return
+    replayed_refs = {
+        str(ref)
+        for ref in (outcome.get("replayed_patch_refs") or [])
+        if str(ref)
+    }
+    if not replayed_refs:
+        return
+    warm_root = getattr(sections, "warm_start_dir", None)
+    if warm_root is None:
+        raise RemoteRecipeValidationError(
+            "replayed prior overlays have no warm-start artifact root"
+        )
+    warm_root = Path(warm_root)
+    recipe_path = warm_root / "recipe.json"
+    if not recipe_path.is_file():
+        raise RemoteRecipeValidationError(
+            "replayed prior overlays are missing warm-start recipe.json"
+        )
+    try:
+        import json
+
+        document = json.loads(recipe_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RemoteRecipeValidationError(
+            f"cannot read replayed prior recipe: {exc}"
+        ) from exc
+    prior_value = _mapping(document.get("value"))
+    if not prior_value:
+        knowledge = _mapping(document.get("knowledge"))
+        prior_value = _mapping(knowledge.get("value"))
+
+    # Config/env is part of what replay proved. Preserve it when no newer
+    # section-owned snapshot has replaced that field.
+    for owner in ("explore", "framework"):
+        prior = _mapping(prior_value.get(owner))
+        current = _mapping(value.get(owner))
+        if not current.get("extra_server_args") and prior.get("extra_server_args"):
+            current["extra_server_args"] = str(prior.get("extra_server_args") or "")
+        prior_envs = _mapping(prior.get("extra_envs"))
+        current_envs = _mapping(current.get("extra_envs"))
+        if prior_envs:
+            current["extra_envs"] = {**prior_envs, **current_envs}
+        value[owner] = current
+
+    replay_index = next(
+        (
+            index
+            for index, entry in enumerate(stack)
+            if str(entry.get("action") or "").lower() == "replay_warm_recipe"
+        ),
+        -1,
+    )
+    if replay_index < 0:
+        raise RemoteRecipeValidationError(
+            "replayed prior overlays have no replay_warm_recipe stack entry"
+        )
+    prior_timeline = prior_value.get("patch_timeline")
+    candidates: list[tuple[str, str]] = []
+    if isinstance(prior_timeline, list):
+        for row in prior_timeline:
+            ref = str(row or "")
+            owner = ref.split("/", 1)[0].lower()
+            if owner in {"explore", "framework"} and ref in replayed_refs:
+                candidates.append((owner, ref))
+    if not candidates:
+        for owner in ("explore", "framework"):
+            for ref in _mapping(prior_value.get(owner)).get("patches") or []:
+                if str(ref) in replayed_refs:
+                    candidates.append((owner, str(ref)))
+    candidate_refs = {ref for _owner, ref in candidates}
+    missing_metadata = replayed_refs - candidate_refs
+    if missing_metadata:
+        raise RemoteRecipeValidationError(
+            "successfully replayed prior overlays are absent from prior "
+            f"knowledge: {sorted(missing_metadata)!r}"
+        )
+
+    member_index = 0
+    seen: set[str] = set()
+    files_root = warm_root / "files"
+    if files_root.is_symlink():
+        raise RemoteRecipeValidationError(
+            "replayed prior files root must not be a symlink"
+        )
+    resolved_root = files_root.resolve()
+    for owner, old_ref in candidates:
+        if old_ref in seen:
+            continue
+        seen.add(old_ref)
+        normalized_ref = validate_relative_path(old_ref)
+        source = files_root / normalized_ref
+        cursor = files_root
+        for part in Path(normalized_ref).parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise RemoteRecipeValidationError(
+                    "successfully replayed prior overlay resolves through a "
+                    f"symlink: {old_ref!r}"
+                )
+        try:
+            source.resolve().relative_to(resolved_root)
+        except ValueError as exc:
+            raise RemoteRecipeValidationError(
+                f"replayed prior overlay escapes files root: {old_ref!r}"
+            ) from exc
+        if not source.is_file():
+            raise RemoteRecipeValidationError(
+                f"successfully replayed prior overlay is missing: {old_ref!r}"
+            )
+        try:
+            source.read_bytes()
+        except OSError as exc:
+            raise RemoteRecipeValidationError(
+                f"cannot read successfully replayed prior overlay {old_ref!r}: {exc}"
+            ) from exc
+        match = _OVERLAY_REF_RE.match(old_ref)
+        old_name = match.group(4) if match else source.stem
+        safe_name = _OVERLAY_NAME_RE.sub("-", old_name).strip("._-") or "patch"
+        new_ref = (
+            f"{owner}/overlays/{replay_index:06d}/"
+            f"{member_index:02d}-{safe_name}.patch"
+        )
+        try:
+            files.adopt(source, new_ref)
+        except (OSError, ValueError) as exc:
+            raise RemoteRecipeValidationError(
+                f"cannot adopt successfully replayed prior overlay {old_ref!r}: {exc}"
+            ) from exc
+        node = _mapping(value.get(owner))
+        refs = [str(ref) for ref in (node.get("patches") or []) if str(ref)]
+        if new_ref not in refs:
+            refs.append(new_ref)
+        node["patches"] = refs
+        value[owner] = node
+        member_index += 1
+
+
+def _patch_timeline(
+    value: Mapping[str, Any],
+    _stack: list[dict[str, Any]],
+) -> list[str]:
+    """Build the global replay order from section overlay refs."""
+    rows: list[tuple[int, int, str, str]] = []
+    seen: set[str] = set()
+    for owner in ("explore", "framework"):
+        node = _mapping(value.get(owner))
+        for raw_ref in node.get("patches") or []:
+            ref = str(raw_ref or "")
+            match = _OVERLAY_REF_RE.match(ref)
+            if match is None or ref in seen:
+                continue
+            seen.add(ref)
+            stack_index = int(match.group(2))
+            member_index = int(match.group(3))
+            rows.append((stack_index, member_index, owner, ref))
+    rows.sort()
+    return [ref for _stack_index, _member_index, _owner, ref in rows]
+
+
 def merge_staged_sections(
     value: dict[str, Any],
     sections: Any,
     files: "_Files",
     *,
     only: Collection[str] | None = None,
+    required: Collection[str] | None = None,
 ) -> list[str]:
     """Overlay agent-staged sections onto the values scraped from the stack.
 
@@ -603,12 +828,23 @@ def merge_staged_sections(
     artifacts nothing in the knowledge references.
     """
     merged: list[str] = []
+    required_names = set(required or ())
     for name in sections.sections():
         if only is not None and name not in only:
             continue
         try:
             staged = sections.staged(name)
-            if staged is None or not staged.knowledge:
+            if staged is None:
+                if name in required_names:
+                    raise RemoteRecipeValidationError(
+                        f"required staged section {name!r} cannot be read"
+                    )
+                continue
+            if not staged.knowledge:
+                if name in required_names:
+                    raise RemoteRecipeValidationError(
+                        f"required staged section {name!r} is empty"
+                    )
                 continue
             staged_files = [
                 (
@@ -616,12 +852,21 @@ def merge_staged_sections(
                     source.relative_to(sections.files_dir).as_posix(),
                 )
                 for source in staged.files
-                if source.is_file()
+                if source.is_file() and not source.is_symlink()
             ]
             staged_paths = {rel for _, rel in staged_files}
-            staged_refs = extract_knowledge_artifact_refs(
-                staged.knowledge,
-                staged_paths,
+            staged_refs = (
+                {
+                    str(ref)
+                    for key in ("patches", "artifacts")
+                    for ref in (staged.knowledge.get(key) or [])
+                    if str(ref).strip()
+                }
+                if name in required_names
+                else extract_knowledge_artifact_refs(
+                    staged.knowledge,
+                    staged_paths,
+                )
             )
             missing = staged_refs - staged_paths
             orphaned = staged_paths - staged_refs
@@ -635,12 +880,34 @@ def merge_staged_sections(
             for source, rel in staged_files:
                 files.adopt(source, rel)
             current = value.get(name)
-            value[name] = {
+            combined = {
                 **(current if isinstance(current, Mapping) else {}),
                 **staged.knowledge,
             }
+            # Config snapshots replace their fields, while patch/artifact refs
+            # accumulate across KEEPs and warm replay.
+            for ref_key in ("patches", "artifacts"):
+                before = (
+                    list(current.get(ref_key) or [])
+                    if isinstance(current, Mapping)
+                    else []
+                )
+                after = list(staged.knowledge.get(ref_key) or [])
+                if before or after:
+                    combined[ref_key] = list(
+                        dict.fromkeys(
+                            str(ref) for ref in [*before, *after] if str(ref)
+                        )
+                    )
+            value[name] = combined
             merged.append(name)
-        except Exception as exc:  # noqa: BLE001 - one bad column falls back
+        except Exception as exc:
+            if name in required_names:
+                if isinstance(exc, RemoteRecipeValidationError):
+                    raise
+                raise RemoteRecipeValidationError(
+                    f"required staged section {name!r} is invalid: {exc}"
+                ) from exc
             log.warning(
                 "remote recipe: ignoring invalid staged section %s; "
                 "falling back to CLOSE scrape: %s",
@@ -657,10 +924,33 @@ def build_remote_knowledge(
     sections: Any = None,
 ) -> KnowledgeBundle:
     """Construct the final opaque knowledge document and temporary files tree."""
+    pending_sections = list(
+        getattr(state, "kb_stage_outbox", []) or []
+    )
+    if pending_sections:
+        raise RemoteRecipeValidationError(
+            "required section staging is incomplete: "
+            f"{[row.get('id') for row in pending_sections if isinstance(row, Mapping)]!r}"
+        )
     root = Path(files_dir)
     root.mkdir(parents=True, exist_ok=True)
     files = _Files(root)
-    stack = [dict(item) for item in (getattr(state, "optimization_stack", []) or []) if isinstance(item, Mapping)]
+    stack = [
+        {**dict(item), "__stack_index": index}
+        for index, item in enumerate(getattr(state, "optimization_stack", []) or [])
+        if isinstance(item, Mapping)
+    ]
+    owner_names = {
+        "EXPLORE": "explore",
+        "FRAMEWORK_AGENT": "framework",
+    }
+    required_patch_owners = {
+        owner_names[owner]
+        for item in stack
+        if (
+            owner := str(item.get("kb_required_owner") or "").upper()
+        ) in owner_names
+    }
     explore_entries = [item for item in stack if _entry_origin(item) == "explore"]
     framework_entries = [item for item in stack if _entry_origin(item) == "framework"]
     current_best = _mapping(getattr(state, "current_best", {}))
@@ -672,6 +962,7 @@ def build_remote_knowledge(
     gains = list(getattr(state, "gain_per_stack_entry", []) or [])
     worked = _experience(state, "what_worked") or _worked_from_stack(stack, gains)
     value = {
+        "replay_config": _replay_config_from_current_best(state),
         "explore": build_explore_value(state, explore_entries, files),
         "framework": build_framework_value(state, framework_entries, files),
         "kernel": {
@@ -680,12 +971,28 @@ def build_remote_knowledge(
             "rewrite": build_kernel_rewrite_value(state, files),
         },
     }
+    if sections is not None:
+        _adopt_replayed_prior(state, sections, value, files, stack)
     staged_sections = (
-        merge_staged_sections(value, sections, files) if sections is not None else []
+        merge_staged_sections(
+            value,
+            sections,
+            files,
+            required=required_patch_owners,
+        )
+        if sections is not None
+        else []
     )
+    missing_required_owners = required_patch_owners - set(staged_sections)
+    if missing_required_owners:
+        raise RemoteRecipeValidationError(
+            "required staged owner sections are missing: "
+            f"{sorted(missing_required_owners)!r}"
+        )
+    value["patch_timeline"] = _patch_timeline(value, stack)
     knowledge = sanitize_shared_knowledge(
         {
-            "knowledge_schema_version": 2,
+            "knowledge_schema_version": 3,
             "optimized_throughput": optimized_throughput,
             "validated_e2e_gain": validated_gain,
             "value": value,
@@ -955,7 +1262,7 @@ def convert_v1_recipe_to_knowledge(recipe: Mapping[str, Any]) -> dict[str, Any]:
     """Wrap one legacy RecipeKB row for migration/backfill tooling.
 
     Runtime reads use :func:`envelope_to_v1_recipe`; the production CLOSE
-    writer always emits knowledge schema v2.
+    writer emits the current knowledge schema.
     """
     legacy = dict(recipe)
     best_config = _mapping(legacy.get("best_config"))
@@ -1022,23 +1329,27 @@ def envelope_to_v1_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         row["remote_schema_version"] = int(document.get("schema_version") or 2)
         row["knowledge_schema_version"] = 1
         return row
-    if knowledge_version != 2:
+    if knowledge_version not in (2, 3):
         raise RemoteRecipeValidationError(
             f"unsupported knowledge_schema_version: {raw_version!r}"
         )
-    explore = _mapping(value.get("explore"))
-    explore_args = str(explore.get("extra_server_args") or "").strip()
-    explore_envs = {
+    replay_config = _mapping(value.get("replay_config"))
+    if knowledge_version == 3 and not replay_config:
+        raise RemoteRecipeValidationError(
+            "knowledge schema v3 is missing value.replay_config"
+        )
+    replay_args = str(replay_config.get("extra_server_args") or "").strip()
+    replay_envs = {
         str(key): str(value)
-        for key, value in _mapping(explore.get("extra_envs")).items()
+        for key, value in _mapping(replay_config.get("extra_envs")).items()
     }
     session_id = str(document.get("session_id") or "")
     validated_gain = _number(knowledge.get("validated_e2e_gain"))
     return {
         "canonical_id": str(document.get("canonical_id") or ""),
         "best_config": {
-            "extra_server_args": explore_args,
-            "extra_envs": explore_envs,
+            "extra_server_args": replay_args,
+            "extra_envs": replay_envs,
         },
         "best_throughput": _number(knowledge.get("optimized_throughput")),
         "validated_gain_pct": validated_gain,
@@ -1058,7 +1369,7 @@ def envelope_to_v1_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         "provenance": _mapping(knowledge.get("provenance")),
         "remote_session_id": session_id,
         "remote_schema_version": int(document.get("schema_version") or 2),
-        "knowledge_schema_version": 2,
+        "knowledge_schema_version": knowledge_version,
     }
 
 
