@@ -1373,34 +1373,80 @@ async def test_fetch_populates_state_and_deps(tmp_path, monkeypatch):
 # In-flight task progress (``_read_task_progress``).
 
 
+def _history(*notes: tuple[str, dict]) -> str:
+    """Render a ``tasks.history`` column from ``(ts, entry)`` pairs."""
+    return json.dumps([{"ts": ts, **entry} for ts, entry in notes])
+
+
 def _tasks_db(path: Path, rows: list[tuple[str, str, str, str]]) -> Path:
-    """Write a ``tasks`` table holding ``(task_id, kind, state, updated_at)`` rows."""
+    """Write a ``tasks`` table holding ``(task_id, kind, state, history)`` rows."""
     conn = sqlite3.connect(str(path))
-    conn.execute("CREATE TABLE tasks (task_id TEXT PRIMARY KEY, kind TEXT, state TEXT, updated_at TEXT)")
+    conn.execute("CREATE TABLE tasks (task_id TEXT PRIMARY KEY, kind TEXT, state TEXT, history TEXT)")
     conn.executemany("INSERT INTO tasks VALUES (?,?,?,?)", rows)
     conn.commit()
     conn.close()
     return path
 
 
-def test_task_progress_reports_the_freshest_running_heartbeat(tmp_path):
-    """The newest ``updated_at`` among running rows is when work last moved."""
+def test_task_progress_reports_the_freshest_heartbeat_per_agent(tmp_path):
+    """Attribution is what stops one agent's work from vouching for another."""
     db = _tasks_db(
         tmp_path / "coordinator.db",
         [
-            ("t1", "explore", "running", "2026-08-13T10:00:00+00:00"),
-            ("t2", "roofline", "running", "2026-08-13T10:42:00+00:00"),
-            ("t3", "baseline", "succeeded", "2026-08-13T11:00:00+00:00"),
+            (
+                "t1",
+                "explore",
+                "running",
+                _history(("2026-08-13T10:00:00+00:00", {"progress": {"agent": "orchestration"}})),
+            ),
+            (
+                "t2",
+                "roofline",
+                "running",
+                _history(("2026-08-13T10:42:00+00:00", {"progress": {"agent": "orchestration"}})),
+            ),
+            (
+                "t3",
+                "baseline",
+                "succeeded",
+                _history(("2026-08-13T11:00:00+00:00", {"progress": {"agent": "orchestration"}})),
+            ),
         ],
     )
     out = local_probe._read_task_progress(db)
     assert out["running"] == 2
-    assert out["last_progress_task"] == "roofline"
-    assert out["last_progress_unix"] == to_unix("2026-08-13T10:42:00+00:00")
+    assert out["by_agent"] == {
+        "orchestration": {
+            "last_progress_unix": to_unix("2026-08-13T10:42:00+00:00"),
+            "task": "roofline",
+        }
+    }
+
+
+def test_a_bare_state_transition_is_not_a_heartbeat(tmp_path):
+    """``updated_at`` also moves when a task merely enters ``running``."""
+    db = _tasks_db(
+        tmp_path / "coordinator.db",
+        [("t1", "explore", "running", _history(("2026-08-13T10:00:00+00:00", {"to": "running"})))],
+    )
+    out = local_probe._read_task_progress(db)
+    assert out == {"running": 1}
+
+
+def test_an_unattributed_heartbeat_vouches_for_nobody(tmp_path):
+    """A note that names no owner must not silence an accusation against anyone."""
+    db = _tasks_db(
+        tmp_path / "coordinator.db",
+        [("t1", "explore", "running", _history(("2026-08-13T10:00:00+00:00", {"progress": {"unit": "variant"}})))],
+    )
+    assert local_probe._read_task_progress(db) == {"running": 1}
 
 
 def test_task_progress_is_empty_when_nothing_is_running(tmp_path):
-    db = _tasks_db(tmp_path / "coordinator.db", [("t1", "explore", "succeeded", "2026-08-13T10:00:00+00:00")])
+    db = _tasks_db(
+        tmp_path / "coordinator.db",
+        [("t1", "explore", "succeeded", _history(("2026-08-13T10:00:00+00:00", {"progress": {"agent": "x"}})))],
+    )
     assert local_probe._read_task_progress(db) == {}
 
 

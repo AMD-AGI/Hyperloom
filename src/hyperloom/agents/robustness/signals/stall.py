@@ -13,11 +13,15 @@ work is one multi-hour deterministic task — a baseline pair, a profile and its
 roofline, an explore grid — has no LLM turn to emit, so agent silence there is
 the design rather than a fault, and alerting on it trains operators to ignore
 the signal. :attr:`SourceData.local_task_progress` carries the counter-evidence:
-while dispatched work is still reporting units, the accusation is withheld.
+while an agent's *own* dispatched work is still reporting units, its accusation
+is downgraded rather than raised — and never past
+:attr:`StallConfig.severity_high_after_s`, because a busy machine is not proof
+that the agent on it is alive.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,6 +30,9 @@ from hyperloom.common.coerce import to_unix
 from ..role.prompt_inputs import InboxItem, ReactorContext
 from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
+
+
+log = logging.getLogger(__name__)
 
 
 # Agents tracked for stall detection; robustness excludes itself.
@@ -40,7 +47,16 @@ _TRACKED_AGENTS: frozenset[str] = frozenset(
 
 @dataclass
 class StallConfig:
-    """Knobs for :func:`evaluate_stall_signals`."""
+    """Knobs for :func:`evaluate_stall_signals`.
+
+    Attributes:
+        stall_timeout_s (float): Silence past which an agent is accused, and
+            the freshness a heartbeat must beat to count as counter-evidence.
+        severity_high_after_s (float): Silence past which the accusation is
+            HIGH. It doubles as the ceiling on suppression: work that keeps
+            reporting buys an agent time, never immunity, so a genuinely hung
+            Coordinator is still reported on a machine that never goes quiet.
+    """
 
     stall_timeout_s: float = 300.0
     severity_high_after_s: float = 900.0
@@ -56,7 +72,8 @@ def evaluate_stall_signals(
 
     Computes per-agent idle time from the most recent activity timestamp and
     fires MEDIUM (or HIGH past ``severity_high_after_s``) once idle time exceeds
-    the stall timeout.
+    the stall timeout. An agent whose own dispatched work is still reporting is
+    downgraded to LOW instead of accused, up to the ceiling.
 
     Args:
         ctx (ReactorContext): Reactor context (provides inbox and current time).
@@ -70,11 +87,6 @@ def evaluate_stall_signals(
     """
     cfg = config or StallConfig()
     last_seen = _collect_last_seen(ctx.inbox, data.coordinator_events)
-    work_idle_s = _in_flight_work_idle_s(data.local_task_progress, now_unix=ctx.now_unix)
-    if work_idle_s is not None and work_idle_s < cfg.stall_timeout_s:
-        # Dispatched work reported a unit more recently than the threshold: the
-        # session is progressing and quiet agents are waiting on it, not stuck.
-        return []
     out: list[Symptom] = []
     for agent in _TRACKED_AGENTS:
         ts = last_seen.get(agent)
@@ -84,52 +96,116 @@ def evaluate_stall_signals(
         idle_s = max(0.0, ctx.now_unix - ts)
         if idle_s < cfg.stall_timeout_s:
             continue
-        severity = SymptomSeverity.HIGH if idle_s >= cfg.severity_high_after_s else SymptomSeverity.MEDIUM
-        evidence: dict[str, Any] = {
-            "agent": agent,
-            "idle_seconds": int(idle_s),
-            "last_seen_unix": int(ts),
-            "threshold_s": int(cfg.stall_timeout_s),
-        }
-        if work_idle_s is not None:
-            evidence["in_flight_work_idle_seconds"] = int(work_idle_s)
-            evidence["in_flight_work"] = data.local_task_progress.get("last_progress_task")
         out.append(
-            Symptom(
-                name="agent_stall",
-                severity=severity,
-                summary=(f"agent {agent} silent for {int(idle_s)}s (threshold={int(cfg.stall_timeout_s)}s)"),
-                evidence=evidence,
-                subject={"agent": agent},
-                source="local" if data.coordinator_events else "inbox",
-                suggestion=("escalate strategy if agent remains silent"),
+            _stall_symptom(
+                agent,
+                last_seen_unix=ts,
+                idle_s=idle_s,
+                data=data,
+                now_unix=ctx.now_unix,
+                cfg=cfg,
             )
         )
     return out
 
 
-def _in_flight_work_idle_s(
+def _stall_symptom(
+    agent: str,
+    *,
+    last_seen_unix: float,
+    idle_s: float,
+    data: SourceData,
+    now_unix: float,
+    cfg: StallConfig,
+) -> Symptom:
+    """Build the ``agent_stall`` symptom for one agent that has gone silent.
+
+    Args:
+        agent (str): The silent agent.
+        last_seen_unix (float): Its most recent activity timestamp.
+        idle_s (float): Seconds of silence.
+        data (SourceData): Collected source data; supplies the in-flight
+            progress counter-evidence and the symptom ``source``.
+        now_unix (float): Current time.
+        cfg (StallConfig): Thresholds.
+
+    Returns:
+        Symptom: MEDIUM (HIGH past ``severity_high_after_s``), or LOW when the
+        agent's own work is still reporting and the ceiling is not yet reached.
+    """
+    work_idle_s, work_task = _agent_in_flight_work(
+        data.local_task_progress,
+        agent=agent,
+        now_unix=now_unix,
+    ) or (None, "")
+    evidence: dict[str, Any] = {
+        "agent": agent,
+        "idle_seconds": int(idle_s),
+        "last_seen_unix": int(last_seen_unix),
+        "threshold_s": int(cfg.stall_timeout_s),
+    }
+    if work_idle_s is not None:
+        evidence["in_flight_work_idle_seconds"] = int(work_idle_s)
+        evidence["in_flight_work"] = work_task
+    withheld = work_idle_s is not None and work_idle_s < cfg.stall_timeout_s and idle_s < cfg.severity_high_after_s
+    if not withheld:
+        severity = SymptomSeverity.HIGH if idle_s >= cfg.severity_high_after_s else SymptomSeverity.MEDIUM
+        return Symptom(
+            name="agent_stall",
+            severity=severity,
+            summary=(f"agent {agent} silent for {int(idle_s)}s (threshold={int(cfg.stall_timeout_s)}s)"),
+            evidence=evidence,
+            subject={"agent": agent},
+            source="local" if data.coordinator_events else "inbox",
+            suggestion=("escalate strategy if agent remains silent"),
+        )
+    evidence["accusation_withheld"] = True
+    evidence["withheld_until_idle_s"] = int(cfg.severity_high_after_s)
+    summary = (
+        f"agent {agent} silent for {int(idle_s)}s but its dispatched work "
+        f"({work_task or 'unknown'}) reported {int(work_idle_s)}s ago; "
+        f"accusation withheld until {int(cfg.severity_high_after_s)}s"
+    )
+    log.info("stall: %s", summary)
+    return Symptom(
+        name="agent_stall",
+        severity=SymptomSeverity.LOW,
+        summary=summary,
+        evidence=evidence,
+        subject={"agent": agent},
+        source="local" if data.coordinator_events else "inbox",
+        suggestion=("no action while this agent's own work keeps reporting units"),
+    )
+
+
+def _agent_in_flight_work(
     task_progress: dict[str, Any],
     *,
+    agent: str,
     now_unix: float,
-) -> float | None:
-    """Seconds since dispatched work last reported a completed unit.
+) -> tuple[float, str] | None:
+    """Seconds since ``agent``'s own dispatched work last reported a unit.
+
+    Progress belonging to another agent is deliberately invisible here: one
+    busy task must not vouch for an agent it has nothing to do with.
 
     Args:
         task_progress (dict[str, Any]): :attr:`SourceData.local_task_progress`.
+        agent (str): The agent under accusation.
         now_unix (float): Current time.
 
     Returns:
-        float | None: Idle seconds, or ``None`` when nothing is running or the
-        running work has never reported (no heartbeat means no evidence either
-        way, so the caller must fall back to agent silence).
+        tuple[float, str] | None: ``(idle_seconds, task_kind)``, or ``None``
+        when this agent has no attributed heartbeat — no heartbeat is no
+        evidence either way, so the caller falls back to agent silence.
     """
-    if not task_progress:
+    entry = (task_progress.get("by_agent") or {}).get(agent) if task_progress else None
+    if not isinstance(entry, dict):
         return None
-    ts = to_unix(task_progress.get("last_progress_unix"))
+    ts = to_unix(entry.get("last_progress_unix"))
     if ts is None:
         return None
-    return max(0.0, now_unix - ts)
+    return max(0.0, now_unix - ts), str(entry.get("task") or "")
 
 
 def _collect_last_seen(

@@ -29,6 +29,14 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+# Every ``tasks`` row is dispatched and awaited by the Coordinator's
+# orchestration loop, and the table carries no requester column, so a heartbeat
+# can only ever attest to this one agent. Widening that — letting any running
+# task vouch for whoever happens to be quiet — is what allowed a single busy
+# task to silence stall detection for the whole session.
+PROGRESS_OWNER_AGENT = "orchestration"
+
+
 @dataclass
 class RunnerContext:
     """Per-task context handed to an :data:`ExecutorFn`.
@@ -322,7 +330,8 @@ class SubAgentRunner:
         Composite actions call :func:`~...trace.task_progress.report_progress`
         as each internal unit lands, which reaches this sink and lands on the
         task row as a heartbeat instead of the row going dark for the whole
-        run.
+        run. Each note is stamped with :data:`PROGRESS_OWNER_AGENT` so a
+        consumer can tell whose silence the heartbeat actually excuses.
 
         Args:
             task_id (str): Task the returned sink reports for.
@@ -332,6 +341,7 @@ class SubAgentRunner:
         """
 
         async def sink(**note: Any) -> None:
+            note.setdefault("agent", PROGRESS_OWNER_AGENT)
             log.info("task_progress: task=%s %s", task_id, _format_progress(note))
             await self.tasks.record_progress(task_id, note)
 
@@ -355,4 +365,10 @@ def _format_progress(note: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-__all__ = ["RunnerContext", "ExecutorFn", "SubAgentResult", "SubAgentRunner"]
+__all__ = [
+    "PROGRESS_OWNER_AGENT",
+    "RunnerContext",
+    "ExecutorFn",
+    "SubAgentResult",
+    "SubAgentRunner",
+]

@@ -60,21 +60,63 @@ def test_evaluate_stall_no_activity_no_symptom() -> None:
     assert evaluate_stall_signals(ctx, data) == []
 
 
+def _progress(agent: str, *, unix: float, task: str) -> dict:
+    """A ``local_task_progress`` snapshot holding one agent's heartbeat."""
+    return {"running": 1, "by_agent": {agent: {"last_progress_unix": unix, "task": task}}}
+
+
 def test_work_still_reporting_units_withholds_the_accusation() -> None:
     """A phase whose work is one long deterministic task has no turn to emit."""
-    ctx = ReactorContext(inbox=[_item("orchestration", ts=100.0)], now_unix=10_000.0)
-    data = SourceData(
-        local_task_progress={"running": 1, "last_progress_unix": 9_950.0, "last_progress_task": "roofline"},
+    ctx = ReactorContext(inbox=[_item("orchestration", ts=9_800.0)], now_unix=10_000.0)
+    data = SourceData(local_task_progress=_progress("orchestration", unix=9_950.0, task="roofline"))
+    out = evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=100.0))
+    assert [s.severity for s in out] == [SymptomSeverity.LOW]
+    assert out[0].evidence["accusation_withheld"] is True
+    assert out[0].evidence["in_flight_work"] == "roofline"
+
+
+def test_a_withheld_accusation_still_leaves_a_trace() -> None:
+    """``return []`` made the near-miss unobservable; the operator needs to see it."""
+    ctx = ReactorContext(inbox=[_item("orchestration", ts=9_800.0)], now_unix=10_000.0)
+    data = SourceData(local_task_progress=_progress("orchestration", unix=9_950.0, task="explore"))
+    out = evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=100.0))
+    assert out[0].name == "agent_stall"
+    assert out[0].subject == {"agent": "orchestration"}
+    assert "explore" in out[0].summary and "withheld" in out[0].summary
+
+
+def test_busy_work_of_one_agent_does_not_silence_another() -> None:
+    """One busy task used to vouch for every agent at once, with no attribution."""
+    ctx = ReactorContext(
+        inbox=[_item("orchestration", ts=9_800.0), _item("critic", ts=9_800.0)],
+        now_unix=10_000.0,
     )
-    assert evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=300.0)) == []
+    data = SourceData(local_task_progress=_progress("orchestration", unix=9_950.0, task="explore"))
+    by_agent = {
+        s.subject["agent"]: s.severity
+        for s in evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=100.0))
+    }
+    assert by_agent["orchestration"] is SymptomSeverity.LOW
+    assert by_agent["critic"] is SymptomSeverity.MEDIUM
+
+
+def test_progress_buys_time_but_never_immunity() -> None:
+    """Past the ceiling a busy machine stops excusing a Coordinator that is hung."""
+    ctx = ReactorContext(inbox=[_item("orchestration", ts=100.0)], now_unix=10_000.0)
+    data = SourceData(local_task_progress=_progress("orchestration", unix=9_999.0, task="explore"))
+    out = evaluate_stall_signals(
+        ctx,
+        data,
+        config=StallConfig(stall_timeout_s=300.0, severity_high_after_s=900.0),
+    )
+    assert [s.severity for s in out] == [SymptomSeverity.HIGH]
+    assert "accusation_withheld" not in out[0].evidence
 
 
 def test_work_that_has_gone_quiet_too_lets_the_stall_through() -> None:
     """Silent agents plus silent work is the case the signal exists for."""
     ctx = ReactorContext(inbox=[_item("orchestration", ts=100.0)], now_unix=10_000.0)
-    data = SourceData(
-        local_task_progress={"running": 1, "last_progress_unix": 1_000.0, "last_progress_task": "explore"},
-    )
+    data = SourceData(local_task_progress=_progress("orchestration", unix=1_000.0, task="explore"))
     out = evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=300.0))
     assert [s.name for s in out] == ["agent_stall"]
     assert out[0].evidence["in_flight_work"] == "explore"

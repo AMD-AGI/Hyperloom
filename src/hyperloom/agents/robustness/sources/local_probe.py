@@ -335,18 +335,20 @@ class LocalProbeSource:
 def _read_task_progress(db_path: Path | None) -> dict[str, Any]:
     """Summarize in-flight task progress from the session SQLite DB.
 
-    ``updated_at`` on a running row is bumped by every heartbeat a composite
-    action reports, so its maximum over running rows is the freshest evidence
-    that dispatched work is still moving — the counter-evidence a stall
-    accusation needs before it fires at an agent that is simply waiting.
+    Freshness comes from the progress notes ``TaskRegistry.record_progress``
+    appends to a task's ``history``, not from ``updated_at``: that column also
+    moves when a task merely enters ``running``, and a state transition is no
+    evidence that anything is still happening. A note that names no owning
+    agent is counted as running work but vouches for nobody.
 
     Args:
         db_path (Path | None): Path to ``coordinator.db``; ``None`` or a
             missing file short-circuits to ``{}``.
 
     Returns:
-        dict[str, Any]: ``{running, last_progress_unix, last_progress_task}``,
-        or ``{}`` when the DB is unreadable or nothing is running.
+        dict[str, Any]: ``{running, by_agent}`` where ``by_agent`` maps an
+        owning agent to ``{last_progress_unix, task}`` for its freshest
+        heartbeat, or ``{}`` when the DB is unreadable or nothing is running.
     """
     if db_path is None or not db_path.exists():
         return {}
@@ -359,20 +361,58 @@ def _read_task_progress(db_path: Path | None) -> dict[str, Any]:
         conn.row_factory = sqlite3.Row
         rows = _try_select(
             conn,
-            ["SELECT task_id, kind, updated_at FROM tasks WHERE state='running' ORDER BY updated_at DESC"],
+            ["SELECT task_id, kind, history FROM tasks WHERE state='running'"],
             (),
         )
-        if not rows:
-            return {}
-        newest = rows[0]
-        out: dict[str, Any] = {"running": len(rows)}
-        ts = to_unix(newest["updated_at"] if "updated_at" in newest.keys() else None)
-        if ts is not None:
-            out["last_progress_unix"] = ts
-            out["last_progress_task"] = newest["kind"] if "kind" in newest.keys() else newest["task_id"]
-        return out
     finally:
         conn.close()
+    if not rows:
+        return {}
+    out: dict[str, Any] = {"running": len(rows)}
+    by_agent: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        keys = row.keys()
+        note = _latest_progress_note(row["history"] if "history" in keys else None)
+        if note is None:
+            continue
+        ts, agent = note
+        task = str((row["kind"] if "kind" in keys else row["task_id"]) or "")
+        known = by_agent.get(agent)
+        if known is None or ts > known["last_progress_unix"]:
+            by_agent[agent] = {"last_progress_unix": ts, "task": task}
+    if by_agent:
+        out["by_agent"] = by_agent
+    return out
+
+
+def _latest_progress_note(history_json: Any) -> tuple[float, str] | None:
+    """Extract the newest attributed heartbeat from a task's ``history`` column.
+
+    Args:
+        history_json (Any): Raw ``tasks.history`` JSON text.
+
+    Returns:
+        tuple[float, str] | None: ``(unix_ts, owning_agent)`` for the newest
+        entry carrying a ``progress`` note that names its agent, or ``None``
+        when the task has never reported one.
+    """
+    if not isinstance(history_json, str):
+        return None
+    rows = _json_loads_or_none(history_json)
+    if not isinstance(rows, list):
+        return None
+    for entry in reversed(rows):
+        if not isinstance(entry, dict):
+            continue
+        note = entry.get("progress")
+        if not isinstance(note, dict):
+            continue
+        ts = to_unix(entry.get("ts"))
+        agent = str(note.get("agent") or "").strip()
+        if ts is None or not agent:
+            continue
+        return ts, agent
+    return None
 
 
 def _read_coordinator_events(
