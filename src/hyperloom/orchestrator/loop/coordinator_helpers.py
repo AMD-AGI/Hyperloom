@@ -230,6 +230,28 @@ TIME_BUDGET_EXEMPT_ACTIONS: frozenset[str] = frozenset(
 )
 
 
+def expected_action_cost_minutes(meta: Any | None) -> float:
+    """Read an action's expected cost out of its catalogue metadata.
+
+    Both budget guards go through here so the field is named once. Reading it
+    inline with a ``getattr`` default turned the catalogue's move off YAML —
+    which renamed the field — into a gate that admitted everything without a
+    word, because "no estimate on record" and "the field moved" look the same
+    from a default.
+
+    Args:
+        meta (Any | None): The action's catalogue metadata, or ``None`` for an
+            action the catalogue does not carry.
+
+    Returns:
+        float: The expected cost in minutes; ``0.0`` when nothing is on record.
+    """
+    try:
+        return float(getattr(meta, "typical_runtime_min", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def action_fits_time_budget(
     *,
     usable_sec: float | None,
@@ -237,8 +259,8 @@ def action_fits_time_budget(
 ) -> bool:
     """Decide whether an action's expected cost still fits the remaining budget.
 
-    The anchor is the action's *expected* cost (``cost_minutes_p50``), not its
-    p75 backstop. Judging fit on the pessimistic tail would abandon usable
+    The anchor is the action's *expected* cost (its typical runtime), not its
+    pessimistic tail. Judging fit on the pessimistic tail would abandon usable
     budget — with 90 minutes left we would refuse an action that finishes in 60
     minutes half the time — and the session already has a wall-clock reaper for
     the overruns, so the optimistic anchor is the one that keeps the tail of a
