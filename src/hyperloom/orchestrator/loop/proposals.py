@@ -237,7 +237,6 @@ class ProposalsCollaborator:
             "what_worked",
             "what_failed",
             "remaining_gaps",
-            "prs_tested",
             "pitfalls",
             "lessons",
             "last_profiled",
@@ -281,9 +280,6 @@ class ProposalsCollaborator:
             "remaining_gaps": overrides.get("remaining_gaps")
             if "remaining_gaps" in overrides
             else list(live.get("remaining_gaps") or []),
-            "prs_tested": overrides.get("prs_tested")
-            if "prs_tested" in overrides
-            else list(live.get("prs_tested") or []),
             "pitfalls": pitfalls,
             "lessons": lessons,
             "last_profiled": overrides.get("last_profiled")

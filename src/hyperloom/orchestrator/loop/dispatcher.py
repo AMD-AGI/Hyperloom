@@ -1028,16 +1028,17 @@ class DispatcherCollaborator:
                         stage="dispatcher_fact_write",
                         exc=exc,
                     )
-            # Framework prs_tested write-back: record KEEP/REVERT patches.
+            # Real-time KG edge for a framework KEEP/REVERT (best-effort).
             if task.kind == "framework_agent":
                 try:
-                    self._write_prs_tested_from_framework_agent(task=task, result=result, kept=kept)
-                except Exception:  # noqa: BLE001 — defensive
+                    self._emit_framework_agent_kg_decision(
+                        task=task, result=result, kept=kept
+                    )
+                except Exception:  # noqa: BLE001 — real-time KG edge is best-effort
                     log.exception(
-                        "dispatcher: prs_tested write-back failed for task=%s",
+                        "dispatcher: framework KG decision emit failed for task=%s",
                         task.task_id,
                     )
-                    continue
             # explore-round gap update: append per-variant KEEP/REVERT, then re-run the global refresh.
             if task.kind == "explore":
                 result_dict = result.result if isinstance(result.result, dict) else {}
