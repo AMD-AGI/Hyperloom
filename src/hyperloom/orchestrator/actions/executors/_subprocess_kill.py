@@ -681,6 +681,48 @@ def _scan_server_log_increment(path: str, from_offset: int) -> tuple[int, bool, 
     return size, saw_ready, saw_progress, saw_eval_start
 
 
+def session_deadline_to_remaining_sec(session_deadline_sec: float | None) -> float | None:
+    """Convert an in-process session deadline into seconds still left on it.
+
+    The pair of this and :func:`session_remaining_to_deadline_sec` is how a
+    session deadline crosses a process boundary. ``time.monotonic()`` has an
+    unspecified, per-process origin, so the absolute instant means nothing to a
+    reader in another process; a duration means the same thing everywhere.
+
+    Args:
+        session_deadline_sec: Absolute ``time.monotonic()`` instant at which the
+            session budget expires, or ``None`` when the budget is unbounded.
+
+    Returns:
+        Seconds left on the budget, or ``None`` when unbounded. Non-positive
+        when the deadline has already passed, which the receiving side is meant
+        to act on immediately rather than treat as "no budget given".
+    """
+    if session_deadline_sec is None:
+        return None
+    return float(session_deadline_sec) - time.monotonic()
+
+
+def session_remaining_to_deadline_sec(session_remaining_sec: float | None) -> float | None:
+    """Re-anchor a remaining session budget onto this process's monotonic clock.
+
+    The inverse of :func:`session_deadline_to_remaining_sec`. Whatever the
+    budget spent in transit is charged to the receiver, since no clock is shared
+    across the boundary to measure it with.
+
+    Args:
+        session_remaining_sec: Seconds left on the session budget as measured by
+            the sender, or ``None`` when the budget is unbounded.
+
+    Returns:
+        An absolute ``time.monotonic()`` deadline usable in this process, or
+        ``None`` when unbounded.
+    """
+    if session_remaining_sec is None:
+        return None
+    return time.monotonic() + float(session_remaining_sec)
+
+
 def run_with_session_kill(
     cmd: list[str],
     *,
@@ -1127,4 +1169,6 @@ __all__ = [
     "new_session_kwargs",
     "run_with_session_kill",
     "server_log_death_excerpt",
+    "session_deadline_to_remaining_sec",
+    "session_remaining_to_deadline_sec",
 ]
