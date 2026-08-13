@@ -70,6 +70,31 @@ imports it and `:1245` calls it after every explore variant. Either the env
 names are stale or the whole variant-boundary pulse has been inert since the
 env was renamed.
 
+### `agents/kernel/tools/parallel_e2e_runner.py` (538 lines)
+
+No in-repo caller: the only importer is
+`agents/kernel/tests/test_parallel_e2e_env.py` (67 lines, covering
+`load_env_file` alias derivation), and `test_kernel_agent_live.py` only names
+it in a comment. But it is a standalone CLI (`main()` at `:268`, `__main__`
+guard at `:537`) and `pyproject.toml:261` lists it under coverage-omit as a
+subprocess driver -- i.e. it is *designed* to be launched from outside the
+package, which no grep can rule out. The preceding PR also repaired a flag it
+passes (`--test-harness-path` -> `--benchmark-file`), so it was treated as
+live very recently. Needs an operator answer, not a call-graph.
+
+### `robustness/signals/stall.py:28` -- `"kernel_agent"` in `_TRACKED_AGENTS`
+
+Not dead, but misfiring. `intent_router.py:718` really does post bus messages
+with `from_agent="kernel_agent"`, so the detector has timestamps to compare
+against -- it just treats "no kernel request answered for 300s" as a stall,
+which is the normal state through EXPLORE and through a long GEAK phase. The
+16h Mixtral-8x7B run collected three such alerts (`reports/final.md`:
+`agent kernel_agent silent for 309s / 619s / 312s`). Since kernel requests are
+answered synchronously inside the tick that raises them, there is no stall
+this signal can detect that an orchestration stall would not. Removing it
+changes what Robustness reports, so it belongs in a behaviour change rather
+than a deletion.
+
 ### `_grid_variant_filter.apply_compatibility_filter` (~120 lines)
 
 `orchestrator/actions/executors/explore.py:947-950` says so in its own comment:

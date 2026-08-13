@@ -159,7 +159,7 @@ Every proposal in `judge_bundle.proposals` is classified into one of:
 Unknown action names fall through to `evidence_producer` (cold-start
 safe). The exact list lives in
 `runtime.decision_reviewer._PATCH_LANDING_ACTIONS` /
-`_EVIDENCE_PRODUCER_ACTIONS` / `_FRAMEWORK_OP_ACTIONS`, and the
+`_FRAMEWORK_OP_ACTIONS`, and the
 enablement split in `_is_enablement_patch`; the runtime
 also exports the per-class checklists in
 `review_constraints.approve_requires_by_class`.

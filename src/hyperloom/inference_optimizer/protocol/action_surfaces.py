@@ -93,15 +93,6 @@ ROBUSTNESS_DELEGATE_ONLY_ACTIONS: frozenset[str] = frozenset(
 )
 
 
-# Actions whose prompt catalogue should advertise LLM-supplied grids.
-GRID_INJECTABLE_ACTIONS: frozenset[str] = frozenset(
-    {
-        "explore",
-        "sweep",
-    }
-)
-
-
 # Actions rendered in the Orchestration prompt for full kernel-enabled runs.
 # Prompt visibility only; phase_state and PolicyGate decide legality per tick.
 FULL_ENABLED_ACTIONS: tuple[str, ...] = (
@@ -513,7 +504,6 @@ __all__ = [
     "COORDINATOR_INTERNAL_ACTIONS",
     "FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES",
     "FULL_ENABLED_ACTIONS",
-    "GRID_INJECTABLE_ACTIONS",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_ACTION_REQUEST_KINDS",
     "KERNEL_AGENT_OWNED_ACTIONS",

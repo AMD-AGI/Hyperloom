@@ -22,7 +22,6 @@ from pathlib import Path
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     ActionMetadata,
     FULL_ENABLED_ACTIONS,
-    GRID_INJECTABLE_ACTIONS,
     KERNEL_ACTION_REQUEST_KINDS,
     KERNEL_AGENT_OWNED_ACTIONS,
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
@@ -1126,7 +1125,6 @@ def default_enabled_actions(
 
 __all__ = [
     "FULL_ENABLED_ACTIONS",
-    "GRID_INJECTABLE_ACTIONS",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
     "TRANSPORTS",
