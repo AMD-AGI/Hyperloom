@@ -24,6 +24,7 @@ from ..state.task_registry import Task
 from ..loop.coordinator import (
     _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE,
 )
+from ..loop.coordinator_helpers import expected_action_cost_minutes
 from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
@@ -178,10 +179,7 @@ class PreludePhase(PhaseHandler):
             return measured
         registry = getattr(self, "action_registry", None)
         meta = registry.get(self._internal_analysis_kind()) if registry is not None else None
-        try:
-            return float(getattr(meta, "cost_minutes_p50", 0.0) or 0.0) * 60.0
-        except (TypeError, ValueError):
-            return 0.0
+        return expected_action_cost_minutes(meta) * 60.0
 
     def _record_prelude_arm_dropped(self, arm: str, evidence: dict[str, Any]) -> None:
         """Record a PRELUDE arm dropped for budget on the current phase record.

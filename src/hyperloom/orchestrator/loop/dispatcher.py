@@ -37,6 +37,7 @@ from .coordinator_helpers import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
     coerce_needs_gpu,
+    expected_action_cost_minutes,
 )
 
 from .coordinator import (
@@ -1301,7 +1302,7 @@ class DispatcherCollaborator:
         meta = reg.get(action) if reg is not None else None
         if meta is None:
             return None
-        expected_min = float(getattr(meta, "cost_minutes_p50", 0.0) or 0.0)
+        expected_min = expected_action_cost_minutes(meta)
         usable_sec = self.shared_state.session_budget_usable_sec()
         if action_fits_time_budget(
             usable_sec=usable_sec,

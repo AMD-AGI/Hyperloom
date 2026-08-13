@@ -29,11 +29,13 @@ import threading
 
 import pytest
 
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.coordinator_helpers import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
+    expected_action_cost_minutes,
 )
 from hyperloom.orchestrator.policy.gate import PolicyDenied
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
@@ -80,6 +82,23 @@ def _set_budget(coord: Coordinator, *, minutes: float, elapsed_min: float = 0.0)
     """Give the session a finite budget with ``elapsed_min`` already spent."""
     coord.shared_state.max_minutes = int(minutes)
     coord.shared_state.elapsed_minutes = lambda **_kw: elapsed_min  # type: ignore[method-assign]
+
+
+class TestTheCostTheGateJudgesOn:
+    """Where the expected cost comes from: the action catalogue, or nowhere."""
+
+    def test_a_catalogued_action_reads_its_expected_runtime(self):
+        assert expected_action_cost_minutes(ACTION_CATALOGUE[_EXPENSIVE_ACTION]) == pytest.approx(_EXPENSIVE_COST_MIN)
+
+    def test_an_action_the_catalogue_does_not_carry_has_no_estimate(self):
+        assert expected_action_cost_minutes(None) == 0.0
+
+    def test_no_catalogued_action_reads_as_free(self):
+        """A zero cost admits an action on any budget, so a whole catalogue of
+        them is an admission gate that is not there — which is what reading a
+        renamed field through a ``getattr`` default silently produced."""
+        free = sorted(name for name, meta in ACTION_CATALOGUE.items() if expected_action_cost_minutes(meta) <= 0.0)
+        assert free == []
 
 
 class TestFitDecision:
