@@ -560,8 +560,8 @@ def strip_forbidden_proposal_fields(payload: dict[str, Any]) -> list[str]:
     ``proposal_set`` over it, so the specialist's ideas never reach a benchmark
     and there is rarely budget to resubmit. The claim is worthless either way —
     measured gain is the Coordinator's — so dropping it costs nothing and makes
-    the violation unreachable rather than merely audited. Callers keep the
-    scanned field list for the audit note.
+    the violation unreachable rather than merely audited. The names returned are
+    what the caller's audit note records.
 
     Args:
         payload: The ``specialist_done`` payload, mutated in place. Both the
