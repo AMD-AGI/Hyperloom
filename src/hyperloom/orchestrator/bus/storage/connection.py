@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import sqlite3
 import threading
@@ -20,6 +21,9 @@ from pathlib import Path
 from typing import Any
 
 from .schema import ensure_schema
+
+
+log = logging.getLogger(__name__)
 
 
 # Journal mode is env-overridable; WAL default. On networked filesystems
@@ -208,19 +212,30 @@ class SqliteConnection:
 
         Yields:
             An open cursor inside the immediate write transaction; the
-            transaction commits on clean exit and rolls back on exception.
+            transaction commits on clean exit and rolls back on any exception,
+            cancellation included.
         """
         await self._async_lock.acquire()
+        cur: sqlite3.Cursor | None = None
         try:
-            cur = await asyncio.to_thread(self._begin_immediate)
             try:
+                cur = await asyncio.to_thread(self._begin_immediate)
                 yield cur
                 await asyncio.to_thread(self._commit)
-            except Exception:
-                await asyncio.to_thread(self._rollback)
+            except BaseException:
+                # ``BaseException``, not ``Exception``: ``CancelledError`` is
+                # not an ``Exception``, and a cancel landing on any of the
+                # ``to_thread`` hops here — including the one that returns the
+                # cursor, after ``BEGIN IMMEDIATE`` already ran in the worker
+                # thread — would otherwise skip the rollback. The shared
+                # connection then stays inside a transaction for the rest of
+                # the session and every later write fails with "cannot start a
+                # transaction within a transaction".
+                self._rollback_quietly()
                 raise
             finally:
-                await asyncio.to_thread(cur.close)
+                if cur is not None:
+                    await asyncio.to_thread(cur.close)
         finally:
             self._async_lock.release()
 
@@ -245,6 +260,20 @@ class SqliteConnection:
         """Roll back the current transaction under the sync lock."""
         with self._sync_lock:
             self._conn.rollback()
+
+    def _rollback_quietly(self) -> None:
+        """Roll back an open transaction on the way out of a failed body.
+
+        Runs inline rather than on a worker thread: the exception being handled
+        is often this task's own cancellation, and an ``await`` there can be
+        cancelled in turn — which is precisely how the connection would stay
+        wedged. A rollback that itself fails is logged and swallowed so the
+        caller's original exception is the one that propagates.
+        """
+        try:
+            self._rollback()
+        except sqlite3.Error as exc:
+            log.warning("rollback after a failed transaction failed: %r", exc)
 
     def close(self) -> None:
         """Close the underlying connection under the sync lock."""

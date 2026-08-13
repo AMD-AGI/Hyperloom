@@ -274,6 +274,42 @@ async def test_the_driver_stops_with_the_step_it_watches() -> None:
     assert len(notes) == reported_during
 
 
+@pytest.mark.asyncio
+async def test_a_cancelled_progress_write_leaves_the_connection_usable(tmp_path, monkeypatch):
+    """A cancel mid-``BEGIN IMMEDIATE`` must not wedge the shared connection.
+
+    Every heartbeat around a long subprocess ends in a cancel-or-stop of a
+    coroutine that may be inside a registry write, so a transaction left open
+    here fails every later write in the session with "cannot start a
+    transaction within a transaction".
+    """
+    sub = _runner(tmp_path, monkeypatch)
+    task = await sub.tasks.create(kind="explore", params={}, idempotency_key="wedge")
+    await sub.tasks.transition(task.task_id, "running")
+
+    begun = threading.Event()
+    real_begin = sub.tasks.db._begin_immediate
+
+    def _slow_begin():
+        """Widen the window between ``BEGIN IMMEDIATE`` and the caller resuming."""
+        cur = real_begin()
+        if not begun.is_set():
+            begun.set()
+            time.sleep(0.2)
+        return cur
+
+    monkeypatch.setattr(sub.tasks.db, "_begin_immediate", _slow_begin)
+    writing = asyncio.create_task(sub.tasks.record_progress(task.task_id, {"unit": "variant"}))
+    await asyncio.to_thread(begun.wait, 5.0)
+    writing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await writing
+
+    assert not sub.tasks.db.raw.in_transaction
+    await sub.tasks.record_progress(task.task_id, {"unit": "variant", "label": "after"})
+    assert [note.get("label") for note in _progress_notes(await sub.tasks.get(task.task_id))] == ["after"]
+
+
 def test_the_tally_is_safe_to_advance_from_reader_threads() -> None:
     """The pump threads write it; the event loop reads it."""
     activity = OutputActivity()
