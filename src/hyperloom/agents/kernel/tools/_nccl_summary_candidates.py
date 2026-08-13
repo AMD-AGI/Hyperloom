@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from collections import OrderedDict
 from pathlib import Path
@@ -48,55 +49,70 @@ def collective_symbol(kernel_name: str) -> str:
     return head.rsplit("::", 1)[-1].strip()
 
 
-def _iter_device_sources(roots: Iterable[str]) -> Iterable[Path]:
-    """Yield at most the configured number of device-source files."""
-    seen = 0
+def _iter_source_tree_files(roots: Iterable[str]) -> Iterable[Path]:
+    """Yield files lazily without materializing entire source trees."""
+    yielded: set[Path] = set()
     for root in roots:
         base = Path(root)
         if not base.is_dir():
             continue
-        for path in sorted(base.rglob("*")):
-            if seen >= _MAX_SCANNED_FILES:
-                return
-            if path.suffix.lower() in _DEVICE_SOURCE_SUFFIXES and path.is_file():
-                seen += 1
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames.sort()
+            for filename in sorted(filenames):
+                path = Path(dirpath) / filename
+                key = path.absolute()
+                if key in yielded or not path.is_file():
+                    continue
+                yielded.add(key)
                 yield path
 
 
-def collect_device_sources(roots: Sequence[str]) -> tuple[list[Path], bool]:
-    """Return the device sources to scan, and whether the cap truncated them.
-
-    Every symbol scans the same tree, so walking it once turns the lookup from
-    ``O(symbols x files)`` into one pass. The truncation flag matters because a
-    capped scan and a genuinely absent symbol both end in ``None``.
-    """
-    sources = list(_iter_device_sources(roots))
-    return sources, len(sources) >= _MAX_SCANNED_FILES
+def index_device_symbols(
+    symbols: Iterable[str],
+    roots: Sequence[str],
+) -> tuple[dict[str, tuple[str, int, str]], bool]:
+    """Locate requested device symbols in one bounded source-tree pass."""
+    pending = {str(symbol).strip() for symbol in symbols if str(symbol).strip()}
+    if not pending:
+        return {}, False
+    alternatives = "|".join(
+        re.escape(symbol) for symbol in sorted(pending, key=lambda value: (-len(value), value))
+    )
+    pattern = re.compile(r"\b(?P<symbol>" + alternatives + r")\s*\(")
+    located: dict[str, tuple[str, int, str]] = {}
+    scanned = 0
+    for path in _iter_source_tree_files(roots):
+        if scanned >= _MAX_SCANNED_FILES:
+            return located, True
+        scanned += 1
+        if path.suffix.lower() not in _DEVICE_SOURCE_SUFFIXES:
+            continue
+        try:
+            lines = path.read_text(errors="ignore").splitlines()
+        except OSError:
+            continue
+        for idx, line in enumerate(lines):
+            for match in pattern.finditer(line):
+                symbol = match.group("symbol")
+                if symbol not in pending:
+                    continue
+                window = " ".join(lines[max(0, idx - 2) : idx + 1])
+                if "__global__" not in window:
+                    continue
+                located[symbol] = (str(path), idx + 1, symbol)
+                pending.remove(symbol)
+        if not pending:
+            return located, False
+    return located, False
 
 
 def locate_device_symbol(
     symbol: str,
     roots: Sequence[str],
-    *,
-    sources: Sequence[Path] | None = None,
 ) -> tuple[str, int, str] | None:
     """Locate the ``__global__`` definition of a device symbol."""
-    if not symbol:
-        return None
-    pattern = re.compile(r"\b" + re.escape(symbol) + r"\s*\(")
-    scanned = sources if sources is not None else _iter_device_sources(roots)
-    for path in scanned:
-        try:
-            lines = Path(path).read_text(errors="ignore").splitlines()
-        except OSError:
-            continue
-        for idx, line in enumerate(lines):
-            if not pattern.search(line):
-                continue
-            window = " ".join(lines[max(0, idx - 2) : idx + 1])
-            if "__global__" in window:
-                return (str(path), idx + 1, symbol)
-    return None
+    index, _ = index_device_symbols([symbol], roots)
+    return index.get(symbol)
 
 
 def _prorated_totals(
@@ -171,6 +187,7 @@ def extract_collective_candidates(
     source_roots: Sequence[str],
     *,
     log_fn: Callable[[str], None] | None = None,
+    diagnostics: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build source-resolved candidates from TraceLens NCCL metrics."""
     metrics_path = Path(tracelens_dir) / _METRICS_RELPATH
@@ -202,17 +219,29 @@ def extract_collective_candidates(
     total_time_ms = float(total_time_raw)
 
     roots = [r for r in source_roots if r]
-    sources, truncated = collect_device_sources(roots)
-    if truncated and log_fn is not None:
-        log_fn(
-            f"nccl_summary: device-source scan stopped at {_MAX_SCANNED_FILES} "
-            f"files under {', '.join(roots)}; a symbol reported missing below "
-            "may simply lie past the cap"
+    symbols = {name: collective_symbol(name) for name in prorated}
+    symbol_index, truncated = index_device_symbols(symbols.values(), roots)
+    if truncated:
+        message = (
+            f"nccl_summary: source-tree scan stopped at {_MAX_SCANNED_FILES} "
+            f"files under {', '.join(roots)}; an unresolved symbol may lie past "
+            "the cap"
         )
+        if log_fn is not None:
+            log_fn(message)
+        if diagnostics is not None:
+            diagnostics.append(
+                {
+                    "code": "collective_source_scan_truncated",
+                    "message": message,
+                    "scanned_file_limit": _MAX_SCANNED_FILES,
+                    "source_roots": roots,
+                }
+            )
     candidates: list[dict[str, Any]] = []
     for name, (duration_us, call_count, stream) in prorated.items():
-        symbol = collective_symbol(name)
-        located = locate_device_symbol(symbol, roots, sources=sources)
+        symbol = symbols[name]
+        located = symbol_index.get(symbol)
         if located is None:
             if log_fn is not None:
                 log_fn(

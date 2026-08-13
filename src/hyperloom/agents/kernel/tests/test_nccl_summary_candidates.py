@@ -7,20 +7,24 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
+import _nccl_summary_candidates as nccl_candidates  # type: ignore[import-not-found]
 from _nccl_summary_candidates import (  # type: ignore[import-not-found]
     _itanium_components,
     _prorated_totals,
     collective_symbol,
     extract_collective_candidates,
+    index_device_symbols,
     locate_device_symbol,
 )
 
@@ -125,6 +129,50 @@ class SymbolLocationTests(unittest.TestCase):
 
     def test_missing_root_is_skipped(self) -> None:
         self.assertIsNone(locate_device_symbol("x", [str(self.root / "nope")]))
+
+    def test_multiple_symbols_read_each_source_once(self) -> None:
+        """One index pass must not reread a file for each requested symbol."""
+        source = self._write(
+            "include/two.cuh",
+            "__global__ void first_collective(int* p) {}\n"
+            "__global__ void second_collective(int* p) {}\n",
+        )
+        original_read_text = Path.read_text
+        source_reads = 0
+
+        def counted_read_text(path: Path, *args: object, **kwargs: object) -> str:
+            """Count reads of the source shared by both requested symbols."""
+            nonlocal source_reads
+            if path == source:
+                source_reads += 1
+            return original_read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", counted_read_text):
+            index, truncated = index_device_symbols(
+                ["first_collective", "second_collective"],
+                [str(self.root)],
+            )
+
+        self.assertFalse(truncated)
+        self.assertEqual(set(index), {"first_collective", "second_collective"})
+        self.assertEqual(source_reads, 1)
+
+    def test_scan_cap_bounds_non_source_traversal(self) -> None:
+        """Unrelated files must count toward the source-tree traversal cap."""
+        self._write("include/00_notes.txt", "not device source\n")
+        self._write(
+            "include/01_collective.cuh",
+            "__global__ void late_collective(int* p) {}\n",
+        )
+
+        with mock.patch.object(nccl_candidates, "_MAX_SCANNED_FILES", 1):
+            index, truncated = index_device_symbols(
+                ["late_collective"],
+                [str(self.root)],
+            )
+
+        self.assertEqual(index, {})
+        self.assertTrue(truncated)
 
 
 class ProratedTotalsTests(unittest.TestCase):
@@ -282,8 +330,8 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         )
         self.assertEqual(out, existing)
 
-    def test_borrowed_shapes_are_marked_and_require_a_matching_op(self) -> None:
-        """Shapes taken from another row are an inference, not a measurement."""
+    def test_nonmatching_workload_shapes_are_not_borrowed_by_default(self) -> None:
+        """A different all-reduce row must not supply an unobserved workload."""
         from tracelens_analysis import _inject_collective_candidates
 
         self._write_metrics(self._summary())
@@ -294,17 +342,58 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             "input_dtypes": ["bf16"],
         }
 
-        out = _inject_collective_candidates(
-            self.tl,
-            [donor],
-            source_roots=[str(self.src_root)],
-        )
+        with mock.patch.dict(
+            os.environ,
+            {"HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES": ""},
+        ):
+            out = _inject_collective_candidates(
+                self.tl,
+                [donor],
+                source_roots=[str(self.src_root)],
+            )
 
-        self.assertEqual(len(out), 2)
-        self.assertEqual(
-            out[1]["shape_provenance"],
-            "borrowed_sole_all_reduce_family",
+        self.assertEqual(out, [donor])
+
+    def test_truncated_source_scan_is_a_health_warning_after_partial_resolution(
+        self,
+    ) -> None:
+        """A resolved row must not hide that another symbol exceeded the cap."""
+        from tracelens_analysis import _inject_collective_candidates
+
+        (self.src_root / "include" / "late.cuh").write_text(
+            "__global__ void late_collective(int* p) {}\n"
         )
+        self._write_metrics(
+            self._summary(
+                top_ops=[
+                    {"name": AITER_2STAGE, "duration_us": 90.0},
+                    {"name": "late_collective", "duration_us": 10.0},
+                ]
+            )
+        )
+        exact = {
+            "name": AITER_2STAGE,
+            "duration_us": 1000.0,
+            "input_shapes": [{"shape": "(4096, 7168)"}],
+            "input_dtypes": ["bf16"],
+        }
+        warnings: list[dict] = []
+
+        with mock.patch.object(nccl_candidates, "_MAX_SCANNED_FILES", 1):
+            out = _inject_collective_candidates(
+                self.tl,
+                [exact],
+                source_roots=[str(self.src_root)],
+                health_warnings=warnings,
+            )
+
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["candidate_source"], "nccl_summary")
+        self.assertEqual(
+            [warning["code"] for warning in warnings],
+            ["collective_source_scan_truncated"],
+        )
+        self.assertEqual(warnings[0]["scanned_file_limit"], 1)
 
     def test_a_skipped_injection_is_reported_as_a_trace_health_warning(self) -> None:
         """A dirty summary must not look like a workload with no collective.
@@ -349,8 +438,8 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             ["collective_source_root_missing"],
         )
 
-    def test_main_flow_injection_attaches_unique_all_reduce_workload(self) -> None:
-        """A source-resolved row inherits a unique traced all-reduce workload."""
+    def test_opt_in_attaches_unique_all_reduce_workload(self) -> None:
+        """The compatibility flag permits explicitly requested shape inference."""
         from tracelens_analysis import _inject_collective_candidates
 
         self._write_metrics(self._summary())
@@ -360,22 +449,30 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             "input_shapes": [{"shape": "(4096, 7168)"}],
             "input_dtypes": ["bf16"],
         }
-        out = _inject_collective_candidates(
-            self.tl,
-            [donor],
-            source_roots=[str(self.src_root)],
-        )
+        with mock.patch.dict(
+            os.environ,
+            {"HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES": "1"},
+        ):
+            out = _inject_collective_candidates(
+                self.tl,
+                [donor],
+                source_roots=[str(self.src_root)],
+            )
 
         self.assertEqual(len(out), 2)
         self.assertEqual(out[1]["input_shapes"], donor["input_shapes"])
         self.assertEqual(out[1]["input_dtypes"], donor["input_dtypes"])
         self.assertEqual(
+            out[1]["shape_provenance"],
+            "borrowed_sole_all_reduce_family",
+        )
+        self.assertEqual(
             out[1]["workload_source_kernel"],
             donor["name"],
         )
 
-    def test_main_flow_injection_merges_one_profiled_workload_family(self) -> None:
-        """Prefill and decode rows from one wrapper remain separate driver cases."""
+    def test_opt_in_merges_one_profiled_workload_family(self) -> None:
+        """Opted-in prefill and decode rows remain separate driver cases."""
         from tracelens_analysis import _inject_collective_candidates
 
         self._write_metrics(self._summary())
@@ -400,11 +497,15 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             },
         ]
 
-        out = _inject_collective_candidates(
-            self.tl,
-            donors,
-            source_roots=[str(self.src_root)],
-        )
+        with mock.patch.dict(
+            os.environ,
+            {"HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES": "true"},
+        ):
+            out = _inject_collective_candidates(
+                self.tl,
+                donors,
+                source_roots=[str(self.src_root)],
+            )
 
         self.assertEqual(len(out), 3)
         candidate = out[-1]
@@ -440,11 +541,15 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             },
         ]
 
-        out = _inject_collective_candidates(
-            self.tl,
-            donors,
-            source_roots=[str(self.src_root)],
-        )
+        with mock.patch.dict(
+            os.environ,
+            {"HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES": "yes"},
+        ):
+            out = _inject_collective_candidates(
+                self.tl,
+                donors,
+                source_roots=[str(self.src_root)],
+            )
 
         self.assertEqual(out, donors)
 

@@ -2046,14 +2046,29 @@ def _inject_collective_candidates(
         )
 
     messages: list[str] = []
+    scan_diagnostics: list[dict[str, Any]] = []
     try:
         extracted = extract_collective_candidates(
             tracelens_dir,
             roots,
             log_fn=messages.append,
+            diagnostics=scan_diagnostics,
         )
     except ValueError as exc:
         return _skip("collective_summary_unusable", str(exc))
+    for diagnostic in scan_diagnostics:
+        message = str(diagnostic.get("message") or "")
+        log.warning(message)
+        if health_warnings is not None:
+            health_warnings.append(
+                {
+                    "code": str(diagnostic.get("code") or ""),
+                    "severity": "warning",
+                    "message": message,
+                    "scanned_file_limit": diagnostic.get("scanned_file_limit"),
+                    "source_roots": list(diagnostic.get("source_roots") or []),
+                }
+            )
     if not extracted:
         # Every summary row failed device-symbol resolution. Individually those
         # are debug detail, but together they mean the trace saw collectives and
@@ -2182,6 +2197,12 @@ def _inject_collective_candidates(
         family = _workload_family(row)
         if family:
             workload_families.setdefault(family, []).append(row)
+    allow_inferred_shapes = (
+        os.environ.get("HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES", "")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    )
     appended: list[dict[str, Any]] = []
     for item in extracted:
         exact = by_name.get(_name(item))
@@ -2200,7 +2221,11 @@ def _inject_collective_candidates(
         if exact is not None and _has_workload(exact):
             donors = [exact]
             borrowed = False
-        elif len(workload_families) == 1 and _is_all_reduce_workload(item):
+        elif (
+            allow_inferred_shapes
+            and len(workload_families) == 1
+            and _is_all_reduce_workload(item)
+        ):
             # Shapes are inferred from the sole all-reduce family, valid only
             # because the symbol is itself an all-reduce. Handing the driver
             # shapes the traced kernel never ran would yield confident SNR and
