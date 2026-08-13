@@ -3499,7 +3499,7 @@ def _forge_loop_result_stdout() -> str:
     return f"__FORGE_RESULT__{json.dumps(payload)}__FORGE_RESULT__"
 
 
-def _run_loop_with_popen(tmp_path, monkeypatch, fake_popen):
+def _run_loop_with_popen(tmp_path, monkeypatch, fake_popen, **overrides):
     workspace = tmp_path / "worktree"
     workspace.mkdir()
     kernel = workspace / "kernel.py"
@@ -3532,6 +3532,7 @@ def _run_loop_with_popen(tmp_path, monkeypatch, fake_popen):
         timeout_s=120,
         deadline_unix=time.time() + 120.0,
         experience_id="attempt-1",
+        **overrides,
     )
 
 
@@ -3606,3 +3607,30 @@ def test_a_rejected_load_bearing_option_still_fails_the_attempt(tmp_path, monkey
     assert len(commands) == 1
     assert outcome.error is not None
     assert "rc=2" in str(outcome.error)
+
+
+def test_two_rejected_options_in_a_row_are_both_dropped(tmp_path, monkeypatch):
+    """The installed forge-loop can be missing more than one advisory option.
+
+    KernelForge main currently has neither ``--shapes-json`` nor ``--e2e-pct``,
+    and click reports only the first one it hits, so recovery has to survive
+    being told about them one at a time.
+    """
+    commands: list[list[str]] = []
+    rejections = ["--shapes-json", "--e2e-pct"]
+
+    def fake_popen(command, **kwargs):
+        commands.append(list(command))
+        for option in rejections:
+            if option in command:
+                return _RejectingProcess(option)
+        return _SucceedingProcess()
+
+    outcome = _run_loop_with_popen(tmp_path, monkeypatch, fake_popen, e2e_pct=12.5)
+
+    assert len(commands) == 3
+    assert "--shapes-json" in commands[0] and "--e2e-pct" in commands[0]
+    assert "--shapes-json" not in commands[2]
+    assert "--e2e-pct" not in commands[2]
+    assert outcome.error is None
+    assert outcome.best_ms == 1.0
