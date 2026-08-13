@@ -273,23 +273,6 @@ def _classify(
     )
 
 
-def _persist_audit(request: dict[str, Any], result: dict[str, Any]) -> None:
-    """Persist the semantic audit result next to audit material."""
-    work_dir = Path(
-        str(request.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent" / "phase-audit"))
-    ).expanduser()
-    try:
-        work_dir.mkdir(parents=True, exist_ok=True)
-        import json
-
-        (work_dir / "semantic_audit.json").write_text(
-            json.dumps(result, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except OSError:
-        log.debug("phase-audit: could not persist semantic_audit.json", exc_info=True)
-
-
 def run_phase_audit(request: dict[str, Any]) -> dict[str, Any]:
     """Run the FRAMEWORK semantic audit for one candidate.
 
@@ -299,8 +282,8 @@ def run_phase_audit(request: dict[str, Any]) -> dict[str, Any]:
             model?, context?}``.
 
     Returns:
-        The semantic_audit verdict dict (also written to
-        ``<work_dir>/semantic_audit.json`` when ``work_dir`` is set).
+        The semantic_audit verdict dict (written to stdout / ``--out``
+        by the CLI; also written to the session candidate dir by the orchestrator).
     """
     candidate = request.get("candidate") or {}
     candidate_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
@@ -310,9 +293,7 @@ def run_phase_audit(request: dict[str, Any]) -> dict[str, Any]:
         # Lazy import to keep the audit<->cross_framework import cycle broken.
         from .cross_framework import run_cross_framework_audit
 
-        result = run_cross_framework_audit(request)
-        _persist_audit(request, result)
-        return result
+        return run_cross_framework_audit(request)
 
     roots = [Path(str(r)).expanduser() for r in (request.get("framework_source_roots") or []) if str(r).strip()]
     work_dir = Path(
@@ -367,7 +348,6 @@ def run_phase_audit(request: dict[str, Any]) -> dict[str, Any]:
             log.warning("phase-audit: LLM refine failed; keeping static verdict: %r", exc)
             result.setdefault("risks", []).append(f"llm refine exception: {exc!r}")
 
-    _persist_audit(request, result)
     return result
 
 
@@ -499,7 +479,6 @@ def _parse_llm_json(content: str) -> dict[str, Any] | None:
 
 __all__ = [
     "FileChange",
-    "_persist_audit",
     "parse_unified_diff",
     "run_phase_audit",
 ]

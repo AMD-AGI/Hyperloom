@@ -231,16 +231,12 @@ class KernelPhase(PhaseHandler):
     def _geak_enabled(self) -> bool:
         """Whether the KERNEL_AGENT phase is delegated to the GEAK e2e optimizer.
 
-        The source of truth is the kernel backend order
-        (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``): when ``geak``
-        appears there it owns the whole phase. The ``kernel_optimizer`` state
-        field is the persisted record used as a resume fallback.
+        ``KERNEL_OPT_BACKEND_ORDER`` is the only source of truth: anything
+        other than an exact ``forge`` leaves GEAK owning the whole phase.
         """
         from ..kernel.request_handlers import geak_selected
 
-        if geak_selected():
-            return True
-        return str(getattr(self.shared_state, "kernel_optimizer", "") or "").strip().lower() == "geak"
+        return geak_selected()
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
         """Run deterministic KERNEL-entry setup: FP8 GEMM tuning gate, fusion, re-profile.

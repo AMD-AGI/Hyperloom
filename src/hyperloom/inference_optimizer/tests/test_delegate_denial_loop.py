@@ -240,7 +240,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 
 @pytest.fixture
 def gate() -> PolicyGate:
-    """Plain gate without ActionRegistry / shared_state."""
+    """Plain gate without an action catalogue / shared_state."""
     return PolicyGate(role_registry=default_role_registry())
 
 

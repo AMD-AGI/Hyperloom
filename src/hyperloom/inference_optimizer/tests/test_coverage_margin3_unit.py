@@ -172,39 +172,6 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch) -> None:
     assert gpu_types._autodetect_gpu_type() is None
 
 
-def test_action_registry_names_all_and_lazy_load(tmp_path) -> None:
-    from hyperloom.orchestrator.actions.registry import ActionRegistry
-
-    meta_dir = tmp_path / "_meta"
-    meta_dir.mkdir()
-    (meta_dir / "_ignored.yaml").write_text("name: ignored\n", encoding="utf-8")
-    (meta_dir / "target_analysis.yaml").write_text(
-        "\n".join(
-            [
-                "name: target_analysis",
-                "family: prep",
-                "cost_minutes_p50: 0.1",
-                "cost_minutes_p75: 0.2",
-                "expected_gain_pct: [0, 0]",
-                "accuracy_risk: 0",
-                "crash_risk: 0",
-                "requires_lanes: []",
-                "allowed_tools: [Read]",
-                "side_effects: [writes_state]",
-                "pipeline_phase: prep",
-                "verdict_class: archival",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    reg = ActionRegistry(tmp_path)
-    assert reg.names() == ["target_analysis"]
-    assert [meta.name for meta in reg.all()] == ["target_analysis"]
-    meta = reg.get("target_analysis")
-    assert meta is not None
-    assert meta.description == "target_analysis"
-    assert reg.get("missing") is None
 
 
 def test_kernel_decision_retry_budget_env(monkeypatch) -> None:
@@ -220,40 +187,6 @@ def test_kernel_decision_retry_budget_env(monkeypatch) -> None:
     assert settings.resolve_kernel_opt_max_failures() == 2
 
 
-def test_dispatcher_inline_whitelist_filters_and_registry_errors(monkeypatch) -> None:
-    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
-
-    reg = SimpleNamespace(names=lambda: ["report", "missing", "lane_action", "ok_action"])
-    coord = SimpleNamespace(
-        action_registry=reg,
-        sub=SimpleNamespace(executor_registry={"lane_action": object(), "ok_action": object()}),
-        _INLINE_ACTION_DENY=frozenset({"report"}),
-    )
-    disp = DispatcherCollaborator(coord)
-    monkeypatch.setattr(disp, "_registry_lanes_ttl", lambda name: (["gpu"] if name == "lane_action" else [], 60))
-    assert disp._inline_action_whitelist() == frozenset({"ok_action"})
-
-    coord.action_registry = SimpleNamespace(names=lambda: (_ for _ in ()).throw(RuntimeError("bad registry")))
-    assert disp._inline_action_whitelist() == frozenset()
-
-    coord.action_registry = None
-    assert disp._inline_action_whitelist() == frozenset()
-
-
-def test_dispatcher_inline_whitelist_all_fallback(monkeypatch) -> None:
-    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
-
-    reg = SimpleNamespace(all=lambda: [SimpleNamespace(name="from_all")])
-    coord = SimpleNamespace(
-        action_registry=reg,
-        sub=SimpleNamespace(executor_registry={"from_all": object()}),
-        _INLINE_ACTION_DENY=frozenset(),
-    )
-    disp = DispatcherCollaborator(coord)
-    monkeypatch.setattr(disp, "_registry_lanes_ttl", lambda _name: ([], 60))
-    assert disp._inline_action_whitelist() == frozenset({"from_all"})
-
-
 def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch) -> None:
     from hyperloom.orchestrator.loop import dispatcher as dispatcher_mod
     from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
@@ -262,7 +195,7 @@ def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch) -> None:
         _inline_fast_actions_enabled=True,
         _coordinator_loop=None,
         _INLINE_ACTION_DENY=frozenset(),
-        action_registry=None,
+        action_registry={},
         sub=SimpleNamespace(executor_registry={}),
     )
     disp = DispatcherCollaborator(coord)

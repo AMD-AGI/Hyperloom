@@ -16,20 +16,17 @@ from __future__ import annotations
 import asyncio
 import ast
 import importlib.util
-import json
 import os
 import re
 import shlex
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
 from hyperloom.common.codex_session import (
     CodexSessionError,
     CodexSessionResult,
-    describe_codex_item,
     run_codex_turn,
 )
 from hyperloom.common.llm_config import claude_sdk_env_options
@@ -158,11 +155,6 @@ def _tool_call_transition(message: Any) -> str | None:
 
 # Strips a ``Kernel N:`` label prefix from a kernel-name cell piece.
 _KERNEL_LABEL_RE = re.compile(r"^\s*Kernel\s+\d+\s*:\s*", re.IGNORECASE)
-
-# Transcript field cap: a single block can be megabytes and the transcript is
-# diagnostic-only, so cap every serialized string field. Truncation appends a marker.
-_TRANSCRIPT_FIELD_MAX_CHARS = 16_384
-
 
 # Upstream TraceLens category enum (orchestrator_prepare.py CATEGORY_SKILL_MAP) → GEAK labels.
 UPSTREAM_CATEGORY_TO_GEAK: dict[str, str] = {
@@ -467,186 +459,6 @@ def _iter_message_text(message: Any) -> Iterable[str]:
         yield result_text
 
 
-def _cap_str(value: str, limit: int = _TRANSCRIPT_FIELD_MAX_CHARS) -> str:
-    """Truncate a transcript string, appending a clip marker when bounded.
-
-    Args:
-        value: The string to truncate.
-        limit: Maximum length before truncation.
-
-    Returns:
-        The original string, or a truncated copy with a clip marker.
-    """
-    if len(value) <= limit:
-        return value
-    return value[:limit] + f"... [truncated {len(value) - limit} chars]"
-
-
-def _json_safe(value: Any, *, cap: bool = True) -> Any:
-    """Best-effort coercion of an SDK field into a JSON-serializable value.
-
-    Falling back to ``str`` keeps the transcript write infallible. When ``cap``
-    is set every string (at any nesting depth) is bounded to
-    ``_TRANSCRIPT_FIELD_MAX_CHARS``.
-
-    Args:
-        value: The value to coerce.
-        cap: When ``True``, bound every nested string to the field max.
-
-    Returns:
-        A JSON-serializable representation of ``value``.
-    """
-    if isinstance(value, str):
-        return _cap_str(value) if cap else value
-    if isinstance(value, dict):
-        return {str(k): _json_safe(v, cap=cap) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(v, cap=cap) for v in value]
-    try:
-        json.dumps(value)
-        return value
-    except (TypeError, ValueError):
-        return _cap_str(str(value)) if cap else str(value)
-
-
-def _serialize_sdk_block(block: Any) -> dict[str, Any]:
-    """Serialize one message content block into a JSON-safe record.
-
-    Blocks are tagged by class name and probed for the union of fields those
-    types expose, rather than importing the SDK's concrete block classes, so the
-    runner stays decoupled from claude-agent-sdk internals.
-
-    Args:
-        block: An SDK content block (or a plain dict).
-
-    Returns:
-        A JSON-safe record describing the block.
-    """
-    if isinstance(block, dict):
-        record = _json_safe(block)
-        if isinstance(record, dict):
-            record.setdefault("block", record.get("type", "dict"))
-            return record
-        return {"block": "dict", "value": record}
-    cls_name = type(block).__name__
-    record: dict[str, Any] = {"block": cls_name}
-    text = getattr(block, "text", None)
-    if isinstance(text, str):
-        record["text"] = _cap_str(text)
-    thinking = getattr(block, "thinking", None)
-    if isinstance(thinking, str):
-        record["thinking"] = _cap_str(thinking)
-    name = getattr(block, "name", None)
-    if isinstance(name, str):
-        record["name"] = name
-    block_id = getattr(block, "id", None)
-    if isinstance(block_id, str):
-        record["id"] = block_id
-    tool_input = getattr(block, "input", None)
-    if tool_input is not None:
-        record["input"] = _json_safe(tool_input)
-    tool_use_id = getattr(block, "tool_use_id", None)
-    if isinstance(tool_use_id, str):
-        record["tool_use_id"] = tool_use_id
-    # ``TextBlock`` has no ``content``; only tool-result-style blocks do.
-    content = getattr(block, "content", None)
-    if content is not None and cls_name != "TextBlock":
-        record["content"] = _json_safe(content)
-    is_error = getattr(block, "is_error", None)
-    if isinstance(is_error, bool):
-        record["is_error"] = is_error
-    if set(record.keys()) == {"block"}:
-        # Unknown block with no recognized fields: keep a bounded repr.
-        record["repr"] = str(block)[:2000]
-    return record
-
-
-def _serialize_sdk_message(message: Any, *, seq: int) -> dict[str, Any]:
-    """Serialize one SDK stream message into a JSON-safe transcript record.
-
-    The record carries the message class name (``AssistantMessage`` /
-    ``ResultMessage`` / ...), its content blocks, and — when present on a
-    terminal ``ResultMessage`` — the consolidated ``result`` text and the
-    Anthropic ``usage`` dict (token accounting).
-
-    Args:
-        message: An SDK stream message.
-        seq: The message sequence number within the stream.
-
-    Returns:
-        A JSON-safe transcript record for the message.
-    """
-    record: dict[str, Any] = {
-        "seq": seq,
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "type": type(message).__name__,
-    }
-    blocks = getattr(message, "content", None)
-    if blocks:
-        record["content"] = [_serialize_sdk_block(b) for b in list(blocks)]
-    result_text = getattr(message, "result", None)
-    if isinstance(result_text, str) and result_text:
-        record["result"] = _cap_str(result_text)
-    usage = getattr(message, "usage", None)
-    if isinstance(usage, dict) and usage:
-        record["usage"] = _json_safe(usage)
-    return record
-
-
-def _write_codex_transcript(
-    transcript_path: Path,
-    result: CodexSessionResult,
-    *,
-    log: Callable[[str], None] | None,
-) -> bool:
-    """Persist one Codex turn as a stream-JSON transcript.
-
-    Writes one record per typed SDK thread item plus a terminal record carrying
-    the final response, token usage and any in-band SDK error. Best-effort: the
-    transcript is diagnostic, so a logging-side failure must not sink a run that
-    already produced its report.
-
-    Args:
-        transcript_path (Path): Destination ``agent_transcript.jsonl``.
-        result (CodexSessionResult): The normalized Codex turn.
-        log (Callable[[str], None] | None): Optional logging callback.
-
-    Returns:
-        bool: Whether at least one record was written.
-    """
-    records: list[dict[str, Any]] = []
-    for seq, item in enumerate(result.items):
-        records.append(
-            {
-                "seq": seq,
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "type": str(item.get("type") or "ThreadItem"),
-                "item": _json_safe(item),
-            }
-        )
-    terminal: dict[str, Any] = {
-        "seq": len(result.items),
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "type": "TurnResult",
-        "thread_id": result.thread_id,
-        "result": _cap_str(result.text),
-    }
-    if result.usage:
-        terminal["usage"] = result.usage
-    if result.error:
-        terminal["error"] = _cap_str(result.error)
-    records.append(terminal)
-    try:
-        with transcript_path.open("w", encoding="utf-8") as transcript_fh:
-            for record in records:
-                transcript_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-        return True
-    except OSError as exc:
-        if log:
-            log(f"[codex-sdk] WARNING: cannot write transcript {transcript_path}: {exc}")
-        return False
-
-
 async def _run_tracelens_skill_codex(
     *,
     prompt: str,
@@ -670,7 +482,7 @@ async def _run_tracelens_skill_codex(
 
     Args:
         prompt (str): The orchestrator prompt.
-        output_dir (Path): Directory the report and transcript are written to.
+        output_dir (Path): Directory the report is written to.
         prefix_path (Path): The command-prefix cache path, reported as an
             artifact.
         tracelens_root (Path): The TraceLens project root; the session cwd.
@@ -704,15 +516,6 @@ async def _run_tracelens_skill_codex(
             log(f"[codex-sdk] WARNING: {codex_error}")
     codex_error = codex_error or result.error
 
-    if log:
-        for item in result.items:
-            summary = describe_codex_item(item)
-            if summary:
-                log(f"[codex-sdk] {summary[:1000]}")
-
-    transcript_path = output_dir / "agent_transcript.jsonl"
-    transcript_written = _write_codex_transcript(transcript_path, result, log=log)
-
     report_path = output_dir / "analysis.md"
     if not report_path.exists():
         if codex_error:
@@ -723,8 +526,6 @@ async def _run_tracelens_skill_codex(
         "tracelens_agent_report": str(report_path),
         "tracelens_cmd_prefix": str(prefix_path),
     }
-    if transcript_written:
-        artifact_paths["tracelens_agent_transcript"] = str(transcript_path)
     if codex_error:
         artifact_paths["tracelens_agent_sdk_error"] = codex_error
     return TraceLensSkillRunResult(
@@ -838,7 +639,6 @@ async def run_tracelens_skill(
         "write artifacts under the requested output directory, and do not "
         "modify application source code."
     )
-    # Fixed turn budget shared by smoke and production runs.
     max_turns = 300
     kwargs: dict[str, Any] = {
         "max_turns": max_turns,
@@ -862,19 +662,6 @@ async def run_tracelens_skill(
     sdk_error = ""
     if log:
         log(f"TraceLens SDK runner: prefix cache={prefix_path}")
-
-    # Persist a stream-JSON transcript of the agent's turns for inspection.
-    # Best-effort: a logging-side error must never abort a successful run, so
-    # every write and the handle open are guarded.
-    transcript_path = output_dir / "agent_transcript.jsonl"
-    transcript_written = False
-    transcript_seq = 0
-    try:
-        transcript_fh: Any = transcript_path.open("w", encoding="utf-8")
-    except OSError as exc:  # noqa: BLE001
-        transcript_fh = None
-        if log:
-            log(f"[claude-sdk] WARNING: cannot open transcript {transcript_path}: {exc}")
     # Drive the SDK stream manually so each next message is bounded by a
     # per-message idle timeout (inactivity, not a total budget); the in-process
     # SDK has no client-side read timeout and would otherwise block on a stall.
@@ -914,16 +701,6 @@ async def run_tracelens_skill(
                 tool_in_flight = True
             elif transition == "end":
                 tool_in_flight = False
-            if transcript_fh is not None:
-                try:
-                    record = _serialize_sdk_message(message, seq=transcript_seq)
-                    transcript_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    transcript_fh.flush()
-                    transcript_seq += 1
-                    transcript_written = True
-                except Exception:  # noqa: BLE001
-                    # Transcript is diagnostic-only; swallow and keep going.
-                    pass
             for text in _iter_message_text(message):
                 chunks.append(text)
                 if log:
@@ -933,15 +710,6 @@ async def run_tracelens_skill(
         sdk_error = f"{type(exc).__name__}: {exc}"
         if log:
             log(f"[claude-sdk] WARNING: {sdk_error}")
-    finally:
-        if transcript_fh is not None:
-            try:
-                transcript_fh.close()
-            except OSError as exc:
-                # Closing the diagnostic transcript must never abort an
-                # otherwise-successful run; surface it as a warning instead.
-                if log:
-                    log(f"[claude-sdk] WARNING: cannot close transcript {transcript_path}: {exc}")
 
     # Final report is ``analysis.md``.
     report_path = output_dir / "analysis.md"
@@ -954,17 +722,6 @@ async def run_tracelens_skill(
         "tracelens_agent_report": str(report_path),
         "tracelens_cmd_prefix": str(prefix_path),
     }
-    # Surface the stream-JSON transcript into the kernel-agent status sidecar,
-    # but only when at least one turn was actually recorded.
-    if transcript_written:
-        artifact_paths["tracelens_agent_transcript"] = str(transcript_path)
-    else:
-        # No turn recorded: remove the zero-byte file truncated open at start.
-        try:
-            transcript_path.unlink(missing_ok=True)
-        except OSError as exc:
-            if log:
-                log(f"[claude-sdk] WARNING: cannot remove empty transcript {transcript_path}: {exc}")
     if sdk_error:
         artifact_paths["tracelens_agent_sdk_error"] = sdk_error
 

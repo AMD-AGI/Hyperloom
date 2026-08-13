@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CLI entry — ``optimize`` subcommand wiring Claude+Codex backends, executors, objective, and Coordinator.run().
-
-Env vars consumed: MODEL_PATH, OPENAI_BASE_URL / ANTHROPIC_BASE_URL +
-OPENAI_API_KEY / ANTHROPIC_API_KEY, ROCR_VISIBLE_DEVICES,
-CLAUDE_MODEL, CODEX_MODEL, USER_DATA_PATH.
-"""
+"""Multi-node helpers for the ``optimize`` CLI: cluster adoption, backend resolution, kernel-patch replay."""
 
 from __future__ import annotations
 
@@ -14,83 +9,15 @@ import argparse
 import json
 import logging
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
-import time
 from pathlib import Path
-from typing import Any
 
 from ..session.paths import (
-    mn_profile_trace_root,
     session_dir as _session_dir_resolve,
 )
 
 log = logging.getLogger(__name__)
-
-
-def _gc_old_profile_traces(
-    root: str | None = None,
-    retention_days: int = 7,
-    keep: str | None = None,
-) -> None:
-    """Best-effort GC of stale per-RayJob profile-trace dirs older than ``retention_days`` (``keep`` name-guarded).
-
-    Never blocks startup (errors swallowed). Env knobs: HYPERLOOM_MN_TRACE_RETENTION_DAYS,
-    HYPERLOOM_MN_TRACE_GC_DISABLE.
-
-    Args:
-        root (str | None): The trace-root directory to scan; defaults to the
-            multi-node profile-trace root.
-        retention_days (int): Age threshold in days before a trace dir is
-            removed (env-overridable).
-        keep (str | None): A directory name to always preserve (name-matched).
-    """
-    if os.environ.get("HYPERLOOM_MN_TRACE_GC_DISABLE", "").strip() in (
-        "1",
-        "true",
-        "yes",
-    ):
-        return
-    try:
-        retention_days = int(os.environ.get("HYPERLOOM_MN_TRACE_RETENTION_DAYS") or retention_days)
-    except ValueError:
-        retention_days = 7
-    base = Path(root) if root is not None else mn_profile_trace_root()
-    if not base.is_dir():
-        return
-    cutoff = time.time() - retention_days * 86400
-    keep_name = Path(keep).name if keep else ""
-    removed = 0
-    kept = 0
-    try:
-        for child in base.iterdir():
-            if not child.is_dir():
-                continue
-            if keep_name and child.name == keep_name:
-                kept += 1
-                continue
-            try:
-                mtime = child.stat().st_mtime
-            except OSError:
-                continue
-            if mtime >= cutoff:
-                kept += 1
-                continue
-            try:
-                shutil.rmtree(child)
-                removed += 1
-            except OSError as exc:
-                print(
-                    f"WARN multi-node GC: failed to rm {child}: {exc}",
-                    file=sys.stderr,
-                )
-    except OSError as exc:
-        print(f"WARN multi-node GC: scan failed under {base}: {exc}", file=sys.stderr)
-        return
-    if removed or kept:
-        print(f"multi-node: GC profile-traces removed={removed} kept={kept} retention={retention_days}d root={base}")
 
 
 def _resolve_mn_backend(args: argparse.Namespace) -> str:
@@ -386,90 +313,3 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
         )
 
 
-def _dump_mn_input_params(args: argparse.Namespace, nodes_resolved: int) -> None:
-    """Dump resolved multi-node input params (CLI args + relevant env) to
-    ``$USER_DATA_PATH/optimizer_runs`` for tracing the env->CLI migration.
-
-    Many knobs moved from env vars to CLI flags; this snapshot records both
-    the parsed CLI namespace and the multi-node-relevant env at launch so a
-    mismatch (e.g. a flag not picking up its old env, or a stale env still
-    leaking) is auditable post-hoc. Secrets are redacted; best-effort and
-    never raises.
-
-    Args:
-        args: The parsed optimize CLI namespace.
-        nodes_resolved: The resolved node count (>=2 for multi-node).
-    """
-    try:
-        import datetime as _dt
-
-        base = os.path.expandvars("$USER_DATA_PATH/optimizer_runs")
-        if "$" in base or not base.startswith("/"):
-            base = str(Path(tempfile.gettempdir()) / "optimizer_runs")
-        os.makedirs(base, exist_ok=True)
-        ts = _dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-
-        def _redact(key: str, val: Any) -> Any:
-            kl = str(key).lower()
-            if any(tok in kl for tok in ("api_key", "secret", "token", "password")):
-                return "***REDACTED***"
-            return val
-
-        cli: dict[str, Any] = {}
-        for k, v in sorted(vars(args).items()):
-            try:
-                json.dumps(v)
-                cli[k] = _redact(k, v)
-            except (TypeError, ValueError):
-                cli[k] = _redact(k, repr(v))
-
-        env_prefixes = (
-            "INFERENCE_OPTIMIZER_",
-            "HYPERLOOM_MN_",
-            "PD_",
-            "SAFE_",
-            "MAGPIE_",
-            "SGLANG_",
-            "NCCL_",
-            "MC_",
-            "MORI_",
-            "AITER_",
-        )
-        env_exact = (
-            "MODEL_PATH",
-            "FRAMEWORK",
-            "TP",
-            "EP",
-            "NODES",
-            "MN_BACKEND",
-            "MODEL_CLASS",
-            "PRECISION",
-            "USER_DATA_PATH",
-            "BENCHMARK_BASE_URL",
-            "SKIP_VARIANTS",
-            "RUN_EVAL",
-            "GPU_TYPE",
-            "ISL",
-            "OSL",
-            "CONC",
-            "RANDOM_RANGE_RATIO",
-            "INFERENCEX_PATH",
-            "TRACELENS_ROOT",
-        )
-        env: dict[str, str] = {}
-        for k, v in sorted(os.environ.items()):
-            if k.startswith(env_prefixes) or k in env_exact:
-                env[k] = _redact(k, v)
-
-        out = os.path.join(base, "mn_input_params_" + ts + ".json")
-        with open(out, "w", encoding="utf-8") as f:
-            json.dump(
-                {"ts": ts, "nodes_resolved": nodes_resolved, "cli_args": cli, "env": env},
-                f,
-                indent=2,
-                sort_keys=True,
-            )
-        print("multi-node input params dumped -> " + out)
-        log.info("multi-node input params (nodes=%d) dumped to %s", nodes_resolved, out)
-    except Exception as exc:  # noqa: BLE001 - tracing aid must never break the run
-        log.warning("failed to dump multi-node input params: %r", exc)
