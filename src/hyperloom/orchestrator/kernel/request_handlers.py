@@ -4594,6 +4594,19 @@ async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerR
 
     source_file = candidate["source_file"].strip()
     source_function = candidate["source_function"].strip()
+    # The anchor alone hides the op's sibling sources, so a fused variant of the
+    # same collective stays uneditable. Keep the anchor first, then whatever the
+    # candidate declares as the op's source set.
+    raw_kernel_sources = candidate.get("kernel_sources") or []
+    if isinstance(raw_kernel_sources, str):
+        raw_kernel_sources = [raw_kernel_sources]
+    collective_sources = list(
+        dict.fromkeys(
+            str(path).strip()
+            for path in (source_file, *raw_kernel_sources)
+            if str(path or "").strip()
+        )
+    )
     kernel_repo_raw = candidate.get("kernel_repo")
     if kernel_repo_raw is not None and not isinstance(kernel_repo_raw, str):
         return _collective_revert_result(
@@ -4670,7 +4683,7 @@ async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerR
         "max_hours": max_hours,
         "llm_model": payload.get("llm_model") or os.environ.get("CLAUDE_MODEL"),
         "target_functions": [source_function],
-        "source_files": [source_file],
+        "source_files": collective_sources,
         "operator_name": source_function,
         "framework": str(getattr(state, "framework", "") or ""),
         # forge-loop projects an Amdahl E2E ceiling from this share, so a
