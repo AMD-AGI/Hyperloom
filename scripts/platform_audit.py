@@ -94,7 +94,10 @@ CHECKED: dict[str, dict] = {
             "Boost is Enable/Auto by default and no chapter 5 profile disables it "
             "(58011 §4.1.3). Off, the CPU-side work in a serving benchmark -- "
             "sampling, scheduling, tokenization, dispatch -- runs below rated "
-            "clocks, and the effect is directly measurable here as achieved MHz."
+            "clocks. The verdict reads the knob itself; achieved MHz is recorded "
+            "beside it for the operator rather than compared against the boost "
+            "ceiling, because a margin tight enough to catch a disabled boost "
+            "sits inside normal run-to-run clock variation."
         ),
     },
     "cpufreq_governor": {
@@ -299,13 +302,6 @@ def core_freq_mhz(cpu: int) -> float | None:
     return None
 
 
-def _sleepy(times: int, gap: float):
-    for i in range(times):
-        if i:
-            time.sleep(gap)
-        yield i
-
-
 def measure_peak_mhz(core: int | None = None, seconds: int = 4) -> float | None:
     """Load one core and sample *that core's* achieved frequency.
 
@@ -324,7 +320,13 @@ def measure_peak_mhz(core: int | None = None, seconds: int = 4) -> float | None:
         except (OSError, AttributeError):
             return None
         time.sleep(1.5)
-        samples = [f for f in (core_freq_mhz(target) for _ in _sleepy(4, 0.4)) if f]
+        samples = []
+        for i in range(4):
+            if i:
+                time.sleep(0.4)
+            freq = core_freq_mhz(target)
+            if freq:
+                samples.append(freq)
         return max(samples) if samples else None
     finally:
         proc.kill()
