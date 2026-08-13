@@ -1622,8 +1622,11 @@ async def test_explore_variant_cap_is_clamped_to_the_session_budget(
     sub, tr, _ = sub_agent_runner
     state = SharedState()
     state.baseline_tput = 800.0
-    state.max_minutes = 3.0  # 180s budget - 120s close reserve => ~60s usable
+    state.max_minutes = 3.0
     sub.shared_state = state
+    # Read before the run: the budget only shrinks from here, so a cap granted
+    # later can only be smaller than what this allows.
+    usable_sec = state.session_budget_usable_sec()
 
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -1666,12 +1669,12 @@ async def test_explore_variant_cap_is_clamped_to_the_session_budget(
         res = await sub.run_task(task)
 
     assert res.result["status"] == "succeeded"
-    assert granted, "the variant should have been admitted (20s expected, ~60s left)"
+    assert granted, f"the variant should have been admitted (20s expected, ~{usable_sec:.0f}s left)"
     # The hard cap is allowed to sit a grace window past the deadline so the
     # in-process session watchdog reaps the tree first and the kill is attributed
     # to the budget rather than to a slow variant.
-    assert all(t <= 60 + _SESSION_KILL_GRACE_SEC for t in granted), (
-        f"caps must be clamped to the ~60s budget, got {granted}"
+    assert all(t <= usable_sec + _SESSION_KILL_GRACE_SEC for t in granted), (
+        f"caps must be clamped to the ~{usable_sec:.0f}s budget, got {granted}"
     )
     assert all(t < 3600 for t in granted), f"the declared 3600s cap must not survive the budget, got {granted}"
 
