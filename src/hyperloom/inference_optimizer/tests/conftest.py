@@ -46,6 +46,23 @@ def _bootstrap_kernel_agent_env() -> None:
 _bootstrap_kernel_agent_env()
 
 
+def launches_by_round_slot(recorded: list[dict]) -> dict[str, dict]:
+    """Index recorded benchmark launches by the output slot each round ran in.
+
+    A round is identified by the slot it writes into rather than by its position
+    in the launch order, so a test can assert on one pass of a round without
+    encoding how many passes precede it.
+
+    Args:
+        recorded: Launch records, each carrying the ``round_slot`` name the
+            subprocess doubles stamp on every round they see.
+
+    Returns:
+        dict[str, dict]: The last launch recorded per slot name.
+    """
+    return {launch["round_slot"]: launch for launch in recorded}
+
+
 def seed_target_analysis_marker(session_dir: Path) -> Path:
     """Write a ``no_target_gpu_configured`` marker JSON at the session dir."""
     from hyperloom.inference_optimizer.session.session_paths import target_baseline_json

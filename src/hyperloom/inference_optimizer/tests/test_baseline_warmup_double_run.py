@@ -48,6 +48,8 @@ from hyperloom.orchestrator.trace.task_progress import progress_scope
 
 from .conftest import chatty_child, enable_multi_node, suppression_window_s
 
+from .conftest import launches_by_round_slot
+
 
 @pytest.fixture(autouse=True)
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
@@ -1834,6 +1836,15 @@ def test_teardown_lifecycle_server_removes_state_files(tmp_path):
     assert not (pid_dir / "vllm_8888.json").exists()
 
 
+# Every output slot a multi-node baseline round launches a benchmark process
+# into, in launch order. The discarded client warmup is a full pass and costs the
+# same wall-clock as the measured round it precedes, so both need the deadline.
+# ``mn_warmup`` is production's name for the warmup slot; the measured round runs
+# in the task's own output dir, which these tests name.
+_MEASURED_ROUND_SLOT = "measured_round"
+_BASELINE_ROUND_SLOTS = ("mn_warmup", _MEASURED_ROUND_SLOT)
+
+
 def _budgeted_state(*, remaining_sec: float | None) -> SimpleNamespace:
     """A session state whose only content is how much wall-clock is left."""
     return SimpleNamespace(
@@ -1844,17 +1855,38 @@ def _budgeted_state(*, remaining_sec: float | None) -> SimpleNamespace:
 
 
 def _capturing_fake_run(returncode: int = 0, *, produces_workspace: bool = True):
-    """A ``run_with_session_kill`` stand-in that records how it was called."""
+    """A ``run_with_session_kill`` stand-in that records how each round was launched.
+
+    Every record carries the ``round_slot`` the round wrote into, so a launch can
+    be looked up by which pass it was rather than by the order it happened in.
+    """
     calls: list[dict] = []
 
     def fake_run(cmd, *args, **kwargs):
-        calls.append(dict(kwargs))
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        calls.append({"round_slot": slot.name, **kwargs})
         if produces_workspace:
-            out_idx = cmd.index("--output-dir")
-            _fake_workspace(Path(cmd[out_idx + 1]), tput=_HOT_TPUT)
+            _fake_workspace(slot, tput=_HOT_TPUT)
         return subprocess.CompletedProcess(cmd, returncode, "ok", "")
 
     return fake_run, calls
+
+
+def _enable_multi_node(monkeypatch) -> None:
+    """Put the executor on the multi-node path with the per-round restart stubbed.
+
+    Multi-node is what adds the discarded client-warmup pass in front of the
+    measured round, so it is the only mode in which a baseline round launches
+    more than one benchmark process.
+    """
+    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+
+    async def fake_restart_server_for_round(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(mnl, "restart_server_for_round", fake_restart_server_for_round)
 
 
 def _run_baseline_under_budget(
@@ -1877,7 +1909,7 @@ def _run_baseline_under_budget(
     )
     ctx = _make_ctx(
         {
-            "output_dir": str(tmp_path / "ws"),
+            "output_dir": str(tmp_path / _MEASURED_ROUND_SLOT),
             "timeout_sec": timeout_sec,
             "gpu_type": "mi300x",
         }
@@ -1901,10 +1933,27 @@ class TestTheSessionBudgetReachesTheBaselineRound:
     reached the reaper, and nothing clamped the cap to what was left.
     """
 
-    def test_the_deadline_reaches_the_reaper(self, tmp_path):
+    @pytest.mark.parametrize("round_slot", _BASELINE_ROUND_SLOTS)
+    def test_the_deadline_reaches_the_reaper(self, tmp_path, monkeypatch, round_slot):
+        """Parameterized over the passes a round launches, not just the measured one.
+
+        The reaper is the only thing that attributes a budget kill correctly, and
+        it only knows about the deadline it was handed. A pass launched without
+        one runs until its own hard cap and comes back looking like a variant
+        that timed out.
+        """
+        _enable_multi_node(monkeypatch)
         _result, calls = _run_baseline_under_budget(tmp_path, remaining_sec=3600.0)
 
-        assert calls and calls[0]["session_deadline_sec"] is not None
+        assert launches_by_round_slot(calls)[round_slot]["session_deadline_sec"] is not None
+
+    def test_no_pass_of_a_round_is_launched_without_the_deadline(self, tmp_path, monkeypatch):
+        """The net for a pass added later, which no per-slot test would know about."""
+        _enable_multi_node(monkeypatch)
+        _result, calls = _run_baseline_under_budget(tmp_path, remaining_sec=3600.0)
+
+        assert set(launches_by_round_slot(calls)) >= set(_BASELINE_ROUND_SLOTS)
+        assert [c["round_slot"] for c in calls if c.get("session_deadline_sec") is None] == []
 
     def test_the_hang_backstop_is_clamped_to_what_is_left(self, tmp_path):
         """A cap larger than the budget outlives the session it belongs to."""
@@ -1957,16 +2006,9 @@ class TestTheSessionBudgetReachesTheBaselineRound:
         run has already been told to stop spending -- and grades the baseline on
         a round started after the stop.
         """
-        from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl
-
         base = tmp_path / "base.yaml"
         _write_yaml(base, framework="vllm")
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-
-        async def fake_restart_server_for_round(*_args, **_kwargs):
-            return None
-
-        monkeypatch.setattr(mnl, "restart_server_for_round", fake_restart_server_for_round)
+        _enable_multi_node(monkeypatch)
         launched: list[str] = []
 
         def fake_run(cmd, *args, **kwargs):
