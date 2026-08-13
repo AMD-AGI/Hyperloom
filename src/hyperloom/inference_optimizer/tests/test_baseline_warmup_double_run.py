@@ -2040,6 +2040,31 @@ class TestTheSessionBudgetReachesTheBaselineRound:
         assert launched == ["mn_warmup"], f"the measured round ran after the cancel: {launched}"
         assert result["error_class"] == ORCHESTRATOR_CANCELLED_CLASS
 
+    def test_the_multi_node_warmup_cap_reserves_budget_for_the_measured_round(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """One clamp handed to both passes grants each of them the whole budget.
+
+        The absolute deadline still stops the session, so nothing overruns it --
+        but a warmup granted the measured round's cap can spend the budget that
+        round needed, which is then admitted with nothing left and reaped. The
+        result is a baseline reported as ``session_time_exhausted`` whose warmup
+        succeeded, after a round of GPU time that could never have finished.
+        """
+        _enable_multi_node(monkeypatch)
+        _result, calls = _run_baseline_under_budget(tmp_path, remaining_sec=1000.0, timeout_sec=600)
+        launches = launches_by_round_slot(calls)
+
+        warmup = launches["mn_warmup"]["timeout"]
+        measured = launches[_MEASURED_ROUND_SLOT]["timeout"]
+        assert measured == 600, f"the measured round keeps its declared cap, got {measured}"
+        assert warmup <= 1000 - 600 + _SESSION_KILL_GRACE_SEC, (
+            f"the warmup cap must hold back the measured round's {measured}s, got {warmup}"
+        )
+        assert warmup < measured, "the warmup must be granted less than the round it reserves budget for"
+
     def test_the_profile_arm_gets_all_of_it(self, tmp_path):
         """Profile is the same executor with a four-hour default -- longer than
         any session budget it could be given."""
