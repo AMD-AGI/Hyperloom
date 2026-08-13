@@ -7,16 +7,18 @@
 Reads only what the operating system exposes -- ``/sys``, ``/proc`` and, when
 run as root, the HWCR MSR.
 
-Judges Core Performance Boost, the cpufreq governor, and determinism control.
-Records SMT and nodes-per-socket without a verdict, because AMD's own tuning
-guide varies those by workload and this tool should not invent a recommendation
-for LLM inference that AMD does not publish. See ``SOURCE`` below for the
-citation and the per-knob reasoning.
+Judges Core Performance Boost and the cpufreq governor. Records determinism
+control, SMT and nodes-per-socket without a verdict. A knob is only judged when
+there is a defensible answer *and* a trustworthy way to read it here; see
+``SOURCE`` below for the citation and the per-knob reasoning.
 
-Determinism is targeted at Power, which maximizes what a given platform can do
-at the cost of making platforms differ from each other. That cost is paid by
-recording the setting rather than by avoiding it: a system-to-system delta stays
-explicable because the report says which mode each run was in.
+Power is still the determinism setting to want, because it maximizes what a
+given platform can do. It is recorded rather than judged because the OS layer
+cannot read it -- only infer it from per-core frequency spread -- and that
+inference is not steady enough to gate on. The cost of Power, that platforms
+then differ from each other, is paid by recording the setting: a system-to-
+system delta stays explicable because the report says which mode each run
+was in.
 
 Why check at all, given a session's A/B is same-machine: host tuning applies to
 baseline and candidates alike, so it cancels out of the *delta*. It does not
@@ -105,39 +107,52 @@ CHECKED: dict[str, dict] = {
             "ones. This is the knob most often wrong on a freshly imaged node."
         ),
     },
+}
+
+#: Recorded for comparability, never judged. Each entry says why there is no
+#: verdict, because "we did not check this" is a claim that needs a reason.
+RECORDED: dict[str, dict] = {
     "determinism": {
         "label": "Determinism control",
-        "target": ("power",),
-        "basis": (
-            "58011 §4.2.2 offers Power -- 'maximum performance of any individual "
-            "system by leveraging the capabilities of a given CPU to the maximum' "
-            "-- against Performance, which buys uniformity across a fleet at the "
-            "cost of leaving headroom unused on the better parts. Hyperloom's job "
-            "is to find the best a given platform can do, so Power is the target. "
-            "The usual objection, that Power makes systems differ, is answered by "
-            "recording the setting rather than by constraining it: a system-to-"
-            "system delta stays explicable because the report says which mode "
-            "each run was in."
+        "why": (
+            "Power is the setting to want: 58011 §4.2.2 offers it as 'maximum "
+            "performance of any individual system by leveraging the capabilities "
+            "of a given CPU to the maximum', against Performance, which buys "
+            "fleet uniformity by leaving headroom unused on the better parts. "
+            "There is no verdict because the OS layer cannot read the setting, "
+            "only infer it from per-core frequency spread, and that inference is "
+            "not steady enough to gate on -- see DETERMINISM_SPREAD_MHZ. Read it "
+            "from BIOS, or with platform_audit_bmc.py, when it has to be certain."
         ),
         "inferred": True,
     },
+    "smt": {
+        "label": "SMT",
+        "why": (
+            "On by default across the EPYC fleet, and chapter 5 leaves SMT "
+            "Control at default in every general-purpose column. Judging it "
+            "would fail nearly every node from day one."
+        ),
+    },
+    "nps": {
+        "label": "NPS",
+        "why": (
+            "NPS1 and NPS4 are opposite and both defensible -- NPS1 interleaves "
+            "for bandwidth, NPS4 favours locality -- and chapter 5's own NUMA "
+            "rows differ per workload."
+        ),
+    },
 }
 
-#: Recorded for comparability, never judged.
+#: Frequency spread, in MHz, above which cores look like they are running to
+#: their own limits rather than a common one. A heuristic, not a vendor spec.
 #:
-#: ``smt``: on by default across the EPYC fleet, and chapter 5 leaves SMT Control
-#: at default in every general-purpose column. Judging it would fail nearly every
-#: node from day one, which is why the preflight check stopped warning on it too.
-#: ``nps``: NPS1 and NPS4 are opposite, both defensible tradeoffs -- NPS1
-#: interleaves for bandwidth, NPS4 favours locality -- and chapter 5's own NUMA
-#: rows differ per workload.
-RECORDED = ("smt", "nps")
-
-#: Frequency spread, in MHz, above which cores are judged to be running to their
-#: own limits rather than a common one. Chosen as a threshold comfortably above
-#: sampling jitter observed on an idle-ish EPYC node, not from a vendor spec;
-#: it is a heuristic, and a run that lands near it reports UNKNOWN rather than
-#: picking a side.
+#: These thresholds classify a recorded value and nothing more. They were once
+#: used for a verdict, and review showed why that could not hold: five
+#: consecutive runs on one unchanged EPYC 9575F measured 7.9, 21.0, 18.1, 20.9
+#: and 15.1 MHz. The host's own jitter straddles the 8.0 boundary, so a gate
+#: built on a single sample flips its answer on a machine nobody touched -- and
+#: a check that does that is one people learn to ignore.
 DETERMINISM_SPREAD_MHZ = 8.0
 DETERMINISM_AMBIGUOUS_MHZ = 4.0
 
@@ -181,6 +196,19 @@ def epyc_generation(model: str) -> str:
     return f"EPYC {d[0]}00{d[3]} ({_EPYC_FAMILIES.get(f'{d[0]}00{d[3]}', 'unknown')})"
 
 
+def list_dir(path: str) -> list[str]:
+    """Directory entries, or ``[]`` when the tree is absent.
+
+    A host without ``/sys/devices/system/cpu`` -- a minimal container, usually
+    -- has nothing to count rather than something to fail on. One shared helper
+    is what keeps that true at every call site instead of at most of them.
+    """
+    try:
+        return os.listdir(path)
+    except OSError:
+        return []
+
+
 def cpu_identity() -> dict:
     """Model, socket and NUMA counts, and derived nodes-per-socket."""
     model = "unknown"
@@ -191,20 +219,15 @@ def cpu_identity() -> dict:
     sockets = len(
         {
             read(f"/sys/devices/system/cpu/{d}/topology/physical_package_id")
-            for d in os.listdir("/sys/devices/system/cpu")
+            for d in list_dir("/sys/devices/system/cpu")
             if re.fullmatch(r"cpu\d+", d)
         }
         - {""}
     )
-    try:
-        nodes = len(
-            [d for d in os.listdir("/sys/devices/system/node") if re.fullmatch(r"node\d+", d)]
-        )
-    except OSError:
-        nodes = 0
-    # Both counts are required. Dividing by a missing node tree previously
-    # produced "NPS0" -- a value no BIOS can hold, which then read downstream as
-    # a real misconfiguration rather than an unanswerable question.
+    nodes = len([d for d in list_dir("/sys/devices/system/node") if re.fullmatch(r"node\d+", d)])
+    # Both counts are required. Dividing into a missing node tree would yield
+    # "NPS0", a value no BIOS can hold, which reads downstream as a real
+    # misconfiguration rather than as an unanswerable question.
     nps = f"NPS{nodes // sockets}" if sockets and nodes else "unknown"
     return {
         "model": model,
@@ -218,13 +241,10 @@ def cpu_identity() -> dict:
 def physical_cores() -> list[int]:
     """One online CPU id per physical core, so SMT siblings are not sampled twice."""
     seen: dict[tuple[str, str], int] = {}
-    try:
-        entries = sorted(
-            (d for d in os.listdir("/sys/devices/system/cpu") if re.fullmatch(r"cpu\d+", d)),
-            key=lambda d: int(d[3:]),
-        )
-    except OSError:
-        return []
+    entries = sorted(
+        (d for d in list_dir("/sys/devices/system/cpu") if re.fullmatch(r"cpu\d+", d)),
+        key=lambda d: int(d[3:]),
+    )
     for d in entries:
         cpu = int(d[3:])
         topo = f"/sys/devices/system/cpu/{d}/topology"
@@ -356,15 +376,14 @@ def infer_determinism(spread: float | None) -> tuple[str | None, str]:
     """Infer determinism from per-core spread.
 
     Returns ``(value, note)`` where value is the normalized ``"power"`` /
-    ``"performance"`` / ``None``, and note is the human-readable caveat. These
-    are deliberately separate: a previous version returned the prose
-    "Performance (or Power at a uniform bin)" as the *value*, which the verdict
-    matcher then substring-matched against the target "power" and passed -- so
-    the single case this check exists to catch reported PASS.
+    ``"performance"`` / ``None`` and note is the human-readable caveat. The two
+    must stay separate: any caveat folded into the value becomes a value that
+    contains the name of another setting, which is a trap for every comparison
+    downstream.
 
-    Only spread is used. An earlier overshoot test compared achieved MHz against
-    ``cpuinfo_max_freq``, but under ``amd_pstate`` that file *is* the boost
-    ceiling, so the comparison could never fire.
+    Spread is the only input. Comparing achieved MHz against ``cpuinfo_max_freq``
+    cannot add anything, because under ``amd_pstate`` that file *is* the boost
+    ceiling.
     """
     if spread is None:
         return None, "no trustworthy frequency sample"
@@ -404,11 +423,12 @@ def os_layer(quick: bool = False) -> dict:
     out["core_performance_boost"] = cpb_msr or sysfs_cpb or "unknown"
 
     if quick:
-        # No load generation, so nothing that needs a measurement can be judged.
+        # No load generation, so the measured knobs have nothing to report. None
+        # of them is judged, so the exit code is unaffected.
         out["peak_mhz"] = None
         out["core_spread_mhz"] = None
         out["determinism"] = "unknown"
-        out["determinism_note"] = "skipped in --quick (needs load generation)"
+        out["determinism_note"] = "not measured in --quick (needs load generation)"
         return out
 
     peak = measure_peak_mhz()
@@ -448,46 +468,40 @@ def verdict(key: str, value: object) -> str:
 EXIT_OK, EXIT_FAIL, EXIT_UNKNOWN = 0, 1, 2
 
 
-_RECORD_LABELS = {"smt": "SMT", "nps": "NPS"}
-
-#: Knobs resolved by generating load rather than by reading a file, so
-#: ``--quick`` cannot judge them.
-MEASURED = ("determinism",)
-
-
 def build_rows(osl: dict) -> list[dict]:
-    """One row per checked knob, plus the recorded-only entries.
+    """One row per checked knob, then one per recorded knob.
 
-    In ``--quick`` a measurement-dependent knob is reported SKIPPED rather than
-    UNKNOWN. That is the difference between "we did not look" and "we looked and
-    could not tell", and it is what keeps ``--quick`` usable as a gate: reporting
-    it as unresolved made a fast run exit non-zero every time.
+    Every knob that needs load generation is recorded rather than checked, so
+    ``--quick`` reaches every verdict this tool offers and needs no special
+    case: a fast run and a full run return the same exit code on the same host.
     """
-    quick = bool(osl.get("quick"))
     rows = []
     for key, spec in CHECKED.items():
         value = osl.get(key, "unknown")
-        skipped = quick and key in MEASURED
         rows.append(
             {
                 "knob": spec["label"],
                 "key": key,
                 "value": str(value),
                 "target": "/".join(spec["target"]),
-                "verdict": "SKIPPED" if skipped else verdict(key, value),
+                "verdict": verdict(key, value),
                 "note": osl.get(f"{key}_note", ""),
                 "inferred": bool(spec.get("inferred")),
             }
         )
-    for key in RECORDED:
+    for key, spec in RECORDED.items():
         rows.append(
             {
-                "knob": _RECORD_LABELS.get(key, key),
+                "knob": spec["label"],
                 "key": key,
                 "value": str(osl.get(key, "unknown")),
                 "target": "",
                 "verdict": "RECORD",
-                "note": osl.get(f"{key}_note", "") or "recorded for comparability; not judged",
+                "note": osl.get(f"{key}_note", ""),
+                "inferred": bool(spec.get("inferred")),
+                # Carried into --json so the record explains its own silence to
+                # whoever reads it later, without the reader needing this file.
+                "why": spec["why"],
             }
         )
     return rows
@@ -522,8 +536,11 @@ def render(osl: dict, rows: list[dict]) -> None:
     for r in rows:
         target = f"  (want {r['target']})" if r["target"] and r["verdict"] != "PASS" else ""
         print(f"  {r['verdict']:<7} {r['knob']:<{width}}  {r['value']}{target}")
-        if r["note"] and r["verdict"] in ("UNKNOWN", "FAIL"):
-            print(f"          {' ' * width}  {r['note']}")
+        # An inferred row always shows its note: the value is a deduction, and a
+        # reader who cannot see that will treat it as a reading.
+        if r["note"] and (r["verdict"] in ("UNKNOWN", "FAIL") or r["inferred"]):
+            prefix = "inferred: " if r["inferred"] else ""
+            print(f"          {' ' * width}  {prefix}{r['note']}")
     print()
     fails = [r for r in rows if r["verdict"] == "FAIL"]
     unknown = [r for r in rows if r["verdict"] == "UNKNOWN"]
@@ -533,15 +550,6 @@ def render(osl: dict, rows: list[dict]) -> None:
             print(f"    {r['knob']}: {r['value']} (want {r['target']})")
             print(textwrap.fill(CHECKED[r["key"]]["basis"], width=76,
                                 initial_indent="        ", subsequent_indent="        "))
-            if r.get("inferred"):
-                # This verdict rests on a frequency measurement, not a BIOS read.
-                # Say so, so nobody changes a BIOS setting on the strength of a
-                # heuristic that a uniformly binned part can also produce.
-                print(textwrap.fill(
-                    "Inferred from per-core frequency spread, not read from BIOS. "
-                    "Confirm in BIOS (or with platform_audit_bmc.py) before changing it.",
-                    width=76, initial_indent="        -> ", subsequent_indent="           ",
-                ))
     if unknown:
         print("Unresolved (not a pass):")
         for r in unknown:
@@ -549,7 +557,7 @@ def render(osl: dict, rows: list[dict]) -> None:
     if not fails and not unknown:
         print("All checked knobs on target.")
     print(f"\nTargets follow {SOURCE}.")
-    print("RECORD rows are reported, not judged: the guide varies them by workload.")
+    print("RECORD rows are reported, not judged; run with --json for the reason.")
     if os.geteuid() != 0:
         print("\nNote: not root — the HWCR MSR was not read, so Core Performance Boost")
         print("falls back to the sysfs view.")
@@ -560,8 +568,9 @@ def main() -> int:
         description="Audit OS-visible AMD EPYC tuning that affects benchmark results",
         epilog=(
             "Exit: 0 all checked knobs on target, 1 a knob is wrong, "
-            "2 a knob could not be resolved. Recorded-only knobs (determinism, "
-            f"SMT, NPS) never affect the exit code. Targets follow {SOURCE}."
+            "2 a knob could not be resolved. Checked knobs are Core Performance "
+            "Boost and the cpufreq governor; determinism, SMT and NPS are "
+            f"recorded only and never affect the exit code. Targets follow {SOURCE}."
         ),
     )
     ap.add_argument(

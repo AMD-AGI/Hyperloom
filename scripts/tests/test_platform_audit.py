@@ -33,44 +33,43 @@ pa = _load()
 
 # -------------------------------------------------------------- verdicts
 
-def test_determinism_targets_power():
-    """Power is the target: it maximizes what a given platform can deliver.
+def test_determinism_is_recorded_not_judged():
+    """The one knob this tool cannot read, only infer, must not gate anything.
 
-    58011 §4.2.2 offers Power -- "maximum performance of any individual system"
-    -- against Performance, which buys fleet uniformity by leaving headroom
-    unused on the better parts. Power's cost is that platforms then differ from
-    each other; that cost is paid by recording the setting rather than by
-    avoiding it, since the report says which mode each run was in.
+    Power remains the setting to want (58011 §4.2.2, "maximum performance of any
+    individual system"). But the OS layer infers it from per-core frequency
+    spread, and five consecutive runs on one unchanged EPYC 9575F measured 7.9,
+    21.0, 18.1, 20.9 and 15.1 MHz -- the host's own jitter straddles the
+    threshold. Gating on that flips the exit code on a machine nobody touched.
     """
-    assert pa.CHECKED["determinism"]["target"] == ("power",)
-    assert pa.verdict("determinism", "power") == "PASS"
-    assert pa.verdict("determinism", "performance") == "FAIL"
+    assert "determinism" not in pa.CHECKED
+    assert "determinism" in pa.RECORDED
+    row = {r["key"]: r for r in pa.build_rows({"determinism": "performance"})}["determinism"]
+    assert row["verdict"] == "RECORD"
+    assert pa.exit_code(pa.build_rows({"determinism": "performance"})) != pa.EXIT_FAIL
 
 
-def test_determinism_prose_cannot_pass_as_power():
-    """Regression: the explanatory string must never satisfy the "power" target.
-
-    The inference for Performance determinism used to be returned as the prose
-    "Performance (or Power at a uniform bin)". Substring matching found "power"
-    inside it and returned PASS -- so the one configuration this check exists to
-    catch was the one it silently approved.
-    """
-    assert pa.verdict("determinism", "Performance (or Power at a uniform bin)") == "FAIL"
-
-
-def test_determinism_verdict_is_marked_as_inferred():
-    """A FAIL here rests on a frequency heuristic, not a BIOS read, and says so.
+def test_determinism_row_says_it_was_inferred():
+    """A deduction presented like a reading invites a BIOS change on a heuristic.
 
     A uniformly binned part running Power determinism produces the same low
-    spread as a part running Performance determinism, so this verdict must not
-    read as a definitive statement about BIOS.
+    spread as a part running Performance determinism, so the row must carry the
+    caveat rather than look like a setting that was read.
     """
-    assert pa.CHECKED["determinism"].get("inferred") is True
+    assert pa.RECORDED["determinism"].get("inferred") is True
     row = {r["key"]: r for r in pa.build_rows({"determinism": "performance"})}["determinism"]
-    assert row["verdict"] == "FAIL" and row["inferred"] is True
+    assert row["inferred"] is True
     # A knob read straight from sysfs/MSR carries no such caveat.
     boost = {r["key"]: r for r in pa.build_rows({"core_performance_boost": "enabled"})}
     assert boost["core_performance_boost"]["inferred"] is False
+
+
+def test_every_recorded_knob_explains_its_silence():
+    """"Not checked" is a claim, so each recorded knob carries its reason."""
+    for key, spec in pa.RECORDED.items():
+        assert spec["why"].strip(), f"{key} records no reason for having no verdict"
+    row = {r["key"]: r for r in pa.build_rows({})}["nps"]
+    assert row["why"], "the reason must reach --json, not only this module"
 
 
 def test_verdict_is_exact_not_substring():
@@ -127,29 +126,27 @@ def test_recorded_knobs_never_affect_the_exit_code():
     assert pa.exit_code(_rows(a="PASS", smt="RECORD", nps="RECORD")) == pa.EXIT_OK
 
 
-def test_quick_mode_can_still_pass():
-    """--quick exists to be fast; it must not guarantee a non-zero exit.
+def test_quick_and_full_agree_on_the_same_host():
+    """--quick must reach the same verdicts, or it is not a usable gate.
 
-    Determinism needs load generation, so quick mode cannot judge it. Reporting
-    it as unresolved made every fast run exit 2, which made the flag useless as
-    a gate; it is now SKIPPED, which is excluded from the exit code.
+    No judged knob needs load generation any more, so the only thing --quick
+    gives up is a recorded value. A fast run and a full run on one healthy host
+    must therefore return the same exit code.
     """
-    osl = {
+    common = {
         "core_performance_boost": "enabled",
         "cpufreq_governor": "performance",
-        "determinism": "unknown",
-        "determinism_note": "skipped in --quick (needs load generation)",
         "smt": "enabled",
         "nps": "NPS1",
-        "quick": True,
     }
-    rows = pa.build_rows(osl)
-    assert {r["key"]: r["verdict"] for r in rows}["determinism"] == "SKIPPED"
-    assert pa.exit_code(rows) == pa.EXIT_OK
+    quick = pa.build_rows({**common, "determinism": "unknown", "quick": True})
+    full = pa.build_rows({**common, "determinism": "power"})
+    assert pa.exit_code(quick) == pa.exit_code(full) == pa.EXIT_OK
+    assert {r["key"]: r["verdict"] for r in quick}["determinism"] == "RECORD"
 
 
 def test_quick_mode_still_fails_on_a_knob_it_can_read():
-    """Skipping the measured knob must not mask a knob quick mode can see."""
+    """An unmeasured recorded knob must not mask a knob quick mode can see."""
     osl = {
         "core_performance_boost": "disabled",
         "cpufreq_governor": "performance",
@@ -174,7 +171,7 @@ def test_build_rows_marks_recorded_knobs_and_judges_the_rest():
     by_key = {r["key"]: r for r in pa.build_rows(osl)}
     assert by_key["core_performance_boost"]["verdict"] == "PASS"
     assert by_key["cpufreq_governor"]["verdict"] == "FAIL"
-    assert by_key["determinism"]["verdict"] == "PASS"
+    assert by_key["determinism"]["verdict"] == "RECORD"
     assert by_key["smt"]["verdict"] == "RECORD"
     assert by_key["nps"]["verdict"] == "RECORD"
 
@@ -221,3 +218,25 @@ def test_sample_cores_degrades_on_small_parts(monkeypatch):
     assert pa.sample_cores(4) == [0, 1]
     monkeypatch.setattr(pa, "physical_cores", lambda: [])
     assert pa.sample_cores(4) == []
+
+
+def test_os_layer_survives_a_host_with_no_cpu_sysfs(monkeypatch):
+    """"Never raises" is a promise, and a missing /sys tree is how it breaks.
+
+    A container without /sys/devices/system/cpu is the ordinary case here, not
+    an exotic one: it must degrade to "unknown" rather than throw out of a
+    function every caller treats as total.
+    """
+    def _no_such_tree(path):
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(pa.os, "listdir", _no_such_tree)
+    monkeypatch.setattr(pa, "read", lambda _path: "")
+    monkeypatch.setattr(pa, "read_hwcr", lambda: None)
+
+    osl = pa.os_layer(quick=True)
+    assert osl["identity"]["sockets"] is None
+    assert osl["identity"]["nps"] == "unknown", "NPS0 is a value no BIOS can hold"
+    assert pa.physical_cores() == []
+    # Still a usable record: unresolved, not absent.
+    assert {r["key"] for r in pa.build_rows(osl)} >= set(pa.CHECKED) | set(pa.RECORDED)
