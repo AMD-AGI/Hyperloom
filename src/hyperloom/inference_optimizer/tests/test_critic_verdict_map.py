@@ -543,7 +543,7 @@ async def test_a_held_reject_is_recorded_not_silently_corrected(coord, caplog):
     """The downgrade leaves both a log line and an observation, so prompt drift stays visible."""
     import logging
 
-    pending = _seed_explore_proposal(coord, msg_id="msg-audit")
+    _seed_explore_proposal(coord, msg_id="msg-audit")
     intent = Intent(
         type=IntentType.REVIEW_VERDICT,
         payload={
