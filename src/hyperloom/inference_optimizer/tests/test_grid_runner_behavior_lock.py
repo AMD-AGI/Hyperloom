@@ -106,7 +106,7 @@ def _invalid_rc0_workspace(slot: Path) -> Path:
 
 
 class TestPulseMatrix:
-    """``_after_variant`` (delegating to ``_robustness_pulse``) fires on
+    """``_pulse_after_variant`` (delegating to ``_robustness_pulse``) fires on
     every failure path EXCEPT the multi-node ``mn_server_restart_failed`` path,
     which returns/continues before the pulse call."""
 

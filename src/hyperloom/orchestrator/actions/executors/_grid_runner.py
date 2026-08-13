@@ -1269,7 +1269,7 @@ async def run_grid(
         except Exception as exc:  # noqa: BLE001 - reference base is additive; never block the grid
             log.debug("grid_runner: reference env resolve swallowed: %r", exc)
 
-    # Reported on entry, not on completion: ``_after_variant`` only runs once a
+    # Reported on entry, not on completion: ``_pulse_after_variant`` only runs once a
     # result has been appended, so a first variant that hangs — or a branch that
     # raises before reaching it — would emit nothing at all, which is exactly
     # the silence the heartbeat exists to break.
@@ -1292,11 +1292,12 @@ async def run_grid(
     # surfaces between variants, plus a progress heartbeat so a grid that runs
     # for hours is distinguishable from one that hung on its first variant.
     # Both best-effort.
-    async def _after_variant(idx: int) -> None:
-        """Run the variant-boundary hooks once the variant's result is appended.
+    async def _pulse_after_variant(idx: int) -> None:
+        """Report the finished variant and run a best-effort robustness pulse.
 
-        Exceptions from the pulse are swallowed (logged at debug) so a pulse
-        failure never aborts the grid.
+        Called once the variant's result has been appended, so the progress
+        note carries what actually landed. Exceptions from the pulse are
+        swallowed (logged at debug) so a pulse failure never aborts the grid.
 
         Args:
             idx (int): Zero-based index of the just-finished variant, passed
@@ -1367,7 +1368,7 @@ async def run_grid(
                     note=variant.note,
                 )
             )
-            await _after_variant(i)
+            await _pulse_after_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -1411,7 +1412,7 @@ async def run_grid(
                     note=variant.note,
                 )
             )
-            await _after_variant(i)
+            await _pulse_after_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -1505,7 +1506,7 @@ async def run_grid(
                         note=variant.note,
                     )
                 )
-                await _after_variant(i)
+                await _pulse_after_variant(i)
                 if not keep_going_on_failure:
                     break
                 continue
@@ -1563,7 +1564,7 @@ async def run_grid(
                         nonfatal_warnings=["run_grid_warmup_round_failed"],
                     )
                 )
-                await _after_variant(i)
+                await _pulse_after_variant(i)
                 if not keep_going_on_failure:
                     break
                 continue
@@ -1641,7 +1642,7 @@ async def run_grid(
                         ],
                     )
                 )
-                await _after_variant(i)
+                await _pulse_after_variant(i)
                 if not keep_going_on_failure:
                     break
                 continue
@@ -1817,7 +1818,7 @@ async def run_grid(
                     nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in to_harvested],
                 )
             )
-            await _after_variant(i)
+            await _pulse_after_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -1866,7 +1867,7 @@ async def run_grid(
                     note=variant.note,
                 )
             )
-            await _after_variant(i)
+            await _pulse_after_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -1918,7 +1919,7 @@ async def run_grid(
                     nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in sd_harvested],
                 )
             )
-            await _after_variant(i)
+            await _pulse_after_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -1970,7 +1971,7 @@ async def run_grid(
                     nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in ds_harvested],
                 )
             )
-            await _after_variant(i)
+            await _pulse_after_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -2025,7 +2026,7 @@ async def run_grid(
                 float(soft_deadline_sec or 0.0),
                 f"{estimated_tput:.1f}" if estimated_tput is not None else "n/a",
             )
-            await _after_variant(i)
+            await _pulse_after_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -2078,7 +2079,7 @@ async def run_grid(
                     note=variant.note,
                 )
             )
-            await _after_variant(i)
+            await _pulse_after_variant(i)
             if rc != 0 and not keep_going_on_failure:
                 break
             continue
@@ -2152,7 +2153,7 @@ async def run_grid(
                     note=variant.note,
                 )
             )
-            await _after_variant(i)
+            await _pulse_after_variant(i)
             if rc != 0 and not keep_going_on_failure:
                 break
             continue
@@ -2190,7 +2191,7 @@ async def run_grid(
             variant.name,
             results[-1].output_throughput or 0.0,
         )
-        await _after_variant(i)
+        await _pulse_after_variant(i)
     return results
 
 
