@@ -231,16 +231,12 @@ class KernelPhase(PhaseHandler):
     def _geak_enabled(self) -> bool:
         """Whether the KERNEL_AGENT phase is delegated to the GEAK e2e optimizer.
 
-        The source of truth is the kernel backend order
-        (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``): when ``geak``
-        appears there it owns the whole phase. The ``kernel_optimizer`` state
-        field is the persisted record used as a resume fallback.
+        ``KERNEL_OPT_BACKEND_ORDER`` is the only source of truth: anything
+        other than an exact ``forge`` leaves GEAK owning the whole phase.
         """
         from ..kernel.request_handlers import geak_selected
 
-        if geak_selected():
-            return True
-        return str(getattr(self.shared_state, "kernel_optimizer", "") or "").strip().lower() == "geak"
+        return geak_selected()
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
         """Run deterministic KERNEL-entry setup: FP8 GEMM tuning gate, fusion, re-profile.
@@ -1470,6 +1466,83 @@ class KernelPhase(PhaseHandler):
                     exc_info=True,
                 )
 
+    def _runtime_uses_aiter_fused_moe(self) -> bool:
+        """Return whether the served model dispatches MoE through aiter.
+
+        vLLM's Triton ``fused_moe`` reads ``VLLM_TUNED_CONFIG_FOLDER``; aiter's
+        fused MoE does not. When aiter owns the MoE the Triton tuner's JSON is
+        unreachable, so validating it burns two full benchmark rounds on a config
+        the server cannot load.
+        """
+        from ..kernel.request_handlers import _resolve_forge_server_log
+
+        try:
+            log_path = _resolve_forge_server_log(self.shared_state, self.session_dir)
+        except Exception:  # noqa: BLE001 - detection is best-effort
+            return False
+        if not log_path:
+            return False
+        try:
+            text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        return "[aiter] [fused_moe]" in text or "Mxfp4 MoE backend" in text
+
+    def _gemm_tuned_config_coverage(
+        self,
+        tuner_name: str,
+        envs: dict[str, str],
+    ) -> dict[str, Any] | None:
+        """Report whether the validated aiter CSV was reachable by the server.
+
+        A tuned CSV only helps when aiter's padded (M, N, K) lookup can resolve a
+        row for the shapes the server actually asks for. When it cannot, the run
+        still boots and benchmarks fine, so the gate sees an honest "no gain" and
+        the real cause -- an artifact the runtime never applied -- stays invisible.
+        Replaying the lookup against the round's ``server.log`` separates the two.
+        """
+        from ..kernel.gemm_shape_coverage import (
+            parse_aiter_consulted_tables,
+            parse_aiter_shape_lookups,
+            tuned_config_coverage,
+            tuned_csv_shapes,
+        )
+
+        csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
+        if not csv_paths:
+            return None
+        run_dir = self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}"
+        logs = sorted(run_dir.rglob("server.log"), key=lambda p: p.stat().st_mtime if p.exists() else 0)
+        if not logs:
+            return None
+        try:
+            log_text = logs[-1].read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        missed, hit = parse_aiter_shape_lookups(log_text)
+        requested = missed | hit
+        if not requested:
+            return None
+        tuned: set[tuple[int, int, int]] = set()
+        for path in csv_paths:
+            tuned |= tuned_csv_shapes(path)
+        report = tuned_config_coverage(tuned, requested)
+        report["server_log"] = str(logs[-1])
+        report["runtime_lookup_miss"] = len(missed)
+        report["runtime_lookup_hit"] = len(hit)
+        report["artifact_applied"] = bool(report.get("covered"))
+        consulted = parse_aiter_consulted_tables(log_text)
+        report["consulted_tables"] = sorted(consulted)[:8]
+        wanted = {Path(path).name for path in csv_paths}
+        if consulted and not (wanted & {Path(name).name for name in consulted}):
+            # The runtime resolved a different quantisation variant's table, so
+            # the tuner targeted a kernel this server never dispatches to.
+            report["artifact_applied"] = False
+            report["not_applied_reason"] = "artifact_table_not_consulted"
+        elif not report["artifact_applied"]:
+            report["not_applied_reason"] = "no_shape_key_matched"
+        return report
+
     def _merge_gemm_candidate_with_runtime(
         self, env_var: str, candidate_csv_path: str
     ) -> str | None:
@@ -2170,8 +2243,22 @@ class KernelPhase(PhaseHandler):
             model_supports_aiter_ck_fused_moe,
         )
 
+        triton_moe_inert = (
+            any(c.get("tuner") == "vllm_moe_triton" for c in candidates)
+            and self._runtime_uses_aiter_fused_moe()
+        )
+
         for cand in candidates:
             tuner_name = cand["tuner"]
+            if tuner_name == "vllm_moe_triton" and triton_moe_inert:
+                log.warning(
+                    "forge gemm E2E: skipping %s — the server dispatches MoE through "
+                    "aiter, which never reads VLLM_TUNED_CONFIG_FOLDER, so the tuned "
+                    "Triton config cannot take effect",
+                    tuner_name,
+                )
+                reverted.append({**cand, "reason": "aiter_moe_runtime_triton_config_inert"})
+                continue
             if tuner_name == "fmoe_ck" and not model_supports_aiter_ck_fused_moe(
                 str(getattr(self.shared_state, "model_path", "") or ""),
                 int(getattr(self.shared_state, "tp", 0) or 0),
@@ -2275,6 +2362,27 @@ class KernelPhase(PhaseHandler):
                 gain_pct,
             )
 
+            coverage = self._gemm_tuned_config_coverage(tuner_name, env)
+            if coverage is not None:
+                cand = {**cand, "tuned_config_coverage": coverage}
+                if not coverage.get("artifact_applied"):
+                    log.error(
+                        "forge gemm E2E: tuner=%s produced an artifact the runtime never "
+                        "applied — 0 of %d requested shape(s) resolve to a tuned row; "
+                        "the %.2f%% e2e delta measures nothing about the tuning",
+                        tuner_name,
+                        coverage.get("requested") or 0,
+                        gain_pct,
+                    )
+                else:
+                    log.info(
+                        "forge gemm E2E: tuner=%s tuned-config coverage %.2f%% (%d/%d shapes)",
+                        tuner_name,
+                        coverage.get("coverage_pct") or 0.0,
+                        coverage.get("covered") or 0,
+                        coverage.get("requested") or 0,
+                    )
+
             if decision == "KEEP" and new_tput > running_tput:
                 stacked_envs.update(env)
                 running_tput = new_tput
@@ -2316,7 +2424,12 @@ class KernelPhase(PhaseHandler):
                     task_id=f"gemm_tune_e2e_{tuner_name}",
                 )
             else:
-                reverted.append({**cand, "reason": f"decision={decision}, gain={gain_pct:.2f}%"})
+                reason = f"decision={decision}, gain={gain_pct:.2f}%"
+                if coverage is not None and not coverage.get("artifact_applied"):
+                    # Distinguish "the tuning did not pay off" from "the tuned
+                    # artifact was never reachable", which is a wiring defect.
+                    reason = f"tuned_config_never_applied ({reason})"
+                reverted.append({**cand, "reason": reason})
 
         # Update current_best and cumulative_gain with final stacked result.
         if kept:

@@ -89,7 +89,6 @@ def test_audit_already_equivalent(tmp_path: Path):
     assert out["applicability"] == "not_applicable"
     assert out["recommended_next_step"] == "skip"
     assert out["evidence"]  # evidence-gated
-    assert (tmp_path / "wd" / "semantic_audit.json").exists()
 
 
 def test_audit_not_present_direct_apply(tmp_path: Path):

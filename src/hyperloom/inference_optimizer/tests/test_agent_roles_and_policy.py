@@ -112,9 +112,6 @@ def test_kernel_owned_actions_include_gemm_tuning():
         {
             "kernel_opt",
             "integrate",
-            "deep_kernel_analysis",
-            "operator_tuning",
-            "vendor_kernel_config",
             "gemm_tuning",
         }
     )
@@ -185,7 +182,7 @@ def test_gate_orchestration_propose_kernel_owned_rejected():
     """Kernel-owned actions are REQUEST-only on both channels: propose_action is denied like delegate."""
     state = SharedState(phase="KERNEL", precision="bf16", framework="sglang")
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
-    for action in ("kernel_opt", "gemm_tuning", "integrate", "deep_kernel_analysis"):
+    for action in ("kernel_opt", "gemm_tuning", "integrate"):
         with pytest.raises(PolicyDenied) as exc:
             gate.validate_intent(
                 "orchestration",

@@ -118,13 +118,9 @@ def _load_action_verdict_policy() -> dict[str, str]:
     critic-agent approves exploration / archival actions without demanding the
     before/after evidence they themselves produce.
     """
-    try:
-        from hyperloom.orchestrator.actions.registry import ActionRegistry
+    from ..protocol.action_surfaces import ACTION_CATALOGUE
 
-        _reg = ActionRegistry().load()
-        return {a.name: a.verdict_class for a in _reg.all()}
-    except Exception:  # noqa: BLE001 — degrade to empty policy
-        return {}
+    return {a.name: a.verdict_class for a in ACTION_CATALOGUE.values()}
 
 
 def _build_backends(
