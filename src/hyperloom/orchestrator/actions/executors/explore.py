@@ -47,6 +47,12 @@ from ...state.failure_evidence import (
     tail_excerpt,
 )
 from ...state.shared_state import first_positive_tput, resolve_grading_anchor_tput, stack_base_params
+from ..stop_attribution import (
+    SESSION_TIME_EXHAUSTED_CLASS,
+    STOPPED_BY_THE_RUN,
+    StoppedByTheRun,
+    stopped_by_the_run_class,
+)
 from ._accuracy_gate import (
     accuracy_passed,
     is_high_accuracy_risk,
@@ -63,7 +69,6 @@ from ._grid_runner import (
     apply_aiter_moe_pin_filter,
     apply_multi_node_invalid_variants,
     reorder_grid_for_multi_node,
-    SESSION_TIME_EXHAUSTED_CLASS,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
@@ -1134,10 +1139,49 @@ class ExploreExecutor:
         )
         warmup_expected_sec = (baseline_runtime_sec if baseline_runtime_sec > 0 else None) or session_expected_sec
         decision_expected_sec = (decision_anchor_sec if decision_anchor_sec > 0 else None) or session_expected_sec
-        # Set when the loop stops early for lack of budget, so the round can say
+        # Set when the loop stops because the run stopped it -- the budget ran
+        # out, or the orchestrator cancelled the action -- so the round can say
         # so instead of reporting a bare, unattributed failure: a variant that
-        # never ran is not a variant that failed.
+        # never ran is not a variant that failed. ``run_stop_detail`` is the
+        # lead clause, which differs by whether a round was already under way.
+        run_stop: StoppedByTheRun | None = None
+        run_stop_detail = ""
         session_budget_untested = 0
+
+        def _stopped_by_the_run(result: Any, *, variant: GridVariant, idx: int, round_label: str) -> bool:
+            """Whether the run stopped this round, and record it if it did.
+
+            A reaped round measured nothing, so the variant is left out of every
+            ledger exactly as an unadmitted one is: writing it as ``FAILED``
+            would make a resume skip a variant nothing ever measured, and would
+            teach the KB that these knobs are bad because a clock ran out.
+
+            Args:
+                result: The round's :class:`VariantResult`, or ``None``.
+                variant: The variant the round was measuring, for the log line.
+                idx: Its index in ``runnable``, for the untested count.
+                round_label: Which round was stopped, for the log line.
+
+            Returns:
+                bool: ``True`` when the caller must stop testing variants.
+            """
+            nonlocal run_stop, run_stop_detail, session_budget_untested
+            stopped = stopped_by_the_run_class(getattr(result, "error_class", "") if result is not None else "")
+            if stopped is None:
+                return False
+            run_stop = stopped
+            run_stop_detail = stopped.interrupted
+            session_budget_untested = len(runnable) - idx
+            log.warning(
+                "explore: the %s round of variant %s was stopped by the run (%s); it and the "
+                "%d variant(s) after it stay out of the ledger so a resume can retry them",
+                round_label,
+                variant.name,
+                stopped.error_class,
+                session_budget_untested - 1,
+            )
+            return True
+
         try:
             for idx, gv in enumerate(runnable):
                 # A warm-decision variant pays for both rounds, so admitting it on
@@ -1150,6 +1194,8 @@ class ExploreExecutor:
                 else:
                     fit_required_sec = float(timeout_sec)
                 if session_deadline_sec is not None and (session_deadline_sec - time.monotonic()) < fit_required_sec:
+                    run_stop = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS]
+                    run_stop_detail = run_stop.never_started
                     session_budget_untested = len(runnable) - idx
                     log.warning(
                         "explore: session budget cannot fit another variant "
@@ -1245,6 +1291,8 @@ class ExploreExecutor:
                             variant_expected_sec=warmup_expected_sec,
                         )
                         w = warmup_results[0] if warmup_results else None
+                        if _stopped_by_the_run(w, variant=gv, idx=idx, round_label="warmup"):
+                            break
                         if w is None or getattr(w, "status", "") != "succeeded":
                             werr = (getattr(w, "error", "") or "")[-200:] if w is not None else "no_result"
                             log.warning(
@@ -1345,6 +1393,8 @@ class ExploreExecutor:
                         )
                         continue
                     r = results[0]
+                    if _stopped_by_the_run(r, variant=gv, idx=idx, round_label="decision"):
+                        break
 
                     # Overtime gate fired: record a ``KILLED_OVERTIME`` row (no
                     # faked tput/gain), skip downstream gates, leave the stack
@@ -1649,6 +1699,18 @@ class ExploreExecutor:
                                 session_deadline_sec=session_deadline_sec,
                                 variant_expected_sec=decision_expected_sec,
                             )
+                            # A confirmation the run stopped is not a failed
+                            # confirmation: grading it would evict a variant as
+                            # unstable on the strength of a round that never
+                            # measured it. Undo the stack fold and drop the
+                            # decision-round entry too, so a resume re-measures
+                            # the variant and its confirmation together.
+                            if _stopped_by_the_run(rebench, variant=gv, idx=idx, round_label="stack rebench"):
+                                in_batch_keeps.pop()
+                                tested_update.pop(fp, None)
+                                if gv.name:
+                                    name_index.pop(gv.name, None)
+                                break
                             stack_rebench_tput = rebench.tput
                             stack_rebench_workspace = rebench.workspace
                             stack_rebench_warnings = rebench.warnings
@@ -1956,16 +2018,16 @@ class ExploreExecutor:
             if t.get("round_id") == round_id
         )
         status = "succeeded" if produced_measurement or winners else "failed"
-        # A round that measured nothing because the budget ran out is not the same
-        # as one whose variants failed, and it used to be reported as a bare
+        # A round that measured nothing because the run stopped it is not the
+        # same as one whose variants failed, and it used to be reported as a bare
         # ``failed`` with no error_class at all -- nothing downstream could tell
         # the two apart, so the KB could learn that these variants are bad.
         budget_error: dict[str, Any] = {}
-        if status == "failed" and session_budget_untested > 0:
+        if status == "failed" and run_stop is not None:
             budget_error = {
-                "error_class": SESSION_TIME_EXHAUSTED_CLASS,
+                "error_class": run_stop.error_class,
                 "error": (
-                    f"session wall-clock budget exhausted; {session_budget_untested} variant(s) never ran "
+                    f"{run_stop_detail}; {session_budget_untested} variant(s) went unmeasured "
                     "and stay out of the ledger so a resume can retry them"
                 ),
             }
