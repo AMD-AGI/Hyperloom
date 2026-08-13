@@ -44,27 +44,12 @@ from ..trace.parse_usage import (
     parse_forge_usage,
 )
 
-# Cohesive clusters live in sibling modules; re-exported here so the module
-# namespace + monkeypatch surface is intact.
+# Re-exported so ``request_handlers.<name>`` stays the monkeypatch surface the
+# callers below already patch. Everything else in _kernel_decisions is reached
+# through SharedState's methods, so it is not mirrored here.
 from ._kernel_decisions import (
     _honest_flag as _honest_flag,
     _format_last_kernel_opt as _format_last_kernel_opt,
-    _resolve_kernel_patch_identity as _resolve_kernel_patch_identity,
-    kernel_patch_key as kernel_patch_key,
-    find_rejected_kernel_patch as find_rejected_kernel_patch,
-    record_kernel_integrate_result as record_kernel_integrate_result,
-    record_kernel_opt as record_kernel_opt,
-    record_gemm_tuning as record_gemm_tuning,
-    _kernel_ids_in_optimization_stack as _kernel_ids_in_optimization_stack,
-    _source_files_in_optimization_stack as _source_files_in_optimization_stack,
-    _kernel_ids_with_integrate_attempts as _kernel_ids_with_integrate_attempts,
-    integrate_attempt_count_for_kernel as integrate_attempt_count_for_kernel,
-    _kernel_trace_impact_pct as _kernel_trace_impact_pct,
-    next_pending_keep_kernel_id as next_pending_keep_kernel_id,
-    pending_keep_kernel_ids as pending_keep_kernel_ids,
-    has_keep_pending_integrate as has_keep_pending_integrate,
-    kernel_opt_attempts_count as kernel_opt_attempts_count,
-    untried_hot_reusable_kernels as untried_hot_reusable_kernels,
 )
 
 
@@ -6909,24 +6894,7 @@ __all__ = [
     "run_gemm_tuning_handler",
     "run_optimization_handler",
     "trace_analyze_handler",
-    # Re-exported from sibling modules for backward compat and the test
-    # monkeypatch surface (referenced via ``request_handlers.<name>``).
-    # Declared so the re-exports are intentional, not flagged imports.
+    # Re-exported from _kernel_decisions; declared so the re-export reads as
+    # intentional rather than an unused import.
     "_format_last_kernel_opt",
-    "_resolve_kernel_patch_identity",
-    "kernel_patch_key",
-    "find_rejected_kernel_patch",
-    "record_kernel_integrate_result",
-    "record_kernel_opt",
-    "record_gemm_tuning",
-    "_kernel_ids_in_optimization_stack",
-    "_source_files_in_optimization_stack",
-    "_kernel_ids_with_integrate_attempts",
-    "integrate_attempt_count_for_kernel",
-    "_kernel_trace_impact_pct",
-    "next_pending_keep_kernel_id",
-    "pending_keep_kernel_ids",
-    "has_keep_pending_integrate",
-    "kernel_opt_attempts_count",
-    "untried_hot_reusable_kernels",
 ]

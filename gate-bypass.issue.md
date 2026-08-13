@@ -95,6 +95,22 @@ this signal can detect that an orchestration stall would not. Removing it
 changes what Robustness reports, so it belongs in a behaviour change rather
 than a deletion.
 
+### The remaining 16 `SharedState` forwarding shims (~170 lines)
+
+`shared_state.py` keeps 16 one-to-four-line methods that forward to
+`orchestrator/kernel/_kernel_decisions`. Collapsing them was scoped as the
+last cut, then measured and dropped: they carry **45 production call sites and
+~205 test call sites**, and removing them means every one of those ~40 modules
+imports the private `_kernel_decisions` and threads `state` through by hand.
+That trades 170 lines of facade for a wider import surface onto a private
+module — a relocation, not a removal.
+
+Three shims with no reader at all (`_kernel_ids_in_optimization_stack`,
+`_source_files_in_optimization_stack`, `_kernel_trace_impact_pct`) were
+removed; their implementations stay because `_kernel_decisions` calls them
+internally. `kernel_opt_attempts_count` looked dead to a `.name(` grep but is a
+`@property` read by `render.py:588` and `robustness/signals/progress.py:217`.
+
 ### `_grid_variant_filter.apply_compatibility_filter` (~120 lines)
 
 `orchestrator/actions/executors/explore.py:947-950` says so in its own comment:
