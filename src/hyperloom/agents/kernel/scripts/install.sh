@@ -1075,6 +1075,28 @@ write_env_file() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
   fi
+  # Emit one credential into the env file as a fallback, not an override.
+  #
+  # Credentials are runtime input owned by .env / the caller; the paths beside
+  # them in that file are install-time results owned by this script. Every
+  # documented launch sources .env first and the env file second, and only the
+  # first install runs install.sh -- so a credential re-exported unconditionally
+  # outranks a key the operator just rotated, on every later launch, with nothing
+  # to show for it (#1169). Assigning only when unset keeps the snapshot useful
+  # for the slurm/Ray paths that source the env file alone, and announces a
+  # mismatch (never a value) so a rotation that has not reached this file stays
+  # visible at launch. Defined here so the emitted block travels with the
+  # function body.
+  _emit_credential_fallback() {
+    local _name="$1"
+    local _value="$2"
+    echo "if [ -n \"\${${_name}:-}\" ]; then"
+    echo "  [ \"\${${_name}}\" = '${_value}' ] || \\"
+    echo "    echo '[kernel-agent] ${_name} differs from the install-time snapshot in this file; keeping the value already in the environment (re-run install.sh to refresh it)' >&2"
+    echo "else"
+    echo "  export ${_name}='${_value}'"
+    echo "fi"
+  }
   # Strict protocol-side separation: each side keeps its own canonical values;
   # GEAK aliases are never written back to provider slots.
   local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-}"
@@ -1110,12 +1132,12 @@ write_env_file() {
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
     # The kernel-agent drives Claude Code, so only the Anthropic side is
     # exported here; gateway/OpenAI credentials are never persisted.
-    [ -n "${_anthropic_url}" ] && echo "export ANTHROPIC_BASE_URL='${_anthropic_url}'"
-    [ -n "${_anthropic_key}" ] && echo "export ANTHROPIC_API_KEY='${_anthropic_key}'"
+    [ -n "${_anthropic_url}" ] && _emit_credential_fallback ANTHROPIC_BASE_URL "${_anthropic_url}"
+    [ -n "${_anthropic_key}" ] && _emit_credential_fallback ANTHROPIC_API_KEY "${_anthropic_key}"
     # A subscription token is the Anthropic side on its own: an oauth-only host
     # resolves neither URL nor key, so without this line sourcing the file
     # leaves the kernel-agent with no Anthropic credential at all.
-    [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && echo "export CLAUDE_CODE_OAUTH_TOKEN='${CLAUDE_CODE_OAUTH_TOKEN}'"
+    [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && _emit_credential_fallback CLAUDE_CODE_OAUTH_TOKEN "${CLAUDE_CODE_OAUTH_TOKEN}"
     # Pin TRACELENS_ROOT and TRACELENS_INTERNAL_ROOT to the (possibly
     # mirrored) values resolved by ensure_tracelens(). This is what lets
     # setsid nohup python -m hyperloom.inference_optimizer.cli optimize →
