@@ -58,6 +58,34 @@ def _iso_ago(seconds: float) -> str:
     return datetime.fromtimestamp(time.time() - seconds, tz=timezone.utc).isoformat()
 
 
+# Bound on every wait paced by the heartbeat driver, so a regression that stops
+# the driver fails in seconds instead of hanging the suite.
+_HEARTBEAT_BACKSTOP_S = 10.0
+
+
+async def _await_notes(notes: list[dict], label: str, count: int, *, interval_s: float) -> None:
+    """Wait until the driver stamping ``label`` has reported ``count`` notes.
+
+    Paces a test on the driver's own reports rather than on elapsed time. A tick
+    is a timer, so "another interval went by" cannot be asserted from a ``sleep``
+    on a runner that may starve the loop for longer than the interval itself; a
+    note is proof the driver got that tick. A driver that is meant to be silent
+    is paced the same way, by the notes of a second one kept deliberately noisy.
+
+    Args:
+        notes (list[dict]): The sink's accumulated notes.
+        label (str): The ``label`` field the driver of interest stamps.
+        count (int): Notes bearing ``label`` to wait for.
+        interval_s (float): The driver's tick interval, used as the poll period.
+    """
+
+    async def _reached() -> None:
+        while sum(1 for note in notes if note.get("label") == label) < count:
+            await asyncio.sleep(interval_s)
+
+    await asyncio.wait_for(_reached(), timeout=_HEARTBEAT_BACKSTOP_S)
+
+
 @pytest.mark.asyncio
 async def test_a_task_that_reports_units_leaves_a_trail_on_its_own_row(tmp_path, monkeypatch):
     """The heartbeat is what separates a working long task from a hung one."""
@@ -220,11 +248,11 @@ async def test_a_long_step_keeps_reporting_while_its_child_talks() -> None:
             label="trace_analyze",
             interval_s=interval,
         ) as activity:
-            for _ in range(3):
+            for line in range(1, 4):
                 activity.note()
-                await asyncio.sleep(interval * 1.5)
+                await _await_notes(notes, "trace_analyze", line, interval_s=interval)
 
-    assert len(notes) >= 2
+    assert len(notes) == 3
     assert {n["label"] for n in notes} == {"trace_analyze"}
     assert all(n["status"] == "running" for n in notes)
     assert [n["output_lines"] for n in notes] == sorted(n["output_lines"] for n in notes)
@@ -232,7 +260,13 @@ async def test_a_long_step_keeps_reporting_while_its_child_talks() -> None:
 
 @pytest.mark.asyncio
 async def test_a_step_whose_child_went_quiet_is_allowed_to_go_stale() -> None:
-    """A timer would keep vouching for a wedged process; that is the failure to catch."""
+    """A timer would keep vouching for a wedged process; that is the failure to catch.
+
+    A second heartbeat, kept noisy, paces the quiet stretch: each of its notes is
+    an interval in which the first driver also had a tick and nothing new to
+    report. Sleeping for a multiple of the interval instead would assume the loop
+    was scheduled during it, which is the assumption a 2-vCPU runner breaks.
+    """
     notes: list[dict] = []
 
     async def _sink(**note) -> None:
@@ -246,17 +280,23 @@ async def test_a_step_whose_child_went_quiet_is_allowed_to_go_stale() -> None:
             interval_s=interval,
         ) as activity:
             activity.note()
-            await asyncio.sleep(interval * 2)
-            reported_while_alive = len(notes)
-            await asyncio.sleep(interval * 5)
+            await _await_notes(notes, "trace_analyze", 1, interval_s=interval)
+            async with heartbeat_while_output_flows(label="pacer", interval_s=interval) as pacer:
+                for tick in range(1, 4):
+                    pacer.note()
+                    await _await_notes(notes, "pacer", tick, interval_s=interval)
 
-    assert reported_while_alive == 1
-    assert len(notes) == 1
+    assert [note["label"] for note in notes] == ["trace_analyze", "pacer", "pacer", "pacer"]
 
 
 @pytest.mark.asyncio
 async def test_the_driver_stops_with_the_step_it_watches() -> None:
-    """A leaked driver task would report a step that already returned."""
+    """A leaked driver task would report a step that already returned.
+
+    The silence after the step returns is paced by a second heartbeat's notes, so
+    the window a leaked driver would have reported in is three intervals it
+    actually got rather than three the test hoped had gone by.
+    """
     notes: list[dict] = []
 
     async def _sink(**note) -> None:
@@ -266,22 +306,30 @@ async def test_the_driver_stops_with_the_step_it_watches() -> None:
     with progress_scope(_sink):
         async with heartbeat_while_output_flows(label="t", interval_s=interval) as activity:
             activity.note()
-            await asyncio.sleep(interval * 2)
-        reported_during = len(notes)
-        activity.note()
-        await asyncio.sleep(interval * 3)
+            await _await_notes(notes, "t", 1, interval_s=interval)
+        activity.note()  # the step it belonged to is over; nothing may report this
+        async with heartbeat_while_output_flows(label="pacer", interval_s=interval) as pacer:
+            for tick in range(1, 4):
+                pacer.note()
+                await _await_notes(notes, "pacer", tick, interval_s=interval)
 
-    assert reported_during == 1
-    assert len(notes) == reported_during
+    assert [note["label"] for note in notes] == ["t", "pacer", "pacer", "pacer"]
 
 
 @pytest.mark.asyncio
 async def test_teardown_lets_the_note_in_flight_finish_before_giving_up() -> None:
-    """A note is a ``tasks`` write; cancelling one mid-write wedges the connection."""
+    """A note is a ``tasks`` write; cancelling one mid-write wedges the connection.
+
+    Teardown starts on the sink's own signal that it is mid-write rather than
+    after a sleep long enough to hope one began, so the note is always in flight
+    when the grace window opens.
+    """
     events: list[str] = []
+    writing = asyncio.Event()
 
     async def _slow_sink(**_note) -> None:
         events.append("begin")
+        writing.set()
         try:
             await asyncio.sleep(0.05)
         except asyncio.CancelledError:
@@ -293,7 +341,7 @@ async def test_teardown_lets_the_note_in_flight_finish_before_giving_up() -> Non
     with progress_scope(_slow_sink):
         async with heartbeat_while_output_flows(label="t", interval_s=interval) as activity:
             activity.note()
-            await asyncio.sleep(interval * 3)
+            await asyncio.wait_for(writing.wait(), timeout=_HEARTBEAT_BACKSTOP_S)
 
     assert events == ["begin", "end"]
 
@@ -314,16 +362,15 @@ async def test_a_wedged_sink_cannot_hold_the_step_open(monkeypatch) -> None:
             raise
 
     interval = 0.01
-    started = time.monotonic()
     with progress_scope(_wedged_sink):
         async with heartbeat_while_output_flows(label="t", interval_s=interval) as activity:
             activity.note()
             await entered.wait()
-    elapsed = time.monotonic() - started
 
     await asyncio.sleep(0)
+    # The cancellation is the whole claim: a teardown that waited on the sink
+    # instead would still be inside the ``async with``, not here.
     assert events == ["cancelled"]
-    assert elapsed < 1.0
 
 
 @pytest.mark.asyncio
