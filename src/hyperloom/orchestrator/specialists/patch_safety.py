@@ -516,37 +516,33 @@ class PatchSafetyReport:
         return out
 
 
-def scan_quantitative_claims(payload: dict[str, Any]) -> tuple[list[str], list[str]]:
-    """Return ``(forbidden_fields_present, numeric_warning_strings)``.
+def scan_numeric_claims(payload: dict[str, Any]) -> list[str]:
+    """Return the numeric speedup claims smuggled into ``payload``'s prose.
 
-    Forbidden quantitative fields are a hard signal; numeric claims in the
-    summary / qualitative argument are advisory warnings (the Coordinator's
-    measured gain is the truth, not the claim).
+    A number in a summary or qualitative argument is advisory: the Coordinator's
+    measured gain is the truth, not the claim, and the audit note this feeds is
+    how a smuggled one stays visible.
+
+    The forbidden *fields* are a different question, and
+    :func:`strip_forbidden_proposal_fields` is the one place that answers it: it
+    removes them and returns what it took. Answering it a second time here would
+    be a copy of that same ``keys & FORBIDDEN_*`` intersection with nothing
+    holding the two in step.
 
     Args:
         payload: The specialist_done payload to scan.
 
     Returns:
-        A ``(forbidden_fields_present, numeric_warning_strings)`` tuple, each
-        de-duped with order preserved.
+        The matched numeric-claim substrings, de-duped with order preserved.
     """
-    forbidden = sorted(set((payload or {}).keys()) & FORBIDDEN_PAYLOAD_FIELDS)
     warnings: list[str] = []
     for key in ("summary", "expected_qualitative_argument", "cross_domain_rationale"):
-        hits = numeric_claims(str((payload or {}).get(key) or ""))
-        if hits:
-            warnings.extend(hits)
+        warnings.extend(numeric_claims(str((payload or {}).get(key) or "")))
     for proposal in (payload or {}).get("proposal_set") or []:
         if not isinstance(proposal, dict):
             continue
-        forbidden.extend(sorted(set(proposal.keys()) & FORBIDDEN_PROPOSAL_FIELDS))
-        hits = numeric_claims(str(proposal.get("expected_qualitative_argument") or ""))
-        if hits:
-            warnings.extend(hits)
-    # de-dupe, preserve order
-    forbidden = list(dict.fromkeys(forbidden))
-    warnings = list(dict.fromkeys(warnings))
-    return forbidden, warnings
+        warnings.extend(numeric_claims(str(proposal.get("expected_qualitative_argument") or "")))
+    return list(dict.fromkeys(warnings))
 
 
 def strip_forbidden_proposal_fields(payload: dict[str, Any]) -> list[str]:
@@ -647,7 +643,7 @@ __all__ = [
     "patch_file_targets",
     "patch_targets_missing",
     "quantitative_claim_rule_descriptor",
-    "scan_quantitative_claims",
+    "scan_numeric_claims",
     "strip_forbidden_proposal_fields",
     "vet_patches",
 ]

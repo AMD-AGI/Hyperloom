@@ -165,37 +165,52 @@ def test_patch_safety_report_notes_empty():
     assert ps.PatchSafetyReport().notes() == []
 
 
-# ---- scan_quantitative_claims ---------------------------------------------
-def test_scan_quantitative_claims():
+# ---- scan_numeric_claims ---------------------------------------------------
+def test_scan_numeric_claims():
     payload = {
-        "expected_gain": 12.0,
         "summary": "gives 20% boost",
         "proposal_set": [
-            {"score": 1, "confidence": 0.9, "expected_qualitative_argument": "3x faster"},
+            {"expected_qualitative_argument": "3x faster"},
             "not-a-dict",
         ],
     }
-    forbidden, warnings = ps.scan_quantitative_claims(payload)
-    assert "expected_gain" in forbidden
-    assert "score" in forbidden
-    assert "confidence" in forbidden
+    warnings = ps.scan_numeric_claims(payload)
     assert any("%" in w for w in warnings)
     assert any("x" in w.lower() for w in warnings)
 
 
-def test_scan_quantitative_claims_empty():
-    assert ps.scan_quantitative_claims({}) == ([], [])
+def test_scan_numeric_claims_empty():
+    assert ps.scan_numeric_claims({}) == []
 
 
-def test_round_level_confidence_is_not_a_per_proposal_gain_claim():
-    """The output schema asks for it and the round audit records it, so flagging
-    it at the top level only made our own template a violation."""
-    forbidden, _ = ps.scan_quantitative_claims({"confidence": 0.6})
+def test_the_numeric_scan_answers_only_the_question_no_one_else_answers():
+    """It used to return the same ``keys & FORBIDDEN_*`` intersection
+    ``strip_forbidden_proposal_fields`` computes, for a caller that discarded
+    it: one question with two implementations, free to drift apart. The numbers
+    in the prose are what this scan alone finds."""
+    payload = {
+        "expected_gain": 12.0,
+        "summary": "gives 20% boost",
+        "proposal_set": [{"score": 1, "confidence": 0.9}],
+    }
 
-    assert forbidden == []
+    assert ps.scan_numeric_claims(payload) == ["20%"]
 
 
 # ---- strip_forbidden_proposal_fields --------------------------------------
+def test_round_level_confidence_is_not_a_per_proposal_gain_claim():
+    """The output schema asks for a round-level self-assessment and the round
+    audit records it, so stripping it at the top level only made our own
+    template a violation. Per proposal it is the ranking claim the guard is
+    about, and one function now decides both."""
+    payload = {"confidence": 0.6, "proposal_set": [{"confidence": 0.4}]}
+
+    assert ps.strip_forbidden_proposal_fields(payload) == ["confidence"]
+    assert payload["confidence"] == 0.6
+    assert payload["proposal_set"][0] == {}
+
+
+
 def test_forbidden_fields_are_stripped_so_the_critic_cannot_reject_on_format():
     payload = {
         "expected_gain": 9.0,
