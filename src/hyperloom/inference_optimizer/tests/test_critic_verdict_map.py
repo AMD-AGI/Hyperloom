@@ -1003,6 +1003,31 @@ async def test_one_variant_held_to_advise_does_not_out_rank_its_siblings(coord):
 
 
 @pytest.mark.asyncio
+async def test_a_variant_citing_its_rule_in_the_key_the_entry_carries_is_held(coord):
+    """A ``verdict_map`` entry is ``{verdict, rationale?}`` — the shape PolicyGate
+    documents and every fixture uses. Scanning ``reasoning`` there left the
+    per-variant hold unreachable on the path it was written for."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-rationale", variants=["v_a", "v_b"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-rationale",
+            "verdict_map": {
+                "v_a": {"verdict": "needs_review", "rationale": "no prior on this flag"},
+                "v_b": {
+                    "verdict": "reject",
+                    "rationale": (f"{QUANTITATIVE_CLAIM_REASON_CODE}: the variant carries a self-reported gain."),
+                },
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "advise"
+    assert len(coord._materialise_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_a_grid_rejected_only_on_advisory_rules_survives(coord):
     """A whole map rejected on advisory-only grounds collapses to advise, not reject."""
     pending = _seed_explore_proposal(coord, msg_id="msg-grid-all", variants=["v_a", "v_b"])

@@ -548,10 +548,12 @@ def serialize_verdict_advisory(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-# The one verdict field a Critic states its grounds in. ``notes`` is
-# remediation text and ``risks[*].summary`` describes the risk, so a rule named
-# in either is being discussed rather than invoked; both stay out.
-_VERDICT_PROSE_KEY: str = "reasoning"
+# The fields a Critic states its grounds in: ``reasoning`` on a single verdict,
+# ``rationale`` on one ``verdict_map`` entry — the per-variant shape PolicyGate
+# documents and every fixture uses. ``notes`` is remediation text and
+# ``risks[*].summary`` describes the risk, so a rule named in either is being
+# discussed rather than invoked; both stay out.
+_VERDICT_PROSE_KEYS: tuple[str, ...] = ("reasoning", "rationale")
 
 # What a citation looks like: the code opens the verdict's grounds and a colon
 # introduces the finding, the shape the field verdict used --
@@ -570,11 +572,20 @@ _VERDICT_PROSE_KEY: str = "reasoning"
 _CITATION_OPENER: str = r"[ \t]*`?"
 
 
-def _opening_line(text: str) -> str:
-    """Return the first non-blank line of ``text``, or ``""`` when it has none."""
-    for line in text.splitlines():
-        if line.strip():
-            return line
+def _opening_prose_line(entry: dict[str, Any]) -> str:
+    """Return the first non-blank line of the grounds ``entry`` states in prose.
+
+    Args:
+        entry: A ``review_verdict`` payload or one ``verdict_map`` entry; the
+            two spell the field differently (:data:`_VERDICT_PROSE_KEYS`).
+
+    Returns:
+        The opening line, or ``""`` when the entry states no grounds in prose.
+    """
+    for key in _VERDICT_PROSE_KEYS:
+        for line in str(entry.get(key) or "").splitlines():
+            if line.strip():
+                return line
     return ""
 
 
@@ -583,8 +594,8 @@ def cited_advisory_reason_code(entry: dict[str, Any]) -> str:
 
     ``failure_reason_code`` is the reliable path: the Critic's output schema
     asks for the code of the rule its verdict rests on. Prose is read only as a
-    fallback, for a verdict that names its rule in ``reasoning`` instead — the
-    shape observed in the field.
+    fallback, for a verdict that names its rule in its grounds text instead —
+    the shape observed in the field.
 
     A mention is not a citation: a Critic that clears one rule and refuses on
     another names both, and reading the cleared one as the grounds would
@@ -603,7 +614,7 @@ def cited_advisory_reason_code(entry: dict[str, Any]) -> str:
     explicit = str(entry.get("failure_reason_code") or "").strip()
     if explicit:
         return explicit if explicit in advisory else ""
-    opening = _opening_line(str(entry.get(_VERDICT_PROSE_KEY) or ""))
+    opening = _opening_prose_line(entry)
     if not opening:
         return ""
     # At most one code can open one line, so the sort only fixes the order the
