@@ -417,8 +417,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--iters", type=int, default=100)
     p.add_argument("--repeat", type=int, default=1, help="in-process repeats of the sweep")
-    p.add_argument("--snr-threshold", type=float, default=SNR_FLOOR_DB)
-    p.add_argument("--seed", type=int, default=0)
     return p
 
 
@@ -441,8 +439,6 @@ def main(argv: list[str]) -> int:
             raise ValueError(
                 "warmup must be non-negative; iters and repeat must be positive"
             )
-        if not math.isfinite(args.snr_threshold):
-            raise ValueError("snr-threshold must be finite")
 
         rc = self_launch(argv)
         if rc >= 0:
@@ -501,7 +497,7 @@ def main(argv: list[str]) -> int:
                     print(f"group_ms: {name} {score_ms:.9f}", flush=True)
                 print(f"mean_ms: {result['mean_ms']:.9f}", flush=True)
         else:
-            checks = [check_case(tuple(s), ctx, args.snr_threshold, args.seed) for s in CASES]
+            checks = [check_case(tuple(s), ctx) for s in CASES]
             result["correctness"] = checks
             result["correctness_passed"] = all(c["passed"] for c in checks)
             result["status"] = "ok" if result["correctness_passed"] else "failed"

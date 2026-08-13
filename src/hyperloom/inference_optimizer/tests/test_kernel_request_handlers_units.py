@@ -1786,7 +1786,6 @@ class TestForgeCollectiveCoverage:
         assert captured["input"] == {
             "agent_timeout_sec": "900",
             "candidate": selected,
-            "e2e_pct": selected["gpu_pct"],
             "experience_id": "attempt-123",
             "finalize_grace_sec": 300,
             "framework": "",

@@ -10,7 +10,6 @@ import argparse
 import base64
 import binascii
 import fcntl
-import functools
 import hashlib
 import json
 import logging
@@ -214,29 +213,6 @@ def _build_cmd(
     ):
         raise ValueError("bench_repeat must be a positive integer")
     _add_opt(cmd, bench_repeat, "--bench-repeat")
-    calibrate_noise_floor = args.get("calibrate_noise_floor")
-    if calibrate_noise_floor in (None, ""):
-        calibrate_noise_floor = 5
-    if (
-        isinstance(calibrate_noise_floor, bool)
-        or not isinstance(calibrate_noise_floor, int)
-        or calibrate_noise_floor <= 0
-    ):
-        raise ValueError(
-            "calibrate_noise_floor must be a positive integer"
-        )
-    if _forge_loop_accepts("--calibrate-noise-floor"):
-        _add_opt(
-            cmd,
-            calibrate_noise_floor,
-            "--calibrate-noise-floor",
-        )
-    else:
-        log.warning(
-            "installed forge-loop declares no --calibrate-noise-floor; the "
-            "campaign judges speedups against a fixed threshold instead of a "
-            "measured noise floor"
-        )
     target_functions = args.get("target_functions")
     if not isinstance(target_functions, list) or not target_functions:
         raise ValueError("target_functions must be a non-empty list")
@@ -258,23 +234,6 @@ def _build_cmd(
             _add_opt(cmd, joined, "--source-files")
         _add_opt(cmd, args.get("operator_name"), "--operator-name")
     _add_opt(cmd, args.get("framework"), "--framework")
-    e2e_pct = args.get("e2e_pct")
-    if e2e_pct is not None:
-        if (
-            isinstance(e2e_pct, bool)
-            or not isinstance(e2e_pct, (int, float))
-            or not math.isfinite(float(e2e_pct))
-            or float(e2e_pct) <= 0
-        ):
-            raise ValueError(f"e2e_pct must be a positive finite share: {e2e_pct!r}")
-        if _forge_loop_accepts("--e2e-pct"):
-            _add_opt(cmd, float(e2e_pct), "--e2e-pct")
-        else:
-            log.warning(
-                "installed forge-loop declares no --e2e-pct; the campaign runs "
-                "without an Amdahl ceiling on the %.3f%% share it was given",
-                float(e2e_pct),
-            )
     spec_file = str(args.get("invocation_spec_file") or "").strip()
     if spec_file and Path(spec_file).is_file():
         _add_opt(cmd, str(Path(spec_file).resolve()), "--invocation-spec-file")
@@ -419,22 +378,6 @@ def _restore_config(repo: str, snapshot: dict[str, str | None]) -> None:
             proc = _git(repo, "config", "--local", key, value)
             if proc.returncode != 0:
                 raise RuntimeError(f"could not restore local Git config {key}")
-
-
-@functools.lru_cache(maxsize=None)
-def _forge_loop_accepts(option: str) -> bool:
-    """Return whether the installed forge-loop declares this option.
-
-    An option the CLI does not declare aborts the campaign before it starts, and
-    the noise-floor and E2E-share inputs exist only in some builds. An
-    unimportable forge-loop cannot run the campaign either way, so the answer
-    there is the one that keeps a caller's argv intact.
-    """
-    try:
-        from kernel_agents.cli import forge_loop
-    except (ImportError, AttributeError):
-        return True
-    return any(option in param.opts for param in forge_loop.params)
 
 
 def _restore_journal_path(repo: str) -> Path:

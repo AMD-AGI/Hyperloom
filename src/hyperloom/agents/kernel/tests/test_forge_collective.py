@@ -43,18 +43,6 @@ def _isolate_environ():
         os.environ.update(saved)
 
 
-@pytest.fixture(autouse=True)
-def _declare_every_forge_loop_option(monkeypatch):
-    """Pin option probing so argv assertions do not read the installed CLI.
-
-    ``_forge_loop_accepts`` imports the real ``kernel_agents.cli`` to ask which
-    options it declares, which would make every argv expectation here depend on
-    which KernelForge the machine happens to have. Tests that exercise the
-    probe itself override this.
-    """
-    monkeypatch.setattr(fc, "_forge_loop_accepts", lambda option: True)
-
-
 _CANDIDATE = {
     "device_kernel_name": "all_reduce_cross_device",
     "source_file": "/repo/csrc/include/custom_all_reduce.cuh",
@@ -162,7 +150,6 @@ def test_cmd_defaults_target_the_noise_floor(tmp_path):
         deadline_unix=9_999_999_999,
     )
     assert cmd[cmd.index("--bench-repeat") + 1] == "3"
-    assert cmd[cmd.index("--calibrate-noise-floor") + 1] == "5"
     assert cmd[cmd.index("--snr-threshold") + 1] == str(fc.DEFAULT_SNR_THRESHOLD)
 
 
@@ -179,7 +166,7 @@ def test_cmd_preserves_explicit_zero_snr_threshold(tmp_path):
 
 @pytest.mark.parametrize(
     "field",
-    ["bench_repeat", "calibrate_noise_floor"],
+    ["bench_repeat"],
 )
 def test_cmd_rejects_zero_iteration_controls(tmp_path, field):
     """Iteration controls must be positive integers."""
@@ -221,14 +208,13 @@ def test_target_functions_list_is_joined(tmp_path):
     assert cmd[cmd.index("--target-functions") + 1] == "a::b,c"
 
 
-def test_cmd_carries_kb_identity_and_amdahl_share(tmp_path):
-    """forge-loop needs these to pick the fellow and project an E2E ceiling."""
+def test_cmd_carries_kb_identity(tmp_path):
+    """forge-loop needs these to pick the fellow and place the KB page."""
     payload = _payload(
         tmp_path,
         source_files=["/repo/custom_all_reduce.cuh"],
         operator_name="cross_device_reduce_1stage",
         framework="sglang",
-        e2e_pct=6.881,
         experience_id="attempt-7",
     )
     cmd = fc._build_cmd(
@@ -241,7 +227,6 @@ def test_cmd_carries_kb_identity_and_amdahl_share(tmp_path):
     assert cmd[cmd.index("--framework") + 1] == "sglang"
     assert cmd[cmd.index("--operator-name") + 1] == "cross_device_reduce_1stage"
     assert cmd[cmd.index("--source-files") + 1] == "/repo/custom_all_reduce.cuh"
-    assert cmd[cmd.index("--e2e-pct") + 1] == "6.881"
     assert cmd[cmd.index("--experiment-id") + 1] == fc.EXPERIMENT_ID
     assert cmd[cmd.index("--experience-id") + 1] == "attempt-7"
     # Both were rejected upstream: one is a hidden legacy alias, the other a
@@ -2576,34 +2561,3 @@ def test_a_loop_result_without_bandwidth_reports_none(tmp_path):
     )
 
     assert "bandwidth" not in result
-
-
-# --- Optional campaign inputs ---------------------------------------------------
-
-
-def test_an_option_the_installed_forge_loop_lacks_is_dropped(monkeypatch, caplog, tmp_path):
-    """An undeclared option aborts the campaign before it starts."""
-    monkeypatch.setattr(fc, "_forge_loop_accepts", lambda option: False)
-    payload = _payload(tmp_path, e2e_pct=29.5)
-
-    with caplog.at_level(logging.WARNING, logger=fc.log.name):
-        cmd = fc._build_cmd(payload, _rig(tmp_path), tmp_path, deadline_unix=9_999_999_999)
-
-    assert "--e2e-pct" not in cmd
-    assert "--calibrate-noise-floor" not in cmd
-    # Both inputs are what the lane's verdict is trusted on, so a build that
-    # cannot take them must say so rather than quietly judging on less.
-    dropped = "\n".join(r.message % r.args for r in caplog.records)
-    assert "--e2e-pct" in dropped
-    assert "--calibrate-noise-floor" in dropped
-
-
-def test_a_forge_loop_that_declares_them_still_receives_them(monkeypatch, tmp_path):
-    """Dropping them is a concession to the build, not a change of intent."""
-    monkeypatch.setattr(fc, "_forge_loop_accepts", lambda option: True)
-    payload = _payload(tmp_path, e2e_pct=29.5)
-
-    cmd = fc._build_cmd(payload, _rig(tmp_path), tmp_path, deadline_unix=9_999_999_999)
-
-    assert "--e2e-pct" in cmd
-    assert "--calibrate-noise-floor" in cmd

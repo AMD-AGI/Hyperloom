@@ -4686,9 +4686,6 @@ async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerR
         "source_files": collective_sources,
         "operator_name": source_function,
         "framework": str(getattr(state, "framework", "") or ""),
-        # forge-loop projects an Amdahl E2E ceiling from this share, so a
-        # campaign that cannot pay for itself is visible before it starts.
-        "e2e_pct": candidate.get("gpu_pct"),
         "experience_id": workspace.name,
     }
     input_json = workspace / "forge_collective_input.json"

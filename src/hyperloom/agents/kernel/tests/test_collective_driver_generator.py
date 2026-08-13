@@ -99,7 +99,7 @@ def test_the_regime_cut_separates_the_traced_shapes(tmp_path, shape, group):
 
 @pytest.mark.parametrize(
     "flag",
-    ["--bench-mode", "--profile-run", "--warmup", "--iters", "--repeat", "--snr-threshold"],
+    ["--bench-mode", "--profile-run", "--warmup", "--iters", "--repeat"],
 )
 def test_driver_accepts_every_flag_forge_loop_passes(tmp_path, flag):
     driver, _ = _gen(tmp_path)
