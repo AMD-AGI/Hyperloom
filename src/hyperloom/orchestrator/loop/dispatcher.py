@@ -305,24 +305,24 @@ class DispatcherCollaborator:
             )
         return False
 
-    async def _pump_dispatcher_once(self) -> None:
-        """Dispatch queued tasks respecting per-lane capacity, re-scanning for
-        newly-fittable tasks while in-flight tasks run.
+    async def _reclaim_stale_dispatch_state(self) -> None:
+        """Free rows and leases a previous tick left stuck, before scanning the queue.
 
-        Re-scans the queue whenever an in-flight task completes
-        (FIRST_COMPLETED) or a short poll elapses, so a queued GPU task starts
-        the moment its lane frees. The pump still fully drains all currently
-        dispatchable work before returning. Each GPU lease is bound to its
-        task_id and released by the runner.
+        Runs every tick and is idempotent. Four independent claims a crashed or
+        vanished worker can leave behind, each reclaimed on its own so one
+        failure does not hide the next -- and every one of them best-effort,
+        because a self-heal that raises would stop the pump it exists to keep
+        running:
 
-        Budget guard: once the phase's cyclic budget is spent
-        (:meth:`_dispatch_paused_for_phase_budget`), stop spawning NEW
-        phase-scoped variants — drain in-flight, then return so the tick can
-        advance the phase.
+        * a running row whose holder PID is dead, so its lanes free and the task
+          fails while it is still retry-eligible, this same tick;
+        * the failure that reclaim implies, charged once;
+        * the lane leases that holder still held;
+        * a running row past its TTL, covering a recycled holder PID or a
+          missing holder record, which the dead-PID check cannot see;
+        * an ``integrate_patch`` row cancelled at dispatch whose critic verdict
+          was restored afterwards by a resume.
         """
-        # Dead-holder self-heal (runs every tick, before scanning the queue):
-        # detect a crashed worker's dead PID so its leased lanes free and the
-        # stuck task fails (retry-eligible) this same tick.
         dead_tasks: list[str] = []
         try:
             dead_tasks = await self.tasks.reclaim_dead_running(reason="dead_holder_pump")
@@ -343,8 +343,6 @@ class DispatcherCollaborator:
             await self.locks.reap_dead_holders()
         except Exception:  # noqa: BLE001
             log.exception("dispatcher: dead-holder lease reap failed")
-        # TTL-expiry self-heal (runs every tick): covers tasks whose holder PID
-        # was recycled or whose holder record is missing. Idempotent.
         try:
             expired_tasks = await self.tasks.reclaim_expired_running(reason="pump_watchdog")
             if expired_tasks:
@@ -359,6 +357,23 @@ class DispatcherCollaborator:
             await self._reconcile_cancelled_policy_denied_integrate_tasks()
         except Exception:  # noqa: BLE001 — reconcile must not abort the pump
             log.exception("dispatcher: cancelled policy-denied integrate_patch reconcile failed")
+
+    async def _pump_dispatcher_once(self) -> None:
+        """Dispatch queued tasks respecting per-lane capacity, re-scanning for
+        newly-fittable tasks while in-flight tasks run.
+
+        Re-scans the queue whenever an in-flight task completes
+        (FIRST_COMPLETED) or a short poll elapses, so a queued GPU task starts
+        the moment its lane frees. The pump still fully drains all currently
+        dispatchable work before returning. Each GPU lease is bound to its
+        task_id and released by the runner.
+
+        Budget guard: once the phase's cyclic budget is spent
+        (:meth:`_dispatch_paused_for_phase_budget`), stop spawning NEW
+        phase-scoped variants — drain in-flight, then return so the tick can
+        advance the phase.
+        """
+        await self._reclaim_stale_dispatch_state()
         inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         # Cumulative across the whole pump, not just the live in-flight set, so a
         # fast task reaped before its queued->running transition is visible is
@@ -1716,6 +1731,52 @@ class DispatcherCollaborator:
             log.exception("run_action_now: inline run of %r failed", name)
             return f"(run_action_now: {name!r} errored: {exc!r})"
 
+    async def _inline_action_denial(
+        self,
+        action_name: str,
+        params: dict[str, Any],
+    ) -> str | None:
+        """Run the admission gates an inline action shares with a dispatched one.
+
+        The synthetic delegate goes through PolicyGate so the phase, role and
+        path gates reach an inline call exactly as they reach one that went
+        through the queue; the sequence gate is asked separately because it is
+        about what the run has already done rather than about the intent. Either
+        denial is recorded before it is reported, so an inline call that never
+        ran is still auditable.
+
+        Args:
+            action_name: Name of the action about to run.
+            params: Parameters it would run with.
+
+        Returns:
+            str | None: The message for the caller when the action is denied, or
+                ``None`` when it may run.
+        """
+        intent = Intent(
+            type=IntentType.DELEGATE,
+            payload={"action_name": action_name, "params": dict(params or {})},
+        )
+        try:
+            self.policy.validate_intent("orchestration", intent)
+        except PolicyDenied as denied:
+            await self._record_policy_denied("orchestration", intent, denied)
+            return (
+                f"(run_action_now: {action_name!r} denied by policy: "
+                f"{getattr(denied, 'rule', '')!s} — "
+                f"{str(getattr(denied, 'hint', denied))[:200]})"
+            )
+        seq_denied = self._admission_denial_for_action(action_name)
+        if seq_denied is None:
+            return None
+        await self._record_policy_denied(
+            "orchestration",
+            intent,
+            seq_denied,
+            action_name=action_name,
+        )
+        return f"(run_action_now: {action_name!r} denied: {str(getattr(seq_denied, 'hint', seq_denied))[:200]})"
+
     async def _run_action_now(
         self,
         action_name: str,
@@ -1731,30 +1792,9 @@ class DispatcherCollaborator:
             A status string: a policy/sequence denial message, an
             already-in-flight notice, or the rendered delegated_result line.
         """
-
-        # PolicyGate parity: validate the synthetic delegate so phase/role/path gates apply.
-        intent = Intent(
-            type=IntentType.DELEGATE,
-            payload={"action_name": action_name, "params": dict(params or {})},
-        )
-        try:
-            self.policy.validate_intent("orchestration", intent)
-        except PolicyDenied as denied:
-            await self._record_policy_denied("orchestration", intent, denied)
-            return (
-                f"(run_action_now: {action_name!r} denied by policy: "
-                f"{getattr(denied, 'rule', '')!s} — "
-                f"{str(getattr(denied, 'hint', denied))[:200]})"
-            )
-        seq_denied = self._admission_denial_for_action(action_name)
-        if seq_denied is not None:
-            await self._record_policy_denied(
-                "orchestration",
-                intent,
-                seq_denied,
-                action_name=action_name,
-            )
-            return f"(run_action_now: {action_name!r} denied: {str(getattr(seq_denied, 'hint', seq_denied))[:200]})"
+        denial = await self._inline_action_denial(action_name, params)
+        if denial is not None:
+            return denial
         lanes, ttl = self._registry_lanes_ttl(action_name)
         content_fp = hashlib.sha1(
             json.dumps(params or {}, sort_keys=True, default=str).encode(),
