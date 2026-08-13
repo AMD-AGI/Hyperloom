@@ -213,17 +213,27 @@ PROGRESS_TIME_SCALE: float = 600.0
 
 
 class ProgressCadence:
-    """Records when a path reported progress, in production seconds.
+    """Records when a path reported progress, on a simulated production clock.
 
     A long-running path is not judged by whether it reports at all — every one
     of them reports on entry — but by whether the gap between two consecutive
     notes stays under the window a consumer waits before calling the owning
     agent silent. That is the property a dropped liveness callback breaks and
     an "it emitted a note" assertion cannot see.
+
+    The clock is simulated rather than read off the wall: it advances only when
+    the fake child does a chunk of the work it is standing in for
+    (:func:`chatty_child` calls :meth:`sleep`). Reading real elapsed time and
+    scaling it by :data:`PROGRESS_TIME_SCALE` instead would multiply every
+    scheduling delay in the test — a slow import, a loaded runner starving the
+    event loop — by 600 and charge it to the path under test, which turns a 4x
+    headroom into a coin flip on a 2-vCPU CI runner. What the simulated clock
+    gives up is the ability to see a long *non-child* block, which no compressed
+    wall-clock measurement could tell apart from load anyway.
     """
 
     def __init__(self, scale: float = PROGRESS_TIME_SCALE) -> None:
-        """Start the clock. Construct immediately before entering the path.
+        """Start the clock at zero.
 
         Args:
             scale (float): Production seconds per real second.
@@ -231,18 +241,22 @@ class ProgressCadence:
         self.scale = scale
         self.notes: list[dict] = []
         self.reported_at: list[float] = []
-        self._t0 = time.monotonic()
-
-    def start(self) -> None:
-        """Re-zero the clock. Call immediately before entering the path."""
-        self._t0 = time.monotonic()
+        self._elapsed = 0.0
 
     def now(self) -> float:
-        """Production seconds elapsed since the clock was last zeroed."""
-        return (time.monotonic() - self._t0) * self.scale
+        """Production seconds of simulated work done so far."""
+        return self._elapsed
 
     def sleep(self, simulated_s: float) -> None:
-        """Block for the real time ``simulated_s`` production seconds map to."""
+        """Charge ``simulated_s`` production seconds, blocking the real time they map to.
+
+        The real block is what gives the heartbeat driver — ticking on the same
+        compressed timescale — its chance to notice the output and report.
+
+        Args:
+            simulated_s (float): Production seconds the simulated child spent.
+        """
+        self._elapsed += simulated_s
         time.sleep(simulated_s / self.scale)
 
     def sink(self):
@@ -282,7 +296,8 @@ def chatty_child(cadence: ProgressCadence, inner, *, blocks_for_s: float, line_e
     """Wrap a fake ``run_with_session_kill`` so its child talks while it blocks.
 
     Args:
-        cadence (ProgressCadence): Supplies the compressed clock.
+        cadence (ProgressCadence): Advanced by ``line_every_s`` per line, so it
+            is the simulated child's progress that moves the clock.
         inner: The fake the path already uses; called for the return value once
             the simulated child stops talking.
         blocks_for_s (float): Production seconds the child runs for.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import time
 
 import pytest
@@ -20,7 +21,7 @@ from hyperloom.orchestrator.roles._llm_stability_env import (
 from hyperloom.orchestrator.kernel.request_handlers import _run_subprocess, _tool_label
 from hyperloom.orchestrator.trace.task_progress import progress_scope
 
-from .conftest import PROGRESS_TIME_SCALE, suppression_window_s
+from .conftest import chatty_child, suppression_window_s
 
 
 def test_apply_llm_stability_env_sets_defaults():
@@ -106,23 +107,28 @@ async def test_run_subprocess_counts_the_lines_its_child_emits(monkeypatch):
     assert counted == [2]
 
 
-async def test_a_kernel_tool_keeps_reporting_while_its_child_works(progress_cadence):
+async def test_a_kernel_tool_keeps_reporting_while_its_child_works(monkeypatch, progress_cadence):
     """A trace analysis blocks for the better part of an hour behind one ``await``.
 
     Bounding the gap between notes is what a dropped liveness callback fails;
-    asserting that a callback was passed is not.
+    asserting that a callback was passed is not. The child is faked rather than
+    spawned so the timeline is the simulated one — that a real child's lines
+    reach ``on_output`` is covered by
+    ``test_run_subprocess_counts_the_lines_its_child_emits``.
     """
-    line_every_s = 30.0
-    child = (
-        "import time\n"
-        "for i in range(20):\n"
-        f"    time.sleep({line_every_s / PROGRESS_TIME_SCALE})\n"
-        "    print(i)\n"
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill
+
+    def _done(cmd, **_kwargs) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(
+        _subprocess_kill,
+        "run_with_session_kill",
+        chatty_child(progress_cadence, _done, blocks_for_s=600.0, line_every_s=30.0),
     )
 
     with progress_scope(progress_cadence.sink()):
-        progress_cadence.start()
-        rc, _stdout, _stderr = await _run_subprocess(["python3", "-c", child], timeout_sec=30)
+        rc, _stdout, _stderr = await _run_subprocess(["python3", "-c", "pass"], timeout_sec=30)
 
     assert rc == 0
     assert progress_cadence.widest_silence() < suppression_window_s()
@@ -155,9 +161,7 @@ async def test_run_subprocess_kills_grandchild_on_timeout(tmp_path):
             timeout_sec=2,
         )
     # A hard timeout surfaces as TimeoutExpired.
-    import subprocess as _sp
-
-    assert isinstance(excinfo.value, _sp.TimeoutExpired)
+    assert isinstance(excinfo.value, subprocess.TimeoutExpired)
 
     assert pidfile.exists(), "grandchild never recorded its pid"
     gc_pid = int(pidfile.read_text().strip())
