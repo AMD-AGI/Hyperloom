@@ -30,7 +30,7 @@ from hyperloom.common.codex_session import (
     CodexSessionResult,
     CodexSessionUnavailableError,
 )
-from hyperloom.orchestrator.actions.registry import ActionRegistry
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -67,7 +67,7 @@ _FORBIDDEN_WITHOUT_TOOLS: tuple[str, ...] = (*_TOOL_SURFACE_TOKENS, *CONTEXT_TOO
 
 def _prompt(transport: str, *, phase: str = "") -> str:
     return build_orchestration_prompt(
-        action_registry=ActionRegistry().load(),
+        action_registry=ACTION_CATALOGUE,
         enabled_actions=default_enabled_actions(no_kernel=False),
         framework="sglang",
         objective_kind="time_only",
@@ -117,7 +117,7 @@ def test_every_tool_the_prompt_names_is_one_policy_gate_grants() -> None:
 def test_transport_defaults_to_the_tool_surface() -> None:
     """An unspecified transport keeps the historical Claude rendering."""
     assert _prompt(TRANSPORT_TOOLS) == build_orchestration_prompt(
-        action_registry=ActionRegistry().load(),
+        action_registry=ACTION_CATALOGUE,
         enabled_actions=default_enabled_actions(no_kernel=False),
         framework="sglang",
         objective_kind="time_only",

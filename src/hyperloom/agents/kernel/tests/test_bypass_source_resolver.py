@@ -5,12 +5,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for the independent bypass op->source resolver.
+"""Unit tests for the bypass op->source resolver.
 
-Covers the editability filter, container selection, dispatch-kind matching, the
-trace ``kernel_file`` fast-path, and the repo-scan fallback. The mapping-driven
-paths run against a synthetic in-memory mapping so no real
-``op_to_source.json`` is required; the repo-scan tests write throwaway sources.
+Covers the editability filter, kernel-name demangling, the active-finder
+delegation (native ``.cu``/``.hip`` via the symbol index), Triton ``.py`` def-line
+pinning via AST, the trace ``kernel_file`` fast-path, and the repo-scan fallback.
+There is no static ``op_to_source.json`` and no mapping-driven path.
 """
 
 from __future__ import annotations
@@ -24,11 +24,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import _bypass_source_resolver as resolver  # noqa: E402
-
-
-def _patch_mapping(monkeypatch, mapping):
-    """Force the resolver to use ``mapping`` instead of the on-disk JSON."""
-    monkeypatch.setattr(resolver, "_load_mapping", lambda: mapping)
+import source_resolver  # noqa: E402
 
 
 def test_native_sources_are_editable():
@@ -44,97 +40,45 @@ def test_repo_triton_py_is_editable_but_generated_is_not():
     assert resolver.is_editable_source("") is False
 
 
-def test_resolve_single_native_source(monkeypatch):
-    mapping = {
-        "_C::silu_and_mul": {
-            "kind": "single",
-            "vllm": {
-                "act_kernel": {
-                    "kernel_source_path": "/opt/aiter/csrc/activation_kernels.cu",
-                    "kernel_kind": "aiter_hip",
-                    "patchable": True,
-                }
-            },
-            "sglang": {},
-        }
-    }
-    _patch_mapping(monkeypatch, mapping)
-    src, method = resolver.resolve_source("_C::silu_and_mul", framework="vllm")
-    assert src == "/opt/aiter/csrc/activation_kernels.cu"
-    assert method == "op_to_source"
+# --- active-finder delegation (native .cu/.hip via the live symbol index) -----
 
 
-def test_resolve_strips_phase_suffix(monkeypatch):
-    mapping = {
-        "aten::mm": {
-            "kind": "single",
-            "sglang": {"g": {"kernel_source_path": "/s/gemm.cu", "patchable": True}},
-        }
-    }
-    _patch_mapping(monkeypatch, mapping)
-    src, method = resolver.resolve_source("aten::mm (decode)", framework="sglang")
-    assert src == "/s/gemm.cu" and method == "op_to_source"
+def test_resolve_source_without_symbol_is_unresolved():
+    # The finder is symbol-driven: no device kernel name -> nothing to look up.
+    assert resolver.resolve_source("_C::silu_and_mul", framework="vllm") == ("", "unresolved")
+    assert resolver.resolve_source("", device_kernel_name="") == ("", "unresolved")
 
 
-def test_resolve_skips_non_patchable_and_non_editable(monkeypatch):
-    mapping = {
-        "op::x": {
-            "kind": "single",
-            "sglang": {
-                "a": {"kernel_source_path": "/s/a.cu", "patchable": False},
-                "b": {"kernel_source_path": "/tmp/torchinductor_x/b.py", "patchable": True},
-            },
-        }
-    }
-    _patch_mapping(monkeypatch, mapping)
-    src, method = resolver.resolve_source("op::x", framework="sglang")
-    assert src == "" and method == "unresolved"
+def test_resolve_source_delegates_to_active_finder(monkeypatch):
+    calls = {}
+
+    def fake_resolve_source(op_name, *, framework="", device_kernel_name=""):
+        calls["args"] = (op_name, framework, device_kernel_name)
+        return "/opt/vllm/csrc/act.cu", "symbol_index"
+
+    monkeypatch.setattr(source_resolver, "resolve_source", fake_resolve_source)
+    src, method = resolver.resolve_source(
+        "_C::silu_and_mul", framework="vllm", device_kernel_name="act_kernel"
+    )
+    assert src == "/opt/vllm/csrc/act.cu"
+    assert method == "symbol_index"
+    assert calls["args"] == ("_C::silu_and_mul", "vllm", "act_kernel")
 
 
-def test_resolve_miss_returns_unresolved(monkeypatch):
-    _patch_mapping(monkeypatch, {"op::y": {"kind": "single", "sglang": {}}})
-    assert resolver.resolve_source("op::not_present") == ("", "unresolved")
-    assert resolver.resolve_source("") == ("", "unresolved")
+def test_resolve_source_finder_miss_is_unresolved(monkeypatch):
+    monkeypatch.setattr(source_resolver, "resolve_source", lambda *a, **k: ("", "unresolved"))
+    assert resolver.resolve_source("op::x", device_kernel_name="zzz") == ("", "unresolved")
 
 
-def test_resolve_framework_hint_selects_container(monkeypatch):
-    mapping = {
-        "op::z": {
-            "kind": "single",
-            "vllm": {"v": {"kernel_source_path": "/v/z.cu", "patchable": True}},
-            "sglang": {"s": {"kernel_source_path": "/s/z.cu", "patchable": True}},
-        }
-    }
-    _patch_mapping(monkeypatch, mapping)
-    assert resolver.resolve_source("op::z", framework="vllm")[0] == "/v/z.cu"
-    assert resolver.resolve_source("op::z", framework="sglang")[0] == "/s/z.cu"
+def test_resolve_source_swallows_finder_errors(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("index build failed")
+
+    monkeypatch.setattr(source_resolver, "resolve_source", boom)
+    assert resolver.resolve_source("op::x", device_kernel_name="k") == ("", "unresolved")
 
 
-def test_resolve_dispatch_matches_device_kernel(monkeypatch):
-    mapping = {
-        "op::disp": {
-            "kind": "dispatch",
-            "vllm": {
-                "kernel_A": {"kernel_source_path": "/v/a.cu", "patchable": True},
-                "kernel_B": {"kernel_source_path": "/v/b.cu", "patchable": True},
-            },
-        }
-    }
-    _patch_mapping(monkeypatch, mapping)
-    src, method = resolver.resolve_source("op::disp", framework="vllm", device_kernel_name="kernel_B")
-    assert src == "/v/b.cu" and method == "op_to_source"
-
-
-def test_resolve_dispatch_unknown_kernel_falls_back(monkeypatch):
-    mapping = {
-        "op::disp": {
-            "kind": "dispatch",
-            "vllm": {"kernel_A": {"kernel_source_path": "/v/a.cu", "patchable": True}},
-        }
-    }
-    _patch_mapping(monkeypatch, mapping)
-    src, _ = resolver.resolve_source("op::disp", framework="vllm", device_kernel_name="kernel_ZZZ")
-    assert src == "/v/a.cu"
+# --- Triton .py resolution (trace kernel_file + AST def-line pinning) ----------
 
 
 def test_editable_trace_source_repo_py():
@@ -146,9 +90,53 @@ def test_editable_trace_source_rejects_generated_and_empty():
     assert resolver.editable_trace_source("") == ""
 
 
-def test_missing_json_yields_unresolved(monkeypatch):
-    _patch_mapping(monkeypatch, {})
-    assert resolver.resolve_source("anything", framework="vllm") == ("", "unresolved")
+@pytest.fixture
+def repo_dir():
+    """A repo-like dir avoiding /tmp and the 'test' skip marker in its path."""
+    base = Path(__file__).resolve().parents[2] / "_bypass_repo_scan_fixture" / "src"
+    base.mkdir(parents=True, exist_ok=True)
+    yield base
+    shutil.rmtree(base.parent, ignore_errors=True)
+
+
+def test_resolve_triton_py_pins_def_line(repo_dir):
+    py = repo_dir / "fused.py"
+    py.write_text(
+        "import triton\n"
+        "\n"
+        "@triton.jit\n"
+        "def my_fused_kernel(x):\n"
+        "    return x\n",
+        encoding="utf-8",
+    )
+    source, line, method = resolver.resolve_triton_py(str(py), symbol="my_fused_kernel")
+    assert source == str(py)
+    assert method == "trace_kernel_file_ast"
+    assert py.read_text().splitlines()[line - 1].strip() == "def my_fused_kernel(x):"
+
+
+def test_resolve_triton_py_launcher_form_parsed(repo_dir):
+    py = repo_dir / "attn.py"
+    py.write_text("import triton\n@triton.jit\ndef attn_kernel(x):\n    return x\n", encoding="utf-8")
+    # Launcher form "<path>:<line>:<func>" must be split down to the bare .py.
+    source, line, method = resolver.resolve_triton_py(f"{py}:2:attn_kernel")
+    assert source == str(py)
+    assert line == 3  # the def line, pinned via AST (not the launcher's :2)
+    assert method == "trace_kernel_file_ast"
+
+
+def test_resolve_triton_py_rejects_generated():
+    src, line, method = resolver.resolve_triton_py("/tmp/torchinductor_x/c.py")
+    assert (src, line, method) == ("", None, "unresolved")
+
+
+def test_triton_def_line_single_unambiguous(repo_dir):
+    py = repo_dir / "solo.py"
+    py.write_text("import triton\n@triton.jit\ndef only_kernel(x):\n    return x\n", encoding="utf-8")
+    assert resolver.triton_def_line(str(py)) == 3
+
+
+# --- kernel-name demangling ---------------------------------------------------
 
 
 def test_demangle_itanium_nested():
@@ -165,13 +153,7 @@ def test_demangle_anonymous_namespace_template():
     assert resolver._demangle_kernel_name(n) == "kda_packed_decode_kernel"
 
 
-@pytest.fixture
-def repo_dir():
-    """A repo-like dir avoiding /tmp and the 'test' skip marker in its path."""
-    base = Path(__file__).resolve().parents[2] / "_bypass_repo_scan_fixture" / "src"
-    base.mkdir(parents=True, exist_ok=True)
-    yield base
-    shutil.rmtree(base.parent, ignore_errors=True)
+# --- repo-scan fallback (by demangled kernel name) ----------------------------
 
 
 def test_resolve_by_kernel_name_triton_and_native(monkeypatch, repo_dir):

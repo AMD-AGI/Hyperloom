@@ -243,7 +243,6 @@ def test_phase_audit_dispatches_to_cross_framework(kb_root: Path, tmp_path: Path
         }
     )
     assert res["layer"] == "cross_framework"
-    assert (work / "semantic_audit.json").is_file()
 
 
 def test_phase_audit_same_framework_not_cross(kb_root: Path, tmp_path: Path) -> None:

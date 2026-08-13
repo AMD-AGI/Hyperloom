@@ -13,8 +13,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import pytest
-
 _BACKENDS_DIR = Path(__file__).resolve().parent.parent / "tools" / "backends"
 sys.path.insert(0, str(_BACKENDS_DIR))
 import forge_submit  # noqa: E402
@@ -354,24 +352,11 @@ def test_validated_checkpoint_requires_commit_metrics_and_coverage(tmp_path, cap
     assert "case coverage mismatch" in caplog.text
 
 
-@pytest.mark.parametrize(
-    "declared",
-    [
-        pytest.param(None, id="key-absent"),
-        pytest.param([], id="declared-empty"),
-    ],
-)
-def test_validated_checkpoint_accepts_a_producer_that_declares_no_coverage(
-    tmp_path,
-    declared,
-):
-    """A checkpoint that states no case set is still recoverable evidence.
+def test_a_checkpoint_that_reports_no_coverage_is_still_recoverable(tmp_path):
+    """forge-loop stopped reporting case coverage when drivers took over the suite.
 
-    KernelForge stopped echoing the case set back into the checkpoint, and an
-    older one writes an empty list when it was handed no case set. Treating
-    either as "declared as nothing" made the comparison unsatisfiable, which
-    rejected every KEEP and closed the recovery tier that outlives the worktree
-    -- the one that exists precisely for a hard kill.
+    Vetoing on the field's absence throws away every salvageable best from a
+    timed-out campaign, silently: the run just looks like it recovered nothing.
     """
     env = _make_repo(tmp_path)
     repo = env["repo"]
@@ -381,9 +366,7 @@ def test_validated_checkpoint_accepts_a_producer_that_declares_no_coverage(
     kernel.write_text("KERNEL_VALIDATED_BEST\n")
     _commit_all(repo, "iter1: validated best")
     best_commit = _git(repo, "rev-parse", "HEAD")
-    # Non-empty on this side, which is the case for every grouped candidate and
-    # for any candidate with derivable named dimensions.
-    shapes = {"validation": [{"CASE_ID": "case_001", "M": 4096}]}
+    shapes = {"validation": [{"CASE_ID": "case_001"}, {"CASE_ID": "case_002"}]}
     checkpoint = {
         "schema_version": 1,
         "experiment_id": "hyperloom",
@@ -398,19 +381,21 @@ def test_validated_checkpoint_accepts_a_producer_that_declares_no_coverage(
         "incremental_improved": True,
         "validation_passed": True,
     }
-    if declared is not None:
-        checkpoint["case_coverage"] = declared
 
-    recovered = forge_submit._validated_forge_checkpoint(
-        checkpoint,
-        workspace=repo,
-        base_commit=base_commit,
-        shapes=shapes,
-    )
+    def recover(payload):
+        return forge_submit._validated_forge_checkpoint(
+            payload,
+            workspace=repo,
+            base_commit=base_commit,
+            shapes=shapes,
+        )
 
-    assert recovered is not None
-    assert recovered["best_commit"] == best_commit
-    assert recovered["improved"] is True
+    # Absent: a current forge-loop reports no coverage key at all.
+    assert recover(dict(checkpoint)) is not None
+    # Empty: an older forge-loop reports the key with nothing in it.
+    assert recover({**checkpoint, "case_coverage": []}) is not None
+    # Present and disagreeing still vetoes: that is evidence, not silence.
+    assert recover({**checkpoint, "case_coverage": [{"CASE_ID": "case_001"}]}) is None
 
 
 def test_submit_salvages_validated_best_after_timeout(tmp_path, monkeypatch):
@@ -424,8 +409,6 @@ def test_submit_salvages_validated_best_after_timeout(tmp_path, monkeypatch):
     best_commit = _git(repo, "rev-parse", "HEAD")
     kernel.write_text("KERNEL_UNVALIDATED_TIMEOUT_CANDIDATE\n")
 
-    driver = tmp_path / "driver.py"
-    driver.write_text("print('allclose: True')\n")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("# optimize\n")
     output_dir = tmp_path / "forge-output"
@@ -466,11 +449,6 @@ def test_submit_salvages_validated_best_after_timeout(tmp_path, monkeypatch):
         lambda *_args, **_kwargs: (repo, str(kernel), base_commit),
     )
     monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
-    monkeypatch.setattr(
-        forge_submit,
-        "_autogen_forge_driver",
-        lambda *_args, **_kwargs: str(driver),
-    )
     monkeypatch.setattr(
         forge_submit,
         "_resolve_gpu_target",

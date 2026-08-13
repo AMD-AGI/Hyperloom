@@ -901,15 +901,6 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         for item in (result.get("task_group_kernel_ids") or [])
         if str(item)
     ]
-    # Extract test_command from the first attempt that recorded one so
-    # after_kernel_opt rocprof can reuse it.
-    test_command = ""
-    for _attempt in result.get("attempts") or []:
-        if isinstance(_attempt, dict):
-            _tc = str((_attempt.get("backend_paths") or {}).get("test_command") or "").strip()
-            if _tc:
-                test_command = _tc
-                break
     status = str(result.get("status") or "").lower()
     err_class = str(result.get("error_class") or "")
     # Pure infra failure = backend ladder with no verdict; kept distinct from
@@ -1123,8 +1114,6 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     )
     entry["last_ts"] = ts
     entry["history"] = history
-    if test_command:
-        entry["test_command"] = test_command
 
     # last_kernel_opt overwrite policy: KEEP always wins; non-KEEP writes only
     # when there is no pending KEEP to protect.

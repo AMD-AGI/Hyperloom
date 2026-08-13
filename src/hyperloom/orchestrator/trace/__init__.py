@@ -18,6 +18,8 @@ Modules:
   ``codex exec --json``), plus sanitized Codex failure messages.
 * :mod:`conversation_trace` — :class:`ConversationRecord` rows plus
   :func:`redact_secrets` for the conversation ledger.
+* :mod:`orchestration_trace` — :func:`write_mcp_setup_once`, the once-per-session
+  MCP setup sidecar.
 * :mod:`langfuse_emitter` — the live push sink (:func:`get_emitter`,
   :func:`flush_session`).
 * :mod:`langfuse_mapping` — projection of local rows onto Langfuse
@@ -40,9 +42,6 @@ from .llm_trace import (
     append_llm_call,
 )
 from .orchestration_trace import (
-    OrchestrationTraceRowError,
-    OrchestrationTurnRecord,
-    append_orchestration_turn,
     write_mcp_setup_once,
 )
 from .langfuse_emitter import flush_session, get_emitter
@@ -59,11 +58,8 @@ __all__ = [
     "ConversationRowError",
     "LLMCallRecord",
     "LLMTraceRowError",
-    "OrchestrationTraceRowError",
-    "OrchestrationTurnRecord",
     "append_conversation",
     "append_llm_call",
-    "append_orchestration_turn",
     "flush_session",
     "get_emitter",
     "langfuse_live_enabled",

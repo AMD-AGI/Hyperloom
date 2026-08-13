@@ -1,4 +1,4 @@
-"""Regression tests for Forge driver fallback delegation."""
+"""Regression tests for Forge driver delegation to the task preparer."""
 
 from __future__ import annotations
 
@@ -17,8 +17,6 @@ def _submit_with_stubbed_loop(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     *,
-    test_command: str = "",
-    autogen_driver: str | None = None,
     candidate: dict | None = None,
     invocation_spec_file: str = "",
 ) -> tuple[dict, dict]:
@@ -39,11 +37,6 @@ def _submit_with_stubbed_loop(
     )
     monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(forge_submit, "_resolve_gpu_target", lambda _candidate: "gfx942")
-    monkeypatch.setattr(
-        forge_submit,
-        "_autogen_forge_driver",
-        lambda *_args, **_kwargs: autogen_driver,
-    )
     monkeypatch.setattr(
         forge_submit,
         "_export_best_artifacts",
@@ -85,7 +78,6 @@ def _submit_with_stubbed_loop(
         source_file=str(kernel),
         prompt_file=prompt,
         output_dir=output_dir,
-        test_command=test_command,
         source_type="triton",
         candidate=candidate or {"operation": "unsupported_op"},
         timeout_s=60,
@@ -96,12 +88,6 @@ def _submit_with_stubbed_loop(
 
 
 def _assert_staged_placeholder(driver: str, workspace: Path) -> None:
-    """The delegated driver is a staged placeholder the preparer repairs.
-
-    forge-loop resolves ``--driver`` against ``--workspace`` and requires the
-    file to exist before ``preflight_task`` runs, so delegation stages a hidden
-    placeholder in the workspace instead of naming a path outside it.
-    """
     path = Path(driver)
     assert path.parent == workspace
     assert path.name.startswith(".forge_driver_")
@@ -144,39 +130,12 @@ def test_submit_reports_the_card_it_could_not_name(monkeypatch, tmp_path, caplog
     assert any("no known hardware model" in record.message for record in caplog.records)
 
 
-def test_missing_autogen_driver_reaches_forge_loop_task_preparer(monkeypatch, tmp_path):
+def test_plain_candidate_delegates_driver_to_task_preparer(monkeypatch, tmp_path):
     result, captured = _submit_with_stubbed_loop(monkeypatch, tmp_path)
 
     assert result["returncode"] == 0
     assert result["skipped"] is False
     _assert_staged_placeholder(captured["driver"], tmp_path / "repo")
-
-
-def test_adapter_and_autogen_failure_reaches_task_preparer(monkeypatch, tmp_path):
-    result, captured = _submit_with_stubbed_loop(
-        monkeypatch,
-        tmp_path,
-        test_command="python bench.py && echo unsafe",
-    )
-
-    assert result["returncode"] == 0
-    assert result["skipped"] is False
-    _assert_staged_placeholder(captured["driver"], tmp_path / "repo")
-
-
-def test_compile_only_driver_reaches_forge_loop_task_preparer(monkeypatch, tmp_path):
-    driver = tmp_path / "compile_only_driver.py"
-    driver.write_text('print("compile_only: True")\n')
-
-    result, captured = _submit_with_stubbed_loop(
-        monkeypatch,
-        tmp_path,
-        autogen_driver=str(driver),
-    )
-
-    assert result["returncode"] == 0
-    assert result["skipped"] is False
-    assert captured["driver"] == str(driver)
 
 
 def test_grouped_multi_shape_task_requires_one_prepared_driver(monkeypatch, tmp_path):
@@ -238,7 +197,6 @@ def test_grouped_multi_shape_task_requires_one_prepared_driver(monkeypatch, tmp_
     result, captured = _submit_with_stubbed_loop(
         monkeypatch,
         tmp_path,
-        test_command="python existing_harness.py --correctness",
         candidate=candidate,
         invocation_spec_file=str(invocation_spec),
     )

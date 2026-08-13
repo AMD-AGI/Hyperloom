@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-
+import yaml
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +82,41 @@ EVAL_PROBE_FILENAME = "hyperloom_eval_probe.json"
 # means the environment/config is fundamentally wrong, so the whole run halts
 # rather than optimizing against an unvalidated baseline.
 BASELINE_ACCURACY_STOP_REASON = "baseline_accuracy_failed"
+
+# Truthy-false spellings that disable the accuracy gate.
+_RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
+
+
+def materialized_run_eval_disabled(config_path: Path | str) -> bool:
+    """Report whether lm-eval is disabled in the materialized benchmark config.
+
+    ``materialize_config_with_envs`` writes the effective ``RUN_EVAL`` (folded
+    from the base YAML ``benchmark.envs``, ``reference_envs``, ``extra_envs`` and
+    process ``$RUN_EVAL``, defaulting to "true") into ``benchmark.envs.RUN_EVAL``
+    -- the value the benchmark subprocess actually consumes. Reading it back is
+    the single source of truth for "did eval run this round", reusing the shared
+    ``_RUN_EVAL_FALSE_VALUES`` present-and-falsey semantics.
+
+    Lives in this module because every arm that asks the question needs it --
+    the baseline, the grid and the env materializer -- and this module imports no
+    executor sibling, so all three can reach it without an import cycle.
+
+    Args:
+        config_path (Path | str): The materialized benchmark YAML config path.
+
+    Returns:
+        bool: ``True`` when the config's ``RUN_EVAL`` is present and falsey.
+            A missing key reads as enabled (matches the materialize default).
+            An unreadable config also reads as enabled: the eval-side guards
+            keyed off this must fail closed, not skip themselves.
+    """
+    try:
+        cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return False
+    envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
+    val = envs.get("RUN_EVAL")
+    return val is not None and str(val).strip().lower() in _RUN_EVAL_FALSE_VALUES
 
 
 def request_baseline_accuracy_stop(shared_state: Any, *, context: str) -> bool:
@@ -229,7 +264,10 @@ def _extract_eval_contract_fields(config_path: str | Path | None) -> dict[str, s
     envs: dict = bench.get("envs") or {}
 
     # Eval-contract keys in benchmark.envs; all others are excluded. The probe
-    # knobs belong here: they change how early an eval is cut short.
+    # knobs belong here: they change how early an eval is cut short. So do the
+    # generation-bounds knobs, for the same reason one rung lower: they decide
+    # where each individual answer is truncated, so two runs that disagree on
+    # them are not scoring the same eval even when the task and limit match.
     _EVAL_CONTRACT_ENV_KEYS = (
         "RUN_EVAL",
         "MAGPIE_EVAL_TASKS",
@@ -237,6 +275,9 @@ def _extract_eval_contract_fields(config_path: str | Path | None) -> dict[str, s
         "HYPERLOOM_EVAL_PROBE",
         "HYPERLOOM_EVAL_PROBE_MIN_SAMPLES",
         "HYPERLOOM_EVAL_PROBE_LENGTH_RATIO",
+        "HYPERLOOM_EVAL_MAX_TOKENS",
+        "HYPERLOOM_EVAL_DERIVE_STOP",
+        "HYPERLOOM_EVAL_STOP_STRINGS",
     )
     # Workload-shape keys that define what is being measured.
     _WORKLOAD_SHAPE_ENV_KEYS = (

@@ -244,9 +244,6 @@ admits these actions:
 
 - `kernel_opt`
 - `integrate`
-- `deep_kernel_analysis`
-- `operator_tuning`
-- `vendor_kernel_config`
 - `gemm_tuning`
 - `roofline`
 - `profile`

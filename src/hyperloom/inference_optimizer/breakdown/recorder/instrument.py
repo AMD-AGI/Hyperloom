@@ -2701,7 +2701,6 @@ def record_kernel_backend_result(
                 correctness_source = (
                     att.get("correctness_source")
                     or verification.get("correctness_source")
-                    or (att.get("backend_paths") or {}).get("test_command")
                     or "partial:not_provided"
                 )
                 canonical_attempts.append(

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -186,22 +185,6 @@ def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytes
 
 def test_cli_multi_node_gc_backend_and_replay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import multi_node as mn
-
-    root = tmp_path / "profile-traces"
-    old = root / "old"
-    keep = root / "keep"
-    new = root / "new"
-    for p in (old, keep, new):
-        p.mkdir(parents=True)
-    now = 10_000_000.0
-    os.utime(old, (now - 10 * 86400, now - 10 * 86400))
-    os.utime(keep, (now - 10 * 86400, now - 10 * 86400))
-    os.utime(new, (now, now))
-    monkeypatch.setattr(mn.time, "time", lambda: now)
-    mn._gc_old_profile_traces(str(root), retention_days=7, keep="keep")
-    assert not old.exists()
-    assert keep.exists()
-    assert new.exists()
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "infera")
     assert mn._resolve_mn_backend(argparse.Namespace(mn_backend=None)) == "infera"
@@ -905,7 +888,6 @@ def test_framework_static_audit_classification(tmp_path: Path, monkeypatch: pyte
     assert result["semantic_status"] == "not_present"
     assert result["applicability"] == "direct_apply"
     assert result["metrics"]["patch_source"] == "inline"
-    assert (tmp_path / "audit-direct" / "semantic_audit.json").is_file()
 
     already_diff = (
         "diff --git a/pkg/model.py b/pkg/model.py\n"
@@ -1222,32 +1204,6 @@ def test_infera_install_timeout_failure(monkeypatch: pytest.MonkeyPatch) -> None
 
     monkeypatch.setattr(inf._mn_cli, "_infera_ssh_run_script", _geak_run)
     assert inf.cmd_install_geak(argparse.Namespace(geak_src="/geak", poll_timeout=5, print_logs=False)) == 1
-
-
-def test_cli_multi_node_remaining_edge_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.inference_optimizer.cli import multi_node as opt_mn
-
-    root = tmp_path / "gc"
-    root.mkdir()
-
-    class _BadStatDir:
-        name = "bad-stat"
-
-        def is_dir(self) -> bool:
-            return True
-
-        def stat(self):
-            raise OSError("stat failed")
-
-    real_iterdir = Path.iterdir
-
-    def _iterdir_with_bad_stat(self):
-        if self == root:
-            return iter([_BadStatDir()])
-        return real_iterdir(self)
-
-    monkeypatch.setattr(Path, "iterdir", _iterdir_with_bad_stat)
-    opt_mn._gc_old_profile_traces(str(root), retention_days=7)
 
 
 def test_server_lifecycle_remaining_resolution_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

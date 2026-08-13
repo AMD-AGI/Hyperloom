@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 import pytest
 
 from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir, asset_system_prompts_dir
-from hyperloom.orchestrator.actions.registry import ActionRegistry
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.phases import machine_state as _ps
 from hyperloom.orchestrator.prompts.prompt_builder import (
     _filter_rules_fragment,
@@ -76,11 +76,11 @@ ALWAYS_ON = (
 
 
 @pytest.fixture(scope="module")
-def registry() -> ActionRegistry:
-    return ActionRegistry().load()
+def registry() -> dict:
+    return ACTION_CATALOGUE
 
 
-def _build(registry: ActionRegistry, phase: str) -> str:
+def _build(registry: dict, phase: str) -> str:
     return build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),

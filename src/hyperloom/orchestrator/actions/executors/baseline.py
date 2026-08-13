@@ -52,8 +52,11 @@ from ._subprocess_kill import (
     run_with_session_kill,
     server_log_death_excerpt,
 )
-from ._workload_envs import (
+from ._accuracy_gate import (
     _RUN_EVAL_FALSE_VALUES,
+    materialized_run_eval_disabled,
+)
+from ._workload_envs import (
     _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -71,6 +74,8 @@ from ._magpie_patcher import ensure_eval_concurrency_compat
 from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
+    select_run_workspace,
+    snapshot_workspaces,
 )
 from .benchmark_backend import build_benchmark_command
 
@@ -324,29 +329,6 @@ BASELINE_COLD_START_TIMEOUT_SEC = 9000  # COLD-start cap, 150 min (includes ~20 
 # names live in `_workload_envs`.
 _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
-
-
-def _materialized_run_eval_disabled(config_path: Path) -> bool:
-    """Report whether lm-eval is disabled in the materialized benchmark config.
-
-    ``materialize_config_with_envs`` writes the effective ``RUN_EVAL`` (folded
-    from the base YAML ``benchmark.envs``, ``reference_envs``, ``extra_envs`` and
-    process ``$RUN_EVAL``, defaulting to "true") into ``benchmark.envs.RUN_EVAL``
-    -- the value the benchmark subprocess actually consumes. Reading it back is
-    the single source of truth for "did eval run this round", reusing the shared
-    ``_RUN_EVAL_FALSE_VALUES`` present-and-falsey semantics.
-
-    Args:
-        config_path (Path): The materialized benchmark YAML config path.
-
-    Returns:
-        bool: ``True`` when the config's ``RUN_EVAL`` is present and falsey.
-            A missing key reads as enabled (matches the materialize default).
-    """
-    cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
-    envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
-    val = envs.get("RUN_EVAL")
-    return val is not None and str(val).strip().lower() in _RUN_EVAL_FALSE_VALUES
 
 
 def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
@@ -1148,7 +1130,7 @@ class BaselineExecutor:
         if ix_root:
             ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
             ensure_benchmark_lib_eval_start_patched(Path(ix_root))
-        if not _materialized_run_eval_disabled(config_path):
+        if not materialized_run_eval_disabled(config_path):
             # Target present but unpatchable is a hard stop; target absent is an
             # unrecognized layout, which warns rather than failing every eval run.
             probe_root = Path(ix_root) if ix_root else None
@@ -2137,7 +2119,7 @@ class BaselineExecutor:
                 materialized_config_path,
                 enabled=False,
             )
-        run_eval_disabled = _materialized_run_eval_disabled(
+        run_eval_disabled = materialized_run_eval_disabled(
             materialized_config_path
         )
 
@@ -2777,6 +2759,7 @@ class BaselineExecutor:
             except Exception as exc:  # noqa: BLE001 - warmup is best-effort
                 log.warning("baseline_executor: MN warmup pass failed (ignored): %r", exc)
 
+        workspaces_before = snapshot_workspaces(output_dir)
         subprocess_started_unix = time.time()
         # Anchor the Magpie parent process cwd to the per-task output_dir. NOTE:
         # this does NOT keep the server's cuda-graph dump safe on its own —
@@ -2838,8 +2821,7 @@ class BaselineExecutor:
                 proc_stdout = proc.stdout
                 proc_stderr = proc.stderr
         except subprocess.TimeoutExpired as exc:
-            timeout_candidates = sorted(output_dir.glob("benchmark_*"))
-            timeout_destination = timeout_candidates[-1] if timeout_candidates else output_dir
+            timeout_destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
             timeout_harvested = harvest_leaked_artifacts(
                 timeout_destination,
                 subprocess_started_unix=subprocess_started_unix,
@@ -2859,8 +2841,7 @@ class BaselineExecutor:
         # A stall reap leaves no benchmark_* workspace; a distinct error_class
         # lets the coordinator fast-fail instead of burning the full timeout.
         if proc_returncode == DETOKENIZER_STALL_RETURNCODE:
-            stall_candidates = sorted(output_dir.glob("benchmark_*"))
-            stall_destination = stall_candidates[-1] if stall_candidates else output_dir
+            stall_destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
             stall_harvested = harvest_leaked_artifacts(
                 stall_destination,
                 subprocess_started_unix=subprocess_started_unix,
@@ -2915,12 +2896,11 @@ class BaselineExecutor:
             proc_stdout or "",
         )
 
-        # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
-        candidates = sorted(output_dir.glob("benchmark_*"))
+        workspace = select_run_workspace(output_dir, known_before=workspaces_before)
         # Always-on artifact harvest: copy wrapper-side leaks into the task
         # workspace so failure-path diagnostics survive; mtime gating rejects
         # stale prior-run leaks.
-        harvest_destination = candidates[-1] if candidates else output_dir
+        harvest_destination = workspace if workspace is not None else output_dir
         harvested = harvest_leaked_artifacts(
             harvest_destination,
             subprocess_started_unix=subprocess_started_unix,
@@ -2931,7 +2911,7 @@ class BaselineExecutor:
                 len(harvested),
                 ", ".join(str(src.name) for src, _ in harvested),
             )
-        if not candidates:
+        if workspace is None:
             failure_extras = {
                 "output_dir": str(output_dir),
                 "harvested_artifacts": [str(dst) for _, dst in harvested],
@@ -2994,7 +2974,6 @@ class BaselineExecutor:
                 "error": "Magpie completed but produced no benchmark_* workspace",
                 **failure_extras,
             }
-        workspace = candidates[-1]
         report_path = workspace / "benchmark_report.json"
         report: dict[str, Any] | None = None
         if report_path.exists():
