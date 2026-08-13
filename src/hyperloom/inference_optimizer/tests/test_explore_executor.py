@@ -28,6 +28,14 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     _SESSION_KILL_GRACE_SEC,
     apply_compatibility_filter,
 )
+from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+    ORCHESTRATOR_CANCELLED_RETURNCODE,
+    SESSION_TIME_EXHAUSTED_RETURNCODE,
+)
+from hyperloom.orchestrator.actions.stop_attribution import (
+    ORCHESTRATOR_CANCELLED_CLASS,
+    SESSION_TIME_EXHAUSTED_CLASS,
+)
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     _RUN_EVAL_FALSE_VALUES as _RUN_EVAL_FALSE,
 )
@@ -1738,6 +1746,218 @@ async def test_explore_skips_a_variant_the_budget_cannot_fit(
     assert res.result["session_budget_untested"] == 1
     # Untested variants stay out of the ledger so a resume can retry them.
     assert res.result["losers"] == []
+    assert res.result["explore_search_update"]["tested"] == {}
+
+
+@pytest.mark.asyncio
+async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """The common case: the budget expires while a variant is running, not before it.
+
+    ``run_grid`` records such a variant as ``skipped`` because nothing was
+    measured. Explore has to consume that distinction: a variant written into
+    the KB-facing ``tested`` ledger as ``FAILED`` is one a resume will skip
+    forever, and one the KB learns is a bad idea, on the evidence of a clock.
+    """
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.max_minutes = 600.0  # admits both variants; the reap comes mid-round
+    state.baseline_runtime_sec = 20.0
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    ran: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        if "--output-dir" not in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        ran.append(slot.name)
+        if "v_reaped" not in str(slot):
+            _fake_workspace(slot, tput=840.0)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+        # The session deadline elapsed while this round was running, so the
+        # reaper tore the tree down and named the cause.
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=SESSION_TIME_EXHAUSTED_RETURNCODE,
+            stdout="",
+            stderr="reaped",
+        )
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-reaped"),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "v_measured",
+                    "extra_args": "--max-num-seqs 256",
+                    "extra_envs": {},
+                    "provenance": "default_grid",
+                },
+                {
+                    "name": "v_reaped",
+                    "extra_args": "--max-num-seqs 512",
+                    "extra_envs": {},
+                    "provenance": "default_grid",
+                },
+            ],
+            "variant_timeout_sec": 3600,
+            "baseline_runtime_sec": 20.0,
+        },
+        idempotency_key="ex-budget-reaped",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    tested = res.result["explore_search_update"]["tested"]
+    # A variant the run reaped was never measured; recording it keeps a resume
+    # from ever retrying it, and teaches the KB a clock's verdict.
+    assert [t["name"] for t in tested.values()] == ["v_measured"]
+    assert [lr["name"] for lr in res.result["losers"]] == []
+    assert res.result["session_budget_untested"] == 1
+
+
+@pytest.mark.asyncio
+async def test_explore_does_not_call_a_variant_unstable_when_the_run_reaped_its_rebench(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """A confirmation the run stopped is not a failed confirmation.
+
+    The post-KEEP rebench is the second gate, so a reaped rebench used to evict
+    the variant as ``KEEP_UNSTABLE`` -- a stability verdict drawn from a round
+    that measured nothing. The decision round's own entry goes too, so a resume
+    re-measures the variant and its confirmation together.
+    """
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.max_minutes = 600.0
+    state.baseline_runtime_sec = 20.0
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        if "--output-dir" not in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        if "stack_rebench" in str(slot):
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=SESSION_TIME_EXHAUSTED_RETURNCODE,
+                stdout="",
+                stderr="reaped",
+            )
+        _fake_workspace(slot, tput=900.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-rebench-reaped"),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "v_unconfirmed",
+                    "extra_args": "--max-num-seqs 256",
+                    "extra_envs": {},
+                    "provenance": "default_grid",
+                }
+            ],
+            "variant_timeout_sec": 3600,
+            "baseline_runtime_sec": 20.0,
+        },
+        idempotency_key="ex-budget-rebench-reaped",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    assert res.result["explore_search_update"]["tested"] == {}
+    assert res.result["losers"] == []
+    assert res.result["winners"] == []
+    assert res.result["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
+    assert res.result["session_budget_untested"] == 1
+
+
+@pytest.mark.asyncio
+async def test_explore_attributes_a_round_the_run_reaped_before_anything_measured(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """With nothing measured the round is ``failed``, and must say who stopped it."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.max_minutes = 600.0
+    state.baseline_runtime_sec = 20.0
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        if "--output-dir" not in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=ORCHESTRATOR_CANCELLED_RETURNCODE,
+            stdout="",
+            stderr="cancelled",
+        )
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-cancelled"),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "v_cancelled",
+                    "extra_args": "--max-num-seqs 256",
+                    "extra_envs": {},
+                    "provenance": "default_grid",
+                }
+            ],
+            "variant_timeout_sec": 3600,
+            "baseline_runtime_sec": 20.0,
+        },
+        idempotency_key="ex-budget-cancelled",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    assert res.result["status"] == "failed"
+    assert res.result["error_class"] == ORCHESTRATOR_CANCELLED_CLASS
     assert res.result["explore_search_update"]["tested"] == {}
 
 

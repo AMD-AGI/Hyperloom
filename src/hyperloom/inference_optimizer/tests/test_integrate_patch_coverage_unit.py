@@ -491,7 +491,8 @@ async def test_stack_rebench_is_bounded_by_the_session_budget(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_rebench_dropped_for_budget_is_not_reported_as_a_failed_measurement(tmp_path):
+@pytest.mark.parametrize("error_class", ["session_time_exhausted", "orchestrator_cancelled"])
+async def test_rebench_the_run_stopped_is_not_reported_as_a_failed_measurement(tmp_path, error_class):
     """Not measuring a variant is not evidence that the variant is unstable."""
     from unittest.mock import patch
 
@@ -503,8 +504,8 @@ async def test_rebench_dropped_for_budget_is_not_reported_as_a_failed_measuremen
         extra_server_args="",
         extra_envs={},
         status="skipped",
-        error="session wall-clock budget exhausted before this variant ran",
-        error_class="session_time_exhausted",
+        error="the run stopped this round before it measured anything",
+        error_class=error_class,
     )
 
     async def _fake_run_grid(**_kwargs):
@@ -521,8 +522,8 @@ async def test_rebench_dropped_for_budget_is_not_reported_as_a_failed_measuremen
             variant_timeout_sec=600,
         )
 
-    assert result.skipped_for_session_budget
-    assert result.warnings == ["stack_rebench_skipped:session_time_exhausted"]
+    assert result.error_class == error_class
+    assert result.warnings == [f"stack_rebench_skipped:{error_class}"]
     assert not any("stack_rebench_failed" in w for w in result.warnings)
 
 

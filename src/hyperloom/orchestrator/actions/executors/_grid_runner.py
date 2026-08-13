@@ -34,6 +34,12 @@ from hyperloom.common.env_safety import (
 
 from ...roles.robustness_pulse import pulse as _robustness_pulse
 from ...trace.task_progress import heartbeat_while_output_flows, report_progress
+from ..stop_attribution import (
+    ORCHESTRATOR_CANCELLED_CLASS,
+    SESSION_TIME_EXHAUSTED_CLASS,
+    STOPPED_BY_THE_RUN,
+    StoppedByTheRun,
+)
 from ._accuracy_gate import materialized_run_eval_disabled
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_RETURNCODE,
@@ -1244,56 +1250,13 @@ def _variant_progress_note(
 # that it cannot meaningfully eat the close-window reserve.
 _SESSION_KILL_GRACE_SEC: int = 15
 
-# Labels a round that never ran because the session wall-clock budget was spent.
-# Distinct from any measurement failure: a round that was not run is not evidence
-# about the variant, and the ledger must not read it as one.
-SESSION_TIME_EXHAUSTED_CLASS = "session_time_exhausted"
-
-# Labels a round the orchestrator stopped from outside -- a shutdown, or a
-# budget the dispatcher found spent. Kept apart from the class above for the
-# same reason their returncodes are: a resume faces the spent budget again and
-# does not face the shutdown.
-ORCHESTRATOR_CANCELLED_CLASS = "orchestrator_cancelled"
-
-
-class StoppedByTheRun(NamedTuple):
-    """How a sentinel returncode that stopped a round from outside is recorded.
-
-    Neither cause is evidence about what was being measured, so a round that
-    ends this way is never graded as a failed measurement -- see the branches
-    that consume this, in the grid and in the baseline arm.
-
-    Attributes:
-        error_class: The ledger class for the cause.
-        interrupted: What to report when the round was already running.
-        never_started: What to report when the round never began.
-        ends_the_batch: Whether the caller should stop launching further rounds
-            on its own, rather than leave that to a budget check it may not have.
-    """
-
-    error_class: str
-    interrupted: str
-    never_started: str
-    ends_the_batch: bool
-
-
-# The two causes that stop a round without saying anything about what it was
-# measuring. The budget leaves the rest of a grid to the fit check at the top of
-# its loop, which sees a deadline in the past and skips them all under the same
-# label; a cancel has no such check, and nothing new should start under one.
+# The returncode side of :mod:`...stop_attribution`: the same two causes, keyed
+# by the sentinel a subprocess comes back with. The classes themselves live in
+# that leaf because the ledgers downstream of here carry the class, not the
+# returncode.
 _STOPPED_BY_THE_RUN: dict[int, StoppedByTheRun] = {
-    SESSION_TIME_EXHAUSTED_RETURNCODE: StoppedByTheRun(
-        error_class=SESSION_TIME_EXHAUSTED_CLASS,
-        interrupted="session wall-clock budget exhausted while this round was running",
-        never_started="session wall-clock budget exhausted before this round ran",
-        ends_the_batch=False,
-    ),
-    ORCHESTRATOR_CANCELLED_RETURNCODE: StoppedByTheRun(
-        error_class=ORCHESTRATOR_CANCELLED_CLASS,
-        interrupted="the orchestrator cancelled this action while this round was running",
-        never_started="the orchestrator cancelled this action before this round ran",
-        ends_the_batch=True,
-    ),
+    SESSION_TIME_EXHAUSTED_RETURNCODE: STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
+    ORCHESTRATOR_CANCELLED_RETURNCODE: STOPPED_BY_THE_RUN[ORCHESTRATOR_CANCELLED_CLASS],
 }
 
 

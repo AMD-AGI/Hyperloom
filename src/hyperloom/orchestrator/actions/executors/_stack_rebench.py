@@ -14,7 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ._grid_runner import SESSION_TIME_EXHAUSTED_CLASS, GridVariant, run_grid
+from ..stop_attribution import stopped_by_the_run_class
+from ._grid_runner import GridVariant, run_grid
 
 
 # Single source of truth for the post-KEEP confirmation floor shared by every
@@ -37,20 +38,16 @@ class StackRebenchResult:
     workspace: str | None
     warnings: list[str] = field(default_factory=list)
     stable_floor: float = 0.0
+    # Set to the ledger class from :mod:`..stop_attribution` when the run itself
+    # stopped the round, empty otherwise. Lets a caller tell "the confirmation
+    # did not happen" apart from "the confirmation failed": :attr:`stable` is
+    # ``False`` for both, and only one of them is evidence about the variant.
+    error_class: str = ""
 
     @property
     def stable(self) -> bool:
         """True when the measured throughput cleared the stability floor."""
         return self.tput is not None and self.tput >= self.stable_floor
-
-    @property
-    def skipped_for_session_budget(self) -> bool:
-        """True when the round never ran because the session budget was spent.
-
-        Lets a caller tell "the confirmation did not happen" apart from "the
-        confirmation failed", which are different facts about the variant.
-        """
-        return any(w.startswith(f"stack_rebench_skipped:{SESSION_TIME_EXHAUSTED_CLASS}") for w in self.warnings)
 
 
 async def measure_stack_rebench(
@@ -119,18 +116,26 @@ async def measure_stack_rebench(
     tput: float | None = None
     workspace: str | None = None
     warnings: list[str] = []
+    error_class = ""
     if rb is not None and rb.status == "succeeded":
         tput = rb.output_throughput
         workspace = rb.workspace
         warnings = list(rb.nonfatal_warnings)
-    elif rb is not None and getattr(rb, "error_class", "") == SESSION_TIME_EXHAUSTED_CLASS:
-        warnings.append(f"stack_rebench_skipped:{SESSION_TIME_EXHAUSTED_CLASS}")
+    elif rb is not None and stopped_by_the_run_class(getattr(rb, "error_class", "")) is not None:
+        error_class = rb.error_class
+        warnings.append(f"stack_rebench_skipped:{error_class}")
     elif rb is not None:
         warnings.append(f"stack_rebench_failed:{(rb.error or '')[-120:]}")
     else:
         warnings.append("stack_rebench_no_result")
     stable_floor = base_tput * (1.0 + stable_threshold_pct / 100.0)
-    return StackRebenchResult(tput=tput, workspace=workspace, warnings=warnings, stable_floor=stable_floor)
+    return StackRebenchResult(
+        tput=tput,
+        workspace=workspace,
+        warnings=warnings,
+        stable_floor=stable_floor,
+        error_class=error_class,
+    )
 
 
 __all__ = ["DEFAULT_STACK_STABLE_PCT", "StackRebenchResult", "measure_stack_rebench"]
