@@ -112,8 +112,11 @@ PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup
 The backend runs `install_baremetal.sh` in five phases:
 
 1. **Base preflight**: checks ROCm, GPU arch, ROCm torch, torch/triton alignment,
-   and serving framework imports.
+   and serving framework imports. It passes as soon as one of `sglang`, `vllm`,
+   or `atom` imports, so the other two being reported missing is not an error.
 2. **Framework install**: optionally installs the SGLang or vLLM framework layer.
+   ATOM cannot be installed here — take it from `rocm/atom:latest` and run setup
+   with `--install-framework none`.
 3. **ROCm hotfix**: applies the profiler hotfix when the ROCm stack is eligible.
 4. **Credentials**: resolves LLM gateway credentials into `.env`.
 5. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv roots,
@@ -130,8 +133,8 @@ Requirements:
 
 - Docker with AMD GPU access (`/dev/kfd`, `/dev/dri`) on the selected target
   host.
-- A ROCm container image that already ships the serving framework, such as
-  SGLang or vLLM.
+- A ROCm container image that already ships the serving framework — SGLang,
+  vLLM, or ATOM (`rocm/atom:latest`).
 
 In this scenario, `/hyperloom-setup` writes `.env` only and does **not** start a
 container. The selected demo skill owns the container lifecycle.
@@ -169,6 +172,28 @@ run:
 The preset demos reuse the values already in `.env`, so nothing is re-entered.
 The custom advanced run also reuses setup values, then asks for workload and
 phase choices before launch.
+
+### Choose a Framework
+
+A session is single-framework, selected with `--framework` (or `FRAMEWORK` in
+`.env`) and locked for the run:
+
+| Framework | Container image | Notes |
+|---|---|---|
+| `sglang` (default) | `rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x` / `-mi350x` | |
+| `vllm` | `rocm/hyperloom:vllm-v0.24.0-rocm7.2.0` | |
+| `atom` | `rocm/atom:latest` | single-node only (`--nodes 1`) |
+
+[ATOM](https://github.com/ROCm/ATOM) is AMD's AITER-based inference engine.
+Run it through the same demo flow as the other two — `/hyperloom-setup`, then a
+demo skill with `--framework atom` — rather than a standalone local setup
+script. Its image ships ATOM and AITER but not SGLang or vLLM, so setup reports
+those two as missing and passes on `framework atom: OK`; that is expected, and
+`--skip-base-check` is still not needed. Benchmarking, profiling, roofline,
+TraceLens, kernel-agent, and framework-agent all work on atom. Because the
+shipped `baseline_atom.yaml` defaults target a full node (`TP=8`, FP8), pass
+`--tp` and `--precision` explicitly for a smaller run. See
+[`custom advanced`](hyperloom-custom-advanced/SKILL.md) for the full ATOM notes.
 
 ### Use a Custom Model
 

@@ -40,6 +40,12 @@ Suggested Docker images:
 - `vllm`: `docker.io/rocm/hyperloom:vllm-v0.24.0-rocm7.2.0`
 - `sglang` MI300X: `docker.io/rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x`
 - `sglang` MI355X: `docker.io/rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi350x`
+- `atom` MI300X / MI355X: `docker.io/rocm/atom:latest`
+
+The atom image ships ATOM and AITER but no SGLang or vLLM, so Phase 1 preflight
+reports `framework sglang: missing` / `framework vllm: missing` and passes on
+`framework atom: OK`. That is expected; keep `--install-framework none` and
+leave `--skip-base-check` off.
 
 In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
 (or the current host when it is unset) before running setup or optimize:
@@ -97,8 +103,10 @@ Collect these required values:
   - existing `MODEL_PATH`, when set;
   - custom local path, which must contain `config.json`;
   - Hugging Face repo id plus a local cache directory.
-- Framework: `sglang` or `vllm`. Prefer the existing
-  `FRAMEWORK` value when it is set; otherwise default to `sglang`.
+- Framework: `sglang`, `vllm`, or `atom`. Prefer the existing
+  `FRAMEWORK` value when it is set; otherwise default to `sglang`. When the user
+  picks `atom`, force `NODES=1` and tell them multi-node is rejected — see
+  [ATOM runs](#atom-runs).
 - Workload: `TP`, `EP`, `CONC`, `ISL`, `OSL`, `PRECISION`, and optional
   `MAX_MODEL_LEN` / `PROFILE_OSL`.
 - Objective and budget: `MAX_HOURS` plus `TARGET_GAIN`.
@@ -181,6 +189,43 @@ Guardrails:
   optimizer.
 - There is no generic `--skip-stage` flag and no `--no-sweep` flag. Compose
   phase behavior from the explicit flags above.
+
+## ATOM runs
+
+[ATOM](https://github.com/ROCm/ATOM) is AMD's AITER-based inference engine. It
+is a first-class Hyperloom framework — there is no separate setup script for it,
+so drive it through this skill with `--framework atom` rather than launching
+`atom.entrypoints.openai_server` by hand.
+
+What differs from an sglang/vllm run:
+
+- **Single node only.** `--nodes >= 2` is rejected at startup. Keep `--nodes 1`.
+- **Get ATOM from its image.** `docker.io/rocm/atom:latest` ships ATOM plus
+  AITER; run setup inside it with `--install-framework none`. Bare-metal
+  installation of ATOM is not something setup can do for you.
+- **Every phase is available.** Kernel-agent, framework-agent, and
+  profile / roofline / TraceLens all work — the Magpie `atom_mi300x.sh` /
+  `atom_mi355x.sh` wrappers bridge `PROFILE=1` to atom's `--torch-profiler-dir`,
+  and TraceLens reads the resulting traces unchanged. Do not add `--no-kernel`
+  or `--no-framework-agent` just because the framework is atom.
+- **Extra server flags ride on `EXTRA_ATOM_ARGS`,** not `EXTRA_SGLANG_ARGS` /
+  `EXTRA_VLLM_ARGS`. `baseline_atom.yaml` presets `--trust-remote-code` because
+  most atom-served models ship their own modeling code.
+- **The shipped defaults assume a full node** (`TP=8`, `precision: fp8`,
+  `CONC=32`, `ISL/OSL=128`). Those come from `baseline_atom.yaml`, not from this
+  skill's defaults, so pass `--tp`, `--precision`, `--conc`, `--isl`, and
+  `--osl` explicitly for anything smaller — a single-GPU bf16 run needs
+  `--tp 1 --precision bf16`.
+- **Cold start is slow and cache-sensitive.** atom torch.compile artifacts live
+  in `~/.cache/atom/torch_compile_cache`. Two models with the same vocabulary
+  but different hidden sizes (for example Qwen3-0.6B and Qwen3-8B, both
+  vocab 151936) can collide there and the second one dies in warmup with
+  `assert_size_stride ... expected size 4096==1024`. Clear that directory when
+  switching models on a box.
+
+Unlike sglang and vllm, atom ships a programmatic cold-start seed grid, so
+EXPLORE still produces candidates when the orchestration model returns nothing
+instead of failing with `error_class="empty_grid"`.
 
 ## Model Resolution
 

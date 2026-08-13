@@ -12,7 +12,7 @@ Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimi
 Resolve the run mode before launching Hyperloom:
 
 1. If `HYPERLOOM_RUN_MODE=baremetal` or it is unset, run this demo directly on the host.
-2. If `HYPERLOOM_RUN_MODE=docker`, this skill owns the Docker setup. Ask the user whether they want a `vllm` or `sglang` Docker image unless `HYPERLOOM_IMAGE` is already set. Use a ROCm image that already contains the selected framework; do not install the framework inside Docker.
+2. If `HYPERLOOM_RUN_MODE=docker`, this skill owns the Docker setup. Ask the user whether they want a `vllm`, `sglang`, or `atom` Docker image unless `HYPERLOOM_IMAGE` is already set. Use a ROCm image that already contains the selected framework; do not install the framework inside Docker.
 
 In docker mode:
 - If `hyperloom-setup` already ran, do **not** re-run setup on the host.
@@ -30,6 +30,13 @@ Suggested Docker images:
 - `vllm`: `docker.io/rocm/hyperloom:vllm-v0.24.0-rocm7.2.0`
 - `sglang` MI300X: `docker.io/rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x`
 - `sglang` MI355X: `docker.io/rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi350x`
+- `atom` MI300X / MI355X: `docker.io/rocm/atom:latest`
+
+The atom image ships ATOM and AITER but no SGLang or vLLM, so Phase 1 preflight
+reports `framework sglang: missing` / `framework vllm: missing` and passes on
+`framework atom: OK`. That is expected — still pass `--install-framework none`
+and still leave `--skip-base-check` off. Add `--framework atom` to the launch
+command below; atom is single-node only, so keep `--nodes 1`.
 
 In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
 (or the current host when it is unset) before running setup or optimize:

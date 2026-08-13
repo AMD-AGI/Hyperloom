@@ -151,9 +151,19 @@ accordingly.
      - MI355X
    * - ``rocm/hyperloom:vllm-v0.24.0-rocm7.2.0``
      - MI300X / MI325X / MI355X
+   * - ``rocm/atom:latest`` (``--framework atom``)
+     - MI300X / MI355X
 
 Browse all available tags at
-`hub.docker.com/r/rocm/hyperloom/tags <https://hub.docker.com/r/rocm/hyperloom/tags>`_.
+`hub.docker.com/r/rocm/hyperloom/tags <https://hub.docker.com/r/rocm/hyperloom/tags>`_,
+and the ATOM images at
+`hub.docker.com/r/rocm/atom/tags <https://hub.docker.com/r/rocm/atom/tags>`_.
+
+The ATOM image is published by the `ROCm/ATOM <https://github.com/ROCm/ATOM>`_
+project rather than under ``rocm/hyperloom``. It ships ATOM and AITER but not
+SGLang or vLLM, so bare-metal setup inside it reports those two as missing and
+passes on ``framework atom: OK``. Run setup there with
+``--install-framework none``; ATOM itself is not installable by Hyperloom setup.
 
 Bare-metal recommended environment
 -----------------------------------

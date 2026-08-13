@@ -35,7 +35,10 @@ ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-l
 DEFAULT_OPENAI_BASE_URL="${DEFAULT_OPENAI_BASE_URL:-https://your-openai-compatible-gateway.example.com/v1}"
 OPENAI_API_KEY_PLACEHOLDER="ak-your-api-key-here"
 
-FRAMEWORKS="sglang,vllm"
+# Phase 1 probes every serving framework Hyperloom can benchmark, not just the
+# two it can install. An atom image ships neither sglang nor vllm, so gating the
+# preflight on those alone made every `--framework atom` host fail setup.
+FRAMEWORKS="${FRAMEWORKS:-sglang,vllm,atom}"
 INSTALL_FRAMEWORK="none"
 # Track whether the operator explicitly picked a framework env (via $FRAMEWORK_ENV
 # or --framework-env). When unset, vLLM defaults to isolated (its wheel pins a
@@ -85,9 +88,14 @@ runtime env. Stops BEFORE launching.
 Options:
   --user-data-path PATH  Writable artifact root (default: /workspace/hyperloom)
   --deps-root PATH       Directory for auto-cloned dependency checkouts
-  --frameworks LIST      Comma list to verify in Phase 1 (default: sglang,vllm)
+  --frameworks LIST      Comma list to verify in Phase 1 (default:
+                         sglang,vllm,atom). Phase 1 passes when at least one
+                         entry imports.
   --install-framework FW Install a missing bare-metal framework layer.
                          Supported: none, sglang, vllm. Default: none.
+                         atom is not installable here — it ships in
+                         rocm/atom:latest, so run setup inside that image with
+                         --install-framework none.
   --framework-env MODE   Install target for framework packages: shared or
                          isolated. Default: shared, except vLLM which defaults
                          to isolated so it never replaces the shared ROCm
@@ -159,7 +167,8 @@ warn() { echo "[install-baremetal WARN] $*" >&2; }
 die() { echo "[install-baremetal ERROR] $*" >&2; exit 1; }
 
 IMAGE_HINT="Provision the ROCm framework base first (run inside an AMD ROCm \
-SGLang/vLLM image such as rocm/hyperloom:sglang-*-rocm7.2.0-mi300x|mi350x, or \
+image that already ships the engine — rocm/hyperloom:sglang-*-rocm7.2.0-mi300x|mi350x, \
+rocm/hyperloom:vllm-*-rocm7.2.0, or rocm/atom:latest for --framework atom — or \
 install an equivalent ROCm torch + framework stack), then re-run."
 
 is_interactive() { [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; }
@@ -333,10 +342,17 @@ PY
     log "torch: ${tv} (hip=${thip}) ROCm OK"
     check_torch_rocm_shared_libs "$py" || rc=1
     check_rocm_toolchain_alignment "$thip" || rc=1
-    check_torch_triton_alignment "$py" || rc=1
+    # The torch/triton pin only has to hold when this run is about to build a
+    # framework layer against it. An image that already ships a working engine
+    # (atom, or a prebuilt sglang/vllm) is allowed to carry its own triton.
+    if [ "$INSTALL_FRAMEWORK" = "none" ]; then
+      check_torch_triton_alignment "$py" || true
+    else
+      check_torch_triton_alignment "$py" || rc=1
+    fi
   fi
 
-  local any_fw=0 fw
+  local any_fw=0 sglang_ok=0 fw
   IFS=',' read -r -a _fw_arr <<< "$FRAMEWORKS"
   for fw in "${_fw_arr[@]}"; do
     fw="$(echo "$fw" | tr -d '[:space:]')"; [ -z "$fw" ] && continue
@@ -351,6 +367,7 @@ PY
         log "framework ${fw}: OK"
       fi
       any_fw=1
+      [ "$fw" = "sglang" ] && sglang_ok=1
     elif [ "$REQUIRE_FRAMEWORKS" -eq 1 ]; then
       warn "framework ${fw}: MISSING (required). ${IMAGE_HINT}"; rc=1
     else
@@ -366,9 +383,14 @@ PY
     fi
   fi
 
-  # vLLM's ROCm stack owns triton/aiter in isolated mode; SGLang owns sgl_kernel.
-  local m dep_py
-  for m in triton aiter sgl_kernel; do
+  # vLLM's ROCm stack owns triton/aiter in isolated mode; SGLang owns sgl_kernel,
+  # so only look for it once SGLang is the engine actually in play — an atom or
+  # vLLM host has no use for it and should not be told a dependency is missing.
+  local m dep_py deps="triton aiter"
+  if [ "$sglang_ok" -eq 1 ] || [ "$INSTALL_FRAMEWORK" = "sglang" ]; then
+    deps="$deps sgl_kernel"
+  fi
+  for m in $deps; do
     dep_py="$py"
     if [ "$m" != "sgl_kernel" ] && [ "$FRAMEWORK_ENV" = "isolated" ] \
        && [ -x "${VLLM_VENV_ROOT}/bin/python" ] \
@@ -432,7 +454,7 @@ check_torch_triton_alignment() {
   [ -n "$required" ] || return 0
   current="$(installed_dist_version "$py" triton 2>/dev/null || true)"
   if [ "$current" != "$required" ]; then
-    warn "triton ${current:-missing} does not match torch requirement ${required}; reinstall the torch-pinned ROCm Triton before installing SGLang"
+    warn "triton ${current:-missing} does not match torch requirement ${required}; reinstall the torch-pinned ROCm Triton before installing a framework layer"
     return 1
   fi
 }

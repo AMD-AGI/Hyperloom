@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 
 from pathlib import Path
@@ -1020,6 +1021,9 @@ def test_baremetal_runtime_deps_probe_vllm_venv_for_isolated_vllm(tmp_path: Path
                 f"VLLM_VENV_ROOT={vllm_root}",
                 "FRAMEWORK_ENV=isolated",
                 "FRAMEWORKS=sglang,vllm",
+                # sgl_kernel is only probed once SGLang itself imported.
+                "sglang_ok=1",
+                "INSTALL_FRAMEWORK=none",
                 'log() { :; }',
                 'warn() { :; }',
                 '_py_has() { printf "probe %s %s\\n" "$1" "$2"; return 0; }',
@@ -1045,6 +1049,104 @@ def test_baremetal_runtime_deps_probe_vllm_venv_for_isolated_vllm(tmp_path: Path
         f"probe {vllm_py} aiter",
         f"probe {host_py} sgl_kernel",
     ]
+
+
+def _runtime_dep_loop(install_script: Path) -> str:
+    script_text = install_script.read_text(encoding="utf-8")
+    loop_start = script_text.index("  local m", script_text.index('  if [ "$any_fw" -eq 0 ]; then'))
+    loop_end = script_text.index('\n\n  [ "$rc" -ne 0 ]', loop_start)
+    return script_text[loop_start:loop_end]
+
+
+def test_baremetal_runtime_deps_skip_sgl_kernel_without_sglang(tmp_path: Path):
+    """An atom-only host must not be told sgl_kernel is missing.
+
+    atom images ship neither SGLang nor its sgl_kernel companion, so probing for
+    it there only produces a scary 'missing' line about a dependency the run
+    will never use.
+    """
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+
+    host_py = tmp_path / "host-python"
+    host_py.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    host_py.chmod(0o755)
+
+    runner = tmp_path / "runtime-deps-atom.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"py={host_py}",
+                f"VLLM_VENV_ROOT={tmp_path}/absent",
+                "FRAMEWORK_ENV=shared",
+                "FRAMEWORKS=sglang,vllm,atom",
+                "sglang_ok=0",
+                "INSTALL_FRAMEWORK=none",
+                "log() { :; }",
+                "warn() { :; }",
+                '_py_has() { printf "probe %s\\n" "$2"; return 0; }',
+                "run_probe() {",
+                _runtime_dep_loop(install_script),
+                "}",
+                "run_probe",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out = subprocess.run(
+        ["bash", str(runner)], check=True, text=True, stdout=subprocess.PIPE
+    ).stdout.splitlines()
+
+    assert out == ["probe triton", "probe aiter"]
+
+
+def test_baremetal_preflight_probes_atom_by_default():
+    """Phase 1 must accept an atom-only host without extra flags.
+
+    The default probe list gated on sglang/vllm alone, so setup inside
+    rocm/atom:latest died with 'no serving framework importable' even though
+    atom was installed and is a registered framework.
+    """
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    text = install_script.read_text(encoding="utf-8")
+
+    m = re.search(r'^FRAMEWORKS="\$\{FRAMEWORKS:-([^}]+)\}"', text, re.MULTILINE)
+    assert m, "install_baremetal.sh must define an overridable FRAMEWORKS default"
+    assert "atom" in m.group(1).split(","), (
+        "atom must be in the default Phase 1 probe list; otherwise setup inside "
+        "rocm/atom:latest fails preflight"
+    )
+
+    assert "rocm/atom:latest" in text, (
+        "the missing-framework hint must point atom users at their image"
+    )
+
+
+def test_baremetal_triton_pin_is_advisory_when_installing_nothing():
+    """A prebuilt image may carry its own triton.
+
+    The torch/triton pin exists to protect a framework build. When
+    --install-framework is none there is nothing to build, so a drifting triton
+    must warn rather than fail the whole preflight -- rocm/atom:latest ships a
+    triton newer than torch's pin.
+    """
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    text = install_script.read_text(encoding="utf-8")
+
+    guard = re.search(
+        r'if \[ "\$INSTALL_FRAMEWORK" = "none" \]; then\s*\n'
+        r'\s*check_torch_triton_alignment "\$py" \|\| true\s*\n'
+        r"\s*else\s*\n"
+        r'\s*check_torch_triton_alignment "\$py" \|\| rc=1',
+        text,
+    )
+    assert guard, (
+        "the triton alignment check must be advisory when --install-framework "
+        "is none and fatal only when a framework layer will be built"
+    )
 
 
 def test_baremetal_aiter_install_preserves_system_triton_and_rechecks_alignment(tmp_path: Path):
