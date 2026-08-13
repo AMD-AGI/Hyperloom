@@ -5,10 +5,13 @@
 
 Single source of truth for reading the handful of ``/sys`` and ``/proc`` values
 that describe how a host is tuned: SMT, socket and NUMA counts, nodes-per-socket,
-the cpufreq governor, and Core Performance Boost. Three call sites grew their own
-copy of this logic (CLI preflight, the run report, and the standalone auditor) and
-they drifted -- one dropped the empty-string filter, one omitted the zero guard
-that turns a container without ``/sys/devices/system/node`` into a bogus ``NPS0``.
+the cpufreq governor, and Core Performance Boost. It is shared rather than
+reimplemented per caller because these reads have edge cases -- an empty-string
+socket id, a container with no NUMA tree -- that every copy has to get right, and
+a copy that gets one wrong reports a plausible wrong number rather than failing.
+
+``scripts/platform_audit.py`` is the deliberate exception: it must run on hosts
+with no Hyperloom install, so it carries its own copy and says so.
 
 Design:
 
@@ -20,13 +23,23 @@ Design:
   otherwise distinguish.
 * **injectable root**: every function takes ``root`` so tests can build a fake
   ``/sys`` tree instead of monkeypatching module internals.
-* **stdlib-only, never raises**: importable from any layer without a cycle.
+* **light and never raises**: stdlib plus ``hyperloom.common.provenance``, which
+  is itself stdlib-only. Importable from any layer without a cycle, and cheap
+  enough for the crash-safe writer to use after a run has already died.
 """
 
 from __future__ import annotations
 
+import logging
+import os
+import socket
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
+
+from hyperloom.common.provenance import detect_gfx_arch, detect_stack_fingerprint
+
+log = logging.getLogger(__name__)
 
 #: Filesystem root the probe reads under. Overridden in tests.
 DEFAULT_ROOT = Path("/")
@@ -161,6 +174,84 @@ def probe_cpu_platform(*, root: Path = DEFAULT_ROOT) -> CpuPlatform | None:
     )
 
 
+def platform_fingerprint(
+    gpu_type: str | None = None,
+    *,
+    multi_node: bool | None = None,
+) -> dict[str, Any]:
+    """Full host record -- CPU tuning, GPUs and software stack -- for provenance.
+
+    Lives here rather than beside the report renderer because both callers that
+    need it, the run report and the crash-safe ``final.json`` writer, sit above
+    ``hyperloom.common``. Reaching the other way round would make the crash path
+    import a private symbol out of the orchestrator, and with it the message bus
+    and a SQLite connection layer -- roughly 350 modules -- to fill in six fields
+    at the exact moment those subsystems may be the thing that just failed.
+
+    Always returns a dict carrying ``status``. An archived report must be able
+    to distinguish "this host had no CPU sysfs" from "the probe broke", which a
+    bare ``null`` cannot express, and that distinction matters precisely when
+    someone is trying to explain a delta long after the run.
+
+    Scope: this samples the calling process's own node. In a multi-node session
+    that is usually not the benchmark node, so the record would describe a
+    machine the numbers did not come from -- worse than no record, because it
+    reads as fact. ``host`` names the sampled machine and ``multi_node_session``
+    marks when the record is known to be partial.
+
+    Args:
+        gpu_type: Session ``--gpu-type``. Resolves the gfx arch from the board
+            table, so building this record never spawns a probe subprocess.
+        multi_node: Whether this is a >=2-node session, when the caller knows.
+            ``None`` records that nobody established it, which is the honest
+            answer on the crash path rather than an unearned ``False``.
+
+    Returns:
+        dict[str, Any]: ``status="ok"`` with the platform facts, or
+        ``status="unavailable"``/``"error"`` with a human-readable ``reason``.
+    """
+    try:
+        plat = probe_cpu_platform()
+        if plat is None:
+            return {"status": "unavailable", "reason": "no host CPU sysfs on this machine"}
+
+        record: dict[str, Any] = {
+            "status": "ok",
+            "host": socket.gethostname(),
+            "multi_node_session": multi_node,
+            **plat.as_dict(),
+        }
+        # Each block below degrades on its own: one unreadable file must not
+        # take the whole platform record with it.
+        try:
+            record["gpu"] = {
+                # PCI devices bound to amdgpu: what the host has, not what the
+                # run could see. *_VISIBLE_DEVICES masking does not change this
+                # number, so it is named for the host to keep it from being read
+                # as the run's device count.
+                "host_count": len(list(Path("/sys/bus/pci/drivers/amdgpu").glob("0000:*"))) or None,
+                # probe=False: gpu_type already answers this, and report
+                # generation runs in-process under unit tests that must not
+                # spawn rocminfo.
+                "gfx_arch": detect_gfx_arch(os.environ, gpu_type=gpu_type, probe=False) or "unknown",
+                "amdgpu_driver": read_kernel_file("/sys/module/amdgpu/version") or "unknown",
+            }
+        except Exception:  # noqa: BLE001 - one degraded field, not a dropped record
+            log.warning("platform fingerprint: GPU block unreadable", exc_info=True)
+            record["gpu"] = {"status": "error"}
+        try:
+            record["stack"] = detect_stack_fingerprint(os.environ)
+        except Exception:  # noqa: BLE001
+            log.warning("platform fingerprint: stack block unreadable", exc_info=True)
+            record["stack"] = {"status": "error"}
+        return record
+    except Exception as exc:  # noqa: BLE001 - never break the caller
+        # Warning, not debug: this record is provenance, and a silent hole in it
+        # is only discovered when someone needs it and it is too late to re-run.
+        log.warning("platform fingerprint failed: %s", exc, exc_info=True)
+        return {"status": "error", "reason": str(exc)}
+
+
 __all__ = [
     "CpuPlatform",
     "DEFAULT_ROOT",
@@ -170,6 +261,7 @@ __all__ = [
     "kernel_release",
     "nodes_per_socket",
     "numa_node_count",
+    "platform_fingerprint",
     "probe_cpu_platform",
     "read_kernel_file",
     "smt_state",

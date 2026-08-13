@@ -112,3 +112,31 @@ def test_sigkill_cannot_write_final_json(tmp_path):
 
     final_json = tmp_path / "reports" / "final.json"
     assert not final_json.exists(), "SIGKILL bypasses finally; final.json cannot exist"
+
+
+def test_crash_safe_platform_does_not_drag_in_the_orchestrator():
+    """The safety net must not import the subsystems that may have just failed.
+
+    Building this record used to reach into the orchestrator's report renderer,
+    which imports the message bus and a SQLite connection layer at module level.
+    That is a poor dependency to acquire after a run has already died -- and if
+    the crash came from that subsystem, the record explaining it is what breaks.
+    Run in a subprocess because the import is global and one test cannot unsee it.
+    """
+    probe = (
+        "import sys;"
+        "from hyperloom.inference_optimizer.breakdown.exporter import _crash_safe_platform;"
+        "rec = _crash_safe_platform('mi355x');"
+        "assert rec.get('status'), rec;"
+        "heavy = [m for m in ("
+        "  'hyperloom.orchestrator.actions.executors.report',"
+        "  'hyperloom.orchestrator.bus.message_bus',"
+        ") if m in sys.modules];"
+        "print('LEAKED:' + ','.join(heavy) if heavy else 'CLEAN')"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(_REPO_ROOT), capture_output=True, text=True, timeout=120,
+    )
+    assert out.returncode == 0, out.stderr
+    assert "CLEAN" in out.stdout, out.stdout

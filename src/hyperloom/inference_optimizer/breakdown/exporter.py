@@ -2141,17 +2141,22 @@ def write_minimal_final_report(
 
 
 def _crash_safe_platform(gpu_type: str | None) -> dict[str, Any]:
-    """Platform record for the crash-safe path, never raising.
+    """Platform record for the crash-safe path.
 
-    Imported lazily and wrapped: the safety net must still produce consumable
-    JSON even if the probe itself is what is broken.
+    Imported lazily to keep this module's import cost off the normal path, but
+    from ``hyperloom.common`` rather than from the orchestrator's report
+    renderer: this runs when a run has already died, which is the worst moment
+    to pull in the message bus and a SQLite connection layer, and the worst
+    moment to depend on a private symbol in another layer.
+
+    ``platform_fingerprint`` returns a ``status`` dict on every path and does
+    not raise, so there is no second net here. ``multi_node`` is left unset --
+    nothing on this path establishes it, and an unearned ``False`` would read as
+    a fact about the session.
     """
-    try:
-        from hyperloom.orchestrator.actions.executors.report import _platform_fingerprint
+    from hyperloom.common.platform_probe import platform_fingerprint
 
-        return _platform_fingerprint(gpu_type)
-    except Exception as exc:  # noqa: BLE001 - the safety net cannot itself fail
-        return {"status": "error", "reason": str(exc)}
+    return platform_fingerprint(gpu_type)
 
 
 def write_minimal_final_json(
