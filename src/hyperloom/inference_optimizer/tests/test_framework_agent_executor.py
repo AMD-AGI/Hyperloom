@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -716,6 +717,51 @@ async def test_executor_bench_exception_triggers_revert(tmp_path: Path):
     assert result["status"] == "reverted"
     assert result["error_class"] == "bench_exception"
     assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_executor_cancelled_bench_reverts_and_re_raises(tmp_path: Path):
+    """A cancelled bench must not leave the candidate in the framework tree.
+
+    The dispatcher cancels in-flight actions on shutdown and on a spent
+    wall-clock budget. ``CancelledError`` is not an ``Exception``, so the REVERT
+    handler beside it never sees the stop, and the candidate would stay applied
+    with the operator's auto-stash still on the stack. The cancel is re-raised
+    rather than graded as a REVERT: work the run stopped is not work that
+    failed, and SubAgentRunner records it as ``cancelled``.
+    """
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    patch_path = tmp_path / "p.patch"
+    patch_path.write_text(_VALID_PATCH, encoding="utf-8")
+    scratch = repo / "user_scratch.txt"
+    scratch.write_text("user work in progress\n", encoding="utf-8")
+
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
+
+    async def cancelled(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
+        raise asyncio.CancelledError
+
+    ctx = _make_ctx(
+        "t-fp-cancel",
+        {
+            "candidate": _make_candidate(),
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+        },
+    )
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=cancelled):
+        with pytest.raises(asyncio.CancelledError):
+            await executor(ctx)
+
+    assert (repo / "src.py").read_text().endswith("return 1\n"), (
+        "the cancelled candidate was left applied in the framework tree"
+    )
+    assert scratch.exists(), "user auto-stash was not restored after the cancel"
+    assert scratch.read_text(encoding="utf-8") == "user work in progress\n"
 
 
 _PATCH_B_ADDS_FILE = """\
