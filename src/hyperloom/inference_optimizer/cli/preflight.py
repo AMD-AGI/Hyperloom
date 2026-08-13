@@ -656,11 +656,6 @@ def _ensure_framework_deps(args, python_exe: str, pip_extra: list[str]) -> None:
 # install_baremetal.sh's --skip-base-check.
 SKIP_FRAMEWORK_CHECK_ENV = "HYPERLOOM_SKIP_FRAMEWORK_CHECK"
 
-# Named as a family rather than pinned tags: exact versions live in the doc
-# below, and a copy here would rot unnoticed in an error path.
-_FRAMEWORK_IMAGE_FAMILY = "rocm/hyperloom:vllm-* | rocm/hyperloom:sglang-*-mi300x|mi350x"
-_FRAMEWORK_IMAGE_DOCS = "docs/install/install.md"
-
 
 def _in_container() -> bool:
     """Best-effort containerization test (never raises).
@@ -808,10 +803,7 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
             "The wheel on PyPI is the CUDA build: it imports fine and then fails at\n"
             "GPU init. Replace it with the ROCm build:\n"
             "    python3 -m hyperloom.inference_optimizer.setup -- "
-            f"--install-framework {framework}\n"
-            "or run inside a ROCm image that already ships it:\n"
-            f"  images: {_FRAMEWORK_IMAGE_FAMILY}\n"
-            f"  tags:   {_FRAMEWORK_IMAGE_DOCS}\n\n"
+            f"--install-framework {framework}\n\n"
             f"To proceed anyway, set {SKIP_FRAMEWORK_CHECK_ENV}=1.",
             file=sys.stderr,
         )
@@ -820,10 +812,10 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
     probed = "\n".join(f"  - {python_exe}" for python_exe in interpreters)
     if _in_container():
         remedy = (
-            "This process is already running in a container, so its image does not\n"
-            f"ship {framework}. Restart it from an image that does:\n"
-            f"  images: {_FRAMEWORK_IMAGE_FAMILY}\n"
-            f"  tags:   {_FRAMEWORK_IMAGE_DOCS}"
+            "This process already runs in a container, so its image does not ship\n"
+            f"{framework}. Restart it from a ROCm image that does, or install it here:\n"
+            "    python3 -m hyperloom.inference_optimizer.setup -- "
+            f"--install-framework {framework}"
         )
     else:
         remedy = (
@@ -832,10 +824,9 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
             "     it from the ROCm wheel index instead):\n"
             "       python3 -m hyperloom.inference_optimizer.setup -- "
             f"--install-framework {framework}\n"
-            "  2. Run Hyperloom inside a ROCm image that already ships it, by setting\n"
-            "     HYPERLOOM_RUN_MODE=docker before setup:\n"
-            f"       images: {_FRAMEWORK_IMAGE_FAMILY}\n"
-            f"       tags:   {_FRAMEWORK_IMAGE_DOCS}\n"
+            "  2. Run Hyperloom inside a ROCm image that already ships it: set\n"
+            "     HYPERLOOM_RUN_MODE=docker before setup, which hands image choice\n"
+            "     and container startup to the demo skill.\n"
             "\nNote: HYPERLOOM_RUN_MODE selects where Hyperloom itself runs and is\n"
             "unrelated to Magpie's run_mode=local, which only means: do not start a\n"
             "second container. That stays correct in both cases."

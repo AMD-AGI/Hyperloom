@@ -78,18 +78,29 @@ def test_missing_serving_framework_exits_with_guidance(monkeypatch, capsys):
     # so nobody repeats the issue author's reading of Magpie's run_mode=local.
     assert "vllm" in err
     assert "--install-framework vllm" in err
-    assert "rocm/hyperloom" in err
     assert "HYPERLOOM_RUN_MODE=docker" in err
     assert _SKIP_ENV in err
 
 
-def test_image_hint_names_a_family_not_pinned_tags():
-    """Pinned tags in an error path rot unnoticed and would send users to a
-    nonexistent image; the install doc stays the single source of versions."""
-    family = preflight._FRAMEWORK_IMAGE_FAMILY
+@pytest.mark.parametrize("in_container", [False, True])
+def test_guidance_carries_no_image_tags_or_doc_paths(monkeypatch, capsys, in_container):
+    """Error text must only name things that cannot go stale or go missing.
 
-    assert preflight._FRAMEWORK_IMAGE_DOCS.endswith("install.md")
-    assert not re.search(r"v\d+\.\d+", family), f"pinned version in image family: {family}"
+    An image tag encodes framework, ROCm and GPU-arch versions that all move
+    independently, and no test executes this branch when they bump. A repo doc
+    path is worse: ``pip install`` ships no ``docs/``, so it dangles.
+    """
+    _probe_result(monkeypatch, importable=False)
+    monkeypatch.setattr(preflight, "_in_container", lambda: in_container)
+
+    with pytest.raises(SystemExit):
+        preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    err = capsys.readouterr().err
+    assert not re.search(r"v\d+\.\d+|rocm\d|mi\d00x", err), f"stale-able version in: {err}"
+    assert not re.search(r"\bdocs/\S+\.md\b", err), f"repo doc path in: {err}"
+    # Still actionable: the command and the env var both exist in any install.
+    assert "--install-framework vllm" in err
 
 
 def test_importable_framework_proceeds(monkeypatch, capsys):
@@ -156,7 +167,8 @@ def test_container_message_omits_the_container_remedy(monkeypatch, capsys):
         preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
 
     err = capsys.readouterr().err
-    assert "already running in a container" in err
+    assert "already runs in a container" in err
+    assert "HYPERLOOM_RUN_MODE=docker" not in err
 
 
 def test_framework_falls_back_to_env_then_default(monkeypatch):
