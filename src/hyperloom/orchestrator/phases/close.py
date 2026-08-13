@@ -559,20 +559,6 @@ class ClosePhase(PhaseHandler):
             task_id: Optional task id associated with the step.
             detail: Optional free-text detail recorded on the row.
         """
-        history = self.shared_state.phase_history or []
-        if not history:
-            return
-        row = history[-1]
-        if not isinstance(row, dict):
-            return
-        evidence = row.get("evidence")
-        if not isinstance(evidence, dict):
-            evidence = {}
-            row["evidence"] = evidence
-        steps = evidence.get("close_steps")
-        if not isinstance(steps, list):
-            steps = []
-            evidence["close_steps"] = steps
         entry: dict[str, Any] = {
             "step": step,
             "status": status,
@@ -582,7 +568,12 @@ class ClosePhase(PhaseHandler):
             entry["task_id"] = task_id
         if detail:
             entry["detail"] = detail
-        steps.append(entry)
+        if not _phase_state.append_phase_evidence_row(
+            self.shared_state.phase_history,
+            key="close_steps",
+            row=entry,
+        ):
+            return
         try:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001

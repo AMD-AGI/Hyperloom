@@ -152,6 +152,59 @@ class PreludePhase(PhaseHandler):
             else "profile"
         )
 
+    def _measured_analysis_cost_sec(self) -> float:
+        """Expected cost of the initial roofline/profile arm, in seconds.
+
+        Anchored on this session's own baseline round rather than the action
+        catalog. The catalog's estimates (``baseline`` 5 min, ``roofline``
+        8 min) are calibrated on small models: the two sessions that motivated
+        this guard measured 51 and 125 minutes of baseline and an 81-minute
+        roofline, so a catalog-anchored guard admits an arm it cannot pay for.
+
+        The analysis arm boots its own server and runs the same benchmark under
+        a profiler, so one measured baseline round is a floor on its cost
+        rather than a guess at it. The catalog is the fallback for the first
+        analysis of a session that has no measurement yet.
+
+        Returns:
+            float: Expected cost in seconds; ``0.0`` when nothing is on record,
+            which :func:`machine_state.prelude_can_afford` reads as free.
+        """
+        try:
+            measured = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            measured = 0.0
+        if measured > 0.0:
+            return measured
+        registry = getattr(self, "action_registry", None)
+        meta = registry.get(self._internal_analysis_kind()) if registry is not None else None
+        try:
+            return float(getattr(meta, "cost_minutes_p50", 0.0) or 0.0) * 60.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _record_prelude_arm_dropped(self, arm: str, evidence: dict[str, Any]) -> None:
+        """Record a PRELUDE arm dropped for budget on the current phase record.
+
+        The phase record is what the session breakdown exports, so a dropped
+        arm reads as a decision with numbers behind it rather than as an arm
+        that silently never ran.
+
+        Args:
+            arm: The arm that was dropped.
+            evidence: The affordability numbers behind the decision.
+        """
+        if not _phase_state.append_phase_evidence_row(
+            getattr(self.shared_state, "phase_history", None),
+            key="budget_dropped_arms",
+            row={"arm": arm, **evidence},
+        ):
+            return
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — best-effort record
+            log.exception("PRELUDE: failed to persist the dropped-arm record for %r", arm)
+
     def _warm_recipe_proven_items(self) -> list[dict[str, str]]:
         """Summarise warm-start ``what_worked`` items the scout can skip ({name, source}); fail-soft.
 
@@ -2302,6 +2355,22 @@ class PreludePhase(PhaseHandler):
         if not isinstance(baseline_tput, (int, float)) or baseline_tput <= 0:
             return
         if (state.auto_roofline_pending_task_id or "").strip():
+            return
+        affordable, evidence = _phase_state.prelude_can_afford(
+            state,
+            expected_cost_sec=self._measured_analysis_cost_sec(),
+        )
+        if not affordable:
+            log.warning(
+                "PRELUDE: skipping the initial %s — %.0fs of preparation budget "
+                "left (bound=%s) against an expected %.0fs. The optimization "
+                "phases keep the time instead.",
+                self._internal_analysis_kind(),
+                evidence.get("affordable_sec", 0.0),
+                evidence.get("bound", ""),
+                evidence.get("expected_cost_sec", 0.0),
+            )
+            self._record_prelude_arm_dropped("initial_analysis", evidence)
             return
         try:
             rl_task = await self._enqueue_internal_analysis_task(

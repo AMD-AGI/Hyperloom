@@ -928,6 +928,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_reseed_orch_prompt_for_phase": "phase_machine",
         "_record_phase_entry_evidence": "phase_machine",
         "_internal_analysis_kind": "phase_prelude",
+        "_measured_analysis_cost_sec": "phase_prelude",
+        "_record_prelude_arm_dropped": "phase_prelude",
         "_warm_recipe_proven_items": "phase_prelude",
         "_inject_warm_recipe_history_into_ledger": "phase_prelude",
         "_filter_warm_patches_with_kg": "phase_prelude",
