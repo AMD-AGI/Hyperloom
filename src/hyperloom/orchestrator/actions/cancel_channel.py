@@ -20,9 +20,13 @@ Cooperative means exactly that: work that never looks at the scope cannot be
 stopped through it, which is why a scope also counts its listeners -- the
 canceller waits only for work that can hear it.
 
-The channel is in-process. A round running inside a Ray actor is in another
-process where this ContextVar is unset, and stops on the session deadline it
-was handed instead.
+The channel is in-process: this ContextVar is unset inside a Ray actor, so a
+round running there cannot read the scope. What crosses is the request, not the
+channel -- :class:`..executors._ray_serving.ServingLease` watches the scope on
+the submitter's side and forwards a cancel to the actor, which publishes a scope
+of its own around the round so the same reaper stops it. Work put on Ray by
+anything that does not do that forwarding is out of reach, and stops only on the
+session deadline it was handed.
 """
 
 from __future__ import annotations
