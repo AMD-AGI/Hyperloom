@@ -60,8 +60,12 @@ async def test_factory_config_map_covers_all_registry_entries(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_stall_escalation_threshold_is_operator_configurable(tmp_path: Path):
-    """Deployments whose work units differ need the escalation point to move."""
+async def test_the_stall_escalation_threshold_reaches_the_signal_from_the_config(tmp_path: Path):
+    """Deployments whose work units differ need the escalation point to move.
+
+    In code: like every other threshold on ``Config`` it is set by whoever
+    constructs it, not by an environment variable ``discover`` reads.
+    """
     config = Config(session_dir=tmp_path, robustness_server_url="", agent_stall_high_after_s=7200.0)
     bundle = build_reactor_components(config)
     try:

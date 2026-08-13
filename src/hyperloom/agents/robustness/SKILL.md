@@ -126,6 +126,13 @@ host -> subprocess -> envelope -> upstream PolicyGate path.
 | `LLM_MODEL` | no | provider default | RCA model name. With neither override set the chain is openai: `OPENAI_MODEL` → `CODEX_MODEL` → `gpt-5.6-sol`, else anthropic: `ANTHROPIC_MODEL` → `CLAUDE_MODEL` → `claude-opus-5`. |
 | `ROBUSTNESS_LLM_RCA_DISABLED` | no | unset | Set to `1` to forcibly disable the LlmRcaEngine even when credentials are present. |
 
+`Config.discover()` reads the variables above plus the deployment-shape ones
+(`ROBUSTNESS_DISABLE_LOCAL_PROBE`, `ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS`,
+`ROBUSTNESS_NODES`) and nothing else. Every threshold — stall timeouts, disk and
+shm percentages, GPU temperatures — is a field on `Config` with a default in
+`config.py`, changed in code or by whoever constructs the `Config`, not from the
+environment.
+
 ## Symptom -> intent mapping (M1 / M1.5)
 
 | Symptom | Severity | Intents emitted | Source |

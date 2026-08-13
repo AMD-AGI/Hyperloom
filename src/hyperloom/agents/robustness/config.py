@@ -96,8 +96,13 @@ class Config:
         return self.session_dir / "storage" / "coordinator.db"
 
     # -- thresholds --
+    # Set in code, by whoever constructs the Config: :meth:`discover` reads only
+    # the deployment-shape variables listed in SKILL.md, so none of the
+    # thresholds below is settable from the environment.
     gpu_temp_warn_c: float = 85.0
     agent_stall_timeout_s: float = 300.0
+    # Silence past which an agent_stall is HIGH rather than MEDIUM. Deployments
+    # whose work units differ move it; it does not grade a withheld accusation.
     agent_stall_high_after_s: float = 900.0
 
     # -- LLM for RCA (auto-detected from Claw sandbox env) --
