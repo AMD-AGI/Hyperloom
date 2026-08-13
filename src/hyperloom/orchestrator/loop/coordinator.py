@@ -1154,6 +1154,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_account_dead_holder_failures": "dispatcher",
         "_lanes_fit": "dispatcher",
         "_sequence_denial_for_action": "dispatcher",
+        "_time_budget_denial_for_action": "dispatcher",
+        "_admission_denial_for_action": "dispatcher",
         "_sequence_denial_for_request": "dispatcher",
         "_skip_gemm_tuning": "dispatcher",
         "_gemm_tuning_required_before_kernel_opt": "dispatcher",
