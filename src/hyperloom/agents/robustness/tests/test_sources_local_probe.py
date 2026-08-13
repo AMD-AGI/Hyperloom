@@ -1537,6 +1537,14 @@ async def test_a_process_probe_that_found_nothing_is_still_an_answer(monkeypatch
     assert data.local_processes_known is True
 
 
+def test_a_pathologically_nested_blob_costs_only_its_own_sub_probe():
+    """A blob written by another process must not take down the whole tick."""
+    nested = "[" * 20_000 + "]" * 20_000
+
+    assert local_probe._json_loads_or_none(nested) is None
+    assert local_probe._latest_progress_note(nested) is None
+
+
 def test_task_progress_survives_a_db_without_the_expected_columns(tmp_path):
     """An older or foreign schema degrades to "no evidence", never to an exception."""
     conn = sqlite3.connect(str(tmp_path / "coordinator.db"))

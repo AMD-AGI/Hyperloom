@@ -1532,6 +1532,10 @@ def _load_ci_metrics(
 def _json_loads_or_none(text: str) -> Any:
     """Parse JSON text, returning ``None`` instead of raising on error.
 
+    ``RecursionError`` is caught alongside the decode errors: the probe reads
+    blobs written by other processes, and a deeply nested one would otherwise
+    take down the whole tick rather than just the sub-probe that read it.
+
     Args:
         text (str): The JSON text to parse.
 
@@ -1544,7 +1548,7 @@ def _json_loads_or_none(text: str) -> Any:
 
     try:
         return json.loads(text)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, RecursionError):
         return None
 
 
