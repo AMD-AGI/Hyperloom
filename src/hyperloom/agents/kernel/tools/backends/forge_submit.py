@@ -98,6 +98,41 @@ def _knowledge_config_for_forge():
         _KNOWLEDGE_CONFIG_RESOLVED = True
         return config
 
+# Every option _run_loop_via_cli may pass to `kernel_agents.cli forge-loop`.
+# click rejects an unknown option while parsing, before running anything, so one
+# option the installed KernelForge lacks costs a whole attempt rather than
+# degrading it. Two consumers keep this honest: a unit test pins it against the
+# argv the launcher really builds, and the launcher preflight compares it against
+# the installed CLI so a mismatch fails the launch instead of every attempt.
+FORGE_LOOP_OPTIONS = frozenset(
+    {
+        "--agent-backend",
+        "--agent-fallback-provider",
+        "--deadline-unix",
+        "--driver",
+        "--experience-id",
+        "--experiment-id",
+        "--experiments-dir",
+        "--fellow",
+        "--framework",
+        "--git-branch",
+        "--gpu-target",
+        "--gpu-type",
+        "--invocation-spec-file",
+        "--kernel",
+        "--max-hours",
+        "--max-iters",
+        "--model",
+        "--operator-name",
+        "--program-md-file",
+        "--result-json",
+        "--snr-threshold",
+        "--source-files",
+        "--target-functions",
+        "--workspace",
+    }
+)
+
 _FORGE_EXPERIMENT_ID = "hyperloom"
 # Mirrors kernel_agents.cli.MIN_MAX_HOURS (1.0h): forge-loop refuses a shorter
 # runtime budget rather than running a non-productive campaign.

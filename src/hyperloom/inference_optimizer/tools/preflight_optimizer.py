@@ -88,6 +88,82 @@ def _print_rocm_snapshot() -> None:
         print("rocm_smi_stderr=", result.stderr.strip()[:500])
 
 
+def _forge_loop_options(forge_path: str) -> set[str] | None:
+    """Return the options the installed forge-loop accepts, hidden ones included.
+
+    Args:
+        forge_path: Directory holding ``kernel_agents``, as ``$FORGE_PATH`` names
+            it; empty relies on an installed package.
+
+    Returns:
+        The accepted option strings, or ``None`` when KernelForge cannot be
+        imported or exposes no ``forge-loop`` command.
+    """
+    if forge_path and forge_path not in sys.path:
+        sys.path.insert(0, forge_path)
+    try:
+        from kernel_agents import cli  # type: ignore[import-not-found]
+    except Exception as exc:
+        print("forge_loop_contract=unavailable", type(exc).__name__, str(exc)[:200])
+        return None
+
+    command = getattr(cli, "main", None)
+    command = getattr(command, "commands", {}).get("forge-loop") if command else None
+    if command is None:
+        print("forge_loop_contract=unavailable no forge-loop command")
+        return None
+
+    accepted: set[str] = set()
+    for param in command.params:
+        accepted.update(param.opts)
+        accepted.update(param.secondary_opts)
+    return accepted
+
+
+def _print_forge_loop_contract() -> bool:
+    """Report whether the installed forge-loop accepts every option we pass.
+
+    click rejects an unknown option while parsing, before running anything, so a
+    KernelForge that retired one of these loses every forge attempt with rc=2 --
+    hours into a run, and only in the per-attempt logs. Saying so at launch costs
+    a second and names the option.
+
+    Returns:
+        ``True`` when the contract holds or KernelForge is absent (a run without
+        it simply has no forge backend to break), ``False`` on a real mismatch.
+    """
+    accepted = _forge_loop_options(os.environ.get("FORGE_PATH", "").strip())
+    if accepted is None:
+        return True
+
+    repo_root = pathlib.Path(__file__).resolve().parents[3]
+    backends = repo_root / "hyperloom" / "agents" / "kernel" / "tools" / "backends"
+    if str(backends) not in sys.path:
+        sys.path.insert(0, str(backends))
+    try:
+        import forge_submit  # type: ignore[import-not-found]
+    except Exception as exc:
+        print("forge_loop_contract=unchecked", type(exc).__name__, str(exc)[:200])
+        return True
+
+    missing = sorted(set(forge_submit.FORGE_LOOP_OPTIONS) - accepted)
+    if missing:
+        print(
+            "forge_loop_contract_missing=" + ",".join(missing),
+            file=sys.stderr,
+        )
+        print(
+            "the installed forge-loop rejects these, so every forge attempt "
+            "would exit rc=2; install a KernelForge that has them or stop "
+            "passing them",
+            file=sys.stderr,
+        )
+        return False
+
+    print("forge_loop_contract_ok=", len(forge_submit.FORGE_LOOP_OPTIONS))
+    return True
+
+
 def _find_stale_processes() -> list[tuple[str, str]]:
     """Scan ``/proc`` for running processes matching known stale patterns.
 
@@ -108,8 +184,9 @@ def _find_stale_processes() -> list[tuple[str, str]]:
 def main() -> int:
     """Run launcher preflight checks and return a process exit code.
 
-    Validates the model path, prints torch/ROCm visibility, and reports any
-    stale optimizer/server processes.
+    Validates the model path, prints torch/ROCm visibility, checks the forge-loop
+    argv contract against the installed KernelForge, and reports any stale
+    optimizer/server processes.
 
     Returns:
         ``0`` when every check passes, otherwise ``2``.
@@ -128,6 +205,9 @@ def main() -> int:
         print(f"model_path_ok={model_path}")
 
     if not _print_torch_visibility():
+        ok = False
+
+    if not _print_forge_loop_contract():
         ok = False
 
     _print_rocm_snapshot()

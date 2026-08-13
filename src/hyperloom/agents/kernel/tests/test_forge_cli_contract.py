@@ -129,6 +129,22 @@ def test_every_option_the_launcher_passes_exists_in_the_installed_forge_loop(
     )
 
 
+def test_the_declared_option_set_matches_the_argv_the_launcher_builds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The launcher preflight checks a declared set, so it must not drift.
+
+    Nothing in the image can capture an argv, so the preflight compares
+    ``FORGE_LOOP_OPTIONS`` against the installed CLI. That is only meaningful
+    while this holds.
+    """
+    argv = _maximal_launcher_argv(tmp_path, monkeypatch)
+    passed = {token for token in argv if token.startswith("--")}
+
+    assert passed == set(forge_submit.FORGE_LOOP_OPTIONS)
+
+
 def test_the_probe_would_notice_an_option_that_disappeared(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
