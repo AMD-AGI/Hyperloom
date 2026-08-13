@@ -133,6 +133,37 @@ FORGE_LOOP_OPTIONS = frozenset(
     }
 )
 
+def forge_loop_contract_gaps() -> list[str] | None:
+    """Return the options in :data:`FORGE_LOOP_OPTIONS` that forge-loop rejects.
+
+    Resolves the same KernelForge a dispatch would, so the answer describes the
+    build that will actually run rather than whatever is newest upstream.
+    Introspects the click command instead of ``--help`` because a hidden option
+    is absent from help text -- ``--shapes-json`` was hidden.
+
+    Returns:
+        The rejected options, ``[]`` when the contract holds, or ``None`` when
+        KernelForge cannot be introspected (a run without it has no forge
+        backend to break).
+    """
+    _ensure_forge_on_path()
+    try:
+        from kernel_agents import cli as forge_cli  # type: ignore[import-not-found]
+    except Exception:
+        return None
+
+    group = getattr(forge_cli, "main", None)
+    command = getattr(group, "commands", {}).get("forge-loop") if group else None
+    if command is None:
+        return None
+
+    accepted: set[str] = set()
+    for param in command.params:
+        accepted.update(param.opts)
+        accepted.update(param.secondary_opts)
+    return sorted(FORGE_LOOP_OPTIONS - accepted)
+
+
 _FORGE_EXPERIMENT_ID = "hyperloom"
 # Mirrors kernel_agents.cli.MIN_MAX_HOURS (1.0h): forge-loop refuses a shorter
 # runtime budget rather than running a non-productive campaign.

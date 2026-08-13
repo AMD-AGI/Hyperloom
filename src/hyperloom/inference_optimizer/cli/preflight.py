@@ -1030,6 +1030,41 @@ def _check_tracelens_cli() -> None:
     sys.exit(2)
 
 
+def _check_forge_loop_contract() -> None:
+    """Hard-gate the forge-loop argv against the KernelForge this run will use.
+
+    click rejects an unknown option while parsing, before running anything, so a
+    KernelForge that retired one of the options the launcher passes loses every
+    forge attempt with rc=2 -- and the session still finishes looking healthy,
+    with no kernel work and nothing in the report to say why. Hyperloom and
+    KernelForge are separate repositories resolved through ``$FORGE_PATH``, so
+    this pairing is only knowable here, at launch.
+    """
+    try:
+        from hyperloom.agents.kernel.tools.backends import forge_submit
+    except Exception as exc:  # noqa: BLE001 - a broken import is not this gate's news
+        print(f"Preflight: WARNING — forge-loop contract unchecked ({exc})")
+        return
+
+    missing = forge_submit.forge_loop_contract_gaps()
+    if missing is None:
+        print("Preflight: forge-loop contract unchecked (KernelForge not importable)")
+        return
+    if not missing:
+        print(f"Preflight: forge-loop contract OK ({len(forge_submit.FORGE_LOOP_OPTIONS)} options)")
+        return
+
+    print(
+        f"ERROR: the installed forge-loop rejects {missing}. click exits 2 on the "
+        f"first unknown option, so every forge attempt would be lost while the "
+        f"session still reported success with no kernel work. Either install a "
+        f"KernelForge that declares them (check $FORGE_PATH) or stop passing them "
+        f"from forge_submit.FORGE_LOOP_OPTIONS. Refusing to start.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 def _check_tracelens_root_exists() -> None:
     """Hard-gate an explicitly set ``TRACELENS_ROOT`` at preflight.
 
@@ -1710,6 +1745,12 @@ def _preflight(
                 f"Preflight: WARNING — TraceLens CLI(s) not on PATH: {_missing_tl} "
                 f"(skipped; --no-kernel + roofline disabled)"
             )
+
+    # --- forge-loop argv contract (HARD-FAIL unless --no-kernel) ---
+    # A retired option costs every forge attempt while the session still reports
+    # success, so this pairing is checked before the Coordinator starts.
+    if not no_kernel:
+        _check_forge_loop_contract()
 
     # --- IR-3: PR Monitor reachability probe (soft degrade) ---
     if args is not None:

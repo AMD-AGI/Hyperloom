@@ -1,78 +1,77 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Launcher preflight for the forge-loop argv contract.
+"""The launch-time gate on the forge-loop argv contract.
 
-The image that runs a session is the only place that knows which KernelForge is
-installed, and a retired option there costs every forge attempt rc=2 -- hours
-into the run, visible only in per-attempt logs. The preflight turns that into a
-launch-time failure that names the option.
+Hyperloom resolves KernelForge through ``$FORGE_PATH``, so which build a session
+will dispatch is only knowable at launch. A retired option costs every forge
+attempt with rc=2 while the session still finishes reporting success, so the
+preflight refuses to start instead.
 """
 
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
-
 import pytest
 
-_MODULE_PATH = (
-    Path(__file__).resolve().parents[1] / "tools" / "preflight_optimizer.py"
-)
-_SPEC = importlib.util.spec_from_file_location("preflight_optimizer", _MODULE_PATH)
-assert _SPEC and _SPEC.loader
-preflight = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(preflight)
+from hyperloom.agents.kernel.tools.backends import forge_submit
+from hyperloom.inference_optimizer.cli import preflight
 
 
-def _declared_options() -> set[str]:
-    import sys
-
-    backends = (
-        Path(__file__).resolve().parents[3]
-        / "hyperloom"
-        / "agents"
-        / "kernel"
-        / "tools"
-        / "backends"
-    )
-    sys.path.insert(0, str(backends))
-    import forge_submit
-
-    return set(forge_submit.FORGE_LOOP_OPTIONS)
-
-
-def test_a_forge_loop_missing_one_option_fails_the_launch(
+def test_a_forge_loop_missing_one_option_refuses_to_start(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    declared = _declared_options()
     retired = "--gpu-type"
-    assert retired in declared, "pick an option the launcher actually passes"
-    monkeypatch.setattr(
-        preflight, "_forge_loop_options", lambda _path: declared - {retired}
-    )
+    assert retired in forge_submit.FORGE_LOOP_OPTIONS
+    monkeypatch.setattr(forge_submit, "forge_loop_contract_gaps", lambda: [retired])
 
-    assert preflight._print_forge_loop_contract() is False
+    with pytest.raises(SystemExit) as exit_info:
+        preflight._check_forge_loop_contract()
+
+    assert exit_info.value.code == 2
     assert retired in capsys.readouterr().err
 
 
-def test_a_matching_forge_loop_passes(
+def test_a_matching_forge_loop_starts(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # A newer KernelForge may accept more than we pass; only shortfalls matter.
-    accepted = _declared_options() | {"--some-new-option"}
-    monkeypatch.setattr(preflight, "_forge_loop_options", lambda _path: accepted)
+    monkeypatch.setattr(forge_submit, "forge_loop_contract_gaps", lambda: [])
 
-    assert preflight._print_forge_loop_contract() is True
-    assert "forge_loop_contract_ok" in capsys.readouterr().out
+    preflight._check_forge_loop_contract()
+
+    assert "forge-loop contract OK" in capsys.readouterr().out
 
 
-def test_an_absent_kernelforge_does_not_fail_the_launch(
+def test_an_uninspectable_kernelforge_does_not_block_the_launch(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A run without KernelForge has no forge backend to break."""
-    monkeypatch.setattr(preflight, "_forge_loop_options", lambda _path: None)
+    """A run that cannot import KernelForge has no forge backend to break."""
+    monkeypatch.setattr(forge_submit, "forge_loop_contract_gaps", lambda: None)
 
-    assert preflight._print_forge_loop_contract() is True
+    preflight._check_forge_loop_contract()
+
+    assert "unchecked" in capsys.readouterr().out
+
+
+def test_the_gate_reads_the_kernelforge_a_dispatch_would_use(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """`$FORGE_PATH` decides, so the gate must resolve it the same way.
+
+    Reading an installed package while a dispatch would use $FORGE_PATH would
+    check a build that never runs.
+    """
+    resolved: list[str] = []
+    monkeypatch.setattr(
+        forge_submit,
+        "_ensure_forge_on_path",
+        lambda: resolved.append("resolved") or "",
+    )
+    monkeypatch.setenv("FORGE_PATH", str(tmp_path))
+
+    forge_submit.forge_loop_contract_gaps()
+
+    assert resolved == ["resolved"]

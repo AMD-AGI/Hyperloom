@@ -1,17 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The forge-loop argv contract, checked against the installed KernelForge.
+"""The declared forge-loop option set, pinned against the argv really built.
 
-Hyperloom and KernelForge are separate repositories, wired together at runtime
-through ``$FORGE_PATH``, so nothing else makes them agree on this argv. click
-rejects an unknown option while parsing, before running anything, which is why a
-single retired or renamed option costs an entire attempt instead of degrading
-it: 22 attempts were lost to ``--shapes-json`` alone.
+`FORGE_LOOP_OPTIONS` is what the launch-time gate compares against the installed
+KernelForge. Nothing in a running image can capture an argv, so the declaration
+is the gate's only account of what the launcher sends -- and a stale declaration
+makes the gate worse than useless: it would pass while the run still lost every
+attempt to an option the declaration forgot.
 
-Reading ``--help`` is not enough. Hidden options are absent from it, so a check
-built on help text cannot see the ones most likely to be retired -- ``--help``
-listed neither ``--shapes-json`` nor its removal.
+The gate itself, and the KernelForge it reads, are covered by
+``inference_optimizer/tests/test_preflight_forge_contract.py``. Nothing here
+touches KernelForge, so this holds wherever the suite runs.
 """
 
 from __future__ import annotations
@@ -27,28 +27,11 @@ sys.path.insert(0, str(_BACKENDS_DIR))
 import forge_submit  # noqa: E402
 
 
-def _installed_forge_loop_options() -> set[str]:
-    """Every option the installed forge-loop accepts, hidden ones included."""
-
-    cli = pytest.importorskip(
-        "kernel_agents.cli",
-        reason="KernelForge is not installed, so its argv cannot be checked",
-    )
-    command = cli.main.commands.get("forge-loop")
-    if command is None:
-        pytest.fail("the installed kernel_agents CLI has no forge-loop command")
-    supported: set[str] = set()
-    for param in command.params:
-        supported.update(param.opts)
-        supported.update(param.secondary_opts)
-    return supported
-
-
 def _maximal_launcher_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Build the argv with every conditional option present.
 
-    Options this launcher only adds for some candidates are exactly the ones a
-    narrower test would miss, so each condition is satisfied here.
+    Options the launcher only adds for some candidates are exactly the ones a
+    narrower probe would miss, so each condition is satisfied here.
     """
     workspace = tmp_path / "worktree"
     workspace.mkdir()
@@ -110,50 +93,12 @@ def _maximal_launcher_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> l
     return captured["command"]
 
 
-def test_every_option_the_launcher_passes_exists_in_the_installed_forge_loop(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    supported = _installed_forge_loop_options()
-    argv = _maximal_launcher_argv(tmp_path, monkeypatch)
-    passed = {token for token in argv if token.startswith("--")}
-
-    assert passed, "the launcher argv carries no options; the probe is broken"
-    missing = sorted(passed - supported)
-    assert not missing, (
-        "the installed forge-loop does not accept "
-        + ", ".join(missing)
-        + ". click exits 2 on the first unknown option, so every forge attempt "
-        "would be lost. Either stop passing it or install a KernelForge that "
-        "has it."
-    )
-
-
 def test_the_declared_option_set_matches_the_argv_the_launcher_builds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The launcher preflight checks a declared set, so it must not drift.
-
-    Nothing in the image can capture an argv, so the preflight compares
-    ``FORGE_LOOP_OPTIONS`` against the installed CLI. That is only meaningful
-    while this holds.
-    """
     argv = _maximal_launcher_argv(tmp_path, monkeypatch)
     passed = {token for token in argv if token.startswith("--")}
 
+    assert passed, "the launcher argv carries no options; the probe is broken"
     assert passed == set(forge_submit.FORGE_LOOP_OPTIONS)
-
-
-def test_the_probe_would_notice_an_option_that_disappeared(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A green contract test must be able to fail; pin that it can."""
-    argv = _maximal_launcher_argv(tmp_path, monkeypatch)
-    passed = {token for token in argv if token.startswith("--")}
-    supported = _installed_forge_loop_options()
-    sentinel = "--kernel"
-
-    assert sentinel in passed and sentinel in supported
-    assert sentinel in passed - (supported - {sentinel})
