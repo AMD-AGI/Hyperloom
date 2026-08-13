@@ -96,6 +96,7 @@ def _projection(entry: dict) -> dict:
         "reusable_native_kernel",
         "kernel_contract",
         "is_multigpu",
+        "candidate_source",
     )
     return {k: entry[k] for k in keep if k in entry}
 
@@ -206,7 +207,10 @@ def test_trace_projection_preserves_collective_queue_isolation(tmp_path):
         {
             "status": "ok",
             "hot_kernels": [
-                _collective_entry(is_multigpu=True),
+                _collective_entry(
+                    is_multigpu=True,
+                    candidate_source="nccl_summary",
+                ),
             ],
             "trace_health_warnings": [],
         },
@@ -219,6 +223,59 @@ def test_trace_projection_preserves_collective_queue_isolation(tmp_path):
     # The prompt offers this list as the kernel_opt target set, so a collective
     # left in it would dispatch an empty batch on every pick.
     assert state.last_trace_analyze["reusable_native_kernel_ids"] == []
+    codes = {
+        w.get("code") for w in state.last_trace_analyze["trace_health_warnings"]
+    }
+    assert "collective_lane_withheld_kernels" in codes
+
+
+@pytest.mark.parametrize(
+    "entry,reason",
+    [
+        (
+            {
+                "kernel_contract": {"kind": "collective", "collective_op": "reduce"},
+                "is_multigpu": True,
+                "candidate_source": "nccl_summary",
+            },
+            "a single-GPU reduction the lane cannot measure",
+        ),
+        (
+            {
+                "kernel_contract": {"kind": "collective", "collective_op": "broadcast"},
+                "is_multigpu": True,
+                "candidate_source": "nccl_summary",
+            },
+            "a primitive outside the lane's supported set",
+        ),
+        (
+            {
+                "kernel_contract": {"kind": "collective", "collective_op": "all_reduce"},
+                "is_multigpu": True,
+                "candidate_source": "",
+            },
+            "a name/path heuristic match the lane never injected",
+        ),
+    ],
+)
+def test_a_kernel_the_collective_lane_cannot_admit_stays_routable(tmp_path, entry, reason):
+    """The contract's ``collective`` kind is a heuristic, not lane ownership.
+
+    It also fires on a plain ``block_reduce`` and on any source under ``dist/``.
+    The lane is opt-in and admits none of these, so withholding them from
+    kernel_opt would leave them with no lane at all.
+    """
+    state = SharedState.load_or_init(tmp_path)
+    state.record_trace_analyze(
+        {"trace_input": "/trace"},
+        {
+            "status": "ok",
+            "hot_kernels": [_collective_entry(**entry)],
+            "trace_health_warnings": [],
+        },
+    )
+
+    assert state.last_trace_analyze["reusable_native_kernel_ids"] == ["k007"], reason
 
 
 def test_multigpu_hint_without_collective_contract_stays_routable(tmp_path):

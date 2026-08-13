@@ -3000,7 +3000,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             or artifacts.get("tracelens_steady_state_trace")
             or ""
         )
-        summary, kernel_roofline, reusable_ids = self._build_hot_kernel_summaries(result, kernel_roofline_path)
+        summary, kernel_roofline, reusable_ids, withheld_collective = (
+            self._build_hot_kernel_summaries(result, kernel_roofline_path)
+        )
 
         # Project skipped (non-routable) candidates so the LLM sees unoptimizable operators.
         skipped = result.get("skipped_kernels") or []
@@ -3027,6 +3029,26 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             for entry in raw_warnings:
                 if isinstance(entry, dict) and entry.get("code"):
                     warnings_cleaned.append(dict(entry))
+        if withheld_collective:
+            log.warning(
+                "kernel targets: withholding %d collective kernel(s) from kernel_opt "
+                "for the collective lane: %s",
+                len(withheld_collective),
+                ", ".join(
+                    f"{item['kernel_id']}({item['name'][:60]})"
+                    for item in withheld_collective
+                ),
+            )
+            warnings_cleaned.append(
+                {
+                    "code": "collective_lane_withheld_kernels",
+                    "detail": (
+                        "reserved for the collective lane and removed from the "
+                        "kernel_opt target list; unreachable unless that lane runs"
+                    ),
+                    "kernels": withheld_collective,
+                }
+            )
 
         # Monotonic snapshot counter: read previous value + 1.
         prev_snapshot_id = 0
@@ -3125,14 +3147,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         self,
         result: dict[str, Any],
         kernel_roofline_path: str,
-    ) -> "tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]":
-        """Build ``(summary, kernel_roofline, reusable_ids)`` from the top-N hot
-        kernels, merging the optional per-kernel rocprof roofline sidecar.
+    ) -> "tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[dict[str, Any]]]":
+        """Build ``(summary, kernel_roofline, reusable_ids, withheld)`` from the
+        top-N hot kernels, merging the optional per-kernel rocprof roofline sidecar.
 
         ``reusable_ids`` drives the kernel_opt target list offered to the LLM,
         so collective candidates are withheld: they are owned by the dedicated
         collective lane and ``_batch_kernel_candidates`` drops them, which would
         otherwise dispatch an empty batch for every id picked from this list.
+        ``withheld`` names them, because a kernel that no lane will touch must
+        not simply vanish from the target list.
         """
         from ..kernel import _kernel_decisions as _m
 
@@ -3140,6 +3164,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         summary: list[dict[str, Any]] = []
         kernel_roofline: list[dict[str, Any]] = []
         reusable_ids: list[str] = []
+        withheld: list[dict[str, Any]] = []
         rocprof_by_kernel_id: dict[str, Any] = {}
         if kernel_roofline_path:
             try:
@@ -3184,6 +3209,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 "reusable_native_kernel": reusable,
                 "kernel_contract": entry.get("kernel_contract"),
                 "is_multigpu": entry.get("is_multigpu") is True,
+                # Carries the collective lane's ownership test downstream; without
+                # it every reader would re-derive ownership from the name alone.
+                "candidate_source": entry.get("candidate_source") or "",
                 "recommended_backends": entry.get("recommended_backends") or [],
                 "recommended_actions": entry.get("recommended_actions") or [],
             }
@@ -3203,9 +3231,18 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 )
             ):
                 kernel_roofline.append(dict(summary_entry))
-            if reusable and kid and not _m.is_collective_candidate(summary_entry):
-                reusable_ids.append(str(kid))
-        return summary, kernel_roofline, reusable_ids
+            if reusable and kid:
+                if _m.is_collective_candidate(summary_entry):
+                    withheld.append(
+                        {
+                            "kernel_id": str(kid),
+                            "name": str(entry.get("name") or ""),
+                            "gpu_pct": entry.get("gpu_pct"),
+                        }
+                    )
+                else:
+                    reusable_ids.append(str(kid))
+        return summary, kernel_roofline, reusable_ids, withheld
 
     def _append_roofline_snapshot_history(
         self,

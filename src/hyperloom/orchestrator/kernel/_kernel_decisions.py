@@ -1267,12 +1267,27 @@ def record_gemm_tuning(state, result: dict[str, Any]) -> None:
 
 
 def is_collective_candidate(candidate: dict[str, Any]) -> bool:
-    """Return whether a trace row requires the dedicated collective lane."""
+    """Return whether a trace row requires the dedicated collective lane.
+
+    The contract's ``collective`` kind is a name/path heuristic: it also fires on
+    a single-GPU ``block_reduce`` and on anything whose source sits under a
+    ``dist/`` directory. Withholding those from the other lanes would strand them,
+    because the collective lane is opt-in and only admits an injected
+    nccl-summary row whose primitive it can actually measure. So the ownership
+    test is the lane's own admission test, not the heuristic.
+    """
+    from .request_handlers import SUPPORTED_COLLECTIVE_OPS
+
     contract = candidate.get("kernel_contract")
-    return bool(
-        isinstance(contract, dict)
-        and str(contract.get("kind") or "") == "collective"
-    )
+    if not isinstance(contract, dict):
+        return False
+    if str(contract.get("kind") or "") != "collective":
+        return False
+    if str(contract.get("collective_op") or "") not in SUPPORTED_COLLECTIVE_OPS:
+        return False
+    if str(candidate.get("candidate_source") or "").strip() != "nccl_summary":
+        return False
+    return candidate.get("is_multigpu") is True
 
 
 def _kernel_ids_in_optimization_stack(state) -> set[str]:
