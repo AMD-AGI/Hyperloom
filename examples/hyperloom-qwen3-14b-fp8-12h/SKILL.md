@@ -131,7 +131,8 @@ export REPO_ROOT="$(pwd -P)"
 # caller values, matching install.sh's restore rule.
 _dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
 set -a; . "${REPO_ROOT}/.env"; set +a
-eval "$_dotenv_prev" 2>/dev/null || true; unset _dotenv_prev
+eval "$_dotenv_prev" 2>/dev/null || echo "warning: could not restore the caller's environment" >&2
+unset _dotenv_prev
 export USER_DATA_PATH="${USER_DATA_PATH:?USER_DATA_PATH missing}"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 ulimit -Sn 65536 || true

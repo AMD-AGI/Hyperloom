@@ -28,6 +28,10 @@ RECIPE_DOCS = (
     REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h" / "SKILL.md",
 )
 
+# Loads only credential vars, so the path-variable assertions above do not apply,
+# but .env must still not outrank a credential the caller exported.
+CREDENTIAL_ONLY_DOC = REPO_ROOT / "docs" / "how-to" / "optimize-custom-workload.md"
+
 _FENCE = re.compile(r"^```(?:bash|sh)\s*$")
 _FENCE_END = re.compile(r"^```\s*$")
 
@@ -151,3 +155,21 @@ def test_recipe_lets_dotenv_fill_a_blank_export(doc: Path, tmp_path: Path) -> No
     result = _run_recipe(_extract_dotenv_load(doc), tmp_path, {"USER_DATA_PATH": ""})
 
     assert result["USER_DATA_PATH"] == "/from/dotenv"
+
+
+def test_credential_only_recipe_keeps_the_callers_key(tmp_path: Path) -> None:
+    """install.sh snapshots the same credential vars for this exact reason.
+
+    A stale token in .env must not replace the one the caller exported, even
+    though this recipe filters the load down to credentials.
+    """
+    if not CREDENTIAL_ONLY_DOC.exists():
+        pytest.skip(f"{CREDENTIAL_ONLY_DOC} not present in this layout")
+
+    fragment = _extract_dotenv_load(CREDENTIAL_ONLY_DOC)
+
+    kept = _run_recipe(fragment, tmp_path, {"OPENAI_API_KEY": "key-from-caller"})
+    assert kept["OPENAI_API_KEY"] == "key-from-caller"
+
+    filled = _run_recipe(fragment, tmp_path, {})
+    assert filled["OPENAI_API_KEY"] == "key-from-dotenv"
