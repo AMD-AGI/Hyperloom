@@ -94,6 +94,29 @@ from _analysis_md import render_report
 # outside an importable hyperloom, where the artifact is simply not written.
 try:
     from hyperloom.common import kernel_source_contract as _KSC
+
+    # This script runs as a standalone subprocess against the *installed*
+    # hyperloom, which need not be the same tree as this file (cf.
+    # runtime/source-mirrors/). A contract module that predates the API used
+    # below would raise AttributeError at first use and abort the whole
+    # analysis rather than degrade. Treat an incompatible (too-old) module as
+    # absent so the ``_KSC is not None`` guards below fall back to an unwritten
+    # artifact instead of crashing.
+    if not all(
+        hasattr(_KSC, _name)
+        for _name in (
+            "METHOD_ACTIVE_FINDER",
+            "METHOD_SYMBOL_INDEX",
+            "METHOD_CURATED",
+            "METHOD_GREP",
+            "METHOD_UNRESOLVED",
+            "KNOWN_METHODS",
+            "make_entry",
+            "make_document",
+            "validate_document",
+        )
+    ):
+        _KSC = None  # type: ignore[assignment]
 except ImportError:  # pragma: no cover - standalone invocation
     _KSC = None  # type: ignore[assignment]
 
@@ -130,12 +153,6 @@ def _default_top_k() -> int:
     return val if val > 0 else 1_000_000
 
 
-# Dict-first op-to-source resolver; op_to_source.json is the curated ground truth.
-# Dispatch entries narrow by trace kernel name; single/composite fan out editable sources.
-
-# Vendored ground-truth dictionary (committed under tools/data/).
-_OP_TO_SOURCE_JSON = Path(__file__).resolve().parent / "data" / "op_to_source.json"
-
 # Statuses that mean "we have an editable device source to optimize".
 _ROUTABLE_STATUS = "resolved"
 
@@ -148,10 +165,41 @@ _PHASE_SUFFIX_RE = re.compile(r"\s*\((?:prefill|decode|prefilldecode|mixed)\)\s*
 _NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip", ".h")
 _PY_DIST_ROOT = "/usr/local/lib/python3.12/dist-packages/"
 
+# Active-finder resolver: resolve a kernel to its editable source in the
+# *currently installed* framework tree by demangling its device symbol. This is
+# the deterministic op->source tier (it replaces the retired static op_to_source
+# map) and self-heals across file moves/renames and vLLM/aiter/sglang version
+# drift. On a miss the pipeline falls through to the trace-stack/grep/LLM tiers.
+# Optional: if the finder modules are unavailable, tier-1 resolution is skipped.
+try:  # package import (TraceLens route / tests)
+    from . import kernel_source_index as _kernel_source_index
+    from . import source_resolver as _active_finder
+except ImportError:  # flat import (standalone: tools/ on sys.path)
+    try:
+        import kernel_source_index as _kernel_source_index  # type: ignore[no-redef]
+        import source_resolver as _active_finder  # type: ignore[no-redef]
+    except ImportError:
+        _kernel_source_index = None  # type: ignore[assignment]
+        _active_finder = None  # type: ignore[assignment]
+
+_ACTIVE_FINDER_METHOD = getattr(_KSC, "METHOD_ACTIVE_FINDER", "active_finder")
+
+# Resolution methods whose verdict is carried on the ``op_to_source_*`` fields
+# and honored directly by classify_patchability (instead of re-running its
+# heuristics). The active finder is the deterministic tier; ``op_to_source`` is
+# retained only for backward compatibility with any externally-supplied verdict.
+_CURATED_LIKE_METHODS = frozenset({"op_to_source", _ACTIVE_FINDER_METHOD, "symbol_index"})
+
 
 @dataclass
 class OpResolution:
-    """One op's resolution against the ground-truth dictionary.
+    """One op's resolved editable source, as produced by the active finder.
+
+    The finder resolves a single device symbol to a single source, so in the
+    current pipeline it only ever emits ``kind="single"`` with empty
+    ``kernel_kinds`` / ``prebuilt_binaries``. The ``dispatch`` / ``composite`` /
+    fan-out fields and the per-source metadata are retained for the container
+    shape and any external caller; they are inert on the finder path.
 
     Attributes:
         op_name: The CPU op name that was looked up.
@@ -165,7 +213,8 @@ class OpResolution:
         reason: Skip reason (``triton``/``aten``/...) or the entry ``label``.
         matched_route: For ``dispatch``, the ``match`` glob that fired.
         fanout: For ``composite``, one sub-resolution per route that all run.
-        resolution_method: Always ``op_to_source`` (stamped onto candidates).
+        resolution_method: The resolver that produced this verdict (the active
+            finder, ``active_finder``); stamped onto candidates for the audit.
         target_index: Which of ``sources`` this (possibly fanned-out) leaf
             optimizes; see :meth:`leaf_resolutions`.
     """
@@ -179,9 +228,9 @@ class OpResolution:
     reason: str = ""
     matched_route: str | None = None
     fanout: list["OpResolution"] = field(default_factory=list)
-    resolution_method: str = "op_to_source"
+    resolution_method: str = _ACTIVE_FINDER_METHOD
     target_index: int = 0
-    # Per-source curated metadata (aligned with ``sources``): the JSON
+    # Per-source metadata (aligned with ``sources``): the kernel
     # ``kernel_kind`` (``aiter_ck`` / ``aiter_asm`` / ``triton`` / ...) and the
     # optional ``prebuilt_binary`` (a hand-written ``.co`` the ``.cu`` dispatcher
     # loads). Routing reads these to send ASM compute-cores to skip and CK
@@ -278,421 +327,6 @@ class OpResolution:
         if pb:
             item["prebuilt_binary"] = pb
         self.stamp_onto(item)
-
-
-@lru_cache(maxsize=1)
-def load_mapping() -> dict[str, Any]:
-    """Load and cache the vendored ground-truth ``data/op_to_source.json``.
-
-    Returns:
-        The parsed mapping (op name -> entry), or ``{}`` if unreadable.
-
-    The committed JSON stores each op's editable source NESTED as
-    ``sglang``/``vllm`` -> ``{<device_kernel_name>: {kernel_source_path, ...}}``,
-    which :class:`OpResolver` reads directly (no schema bridging).
-    """
-    try:
-        with open(_OP_TO_SOURCE_JSON, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _remap_aiter_meta(path: str) -> str:
-    """Remap a JSON ``…/aiter_meta/csrc/`` source path to the LIVE aiter csrc root.
-
-    The op_to_source.json is built in the python3.12 image where aiter ships as the
-    ``aiter_meta`` package (``/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/…``).
-    On a serve box where aiter lives elsewhere (e.g. python3.10 + ``/sgl-workspace/aiter``),
-    those paths don't exist, so HL's ``Path.exists()`` patchable gate drops EVERY CK/aiter
-    kernel (ck_moe, moe_sorting, topk_softmax, quant, …). Rewrite the build-time
-    ``aiter_meta/csrc/`` prefix to the runtime aiter csrc root reported by the installed
-    package (:func:`_aiter_csrc_root`). No-op when the live root is unknown or the path
-    isn't an aiter_meta path, so it's safe on the original python3.12 layout too.
-    """
-    if not path or "aiter_meta/csrc/" not in path:
-        return path
-    live = _aiter_csrc_root()  # e.g. "/sgl-workspace/aiter/csrc/"
-    if not live:
-        return path
-    idx = path.find("aiter_meta/csrc/")
-    tail = path[idx + len("aiter_meta/csrc/") :]
-    remapped = live.rstrip("/") + "/" + tail
-    # Only adopt the remap if it actually resolves on disk; else keep original.
-    return remapped if os.path.exists(remapped) else path
-
-
-def _absolutize_source(path: str) -> str:
-    """Best-effort absolutize a kernel source path (JSON is pre-absolutized; defensive)."""
-    if not path:
-        return path
-    abs_path = path if path.startswith("/") else _PY_DIST_ROOT + path
-    return _remap_aiter_meta(abs_path)
-
-
-def _is_editable_source(path: str | None, kernel_kind: str | None) -> bool:
-    """True for an editable kernel source we can route one GEAK run at.
-
-    Editable means either native device code (``.cu``/``.cuh``/``.hip``/``.h``) or a
-    repo-resident Triton/TileLang ``.py`` kernel. The ``.py`` case is gated only
-    against *generated* Triton: ``triton_inductor_generated`` and any
-    ``torchinductor`` / ``/tmp/`` path are excluded because they are regenerated
-    code, not an editable repo source. The leaf's ``kernel_kind``
-    (``triton``/``tilelang``/...) does NOT otherwise restrict editability -- a
-    repo ``.py`` Triton/TileLang kernel is as routable as a native source.
-    """
-    if not path:
-        return False
-    low = path.lower()
-    if low.endswith(_NATIVE_SOURCE_EXTS):
-        return True
-    if low.endswith(".py"):
-        if kernel_kind == "triton_inductor_generated":
-            return False
-        if "torchinductor" in path or path.startswith("/tmp/"):  # nosec B108 - marker for generated compiler artifacts.
-            return False
-        return True
-    return False
-
-
-def _nonrewritable_reason(entry: dict[str, Any]) -> str:
-    """Derive a skip reason for an entry with no editable source (audit/classify)."""
-    kinds = {
-        str((info or {}).get("kernel_kind") or "")
-        for cont in ("vllm", "sglang")
-        for info in (entry.get(cont) or {}).values()
-    }
-    kinds.discard("")
-    if kinds and kinds <= {"triton_inductor_generated"}:
-        return "inductor-generated kernels (no editable source)"
-    return "no editable native/triton source"
-
-
-class OpResolver:
-    """Reads the ground-truth dictionary and resolves a CPU op to its editable source.
-
-    The JSON stores, per op, the device kernels seen in each container under
-    ``vllm`` / ``sglang`` as ``{device_kernel_name: {kernel_source_path, ...}}``.
-    Routability is derived (no stored ``status``): an op is routable iff its
-    selected container has at least one ``patchable`` kernel whose
-    ``kernel_source_path`` is an editable source -- native ``.cu``/``.cuh``/``.hip``
-    OR a repo-resident Triton/TileLang ``.py`` kernel (only inductor-generated /
-    ``torchinductor`` / ``/tmp/`` Triton is excluded; see
-    :func:`_is_editable_source`).
-
-    Resolution by ``kind``: ``single`` -> the container's editable source(s)
-    (fanned out one GEAK run each); ``dispatch`` -> the single kernel whose name
-    matches the trace ``device_kernel_name``; ``composite`` -> a fan-out over all
-    editable kernels in the container. A dictionary miss returns ``None`` so the
-    caller falls back to the ``.py`` launcher + shapes (GEAK handles it).
-
-    ``single`` and ``composite`` route identically (both dedup the selected
-    container's editable sources and run one GEAK pass per distinct file). The
-    distinction is purely semantic ownership: ``single`` is one logical op's own
-    kernels (variants/phases), ``composite`` is an explicit fusion of distinct,
-    independently-owned kernels. Only ``dispatch`` changes the resolved result.
-    """
-
-    def __init__(self, mapping: dict[str, Any]):
-        self.mapping = mapping
-
-    def resolve_op_source(
-        self,
-        op_name: str,
-        framework: str | None = None,
-        device_kernel_name: str | None = None,
-    ) -> OpResolution | None:
-        """Resolve ``op_name`` to an :class:`OpResolution`, or ``None`` on a dict miss."""
-        op_name = _PHASE_SUFFIX_RE.sub("", op_name)
-        entry = self.mapping.get(op_name)
-        if entry is None:
-            return None
-        kind = str(entry.get("kind") or "single")
-        if kind == "dispatch":
-            return self._dispatch(op_name, entry, framework, device_kernel_name)
-        if kind == "composite":
-            return self._composite(op_name, entry, framework, device_kernel_name)
-        return self._single(op_name, entry, framework)
-
-    @staticmethod
-    def _container_source_meta(
-        container: dict[str, Any] | None,
-    ) -> list[tuple[str, str, str]]:
-        """Editable patchable ``(abs_path, kernel_kind, prebuilt_binary)`` for one container.
-
-        Dedups by path (first occurrence wins, order-preserving) so the per-source
-        ``kernel_kind`` / ``prebuilt_binary`` stay aligned with the path list.
-        """
-        out: list[tuple[str, str, str]] = []
-        seen: set[str] = set()
-        for info in (container or {}).values():
-            if not isinstance(info, dict) or not info.get("patchable"):
-                continue
-            path = info.get("kernel_source_path")
-            if not _is_editable_source(path, info.get("kernel_kind")):
-                continue
-            abs_path = _absolutize_source(str(path))
-            if abs_path in seen:
-                continue
-            seen.add(abs_path)
-            out.append(
-                (
-                    abs_path,
-                    str(info.get("kernel_kind") or ""),
-                    str(info.get("prebuilt_binary") or ""),
-                )
-            )
-        return out
-
-    def _select_source_meta(
-        self,
-        entry: dict[str, Any],
-        framework: str | None,
-    ) -> list[tuple[str, str, str]]:
-        """Pick the editable ``(path, kernel_kind, prebuilt_binary)`` list per container.
-
-        When both containers carry editable sources, prefer whichever is present
-        on disk; otherwise honor the ``framework`` hint (only ``vllm``/``sglang``
-        are recognized -- any other value falls through), then default to sglang.
-        """
-
-        def present(path: str) -> bool:
-            try:
-                return bool(path) and os.path.exists(path)
-            except OSError:
-                return False
-
-        sgl = self._container_source_meta(entry.get("sglang"))
-        vll = self._container_source_meta(entry.get("vllm"))
-        if not (sgl or vll):
-            return []
-        sgl_present = any(present(m[0]) for m in sgl)
-        vll_present = any(present(m[0]) for m in vll)
-        if sgl_present and not vll_present:
-            return sgl
-        if vll_present and not sgl_present:
-            return vll
-        fw = (framework or "").strip().lower()
-        if fw == "vllm" and vll:
-            return vll
-        if fw == "sglang" and sgl:
-            return sgl
-        return sgl or vll
-
-    def _single(
-        self,
-        op_name: str,
-        entry: dict[str, Any],
-        framework: str | None,
-    ) -> OpResolution:
-        """Resolve a ``single`` entry to its editable source(s)."""
-        meta = self._select_source_meta(entry, framework)
-        sources = [m[0] for m in meta]
-        if sources:
-            return OpResolution(
-                op_name=op_name,
-                kind="single",
-                status=_ROUTABLE_STATUS,
-                patchable=True,
-                framework=framework,
-                sources=sources,
-                kernel_kinds=[m[1] for m in meta],
-                prebuilt_binaries=[m[2] for m in meta],
-            )
-        return OpResolution(
-            op_name=op_name,
-            kind="single",
-            status="non_rewritable",
-            patchable=False,
-            framework=framework,
-            sources=[],
-            reason=_nonrewritable_reason(entry),
-        )
-
-    @staticmethod
-    def _kernel_matches(trace_name: str, key: str) -> bool:
-        """Loosely match a trace device kernel name against a JSON kernel-symbol key.
-
-        Keys are (often truncated) mangled symbols; the trace name may be a plain
-        or differently truncated form, so accept either as a substring of the other.
-        """
-        if not trace_name or not key:
-            return False
-        return trace_name == key or trace_name in key or key in trace_name
-
-    def _dispatch(
-        self,
-        op_name: str,
-        entry: dict[str, Any],
-        framework: str | None,
-        device_kernel_name: str | None,
-    ) -> OpResolution:
-        """Resolve a ``dispatch`` entry by matching the trace device kernel name to one kernel."""
-        name = (device_kernel_name or "").strip()
-        if name:
-            fw = (framework or "").strip().lower()
-            containers = (
-                [entry.get("vllm"), entry.get("sglang")] if fw != "sglang" else [entry.get("sglang"), entry.get("vllm")]
-            )
-            for container in containers:
-                for kname, info in (container or {}).items():
-                    if not isinstance(info, dict) or not self._kernel_matches(name, kname):
-                        continue
-                    path = info.get("kernel_source_path")
-                    if info.get("patchable") and _is_editable_source(path, info.get("kernel_kind")):
-                        return OpResolution(
-                            op_name=op_name,
-                            kind="dispatch",
-                            status=_ROUTABLE_STATUS,
-                            patchable=True,
-                            framework=framework,
-                            sources=[_absolutize_source(str(path))],
-                            matched_route=kname,
-                            kernel_kinds=[str(info.get("kernel_kind") or "")],
-                            prebuilt_binaries=[str(info.get("prebuilt_binary") or "")],
-                            runtime_backends=[str(info.get("backend") or "")],
-                        )
-                    return OpResolution(
-                        op_name=op_name,
-                        kind="dispatch",
-                        status="non_rewritable",
-                        patchable=False,
-                        framework=framework,
-                        sources=[],
-                        reason="dispatch route has no editable source",
-                        matched_route=kname,
-                        runtime_backends=[str(info.get("backend") or "")],
-                    )
-        return OpResolution(
-            op_name=op_name,
-            kind="dispatch",
-            status="unresolved",
-            patchable=None,
-            framework=framework,
-            sources=[],
-        )
-
-    def _composite(
-        self,
-        op_name: str,
-        entry: dict[str, Any],
-        framework: str | None,
-        device_kernel_name: str | None = None,
-    ) -> OpResolution:
-        """Resolve a ``composite`` entry into a fan-out over its editable kernels.
-
-        A ``composite`` profiler label aggregates several device kernels that fire
-        under one CPU op (e.g. the Triton fused-MoE label covers the MoE GEMM plus
-        co-firing quant/align helpers). When the trace reports the *dominant* device
-        kernel name for this op, narrow to the single editable source whose symbol
-        matches it (the same disambiguation ``dispatch`` uses via
-        :meth:`_kernel_matches`) instead of fanning out to every co-kernel source.
-        This keeps the hot kernel as the optimization target rather than splitting
-        ``duration_us`` evenly across minor helpers and sending GEAK at the wrong file.
-        Falls back to the full fan-out (``_select_source_meta``) only when no device
-        name is given or none of the composite's editable kernels match it -- so
-        behavior is unchanged for composites without a trace device symbol.
-        """
-        name = (device_kernel_name or "").strip()
-        if name:
-            fw = (framework or "").strip().lower()
-            containers = (
-                [entry.get("sglang"), entry.get("vllm")] if fw == "sglang" else [entry.get("vllm"), entry.get("sglang")]
-            )
-            for container in containers:
-                for kname, info in (container or {}).items():
-                    if not isinstance(info, dict) or not self._kernel_matches(name, kname):
-                        continue
-                    path = info.get("kernel_source_path")
-                    if info.get("patchable") and _is_editable_source(path, info.get("kernel_kind")):
-                        return OpResolution(
-                            op_name=op_name,
-                            kind="composite",
-                            status=_ROUTABLE_STATUS,
-                            patchable=True,
-                            framework=framework,
-                            sources=[_absolutize_source(str(path))],
-                            matched_route=kname,
-                        )
-        # No trace device symbol (composite pybind ops frequently carry none —
-        # device_kernel_name is None for the fused-MoE / gdn-attention labels).
-        # NAME-ANCHORED disambiguation: a composite op is named after its primary
-        # device kernel (``..._invoke_fused_moe_kernel``, ``paged_attention_ragged``).
-        # Route to the single editable leaf whose device-kernel symbol is contained
-        # in the op name, instead of splitting ``duration_us`` evenly across the
-        # co-firing quant/scale/align helpers (which sends GEAK at the wrong file).
-        # Only pins when EXACTLY ONE editable source matches; otherwise the full
-        # fan-out below is unchanged (byte-identical for ambiguous/0-match ops).
-        anchor = op_name.split("::")[-1].lower()
-        if anchor:
-            fw_anchor = (framework or "").strip().lower()
-            anchor_containers = (
-                [entry.get("sglang"), entry.get("vllm")]
-                if fw_anchor == "sglang"
-                else [entry.get("vllm"), entry.get("sglang")]
-            )
-            for container in anchor_containers:
-                matched: list[tuple[str, str, str]] = []
-                seen_paths: set[str] = set()
-                for kname, info in (container or {}).items():
-                    if not isinstance(info, dict) or not info.get("patchable"):
-                        continue
-                    path = info.get("kernel_source_path")
-                    if not _is_editable_source(path, info.get("kernel_kind")):
-                        continue
-                    core = str(kname).split("(")[0].strip().lower()
-                    # Require the device-kernel SYMBOL to appear in the op name
-                    # (the composite is named after its primary kernel, e.g.
-                    # ``fused_moe_kernel`` ⊂ ``..._invoke_fused_moe_kernel``).
-                    # One-directional + min length avoids trivial-token mis-pins.
-                    if core and len(core) >= 6 and core in anchor:
-                        ap = _absolutize_source(str(path))
-                        if ap not in seen_paths:
-                            seen_paths.add(ap)
-                            matched.append(
-                                (ap, str(info.get("kernel_kind") or ""), str(info.get("prebuilt_binary") or ""))
-                            )
-                if len(matched) == 1:
-                    ap, kk, pb = matched[0]
-                    return OpResolution(
-                        op_name=op_name,
-                        kind="composite",
-                        status=_ROUTABLE_STATUS,
-                        patchable=True,
-                        framework=framework,
-                        sources=[ap],
-                        kernel_kinds=[kk],
-                        prebuilt_binaries=[pb],
-                        matched_route="name_anchored",
-                    )
-                if matched:
-                    break  # ambiguous in this container -> fall through to fan-out
-
-        meta = self._select_source_meta(entry, framework)
-        fanout = [
-            OpResolution(
-                op_name=op_name,
-                kind="composite",
-                status=_ROUTABLE_STATUS,
-                patchable=True,
-                framework=framework,
-                sources=[src],
-                kernel_kinds=[kind_],
-                prebuilt_binaries=[pb],
-            )
-            for src, kind_, pb in meta
-        ]
-        return OpResolution(
-            op_name=op_name,
-            kind="composite",
-            status=_ROUTABLE_STATUS if fanout else "non_rewritable",
-            patchable=bool(fanout),
-            framework=framework,
-            sources=[],
-            reason="" if fanout else "composite: no editable sources",
-            fanout=fanout,
-        )
 
 
 # HIGH_IDLE_PCT_THRESHOLD_* and the idle-gate helpers now live in _idle_gate
@@ -1740,18 +1374,19 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
     source_file = str(candidate.get("source_file") or "")
     name = str(candidate.get("name") or "")
     lower_name = name.lower()
-    # Dict-first: honor the curated op_to_source verdict when present. A routable
-    # entry is ground truth and bypasses the heuristics; a non-rewritable verdict
-    # reports its reason; a None verdict falls through to the heuristics below.
-    if candidate.get("source_resolution_method") == "op_to_source":
+    # Verdict-first: honor the active finder's symbol-based verdict (carried on
+    # the op_to_source_* audit fields) when present. A routable entry is ground
+    # truth and bypasses the heuristics; a non-rewritable verdict reports its
+    # reason; anything else falls through to the heuristics below.
+    if candidate.get("source_resolution_method") in _CURATED_LIKE_METHODS:
         patchable = candidate.get("op_to_source_patchable")
         if patchable is True and source_file:
-            # aiter_asm compute-cores are hand-written assembly: the curated .cu
+            # aiter_asm compute-cores are hand-written assembly: the resolved .cu
             # is only a dispatcher for a prebuilt .co, so the compute core is not
             # editable from source. Skip with a clear reason.
             if str(candidate.get("kernel_kind") or "").strip().lower() == "aiter_asm":
                 return False, (
-                    "op_to_source: aiter_asm prebuilt assembly compute-core "
+                    "source: aiter_asm prebuilt assembly compute-core "
                     "(.co loaded by the .cu dispatcher; no editable .s source) "
                     "-- not rewritable, no deterministic tuner available"
                 )
@@ -1762,7 +1397,7 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
                 or str(candidate.get("op_to_source_status") or "").strip()
                 or "non-rewritable"
             )
-            return False, f"op_to_source: {reason}"
+            return False, f"source: {reason}"
     if not source_file:
         # A bare launch API has no kernel body to rewrite, which is a different
         # situation from a kernel whose source we merely failed to locate. Say
@@ -3089,8 +2724,8 @@ def load_op_dominant_kernel_map(perf_report_csv_dir: Path | str) -> dict[str, st
 
     A composite profiler op fires several device kernels under one CPU op; the
     dominant (max aggregated duration) one is the real hot kernel, and surfacing
-    it as ``device_kernel_name`` lets :meth:`OpResolver._composite` pin the single
-    owning source. ``{}`` when the CSV is absent or unreadable.
+    it as ``device_kernel_name`` lets the active finder pin the single owning
+    source. ``{}`` when the CSV is absent or unreadable.
     """
     csv_path = Path(perf_report_csv_dir) / "unified_perf_summary.csv"
     if not csv_path.is_file():
@@ -3119,31 +2754,100 @@ def load_op_dominant_kernel_map(perf_report_csv_dir: Path | str) -> dict[str, st
     return {op: max(per.items(), key=lambda kv: kv[1])[0] for op, per in agg.items() if per}
 
 
+@lru_cache(maxsize=1)
+def _load_finder_index() -> Any:
+    """Build the live source index once per process (``None`` if unavailable).
+
+    The index is an optimization: any failure (finder not importable, no
+    framework trees discovered, scan error) degrades to curated-only resolution.
+    """
+    if _kernel_source_index is None:
+        return None
+    try:
+        return _kernel_source_index.load_or_build()
+    except Exception:  # noqa: BLE001 - best-effort; degrade to curated-only.
+        return None
+
+
+def _resolve_via_active_finder(
+    op_name: str,
+    framework: str | None,
+    device_kernel_name: str | None,
+    index: Any,
+) -> "OpResolution | None":
+    """Resolve via the active finder (symbol -> live index): the deterministic tier.
+
+    Returns a routable or ``non_rewritable`` :class:`OpResolution` on a symbol
+    hit, or ``None`` (a miss) so the caller falls through to the downstream
+    trace-stack / grep / LLM tiers. The finder is symbol-driven, so it only runs
+    when a device kernel name is available.
+    """
+    if _active_finder is None or not device_kernel_name:
+        return None
+    try:
+        res = _active_finder.resolve(
+            op_name,
+            framework=framework or "",
+            device_kernel_name=device_kernel_name,
+            index=index,
+        )
+    except Exception:  # noqa: BLE001 - a finder failure must fall through, not raise.
+        return None
+    op = _PHASE_SUFFIX_RE.sub("", op_name)
+    if res.source_file and res.patchable:
+        return OpResolution(
+            op_name=op,
+            kind="single",
+            status=_ROUTABLE_STATUS,
+            patchable=True,
+            framework=framework,
+            sources=[res.source_file],
+            matched_route=device_kernel_name,
+            resolution_method=_ACTIVE_FINDER_METHOD,
+        )
+    if res.method == "non_patchable":
+        return OpResolution(
+            op_name=op,
+            kind="single",
+            status="non_rewritable",
+            patchable=False,
+            framework=framework,
+            reason=res.reason or "non-patchable kernel (symbol-detected)",
+            matched_route=device_kernel_name,
+            resolution_method=_ACTIVE_FINDER_METHOD,
+        )
+    return None
+
+
 def _expand_op_fanout(
     top: list[dict[str, Any]],
     framework: str | None = None,
     op_dominant_kernel: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Resolve each op against the dictionary and fan out one candidate per ``.cu``.
+    """Resolve each op via the active finder and fan out one candidate per ``.cu``.
 
     A routable op with N editable sources becomes N candidates, each routed to
     its own GEAK run; the op's ``duration_us`` is split evenly so ``gpu_pct`` is
-    not inflated. Non-routable ops and dictionary misses pass through unchanged,
-    with their :class:`OpResolution` cached on ``_op_resolution`` for finalize.
+    not inflated. Non-routable ops and finder misses pass through unchanged, with
+    their :class:`OpResolution` (or ``None``) cached on ``_op_resolution`` for
+    finalize, which then applies the downstream trace/grep/LLM tiers.
 
-    ``framework`` disambiguates which container's source to route to; only
-    ``vllm``/``sglang`` are honored, any other value falls through to
-    ``OpResolver._select_source_meta``'s on-disk-then-default ordering.
+    ``framework`` disambiguates which framework tree's source to prefer when a
+    symbol lives in more than one; only ``vllm``/``sglang`` are honored.
     """
     framework = (framework or "").strip().lower() or None
     op_dominant_kernel = op_dominant_kernel or {}
+    finder_index = _load_finder_index()
     expanded: list[dict[str, Any]] = []
     for item in top:
         op_name = str(item.get("name") or "")
         # Prefer the candidate's own device symbol; else fall back to the
         # dominant-by-time device kernel so _composite pins the single hot source.
         dkn = str(item.get("device_kernel_name") or "").strip() or op_dominant_kernel.get(op_name) or None
-        res = OpResolver(load_mapping()).resolve_op_source(op_name, framework=framework, device_kernel_name=dkn)
+        # Active finder (symbol -> live installed source) is the deterministic
+        # tier. On a miss, _op_resolution is None so _finalize_candidates falls
+        # through to the trace-stack / grep / LLM tiers.
+        res = _resolve_via_active_finder(op_name, framework, dkn, finder_index)
         if res is None:
             item["_op_resolution"] = None
             expanded.append(item)
@@ -4462,8 +4166,8 @@ def _finalize_candidates(
                     else:
                         item.pop("source_line", None)
                         item.pop("source_function", None)
-                        item["source_resolution_method"] = (
-                            _KSC.METHOD_GREP if _KSC is not None else "name_grep"
+                        item["source_resolution_method"] = getattr(
+                            _KSC, "METHOD_GREP", "name_grep"
                         )
                         if trace_source:
                             _append_resolution_reason(
@@ -4533,13 +4237,13 @@ def _candidate_resolution_method(item: dict[str, Any]) -> str:
     arrived from grep has none, and an absent path means nothing resolved it.
     """
     stamped = str(item.get("source_resolution_method") or "").strip()
-    if stamped in _KSC.KNOWN_METHODS:
+    if stamped in getattr(_KSC, "KNOWN_METHODS", frozenset()):
         return stamped
     if str(item.get("source_file") or "").strip():
         # No tier claimed it but a path is present: grep is the only tier that
         # resolves without stamping.
-        return _KSC.METHOD_GREP
-    return _KSC.METHOD_UNRESOLVED
+        return getattr(_KSC, "METHOD_GREP", "name_grep")
+    return getattr(_KSC, "METHOD_UNRESOLVED", "unresolved")
 
 
 def build_source_resolution_entries(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4607,16 +4311,21 @@ _SOURCE_DERIVED_METADATA = (
 
 
 def _is_curated_resolution(item: dict[str, Any]) -> bool:
-    """Whether this candidate's source came from the curated ground truth.
+    """Whether this candidate's source came from a deterministic, authoritative tier.
 
-    ``op_to_source.json`` is hand-maintained and names the actual device source
-    behind an operator, including which of several files is the compute core.
-    A model shown a path and forty lines cannot outrank that, so curated
-    resolutions are not open to rewriting.
+    The active finder demangles the device symbol and pins the actual editable
+    source in the installed tree; a model shown a path and forty lines cannot
+    outrank that, so finder resolutions (like the retired curated map before
+    them) are not open to LLM rewriting.
     """
     status = str(item.get("op_to_source_status") or "").strip()
     method = str(item.get("source_resolution_method") or "").strip()
-    return method == _KSC.METHOD_CURATED and status in {
+    authoritative = {
+        getattr(_KSC, "METHOD_ACTIVE_FINDER", "active_finder"),
+        getattr(_KSC, "METHOD_SYMBOL_INDEX", "symbol_index"),
+        getattr(_KSC, "METHOD_CURATED", "op_to_source"),
+    }
+    return method in authoritative and status in {
         _ROUTABLE_STATUS,
         "non_rewritable",
         "no_kernel",

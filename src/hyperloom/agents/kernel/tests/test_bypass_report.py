@@ -305,8 +305,10 @@ def test_build_candidates_partition_covers_reusable_without_source(monkeypatch):
     # A reusable kernel whose source is unresolved is not dispatchable, so it must
     # land on the ``skipped_kernels`` side of the partition, never in neither
     # bucket. Force source resolution to fail so the reusable SDPA kernel is
-    # guaranteed source-less regardless of the ambient op_to_source table.
-    monkeypatch.setattr(report, "editable_trace_source", lambda *a, **k: "")
+    # guaranteed source-less regardless of the live active-finder index:
+    # neutralize every tier (Triton .py, active finder). Repo-scan
+    # (resolve_by_kernel_name) finds nothing in tests.
+    monkeypatch.setattr(report, "resolve_triton_py", lambda *a, **k: ("", None, "unresolved"))
     monkeypatch.setattr(report, "resolve_source", lambda *a, **k: ("", "unresolved"))
     cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
     hot_ids = {c["kernel_id"] for c in cands["hot_kernels"]}
@@ -986,3 +988,39 @@ def test_build_candidates_attaches_task_group_and_summary_counts(monkeypatch):
     assert len(cands["task_groups"][0]["shape_cases"]) == 2
     # compact projection: no full rows leak into the summary entry
     assert "rows" not in entry
+
+
+def test_finder_non_patchable_verdict_blocks_repo_scan(monkeypatch):
+    """A finder non_patchable verdict is authoritative: the repo-scan tier must
+    not override it with a coincidental kernel-name hit."""
+    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("", "non_patchable"))
+    scanned: list[str] = []
+
+    def _spy_repo_scan(name):
+        scanned.append(name)
+        return "/repo/should_not_be_used.cu", "repo_scan"
+
+    monkeypatch.setattr(report, "resolve_by_kernel_name", _spy_repo_scan)
+    kernels = [{"name": "ck_gemm_kernel", "op_name": "aiter::gemm", "gpu_time_us": 100.0, "count": 1}]
+    cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
+    # The repo-scan tier is never consulted, and its path is not adopted.
+    assert scanned == []
+    assert cand["source_file"] == ""
+    assert cand["source_resolution_method"] == "non_patchable"
+    # The verdict is carried as structured audit fields (distinguishable from a
+    # plain "not found" miss).
+    assert cand["op_to_source_patchable"] is False
+    assert cand["op_to_source_status"] == "non_rewritable"
+    assert "non-patchable" in cand["op_to_source_reason"]
+
+
+def test_repo_scan_still_runs_on_a_genuine_finder_miss(monkeypatch):
+    """A plain unresolved finder result still falls through to the repo scan."""
+    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("", "unresolved"))
+    monkeypatch.setattr(report, "resolve_by_kernel_name", lambda name: ("/repo/found.cu", "repo_scan"))
+    kernels = [{"name": "mystery_kernel", "op_name": "aiter::mystery", "gpu_time_us": 100.0, "count": 1}]
+    cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
+    assert cand["source_file"] == "/repo/found.cu"
+    assert cand["source_resolution_method"] == "repo_scan"
+    # A repo-scan hit is not a finder verdict, so no op_to_source_* stamping.
+    assert "op_to_source_patchable" not in cand
