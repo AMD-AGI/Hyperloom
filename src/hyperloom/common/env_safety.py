@@ -257,6 +257,12 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
     )
 )
 
+# Env names a per-variant override may never set: shell/loader hijacks plus the
+# control-plane credentials a benchmark subprocess has no use for. Workload pins
+# (TP/CONC/ISL/...) stay allowed because the sweep and shape-capture grids set
+# them from code.
+BLOCKED_VARIANT_ENV_NAMES: frozenset[str] = BLOCKED_UNTRUSTED_ENV_NAMES | BENCHMARK_SECRET_ENV_NAMES
+
 # Credential-shaped name fragments, so an unlisted secret cannot be persisted
 # into a session YAML by name alone.
 _SECRET_NAME_FRAGMENTS: tuple[str, ...] = ("APIKEY", "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
@@ -280,6 +286,12 @@ def is_allowed_external_env_key(key: object) -> bool:
     if not valid_env_key(upper) or upper in BLOCKED_EXTERNAL_ENV_NAMES:
         return False
     return not is_secret_shaped_env_name(upper)
+
+
+def is_allowed_variant_env_key(key: object) -> bool:
+    """True when a per-variant env override is safe to hand a benchmark subprocess."""
+    upper = str(key or "").strip().upper()
+    return valid_env_key(upper) and upper not in BLOCKED_VARIANT_ENV_NAMES
 
 
 def is_python_package_root(path: object) -> bool:
@@ -356,15 +368,6 @@ def scrub_benchmark_process_env(env: dict[str, str]) -> dict[str, str]:
     return env
 
 
-def filter_benchmark_env_mapping(envs: Mapping[str, object] | None) -> dict[str, str]:
-    """Return benchmark env overrides without control-plane credentials."""
-    return {
-        str(name): str(value)
-        for name, value in (envs or {}).items()
-        if str(name).strip().upper() not in BENCHMARK_SECRET_ENV_NAMES
-    }
-
-
 def redact_secret_values(text: str) -> str:
     """Mask recognizable credential values before diagnostic text is persisted."""
     out = str(text or "")
@@ -378,12 +381,13 @@ __all__ = [
     "BLOCKED_CHILD_ENV_NAMES",
     "BLOCKED_EXTERNAL_ENV_NAMES",
     "BLOCKED_UNTRUSTED_ENV_NAMES",
+    "BLOCKED_VARIANT_ENV_NAMES",
     "GPU_MASK_ENV_NAMES",
-    "filter_benchmark_env_mapping",
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",
     "is_allowed_external_env_key",
     "is_allowed_kernel_agent_env_key",
+    "is_allowed_variant_env_key",
     "is_python_package_root",
     "is_secret_shaped_env_name",
     "redact_secret_values",

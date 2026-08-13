@@ -420,6 +420,28 @@ class TestCoerceExtraEnvs:
         }
         assert isinstance(v.fingerprint, str) and len(v.fingerprint) > 0
 
+    def test_drops_hijacking_envs_but_keeps_workload_pins(self):
+        v = GridVariant(
+            name="mixed",
+            extra_envs={
+                "SGLANG_USE_AITER": "1",
+                "CONC": "64",
+                "ISL": "1024",
+                "RUN_EVAL": "false",
+                "LD_PRELOAD": "/tmp/evil.so",
+                "PATH": "/tmp/bin",
+                "PYTHONPATH": "/tmp/evil",
+                "OPENAI_API_KEY": "must-not-reach-benchmark",
+            },
+        )
+
+        assert v.extra_envs == {
+            "SGLANG_USE_AITER": "1",
+            "CONC": "64",
+            "ISL": "1024",
+            "RUN_EVAL": "false",
+        }
+
 
 # Section 3: per-variant mtime gating + param overrides
 

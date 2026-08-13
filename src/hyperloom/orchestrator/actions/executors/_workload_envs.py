@@ -31,7 +31,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import (
-    filter_benchmark_env_mapping,
+    BENCHMARK_SECRET_ENV_NAMES,
     filter_untrusted_env_mapping,
     valid_env_key,
 )
@@ -1541,12 +1541,16 @@ def materialize_config_with_envs(
             # _finalize_framework_server_args already ran, so re-apply the sink-side
             # guard it ends with rather than shipping an unvalidated string.
             envs[framework_env] = validate_server_args_shell_safe(merged)
-    filtered_envs = filter_benchmark_env_mapping(envs)
-    dropped_credentials = sorted(set(envs) - set(filtered_envs))
+    # The rendered YAML is persisted, so credentials must not reach it. Workload
+    # pins and path knobs written above stay untouched.
+    filtered_envs, dropped_credentials = filter_untrusted_env_mapping(
+        envs,
+        allow_predicate=lambda key: key not in BENCHMARK_SECRET_ENV_NAMES,
+    )
     if dropped_credentials:
         log.warning(
             "Dropping control-plane credentials from benchmark envs: %s",
-            ", ".join(dropped_credentials),
+            ", ".join(sorted(dropped_credentials)),
         )
         envs.clear()
         envs.update(filtered_envs)

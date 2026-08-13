@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.env_safety import filter_benchmark_env_mapping
+from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from ._canonical_fingerprint import canonical_fingerprint
 
 log = logging.getLogger(__name__)
@@ -129,7 +129,12 @@ class GridVariant:
         """
         self.name = name
         self.extra_server_args = extra_server_args
-        self.extra_envs = filter_benchmark_env_mapping(extra_envs)
+        self.extra_envs, dropped_envs = filter_untrusted_env_mapping(
+            extra_envs,
+            allow_predicate=is_allowed_variant_env_key,
+        )
+        for dropped in dropped_envs:
+            log.warning("Dropping unsafe extra_envs key %s from variant %s", dropped, name)
         self.remove_args = to_str_list(remove_args)
         self.unset_envs = to_str_list(unset_envs)
         mode = str(args_mode or "append").strip().lower()

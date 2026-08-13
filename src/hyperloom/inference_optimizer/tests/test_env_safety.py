@@ -135,6 +135,25 @@ def test_scrub_benchmark_process_env_removes_control_plane_credentials():
     }
 
 
+def test_variant_env_key_allows_workload_pins_and_blocks_hijacks():
+    # Sweep, conc-sweep and shape-capture grids set these from code, so an
+    # allowlist that dropped them would silently flatten every variant.
+    for pinned in ("CONC", "ISL", "OSL", "NUM_PROMPTS", "RUN_EVAL", "PORT", "TP", "MAX_MODEL_LEN"):
+        assert common_env_safety.is_allowed_variant_env_key(pinned)
+    for knob in ("SGLANG_USE_AITER", "VLLM_USE_MTP", "AITER_CONFIG_GEMM_A8W8", "PYTORCH_TUNABLEOP_ENABLED"):
+        assert common_env_safety.is_allowed_variant_env_key(knob)
+    # Name-shape matching would read this as a credential; it is the private
+    # model download token and has to survive.
+    assert common_env_safety.is_allowed_variant_env_key("HF_TOKEN")
+
+    for hijack in ("LD_PRELOAD", "PATH", "PYTHONPATH", "BASH_ENV", "LD_AUDIT", "PYTHONSTARTUP"):
+        assert not common_env_safety.is_allowed_variant_env_key(hijack)
+    for secret in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_GATEWAY_KEY"):
+        assert not common_env_safety.is_allowed_variant_env_key(secret)
+    assert not common_env_safety.is_allowed_variant_env_key("bad key")
+    assert not common_env_safety.is_allowed_variant_env_key("")
+
+
 def test_redact_secret_values_masks_assignments_and_bearer_tokens():
     text = "OPENAI_API_KEY=ak-sensitive-value Authorization: Bearer sensitive-token"
 
