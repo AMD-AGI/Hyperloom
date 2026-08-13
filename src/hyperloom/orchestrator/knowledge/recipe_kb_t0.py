@@ -375,18 +375,16 @@ def _find_config_donor(
     target_isl: Any = None,
     target_osl: Any = None,
 ) -> tuple[Mapping[str, Any] | None, str, float]:
-    """Borrow a replayable champion config from the nearest same-arch sibling.
+    """Borrow a replayable config through the standard degradation tiers.
 
     Used when no donor config has been established yet — the identity match
     may have no replayable best_config, or it may have one at a non-exact
     tier that failed :func:`_donor_is_trustworthy`, or the KG-native
     cross-model lookup may have come up empty. The identity row still
     supplies priors, but the active warm-replay needs a champion config to
-    apply. Searches L2 (same arch class, cross-model, conf 0.95) then L3
-    (same arch, any framework version, conf 0.5).
-
-    Only same ``hw+framework+model_type+arch(+precision)(+fwv)`` siblings are
-    searched, and each candidate must additionally clear
+    apply. Search and compatibility checks match the main T0 cascade:
+    same-architecture class, same GPU ISA, compatible precision, then nearest
+    non-newer framework version. Each candidate must additionally clear
     :func:`_donor_is_trustworthy` (positive validated gain, concrete matching
     architecture, no workload-shape conflict) so a borrowed config is both
     stack-compatible and evidence-backed. Returns
@@ -394,51 +392,74 @@ def _find_config_donor(
     """
     if not (model_type or arch_slug):
         return None, "", 0.0
-    cascade = (
-        (
-            "same_arch_class",
-            0.95,
-            {
-                "hardware": hardware,
-                "framework": framework or "",
-                "model_type": model_type,
-                "architectures": arch_slug,
-                "framework_version": framework_version or "",
-                "precision": precision or "",
-            },
-        ),
-        (
-            "same_arch_any_version",
-            0.5,
-            {
-                "hardware": hardware,
-                "framework": framework or "",
-                "model_type": model_type,
-                "architectures": arch_slug,
-                "precision": precision or "",
-            },
-        ),
+    common = {
+        "framework": framework or "",
+        "model_type": model_type,
+        "architectures": arch_slug,
+    }
+    tiers = _warm_search_tiers(
+        common=common,
+        hardware=hardware,
+        framework_version=framework_version,
+        precision=precision,
     )
-    for tier, conf, labels in cascade:
-        labels = {k: v for k, v in labels.items() if v and v not in ("unknown_model_type", "unknown_arch")}
-        try:
-            rows = kb.search(label_match=labels, limit=10)
-        except Exception:  # noqa: BLE001 — donor search is best-effort/advisory
-            rows = []
-        for r in rows or []:
-            if str(r.get("canonical_id") or "") == cid:
+    seen = {cid}
+    for (
+        tier,
+        confidence,
+        labels,
+        hardware_in,
+        relax_precision,
+        relax_framework_version,
+    ) in tiers:
+        labels = {
+            key: value
+            for key, value in labels.items()
+            if value and value not in ("unknown_model_type", "unknown_arch")
+        }
+        usable: list[Mapping[str, Any]] = []
+        for candidate in _search_warm_candidates(
+            kb,
+            labels=labels,
+            hardware_in=hardware_in,
+        ):
+            candidate_id = str(candidate.get("canonical_id") or "")
+            if not candidate_id or candidate_id in seen:
                 continue
-            # Borrowed donor must clear the trustworthiness gate (validated gain,
-            # concrete matching arch, no shape conflict) — not just carry a config.
+            seen.add(candidate_id)
+            if hardware_in is not None and not _hardware_is_compatible(
+                hardware,
+                _candidate_dimension(candidate, "hardware"),
+            ):
+                continue
+            if relax_precision and not _precision_is_compatible(
+                precision,
+                _candidate_dimension(candidate, "precision"),
+            ):
+                continue
+            if (
+                relax_framework_version
+                and not _framework_version_is_compatible(
+                    framework_version,
+                    _candidate_dimension(candidate, "framework_version"),
+                )
+            ):
+                continue
             if _donor_is_trustworthy(
-                r,
+                candidate,
                 target_arch_slug=arch_slug,
                 target_model_type=model_type,
                 target_conc=target_conc,
                 target_isl=target_isl,
                 target_osl=target_osl,
             ):
-                return r, tier, conf
+                usable.append(candidate)
+        ranked = _rank_warm_candidates(
+            usable,
+            target_framework_version=framework_version,
+        )
+        if ranked:
+            return ranked[0], tier, confidence
     return None, "", 0.0
 
 
@@ -987,6 +1008,63 @@ def _framework_version_is_compatible(target: str, candidate: str) -> bool:
     )
 
 
+def _warm_search_tiers(
+    *,
+    common: dict[str, str],
+    hardware: str,
+    framework_version: str,
+    precision: str,
+) -> tuple[
+    tuple[str, float, dict[str, str], list[str] | None, bool, bool],
+    ...,
+]:
+    """Build the shared ordered seven-tuple degradation tiers."""
+    hardware_values = _hardware_fallback_values(hardware)
+    return (
+        (
+            "same_arch_class",
+            0.95,
+            {
+                **common,
+                "hardware": hardware,
+                "framework_version": framework_version,
+                "precision": precision,
+            },
+            None,
+            False,
+            False,
+        ),
+        (
+            "same_gpu_isa",
+            0.85,
+            {
+                **common,
+                "framework_version": framework_version,
+                "precision": precision,
+            },
+            hardware_values,
+            False,
+            False,
+        ),
+        (
+            "compatible_precision",
+            0.78,
+            {**common, "framework_version": framework_version},
+            hardware_values,
+            True,
+            False,
+        ),
+        (
+            "compatible_framework_version",
+            0.72,
+            common,
+            hardware_values,
+            True,
+            True,
+        ),
+    )
+
+
 def _candidate_dimension(row: Mapping[str, Any], key: str) -> str:
     """Read one seven-tuple dimension from metadata or canonical id."""
     alias = "framework_name" if key == "framework" else key
@@ -1141,52 +1219,11 @@ def _cascade_warm_start_search(
         "model_type": target_model_type,
         "architectures": target_architecture,
     }
-    hardware_values = _hardware_fallback_values(target_hardware)
-    tiers: tuple[
-        tuple[str, float, dict[str, str], list[str] | None, bool, bool],
-        ...,
-    ] = (
-        (
-            "same_arch_class",
-            0.95,
-            {
-                **common,
-                "hardware": target_hardware,
-                "framework_version": target_framework_version,
-                "precision": target_precision,
-            },
-            None,
-            False,
-            False,
-        ),
-        (
-            "same_gpu_isa",
-            0.85,
-            {
-                **common,
-                "framework_version": target_framework_version,
-                "precision": target_precision,
-            },
-            hardware_values,
-            False,
-            False,
-        ),
-        (
-            "compatible_precision",
-            0.78,
-            {**common, "framework_version": target_framework_version},
-            hardware_values,
-            True,
-            False,
-        ),
-        (
-            "compatible_framework_version",
-            0.72,
-            common,
-            hardware_values,
-            True,
-            True,
-        ),
+    tiers = _warm_search_tiers(
+        common=common,
+        hardware=target_hardware,
+        framework_version=target_framework_version,
+        precision=target_precision,
     )
     seen = {cid}
     for (

@@ -993,17 +993,15 @@ def merge_staged_sections(
         try:
             staged = sections.staged(name)
             if staged is None:
-                if name in required_names:
-                    raise RemoteRecipeValidationError(
-                        f"required staged section {name!r} cannot be read"
-                    )
-                continue
+                qualifier = "required " if name in required_names else ""
+                raise RemoteRecipeValidationError(
+                    f"{qualifier}staged section {name!r} cannot be read"
+                )
             if not staged.knowledge:
-                if name in required_names:
-                    raise RemoteRecipeValidationError(
-                        f"required staged section {name!r} is empty"
-                    )
-                continue
+                qualifier = "required " if name in required_names else ""
+                raise RemoteRecipeValidationError(
+                    f"{qualifier}staged section {name!r} is empty"
+                )
             staged_files = [
                 (
                     source,
@@ -1066,18 +1064,12 @@ def merge_staged_sections(
             value[name] = combined
             merged.append(name)
         except Exception as exc:
-            if name in required_names:
-                if isinstance(exc, RemoteRecipeValidationError):
-                    raise
-                raise RemoteRecipeValidationError(
-                    f"required staged section {name!r} is invalid: {exc}"
-                ) from exc
-            log.warning(
-                "remote recipe: ignoring invalid staged section %s; "
-                "falling back to CLOSE scrape: %s",
-                name,
-                exc,
-            )
+            if isinstance(exc, RemoteRecipeValidationError):
+                raise
+            qualifier = "required " if name in required_names else ""
+            raise RemoteRecipeValidationError(
+                f"{qualifier}staged section {name!r} is invalid: {exc}"
+            ) from exc
     return merged
 
 
