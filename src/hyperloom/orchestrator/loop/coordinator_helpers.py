@@ -589,6 +589,34 @@ def cited_advisory_reason_code(entry: dict[str, Any]) -> str:
     return cited[0] if cited else ""
 
 
+def verdict_rests_on_one_ground(entry: dict[str, Any]) -> bool:
+    """Return whether ``entry`` refuses for a single reason.
+
+    A verdict can cite an advisory rule *and* refuse on its own merits in the
+    same breath — "the proposal claims a 12% gain and has no rollback plan".
+    Holding that verdict to the advisory rule would let the second half of the
+    sentence disappear, so the hold is confined to a reject that names one
+    ground and asks for nothing further: at most one risk entry, and no
+    outstanding evidence request.
+
+    Risk *severity* deliberately plays no part. ``references/risk_rules.md``
+    reserves ``blocker`` for evidence and correctness failures and lists no
+    format item, yet the Critic verdict this hold was built for graded its own
+    format complaint ``blocker`` — so severity separates nothing here, and
+    reading it would only retire the hold on the case that motivated it.
+
+    Args:
+        entry: A ``review_verdict`` payload or one ``verdict_map`` entry.
+
+    Returns:
+        True when the verdict names at most one ground and requests no further
+        evidence.
+    """
+    if [item for item in (entry.get("required_evidence") or []) if item]:
+        return False
+    return len([risk for risk in (entry.get("risks") or []) if risk]) <= 1
+
+
 def verdict_held_to_its_rule(entry: dict[str, Any]) -> tuple[str, str]:
     """Return the verdict a ``review_verdict`` entry carries, and why it moved.
 
@@ -597,6 +625,11 @@ def verdict_held_to_its_rule(entry: dict[str, Any]) -> tuple[str, str]:
     declaration is prose in the Critic prompt, so a model that rejects anyway
     silently gets its way. This holds the verdict to what the cited rule asked
     for, which makes the declaration enforceable rather than advisory.
+
+    The hold is narrow by construction: it only moves a reject whose *only*
+    stated ground is a rule that asked for advice (see
+    :func:`verdict_rests_on_one_ground`), and the verdict it produces is not an
+    integration permit — see :meth:`IntentRouter._handle_review_verdict`.
 
     Args:
         entry: A ``review_verdict`` payload or one ``verdict_map`` entry, with
@@ -611,6 +644,8 @@ def verdict_held_to_its_rule(entry: dict[str, Any]) -> tuple[str, str]:
         return "", ""
     verdict = str(entry.get("verdict") or "").strip()
     if verdict != _REJECT_VERDICT:
+        return verdict, ""
+    if not verdict_rests_on_one_ground(entry):
         return verdict, ""
     reason_code = cited_advisory_reason_code(entry)
     if reason_code:

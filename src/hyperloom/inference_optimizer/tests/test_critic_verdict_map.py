@@ -652,6 +652,61 @@ async def test_a_declared_reject_code_outranks_an_advisory_one_in_prose(coord):
     assert coord._materialise_calls == []
 
 
+@pytest.mark.asyncio
+async def test_a_reject_that_also_names_a_second_risk_is_not_held(coord):
+    """The hold answers "the whole reject was this one rule"; a verdict that
+    also refuses on its own merits keeps both halves of the sentence."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-mixed",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-mixed"}},
+    )
+    coord.state.pending_proposals["msg-mixed"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-mixed",
+            "verdict": "reject",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+            "risks": [
+                {"severity": "minor", "summary": "payload carries a self-reported gain."},
+                {"severity": "blocker", "summary": "the patch can only be rolled back by hand."},
+            ],
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_reject_still_asking_for_evidence_is_not_held(coord):
+    """An outstanding evidence request is a ground of its own: the Critic is
+    not complaining about a field, it is saying it cannot judge yet."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-eviden",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-evid"}},
+    )
+    coord.state.pending_proposals["msg-eviden"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-eviden",
+            "verdict": "reject",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+            "required_evidence": ["matched_benchmark"],
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
 def test_a_reason_code_inside_a_longer_token_is_not_a_citation():
     """The prose scan is word-bounded, so a code embedded in another identifier does not move a verdict."""
     entry = {
