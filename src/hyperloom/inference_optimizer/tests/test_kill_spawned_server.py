@@ -31,6 +31,8 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     new_session_kwargs,
     run_with_session_kill,
     server_log_death_excerpt,
+    session_deadline_to_remaining_sec,
+    session_remaining_to_deadline_sec,
 )
 
 
@@ -360,6 +362,39 @@ class TestSessionDeadline:
         )
         assert cp.returncode == 0
         assert "done" in (cp.stdout or "")
+
+
+class TestSessionDeadlineCrossesAProcessBoundary:
+    """A ``time.monotonic()`` instant is only meaningful in the process that read it.
+
+    Handing the absolute deadline to a Ray worker would name an instant on the
+    worker's own clock, whose origin is unrelated -- an immediate kill or one
+    that never fires, both silently. Only a duration survives the trip.
+    """
+
+    def test_an_unbounded_budget_stays_unbounded_in_both_directions(self):
+        assert session_deadline_to_remaining_sec(None) is None
+        assert session_remaining_to_deadline_sec(None) is None
+
+    def test_a_deadline_becomes_the_seconds_it_has_left(self, monkeypatch):
+        monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
+        assert session_deadline_to_remaining_sec(1300.0) == pytest.approx(300.0)
+
+    def test_a_spent_budget_crosses_as_a_non_positive_duration(self, monkeypatch):
+        """Not floored at zero: the receiver must reap, not read it as "no budget given"."""
+        monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
+        assert session_deadline_to_remaining_sec(940.0) == pytest.approx(-60.0)
+
+    def test_the_duration_re_anchors_onto_the_reading_clock(self, monkeypatch):
+        """The same duration names a different instant on each side; that is the point."""
+        monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
+        remaining = session_deadline_to_remaining_sec(1300.0)
+        monkeypatch.setattr(time, "monotonic", lambda: 5_000_000.0)
+        assert session_remaining_to_deadline_sec(remaining) == pytest.approx(5_000_300.0)
+
+    def test_the_round_trip_is_the_identity_within_one_clock(self, monkeypatch):
+        monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
+        assert session_remaining_to_deadline_sec(session_deadline_to_remaining_sec(1234.5)) == pytest.approx(1234.5)
 
 
 def _sentinel_returncodes() -> dict[int, set[str]]:

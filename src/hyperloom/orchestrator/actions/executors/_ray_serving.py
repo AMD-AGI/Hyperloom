@@ -277,8 +277,14 @@ def _serving_actor_body() -> Any:
             soft_deadline_sec=None,
             server_log_path=None,
             server_already_ready=False,
+            session_remaining_sec=None,
         ):
-            """Run one benchmark round to completion; return ``(rc, stdout, stderr)``."""
+            """Run one benchmark round to completion; return ``(rc, stdout, stderr)``.
+
+            ``session_remaining_sec`` is a duration, not the submitter's absolute
+            session deadline: this actor is a separate process with its own
+            ``time.monotonic()`` origin, so only a duration survives the trip.
+            """
             import subprocess as _sp  # noqa: PLC0415
 
             from ._ray_backend import _run_subprocess_worker  # noqa: PLC0415
@@ -292,6 +298,7 @@ def _serving_actor_body() -> Any:
                     soft_deadline_sec=soft_deadline_sec,
                     server_log_path=server_log_path,
                     server_already_ready=server_already_ready,
+                    session_remaining_sec=session_remaining_sec,
                 )
             except _sp.TimeoutExpired as exc:
                 return _ACTOR_TIMEOUT_RC, "", f"TimeoutExpired: {exc}"
@@ -392,12 +399,30 @@ class ServingLease:
         soft_deadline_sec: float | None = None,
         server_log_path: str | None = None,
         server_already_ready: bool = False,
+        session_remaining_sec: float | None = None,
     ) -> tuple[int, str, str]:
         """Run one benchmark round inside the lease's actor; return ``(rc, stdout, stderr)``.
 
         Drop-in for ``run_with_session_kill``; re-raises ``subprocess.TimeoutExpired``
         on hard timeout. Cluster-ensure failures and Ray worker errors degrade to
         a benchmark failure (rc=1) rather than crashing the session.
+
+        Args:
+            cmd: The benchmark command to run inside the actor.
+            env: Caller env for the subprocess.
+            cwd: Working directory for the subprocess.
+            timeout: Hard timeout in seconds.
+            soft_deadline_sec: Overtime soft deadline.
+            server_log_path: Path to the server log for the watchdogs.
+            server_already_ready: Warm reuse round (soft clock from spawn).
+            session_remaining_sec: Seconds left on the session budget, as
+                produced by ``session_deadline_to_remaining_sec``. The absolute
+                deadline the local path uses cannot cross into the actor: it is
+                a ``time.monotonic()`` instant, and the actor's clock has its own
+                origin. The actor re-anchors this duration onto its own clock.
+
+        Returns:
+            ``(returncode, stdout, stderr)`` from the round.
         """
         import subprocess as _sp  # noqa: PLC0415
 
@@ -416,6 +441,7 @@ class ServingLease:
             soft_deadline_sec=soft_deadline_sec,
             server_log_path=server_log_path,
             server_already_ready=server_already_ready,
+            session_remaining_sec=session_remaining_sec,
         )
         # Resolve Ray's exception classes defensively. Real ray always exposes
         # both, but this is a failure hot-path: a partial test double or a future

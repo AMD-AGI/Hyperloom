@@ -44,6 +44,7 @@ from ._subprocess_kill import (
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     run_with_session_kill,
     server_log_death_excerpt,
+    session_deadline_to_remaining_sec,
 )
 from .benchmark_result import (
     estimate_killed_variant_throughput,
@@ -976,7 +977,9 @@ def _run_magpie(
         session_deadline_sec (float | None): Absolute ``time.monotonic()`` instant
             at which the session budget expires. Reaps the tree and returns
             ``SESSION_TIME_EXHAUSTED_RETURNCODE``. Enforced in every phase,
-            including the accuracy eval that retires ``soft_deadline_sec``.
+            including the accuracy eval that retires ``soft_deadline_sec``. The
+            lease path sends it across as a remaining-seconds duration, the only
+            form that means the same thing in the actor's process.
 
     Returns:
         tuple[int, str, str]: ``(returncode, stdout, stderr)``.
@@ -1085,6 +1088,9 @@ def _run_magpie(
             soft_deadline_sec=soft_deadline_sec,
             server_log_path=str(output_dir / "server.log"),
             server_already_ready=server_already_ready,
+            # Converted here, at the last moment before the process boundary:
+            # the actor cannot read this process's monotonic clock.
+            session_remaining_sec=session_deadline_to_remaining_sec(session_deadline_sec),
         )
 
     cmd = build_benchmark_command(
