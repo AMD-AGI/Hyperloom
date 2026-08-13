@@ -798,6 +798,53 @@ async def test_a_rule_the_critic_cleared_is_not_the_grounds_for_its_reject(coord
     assert coord._materialise_calls == []
 
 
+@pytest.mark.parametrize(
+    "reasoning",
+    [
+        pytest.param(
+            f"- {QUANTITATIVE_CLAIM_REASON_CODE}: clean.\n- rollback: absent. Rejecting on the rollback.",
+            id="enumerated_checklist",
+        ),
+        pytest.param(
+            f"> {QUANTITATIVE_CLAIM_REASON_CODE}: proposal_set[*] must not carry a self-reported gain field.\n"
+            "The proposal is clean on that rule; it is refused for lack of a rollback.",
+            id="quoted_rule_text",
+        ),
+        pytest.param(
+            f"```\n{QUANTITATIVE_CLAIM_REASON_CODE}: proposal_set[*] must not carry a self-reported gain field.\n"
+            "```\nRefused for lack of a rollback.",
+            id="fenced_rule_text",
+        ),
+        pytest.param(
+            f"Refused for lack of a rollback. For reference:\n{QUANTITATIVE_CLAIM_REASON_CODE}: not at issue here.",
+            id="cited_after_the_grounds",
+        ),
+    ],
+)
+def test_a_rule_a_verdict_enumerates_or_quotes_is_not_the_ground_it_rests_on(reasoning):
+    """A model that walks the rule list, or quotes a rule to say it does not
+    apply, writes the code in exactly the shapes a citation would take. Reading
+    one of those as grounds dispatches a proposal the Critic refused, so the
+    scan only fires on a citation opening the verdict's own prose."""
+    entry = {"verdict": "reject", "reasoning": reasoning}
+
+    assert verdict_held_to_its_rule(entry, action_name="specialist") == ("reject", "")
+
+
+def test_a_citation_opening_the_verdict_still_holds_it():
+    """The shape the field verdict used stays readable: the code opens the
+    prose and a colon introduces the finding."""
+    entry = {
+        "verdict": "reject",
+        "reasoning": f"`{QUANTITATIVE_CLAIM_REASON_CODE}`: the payload carries predicted_gain_pct.",
+    }
+
+    assert verdict_held_to_its_rule(entry, action_name="specialist") == (
+        "advise",
+        QUANTITATIVE_CLAIM_REASON_CODE,
+    )
+
+
 def test_a_rule_named_in_a_remediation_note_is_not_a_citation():
     """``notes`` is where a model writes what to do next, including "this is not
     a <code> problem"; grounds are stated in ``reasoning``."""

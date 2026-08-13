@@ -553,28 +553,43 @@ def serialize_verdict_advisory(payload: dict[str, Any]) -> dict[str, Any]:
 # in either is being discussed rather than invoked; both stay out.
 _VERDICT_PROSE_KEY: str = "reasoning"
 
-# What a citation looks like: the code opens the sentence and a colon
+# What a citation looks like: the code opens the verdict's grounds and a colon
 # introduces the finding, the shape the field verdict used --
 # ``"specialist_quantitative_claim_violation: the proposal payload carries the
-# forbidden predicted_gain_pct field."`` A list marker or backticks may precede
-# it. Anything looser matches "checked <code>: clean, rejecting because ...",
-# where the code is the rule the Critic *cleared* the proposal on.
-_CITATION_OPENER: str = r"[ \t>*\-]*`?"
+# forbidden predicted_gain_pct field."`` Nothing may precede the code but
+# whitespace or a backtick, and only the opening line of the prose is read.
+#
+# The two mistakes cost different amounts. Missing a citation costs the round
+# its proposals, which the next round can re-propose; reading one that was not
+# made dispatches a proposal the Critic meant to block. So the scan stays
+# deliberately narrow instead of learning every citation format a model might
+# use -- a list marker, a quote marker or a fence is how one *enumerates* the
+# rules it checked, and "- <code>: clean." must never read as grounds. The
+# reliable path is the explicit ``failure_reason_code`` in the Critic's output
+# schema; this is the fallback.
+_CITATION_OPENER: str = r"[ \t]*`?"
+
+
+def _opening_line(text: str) -> str:
+    """Return the first non-blank line of ``text``, or ``""`` when it has none."""
+    for line in text.splitlines():
+        if line.strip():
+            return line
+    return ""
 
 
 def cited_advisory_reason_code(entry: dict[str, Any]) -> str:
     """Return the advisory-only rule ``entry`` cites, from the field or its prose.
 
-    ``failure_reason_code`` is an input descriptor: the Critic prompt hands the
-    code to the model, but nothing on the output side requires it back, so a
-    Critic that names its rule inside ``reasoning`` — the observed shape — is
-    within contract. Recovering the citation from prose is therefore part of
-    reading the verdict, not a workaround.
+    ``failure_reason_code`` is the reliable path: the Critic's output schema
+    asks for the code of the rule its verdict rests on. Prose is read only as a
+    fallback, for a verdict that names its rule in ``reasoning`` instead — the
+    shape observed in the field.
 
-    A mention is not a citation, though: a Critic that clears one rule and
-    refuses on another names both, and reading the cleared one as the grounds
-    would materialise a proposal it meant to block. Only the opening-clause
-    form counts (see :data:`_CITATION_OPENER`).
+    A mention is not a citation: a Critic that clears one rule and refuses on
+    another names both, and reading the cleared one as the grounds would
+    materialise a proposal it meant to block. Only an unambiguous citation
+    counts (see :data:`_CITATION_OPENER`).
 
     Args:
         entry: A ``review_verdict`` payload or one ``verdict_map`` entry.
@@ -588,16 +603,15 @@ def cited_advisory_reason_code(entry: dict[str, Any]) -> str:
     explicit = str(entry.get("failure_reason_code") or "").strip()
     if explicit:
         return explicit if explicit in advisory else ""
-    text = str(entry.get(_VERDICT_PROSE_KEY) or "")
-    if not text.strip():
+    opening = _opening_line(str(entry.get(_VERDICT_PROSE_KEY) or ""))
+    if not opening:
         return ""
-    # Sorted so a verdict citing several advisory rules still records one
-    # deterministic code; every candidate is advisory, so the choice is only
-    # about which one the audit trail names.
-    cited = sorted(
-        code for code in advisory if re.search(rf"^{_CITATION_OPENER}{re.escape(code)}`?\s*:", text, re.MULTILINE)
-    )
-    return cited[0] if cited else ""
+    # At most one code can open one line, so the sort only fixes the order the
+    # candidates are tried in.
+    for code in sorted(advisory):
+        if re.match(rf"{_CITATION_OPENER}{re.escape(code)}`?[ \t]*:", opening):
+            return code
+    return ""
 
 
 # Priority a batch of per-variant verdicts collapses by: one approved variant
