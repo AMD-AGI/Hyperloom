@@ -12,6 +12,7 @@ from typing import NoReturn
 
 from .. import framework_registry
 from .backends import CRITIC_PROTOCOL_CHOICES
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.llm_config import provider_model_defaults
 from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CLAUDE_MODEL,
@@ -274,7 +275,9 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--gpu-type",
         type=str.lower,
-        choices=["mi300x", "mi308x", "mi325x", "mi355x"],
+        # Sorted for a stable --help listing, and derived so a board added to
+        # the identities table is accepted here without a second edit.
+        choices=sorted(AMD_GPU_DISPATCH_IDENTITIES),
         default=None,
         help="Hint for the real target GPU. The rocm-smi probe always "
         "wins when both are present and disagree; a WARN is "
