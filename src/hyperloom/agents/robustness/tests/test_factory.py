@@ -469,6 +469,48 @@ async def test_factory_scriptable_skips_inference_server_probe(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_a_framework_added_to_the_config_knob_is_recognised_as_a_server(tmp_path: Path, monkeypatch):
+    """The documented knob decides ``is_server``, not a second copy of the list.
+
+    A framework named only in ``server_process_patterns`` used to be matched as
+    a process yet flagged ``is_server=False``, which silently disabled
+    ``local_server_unreachable`` for the very deployment that configured it.
+    """
+    import subprocess
+
+    from hyperloom.agents.robustness.sources import local_probe
+
+    config = Config(session_dir=tmp_path)
+    config.server_process_patterns.append("tinyserve.entrypoint")
+    bundle = build_reactor_components(config)
+    try:
+        probe_cfg = bundle.components.router._fallback._config  # type: ignore[attr-defined]
+        monkeypatch.setattr(
+            local_probe.subprocess,
+            "run",
+            lambda *a, **k: subprocess.CompletedProcess(
+                a[0], 0, "  9 1048576 python -m tinyserve.entrypoint --port 8888\n", ""
+            ),
+        )
+
+        found = local_probe._sample_processes(
+            probe_cfg.process_patterns,
+            probe_cfg.server_process_patterns,
+        )
+
+        assert found == [
+            {
+                "pid": 9,
+                "rss_mb": 1024.0,
+                "cmd": "python -m tinyserve.entrypoint --port 8888",
+                "is_server": True,
+            }
+        ]
+    finally:
+        await bundle.aclose()
+
+
+@pytest.mark.asyncio
 async def test_factory_forwards_multi_node_options_to_server_source(tmp_path: Path):
     """``enable_cluster_pod_metrics`` / ``workload_uid`` reach the server source."""
 

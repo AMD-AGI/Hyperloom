@@ -30,6 +30,8 @@ from hyperloom.common.llm_config import (
     deepseek_compat_env,
 )
 
+from .sources.local_probe import _OTHER_PROCESS_PATTERNS, _SERVER_PROCESS_PATTERNS
+
 log = logging.getLogger(__name__)
 
 # Primary data source: an optional explicit endpoint (ROBUSTNESS_SERVER_URL),
@@ -279,33 +281,18 @@ class Config:
     state_store_enabled: bool = True
 
     # -- server process patterns --
-    # Mirrors ``local_probe._DEFAULT_PROCESS_PATTERNS`` so the
-    # gpu_memory_leaked "no live owner" check matches every legitimate VRAM
-    # holder.
+    # Defaulted from the probe's own lists rather than restated here: a
+    # framework added to one copy but not the other used to appear as a matched
+    # process that is not a server, which silently disabled
+    # ``local_server_unreachable``. ``server_process_patterns`` is what a health
+    # probe may hold accountable for answering a port; the benchmark list adds
+    # the other legitimate VRAM holders the gpu_memory_leaked "no live owner"
+    # check has to see.
     server_process_patterns: list[str] = field(
-        default_factory=lambda: [
-            # SGLang
-            "sglang.srt",
-            "sglang.launch_server",
-            # vLLM
-            "vllm.entrypoints",
-            "vllm serve",
-            "vllm.v1.engine.core",
-            "vllm.engine.async_llm_engine",
-            "EngineCore",
-            # Magpie / InferenceX
-            "Magpie",
-            "inferencex",
-            # Ray + JIT compilation
-            "ray::IDLE",
-            "raylet",
-            "hipcc",
-        ]
+        default_factory=lambda: list(_SERVER_PROCESS_PATTERNS),
     )
     benchmark_process_patterns: list[str] = field(
-        default_factory=lambda: [
-            "benchmark_serving",
-        ]
+        default_factory=lambda: list(_OTHER_PROCESS_PATTERNS),
     )
 
     @classmethod

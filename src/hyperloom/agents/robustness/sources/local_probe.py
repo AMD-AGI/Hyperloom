@@ -41,6 +41,11 @@ log = logging.getLogger(__name__)
 # supposed to be answering right now" is a different question from "what is
 # running": a health probe against a port with no server behind it is an
 # expected refusal, not a wedged server.
+#
+# The single source of truth for that distinction. ``LocalProbeConfig`` and the
+# agent-level ``Config`` knob both default to this tuple rather than restating
+# it, so a framework added in one place cannot show up matched-but-not-a-server
+# in the other and silently disable ``local_server_unreachable``.
 _SERVER_PROCESS_PATTERNS: tuple[str, ...] = (
     # SGLang
     "sglang.srt",
@@ -125,6 +130,9 @@ class LocalProbeConfig:
     # Surface ``/dev/shm`` alongside ``/`` so signals fire shm_pressure separately.
     disk_mountpoints: tuple[str, ...] = ("/", "/dev/shm")  # nosec B108 - mountpoint probe, not temp file creation.
     process_patterns: tuple[str, ...] = _DEFAULT_PROCESS_PATTERNS
+    # The subset of ``process_patterns`` that names an inference server, i.e.
+    # something a health probe may hold accountable for answering a port.
+    server_process_patterns: tuple[str, ...] = _SERVER_PROCESS_PATTERNS
     coordinator_event_limit: int = 200
     log_error_patterns: tuple[str, ...] = _DEFAULT_LOG_ERROR_PATTERNS
     log_error_window_lines: int = 500
@@ -217,7 +225,12 @@ class LocalProbeSource:
             cfg.coordinator_db_path,
         )
         local_disk = await asyncio.to_thread(_sample_disk, cfg.disk_mountpoints)
-        local_processes = await asyncio.to_thread(_sample_processes, cfg.process_patterns)
+        sampled_processes = await asyncio.to_thread(
+            _sample_processes,
+            cfg.process_patterns,
+            cfg.server_process_patterns,
+        )
+        local_processes = sampled_processes or []
         local_gpu = await asyncio.to_thread(_sample_gpu)
         local_log_tail = await asyncio.to_thread(
             _tail_logs,
@@ -325,6 +338,7 @@ class LocalProbeSource:
             local_external_deps=local_external_deps,
             coordinator_events=coordinator_events,
             local_task_progress=local_task_progress,
+            local_processes_known=sampled_processes is not None,
             sources_used=[self.name],
         )
 
@@ -561,24 +575,32 @@ def _sample_disk(mountpoints: tuple[str, ...]) -> dict[str, Any]:
     return out
 
 
-def _sample_processes(patterns: tuple[str, ...]) -> list[dict[str, Any]]:
+def _sample_processes(
+    patterns: tuple[str, ...],
+    server_patterns: tuple[str, ...] = _SERVER_PROCESS_PATTERNS,
+) -> list[dict[str, Any]] | None:
     """List local processes whose command matches any pattern.
 
-    Runs ``ps -eo pid=,rss=,cmd=`` and keeps lines whose command
-    contains one of ``patterns``. Returns ``[]`` when ``ps`` is absent,
-    times out, or exits non-zero.
+    Runs ``ps -eo pid=,rss=,cmd=`` and keeps lines whose command contains one
+    of ``patterns``. An empty list means "nothing matched"; ``None`` means the
+    probe could not answer at all. Consumers must not read the second as the
+    first — an absent ``ps`` would otherwise become evidence that no server is
+    running, and mute a signal that has nothing to do with this probe.
 
     Args:
         patterns (tuple[str, ...]): Substrings matched against each
             process command line; empty disables the probe.
+        server_patterns (tuple[str, ...]): The subset naming an inference
+            server; matches are flagged ``is_server``.
 
     Returns:
-        list[dict[str, Any]]: One ``{pid, rss_mb, cmd, is_server}`` entry per
-        matching process, where ``is_server`` marks an inference server as
-        opposed to a harness, Ray, or build process.
+        list[dict[str, Any]] | None: One ``{pid, rss_mb, cmd, is_server}``
+        entry per matching process, where ``is_server`` marks an inference
+        server as opposed to a harness, Ray, or build process; ``None`` when
+        the probe is disabled, ``ps`` is absent, times out, or exits non-zero.
     """
     if not patterns:
-        return []
+        return None
     try:
         proc = subprocess.run(
             ["ps", "-eo", "pid=,rss=,cmd="],
@@ -589,9 +611,10 @@ def _sample_processes(patterns: tuple[str, ...]) -> list[dict[str, Any]]:
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         log.debug("local_probe: ps failed: %s", exc)
-        return []
+        return None
     if proc.returncode != 0:
-        return []
+        log.debug("local_probe: ps exited %d", proc.returncode)
+        return None
     out: list[dict[str, Any]] = []
     for line in proc.stdout.splitlines():
         line = line.strip()
@@ -613,7 +636,7 @@ def _sample_processes(patterns: tuple[str, ...]) -> list[dict[str, Any]]:
                 "pid": pid,
                 "rss_mb": round(rss_kb / 1024.0, 1),
                 "cmd": cmd,
-                "is_server": any(pat in cmd for pat in _SERVER_PROCESS_PATTERNS),
+                "is_server": any(pat in cmd for pat in server_patterns),
             }
         )
     return out

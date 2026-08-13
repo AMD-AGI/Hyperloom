@@ -130,18 +130,25 @@ def _server_unreachable(data: SourceData) -> list[Symptom]:
     between two variants — with no server up by design, and alerting there
     tells an operator to restart something that was never meant to be running.
 
+    That reasoning needs to know there is no server, which is not the same as
+    failing to find one. When the process probe could not answer at all, the
+    symptom is emitted with the uncertainty recorded in its evidence, so a
+    broken ``ps`` cannot mute an unrelated finding.
+
     Severity is HIGH when every probed target is unreachable, otherwise MEDIUM.
 
     Args:
         data (SourceData): Collected source data including
-            ``local_server_health`` and ``local_processes``.
+            ``local_server_health``, ``local_processes`` and
+            ``local_processes_known``.
 
     Returns:
         list[Symptom]: One symptom per unreachable probe target, possibly empty.
     """
     if not data.local_server_health:
         return []
-    if not any(proc.get("is_server") for proc in data.local_processes):
+    server_seen = any(proc.get("is_server") for proc in data.local_processes)
+    if data.local_processes_known and not server_seen:
         return []
     bad = [entry for entry in data.local_server_health if not entry.get("reachable")]
     if not bad:
@@ -161,6 +168,7 @@ def _server_unreachable(data: SourceData) -> list[Symptom]:
                     "status": status,
                     "status_code": entry.get("status_code"),
                     "error": entry.get("error"),
+                    "server_process_seen": server_seen if data.local_processes_known else None,
                 },
                 subject={"url": url},
                 source="local",

@@ -79,6 +79,32 @@ def test_a_refused_port_with_no_server_behind_it_is_not_a_fault():
     assert all(s.name != "local_server_unreachable" for s in out)
 
 
+def test_a_refused_port_is_still_a_fault_when_nobody_could_look_for_the_server():
+    """A broken ``ps`` must not mute a finding that has nothing to do with it."""
+    data = SourceData(
+        local_processes=[],
+        local_processes_known=False,
+        local_server_health=[
+            {"url": "http://localhost:8888/health", "reachable": False, "status": "error", "error": "connect"},
+        ],
+    )
+    out = evaluate_local_health_signals(_ctx(), data)
+    matched = [s for s in out if s.name == "local_server_unreachable"]
+    assert len(matched) == 1
+    assert matched[0].evidence["server_process_seen"] is None
+
+
+def test_a_seen_server_is_recorded_in_the_evidence():
+    data = SourceData(
+        local_processes=_live_server(),
+        local_server_health=[
+            {"url": "http://localhost:30000", "reachable": False, "status": "error"},
+        ],
+    )
+    matched = [s for s in evaluate_local_health_signals(_ctx(), data) if s.name == "local_server_unreachable"]
+    assert matched and matched[0].evidence["server_process_seen"] is True
+
+
 def test_no_unreachable_targets_is_silent():
     data = SourceData(
         local_server_health=[

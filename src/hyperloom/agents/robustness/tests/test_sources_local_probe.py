@@ -1464,7 +1464,77 @@ def test_a_ray_serving_actor_is_a_process_the_probe_can_see(monkeypatch):
 
     found = local_probe._sample_processes(local_probe._DEFAULT_PROCESS_PATTERNS)
 
+    assert found is not None
     assert [(p["pid"], p["is_server"]) for p in found] == [(1, False), (2, True)]
+
+
+def test_the_caller_decides_which_patterns_name_a_server(monkeypatch):
+    """``is_server`` follows the patterns handed in, not a second copy of the list."""
+    ps_out = "  9 1048576 python -m tinyserve.entrypoint --port 8888\n"
+    monkeypatch.setattr(
+        local_probe.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, ps_out, ""),
+    )
+
+    found = local_probe._sample_processes(("tinyserve.entrypoint",), ("tinyserve.entrypoint",))
+
+    assert found is not None
+    assert [(p["pid"], p["is_server"]) for p in found] == [(9, True)]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param(FileNotFoundError("ps"), id="ps-absent"),
+        pytest.param(subprocess.TimeoutExpired(cmd="ps", timeout=2.0), id="ps-timed-out"),
+        pytest.param(subprocess.CompletedProcess(["ps"], 1, "", "boom"), id="ps-failed"),
+    ],
+)
+def test_a_probe_that_could_not_look_says_so_instead_of_reporting_nothing(monkeypatch, outcome):
+    """``None`` (could not find out) must stay distinct from ``[]`` (nothing runs)."""
+
+    def _run(*_a, **_k):
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(local_probe.subprocess, "run", _run)
+
+    assert local_probe._sample_processes(("sglang.srt",)) is None
+
+
+def test_no_pattern_matching_is_an_answer_not_a_failure(monkeypatch):
+    monkeypatch.setattr(
+        local_probe.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "  1 1024 /bin/bash\n", ""),
+    )
+
+    assert local_probe._sample_processes(("sglang.srt",)) == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_process_probe_is_reported_as_unknown_not_as_an_empty_machine(monkeypatch, tmp_path: Path):
+    """One sub-probe failing must not become evidence for an unrelated signal."""
+    monkeypatch.setattr(local_probe, "_sample_processes", lambda *_a, **_k: None)
+    cfg = LocalProbeConfig(session_dir=None, disk_mountpoints=(str(tmp_path),))
+
+    data = await LocalProbeSource(cfg).fetch(ctx=None)
+
+    assert data.local_processes == []
+    assert data.local_processes_known is False
+
+
+@pytest.mark.asyncio
+async def test_a_process_probe_that_found_nothing_is_still_an_answer(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(local_probe, "_sample_processes", lambda *_a, **_k: [])
+    cfg = LocalProbeConfig(session_dir=None, disk_mountpoints=(str(tmp_path),))
+
+    data = await LocalProbeSource(cfg).fetch(ctx=None)
+
+    assert data.local_processes == []
+    assert data.local_processes_known is True
 
 
 def test_task_progress_survives_a_db_without_the_expected_columns(tmp_path):

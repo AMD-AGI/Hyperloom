@@ -68,6 +68,11 @@ class SourceData:
     cluster_faults: list[dict[str, Any]] = field(default_factory=list)
     local_gpu: dict[str, Any] = field(default_factory=dict)
     local_processes: list[dict[str, Any]] = field(default_factory=list)
+    # ``False`` when the process probe could not answer (``ps`` missing, timed
+    # out, disabled). An empty ``local_processes`` then means "we do not know
+    # what is running", not "nothing is running", and a consumer must not read
+    # the absence of a process as evidence.
+    local_processes_known: bool = True
     local_disk: dict[str, Any] = field(default_factory=dict)
     local_log_tail: list[str] = field(default_factory=list)
     local_log_errors: list[dict[str, Any]] = field(default_factory=list)

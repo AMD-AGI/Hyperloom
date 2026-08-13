@@ -93,6 +93,68 @@ class ReactorBundle:
             await self.server_client.aclose()
 
 
+def _build_local_probe_config(config: Config) -> LocalProbeConfig:
+    """Project the agent config onto the local probe's own configuration.
+
+    ``server_process_patterns`` is passed through as both the server subset and
+    part of the match list, so a framework an operator adds to that knob is
+    matched *and* recognised as a server. Splitting those two decisions across
+    separately-maintained lists is what let a configured framework show up as
+    ``is_server=False`` and silently disable ``local_server_unreachable``.
+
+    Args:
+        config (Config): The discovered agent configuration.
+
+    Returns:
+        LocalProbeConfig: Configuration for :class:`LocalProbeSource`.
+    """
+    # Auto-include the local inference server health endpoint.
+    probe_targets = list(config.health_probe_targets)
+    if (
+        config.auto_probe_inference_server
+        and config.inference_server_health_url
+        and config.inference_server_health_url not in probe_targets
+    ):
+        probe_targets.append(config.inference_server_health_url)
+
+    extra_log_globs: tuple[str, ...] = (
+        "runs/*/*/server.log",
+        "runs/*/*/server_log",
+        "runs/*/server.log",
+        "runs/*/*/*/server.log",
+        "runs/*/*/*/*/server.log",
+    )
+    if config.server_log_extra_globs:
+        extra_log_globs = (
+            *extra_log_globs,
+            *(g.strip() for g in config.server_log_extra_globs.split(":") if g.strip()),
+        )
+
+    return LocalProbeConfig(
+        session_dir=config.session_dir,
+        process_patterns=tuple(config.server_process_patterns + config.benchmark_process_patterns),
+        server_process_patterns=tuple(config.server_process_patterns),
+        health_probe_targets=tuple(probe_targets),
+        health_probe_timeout_s=config.health_probe_timeout_s,
+        ray_probe_enabled=config.ray_probe_enabled,
+        ray_probe_timeout_s=config.ray_probe_timeout_s,
+        fd_probe_enabled=config.fd_probe_enabled,
+        fd_probe_pid=config.fd_probe_pid,
+        decision_audit_enabled=config.decision_audit_enabled,
+        decision_audit_max_integrate=config.decision_audit_max_integrate,
+        decision_audit_max_oob_attempts=(config.decision_audit_max_oob_attempts),
+        preflight_enabled=config.preflight_enabled,
+        critic_health_enabled=config.critic_health_enabled,
+        max_critic_judge_bundles=config.critic_health_max_judge_bundles,
+        extra_server_log_globs=extra_log_globs,
+        max_extra_server_logs=config.server_log_max_extra,
+        state_integrity_enabled=config.state_integrity_enabled,
+        external_deps_enabled=config.external_deps_enabled,
+        external_mount_stat_timeout_s=(config.external_mount_stat_timeout_s),
+        external_gateway_probe_url=config.external_gateway_probe_url,
+    )
+
+
 def build_reactor_components(
     config: Config,
     *,
@@ -138,28 +200,6 @@ def build_reactor_components(
             "config.robustness_server_url is empty",
         )
 
-    # Auto-include the local inference server health endpoint.
-    probe_targets = list(config.health_probe_targets)
-    if (
-        config.auto_probe_inference_server
-        and config.inference_server_health_url
-        and config.inference_server_health_url not in probe_targets
-    ):
-        probe_targets.append(config.inference_server_health_url)
-
-    extra_log_globs: tuple[str, ...] = (
-        "runs/*/*/server.log",
-        "runs/*/*/server_log",
-        "runs/*/server.log",
-        "runs/*/*/*/server.log",
-        "runs/*/*/*/*/server.log",
-    )
-    if config.server_log_extra_globs:
-        extra_log_globs = (
-            *extra_log_globs,
-            *(g.strip() for g in config.server_log_extra_globs.split(":") if g.strip()),
-        )
-
     # Multi-node guard: ``disable_local_probe`` swaps LocalProbe for a quiet stub.
     fallback: Source
     if config.disable_local_probe:
@@ -168,30 +208,7 @@ def build_reactor_components(
             reason="config.disable_local_probe is True (multi-node policy)",
         )
     else:
-        fallback = LocalProbeSource(
-            LocalProbeConfig(
-                session_dir=config.session_dir,
-                process_patterns=tuple(config.server_process_patterns + config.benchmark_process_patterns),
-                health_probe_targets=tuple(probe_targets),
-                health_probe_timeout_s=config.health_probe_timeout_s,
-                ray_probe_enabled=config.ray_probe_enabled,
-                ray_probe_timeout_s=config.ray_probe_timeout_s,
-                fd_probe_enabled=config.fd_probe_enabled,
-                fd_probe_pid=config.fd_probe_pid,
-                decision_audit_enabled=config.decision_audit_enabled,
-                decision_audit_max_integrate=config.decision_audit_max_integrate,
-                decision_audit_max_oob_attempts=(config.decision_audit_max_oob_attempts),
-                preflight_enabled=config.preflight_enabled,
-                critic_health_enabled=config.critic_health_enabled,
-                max_critic_judge_bundles=config.critic_health_max_judge_bundles,
-                extra_server_log_globs=extra_log_globs,
-                max_extra_server_logs=config.server_log_max_extra,
-                state_integrity_enabled=config.state_integrity_enabled,
-                external_deps_enabled=config.external_deps_enabled,
-                external_mount_stat_timeout_s=(config.external_mount_stat_timeout_s),
-                external_gateway_probe_url=config.external_gateway_probe_url,
-            )
-        )
+        fallback = LocalProbeSource(_build_local_probe_config(config))
 
     router = DegradeRouter(
         primary,
@@ -498,6 +515,9 @@ class _QuietFallback:
         """
         return SourceData(
             degraded_reason=f"local-probe disabled: {self.reason}",
+            # Nothing looked: an empty process list here is ignorance, not
+            # evidence that no server is running.
+            local_processes_known=False,
             sources_used=[self.name],
         )
 
