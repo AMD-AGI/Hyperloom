@@ -1646,7 +1646,7 @@ def build_prompt(
     # __global__ in a multi-kernel file.
     device_symbol_block = ""
     device_kernel_name = str(candidate.get("device_kernel_name", "") or "").strip()
-    if candidate.get("source_resolution_method") == "op_to_source" and device_kernel_name:
+    if candidate.get("source_resolution_method") in ("op_to_source", "active_finder", "symbol_index") and device_kernel_name:
         device_symbol_block = (
             "\n>>> DEVICE KERNEL FOCUS <<<\n"
             f"This op (`{kernel_name}`) dispatches to the device kernel symbol:\n"
