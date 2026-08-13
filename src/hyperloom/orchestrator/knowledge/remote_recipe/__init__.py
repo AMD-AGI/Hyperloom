@@ -8,7 +8,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-import shutil
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -20,6 +19,7 @@ from .client import (
     KBStoreError,
     RemoteRecipeClient,
     RemoteRecipeConfigurationError,
+    _deactivate_destination,
 )
 from .models import (
     RemoteRecipeValidationError,
@@ -36,21 +36,13 @@ from .values import (
 log = logging.getLogger(__name__)
 
 
-def _deactivate_warm_path(path: Path) -> None:
-    """Remove a warm path without following a symlink."""
-    if path.is_symlink() or (path.exists() and not path.is_dir()):
-        path.unlink(missing_ok=True)
-    elif path.is_dir():
-        shutil.rmtree(path)
-
-
 def read_remote_recipe(
     canonical_id: str,
     destination: str | Path,
     *,
     client: RemoteRecipeClient | None = None,
 ) -> dict[str, Any] | None:
-    """Download the direct best record as flattened recipe.json + files/."""
+    """Download the exact record and validate it against the current Recipe View."""
     resolved = client or RemoteRecipeClient.from_env_optional()
     if resolved is None:
         return None
@@ -59,7 +51,7 @@ def read_remote_recipe(
         try:
             knowledge_to_warm_recipe(document)
         except Exception:  # noqa: BLE001 — cleanup then preserve original error
-            _deactivate_warm_path(Path(destination))
+            _deactivate_destination(Path(destination))
             raise
     return document
 
@@ -371,7 +363,7 @@ class RemoteWarmRecipeAdapter:
     @staticmethod
     def _deactivate_path(path: Path) -> None:
         """Remove a path without following a symlink."""
-        _deactivate_warm_path(path)
+        _deactivate_destination(path)
 
     def _read(self, canonical_id: str) -> dict[str, Any] | None:
         if canonical_id not in self._cache:
@@ -428,7 +420,7 @@ class RemoteWarmRecipeAdapter:
         canonical_id: str,
         version: int | None = None,
     ) -> dict[str, Any] | None:
-        """Return the exact best record projected into the legacy Recipe shape."""
+        """Return the exact record projected into the current Recipe contract."""
         del version
         return self._read(canonical_id)
 
@@ -439,7 +431,7 @@ class RemoteWarmRecipeAdapter:
         version: int | None = None,
         prefer: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """Return the cached exact best record; relative-tier search is deferred."""
+        """Return the exact record; degraded tiers are ranked by T0 via ``search``."""
         del version, prefer
         return self._read(canonical_id)
 

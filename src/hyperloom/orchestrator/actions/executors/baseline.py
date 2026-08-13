@@ -906,12 +906,13 @@ def _apply_warm_patches(
 
     Reads ``params["patches"]`` (list of dicts with patch_file/patch_content/
     patch_ref) and ``params["blocked_patches"]`` (blocklist). Applies each patch
-    via ``git apply`` in the target repo. Skips patches that appear in the
-    blocklist. Returns list of successfully applied patch metadata dicts.
+    via ``git apply`` in the target repo, skipping blocklisted patches.
 
-    Current-contract timelines set ``required_patch_timeline``. Those patches are
-    sequential and fail closed: first failure stops the sequence and restores
-    the starting tree. Legacy patch lists retain best-effort skip semantics.
+    Legacy patch lists return the list of successfully applied patch metadata
+    dicts (best-effort skip semantics). Current-contract timelines set
+    ``required_patch_timeline`` and fail closed: the patches are sequential, the
+    first failure stops the sequence and restores the starting tree, and the
+    return is a structured result dict describing the failure.
     """
     patches = params.get("patches") or []
     required_timeline = bool(params.get("required_patch_timeline"))

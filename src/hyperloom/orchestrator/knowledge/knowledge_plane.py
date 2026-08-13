@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import KnowledgeConfig, KnowledgeReadResult, KnowledgeStoreMode, KnowledgeWriteResult
+from .config import KnowledgeConfig, KnowledgeStoreMode
 from .kernel_experience_bridge import KernelExperienceBridge
 
 from .pr_monitor import (
@@ -118,64 +118,6 @@ class KnowledgePlane:
                 else {"status": "unconfigured"}
             ),
         }
-
-    def read_recipe(self, *, canonical_id: str, **kwargs: Any) -> KnowledgeReadResult[dict[str, Any]]:
-        """Typed Recipe read while retaining RecipeKB's dict API."""
-
-        config = self.config or KnowledgeConfig.from_env()
-        provenance = {"component": "recipe_kb", "canonical_id": canonical_id}
-        try:
-            value = (
-                self.recipe_kb.get_recipe(canonical_id=canonical_id, **kwargs)
-                if self.recipe_kb is not None
-                else None
-            )
-            return KnowledgeReadResult(
-                value=value,
-                mode=config.mode,
-                backend=config.backend,
-                hit=value is not None,
-                provenance=provenance,
-                error="" if self.recipe_kb is not None else "recipe knowledge disabled",
-            )
-        except Exception as exc:  # noqa: BLE001 - typed API reports failure
-            return KnowledgeReadResult(
-                value=None,
-                mode=config.mode,
-                backend=config.backend,
-                hit=False,
-                provenance=provenance,
-                error=f"{type(exc).__name__}: {exc}",
-            )
-
-    def write_recipe(self, **kwargs: Any) -> KnowledgeWriteResult[dict[str, Any]]:
-        """Typed Recipe write with observable failure."""
-
-        config = self.config or KnowledgeConfig.from_env()
-        provenance = {
-            "component": "recipe_kb",
-            "canonical_id": str(kwargs.get("canonical_id") or ""),
-        }
-        try:
-            if self.recipe_kb is None:
-                raise RuntimeError("recipe knowledge disabled")
-            value = self.recipe_kb.put_recipe(**kwargs)
-            return KnowledgeWriteResult(
-                value=value,
-                mode=config.mode,
-                backend=config.backend,
-                success=True,
-                provenance=provenance,
-            )
-        except Exception as exc:  # noqa: BLE001 - failure is returned, not hidden
-            return KnowledgeWriteResult(
-                value=None,
-                mode=config.mode,
-                backend=config.backend,
-                success=False,
-                provenance=provenance,
-                error=f"{type(exc).__name__}: {exc}",
-            )
 
     def reset_round_caches(self) -> None:
         """No-op at EXPLORE round boundaries."""

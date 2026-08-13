@@ -123,7 +123,7 @@ class _ConfigPatchAgentKB:
         return self._sections is not None
 
     def read(self) -> dict[str, Any]:
-        """Return the prior complete section, or ``{}`` on a cold start."""
+        """Return the prior section, or ``{}`` on a cold start or logged read error."""
         if self._sections is None:
             return {}
         try:
