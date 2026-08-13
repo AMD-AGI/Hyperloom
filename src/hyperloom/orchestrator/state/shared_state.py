@@ -582,10 +582,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Tput watermark for gain-driven roofline refresh; Coordinator re-enqueues at a compound 10% step.
     last_roofline_tput: float = 0.0
     stop_reason: str = ""
-    # When :attr:`stop_reason` was written, and therefore the session's end
-    # time for consumers. Re-stamped by every ``set_stop_reason`` call so the
-    # Coordinator's final write wins over the one CLOSE makes on entry, while
-    # ordinary saves leave a finished session's end time alone.
+    # When the session first stopped, and therefore its end time for
+    # consumers. Stamped by the first ``set_stop_reason`` write and left alone
+    # by later ones, so the CLOSE sequence's own artifacts and any re-export
+    # quote the same end; cleared with the reason on resume.
     stop_ts: str = ""
     # Closing phase — set when wall-clock deadline fires; Coordinator only drains a ``report`` task. Cleared on resume.
     closing_phase: bool = False
@@ -1708,9 +1708,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     ) -> str:
         """Validated writer for :attr:`stop_reason` (Inv-8.3 closed vocab): values outside ``STOP_REASON_VOCAB`` map to ``"unknown"`` (lenient) or raise (``strict=True``, default env ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON``). Returns value written.
 
-        Every write also stamps :attr:`stop_ts` with the current time, so the
-        session's end is recorded once by its producer instead of being guessed
-        by whoever reads the state later.
+        The first write also stamps :attr:`stop_ts`, so the session's end is
+        recorded once by its producer instead of being guessed by whoever reads
+        the state later.
 
         Args:
             value (str): The proposed stop reason; blank clears
@@ -1760,7 +1760,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return self._commit_stop_reason("unknown")
 
     def _commit_stop_reason(self, reason: str) -> str:
-        """Write a validated stop reason together with the time it was written.
+        """Write a validated stop reason, stamping the end time on the first one.
+
+        The session ends when its first terminal reason is recorded. Later
+        calls may refine the reason -- CLOSE stops the session on entry and the
+        Coordinator's ``finally`` re-asserts it -- but the CLOSE sequence writes
+        ``session_breakdown.json`` in between, so moving the timestamp would
+        leave the shipped artifact and the state disagreeing about when the run
+        ended.
 
         Args:
             reason (str): The validated, non-blank reason to record.
@@ -1769,7 +1776,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             str: ``reason``, so callers can return it unchanged.
         """
         self.stop_reason = reason
-        self.stop_ts = _now_iso()
+        if not self.stop_ts:
+            self.stop_ts = _now_iso()
         return reason
 
     # escalate hint plumbing
