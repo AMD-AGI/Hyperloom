@@ -923,22 +923,16 @@ async def test_user_prompt_includes_judge_bundle_and_instructions(
     assert '"abc"' in user_text  # proposal msg_id from judge bundle
 
 
-@pytest.mark.asyncio
-async def test_the_reviewed_bundle_carries_the_quantitative_claim_rule(
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-):
-    """Delivered as data so the Critic's field list stays identical to the one
-    the runner strips, and so a format slip is advisory rather than a reject
-    that costs the round every proposal in the set."""
-    judge_bundle = {
+def _bundle_reviewing(action_name: str) -> dict[str, Any]:
+    """A judge bundle whose single proposal proposes ``action_name``."""
+    return {
         "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
                 "msg_id": "abc",
                 "from_agent": "orchestration",
-                "action_name": "baseline",
+                "action_name": action_name,
                 "payload": {},
                 "predicted_gain_pct": 0.0,
             }
@@ -950,15 +944,21 @@ async def test_the_reviewed_bundle_carries_the_quantitative_claim_rule(
         "missing_context": [],
         "required_context": [],
     }
-    reply = '{"review_verdicts": [{"target_proposal_msg_id": "abc", "verdict": "approve"}]}'
+
+
+async def _review_constraints_sent_for(
+    action_name: str,
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+) -> dict[str, Any]:
+    """Run one review turn and return the ``review_constraints`` the model saw."""
     backend, client = _make_backend(
         fake_critic_root,
         fake_session_dir,
-        codex_replies=[reply],
-        judge_bundle=judge_bundle,
+        codex_replies=['{"review_verdicts": [{"target_proposal_msg_id": "abc", "verdict": "approve"}]}'],
+        judge_bundle=_bundle_reviewing(action_name),
     )
     await backend.run("ignored", system_prompt="you are critic")
-
     user_text = client.completions.calls[0]["messages"][1]["content"]
     match = re.search(
         r"==== JUDGE BUNDLE ====\s*(\{.*?\})\s*==== END JUDGE BUNDLE ====",
@@ -966,9 +966,35 @@ async def test_the_reviewed_bundle_carries_the_quantitative_claim_rule(
         re.DOTALL,
     )
     assert match
-    rule = json.loads(match.group(1))["review_constraints"]["quantitative_claim_rule"]
+    return json.loads(match.group(1))["review_constraints"]
+
+
+@pytest.mark.asyncio
+async def test_the_reviewed_bundle_carries_the_quantitative_claim_rule(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+):
+    """Delivered as data so the Critic's field list stays identical to the one
+    the runner strips, and so a format slip is advisory rather than a reject
+    that costs the round every proposal in the set."""
+    constraints = await _review_constraints_sent_for("specialist", fake_critic_root, fake_session_dir)
+
+    rule = constraints["quantitative_claim_rule"]
     assert rule["failure_verdict"] == "advise"
     assert set(rule["forbidden_proposal_fields"]) == set(FORBIDDEN_PROPOSAL_FIELDS)
+
+
+@pytest.mark.asyncio
+async def test_a_review_the_rule_cannot_apply_to_is_not_handed_the_rule(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+):
+    """The rule is about ``proposal_set[*]``, which a ``baseline`` proposal has
+    no room for. Sending it anyway invites a citation the verdict path then has
+    to read, so it goes only where it can be violated."""
+    constraints = await _review_constraints_sent_for("baseline", fake_critic_root, fake_session_dir)
+
+    assert "quantitative_claim_rule" not in constraints
 
 
 # Static context propagation — backend sources model/framework from manifest.json or explicit static_context.

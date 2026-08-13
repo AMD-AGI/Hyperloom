@@ -306,18 +306,31 @@ def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None
     rc["cross_domain_rules"] = cross_domain_rule_descriptors()
 
 
-def _inject_quantitative_claim_constraint(judge_bundle: dict[str, Any]) -> None:
+def _maybe_inject_quantitative_claim_constraint(judge_bundle: dict[str, Any]) -> None:
     """Set ``review_constraints.quantitative_claim_rule`` from the enforced list.
 
-    Unconditional: the guard applies to every specialist proposal regardless of
-    scope, and delivering it as data keeps the Critic's field list identical to
-    the one the runner strips, instead of a hand-copied prose list that drifts.
+    Delivering the rule as data keeps the Critic's field list identical to the
+    one the runner strips, instead of a hand-copied prose list that drifts. It
+    is sent only when the bundle holds a proposal the rule is about (same
+    condition as the cross-domain rules above): a Critic handed a rule that
+    cannot apply to anything under review can still cite it, and a citation is
+    what the verdict path reads.
 
     Args:
-        judge_bundle: The judge bundle to enrich in place.
+        judge_bundle: The judge bundle to enrich in place; unchanged when no
+            proposal is one of the kinds the rule governs.
     """
-    from ..specialists.patch_safety import quantitative_claim_rule_descriptor
+    from ..specialists.patch_safety import (
+        advisory_rules_govern,
+        quantitative_claim_rule_descriptor,
+    )
 
+    proposals = judge_bundle.get("proposals") or []
+    if not isinstance(proposals, list):
+        return
+    governed = any(advisory_rules_govern(str(p.get("action_name") or "")) for p in proposals if isinstance(p, dict))
+    if not governed:
+        return
     rc = judge_bundle.setdefault("review_constraints", {})
     if not isinstance(rc, dict):
         rc = {}
@@ -619,7 +632,7 @@ class CriticAgentBackend:
 
         _inject_phase_constraints(judge_bundle, self._trace_phase or "")
         _maybe_inject_cross_domain_constraints(judge_bundle)
-        _inject_quantitative_claim_constraint(judge_bundle)
+        _maybe_inject_quantitative_claim_constraint(judge_bundle)
 
         # Codex reasoning; short-circuit when there are no proposals.
         proposals = judge_bundle.get("proposals") or []

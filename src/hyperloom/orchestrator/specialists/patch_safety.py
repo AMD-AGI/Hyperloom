@@ -308,6 +308,40 @@ def advisory_only_reason_codes() -> frozenset[str]:
     return frozenset(codes)
 
 
+# The proposal kinds the advisory rules speak about. Both rule families are
+# about a specialist-authored payload -- ``proposal_set[*]`` for the
+# quantitative-claim rule, ``scope=domains`` for the cross-domain ones -- which
+# reaches review as a ``specialist`` proposal or as the ``explore`` grid that
+# ``proposal_set`` is materialised into. ``framework_agent`` is here because the
+# quantitative-claim rule names it by exception ("never fire the rule on them",
+# see prompts/critic.md): its payload always carries ``predicted_gain_pct``, so
+# a verdict citing the rule there is a misapplication of the rule itself.
+#
+# Spelled out rather than derived: no ACTION_CATALOGUE field separates these
+# from ``integrate_patch``, which shares their ``exploration`` verdict class,
+# ``shallow`` family and ``workspace_write`` side effect while being the one
+# action whose materialisation lands the patch under review.
+ADVISORY_RULE_PROPOSAL_KINDS: frozenset[str] = frozenset(
+    {
+        "explore",
+        "framework_agent",
+        "specialist",
+    }
+)
+
+
+def advisory_rules_govern(action_name: str) -> bool:
+    """Return whether the advisory review rules speak about ``action_name``.
+
+    Args:
+        action_name: The proposed action's name.
+
+    Returns:
+        True when the action is one of :data:`ADVISORY_RULE_PROPOSAL_KINDS`.
+    """
+    return str(action_name or "").strip() in ADVISORY_RULE_PROPOSAL_KINDS
+
+
 def numeric_claims(text: str) -> list[str]:
     """Return numeric-speedup claim substrings found in ``text``.
 
@@ -588,6 +622,7 @@ def vet_patches(
 
 __all__ = [
     "ADVISE_VERDICT",
+    "ADVISORY_RULE_PROPOSAL_KINDS",
     "CROSS_DOMAIN_RULES",
     "CrossDomainRule",
     "FORBIDDEN_PAYLOAD_FIELDS",
@@ -603,6 +638,7 @@ __all__ = [
     "QUANTITATIVE_CLAIM_REASON_CODE",
     "SCOPE_DOMAINS_LITERAL",
     "advisory_only_reason_codes",
+    "advisory_rules_govern",
     "cross_domain_rule_descriptors",
     "ground_patch_text",
     "is_unified_diff",

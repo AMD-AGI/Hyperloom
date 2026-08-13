@@ -806,7 +806,7 @@ def test_a_rule_named_in_a_remediation_note_is_not_a_citation():
         "reasoning": "the benchmark is not comparable with the baseline.",
         "notes": [f"{QUANTITATIVE_CLAIM_REASON_CODE}: nothing to fix on that front."],
     }
-    assert verdict_held_to_its_rule(entry) == ("reject", "")
+    assert verdict_held_to_its_rule(entry, action_name="specialist") == ("reject", "")
 
 
 def test_a_reason_code_inside_a_longer_token_is_not_a_citation():
@@ -815,7 +815,64 @@ def test_a_reason_code_inside_a_longer_token_is_not_a_citation():
         "verdict": "reject",
         "reasoning": f"see log key x_{QUANTITATIVE_CLAIM_REASON_CODE}_v2 for the trace",
     }
-    assert verdict_held_to_its_rule(entry) == ("reject", "")
+    assert verdict_held_to_its_rule(entry, action_name="specialist") == ("reject", "")
+
+
+@pytest.mark.asyncio
+async def test_a_held_reject_never_lands_the_patch_it_rejected(coord):
+    """The rules the hold enforces are about specialist proposal payloads, and
+    ``advise`` means "dispatch may proceed": holding an ``integrate_patch``
+    reject would execute the patch the Critic refused, with the propose-time
+    PolicyGate patch gate already behind it."""
+    coord.shared_state = _PatchVerdictSharedState()
+    pending = PendingProposal(
+        proposal_msg_id="msg-patch",
+        from_agent="orchestration",
+        action_name="integrate_patch",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "integrate_patch", "params": {"specialist_task_id": "t-patch"}},
+    )
+    coord.state.pending_proposals["msg-patch"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-patch",
+            "verdict": "reject",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+    assert coord.shared_state.patch_verdicts["t-patch"] == "reject"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action_name", ["integrate_patch", "kernel_opt", "sweep"])
+async def test_a_reject_of_a_proposal_the_rules_do_not_govern_stands(coord, action_name):
+    """Every advisory rule is about a specialist-authored proposal payload, so a
+    reject of anything else cannot rest on one however the verdict is worded."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-ungoverned",
+        from_agent="orchestration",
+        action_name=action_name,
+        predicted_gain_pct=0.0,
+        payload={"action_name": action_name, "params": {}},
+    )
+    coord.state.pending_proposals["msg-ungoverned"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-ungoverned",
+            "verdict": "reject",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
 
 
 @pytest.mark.asyncio

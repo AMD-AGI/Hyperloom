@@ -23,7 +23,11 @@ from typing import Any
 from ..actions.executors._grid_server_args import (
     tokenize_server_args_preserving_json,
 )
-from ..specialists.patch_safety import ADVISE_VERDICT, advisory_only_reason_codes
+from ..specialists.patch_safety import (
+    ADVISE_VERDICT,
+    advisory_only_reason_codes,
+    advisory_rules_govern,
+)
 
 log = logging.getLogger(__name__)
 
@@ -647,7 +651,7 @@ def verdict_rests_on_one_ground(entry: dict[str, Any]) -> bool:
     return len([risk for risk in (entry.get("risks") or []) if risk]) <= 1
 
 
-def verdict_held_to_its_rule(entry: dict[str, Any]) -> tuple[str, str]:
+def verdict_held_to_its_rule(entry: dict[str, Any], *, action_name: str) -> tuple[str, str]:
     """Return the verdict a ``review_verdict`` entry carries, and why it moved.
 
     Several review rules declare ``advise`` as their failure verdict precisely
@@ -656,15 +660,19 @@ def verdict_held_to_its_rule(entry: dict[str, Any]) -> tuple[str, str]:
     silently gets its way. This holds the verdict to what the cited rule asked
     for, which makes the declaration enforceable rather than advisory.
 
-    The hold is narrow by construction: it only moves a reject whose *only*
-    stated ground is a rule that asked for advice (see
-    :func:`verdict_rests_on_one_ground`), and the verdict it produces is not an
-    integration permit — see :meth:`IntentRouter._handle_review_verdict`.
+    The hold is narrow by construction: it reaches only the proposal kinds those
+    rules are about (:func:`advisory_rules_govern`), and only a reject whose
+    *only* stated ground is a rule that asked for advice (see
+    :func:`verdict_rests_on_one_ground`). Scoping it by proposal kind is what
+    keeps ``advise`` — which means "dispatch may proceed" — from executing an
+    ``integrate_patch`` the Critic refused, since the propose-time
+    ``PolicyGate`` patch gate does not run a second time on the verdict.
 
     Args:
         entry: A ``review_verdict`` payload or one ``verdict_map`` entry, with
             a ``verdict`` and the rule it cites — in ``failure_reason_code`` or
             in its own prose (see :func:`cited_advisory_reason_code`).
+        action_name: The reviewed proposal's action name.
 
     Returns:
         A ``(verdict, reason_code)`` pair: the verdict to act on, and the cited
@@ -674,6 +682,8 @@ def verdict_held_to_its_rule(entry: dict[str, Any]) -> tuple[str, str]:
         return "", ""
     verdict = str(entry.get("verdict") or "").strip()
     if verdict != _REJECT_VERDICT:
+        return verdict, ""
+    if not advisory_rules_govern(action_name):
         return verdict, ""
     if not verdict_rests_on_one_ground(entry):
         return verdict, ""

@@ -287,6 +287,22 @@ def test_the_codes_carry_no_blank_entry():
     assert "" not in ps.advisory_only_reason_codes()
 
 
+# ---- advisory_rules_govern -------------------------------------------------
+@pytest.mark.parametrize("action_name", ["specialist", "explore", "framework_agent"])
+def test_the_rules_govern_the_proposal_kinds_they_are_written_about(action_name):
+    """``proposal_set[*]`` reaches review as a specialist proposal or the explore
+    grid it is materialised into; the framework candidate is the one the
+    quantitative-claim rule names by exception."""
+    assert ps.advisory_rules_govern(action_name) is True
+
+
+@pytest.mark.parametrize("action_name", ["integrate_patch", "kernel_opt", "sweep", "baseline", "", None])
+def test_integrate_patch_is_never_governed_by_an_advisory_rule(action_name):
+    """None of these carries a specialist ``proposal_set``, and holding an
+    ``integrate_patch`` reject to ``advise`` would land the refused patch."""
+    assert ps.advisory_rules_govern(action_name) is False
+
+
 # ---- vet_patches ----------------------------------------------------------
 def test_vet_patches(tmp_path, monkeypatch):
     good = tmp_path / "good.patch"

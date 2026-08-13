@@ -213,13 +213,22 @@ class IntentRouter:
                 },
             )
             return
-        verdict = await self._verdict_held_to_its_rule(intent.payload, target=target)
+        verdict = await self._verdict_held_to_its_rule(
+            intent.payload,
+            target=target,
+            action_name=pending.action_name,
+        )
         authored = str(single_verdict or "").strip()
         if not verdict and isinstance(verdict_map, dict) and verdict_map:
             # Per entry before the collapse below: a variant rejected on an
             # advisory-only rule must not out-rank its siblings' advice.
             sub_verdicts = [
-                await self._verdict_held_to_its_rule(entry or {}, target=target, variant=str(name))
+                await self._verdict_held_to_its_rule(
+                    entry or {},
+                    target=target,
+                    action_name=pending.action_name,
+                    variant=str(name),
+                )
                 for name, entry in verdict_map.items()
             ]
             verdict = collapse_verdicts(sub_verdicts)
@@ -253,6 +262,7 @@ class IntentRouter:
         entry: dict[str, Any],
         *,
         target: str,
+        action_name: str,
         variant: str = "",
     ) -> str:
         """Return ``entry``'s verdict, held to the verdict its cited rule declared.
@@ -266,13 +276,16 @@ class IntentRouter:
         Args:
             entry: The ``review_verdict`` payload, or one ``verdict_map`` entry.
             target: The target proposal msg_id, for the audit record.
+            action_name: The reviewed proposal's action name; only the kinds
+                those rules are about can be held (see
+                :func:`verdict_held_to_its_rule`).
             variant: The ``verdict_map`` key when ``entry`` is one variant's
                 verdict; empty for a single verdict.
 
         Returns:
             The verdict to act on.
         """
-        verdict, downgraded_from_code = verdict_held_to_its_rule(entry)
+        verdict, downgraded_from_code = verdict_held_to_its_rule(entry, action_name=action_name)
         if not downgraded_from_code:
             return verdict
         log.warning(
