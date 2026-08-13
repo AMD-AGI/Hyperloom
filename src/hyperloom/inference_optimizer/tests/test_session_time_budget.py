@@ -37,7 +37,7 @@ from hyperloom.orchestrator.loop.coordinator_helpers import (
 )
 from hyperloom.orchestrator.policy.gate import PolicyDenied
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
-from hyperloom.orchestrator.state.shared_state import CLOSING_RESERVE_SEC, SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
 from hyperloom.orchestrator.state.task_registry import Task
 
 # An action costing an hour at p50, so a short budget cannot fit it.
@@ -62,6 +62,18 @@ def coord(session_dir) -> Coordinator:
     # Past the baseline prerequisite so the sequence gate stays out of the way.
     c.shared_state.baseline_tput = 800.0
     return c
+
+
+def _budgeted_state(
+    *,
+    minutes: float,
+    elapsed_min: float = 0.0,
+    closing_grace_sec: float | None = None,
+) -> SharedState:
+    """A standalone state with a finite budget and ``elapsed_min`` already spent."""
+    state = SharedState(session_id="s", max_minutes=int(minutes), closing_grace_sec=closing_grace_sec)
+    state.elapsed_minutes = lambda **_kw: elapsed_min  # type: ignore[method-assign]
+    return state
 
 
 def _set_budget(coord: Coordinator, *, minutes: float, elapsed_min: float = 0.0) -> None:
@@ -103,24 +115,73 @@ class TestUsableBudgetAccessor:
         assert SharedState(session_id="s").session_budget_usable_sec() is None
 
     def test_the_closing_reserve_is_held_back(self):
-        state = SharedState(session_id="s", max_minutes=60)
-        state.elapsed_minutes = lambda **_kw: 0.0  # type: ignore[method-assign]
-        assert state.session_budget_usable_sec() == pytest.approx(3600.0 - CLOSING_RESERVE_SEC)
+        state = _budgeted_state(minutes=60)
+        assert state.session_budget_usable_sec() == pytest.approx(3600.0 - 72.0)
 
     def test_a_budget_inside_the_reserve_reads_as_spent(self):
-        state = SharedState(session_id="s", max_minutes=60)
-        state.elapsed_minutes = lambda **_kw: 59.9  # type: ignore[method-assign]
+        state = _budgeted_state(minutes=60, elapsed_min=59.9)
         assert state.session_budget_usable_sec() == 0.0
 
     def test_the_grid_deadline_is_derived_from_the_same_number(self, monkeypatch):
         """Both wall-clock layers must agree on how much budget is left."""
         import time as _time
 
-        state = SharedState(session_id="s", max_minutes=60)
-        state.elapsed_minutes = lambda **_kw: 10.0  # type: ignore[method-assign]
+        state = _budgeted_state(minutes=60, elapsed_min=10.0)
         monkeypatch.setattr(_time, "monotonic", lambda: 1000.0)
         usable = state.session_budget_usable_sec()
         assert state.grid_session_deadline_sec() == pytest.approx(1000.0 + usable)
+
+
+class TestTheReserveIsTheClosingGraceWindow:
+    """The budget held back must be the budget the CLOSE phase actually gets.
+
+    A fixed 120s reserve was only ever right for sessions of at least 100
+    minutes: a shorter one was charged more than its closing phase can spend,
+    and an operator who passed ``--closing-grace-sec 0`` to disable that phase
+    paid 120 seconds for work that never runs.
+    """
+
+    @pytest.mark.parametrize(
+        ("minutes", "closing_grace_sec", "expected"),
+        [
+            (120, None, 120.0),  # the default session: unchanged by this fix
+            (60, None, 72.0),  # min(120, 2% of the budget)
+            (60, 0.0, 0.0),  # closing phase disabled: reserve nothing
+            (60, 600.0, 600.0),  # an explicit window wins verbatim
+            (0, None, 0.0),  # unbounded budget: nothing to reserve from
+        ],
+    )
+    def test_the_reserve_tracks_the_resolved_grace_window(self, minutes, closing_grace_sec, expected):
+        state = SharedState(session_id="s", max_minutes=minutes, closing_grace_sec=closing_grace_sec)
+        assert state.closing_reserve_sec() == pytest.approx(expected)
+        assert state.closing_reserve_sec() == pytest.approx(effective_closing_grace_sec(minutes, closing_grace_sec))
+
+    @pytest.mark.parametrize("closing_grace_sec", [None, 0.0, 600.0])
+    def test_admission_and_the_grid_deadline_agree_on_every_reserve(self, closing_grace_sec, monkeypatch):
+        import time as _time
+
+        state = _budgeted_state(minutes=60, elapsed_min=20.0, closing_grace_sec=closing_grace_sec)
+        monkeypatch.setattr(_time, "monotonic", lambda: 1000.0)
+        usable = state.session_budget_usable_sec()
+        assert usable == pytest.approx(max(0.0, 2400.0 - state.closing_reserve_sec()))
+        assert state.grid_session_deadline_sec() == pytest.approx(1000.0 + usable)
+
+    def test_a_disabled_closing_phase_leaves_the_last_minutes_spendable(self):
+        """The 120s a disabled phase used to cost is the difference here."""
+        spent = _budgeted_state(minutes=60, elapsed_min=59.0)
+        kept = _budgeted_state(minutes=60, elapsed_min=59.0, closing_grace_sec=0.0)
+        assert spent.session_budget_usable_sec() == 0.0
+        assert kept.session_budget_usable_sec() == pytest.approx(60.0)
+
+    @pytest.mark.asyncio
+    async def test_the_coordinator_hands_the_operators_window_to_the_state(self, coord: Coordinator):
+        """The reserve lives on SharedState, but the flag arrives at the Coordinator."""
+        try:
+            await coord.run(max_ticks=1, max_minutes=60, closing_grace_sec=0.0)
+        finally:
+            await coord.stop()
+        assert coord.shared_state.closing_grace_sec == 0.0
+        assert coord.shared_state.closing_reserve_sec() == 0.0
 
 
 class TestTimeBudgetGate:

@@ -77,7 +77,7 @@ from ..bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
 )
-from ..state.shared_state import SharedState
+from ..state.shared_state import SharedState, effective_closing_grace_sec
 from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
@@ -89,7 +89,6 @@ from ..trace.orchestration_trace import (
 )
 from .coordinator_helpers import (
     _infer_model_class_from_config,
-    effective_closing_grace_sec,
     format_exc_brief,
     serialize_verdict_advisory,
 )
@@ -1607,6 +1606,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self._coordinator_loop = asyncio.get_running_loop()
         except RuntimeError:
             self._coordinator_loop = None
+        # The reserve every unit of work holds back IS this window, so the
+        # admission gate has to see the operator's choice too, not only the
+        # closing phase that spends it.
+        self.shared_state.closing_grace_sec = closing_grace_sec
         max_minutes_value = max_minutes if max_minutes is not None else 0
         # Persist budget so prompts and Resume can see it.
         if max_minutes is not None:
@@ -2093,7 +2096,7 @@ __all__ = [
     "CoordinatorState",
     "PendingProposal",
     "SharedState",
-    # Re-exported from coordinator_helpers for callers/tests.
+    # Re-exported from coordinator_helpers / state.shared_state for callers/tests.
     "_infer_model_class_from_config",
     "effective_closing_grace_sec",
     # Re-exported from policy.gate; referenced via ``coordinator.<name>`` in tests.

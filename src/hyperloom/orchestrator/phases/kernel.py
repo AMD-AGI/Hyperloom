@@ -33,7 +33,6 @@ from ..loop.coordinator_helpers import (
     _resolve_roofline_watermark_ratio,
     _resolve_serving_fidelity,
     _split_env_and_flags,
-    effective_closing_grace_sec,
 )
 from .base import PhaseHandler
 
@@ -597,10 +596,7 @@ class KernelPhase(PhaseHandler):
         if deadline is None:
             return env_default_timeout, env_default_timeout + 600, False
         remaining = deadline - time.monotonic()
-        grace = effective_closing_grace_sec(
-            float(getattr(self.shared_state, "max_minutes", 0) or 0),
-            None,
-        )
+        grace = self.shared_state.closing_reserve_sec()
         margin = float(os.environ.get("GEAK_BUDGET_MARGIN_S", "300"))
         # Reserve the closing window: kill the subprocess with at least ``grace`` left.
         kill_budget = remaining - grace
