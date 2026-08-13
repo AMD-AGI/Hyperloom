@@ -1511,6 +1511,70 @@ async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error_class", ["session_time_exhausted", "orchestrator_cancelled"])
+async def test_a_revalidation_the_run_stopped_does_not_burn_the_stall_streak(
+    session_dir,
+    monkeypatch,
+    error_class,
+):
+    """The same round cannot be exempt from one ledger and charged to the other.
+
+    A reaped revalidation baseline is exempted from the baseline failure streak
+    because nothing about the baseline was measured. Charging it to the
+    enablement stall streak reaches the cap on the evidence of a clock, and the
+    session's terminal reason becomes ``enablement_stalled`` for rounds nobody
+    ever ran.
+    """
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        st = c.shared_state
+        st.enablement.validation_pending = True
+        st.enablement.revalidation_task_id = "t-reval-stopped"
+        st.enablement.stall_streak = 4
+        await c._handle_unpromotable_result(
+            _mk_task("baseline", "t-reval-stopped"),
+            {"status": "failed", "error_class": error_class, "error": "reaped"},
+        )
+        assert st.enablement.stall_streak == 4
+        assert st.stop_reason in ("", None)
+        assert st.baseline_failure_streak == 0
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_reaped_revalidation_leaves_the_window_open_for_a_resume(session_dir, monkeypatch):
+    """Nothing else reopens the window, so the stop must not close it.
+
+    ``validation_pending`` is set only by an eval-origin KEEP, and the
+    revalidation enqueue is gated on it, so clearing it strands a KEEP'd patch
+    that was never revalidated. The generation is bumped for the same reason
+    opening the window bumps it: the idempotency key must not resolve to the row
+    the run just stopped.
+    """
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        st = c.shared_state
+        st.enablement.validation_pending = True
+        st.enablement.revalidation_task_id = "t-reval-open"
+        st.enablement.revalidation_generation = 2
+        await c._handle_unpromotable_result(
+            _mk_task("baseline", "t-reval-open"),
+            {"status": "failed", "error_class": "session_time_exhausted", "error": "reaped"},
+        )
+        assert st.enablement.validation_pending is True
+        assert st.enablement.revalidation_task_id == ""
+        assert st.enablement.revalidation_generation == 3
+        assert st.enablement.inflight_task_id == ""
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_handle_unpromotable_records_for_non_baseline_kinds(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
