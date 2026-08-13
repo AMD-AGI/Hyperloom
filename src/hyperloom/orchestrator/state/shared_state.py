@@ -27,7 +27,8 @@ Fields::
                                 extra_envs, workspace, latency means)
     cumulative_gain     float — % over baseline
     stop_reason         str   — set when graceful stop fires
-    stop_ts             str   — ISO timestamp of the latest stop_reason write
+    stop_ts             str   — ISO timestamp of the first stop_reason write
+    resumed_ts          str   — ISO timestamp of the most recent --resume
     current_action      str   — what's running right now (set by Orchestration)
     crash_count         int   — incremented by the Coordinator when a tick/agent
                                 exception is recorded; also appends to
@@ -587,6 +588,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # by later ones, so the CLOSE sequence's own artifacts and any re-export
     # quote the same end; cleared with the reason on resume.
     stop_ts: str = ""
+    # When the current run leg began, i.e. the most recent ``--resume``; empty
+    # for a session that has only ever run once. ``start_ts`` cannot answer
+    # this: a resume after a clean stop deliberately keeps it so the wall-clock
+    # budget still counts from the original start, which leaves this the only
+    # record of where the previous leg ended.
+    resumed_ts: str = ""
     # Closing phase — set when wall-clock deadline fires; Coordinator only drains a ``report`` task. Cleared on resume.
     closing_phase: bool = False
     closing_started_unix: float = 0.0

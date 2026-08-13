@@ -419,6 +419,31 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     assert cb._resolve_session_dir_for_summary(None) is None
 
 
+def test_a_clean_stop_resume_records_where_the_new_leg_began() -> None:
+    """start_ts stays the budget anchor, so the resume timestamp is the only leg boundary."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", crash_count=1)
+
+    cb._begin_resume_leg(state, reanchor_budget=False)
+
+    assert state.start_ts == "2026-08-01T00:00:00+00:00"
+    assert state.resumed_ts > state.start_ts
+    assert state.crash_count == 1
+
+
+def test_a_resume_after_a_stop_re_anchors_the_budget_on_the_new_leg() -> None:
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", crash_count=4)
+    state.set_stop_reason("time_exhausted")
+    state.closing_phase = True
+
+    cb._begin_resume_leg(state, reanchor_budget=True)
+
+    assert state.start_ts == state.resumed_ts
+    assert state.stop_reason == ""
+    assert state.stop_ts == ""
+    assert state.closing_phase is False
+    assert state.crash_count == 0
+
+
 def test_reconcile_crash_count_updates_state_and_final_json(tmp_path: Path) -> None:
     state = SharedState(session_id="s", crash_count=5)
     SharedState(session_id="s", crash_count=1).save(tmp_path)
