@@ -4599,7 +4599,7 @@ class WritebackCollaborator:
                 continue
             if kind == "recipe" and target and not manifest:
                 errors.append("recipe:missing_snapshot_manifest")
-                continue
+                break
             manifest_key = (
                 str(manifest.get("manifest_path") or "")
                 if isinstance(manifest, dict)
@@ -4612,36 +4612,41 @@ class WritebackCollaborator:
             if target and manifest:
                 restored = _revert_patches(target, pre_sha, manifest)
                 errors.extend(restored.get("errors") or [])
-        kernel_snapshots = pending.get("kernel_snapshots") or []
-        if isinstance(kernel_snapshots, list) and kernel_snapshots:
-            restored = self.phase_prelude._restore_warm_kernel_snapshots(
-                kernel_snapshots
-            )
-            errors.extend(restored.get("errors") or [])
-        else:
-            kernel_results = pending.get("kernel_apply_results") or []
-            if not isinstance(kernel_results, list):
-                kernel_results = []
-            for apply_result in reversed(kernel_results):
-                if not isinstance(apply_result, dict):
-                    continue
-                try:
-                    reverted = _maybe_revert_kernel_patch(apply_result)
-                    if reverted.get("status") != "ok":
-                        raise RuntimeError(
-                            str(
-                                reverted.get("error")
-                                or reverted.get("reason")
-                                or (
-                                    "kernel revert status="
-                                    f"{reverted.get('status')}"
+                if errors:
+                    break
+        if not errors:
+            kernel_snapshots = pending.get("kernel_snapshots") or []
+            if isinstance(kernel_snapshots, list) and kernel_snapshots:
+                restored = self.phase_prelude._restore_warm_kernel_snapshots(
+                    kernel_snapshots
+                )
+                errors.extend(restored.get("errors") or [])
+            else:
+                kernel_results = pending.get("kernel_apply_results") or []
+                if not isinstance(kernel_results, list):
+                    kernel_results = []
+                for apply_result in reversed(kernel_results):
+                    if not isinstance(apply_result, dict):
+                        continue
+                    try:
+                        reverted = _maybe_revert_kernel_patch(apply_result)
+                        if reverted.get("status") != "ok":
+                            raise RuntimeError(
+                                str(
+                                    reverted.get("error")
+                                    or reverted.get("reason")
+                                    or (
+                                        "kernel revert status="
+                                        f"{reverted.get('status')}"
+                                    )
                                 )
                             )
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(
+                            "kernel:"
+                            f"{apply_result.get('manifest_path')}:"
+                            f"{type(exc).__name__}:{exc}"
                         )
-                except Exception as exc:  # noqa: BLE001
-                    errors.append(
-                        f"kernel:{apply_result.get('manifest_path')}:{type(exc).__name__}:{exc}"
-                    )
         if errors:
             state.warm_replay_pending = {
                 **dict(pending),

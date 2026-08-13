@@ -414,6 +414,32 @@ def test_close_fails_for_empty_required_staged_section(
         )
 
 
+def test_close_fails_for_invalid_staged_kernel_section(tmp_path: Path) -> None:
+    sections = KnowledgeSections(tmp_path / "draft")
+    section_file = sections.root / "sections" / "kernel.json"
+    section_file.parent.mkdir(parents=True)
+    ref = "kernel/rewrite/missing.patch"
+    section_file.write_text(
+        json.dumps(
+            {
+                "knowledge": {"rewrite": {"patch_path": ref}},
+                "files": [ref],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        RemoteRecipeValidationError,
+        match="staged section 'kernel' file mismatch",
+    ):
+        build_remote_knowledge(
+            _state([]),
+            tmp_path / "files",
+            sections=sections,
+        )
+
+
 @pytest.mark.parametrize(
     ("owner", "expected"),
     [

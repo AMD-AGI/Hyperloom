@@ -23,9 +23,13 @@ from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
 
 def _donor(
     *,
+    canonical_id: str = "donor-cid",
     arch: list[str] | None = None,
     model_type: str = "qwen2",
     gain: float = 12.5,
+    hardware: str = "mi300x",
+    framework_version: str = "1.2.5",
+    precision: str = "bf16",
     conc: Any = 64,
     isl: Any = 128,
     osl: Any = 128,
@@ -33,9 +37,12 @@ def _donor(
 ) -> dict[str, Any]:
     """Build a minimal donor recipe row for gate tests."""
     row: dict[str, Any] = {
-        "canonical_id": "donor-cid",
+        "canonical_id": canonical_id,
         "architectures": ["Qwen2ForCausalLM"] if arch is None else arch,
         "model_type": model_type,
+        "hardware": hardware,
+        "framework_version": framework_version,
+        "precision": precision,
         "validated_gain_pct": gain,
         "conc": conc,
         "isl": isl,
@@ -111,6 +118,21 @@ class _StubKB:
         return list(self._rows)
 
 
+class _BatchKB:
+    """Return one result batch per degradation tier."""
+
+    def __init__(self, batches: list[list[dict[str, Any]]]) -> None:
+        self._batches = list(batches)
+
+    def search(
+        self,
+        *,
+        label_match: dict[str, Any],
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:  # noqa: ARG002
+        return self._batches.pop(0) if self._batches else []
+
+
 def _find_kwargs(**over: Any) -> dict[str, Any]:
     base = {
         "cid": "self-cid",
@@ -129,7 +151,12 @@ def _find_kwargs(**over: Any) -> dict[str, Any]:
 
 
 def test_find_config_donor_skips_untrustworthy() -> None:
-    kb = _StubKB([_donor(gain=0.0), _donor(gain=20.0)])
+    kb = _StubKB(
+        [
+            _donor(canonical_id="untrusted", gain=0.0),
+            _donor(canonical_id="trusted", gain=20.0),
+        ]
+    )
     donor, tier, conf = _find_config_donor(kb, **_find_kwargs())
     assert donor is not None
     assert donor["validated_gain_pct"] == 20.0
@@ -149,6 +176,27 @@ def test_find_config_donor_skips_self_cid() -> None:
     kb = _StubKB([_donor(gain=20.0)])
     donor, _tier, _conf = _find_config_donor(kb, **_find_kwargs(cid="donor-cid"))
     assert donor is None
+
+
+def test_find_config_donor_uses_framework_version_fallback() -> None:
+    compatible = _donor(
+        hardware="mi325x",
+        precision="fp16",
+        framework_version="1.2.4",
+        gain=20.0,
+    )
+    kb = _BatchKB([[], [], [], [compatible]])
+
+    donor, tier, conf = _find_config_donor(
+        kb,
+        **_find_kwargs(
+            hardware="mi300x",
+            framework_version="1.2.5",
+        ),
+    )
+
+    assert donor is compatible
+    assert (tier, conf) == ("compatible_framework_version", 0.72)
 
 
 def test_remote_cascade_skips_unproven_and_wrong_structure() -> None:

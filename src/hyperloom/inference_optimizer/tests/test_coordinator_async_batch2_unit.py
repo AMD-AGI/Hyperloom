@@ -143,11 +143,21 @@ async def test_resume_ignores_unarmed_canonical_target_without_manifest(
 @pytest.mark.asyncio
 async def test_resume_retains_pending_recipe_target_without_manifest(
     coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    kernel_restores: list[dict] = []
+    import hyperloom.orchestrator.kernel.request_handlers as kernel_handlers
+
+    monkeypatch.setattr(
+        kernel_handlers,
+        "_maybe_revert_kernel_patch",
+        lambda result: kernel_restores.append(result) or {"status": "ok"},
+    )
     coord.shared_state.warm_replay_pending = {
         "task_id": "warm-recipe-unarmed",
         "recipe_patch_target": "/mirror",
         "recipe_patch_pre_sha": "sha",
+        "kernel_apply_results": [{"manifest_path": "/tmp/kernel"}],
     }
     report = {"fixes": [], "warnings": []}
 
@@ -159,6 +169,7 @@ async def test_resume_retains_pending_recipe_target_without_manifest(
     ]
     assert report["warnings"][0]["kind"] == "resume_warm_rollback_failed"
     assert report["fixes"] == []
+    assert kernel_restores == []
 
 
 @pytest.mark.asyncio

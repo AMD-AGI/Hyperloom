@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PRELUDE phase handler: warm-recipe replay (KB best_config auto-apply) and
-the initial baseline/roofline internal-analysis task enqueue."""
+"""PRELUDE phase handler for section-based Recipe replay and initial analysis.
+
+Merges Explore, Framework, and Kernel AgentKB snapshots, applies their ordered
+patch timeline, and enqueues the baseline/roofline internal-analysis tasks.
+"""
 
 from __future__ import annotations
 import logging as _logging
