@@ -520,6 +520,18 @@ def _close_phase_stop_reason(state: dict[str, Any]) -> tuple[str, str]:
     return "", ""
 
 
+def _session_has_ended(stop_reason: Any) -> bool:
+    """Whether a stop reason marks the session as no longer running.
+
+    Args:
+        stop_reason (Any): Raw ``stop_reason`` from a state or session section.
+
+    Returns:
+        bool: ``True`` once a non-blank stop reason has been recorded.
+    """
+    return bool(str(stop_reason or "").strip())
+
+
 def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> bool:
     """Decide whether the CLOSE-phase stop reason should override the session's.
 
@@ -616,8 +628,9 @@ def collect_session(
     Merges identifiers and timing from ``state`` and ``manifest`` (state
     taking precedence on overlapping fields), computes ``elapsed_minutes``
     from the start timestamp, resolves the container image, and stamps
-    ``ended_at_utc`` only once a ``stop_reason`` is present. When no image can
-    be detected a warning is appended.
+    ``ended_at_utc`` from the recorded stop timestamp only once a
+    ``stop_reason`` is present. When no image can be detected a warning is
+    appended.
 
     Args:
         session_dir (Path): Absolute session root.
@@ -635,8 +648,11 @@ def collect_session(
     if _should_use_close_stop_reason(stop_reason, close_stop_reason):
         stop_reason = close_stop_reason
     ended_at_utc = ""
-    if stop_reason:
-        ended_at_utc = iso_z(close_ts) if close_ts else now_iso(timespec="seconds")
+    if _session_has_ended(stop_reason):
+        # ``stop_ts`` is stamped once, when the reason is written, so a re-export
+        # of a finished session keeps reporting the same end. The CLOSE
+        # transition and the export clock are only next-best guesses.
+        ended_at_utc = iso_z(state.get("stop_ts") or close_ts) or now_iso(timespec="seconds")
     elapsed_min: float | None = None
     if start_ts:
         try:
@@ -680,7 +696,9 @@ def _session_duration_seconds(
 
     Prefers the start / end timestamps because both producers of the
     ``session`` section carry a start, then falls back to ``elapsed_minutes``
-    for callers that supply it and no usable timestamps.
+    for callers that supply it and no usable timestamps. A session that has
+    stopped without leaving an end timestamp is never measured against the
+    export clock.
 
     Args:
         session_section (dict[str, Any]): The resolved ``session`` dict.
@@ -695,8 +713,13 @@ def _session_duration_seconds(
         or manifest.get("created_at_utc")
     )
     if start is not None:
-        end = to_unix(session_section.get("ended_at_utc")) or datetime.now(timezone.utc).timestamp()
-        if end > start:
+        end = to_unix(session_section.get("ended_at_utc"))
+        # Only a session that is still running may be measured up to now:
+        # extrapolating a finished one grows its duration on every re-export,
+        # which reads as a plausible number instead of as missing evidence.
+        if end is None and not _session_has_ended(session_section.get("stop_reason")):
+            end = datetime.now(timezone.utc).timestamp()
+        if end is not None and end > start:
             return int(round(end - start))
     elapsed_min = session_section.get("elapsed_minutes")
     if isinstance(elapsed_min, (int, float)) and elapsed_min > 0:

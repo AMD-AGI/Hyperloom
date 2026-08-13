@@ -129,7 +129,7 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 
 | Section              | Reads from                                                                                                            |
 |----------------------|----------------------------------------------------------------------------------------------------------------------|
-| `session`            | `manifest.json` + `state.{session_id, stop_reason, max_minutes, tick, start_ts}`                                     |
+| `session`            | `manifest.json` + `state.{session_id, stop_reason, stop_ts, max_minutes, tick, start_ts}`                            |
 | `workload`           | `manifest.{framework, model_*, gpu_type, tp, workload, objective}` + `state.{model_class, framework, gpu_type}`      |
 | `baseline`           | `state.{baseline_tput, baseline_accuracy, last_baseline.workspace, baseline_attempts}` + `<workspace>/benchmark_*/benchmark_report.json` |
 | `final`              | `state.{current_best, cumulative_gain, cumulative_gain_validated_*, optimization_stack}`                            |
