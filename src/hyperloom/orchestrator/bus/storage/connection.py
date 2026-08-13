@@ -264,28 +264,47 @@ class SqliteConnection:
     async def _rollback_off_loop(self) -> None:
         """Roll back a failed transaction on a worker thread, uncancellably.
 
-        Two constraints meet here. The rollback must not run on the event-loop
+        Three constraints meet here. The rollback must not run on the event-loop
         thread, because it takes ``_sync_lock``, and when the failure was a
         cancellation the worker that cancel abandoned still holds that lock —
         parked inside its own ``BEGIN IMMEDIATE`` for as long as another writer
         holds the database, up to ``busy_timeout``. An inline rollback queues
         behind it and stops the whole loop for that window, which is the
-        shutdown or budget-exhaustion window that issued the cancel. And the
+        shutdown or budget-exhaustion window that issued the cancel. The
         rollback must not itself be cancellable, because a bare ``await`` in a
         handler for this task's own cancellation is the way the connection stays
-        wedged inside a transaction for the rest of the session.
+        wedged inside a transaction for the rest of the session. And the
+        connection must be out of that transaction *before* ``_async_lock`` is
+        released, or a later writer finds it still open and fails with "cannot
+        start a transaction within a transaction".
 
-        :func:`asyncio.shield` gives both: the rollback runs to completion on a
-        worker no matter what happens to this task, and awaiting it keeps
-        ``_async_lock`` held until the connection is clean, so no later writer
-        can find a transaction still open. A further cancel arriving while we
-        wait abandons the wait, not the rollback. A rollback that fails outright
-        is logged, never allowed to mask the caller's original exception.
+        :func:`asyncio.shield` keeps the worker running whatever happens to this
+        task, but it protects the rollback, not the wait on it: a cancel landing
+        on the wait raises here. Abandoning the wait at that point releases
+        ``_async_lock`` with the rollback still queued behind the parked worker,
+        which is fire-and-forget with the lock already gone — so every cancel is
+        absorbed and the wait resumed until the rollback is done. The last one
+        absorbed is then re-raised, because a cancelled caller that returns
+        normally keeps running as though it had never been cancelled.
+
+        A rollback that fails outright — a statement error, a connection already
+        closed by teardown, an executor that will accept no more work — is
+        logged and never masks the caller's original exception.
         """
-        try:
-            await asyncio.shield(asyncio.to_thread(self._rollback))
-        except BaseException as exc:  # noqa: BLE001 — the caller's exception wins
-            log.warning("rollback after a failed transaction did not complete: %r", exc)
+        rolling_back = asyncio.ensure_future(asyncio.to_thread(self._rollback))
+        cancel: asyncio.CancelledError | None = None
+        while not rolling_back.done():
+            try:
+                await asyncio.shield(rolling_back)
+            except asyncio.CancelledError as exc:
+                cancel = exc
+            except (sqlite3.Error, RuntimeError) as exc:
+                # The rollback itself failed: a statement error, or the loop's
+                # executor refusing new work during teardown. Anything else is
+                # a bug worth surfacing rather than logging.
+                log.warning("rollback after a failed transaction did not complete: %r", exc)
+        if cancel is not None:
+            raise cancel
 
     def close(self) -> None:
         """Close the underlying connection under the sync lock."""

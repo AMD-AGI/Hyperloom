@@ -11,6 +11,8 @@ registry write that makes the row look alive.
 from __future__ import annotations
 
 import asyncio
+import logging
+import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
@@ -61,6 +63,16 @@ def _iso_ago(seconds: float) -> str:
 # Bound on every wait paced by the heartbeat driver, so a regression that stops
 # the driver fails in seconds instead of hanging the suite.
 _HEARTBEAT_BACKSTOP_S = 10.0
+
+# Bound on every wait for a worker thread the rollback tests hold a lock in, so
+# a regression that never frees it fails instead of hanging the suite.
+_ROLLBACK_BACKSTOP_S = 5.0
+
+# How long a cancelled write is given to come back before it is called early.
+# A write that abandoned its rollback returns on the next loop turn, so this is
+# orders of magnitude more than it needs and the assertion still means "it
+# returned while the rollback was queued" rather than "the loop was busy".
+_RETURNED_EARLY_WINDOW_S = 0.2
 
 
 async def _await_notes(notes: list[dict], label: str, count: int, *, interval_s: float) -> None:
@@ -459,7 +471,6 @@ async def test_the_loop_keeps_running_while_a_cancelled_write_rolls_back(tmp_pat
 
     tick_s = 0.01
     ticks_required = 5
-    lock_backstop_s = 5.0
     db = sub.tasks.db
     holding = threading.Event()
     cancelled = threading.Event()
@@ -471,7 +482,7 @@ async def test_the_loop_keeps_running_while_a_cancelled_write_rolls_back(tmp_pat
         with db._sync_lock:
             cur = real_begin()
             holding.set()
-            loop_alive.wait(lock_backstop_s)
+            loop_alive.wait(_ROLLBACK_BACKSTOP_S)
             return cur
 
     monkeypatch.setattr(db, "_begin_immediate", _begin_and_keep_the_lock)
@@ -487,7 +498,7 @@ async def test_the_loop_keeps_running_while_a_cancelled_write_rolls_back(tmp_pat
 
     ticker = asyncio.create_task(_tick_until_the_rollback_may_proceed())
     writing = asyncio.create_task(sub.tasks.record_progress(task.task_id, {"unit": "variant"}))
-    await asyncio.to_thread(holding.wait, lock_backstop_s)
+    await asyncio.to_thread(holding.wait, _ROLLBACK_BACKSTOP_S)
     writing.cancel()
     cancelled.set()
     with pytest.raises(asyncio.CancelledError):
@@ -501,6 +512,143 @@ async def test_the_loop_keeps_running_while_a_cancelled_write_rolls_back(tmp_pat
     # ``BEGIN IMMEDIATE`` would fail the way it did before the rollback existed.
     assert not db.raw.in_transaction
     await sub.tasks.record_progress(task.task_id, {"unit": "variant", "label": "after"})
+
+
+def _rollback_gated_on(db, entered: threading.Event, release: threading.Event, monkeypatch) -> None:
+    """Make ``db``'s rollback announce itself and then wait for ``release``.
+
+    Stands in for the rollback queued behind a worker thread that still holds
+    ``_sync_lock``, which is the state a cancelled ``BEGIN IMMEDIATE`` leaves and
+    the only state in which anything can land on the rollback's own wait.
+
+    Args:
+        db (SqliteConnection): Connection whose ``_rollback`` is gated.
+        entered (threading.Event): Set once the rollback is in flight.
+        release (threading.Event): Awaited before the rollback actually runs.
+        monkeypatch: The active monkeypatch fixture.
+    """
+    real_rollback = db._rollback
+
+    def _gated_rollback() -> None:
+        entered.set()
+        release.wait(_ROLLBACK_BACKSTOP_S)
+        real_rollback()
+
+    monkeypatch.setattr(db, "_rollback", _gated_rollback)
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_landing_on_the_rollback_does_not_release_the_lock_early(tmp_path, monkeypatch):
+    """The second cancel must not abandon the wait the first one created.
+
+    Abandoning it releases ``_async_lock`` while the rollback is still queued
+    behind the worker the first cancel walked away from — fire and forget with
+    the lock already gone, which is the behaviour this rollback was moved off the
+    loop to avoid rather than to adopt. The next writer then finds the
+    connection still inside a transaction and every write in the session fails
+    with "cannot start a transaction within a transaction".
+
+    Both cancels are ones production delivers: the stop that cancels an
+    in-flight action, and the escalation that follows when shutdown is not
+    making progress.
+    """
+    sub = _runner(tmp_path, monkeypatch)
+    task = await sub.tasks.create(kind="explore", params={}, idempotency_key="second-cancel")
+    await sub.tasks.transition(task.task_id, "running")
+
+    db = sub.tasks.db
+    holding = threading.Event()
+    release = threading.Event()
+    rolling_back = threading.Event()
+    real_begin = db._begin_immediate
+
+    def _begin_and_keep_the_lock():
+        """Hold ``_sync_lock`` past the cancel, like a contended BEGIN IMMEDIATE."""
+        with db._sync_lock:
+            cur = real_begin()
+            holding.set()
+            release.wait(_ROLLBACK_BACKSTOP_S)
+            return cur
+
+    monkeypatch.setattr(db, "_begin_immediate", _begin_and_keep_the_lock)
+    _rollback_gated_on(db, rolling_back, release, monkeypatch)
+
+    writing = asyncio.create_task(sub.tasks.record_progress(task.task_id, {"unit": "variant"}))
+    await asyncio.to_thread(holding.wait, _ROLLBACK_BACKSTOP_S)
+    writing.cancel()
+    await asyncio.to_thread(rolling_back.wait, _ROLLBACK_BACKSTOP_S)
+    writing.cancel()
+    await asyncio.wait({writing}, timeout=_RETURNED_EARLY_WINDOW_S)
+
+    assert not writing.done(), "the write returned with its rollback still queued behind the abandoned worker"
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await writing
+
+    assert not db.raw.in_transaction
+    assert not db._async_lock.locked()
+    await sub.tasks.record_progress(task.task_id, {"unit": "variant", "label": "after"})
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_arriving_while_the_rollback_runs_is_not_lost(tmp_path, monkeypatch):
+    """One cancel is enough, and it must not be swallowed by the rollback handler.
+
+    ``record_progress``'s body raises on its own — a ``BEGIN IMMEDIATE`` that
+    outlasted ``busy_timeout``, a ``history`` column that will not parse — so a
+    single cancel is all it takes to land on the rollback's wait. Swallowed, it
+    leaves the caller with the body's exception, which ``report_progress`` drops:
+    the action then runs on as though it had never been cancelled while the
+    dispatcher's ``gather`` waits for it to stop.
+    """
+    sub = _runner(tmp_path, monkeypatch)
+    task = await sub.tasks.create(kind="explore", params={}, idempotency_key="lost-cancel")
+    await sub.tasks.transition(task.task_id, "running")
+    await sub.tasks.db.execute(
+        "UPDATE tasks SET history=? WHERE task_id=?",
+        ("{ this will not parse", task.task_id),
+    )
+
+    db = sub.tasks.db
+    rolling_back = threading.Event()
+    release = threading.Event()
+    _rollback_gated_on(db, rolling_back, release, monkeypatch)
+
+    writing = asyncio.create_task(sub.tasks.record_progress(task.task_id, {"unit": "variant"}))
+    await asyncio.to_thread(rolling_back.wait, _ROLLBACK_BACKSTOP_S)
+    assert writing.cancel()
+    release.set()
+    await asyncio.wait({writing})
+
+    assert writing.cancelled(), f"the cancel was lost; the write ended as {writing.exception()!r}"
+    assert not db.raw.in_transaction
+
+
+@pytest.mark.asyncio
+async def test_a_rollback_the_connection_cannot_do_is_logged_not_raised(tmp_path, monkeypatch, caplog):
+    """A rollback that fails outright must not become the exception the caller sees.
+
+    Teardown closes the connection while writes are still unwinding, and a
+    rollback that lands after it raises ``ProgrammingError``. Losing the body's
+    own exception behind that would hide why the write failed in the first
+    place.
+    """
+    db = SqliteConnection(tmp_path / "coord.db")
+
+    def _rollback_on_a_closed_connection() -> None:
+        raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+
+    monkeypatch.setattr(db, "_rollback", _rollback_on_a_closed_connection)
+    try:
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(ValueError, match="body failed"):
+                async with db.transaction():
+                    raise ValueError("body failed")
+    finally:
+        db.close()
+
+    assert "rollback after a failed transaction did not complete" in caplog.text
+    assert "Cannot operate on a closed database" in caplog.text
 
 
 def test_the_tally_is_safe_to_advance_from_reader_threads() -> None:
