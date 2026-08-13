@@ -127,8 +127,8 @@ def _stable_id(prefix: str, *parts: Any) -> str:
     return f"{prefix}:{readable}:{digest}"
 
 
-def _measurement_occurrence(*values: Any, ordinal: Any = None) -> str:
-    """Tell measuring something again apart from describing it further.
+def _measurement_occurrence(*run_identity: Any, value: Any = None) -> str:
+    """Tell measuring something again apart from measuring it once.
 
     A measurement id is derived from its operation, and an operation is
     deliberately stable across a subject's retries -- one kernel, one
@@ -137,26 +137,37 @@ def _measurement_occurrence(*values: Any, ordinal: Any = None) -> str:
     earlier adoption had been decided on, leaving the adoption citing evidence
     that no longer agreed with it.
 
-    ``ordinal`` is the producer's own count of how many times it has measured
-    this subject, and is what should normally be passed: it separates two
-    readings even when they agree, which is the case a digest of the values
-    cannot see and the one that carries the repeatability evidence.
+    ``run_identity`` names the run that produced the reading -- an attempt id,
+    a benchmark report path, the timestamp the producer stamped on the entry.
+    That is what should be passed. Readings taken by one run share a key, which
+    is correct: they are one act of measuring, and a key drawn from the run is
+    unmoved when one of its metrics is later filled in or corrected. A key
+    drawn from the values is not, and re-recording a run to add its end-to-end
+    numbers used to re-id the untouched micro reading beside them, splitting
+    one reading into two and reporting a re-measure that never happened.
 
-    Falling back to the values keeps older callers from overwriting each other,
-    but it can only distinguish readings that differ. Note that neither form
-    may be allocated by the recorder itself: several producers replay their
-    records from state after a resume, so an id has to be reproducible from
-    what is being recorded rather than from how many parts already exist.
+    ``value`` is a last resort for callers with no run to name, and only ever
+    this metric's own reading -- never a sibling's, which is what made the key
+    move. It can only tell apart readings that differ.
+
+    Neither form may be a counter the recorder keeps: several producers replay
+    their records from state after a resume, so an id has to be reproducible
+    from what is being recorded rather than from how many parts already exist.
+    The plain ordinal a reader wants is assigned at assembly instead, where the
+    whole set is in hand at once.
     """
-    if ordinal is not None and str(ordinal).strip() != "":
-        return f"n{ordinal}"
-    parts: list[str] = []
-    for value in values:
+    parts = [
+        str(part).strip()
+        for part in run_identity
+        if part is not None and str(part).strip()
+    ]
+    if not parts:
         numeric = to_float(value)
-        parts.append(f"{numeric:.10g}" if numeric is not None else str(value or ""))
-    raw = "|".join(parts)
-    if not raw.strip("|"):
+        rendered = f"{numeric:.10g}" if numeric is not None else str(value or "")
+        parts = [rendered] if rendered.strip() else []
+    if not parts:
         return ""
+    raw = "|".join(parts)
     return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:10]
 
 
@@ -374,13 +385,17 @@ def _record_action_measurements(
         "samples": list(result.get("samples") or []) if isinstance(result.get("samples"), (list, tuple)) else [],
         "aggregation": result.get("aggregation") or "result_scalar",
     }
-    occurrence = _measurement_occurrence(*(result.get(field) for field, _, _ in metric_fields))
+    # Every metric below is read from one execution of the action, so they share
+    # the stamp that execution carries: a later pass that fills in one of them
+    # must not re-id the ones it did not touch.
+    occurrence_run = str(common["measured_at"] or "")
     seen_names: set[str] = set()
     for field, name, unit in metric_fields:
         value = result.get(field)
         if value is None or name in seen_names:
             continue
         seen_names.add(name)
+        occurrence = _measurement_occurrence(occurrence_run, value=value)
         measurement_id = _stable_id("measurement", operation_id, name, occurrence)
         measurement_ids.append(measurement_id)
         record_measurement(
@@ -432,7 +447,7 @@ def _record_action_measurements(
                     group,
                     point_key,
                     name,
-                    _measurement_occurrence(point.get(field)),
+                    _measurement_occurrence(occurrence_run, value=point.get(field)),
                 )
                 measurement_ids.append(measurement_id)
                 record_measurement(
@@ -1778,6 +1793,16 @@ def record_geak_operation(
         },
     }
     measurement_refs: list[str] = []
+    # The bench run these numbers were read from. A rebench of the same route
+    # writes a new report and so is kept as its own reading, while re-recording
+    # a stage that already reported lands back on the reading it first wrote.
+    occurrence_run = str(
+        value.get("report_path")
+        or value.get("eval_dir")
+        or value.get("run_id")
+        or value.get("task_id")
+        or ""
+    )
     workload = value.get("workload") if isinstance(value.get("workload"), Mapping) else {}
     harness = value.get("bench_client") or value.get("harness") or "geak_e2e"
     samples = value.get("samples") or value.get("throughput_samples")
@@ -1795,7 +1820,11 @@ def record_geak_operation(
         if numeric is None:
             continue
         measurement_id = _stable_id(
-            "measurement", route_id, label, source_name, _measurement_occurrence(numeric)
+            "measurement",
+            route_id,
+            label,
+            source_name,
+            _measurement_occurrence(occurrence_run, value=numeric),
         )
         metadata = _measurement_metadata(
             source_name,
@@ -2049,21 +2078,21 @@ def record_gemm_tuning_operation(
             }
         )
     measurement_refs: list[str] = []
-    occurrence = _measurement_occurrence(
-        value.get("best_speedup"),
-        value.get("baseline_tput"),
-        value.get("new_tput") or value.get("final_throughput"),
-        value.get("e2e_gain_pct"),
-    )
-    for name, raw, basis, unit in (
-        ("best_speedup", value.get("best_speedup"), "kernel_time_ratio", "ratio"),
-        ("baseline_throughput", value.get("baseline_tput"), "output", "tok/s"),
-        ("final_throughput", value.get("new_tput") or value.get("final_throughput"), "output", "tok/s"),
-        ("e2e_gain_pct", value.get("e2e_gain_pct"), "output", "percent"),
+    # The tuning attempt reads the kernel-time ratio once; the end-to-end
+    # numbers beside it are filled in later, by a validation run of its own.
+    # Keying each to the run it came from is what keeps that second pass from
+    # re-issuing the ratio it never re-measured.
+    e2e_run = str(value.get("final_report_path") or value.get("workspace") or "")
+    for name, raw, basis, unit, occurrence_run in (
+        ("best_speedup", value.get("best_speedup"), "kernel_time_ratio", "ratio", attempt_key),
+        ("baseline_throughput", value.get("baseline_tput"), "output", "tok/s", e2e_run),
+        ("final_throughput", value.get("new_tput") or value.get("final_throughput"), "output", "tok/s", e2e_run),
+        ("e2e_gain_pct", value.get("e2e_gain_pct"), "output", "percent", e2e_run),
     ):
         numeric = to_float(raw)
         if numeric is None:
             continue
+        occurrence = _measurement_occurrence(occurrence_run, value=numeric)
         measurement_id = _stable_id("measurement", operation_id, name, occurrence)
         record_measurement(
             session_dir,
@@ -2951,7 +2980,10 @@ def record_kernel_backend_result(
                         operation_id,
                         canonical_attempt_id,
                         "micro_speedup",
-                        _measurement_occurrence(numeric_speedup),
+                        _measurement_occurrence(
+                            att.get("ended_at") or att.get("started_at"),
+                            value=numeric_speedup,
+                        ),
                     )
                     record_measurement(
                         session_dir,
@@ -3168,10 +3200,11 @@ def record_kernel_e2e(
         patch_path (str | None): the applied patch path.
         target_file (str | None): the integrated target file.
         extra_server_args (str): extra server args carried by the change.
-        occurrence (Any): which integrate of this kernel these numbers came
-            from, as counted by the caller. Keeps a later re-measure from
-            landing on the readings an earlier KEEP was decided on, and is
-            recorded so a replay after resume reproduces the same ids.
+        occurrence (Any): which integrate of this kernel these numbers were read
+            from, as named by the caller; defaults to the integration id, then
+            to the benchmark the integrate was graded on. Keeps a later
+            re-measure from landing on the readings an earlier KEEP was decided
+            on, and is recorded so a replay after resume reproduces the ids.
         producer (str): the breakdown producer label (defaults to the
             kernel-agent).
     """
@@ -3179,10 +3212,20 @@ def record_kernel_e2e(
         return
     try:
         evidence = dict(result or {})
+        # Which integrate these numbers were read from. ``integration_id`` names
+        # it whenever the kernel-patch queue issued one, but an env-only
+        # integrate carries no artifact, so it never enters that queue and never
+        # gets an id -- it is graded on its runtime bundle alone. Naming those by
+        # the benchmark they were graded on keeps them apart, and a replay hands
+        # back the same report path rather than a fresh count. Relative, since
+        # this is recorded: the run is what identifies it, not where it ran.
+        graded_on = str(evidence.get("report_path") or evidence.get("workspace") or "")
         recorded_occurrence = (
             occurrence
             if occurrence is not None
-            else str(evidence.get("integration_id") or "") or None
+            else str(evidence.get("integration_id") or "")
+            or (_rel(Path(graded_on), session_dir) if graded_on else "")
+            or None
         )
         payload = {
             "kernel_id": str(kernel_id),
@@ -3237,18 +3280,8 @@ def record_kernel_e2e(
         measurement_refs: list[str] = []
         # One integrate of one kernel is one occurrence. Re-integrating the
         # same kernel later measures it again, and those numbers must not
-        # displace the ones an earlier KEEP was decided on.
-        #
-        # ``integration_id`` is the default because the handler that performs
-        # the integrate and the bookkeeping that files its verdict both record
-        # this outcome from the same result. Numbering it from either one's own
-        # counter would split a single reading in two.
-        occurrence_key = _measurement_occurrence(
-            evidence.get("base_tput"),
-            evidence.get("new_tput"),
-            e2e_gain_pct,
-            ordinal=recorded_occurrence,
-        )
+        # displace the ones an earlier KEEP was decided on. All three readings
+        # below come off that single benchmark, so they share its key.
         for name, raw, role in (
             ("baseline_throughput", evidence.get("base_tput"), "baseline"),
             ("final_throughput", evidence.get("new_tput"), "final"),
@@ -3258,7 +3291,11 @@ def record_kernel_e2e(
             if numeric is None:
                 continue
             measurement_id = _stable_id(
-                "measurement", operation_id, "integrate", name, occurrence_key
+                "measurement",
+                operation_id,
+                "integrate",
+                name,
+                _measurement_occurrence(recorded_occurrence, value=numeric),
             )
             record_measurement(
                 session_dir,

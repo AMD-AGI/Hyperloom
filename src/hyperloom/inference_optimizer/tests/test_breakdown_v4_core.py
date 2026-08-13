@@ -1629,3 +1629,63 @@ def test_rerecording_the_same_occurrence_still_merges(tmp_path):
     assert [row["value"] for row in measurements if row["name"] == "final_throughput"] == [
         105.0
     ]
+
+
+def test_filling_in_e2e_numbers_leaves_the_tuning_reading_alone(tmp_path):
+    """A tuning run reads its ratio once, however often the run is amended.
+
+    GEMM tuning reports a kernel-time ratio when it finishes and is recorded
+    again once an end-to-end validation has numbers to add beside it. While the
+    occurrence came from the values, that second pass moved the key for every
+    metric in the run, re-filing the untouched ratio under a new id: the
+    breakdown then reported two readings of 1.0577 where the tuner had measured
+    once, and offered the invented one as evidence that the figure repeats.
+    """
+    payload = {"task_id": "gemm-e2e", "gemm_tuning_backend": "forge", "macro_cycle": 0}
+    tuned = {"status": "complete", "decision": "KEEP", "best_speedup": 1.0577}
+    record_gemm_tuning_operation(tmp_path, payload=payload, result=tuned)
+    record_gemm_tuning_operation(
+        tmp_path,
+        payload=payload,
+        result={**tuned, "e2e_validated": True, "e2e_gain_pct": 0.0},
+    )
+
+    ratios = [
+        row for row in assemble_parts(tmp_path)["measurements"] if row["name"] == "best_speedup"
+    ]
+
+    assert [row["value"] for row in ratios] == [1.0577]
+    # The amendment landed on the reading instead of beside it.
+    assert ratios[0]["status"] == "validated"
+
+
+def test_env_only_integrates_are_told_apart_by_their_benchmark(tmp_path):
+    """An integrate with no patch has no integration id to be named by.
+
+    A runtime-bundle integrate names no artifact, so it never enters the
+    kernel-patch queue that issues integration ids and is graded on the bundle
+    alone -- which left it with no occurrence at all, and two such runs that
+    happened to agree would have merged. Each is named by the benchmark it was
+    graded on, which is per-run and comes back unchanged on a replay.
+    """
+    reports = ("runs/integrate/bench_1/report.json", "runs/integrate/bench_2/report.json")
+    for report in (*reports, reports[0]):
+        record_kernel_e2e(
+            tmp_path,
+            kernel_id="gemm_tune_fmoe_ck",
+            integrated=False,
+            e2e_gain_pct=-0.3,
+            validated=False,
+            decision="NEEDS_REVIEW",
+            extra_server_args="--moe-runner-backend aiter",
+            result={"base_tput": 100.0, "new_tput": 99.7, "report_path": report},
+        )
+
+    finals = [
+        row
+        for row in assemble_parts(tmp_path)["measurements"]
+        if row["name"] == "final_throughput"
+    ]
+
+    assert [row["value"] for row in finals] == [99.7, 99.7]
+    assert {row["occurrence"] for row in finals} == set(reports)

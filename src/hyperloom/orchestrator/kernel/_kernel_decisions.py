@@ -680,6 +680,11 @@ def record_kernel_integrate_result(
                 target_file=target_file,
                 extra_server_args=extra_args,
                 result=result,
+                # The id recovered above, not the one on the result: a result
+                # that reached us without one still belongs to the pending
+                # integrate we matched it to, and that is the integrate whose
+                # readings must not be written over by a later one.
+                occurrence=integration_id or None,
                 validation_tier=(
                     str(result.get("validation_tier") or "integrate_e2e")
                     if _dec == "KEEP"
