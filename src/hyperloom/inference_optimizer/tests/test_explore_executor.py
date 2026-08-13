@@ -1987,6 +1987,108 @@ async def test_explore_does_not_call_a_variant_unstable_when_the_run_reaped_its_
 
 
 @pytest.mark.asyncio
+async def test_the_reaped_rebench_rollback_spares_a_prior_rounds_ledger_row(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """Rolling back this round's write must not delete an earlier round's.
+
+    A fingerprint may be re-run across rounds, so the row a rerun overwrites is a
+    real measurement from a previous round. Undoing the rerun by deleting the key
+    takes that measurement out of the negative ledger with it, and the model is
+    free to re-propose a variant already measured and failed -- at the cost of a
+    full benchmark round.
+    """
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.max_minutes = 600.0
+    state.baseline_runtime_sec = 20.0
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    fp_rerun = canonical_fingerprint("--rerun-flag", {})
+
+    def _fake_run(cmd, *args, **kwargs):
+        if "--output-dir" not in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        # Match on path segments: ``tmp_path`` is named after the test, so a
+        # substring check would fire on every round.
+        parts = set(slot.parts)
+        rerun = "v01_v_ok" in parts
+        if rerun and "stack_rebench" in parts:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=SESSION_TIME_EXHAUSTED_RETURNCODE,
+                stdout="",
+                stderr="reaped",
+            )
+        _fake_workspace(slot, tput=1000.0 if rerun else 900.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-rollback"),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "v_measured",
+                    "extra_args": "--other-flag",
+                    "extra_envs": {},
+                    "provenance": "default_grid",
+                },
+                {
+                    "name": "v_ok",
+                    "extra_args": "--rerun-flag",
+                    "extra_envs": {},
+                    "provenance": "default_grid",
+                },
+            ],
+            "explore_search": {
+                "tested": {
+                    fp_rerun: {
+                        "fingerprint": fp_rerun,
+                        "name": "v_ok",
+                        "extra_server_args": "--rerun-flag",
+                        "extra_envs": {},
+                        "outcome": "FAILED",
+                        "round_id": "explore-001",
+                    }
+                },
+                "rejected": [],
+                "name_index": {"v_ok": fp_rerun},
+            },
+            "variant_timeout_sec": 3600,
+            "baseline_runtime_sec": 20.0,
+            "enable_stack_rebench": True,
+        },
+        idempotency_key="ex-rollback-prior-row",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    update = res.result["explore_search_update"]
+    prior = update["tested"].get(fp_rerun)
+    assert prior is not None, "prior round's ledger entry was deleted by the rollback"
+    assert prior["round_id"] == "explore-001"
+    assert prior["outcome"] == "FAILED"
+    assert update["name_index"]["v_ok"] == fp_rerun
+    # The round did measure something, so the update replaces the persisted
+    # ledger wholesale -- which is what makes a deletion here durable.
+    assert {t["name"] for t in update["tested"].values()} == {"v_measured", "v_ok"}
+
+
+@pytest.mark.asyncio
 async def test_explore_attributes_a_round_the_run_reaped_before_anything_measured(
     sub_agent_runner,
     tmp_path,

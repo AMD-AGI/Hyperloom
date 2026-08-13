@@ -985,7 +985,7 @@ class ExploreExecutor:
             search.setdefault(key, default)
 
         tested_dict = search.get("tested") or {}
-        name_index = dict(search.get("name_index") or {})
+        inherited_name_index: dict[str, Any] = dict(search.get("name_index") or {})
 
         # Attach the per-variant fingerprint as an attribute so the result
         # loop needn't recompute.
@@ -1064,7 +1064,13 @@ class ExploreExecutor:
         winners: list[dict[str, Any]] = []
         losers: list[dict[str, Any]] = []
         keep_unstable: list[dict[str, Any]] = []
-        tested_update: dict[str, dict[str, Any]] = dict(tested_dict)
+        # This round's own ledger writes, kept apart from the ledger it inherited
+        # and merged over it once the loop is done. A variant whose confirmation
+        # round the run reaps has to be rolled back, and a fingerprint may be
+        # re-run across rounds -- so rolling back against a merged dict deletes
+        # the earlier round's measured row along with this round's write.
+        round_tested: dict[str, dict[str, Any]] = {}
+        round_name_index: dict[str, Any] = {}
         rejected_update: list[dict[str, Any]] = list(search.get("rejected") or [])
         winners_history_update: list[dict[str, Any]] = list(search.get("winners_history") or [])
 
@@ -1300,7 +1306,7 @@ class ExploreExecutor:
                                 gv.name,
                                 werr,
                             )
-                            tested_update[fp] = {
+                            round_tested[fp] = {
                                 "fingerprint": fp,
                                 "name": gv.name,
                                 "extra_server_args": gv.extra_server_args,
@@ -1326,7 +1332,7 @@ class ExploreExecutor:
                                 "raw_result_path": w.raw_result_path if w is not None else None,
                             }
                             if gv.name:
-                                name_index[gv.name] = fp
+                                round_name_index[gv.name] = fp
                             rejected_update.append(
                                 {
                                     "fingerprint": fp,
@@ -1408,7 +1414,7 @@ class ExploreExecutor:
                         # Informational only: ``tput`` stays None so this never
                         # enters winner selection or gain math.
                         est_tput = getattr(r, "estimated_output_throughput", None)
-                        tested_update[fp] = {
+                        round_tested[fp] = {
                             "fingerprint": fp,
                             "name": gv.name,
                             "extra_server_args": gv.extra_server_args,
@@ -1444,7 +1450,7 @@ class ExploreExecutor:
                             "error_class": "killed_overtime",
                         }
                         if gv.name:
-                            name_index[gv.name] = fp
+                            round_name_index[gv.name] = fp
                         rejected_update.append(
                             {
                                 "fingerprint": fp,
@@ -1556,7 +1562,7 @@ class ExploreExecutor:
                             outcome = "KEEP"
 
                     decision_tput = r.output_throughput
-                    tested_update[fp] = {
+                    round_tested[fp] = {
                         "fingerprint": fp,
                         "name": gv.name,
                         "extra_server_args": gv.extra_server_args,
@@ -1581,7 +1587,7 @@ class ExploreExecutor:
                         "stage": FAILURE_STAGE_DECISION,
                     }
                     if gv.name:
-                        name_index[gv.name] = fp
+                        round_name_index[gv.name] = fp
 
                     # ---- KEEP path (with warm round-2 rebench) ----
                     if outcome == "KEEP":
@@ -1707,9 +1713,9 @@ class ExploreExecutor:
                             # the variant and its confirmation together.
                             if _stopped_by_the_run(rebench, variant=gv, idx=idx, round_label="stack rebench"):
                                 in_batch_keeps.pop()
-                                tested_update.pop(fp, None)
+                                round_tested.pop(fp, None)
                                 if gv.name:
-                                    name_index.pop(gv.name, None)
+                                    round_name_index.pop(gv.name, None)
                                 break
                             stack_rebench_tput = rebench.tput
                             stack_rebench_workspace = rebench.workspace
@@ -1727,10 +1733,10 @@ class ExploreExecutor:
                                     running_base_tput,
                                     stack_stable_threshold_pct,
                                 )
-                                tested_update[fp]["outcome"] = "KEEP_UNSTABLE"
-                                tested_update[fp]["stack_rebench_tput"] = stack_rebench_tput
-                                tested_update[fp]["stack_rebench_workspace"] = stack_rebench_workspace
-                                tested_update[fp]["stack_rebench_warnings"] = stack_rebench_warnings
+                                round_tested[fp]["outcome"] = "KEEP_UNSTABLE"
+                                round_tested[fp]["stack_rebench_tput"] = stack_rebench_tput
+                                round_tested[fp]["stack_rebench_workspace"] = stack_rebench_workspace
+                                round_tested[fp]["stack_rebench_warnings"] = stack_rebench_warnings
                                 keep_unstable.append(
                                     {
                                         **keep_entry,
@@ -1775,11 +1781,11 @@ class ExploreExecutor:
                                 keep_entry["stack_rebench_tput"] = stack_rebench_tput
                                 keep_entry["stack_rebench_workspace"] = stack_rebench_workspace
                                 keep_entry["stack_rebench_warnings"] = stack_rebench_warnings
-                                tested_update[fp]["tput"] = stack_rebench_tput
-                                tested_update[fp]["gain_pct"] = gain
-                                tested_update[fp]["stack_rebench_tput"] = stack_rebench_tput
-                                tested_update[fp]["stack_rebench_workspace"] = stack_rebench_workspace
-                                tested_update[fp]["stack_rebench_warnings"] = stack_rebench_warnings
+                                round_tested[fp]["tput"] = stack_rebench_tput
+                                round_tested[fp]["gain_pct"] = gain
+                                round_tested[fp]["stack_rebench_tput"] = stack_rebench_tput
+                                round_tested[fp]["stack_rebench_workspace"] = stack_rebench_workspace
+                                round_tested[fp]["stack_rebench_warnings"] = stack_rebench_warnings
                         else:
                             # Round 2 disabled — KEEP on the cold round-1
                             # measurement, advance the running baseline naively.
@@ -1861,6 +1867,11 @@ class ExploreExecutor:
                 round_serving_lease.close()
 
         # ----- Ledger compaction (per-fingerprint last-wins) ----------------
+        # This round's writes over the ledger it inherited: a re-run fingerprint
+        # replaces its earlier row, which is what a fresh measurement means, and a
+        # variant this round rolled back leaves the earlier row standing.
+        tested_update: dict[str, dict[str, Any]] = {**tested_dict, **round_tested}
+        name_index: dict[str, Any] = {**inherited_name_index, **round_name_index}
         rejected_dedup: dict[str, dict[str, Any]] = {}
         for entry in rejected_update:
             fp = str(entry.get("fingerprint") or "")
