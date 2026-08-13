@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import (
@@ -20,6 +22,10 @@ from hyperloom.orchestrator.roles.mock_backend import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases.close import (
+    _CLOSE_STEP_WAIT_CEILING_SEC,
+    _CLOSE_STEP_WAIT_FLOOR_SEC,
+)
 from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
 from hyperloom.orchestrator.state.shared_state import effective_closing_grace_sec
 
@@ -338,32 +344,56 @@ async def test_a_terminal_task_is_reported_not_run(coord):
 
 
 class _FinishesWhileWaiting(_StubTaskRegistry):
-    """Registry whose running row lands terminal once the sequencer looks again."""
+    """Registry whose running row lands terminal after ``lands_on`` lookups."""
 
-    def __init__(self, terminal_state: str):
+    def __init__(self, terminal_state: str, *, lands_on: int = 2):
         super().__init__()
         self._terminal_state = terminal_state
+        self._lands_on = lands_on
         self.gets = 0
 
     async def get(self, task_id):
         row = await super().get(task_id)
         self.gets += 1
-        if self.gets >= 2:
+        if self.gets >= self._lands_on:
             row.state = self._terminal_state
         return row
 
 
-def _running_report_row(coord) -> _StubTaskRow:
-    """Register a report the wall-clock deadline path already enqueued AND dispatched."""
+def _running_report_row(coord, *, kind: str = "report") -> _StubTaskRow:
+    """Register a close-step task the wall-clock deadline path already enqueued AND dispatched."""
     row = _StubTaskRow(
         task_id="wallclock-report",
-        kind="report",
+        kind=kind,
         state="running",
         params={},
         idempotency_key="closing-report-1234",
     )
     coord.tasks._by_id[row.task_id] = row
     return row
+
+
+def _clock_advancing_by(monkeypatch: pytest.MonkeyPatch, step_sec: float) -> None:
+    """Give the CLOSE module a monotonic clock that jumps ``step_sec`` per read.
+
+    The wait under test is measured in minutes, so a test that spent it would
+    be a test nobody runs. Only the CLOSE module's view of the clock is
+    replaced, which leaves the event loop's own timekeeping alone.
+    """
+    from hyperloom.orchestrator.phases import close as close_mod
+
+    now = 0.0
+
+    def _monotonic() -> float:
+        nonlocal now
+        now += step_sec
+        return now
+
+    monkeypatch.setattr(
+        close_mod,
+        "time",
+        SimpleNamespace(monotonic=_monotonic, time=time.time),
+    )
 
 
 @pytest.mark.asyncio
@@ -386,11 +416,14 @@ async def test_a_running_task_is_waited_for_not_re_run(coord, terminal_state: st
 
 
 @pytest.mark.asyncio
-async def test_a_running_task_that_never_lands_is_reported_not_waited_on_forever(coord):
-    """The closing grace window is the budget for this work, so it is also the bound."""
-    coord._dispatcher_poll_sec = 0.01
-    # Resolves to a 1.2s grace window, the same arithmetic a real session uses.
-    coord.shared_state.max_minutes = 1
+async def test_a_running_task_that_never_lands_is_reported_not_waited_on_forever(
+    coord,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The wait is patient, not unbounded: a step that never lands is recorded, not awaited forever."""
+    coord._dispatcher_poll_sec = 0.0
+    coord.shared_state.max_minutes = 60
+    _clock_advancing_by(monkeypatch, step_sec=30.0)
 
     state = await coord._run_close_task(_running_report_row(coord), step="1 (report)")
 
@@ -399,14 +432,58 @@ async def test_a_running_task_that_never_lands_is_reported_not_waited_on_forever
 
 
 @pytest.mark.asyncio
-async def test_a_zero_grace_window_buys_no_wait_at_all(coord):
-    """The row is still looked at once: no window is not the same as no answer."""
-    coord.shared_state.max_minutes = 0  # no budget -> no grace window
+async def test_the_wait_for_a_running_report_outlives_a_short_session_reserve(
+    coord,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A ten-minute session reserves twelve seconds for CLOSE; no report is written in twelve seconds.
+
+    Bounding the wait by the reserve made it a wait on paper only — the step
+    the deadline path dispatched was declared failed while it was still
+    running, and the session that ran out of time is the one whose report is
+    worth the most. The bound belongs to the work, so it is the report's own
+    expected runtime.
+    """
+    coord.tasks = _FinishesWhileWaiting("succeeded", lands_on=5)
+    coord._dispatcher_poll_sec = 0.0
+    coord.shared_state.max_minutes = 10
+    assert coord.shared_state.closing_reserve_sec() == pytest.approx(12.0)
+    # Five looks at five simulated seconds apiece: past the reserve, inside the
+    # two minutes the catalogue prices a report at.
+    _clock_advancing_by(monkeypatch, step_sec=5.0)
 
     state = await coord._run_close_task(_running_report_row(coord), step="1 (report)")
 
-    assert state == "running"
+    assert state == "succeeded"
     assert coord.sub.run_calls == []
+
+
+def test_the_wait_is_the_step_s_own_expected_runtime(coord):
+    bound = coord.phase_close._close_step_wait_sec(_running_report_row(coord))
+
+    assert bound == pytest.approx(ACTION_CATALOGUE["report"].typical_runtime_min * 60.0)
+
+
+def test_a_step_the_catalogue_prices_at_almost_nothing_still_gets_the_floor(coord):
+    """``session_breakdown`` is priced at 12s; giving up on it after 12s is giving up on it."""
+    row = _running_report_row(coord, kind="session_breakdown")
+
+    assert coord.phase_close._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
+
+
+def test_an_uncatalogued_step_gets_the_floor_too(coord):
+    row = _running_report_row(coord, kind="not_an_action")
+
+    assert coord.phase_close._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
+
+
+def test_an_extravagantly_priced_step_is_capped(coord):
+    """A wedged step must not hold the process open for as long as its action might legitimately run."""
+    coord.action_registry = {"report": SimpleNamespace(typical_runtime_min=1000.0)}
+
+    bound = coord.phase_close._close_step_wait_sec(_running_report_row(coord))
+
+    assert bound == pytest.approx(_CLOSE_STEP_WAIT_CEILING_SEC)
 
 
 @pytest.mark.asyncio
