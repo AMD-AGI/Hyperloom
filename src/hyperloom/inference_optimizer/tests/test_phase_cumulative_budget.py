@@ -279,6 +279,24 @@ def test_the_charge_back_base_of_a_resumed_phase_stays_inside_the_session():
     assert total == pytest.approx(session_sec * budget[ps.PHASE_PRELUDE] / denom)
 
 
+def test_a_kept_budget_anchor_charges_the_resumed_phase_the_smaller_base():
+    # The clean-stop branch keeps start_ts, so the session stays charged for the
+    # idle gap while the phase clock no longer is. The base is then what the
+    # session had left when THIS leg began, not when the phase was entered.
+    idle_gap = 3600.0
+    state = _resumed_prelude_state()
+    state.start_ts = T0_ISO
+    state.resumed_ts = _iso(T0 + PRELUDE_LEG_SEC + idle_gap)
+    now = T0 + PRELUDE_LEG_SEC + idle_gap + NEW_LEG_SEC
+
+    budget = ps.normalize_budget_pct(None)
+    denom = sum(pct for pct in budget.values() if pct > 0.0)
+    base = RESUMED_SESSION_MINUTES * 60.0 - (PRELUDE_LEG_SEC + idle_gap)
+    total = ps._phase_budget_total_seconds(state, now_unix=now)
+
+    assert total == pytest.approx(base * budget[ps.PHASE_PRELUDE] / denom)
+
+
 def test_a_later_phase_entry_supersedes_the_resume_boundary():
     # The leg boundary only floors the entry it interrupted; once the phase is
     # re-entered its own stamp is the later of the two.

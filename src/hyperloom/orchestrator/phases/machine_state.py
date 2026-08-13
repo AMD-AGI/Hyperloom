@@ -984,9 +984,14 @@ def phase_elapsed_totals_from_history(history: Any) -> dict[str, float]:
     is deliberately excluded: :func:`phase_cumulative_seconds` adds the live
     segment itself, and double-counting it would over-charge the phase.
 
-    ``phase_history`` is capped, so a very long session reconstructs a LOWER
-    bound. That is the safe direction for a budget guard — it can under-charge a
-    resumed phase, but it can never invent time the phase did not spend.
+    The rebuild is an estimate, not a bound in either direction. ``phase_history``
+    is capped, so a very long session loses its oldest segments and is
+    under-charged. And no row marks the process exiting, so two rows either side
+    of a resume bound one "segment" spanning the idle gap between the legs, and
+    charge it to the phase the earlier row named — the over-charge direction
+    :func:`phase_elapsed_seconds` floors off the live segment. That floor reads
+    ``resumed_ts``, which dates the newest leg only; ``phase_history`` dates none
+    of them, so the rebuild cannot repeat it.
 
     Args:
         history (Any): The ``phase_history`` list; any other type yields ``{}``.
@@ -1118,9 +1123,12 @@ def _phase_budget_total_seconds(
 
     session_remaining = session_remaining_seconds(state, now_unix=now_unix)
     if session_remaining is not None:
-        # Charge-back. remaining_at_entry reconstructs the time left when this
-        # phase started (session_remaining shrinks as phase_elapsed grows, so
-        # their sum is constant across the phase).
+        # Charge-back. remaining_at_entry reconstructs the time left when the
+        # phase's live segment opened: within one run leg session_remaining
+        # shrinks exactly as phase_elapsed grows, so their sum holds. A resume
+        # that keeps ``start_ts`` drops that sum by the idle gap between the
+        # legs — the session is charged for it, the phase is not — so a resumed
+        # phase charges back against a smaller, honest base.
         remaining_at_entry = max(0.0, session_remaining + phase_elapsed_seconds(state, now_unix=now_unix))
         if is_long_run(state):
             # Long bounded run: the per-cycle window caps the base as a planning
@@ -2852,8 +2860,10 @@ def make_lifecycle_event(
 
 
 # Phase-transition / lifecycle write-owner functions (take ``state`` first and
-# own the phase_history / lifecycle bookkeeping). ``SharedState`` exposes
-# forwarding shims so existing callers reach these.
+# own the phase_history / lifecycle bookkeeping). ``SharedState`` keeps
+# forwarding shims for the two that were once its methods, so existing
+# ``state.record_*(...)`` call sites still reach them; ``bank_phase_segment``
+# never was one and is called by name, from here and from the resume path.
 def bank_phase_segment(state, *, until_unix: float) -> float:
     """Bank the current phase's live segment, ending at ``until_unix``, into the durable totals.
 
@@ -3098,6 +3108,7 @@ __all__ = [
     "abort_prelude",
     "allowed_actions_for",
     "apply_escalate_budget_bump",
+    "bank_phase_segment",
     "compute_next_phase",
     "compute_plateau_explore",
     "compute_plateau_framework_agent",
@@ -3117,7 +3128,6 @@ __all__ = [
     "compute_kernel_progress_fingerprint",
     "kernel_work_pending",
     "make_history_row",
-    "bank_phase_segment",
     "explore_elapsed_seconds",
     "normalize_budget_pct",
     "phase_budget_remaining_seconds",

@@ -898,8 +898,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # re-entered once per macro-cycle. That turned "KERNEL gets 15% of the run"
     # into "KERNEL gets 15% of the run every time it is entered": three entries
     # burned 288% of the cap while the other phases starved. The guards read
-    # this total plus the live segment instead. ``record_phase_transition`` is
-    # the only writer; unlike ``explore_elapsed_accum_s`` there is no "unknown"
+    # this total plus the live segment instead. ``bank_phase_segment`` is the
+    # only writer; unlike ``explore_elapsed_accum_s`` there is no "unknown"
     # sentinel, because a budget guard must never read "unknown" as "no cap"
     # (see ``from_raw`` for how a pre-upgrade state is reconstructed).
     phase_elapsed_totals: dict[str, float] = field(default_factory=dict)
@@ -1294,8 +1294,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         # transition in phase_history, so the completed segments are
         # reconstructible. Rebuilding beats defaulting to an empty dict: an empty
         # dict silently re-arms the per-entry bug for the rest of a resumed run.
-        # phase_history is capped, so the rebuild is a LOWER bound — the safe
-        # direction, since it can only under-charge a phase, never invent time.
+        # The rebuild errs in both directions — the cap drops old segments, and a
+        # segment straddling a resume carries the idle gap (see the helper).
         if not isinstance(filtered.get("phase_elapsed_totals"), dict):
             from ..phases.machine_state import phase_elapsed_totals_from_history
 
