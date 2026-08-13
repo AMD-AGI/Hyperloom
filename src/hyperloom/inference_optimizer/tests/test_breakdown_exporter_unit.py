@@ -552,8 +552,23 @@ def test_the_recorder_path_keeps_the_fields_only_the_collector_can_resolve(tmp_p
     assert bd["session"]["session_dir"] == str(tmp_path.resolve())
 
 
+def test_a_clean_stop_resume_keeps_measuring_from_the_original_start(tmp_path):
+    """--max-hours still counts from there after a clean stop, so the elapsed time does too."""
+    now = datetime.now(timezone.utc)
+    state = {
+        "session_id": "sess-1178",
+        "start_ts": (now - timedelta(hours=5)).isoformat(),
+        "resumed_ts": (now - timedelta(hours=1)).isoformat(),
+        "max_minutes": 360,
+    }
+
+    section = sessions.collect_session(tmp_path, state, {}, [])
+    # The four hours the session was not running are charged to the budget too.
+    assert 299.0 <= section["elapsed_minutes"] <= 301.0
+
+
 def test_elapsed_time_is_measured_from_the_resumed_start_not_the_first_launch(tmp_path):
-    """A resume resets ``start_ts``, so elapsed stays comparable with ``max_minutes``."""
+    """A resume after a stop re-anchors ``start_ts``, so elapsed restarts with the budget."""
     (tmp_path / "manifest.json").write_text(
         json.dumps({"session_id": "sess-1178", "created_at_utc": "2026-08-01T00:00:00+00:00"}),
         encoding="utf-8",
