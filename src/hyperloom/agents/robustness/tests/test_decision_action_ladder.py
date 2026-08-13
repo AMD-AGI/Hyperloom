@@ -143,7 +143,7 @@ async def test_a_withheld_stall_is_observed_not_alerted():
     out = await ladder.decide(
         [
             _sym(
-                "agent_stall",
+                "agent_quiet_work_progressing",
                 SymptomSeverity.LOW,
                 summary="agent orchestration silent for 400s but its dispatched work reported 10s ago",
                 subject={"agent": "orchestration"},
@@ -154,6 +154,29 @@ async def test_a_withheld_stall_is_observed_not_alerted():
     )
     assert [i.type for i in out.intents] == [IntentType.SEND_MESSAGE]
     assert out.intents[0].payload["topic"] == "observation"
+
+
+async def test_medium_agent_stall_emits_a_medium_alert():
+    """The rung a healthy long phase must not reach: MEDIUM is an alert.
+
+    Documented in SKILL.md as ``alert(medium)``, which is why the withheld note
+    stays on the observation tier however long the phase runs.
+    """
+    ladder = ActionLadder()
+    out = await ladder.decide(
+        [
+            _sym(
+                "agent_stall",
+                SymptomSeverity.MEDIUM,
+                summary="agent orchestration silent for 3941s (threshold=300s)",
+                subject={"agent": "orchestration"},
+            )
+        ],
+        tick_index=0,
+        now_unix=1.0,
+    )
+    assert [i.type for i in out.intents] == [IntentType.ALERT]
+    assert out.intents[0].payload["severity"] == "medium"
 
 
 async def test_repeated_failure_high_emits_alert_plus_prune_branch():

@@ -86,11 +86,15 @@ def test_work_still_reporting_units_withholds_the_accusation() -> None:
 
 
 def test_a_withheld_accusation_still_leaves_a_trace() -> None:
-    """``return []`` made the near-miss unobservable; the operator needs to see it."""
+    """``return []`` made the near-miss unobservable; the operator needs to see it.
+
+    Under its own name: RCA reading ``agent_stall`` off a healthy long phase
+    cannot tell it apart from an agent that really did go quiet.
+    """
     ctx = ReactorContext(inbox=[_item("orchestration", ts=9_800.0)], now_unix=10_000.0)
     data = SourceData(local_task_progress=_progress("orchestration", unix=9_950.0, task="explore"))
     out = evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=100.0))
-    assert out[0].name == "agent_stall"
+    assert out[0].name == "agent_quiet_work_progressing"
     assert out[0].subject == {"agent": "orchestration"}
     assert "explore" in out[0].summary and "withheld" in out[0].summary
 
@@ -142,7 +146,12 @@ def test_busy_work_of_one_agent_does_not_silence_another() -> None:
 
 
 def test_an_hour_long_warmup_that_keeps_reporting_is_never_accused() -> None:
-    """A measured warmup runs 3941s; a ceiling would alert on every healthy one."""
+    """A measured warmup runs 3941s and reports throughout; it is not a stall.
+
+    Any tier above the observation one alerts — MEDIUM routes to
+    ``alert(medium)`` — so grading this by elapsed silence is the ceiling the
+    signal was written to drop, one rung lower.
+    """
     ctx = ReactorContext(inbox=[_item("orchestration", ts=10_000.0)], now_unix=13_941.0)
     data = SourceData(local_task_progress=_progress("orchestration", unix=13_900.0, task="warmup"))
     out = evaluate_stall_signals(
@@ -151,20 +160,24 @@ def test_an_hour_long_warmup_that_keeps_reporting_is_never_accused() -> None:
         config=StallConfig(stall_timeout_s=300.0, severity_high_after_s=900.0),
     )
     assert out[0].evidence["accusation_withheld"] is True
-    assert out[0].severity is SymptomSeverity.MEDIUM
+    assert out[0].name == "agent_quiet_work_progressing"
+    assert out[0].severity is SymptomSeverity.LOW
 
 
-def test_a_long_wait_raises_the_withheld_note_without_turning_it_into_an_accusation() -> None:
-    """Operators need the long ones to stand out; they are still not stalls."""
-    ctx = ReactorContext(inbox=[_item("orchestration", ts=10_000.0)], now_unix=13_941.0)
-    data = SourceData(local_task_progress=_progress("orchestration", unix=13_900.0, task="warmup"))
+def test_the_wait_does_not_grade_a_note_the_evidence_is_still_holding_up() -> None:
+    """Severity follows the evidence: same fresh note, 400s and 3941s of silence."""
     cfg = StallConfig(stall_timeout_s=300.0, severity_high_after_s=900.0)
-    long_wait = evaluate_stall_signals(ctx, data, config=cfg)[0]
-    short_ctx = ReactorContext(inbox=[_item("orchestration", ts=13_500.0)], now_unix=13_941.0)
-    short_wait = evaluate_stall_signals(short_ctx, data, config=cfg)[0]
-    assert short_wait.severity is SymptomSeverity.LOW
-    assert long_wait.severity is SymptomSeverity.MEDIUM
-    assert short_wait.severity is not SymptomSeverity.HIGH
+    data = SourceData(local_task_progress=_progress("orchestration", unix=13_900.0, task="warmup"))
+    by_idle = {
+        int(13_941.0 - last_seen): evaluate_stall_signals(
+            ReactorContext(inbox=[_item("orchestration", ts=last_seen)], now_unix=13_941.0),
+            data,
+            config=cfg,
+        )[0]
+        for last_seen in (13_541.0, 10_000.0)
+    }
+    assert [sym.severity for sym in by_idle.values()] == [SymptomSeverity.LOW, SymptomSeverity.LOW]
+    assert by_idle[3_941].evidence["withheld_while_work_reports_within_s"] == 300
 
 
 def test_the_moment_the_work_stops_reporting_the_next_tick_accuses() -> None:
@@ -176,7 +189,7 @@ def test_the_moment_the_work_stops_reporting_the_next_tick_accuses() -> None:
         stale,
         config=StallConfig(stall_timeout_s=300.0, severity_high_after_s=900.0),
     )
-    assert [s.severity for s in out] == [SymptomSeverity.HIGH]
+    assert [(s.name, s.severity) for s in out] == [("agent_stall", SymptomSeverity.HIGH)]
     assert "accusation_withheld" not in out[0].evidence
 
 

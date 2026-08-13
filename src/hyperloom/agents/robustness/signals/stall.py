@@ -13,14 +13,21 @@ work is one multi-hour deterministic task — a baseline pair, a profile and its
 roofline, an explore grid — has no LLM turn to emit, so agent silence there is
 the design rather than a fault, and alerting on it trains operators to ignore
 the signal. :attr:`SourceData.local_task_progress` carries the counter-evidence:
-while an agent's *own* dispatched work is still reporting units, its accusation
-is downgraded rather than raised. The suppression has no wall-clock ceiling,
-because the work units it covers routinely run past any threshold worth setting
-— a single warmup can take an hour — and a ceiling would make the alert fire on
-exactly the healthy runs it was written to stay quiet about. What bounds it
-instead is the freshness of the evidence: the moment the work stops reporting,
-the next tick accuses. A long wait still shows up, as a withheld accusation that
-rises from LOW to MEDIUM past :attr:`StallConfig.severity_high_after_s`.
+while an agent's *own* dispatched work is still reporting units, the accusation
+is withheld and the tick reports ``agent_quiet_work_progressing`` instead. The
+suppression has no wall-clock ceiling, because the work units it covers
+routinely run past any threshold worth setting — a single warmup runs 3941s —
+and a ceiling would make the alert fire on exactly the healthy runs it was
+written to stay quiet about. What bounds it instead is the freshness of the
+evidence: the moment the work stops reporting, the next tick accuses, at full
+severity.
+
+Severity therefore follows the evidence and not the length of the wait. A phase
+that keeps reporting throughout stays an observation however long it runs;
+elapsed silence only decides how loud the *accusation* is, once there is no
+fresh evidence left to withhold it. The two cases carry different symptom names
+so RCA can tell a healthy long phase from an agent that went quiet past
+:attr:`StallConfig.severity_high_after_s`.
 
 One reporting unit is enough to withhold even when the agent owns several, since
 a quiet unit is not an agent fault and has the lease watchdog behind it. It is
@@ -62,8 +69,9 @@ class StallConfig:
         stall_timeout_s (float): Silence past which an agent is accused, and
             the freshness a heartbeat must beat to count as counter-evidence.
         severity_high_after_s (float): Silence past which an accusation is HIGH
-            rather than MEDIUM, and past which a withheld one is MEDIUM rather
-            than LOW.
+            rather than MEDIUM. It does not grade a withheld accusation: an
+            agent whose work is still reporting is not more suspect for having
+            been dispatched a longer unit.
     """
 
     stall_timeout_s: float = 300.0
@@ -76,13 +84,14 @@ def evaluate_stall_signals(
     *,
     config: StallConfig | None = None,
 ) -> list[Symptom]:
-    """Emit ``agent_stall`` symptoms for tracked agents that have gone silent.
+    """Report each tracked agent that has gone silent past the stall timeout.
 
     Computes per-agent idle time from the most recent activity timestamp and
-    fires MEDIUM (or HIGH past ``severity_high_after_s``) once idle time exceeds
-    the stall timeout. An agent whose own dispatched work is still reporting is
-    not accused: work units outlive the stall window by design, so suppression
-    lasts as long as the evidence stays fresh, and only its own severity rises.
+    fires ``agent_stall`` MEDIUM (or HIGH past ``severity_high_after_s``) once
+    idle time exceeds the stall timeout. An agent whose own dispatched work is
+    still reporting is not accused at all: work units outlive the stall window
+    by design, so it reports ``agent_quiet_work_progressing`` (LOW) for as long
+    as the evidence stays fresh.
 
     Args:
         ctx (ReactorContext): Reactor context (provides inbox and current time).
@@ -91,8 +100,8 @@ def evaluate_stall_signals(
             when ``None``.
 
     Returns:
-        list[Symptom]: One ``agent_stall`` symptom per stalled agent, possibly
-            empty.
+        list[Symptom]: One ``agent_stall`` or ``agent_quiet_work_progressing``
+            symptom per silent agent, possibly empty.
     """
     cfg = config or StallConfig()
     last_seen = _collect_last_seen(ctx.inbox, data.coordinator_events)
@@ -127,7 +136,7 @@ def _stall_symptom(
     now_unix: float,
     cfg: StallConfig,
 ) -> Symptom:
-    """Build the ``agent_stall`` symptom for one agent that has gone silent.
+    """Build the symptom for one agent that has gone silent.
 
     Args:
         agent (str): The silent agent.
@@ -139,9 +148,10 @@ def _stall_symptom(
         cfg (StallConfig): Thresholds.
 
     Returns:
-        Symptom: MEDIUM (HIGH past ``severity_high_after_s``) when accused, or
-        LOW (MEDIUM past the same threshold) when the agent's own work is still
-        reporting and the accusation is withheld.
+        Symptom: ``agent_stall`` at MEDIUM (HIGH past
+        ``severity_high_after_s``) when accused, or
+        ``agent_quiet_work_progressing`` at LOW while the agent's own work is
+        still reporting and the accusation is withheld.
     """
     work_idle_s, work_task = _agent_in_flight_work(
         data.local_task_progress,
@@ -179,7 +189,7 @@ def _stall_symptom(
             suggestion=("escalate strategy if agent remains silent"),
         )
     evidence["accusation_withheld"] = True
-    long_wait = idle_s >= cfg.severity_high_after_s
+    evidence["withheld_while_work_reports_within_s"] = int(cfg.stall_timeout_s)
     summary = (
         f"agent {agent} silent for {int(idle_s)}s but its dispatched work "
         f"({work_task or 'unknown'}) reported {int(work_idle_s)}s ago; "
@@ -187,8 +197,8 @@ def _stall_symptom(
     )
     log.info("stall: %s", summary)
     return Symptom(
-        name="agent_stall",
-        severity=SymptomSeverity.MEDIUM if long_wait else SymptomSeverity.LOW,
+        name="agent_quiet_work_progressing",
+        severity=SymptomSeverity.LOW,
         summary=summary,
         evidence=evidence,
         subject={"agent": agent},
