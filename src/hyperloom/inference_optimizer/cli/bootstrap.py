@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.orchestrator.state.shared_state import SharedState
 from .parser import (
     DEFAULT_ISL,
@@ -213,11 +214,7 @@ def _seed_shared_state(
 
     # Persist the kernel optimizer under the same hard rule used by the runtime:
     # only exact KERNEL_OPT_BACKEND_ORDER=forge opts into per-kernel forge.
-    _kernel_optimizer_record = (
-        "native"
-        if str(os.environ.get("KERNEL_OPT_BACKEND_ORDER") or "").strip().lower() == "forge"
-        else "geak"
-    )
+    _kernel_optimizer_record = "native" if forge_explicitly_enabled() else "geak"
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority
     # base for the baseline server args.

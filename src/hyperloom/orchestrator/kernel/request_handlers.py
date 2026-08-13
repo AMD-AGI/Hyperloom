@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
 from hyperloom.common import codex_session, llm_config
-from hyperloom.common.env import env_bool, is_truthy
+from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.kernel_shape_contract import (
     ALLOWED_SHAPE_PROVENANCE as _ALLOWED_SHAPE_PROVENANCE,
@@ -1716,19 +1716,9 @@ exec {shlex.quote(runner)}
     return path
 
 
-def _forge_explicitly_enabled() -> bool:
-    """Return true only for the single supported forge opt-in switch.
-
-    KernelForge is private infrastructure, so forge must never be selected by
-    request payloads, legacy aliases, or GEMM_TUNING_BACKEND.  The only runtime
-    contract that enables forge is an exact KERNEL_OPT_BACKEND_ORDER=forge.
-    """
-    return str(os.environ.get("KERNEL_OPT_BACKEND_ORDER") or "").strip().lower() == "forge"
-
-
 def _resolve_gemm_tuning_backend(payload: dict) -> str:
     """Resolve GEMM tuning backend under the forge-explicit-only invariant."""
-    return "forge" if _forge_explicitly_enabled() else "geak"
+    return "forge" if forge_explicitly_enabled() else "geak"
 
 
 def _parse_forge_gemm_sentinel(stdout: str) -> dict[str, Any] | None:
@@ -4619,7 +4609,7 @@ def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
     missing value, legacy alias, or payload override stays on the GEAK
     whole-phase backend.
     """
-    if _forge_explicitly_enabled():
+    if forge_explicitly_enabled():
         return ["forge"]
     return list(_DEFAULT_KERNEL_PHASE_BACKEND_ORDER)
 
@@ -6877,7 +6867,9 @@ async def integrate_handler(
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
     "trace_analyze": trace_analyze_handler,
     "run_gemm_tuning": run_gemm_tuning_handler,
-    "run_fusion": run_fusion_handler,
+    # run_fusion is deliberately absent: KernelPhase awaits run_fusion_handler
+    # directly, so no request ever carries that kind and advertising it here
+    # would only invite one that nothing routes.
     "run_optimization": run_optimization_handler,
     "integrate": integrate_handler,
     "apply_patch": integrate_handler,  # alias — same flow

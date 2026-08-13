@@ -34,8 +34,6 @@ from hyperloom.orchestrator.actions.executors.profile import profile_executor
 from hyperloom.orchestrator.actions.executors.roofline import make_roofline_executor
 from hyperloom.orchestrator.roles import ClaudeBackend
 from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
-from ..protocol.action_surfaces import KERNEL_AGENT_OWNED_ACTIONS
-
 if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycle
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
@@ -63,18 +61,6 @@ def _mcp_servers_from_config(config_path: str | None) -> tuple[str, ...] | None:
     return tuple(str(name) for name in servers if str(name).strip())
 
 
-async def _noop_prep(ctx) -> dict:
-    """No-op preparation executor used as a stub.
-
-    Args:
-        ctx: Action context (only ``ctx.task.kind`` is read).
-
-    Returns:
-        A success result envelope tagged as a noop stub.
-    """
-    return {"status": "succeeded", "kind": ctx.task.kind, "note": "noop-stub"}
-
-
 # Declarative action_kind -> ExecutorFn map. Keep in sync with
 # session_paths._runs_actions() (not enforced by a test).
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
@@ -92,10 +78,6 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     # recover cleans up leaked VRAM owners.
     "recover": recover_executor,
 }
-
-# Kernel-owned kinds; no-op executors here so SubAgentRunner doesn't raise
-# no_executor on a stale task.
-_NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = tuple(sorted(KERNEL_AGENT_OWNED_ACTIONS))
 
 
 def _build_specialist_executor(
@@ -287,13 +269,15 @@ def _register_executors(
     specialist_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
 ) -> None:
     """Wire all available action executors onto ``coordinator``: the
-    _REAL_EXECUTORS_FULL set, kernel_agent-owned no-ops (skipped when no_kernel),
-    the always-wired Coordinator-internal executors, and the optional
-    specialist executor.
+    _REAL_EXECUTORS_FULL set, the always-wired Coordinator-internal executors,
+    and the optional specialist executor.
+
+    Kernel-owned actions get no executor at all: they are REQUEST-only, and
+    PolicyGate denies a delegate or propose_action for them.
 
     Args:
         coordinator: The live Coordinator to register executors on.
-        no_kernel: When True, skip wiring the kernel_agent-owned no-op executors.
+        no_kernel: Unused; kept so callers keep their keyword.
         compare_against_gpu: Optional GPU type for the target-analysis executor.
         session_dir: Optional session directory passed to executors.
         specialist_executor: Optional specialist executor to register.
@@ -346,9 +330,3 @@ def _register_executors(
                     required_kind,
                     no_kernel,
                 )
-
-    if no_kernel:
-        return
-
-    for kind in _NOOP_KINDS_KERNEL_ONLY:
-        coordinator.sub.register_executor(kind, _noop_prep)

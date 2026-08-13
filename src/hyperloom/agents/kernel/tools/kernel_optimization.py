@@ -461,7 +461,9 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
         tuple[list[str], dict[str, Any]]: The selected backend ladder and a
             notes dict describing the selection (benchmark availability, etc.).
     """
-    forge_enabled = str(os.environ.get("KERNEL_OPT_BACKEND_ORDER") or "").strip().lower() == "forge"
+    from hyperloom.common.env import forge_explicitly_enabled
+
+    forge_enabled = forge_explicitly_enabled()
     user_backends = parse_backends(args.backends) if forge_enabled else []
     if forge_enabled and not user_backends:
         user_backends = ["forge"]

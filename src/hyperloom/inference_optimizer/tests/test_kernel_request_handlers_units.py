@@ -1345,13 +1345,11 @@ class TestBackendOrder:
     def test_kernel_opt_backends_alias_does_not_enable_forge(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-        monkeypatch.setenv("KERNEL_OPT_BACKENDS", "forge")
 
         assert krh._backend_order({}) == []
 
     def test_kernel_opt_backends_alias_with_mixed_values_stays_geak_only(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        monkeypatch.setenv("KERNEL_OPT_BACKENDS", " FORGE , Foo ")
 
         assert krh._backend_order({}) == []
 

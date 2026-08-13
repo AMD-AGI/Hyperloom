@@ -47,7 +47,6 @@ def _candidate(**overrides):
 
 def test_choose_backends_default_does_not_select_forge(monkeypatch):
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
 
     selected, notes = ko.choose_backends(_args(), _candidate())
 
@@ -56,7 +55,6 @@ def test_choose_backends_default_does_not_select_forge(monkeypatch):
 
 
 def test_choose_backends_geak_env_does_not_select_per_kernel_backend(monkeypatch):
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "geak")
 
     selected, notes = ko.choose_backends(_args(), _candidate())
@@ -66,7 +64,6 @@ def test_choose_backends_geak_env_does_not_select_per_kernel_backend(monkeypatch
 
 
 def test_choose_backends_forge_env_is_explicit_opt_in(monkeypatch):
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
 
     selected, notes = ko.choose_backends(_args(), _candidate())
@@ -77,7 +74,6 @@ def test_choose_backends_forge_env_is_explicit_opt_in(monkeypatch):
 
 def test_choose_backends_forge_cli_does_not_enable_without_env(monkeypatch):
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
 
     selected, notes = ko.choose_backends(_args(backends="forge"), _candidate())
 
