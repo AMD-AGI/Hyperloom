@@ -480,11 +480,15 @@ class RemoteRecipeClient:
         except KBStoreError as exc:
             if "HTTP 409" not in str(exc):
                 raise
-            _, winner, _ = _champion(
+            incumbent, winner, _ = _champion(
                 self.store.get_rollup(canonical_id),
                 validate_metric=True,
                 expected_metric=metric,
             )
+            if incumbent == session_id:
+                # The record just written is already the one readers resolve to,
+                # so a refused promotion changes nothing.
+                return RemoteWriteResult("written", "", canonical_id, session_id, score)
             if winner < score:
                 self.store.set_champion(
                     canonical_id,

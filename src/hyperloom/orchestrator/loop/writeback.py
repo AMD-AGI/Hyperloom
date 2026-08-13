@@ -1638,12 +1638,7 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 - audit cannot break finalization
             log.debug("Remote Recipe KB audit append failed", exc_info=True)
 
-    def _finalize_kernel_agent_kb(
-        self,
-        remote_cid: str,
-        remote_sid: str,
-        source: str,
-    ) -> None:
+    def _finalize_kernel_agent_kb(self, remote_cid: str, source: str) -> None:
         """Publish the independent kernel-agent KB record for this session.
 
         A separate ``kernel:`` record with its own keep-if-better on kernel
@@ -1673,9 +1668,7 @@ class WritebackCollaborator:
                 # The recipe write failed before resolving the workload identity.
                 log.info("Kernel-agent KB finalize skipped: no workload identity")
                 return
-            kernel_result = write_kernel_agent_kb(
-                self.shared_state, kernel_cid, remote_sid
-            )
+            kernel_result = write_kernel_agent_kb(self.shared_state, kernel_cid)
             log.info(
                 "Kernel-agent KB finalize: status=%s reason=%s cid=%s sid=%s",
                 kernel_result.status,
@@ -1772,7 +1765,7 @@ class WritebackCollaborator:
                     optimized_throughput=remote_result.optimized_throughput,
                     reason=remote_result.reason,
                 )
-                self._finalize_kernel_agent_kb(remote_cid, remote_sid, source)
+                self._finalize_kernel_agent_kb(remote_cid, source)
                 return {
                     "status": remote_result.status,
                     "reason": remote_result.reason,
@@ -1793,7 +1786,7 @@ class WritebackCollaborator:
                     error_type=type(exc).__name__,
                 )
                 log.exception("Remote Recipe KB finalize failed (non-fatal)")
-                self._finalize_kernel_agent_kb(remote_cid, remote_sid, source)
+                self._finalize_kernel_agent_kb(remote_cid, source)
                 return {
                     "status": "error",
                     "reason": type(exc).__name__,
