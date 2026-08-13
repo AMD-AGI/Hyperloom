@@ -1717,8 +1717,9 @@ async def run_grid(
             )
         except subprocess.TimeoutExpired as exc:
             # Harvest pre-timeout leaks.
-            to_candidates = sorted(slot.glob("benchmark_*"))
-            to_destination = to_candidates[-1] if to_candidates else slot
+            to_destination = (
+                select_run_workspace(slot, known_before=slot_workspaces_before) or slot
+            )
             to_harvested = harvest_leaked_artifacts(
                 to_destination,
                 subprocess_started_unix=variant_started_unix,
@@ -1777,8 +1778,9 @@ async def run_grid(
                 max(0.0, time.time() - variant_started_unix),
                 2,
             )
-            sd_candidates = sorted(slot.glob("benchmark_*"))
-            sd_destination = sd_candidates[-1] if sd_candidates else slot
+            sd_destination = (
+                select_run_workspace(slot, known_before=slot_workspaces_before) or slot
+            )
             sd_harvested = harvest_leaked_artifacts(
                 sd_destination,
                 subprocess_started_unix=variant_started_unix,
@@ -1830,8 +1832,9 @@ async def run_grid(
                 max(0.0, time.time() - variant_started_unix),
                 2,
             )
-            ds_candidates = sorted(slot.glob("benchmark_*"))
-            ds_destination = ds_candidates[-1] if ds_candidates else slot
+            ds_destination = (
+                select_run_workspace(slot, known_before=slot_workspaces_before) or slot
+            )
             ds_harvested = harvest_leaked_artifacts(
                 ds_destination,
                 subprocess_started_unix=variant_started_unix,
@@ -1882,8 +1885,9 @@ async def run_grid(
                 max(0.0, time.time() - variant_started_unix),
                 2,
             )
-            ok_candidates = sorted(slot.glob("benchmark_*"))
-            ok_destination = ok_candidates[-1] if ok_candidates else slot
+            ok_destination = (
+                select_run_workspace(slot, known_before=slot_workspaces_before) or slot
+            )
             ok_harvested = harvest_leaked_artifacts(
                 ok_destination,
                 subprocess_started_unix=variant_started_unix,
