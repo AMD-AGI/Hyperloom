@@ -1564,6 +1564,83 @@ async def run_grid(
         )
         return clamped
 
+    def _record_round_stop(
+        stopped: StoppedByTheRun,
+        *,
+        idx: int,
+        variant: GridVariant,
+        slot: Path,
+        round_label: str,
+        returncode: int | None,
+        started_unix: float,
+        server_log: Path,
+    ) -> bool:
+        """Record a round the run stopped and say whether the grid is over.
+
+        Every round a variant runs is a full benchmark pass -- the discarded
+        warmup and the multi-node client warmup as much as the measured one -- so
+        any of them can be reaped by the session deadline or by an orchestrator
+        cancel, and none of them says anything about the variant when it is.
+        Hence one place decides what such a round means, called after each launch
+        and before any grading: the row is ``skipped``, exactly like a variant the
+        budget refused to start, because nothing was measured and there is no
+        verdict to record. Grading it as a failure -- or worse as
+        ``killed_overtime``, which asserts the variant is abnormally slow -- puts
+        a conclusion the run never reached into the ledger and the KB.
+
+        A cause that ``ends_the_batch`` also fills in every variant after this
+        one: nothing new may start under it, and their rows have to say why they
+        were never tested rather than be absent.
+
+        Args:
+            stopped (StoppedByTheRun): How to record the cause.
+            idx (int): Zero-based index of the variant whose round was stopped.
+            variant (GridVariant): That variant.
+            slot (Path): Its slot directory, where the abort marker is written.
+            round_label (str): Which round was stopped, for the log line.
+            returncode (int | None): The round's returncode, kept on the row.
+            started_unix (float): ``time.time()`` when the round was launched.
+            server_log (Path): The stopped round's ``server.log``, if it wrote one.
+
+        Returns:
+            bool: ``True`` when the caller must stop testing variants.
+        """
+        runtime_sec = round(max(0.0, time.time() - started_unix), 2)
+        log.warning(
+            "grid_runner: variant %d/%d name=%s %s round reaped after %.1fs: %s; recorded as skipped, not failed",
+            idx + 1,
+            len(grid),
+            variant.name,
+            round_label,
+            runtime_sec,
+            stopped.interrupted,
+        )
+        _write_variant_abort_marker(
+            slot,
+            variant_name=variant.name,
+            error_class=stopped.error_class,
+            error_summary=f"{stopped.interrupted}; tree reaped",
+            extra_args=variant.extra_server_args,
+        )
+        results.append(
+            VariantResult(
+                name=variant.name,
+                extra_server_args=variant.extra_server_args,
+                extra_envs=dict(variant.extra_envs),
+                status="skipped",
+                returncode=returncode,
+                runtime_sec=runtime_sec,
+                error=stopped.interrupted,
+                error_class=stopped.error_class,
+                server_log_path=_existing_log_path(server_log),
+                note=variant.note,
+            )
+        )
+        if stopped.ends_the_batch:
+            results.extend(_not_run_skip_result(rest, stopped) for rest in grid[idx + 1 :])
+            return True
+        return not keep_going_on_failure
+
     # How many full benchmark passes one variant costs. Both warmups run the same
     # workload as the measured pass -- neither is a reduced one -- so a variant
     # that warms up costs twice what its measured round does. Admitting on a
@@ -1851,6 +1928,30 @@ async def run_grid(
                     break
                 continue
 
+            warmup_stopped = stopped_by_the_run(warmup_rc)
+            if warmup_stopped is not None:
+                from ._server_lifecycle import teardown_lifecycle_server
+
+                teardown_lifecycle_server(
+                    pid_dir=slot,
+                    framework=str(lifecycle.get("framework") or ""),
+                    port=int(lifecycle.get("port") or 0),
+                )
+                grid_is_over = _record_round_stop(
+                    warmup_stopped,
+                    idx=i,
+                    variant=variant,
+                    slot=slot,
+                    round_label="warmup",
+                    returncode=warmup_rc,
+                    started_unix=warmup_started_unix,
+                    server_log=warmup_server_log,
+                )
+                await _pulse_after_variant(i)
+                if grid_is_over:
+                    break
+                continue
+
             warmup_run_ws = select_run_workspace(warmup_slot, known_before=warmup_workspaces_before)
             warmup_workspace = warmup_run_ws if warmup_run_ws is not None else warmup_slot
             warmup_harvested = harvest_leaked_artifacts(
@@ -2016,8 +2117,13 @@ async def run_grid(
 
         if _mn_imn() and _mn_warm():
             _mn_warm_slot = slot / "mn_warmup"
+            _mn_warm_started_unix = time.time()
+            # The measurement is discarded, but the returncode is not: a warmup
+            # the run stopped is the same stop as one in the measured round, and
+            # discarding it launches the measured round after the cancel.
+            _mn_warm_rc: int | None = None
             try:
-                await _reported_magpie(
+                _mn_warm_rc, _, _ = await _reported_magpie(
                     i,
                     "mn_warmup",
                     magpie_python=magpie_python,
@@ -2037,10 +2143,11 @@ async def run_grid(
                     session_deadline_sec=session_deadline_sec,
                 )
                 log.info(
-                    "grid_runner: MN warmup pass done (discarded) %d/%d name=%s",
+                    "grid_runner: MN warmup pass done (discarded) %d/%d name=%s rc=%s",
                     i + 1,
                     len(grid),
                     variant.name,
+                    _mn_warm_rc,
                 )
             except Exception as exc:  # noqa: BLE001 - warmup is best-effort
                 log.warning(
@@ -2048,6 +2155,22 @@ async def run_grid(
                     variant.name,
                     exc,
                 )
+            _mn_warm_stopped = stopped_by_the_run(_mn_warm_rc)
+            if _mn_warm_stopped is not None:
+                grid_is_over = _record_round_stop(
+                    _mn_warm_stopped,
+                    idx=i,
+                    variant=variant,
+                    slot=slot,
+                    round_label="mn_warmup",
+                    returncode=_mn_warm_rc,
+                    started_unix=_mn_warm_started_unix,
+                    server_log=_mn_warm_slot / "server.log",
+                )
+                await _pulse_after_variant(i)
+                if grid_is_over:
+                    break
+                continue
 
         # Snapshot wall-clock before launch so the salvage path can mtime-gate
         # leak destinations per-variant.
@@ -2266,50 +2389,20 @@ async def run_grid(
                 break
             continue
 
-        # The round was stopped by the run rather than by anything about the
-        # variant, and the tree was reaped. Recorded as ``skipped``, exactly like
-        # a variant the budget refused to start: in both cases nothing was
-        # measured, so there is no verdict to record about the variant. Grading it
-        # as a failure -- or worse as ``killed_overtime``, which asserts the
-        # variant is abnormally slow -- would put a conclusion the run never
-        # reached into the ledger and the KB.
-        stopped = _STOPPED_BY_THE_RUN.get(rc)
+        stopped = stopped_by_the_run(rc)
         if stopped is not None:
-            variant_runtime_sec = round(max(0.0, time.time() - variant_started_unix), 2)
-            log.warning(
-                "grid_runner: variant %d/%d name=%s reaped after %.1fs: %s; recorded as skipped, not failed",
-                i + 1,
-                len(grid),
-                variant.name,
-                variant_runtime_sec,
-                stopped.interrupted,
-            )
-            _write_variant_abort_marker(
-                slot,
-                variant_name=variant.name,
-                error_class=stopped.error_class,
-                error_summary=f"{stopped.interrupted}; tree reaped",
-                extra_args=variant.extra_server_args,
-            )
-            results.append(
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="skipped",
-                    returncode=rc,
-                    runtime_sec=variant_runtime_sec,
-                    error=stopped.interrupted,
-                    error_class=stopped.error_class,
-                    server_log_path=_existing_log_path(server_log),
-                    note=variant.note,
-                )
+            grid_is_over = _record_round_stop(
+                stopped,
+                idx=i,
+                variant=variant,
+                slot=slot,
+                round_label="measured",
+                returncode=rc,
+                started_unix=variant_started_unix,
+                server_log=server_log,
             )
             await _pulse_after_variant(i)
-            if stopped.ends_the_batch:
-                results.extend(_not_run_skip_result(rest, stopped) for rest in grid[i + 1 :])
-                break
-            if not keep_going_on_failure:
+            if grid_is_over:
                 break
             continue
 

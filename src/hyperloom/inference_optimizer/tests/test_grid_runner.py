@@ -19,6 +19,10 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors import _grid_runner
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+    ORCHESTRATOR_CANCELLED_RETURNCODE,
+    SESSION_TIME_EXHAUSTED_RETURNCODE,
+)
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
@@ -1617,10 +1621,6 @@ class TestSessionKillAttribution:
 
     @pytest.mark.asyncio
     async def test_mid_round_budget_kill_is_recorded_as_skipped_not_failed(self, tmp_path):
-        from hyperloom.orchestrator.actions.executors._subprocess_kill import (
-            SESSION_TIME_EXHAUSTED_RETURNCODE,
-        )
-
         base = tmp_path / "base.yaml"
         _write_baseline_yaml_overrides(base)
 
@@ -1709,6 +1709,152 @@ class TestSessionKillAttribution:
             )
 
         assert seen == [deadline]
+
+
+def _reaping_round(returncode: int, *, slot_name: str):
+    """A ``run_with_session_kill`` double that reaps one named round of a variant.
+
+    Args:
+        returncode: The sentinel the reaped round comes back with.
+        slot_name: Output-slot directory name identifying the round to reap;
+            every other round succeeds with a valid report.
+
+    Returns:
+        tuple: The ``side_effect`` callable, and the list of slot names it
+            appends to as rounds are launched.
+    """
+    launched: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        # The module-memoized interpreter probe is not a benchmark round.
+        if "--output-dir" not in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        launched.append(slot.name)
+        if slot.name == slot_name:
+            return subprocess.CompletedProcess(cmd, returncode, "", "")
+        _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    return fake_run, launched
+
+
+class TestEveryRoundCarriesTheStopThatEndedIt:
+    """A round the run stopped is a stop whichever round it was.
+
+    The measured round is not the only full benchmark pass a variant costs: the
+    discarded warmup runs the same workload, and so does the multi-node client
+    warmup. A reap in either has exactly as much to say about the variant as one
+    in the measured round -- nothing -- so grading it as ``warmup_round_failed``
+    files a verdict the run never reached, and ignoring the returncode entirely
+    keeps launching benchmark rounds after the orchestrator asked the action to
+    stop.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_warmup_reaped_by_the_budget_is_skipped_not_a_failed_variant(self, tmp_path):
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        fake_run, launched = _reaping_round(SESSION_TIME_EXHAUSTED_RETURNCODE, slot_name="warmup_round")
+
+        with (
+            patch(
+                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                side_effect=fake_run,
+            ),
+            patch(
+                "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+                return_value={"eligible": True, "framework": "sglang", "port": 30000, "reason": ""},
+            ),
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("cand0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                session_deadline_sec=time.monotonic() + 600.0,
+                variant_expected_sec=30.0,
+                warmup_before_measure=True,
+            )
+
+        assert launched == ["warmup_round"], "the measured round must not run after the warmup was reaped"
+        assert [r.status for r in results] == ["skipped"]
+        assert results[0].error_class == "session_time_exhausted"
+        assert _read_marker(tmp_path / "out" / "variant_00_cand0")["error_class"] == "session_time_exhausted"
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_warmup_ends_the_grid_instead_of_booting_the_next_variant(self, tmp_path):
+        """Every remaining variant would boot its own server on the Ray path.
+
+        ``run_session_kill`` re-``ensure()``s a lease whose actor the cancel just
+        killed, so a grid that keeps going after a cancel starts a fresh actor
+        and a fresh GPU server per remaining variant.
+        """
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        fake_run, launched = _reaping_round(ORCHESTRATOR_CANCELLED_RETURNCODE, slot_name="warmup_round")
+
+        with (
+            patch(
+                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                side_effect=fake_run,
+            ),
+            patch(
+                "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+                return_value={"eligible": True, "framework": "sglang", "port": 30000, "reason": ""},
+            ),
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("c0"), GridVariant("c1"), GridVariant("c2")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                keep_going_on_failure=True,
+                session_deadline_sec=time.monotonic() + 600.0,
+                variant_expected_sec=30.0,
+                warmup_before_measure=True,
+            )
+
+        assert launched == ["warmup_round"], f"a cancelled action kept launching rounds: {launched}"
+        assert [r.status for r in results] == ["skipped"] * 3
+        assert [r.error_class for r in results] == ["orchestrator_cancelled"] * 3
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_multi_node_warmup_ends_the_grid(self, tmp_path, monkeypatch):
+        """The multi-node warmup discarded its returncode along with its report."""
+        from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+        from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnsl
+
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        monkeypatch.setattr(mne, "is_multi_node", lambda: True)
+        monkeypatch.setattr(mne, "mn_bench_warmup_enabled", lambda: True)
+
+        async def fake_restart_server_for_round(**_kwargs):
+            return None
+
+        monkeypatch.setattr(mnsl, "restart_server_for_round", fake_restart_server_for_round)
+        fake_run, launched = _reaping_round(ORCHESTRATOR_CANCELLED_RETURNCODE, slot_name="mn_warmup")
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=fake_run,
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("c0"), GridVariant("c1")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                keep_going_on_failure=True,
+                session_deadline_sec=time.monotonic() + 600.0,
+                variant_expected_sec=30.0,
+            )
+
+        assert launched == ["mn_warmup"], f"a cancelled action kept launching rounds: {launched}"
+        assert [r.error_class for r in results] == ["orchestrator_cancelled"] * 2
 
 
 class TestSessionBudgetWarmupRounds:

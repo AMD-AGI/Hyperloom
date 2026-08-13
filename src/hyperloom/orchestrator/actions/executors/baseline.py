@@ -37,6 +37,7 @@ from ...framework.paths import resolve_session_framework_root
 from ...loop.sub_agent_runner import RunnerContext
 from ...trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
+from ..stop_attribution import StoppedByTheRun
 from . import _server_lifecycle as _lifecycle
 from ._file_lock import best_effort_file_lock
 from ._aiter_jit import (
@@ -267,6 +268,58 @@ def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:
     if framework_registry.is_scriptable(framework):
         return None
     return str(output_dir / "server.log")
+
+
+def _stopped_round_result(
+    stopped: StoppedByTheRun,
+    *,
+    round_label: str,
+    returncode: int | None,
+    runtime_sec: float,
+    output_dir: Path,
+    capture_meta: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the result for a round the run itself stopped.
+
+    The session budget elapsed mid-round, or the orchestrator cancelled the
+    action. Classified apart from every measurement failure -- and checked before
+    them, because the reap leaves exactly the evidence a broken server does (no
+    workspace, no report, a non-zero returncode) and being graded as
+    ``server_init_dead`` or ``subprocess_nonzero`` would put a verdict on the
+    model that this round never reached. Every round the baseline runs goes
+    through here, the discarded multi-node warmup pass included: a stop in the
+    round that warms the server means the round is over, and going on to the
+    measured pass would spend GPU time the run has been told to stop spending.
+    Nothing here arms a retry either: the cause is the run, and a resume meets it
+    again.
+
+    Args:
+        stopped: How to record the cause.
+        round_label: Which round was stopped, for the log line.
+        returncode: The stopped round's returncode.
+        runtime_sec: Wall-clock seconds the round had run for.
+        output_dir: The task workspace, echoed onto the result.
+        capture_meta: Config/eval-contract facts every failure result carries.
+
+    Returns:
+        dict[str, Any]: The failed result carrying the stop's own error class.
+    """
+    log.warning(
+        "baseline_executor: %s reaped after %.1fs: %s; error_class=%s.",
+        round_label,
+        runtime_sec,
+        stopped.interrupted,
+        stopped.error_class,
+    )
+    return {
+        "status": "failed",
+        "error_class": stopped.error_class,
+        "returncode": returncode,
+        "error": stopped.interrupted,
+        "subprocess_runtime_sec": round(runtime_sec, 2),
+        "output_dir": str(output_dir),
+        **capture_meta,
+    }
 
 
 def _disable_cuda_graph_flag(framework: str) -> str:
@@ -3725,6 +3778,12 @@ class BaselineExecutor:
 
         if _mn_imn() and _mn_warm() and not ctx_extra.get("mn_round_restarted"):
             _mn_warm_dir = output_dir / "mn_warmup"
+            _mn_warm_started_unix = time.time()
+            # The measurement is discarded, but the returncode is not: this pass
+            # is a full benchmark round, so a stop here ends the baseline round.
+            # Going on to the measured pass would spend a second round of GPU
+            # time the run has already been told to stop spending.
+            _mn_warm_rc: int | None = None
             try:
                 _mn_warm_dir.mkdir(parents=True, exist_ok=True)
                 _mn_warm_cmd = [str(_mn_warm_dir) if c == str(output_dir) else c for c in cmd]
@@ -3737,7 +3796,7 @@ class BaselineExecutor:
                     unit="baseline_round",
                     label="mn_warmup",
                 ) as _mn_warm_activity:
-                    await asyncio.to_thread(
+                    _mn_warm_proc = await asyncio.to_thread(
                         run_with_session_kill,
                         _mn_warm_cmd,
                         env=_mn_warm_env,
@@ -3747,9 +3806,20 @@ class BaselineExecutor:
                         on_output=_mn_warm_activity.note,
                         session_deadline_sec=session_deadline_sec,
                     )
-                log.info("baseline_executor: MN warmup pass done (discarded)")
+                _mn_warm_rc = _mn_warm_proc.returncode
+                log.info("baseline_executor: MN warmup pass done (discarded) rc=%s", _mn_warm_rc)
             except Exception as exc:  # noqa: BLE001 - warmup is best-effort
                 log.warning("baseline_executor: MN warmup pass failed (ignored): %r", exc)
+            _mn_warm_stopped = stopped_by_the_run(_mn_warm_rc)
+            if _mn_warm_stopped is not None:
+                return _stopped_round_result(
+                    _mn_warm_stopped,
+                    round_label="multi-node warmup pass",
+                    returncode=_mn_warm_rc,
+                    runtime_sec=max(0.0, time.time() - _mn_warm_started_unix),
+                    output_dir=output_dir,
+                    capture_meta=capture_meta,
+                )
 
         workspaces_before = snapshot_workspaces(output_dir)
         subprocess_started_unix = time.time()
@@ -3841,31 +3911,16 @@ class BaselineExecutor:
                 **capture_meta,
             }
 
-        # The run stopped this round rather than the round failing: the session
-        # budget elapsed mid-round, or the orchestrator cancelled the action.
-        # Classified apart from every measurement failure and checked before
-        # them, because the reap leaves the same evidence a broken server does --
-        # no workspace, no report, a non-zero returncode -- and being graded as
-        # ``server_init_dead`` or ``subprocess_nonzero`` would put a verdict on
-        # the model that this round never reached. Nothing here arms a retry
-        # either: the cause is the run, and a resume meets it again.
         stopped = stopped_by_the_run(proc_returncode)
         if stopped is not None:
-            log.warning(
-                "baseline_executor: round reaped after %.1fs: %s; error_class=%s.",
-                subprocess_runtime_sec,
-                stopped.interrupted,
-                stopped.error_class,
+            return _stopped_round_result(
+                stopped,
+                round_label="measured round",
+                returncode=proc_returncode,
+                runtime_sec=subprocess_runtime_sec,
+                output_dir=output_dir,
+                capture_meta=capture_meta,
             )
-            return {
-                "status": "failed",
-                "error_class": stopped.error_class,
-                "returncode": proc_returncode,
-                "error": stopped.interrupted,
-                "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
-                "output_dir": str(output_dir),
-                **capture_meta,
-            }
 
         # Detokenizer-stall watchdog reap: the server came up healthy but went
         # silent for the stall grace window (hung engine / wedged detokenizer).
