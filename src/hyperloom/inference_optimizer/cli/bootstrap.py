@@ -18,8 +18,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.timeutil import now_iso
+from hyperloom.orchestrator.phases.machine_state import bank_phase_segment
 from hyperloom.orchestrator.state.shared_state import SharedState
 from .parser import (
     DEFAULT_ISL,
@@ -408,6 +410,29 @@ def _print_final_summary(
     print("===============================================")
 
 
+def _bank_previous_leg_phase_segment(state: SharedState) -> None:
+    """Bank the phase time the stopped leg spent but never recorded.
+
+    Per-phase totals are banked at each transition out of a phase, so a leg that
+    stopped mid-phase left its last segment live — and the resume boundary is
+    about to floor that segment away as the idle gap it mostly is.
+    :attr:`SharedState.stop_ts` is the only recorded evidence of when the leg
+    ended; a clean stop or a crash leaves none, and then the segment stays
+    unbanked. That under-charges the phase, which is the direction the phase
+    clock tolerates: over-charging ends a phase early.
+
+    Must run before ``resumed_ts`` is restamped, which would floor the segment
+    to nothing.
+
+    Args:
+        state (SharedState): The loaded session state, mutated in place.
+    """
+    stop_unix = to_unix(state.stop_ts, 0.0) or 0.0
+    if stop_unix <= 0.0:
+        return
+    bank_phase_segment(state, until_unix=stop_unix)
+
+
 def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
     """Mark the start of a resumed run leg on ``state`` (caller persists).
 
@@ -415,12 +440,15 @@ def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
     CLOSE transition stays in ``phase_history`` and would otherwise keep
     speaking for the resumed run — a report reads it as the session's stop
     reason and end time — and this boundary is what dates it as a previous
-    leg's.
+    leg's. It is also what stops the phase clock charging the gap between the
+    two legs to whichever phase the session stopped in.
 
     Only a previous leg that stopped for a recorded reason, or crashed
     repeatedly, re-anchors the wall-clock budget. After a clean stop
     ``start_ts`` is deliberately kept, so ``--max-hours`` still counts from the
-    original session start and the earlier legs' wall-clock stays spent.
+    original session start and the earlier legs' wall-clock stays spent. The
+    phase clock moves on either branch: the two answer different questions, and
+    neither answer includes time nothing was running.
 
     Args:
         state (SharedState): The loaded session state, mutated in place.
@@ -429,6 +457,7 @@ def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
     Returns:
         str: The timestamp stamped as this leg's boundary.
     """
+    _bank_previous_leg_phase_segment(state)
     state.resumed_ts = now_iso()
     if reanchor_budget:
         # CRITICAL: clear the leftover stop_reason or Orchestration heartbeats
