@@ -197,6 +197,49 @@ def test_auto_resolution_sweeps_cpp_and_jit_build_trees(tmp_path, monkeypatch):
     assert not jit_lock.exists()
 
 
+def test_home_build_tree_outranks_the_root_fallback(tmp_path, monkeypatch):
+    """``/root/.aiter/build`` must stay a last resort behind $HOME.
+
+    The fallback tuple still names it, so the ordering is what keeps a non-root
+    run off a directory it cannot read. Nothing else pins that order.
+    """
+    home = tmp_path / "home"
+    (home / ".aiter" / "build").mkdir(parents=True)
+    monkeypatch.delenv("AITER_ROOT_DIR", raising=False)
+    monkeypatch.delenv("AITER_JIT_DIR", raising=False)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(aj.importlib.util, "find_spec", lambda _name: None)
+
+    dirs = [str(d) for d in aj._resolve_lock_sweep_dirs(None)]
+
+    assert dirs.index(str(home / ".aiter" / "build")) == 0
+    assert aj.AITER_CPP_BUILD_PROBE_PATHS[-1] == "/root/.aiter/build"
+
+
+def test_unreadable_fallback_tree_does_not_raise(tmp_path, monkeypatch):
+    """The sweep documents "never raises", and resolution runs before it.
+
+    ``Path.is_dir()`` re-raises EACCES because pathlib ignores only
+    ENOENT/ENOTDIR/EBADF/ELOOP, so an unreadable fallback such as root's aborted
+    resolution before any of the guarded sweep I/O could count an error.
+    """
+    unreadable = tmp_path / "locked"
+    unreadable.mkdir(mode=0o000)
+    monkeypatch.setattr(aj, "AITER_CPP_BUILD_PROBE_PATHS", (str(unreadable / "build"),))
+    for var in ("AITER_ROOT_DIR", "AITER_JIT_DIR", "INFERENCE_OPTIMIZER_AITER_JIT_DIR"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "nohome"))
+    monkeypatch.setattr(aj.importlib.util, "find_spec", lambda _name: None)
+
+    try:
+        stats = aj.clean_stale_aiter_locks(stale_minutes=0)
+    finally:
+        unreadable.chmod(0o700)
+
+    assert stats["deleted"] == 0
+
+
 def test_find_aiter_baton_wait_returns_bounded_evidence(tmp_path):
     server_log = tmp_path / "warmup" / "server.log"
     server_log.parent.mkdir()
