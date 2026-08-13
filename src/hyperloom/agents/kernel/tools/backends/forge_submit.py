@@ -3758,8 +3758,10 @@ def submit(
                 logical_operator or worktree_kernel,
                 driver,
             )
-        elif requires_multi_case_driver:
-            if not _invocation_spec_covers_cases(
+        else:
+            # A grouped task must carry every shape before the preparer sees it;
+            # a single-shape task has nothing to check.
+            if requires_multi_case_driver and not _invocation_spec_covers_cases(
                 invocation_spec_file,
                 grouped_cases,
             ):
@@ -3771,13 +3773,10 @@ def submit(
                 )
             driver = _write_generated_driver(workspace, _TASK_PREPARER_PLACEHOLDER)
             log.info(
-                "forge driver: delegating grouped task with %d distinct shapes to task-preparer -> %s",
+                "forge driver: delegating %d-shape task to forge-loop task-preparer -> %s",
                 len(grouped_cases),
                 driver,
             )
-        else:
-            driver = _write_generated_driver(workspace, _TASK_PREPARER_PLACEHOLDER)
-            log.info("forge driver: delegating driver authoring to forge-loop task-preparer -> %s", driver)
         # GPU_TARGET is passed via the forge-loop child env (not the parent
         # os.environ, which would leak to sibling ladder backends).
         forge_log = output_dir / "forge_loop.log"

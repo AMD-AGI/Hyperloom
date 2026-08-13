@@ -16,7 +16,7 @@ PolicyGate would deny. A blank phase renders every module.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
@@ -241,13 +241,13 @@ def _section_phase_semantics(
 
 
 def _filter_actions(
-    registry: dict[str, ActionMetadata],
+    registry: Mapping[str, ActionMetadata],
     enabled: Iterable[str],
 ) -> list[ActionMetadata]:
     """Resolve enabled action names to their catalogue metadata.
 
     Args:
-        registry (dict[str, ActionMetadata]): The action catalogue to look up.
+        registry (Mapping[str, ActionMetadata]): The action catalogue to look up.
         enabled (Iterable[str]): Enabled action names, drawn from the closed
             :data:`FULL_ENABLED_ACTIONS` set.
 
@@ -265,7 +265,7 @@ def _filter_actions(
 
 
 def _resolve_prompt_prelude(
-    action_registry: dict[str, ActionMetadata],
+    action_registry: Mapping[str, ActionMetadata],
     enabled_actions: Iterable[str],
     framework: str,
     kernel_enabled: bool | None,
@@ -274,7 +274,7 @@ def _resolve_prompt_prelude(
     """Resolve the shared prelude for the orchestration / critic prompt builders.
 
     Args:
-        action_registry (dict[str, ActionMetadata]): The action catalogue.
+        action_registry (Mapping[str, ActionMetadata]): The action catalogue.
         enabled_actions (Iterable[str]): Action names enabled for this run.
         framework (str): The framework name; normalised to lower-case (default
             ``sglang``).
@@ -967,7 +967,7 @@ def _section_reference_index(*, references_dir: Path, phase: str = "") -> list[s
 
 def build_orchestration_prompt(
     *,
-    action_registry: dict[str, ActionMetadata],
+    action_registry: Mapping[str, ActionMetadata],
     enabled_actions: Iterable[str],
     framework: str = "sglang",
     kernel_enabled: bool | None = None,
