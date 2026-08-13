@@ -350,6 +350,14 @@ class WritebackCollaborator:
         include_patches: bool,
     ) -> None:
         """Persist an idempotent section handoff to run after state durability."""
+        from ..knowledge.remote_recipe import KnowledgeSections
+
+        if (
+            str(os.environ.get("KNOWLEDGE_STORE_MODE") or "local").strip()
+            != "remote"
+            or KnowledgeSections.from_env() is None
+        ):
+            return
         normalized = str(owner or "").strip().upper()
         if normalized not in {"EXPLORE", "FRAMEWORK_AGENT"}:
             return
@@ -1821,55 +1829,6 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 - audit cannot break finalization
             log.debug("Remote Recipe KB audit append failed", exc_info=True)
 
-    def _finalize_kernel_agent_kb(self, remote_cid: str, source: str) -> None:
-        """Publish the independent kernel-agent KB record for this session.
-
-        A separate ``kernel:`` record with its own keep-if-better on kernel
-        gain, so kernel optimizations land even when this run does not win the
-        recipe's end-to-end throughput champion — and even when the recipe write
-        itself failed. Only runs when the session produced a kernel
-        optimization, so a kernel-less CLOSE behaves exactly like the
-        recipe-only path. Best-effort: never raises into the caller.
-        """
-        stack = getattr(self.shared_state, "optimization_stack", []) or []
-        has_kernel_opt = any(
-            isinstance(entry, dict)
-            and str(entry.get("action") or "").lower()
-            in ("gemm_tuning", "integrate", "fusion")
-            for entry in stack
-        )
-        if not has_kernel_opt:
-            return
-        try:
-            from ..knowledge.remote_recipe import (
-                kernel_agent_canonical_id,
-                write_kernel_agent_kb,
-            )
-
-            kernel_cid = kernel_agent_canonical_id(remote_cid)
-            if not kernel_cid:
-                # The recipe write failed before resolving the workload identity.
-                log.info("Kernel-agent KB finalize skipped: no workload identity")
-                return
-            kernel_result = write_kernel_agent_kb(self.shared_state, kernel_cid)
-            log.info(
-                "Kernel-agent KB finalize: status=%s reason=%s cid=%s sid=%s",
-                kernel_result.status,
-                kernel_result.reason,
-                kernel_cid,
-                kernel_result.session_id,
-            )
-            self._record_remote_recipe_audit(
-                source=f"{source}:kernel-agent",
-                status=kernel_result.status,
-                canonical_id=kernel_cid,
-                session_id=kernel_result.session_id,
-                optimized_throughput=kernel_result.optimized_throughput,
-                reason=kernel_result.reason,
-            )
-        except Exception:  # noqa: BLE001 - kernel-agent KB is best-effort
-            log.exception("Kernel-agent KB finalize failed (non-fatal)")
-
     def finalize_recipe_and_journal(
         self,
         *,
@@ -1948,7 +1907,6 @@ class WritebackCollaborator:
                     optimized_throughput=remote_result.optimized_throughput,
                     reason=remote_result.reason,
                 )
-                self._finalize_kernel_agent_kb(remote_cid, source)
                 return {
                     "status": remote_result.status,
                     "reason": remote_result.reason,
@@ -1969,7 +1927,6 @@ class WritebackCollaborator:
                     error_type=type(exc).__name__,
                 )
                 log.exception("Remote Recipe KB finalize failed (non-fatal)")
-                self._finalize_kernel_agent_kb(remote_cid, source)
                 return {
                     "status": "error",
                     "reason": type(exc).__name__,
@@ -4700,10 +4657,10 @@ class WritebackCollaborator:
             **dict(getattr(state, "warm_replay_outcome", {}) or {}),
             "status": "failed",
             "reason": "interrupted_combined_validation_rolled_back",
-        }
-        state.warm_kernel_kb_outcome = {
-            "status": "reverted",
-            "reason": "interrupted_combined_validation",
+            "kernel": {
+                "status": "reverted",
+                "reason": "interrupted_combined_validation",
+            },
         }
         report["fixes"].append(
             {

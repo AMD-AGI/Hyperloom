@@ -1,13 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PRELUDE preparation of the independent kernel-agent KB record.
+"""PRELUDE preparation of the inference Recipe's kernel section.
 
-PRELUDE reads the standalone ``kernel:`` KB Store record (flat
-``value.gemm``/``value.fusion``/``value.rewrite`` + a ``files/`` tree) through
-:class:`KernelRecordReader`, stages the whole champion set — every patch on disk
-and every env bundle merged — without a separate benchmark. The Recipe replay
-task later grades the combined set.
+PRELUDE reads nested ``value.kernel.gemm/fusion/rewrite`` through
+:class:`KernelAgentKB` from the same already-downloaded inference Recipe used by
+Explore and Framework. The Recipe replay task grades the combined set once.
 """
 from __future__ import annotations
 
@@ -17,7 +15,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.knowledge.agent_kb import KernelRecordReader
+from hyperloom.orchestrator.knowledge.agent_kb import KernelAgentKB
+from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
+    KnowledgeSections,
+)
 from hyperloom.orchestrator.phases.prelude import PreludePhase
 
 
@@ -30,8 +31,8 @@ class _StubPrelude:
     _warm_kernel_extra_envs = staticmethod(PreludePhase._warm_kernel_extra_envs)
     _revert_warm_kernel_patches = staticmethod(PreludePhase._revert_warm_kernel_patches)
     _snapshot_warm_kernel_target = PreludePhase._snapshot_warm_kernel_target
+    _set_warm_kernel_outcome = PreludePhase._set_warm_kernel_outcome
     _prepare_warm_kernel_kb = PreludePhase._prepare_warm_kernel_kb
-    _maybe_apply_warm_kernel_kb = PreludePhase._maybe_apply_warm_kernel_kb
 
     def _warm_kernel_gate_reason(self) -> str:
         """Stubbed gate: these tests exercise the replay itself."""
@@ -42,7 +43,7 @@ class _StubPrelude:
         self.shared_state = SimpleNamespace(
             warm_kernel_kb_attempted=False,
             warm_kernel_kb_plan=[],
-            warm_kernel_kb_outcome={},
+            warm_replay_outcome={},
             save=lambda *_a, **_k: None,
         )
         self._reader = reader
@@ -52,8 +53,8 @@ class _StubPrelude:
         self.validations: list[dict] = []
         self.reverted: list[dict] = []
 
-    def _open_warm_kernel_record(self) -> object | None:
-        """Stubbed record open: return a preloaded reader (or None = cold)."""
+    def _open_warm_kernel_section(self) -> object | None:
+        """Return the preloaded inference Recipe section facade."""
         return self._reader
 
     async def _record_warm_kernel_keep(self, result, pending, envs, args, applied) -> None:
@@ -67,15 +68,24 @@ class _StubPrelude:
 
 
 def _kernel_record(tmp_path: Path, value: dict, files: dict[str, str]) -> Path:
-    """Write an independent kernel-agent record dir (flat value + files/)."""
-    record = tmp_path / "kernel_agent_kb"
+    """Write one downloaded inference Recipe with nested kernel content."""
+    record = tmp_path / "remote_recipe"
     (record / "files").mkdir(parents=True, exist_ok=True)
-    (record / "recipe.json").write_text(json.dumps({"value": value}), encoding="utf-8")
+    (record / "recipe.json").write_text(
+        json.dumps({"value": {"kernel": value}}),
+        encoding="utf-8",
+    )
     for rel, text in files.items():
         target = record / "files" / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
     return record
+
+
+def _kernel_reader(record: Path) -> KernelAgentKB:
+    return KernelAgentKB(
+        KnowledgeSections(record / "draft", warm_start_dir=record)
+    )
 
 
 def _rewrite_item(target: Path, name: str = "k1") -> dict:
@@ -147,12 +157,12 @@ def test_warm_kernel_envs_empty_without_a_recorded_env_var() -> None:
 
 @pytest.mark.asyncio
 async def test_inactive_without_record(tmp_path: Path) -> None:
-    # No kernel: record downloaded (cold start / remote KB not configured).
+    # No inference Recipe section is available (cold start / KB not configured).
     stub = _StubPrelude(tmp_path, reader=None)
 
-    outcome = await stub._maybe_apply_warm_kernel_kb()
+    outcome = await stub._prepare_warm_kernel_kb()
 
-    assert outcome == {"status": "skipped", "reason": "no_kernel_record"}
+    assert outcome == {"status": "skipped", "reason": "no_kernel_section"}
 
 
 @pytest.mark.asyncio
@@ -178,10 +188,10 @@ async def test_unresolvable_target_defers(tmp_path: Path) -> None:
             "kernel/gemm/t.json": "{}",
         },
     )
-    stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
+    stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
     stub._validate_warm_kernel_set = _grading(stub, "KEEP")  # type: ignore[method-assign]
 
-    outcome = await stub._maybe_apply_warm_kernel_kb()
+    outcome = await stub._prepare_warm_kernel_kb()
 
     assert outcome["status"] == "loaded"
     assert outcome["pending"] == []
@@ -220,10 +230,10 @@ async def test_set_is_staged_without_a_separate_rebaseline(tmp_path: Path) -> No
             "kernel/gemm/t.csv": "M,N,K\n",
         },
     )
-    stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
+    stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
     stub._validate_warm_kernel_set = _grading(stub, "KEEP", gain=7.5)  # type: ignore[method-assign]
 
-    outcome = await stub._maybe_apply_warm_kernel_kb()
+    outcome = await stub._prepare_warm_kernel_kb()
 
     assert sorted(stub.applied) == sorted(targets)
     assert stub.validations == []
@@ -243,7 +253,7 @@ async def test_prepared_set_waits_for_combined_verdict(tmp_path: Path) -> None:
         {"rewrite": {"items": [_rewrite_item(target)]}},
         {"kernel/rewrite/k1.py": "print('new')"},
     )
-    stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
+    stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
     reverted: list[list[dict]] = []
     stub._revert_warm_kernel_patches = (  # type: ignore[method-assign]
         lambda applied, snapshots=None: {
@@ -252,7 +262,7 @@ async def test_prepared_set_waits_for_combined_verdict(tmp_path: Path) -> None:
         }
     )
 
-    outcome = await stub._maybe_apply_warm_kernel_kb()
+    outcome = await stub._prepare_warm_kernel_kb()
 
     assert outcome["status"] == "prepared"
     assert len(outcome["pending"]) == 1
@@ -272,7 +282,7 @@ async def test_kernel_snapshot_is_durable_before_first_mutation(
         {"rewrite": {"items": [_rewrite_item(target)]}},
         {"kernel/rewrite/k1.py": "new"},
     )
-    stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
+    stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
 
     def _crash(_entry: dict, live_target: str) -> dict:
         pending = stub.shared_state.warm_replay_pending
@@ -282,7 +292,7 @@ async def test_kernel_snapshot_is_durable_before_first_mutation(
 
     stub._apply_warm_kernel_patch = _crash  # type: ignore[method-assign]
     with pytest.raises(SystemExit, match="crash window"):
-        await stub._maybe_apply_warm_kernel_kb()
+        await stub._prepare_warm_kernel_kb()
 
     restored = PreludePhase._restore_warm_kernel_snapshots(
         stub.shared_state.warm_replay_pending["kernel_snapshots"]
@@ -317,7 +327,7 @@ async def test_symlink_kernel_target_is_rejected_and_prior_mutation_rolls_back(
             "kernel/rewrite/k2.py": "link-new",
         },
     )
-    stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
+    stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
 
     def _apply(_entry: dict, target: str) -> dict:
         Path(target).write_text("mutated")
@@ -326,7 +336,7 @@ async def test_symlink_kernel_target_is_rejected_and_prior_mutation_rolls_back(
 
     stub._apply_warm_kernel_patch = _apply  # type: ignore[method-assign]
 
-    outcome = await stub._maybe_apply_warm_kernel_kb()
+    outcome = await stub._prepare_warm_kernel_kb()
 
     assert outcome["status"] == "error"
     assert outcome["rollback"]["ok"] is True
@@ -342,10 +352,10 @@ async def test_empty_kernel_plan_clears_stale_warm_pending(
     tmp_path: Path,
 ) -> None:
     record = _kernel_record(tmp_path, {"rewrite": {"items": []}}, {})
-    stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
+    stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
     stub.shared_state.warm_replay_pending = {"status": "preparing_kernel"}
 
-    outcome = await stub._maybe_apply_warm_kernel_kb()
+    outcome = await stub._prepare_warm_kernel_kb()
 
     assert outcome["status"] == "empty"
     assert stub.shared_state.warm_replay_pending == {}
@@ -361,10 +371,10 @@ async def test_loaded_zero_mutation_plan_clears_warm_pending(
         {"rewrite": {"items": [_rewrite_item(missing_target)]}},
         {"kernel/rewrite/k1.py": "replacement"},
     )
-    stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
+    stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
     stub.shared_state.warm_replay_pending = {"status": "old"}
 
-    outcome = await stub._maybe_apply_warm_kernel_kb()
+    outcome = await stub._prepare_warm_kernel_kb()
 
     assert outcome["status"] == "loaded"
     assert outcome["pending"] == []
@@ -397,10 +407,10 @@ async def test_fusion_env_switches_reach_the_measurement(tmp_path: Path) -> None
         },
         {"kernel/fusion/f.py": "print('fused')"},
     )
-    stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
+    stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
     stub._validate_warm_kernel_set = _grading(stub, "KEEP", gain=4.0)  # type: ignore[method-assign]
 
-    outcome = await stub._maybe_apply_warm_kernel_kb()
+    outcome = await stub._prepare_warm_kernel_kb()
 
     assert outcome["status"] == "prepared"
     assert outcome["extra_envs"] == {
@@ -418,10 +428,10 @@ async def test_gemm_without_env_var_is_deferred(tmp_path: Path) -> None:
         {"gemm": {"optimizations": [{"tuned_file": "kernel/gemm/t.csv"}]}},
         {"kernel/gemm/t.csv": "M,N,K\n16,512,7168\n"},
     )
-    stub = _StubPrelude(tmp_path, reader=KernelRecordReader(record))
+    stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
     stub._validate_warm_kernel_set = _grading(stub, "KEEP")  # type: ignore[method-assign]
 
-    outcome = await stub._maybe_apply_warm_kernel_kb()
+    outcome = await stub._prepare_warm_kernel_kb()
 
     assert outcome["status"] == "loaded"
     assert outcome["deferred"] == 1 and outcome["pending"] == []
@@ -430,9 +440,12 @@ async def test_gemm_without_env_var_is_deferred(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_one_shot_guard(tmp_path: Path) -> None:
-    stub = _StubPrelude(tmp_path, reader=KernelRecordReader(_kernel_record(tmp_path, {}, {})))
+    stub = _StubPrelude(
+        tmp_path,
+        reader=_kernel_reader(_kernel_record(tmp_path, {}, {})),
+    )
     stub.shared_state.warm_kernel_kb_attempted = True
 
-    outcome = await stub._maybe_apply_warm_kernel_kb()
+    outcome = await stub._prepare_warm_kernel_kb()
 
     assert outcome == {"status": "skipped", "reason": "already_attempted"}

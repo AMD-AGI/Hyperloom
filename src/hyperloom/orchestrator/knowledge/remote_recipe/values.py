@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
 import re
@@ -29,6 +30,9 @@ from .sanitize import (
 )
 
 log = logging.getLogger(__name__)
+
+CURRENT_KNOWLEDGE_SCHEMA_VERSION = 1
+RECORD_KIND_HYPERLOOM_RECIPE = "hyperloom_recipe"
 
 _PATH_KEYS = (
     "artifact_path",
@@ -257,23 +261,6 @@ def _config_from(entries: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "extra_server_args": sanitize_publish_server_args(args),
         "extra_envs": sanitize_publish_env_mapping(envs),
-    }
-
-
-def _replay_config_from_current_best(state: Any) -> dict[str, Any]:
-    """Publish the single authoritative relaunch config, independent of owner."""
-    current = _mapping(getattr(state, "current_best", {}))
-    return {
-        "extra_server_args": sanitize_publish_server_args(
-            str(
-                current.get("effective_extra_server_args")
-                or current.get("extra_server_args")
-                or ""
-            )
-        ),
-        "extra_envs": sanitize_publish_env_mapping(
-            _mapping(current.get("extra_envs"))
-        ),
     }
 
 
@@ -809,6 +796,177 @@ def _patch_timeline(
     return [ref for _stack_index, _member_index, _owner, ref in rows]
 
 
+def _adopt_replayed_kernel(
+    state: Any,
+    sections: Any,
+    value: dict[str, Any],
+    files: "_Files",
+    stack: list[dict[str, Any]],
+) -> None:
+    """Carry the kernel rows accepted by the combined Recipe replay forward."""
+    outcome = _mapping(getattr(state, "warm_replay_outcome", {}))
+    kernel_outcome = _mapping(outcome.get("kernel"))
+    if (
+        str(outcome.get("status") or "") != "reproduced"
+        or str(kernel_outcome.get("status") or "") != "kept"
+        or not any(_mapping(item.get("kernel_replay")) for item in stack)
+    ):
+        return
+    plan = [
+        dict(entry)
+        for entry in (getattr(state, "warm_kernel_kb_plan", []) or [])
+        if isinstance(entry, Mapping)
+    ]
+    if not plan:
+        raise RemoteRecipeValidationError(
+            "combined replay kept kernel content without a carry-forward plan"
+        )
+    prior = sections.read("kernel")
+    if prior is None:
+        raise RemoteRecipeValidationError(
+            "combined replay kept kernel content but the inference Recipe "
+            "has no kernel section"
+        )
+    files_root = Path(sections.warm_start_dir) / "files"
+    prior_paths = {
+        source.relative_to(files_root).as_posix()
+        for source in prior.files
+        if source.is_file() and not source.is_symlink()
+    }
+    adopted: set[str] = set()
+    rows_by_column: dict[str, list[dict[str, Any]]] = {
+        "gemm": [],
+        "fusion": [],
+        "rewrite": [],
+    }
+    for entry in plan:
+        column = str(entry.get("column") or "")
+        row = entry.get("recipe_row")
+        if column not in rows_by_column or not isinstance(row, Mapping):
+            raise RemoteRecipeValidationError(
+                "combined replay kernel plan cannot reproduce its exact Recipe row"
+            )
+        copied_row = dict(row)
+        refs = extract_knowledge_artifact_refs(copied_row, prior_paths)
+        for ref in sorted(refs):
+            source = files_root / validate_relative_path(ref)
+            if ref not in prior_paths:
+                raise RemoteRecipeValidationError(
+                    f"combined replay kernel artifact is missing: {ref!r}"
+                )
+            if ref not in adopted:
+                files.validate_adoption(source, ref)
+                files.adopt(source, ref)
+                adopted.add(ref)
+        rows_by_column[column].append(copied_row)
+
+    kernel = _mapping(value.get("kernel"))
+    list_keys = {
+        "gemm": "optimizations",
+        "fusion": "items",
+        "rewrite": "items",
+    }
+    for column, accepted_rows in rows_by_column.items():
+        if not accepted_rows:
+            continue
+        list_key = list_keys[column]
+        prior_column = _mapping(prior.knowledge.get(column))
+        current_column = _mapping(kernel.get(column))
+        combined_rows = [
+            *(
+                current_column.get(list_key)
+                if isinstance(current_column.get(list_key), list)
+                else []
+            ),
+            *accepted_rows,
+        ]
+        kernel[column] = {
+            **{
+                key: item
+                for key, item in prior_column.items()
+                if key not in {list_key, "files"}
+            },
+            **current_column,
+            list_key: combined_rows,
+        }
+    value["kernel"] = kernel
+
+
+_KERNEL_ROW_LIST_KEYS = {
+    "gemm": "optimizations",
+    "fusion": "items",
+    "rewrite": "items",
+}
+
+
+def _kernel_row_identity(
+    column: str,
+    row: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Return a stable identity for deduping one kernel optimization row."""
+    for key in ("id", "integration_id", "task_group_key"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return ("id", key, value)
+    ref_keys = {
+        "gemm": ("tuned_file",),
+        "fusion": ("patch", "source_file"),
+        "rewrite": ("patch", "source_files"),
+    }[column]
+    refs: list[str] = []
+    for key in ref_keys:
+        raw = row.get(key)
+        values = raw if isinstance(raw, list) else [raw]
+        refs.extend(str(value) for value in values if str(value or "").strip())
+    if refs:
+        return ("refs", *refs)
+    for key in ("variant_name", "kernel_name", "kernel_id", "name"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return ("name", key, value)
+    return (
+        "content",
+        json.dumps(dict(row), sort_keys=True, separators=(",", ":"), default=str),
+    )
+
+
+def _merge_kernel_section(
+    current: Mapping[str, Any],
+    staged: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Deep-merge kernel sub-columns, with newly staged duplicate rows winning."""
+    combined = {**dict(current), **dict(staged)}
+    for column, list_key in _KERNEL_ROW_LIST_KEYS.items():
+        before = _mapping(current.get(column))
+        after = _mapping(staged.get(column))
+        if not before and not after:
+            continue
+        if column in staged and list_key not in after:
+            combined[column] = dict(after)
+            continue
+        rows: dict[tuple[str, ...], dict[str, Any]] = {}
+        for source in (before, after):
+            candidates = source.get(list_key)
+            if not isinstance(candidates, list):
+                continue
+            for row in candidates:
+                if isinstance(row, Mapping):
+                    copied = dict(row)
+                    rows[_kernel_row_identity(column, copied)] = copied
+        merged_column = {
+            **{key: value for key, value in before.items() if key != "files"},
+            **{key: value for key, value in after.items() if key != "files"},
+            list_key: list(rows.values()),
+        }
+        refs = sorted(
+            extract_knowledge_artifact_refs({list_key: list(rows.values())})
+        )
+        if refs:
+            merged_column["files"] = refs
+        combined[column] = merged_column
+    return combined
+
+
 def merge_staged_sections(
     value: dict[str, Any],
     sections: Any,
@@ -880,10 +1038,16 @@ def merge_staged_sections(
             for source, rel in staged_files:
                 files.adopt(source, rel)
             current = value.get(name)
-            combined = {
-                **(current if isinstance(current, Mapping) else {}),
-                **staged.knowledge,
-            }
+            if name == "kernel":
+                combined = _merge_kernel_section(
+                    current if isinstance(current, Mapping) else {},
+                    staged.knowledge,
+                )
+            else:
+                combined = {
+                    **(current if isinstance(current, Mapping) else {}),
+                    **staged.knowledge,
+                }
             # Config snapshots replace their fields, while patch/artifact refs
             # accumulate across KEEPs and warm replay.
             for ref_key in ("patches", "artifacts"):
@@ -962,7 +1126,6 @@ def build_remote_knowledge(
     gains = list(getattr(state, "gain_per_stack_entry", []) or [])
     worked = _experience(state, "what_worked") or _worked_from_stack(stack, gains)
     value = {
-        "replay_config": _replay_config_from_current_best(state),
         "explore": build_explore_value(state, explore_entries, files),
         "framework": build_framework_value(state, framework_entries, files),
         "kernel": {
@@ -973,6 +1136,7 @@ def build_remote_knowledge(
     }
     if sections is not None:
         _adopt_replayed_prior(state, sections, value, files, stack)
+        _adopt_replayed_kernel(state, sections, value, files, stack)
     staged_sections = (
         merge_staged_sections(
             value,
@@ -992,7 +1156,8 @@ def build_remote_knowledge(
     value["patch_timeline"] = _patch_timeline(value, stack)
     knowledge = sanitize_shared_knowledge(
         {
-            "knowledge_schema_version": 3,
+            "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+            "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
             "optimized_throughput": optimized_throughput,
             "validated_e2e_gain": validated_gain,
             "value": value,
@@ -1020,337 +1185,45 @@ def build_remote_knowledge(
     return bundle
 
 
-_KERNEL_SECTION = "kernel"
-# Producer prefix keeping this record out of KernelForge's kernel: slugs.
-_KERNEL_ID_PREFIX = "hyperloom-"
-# Champion metric for the kernel-agent record: a percentage, not a throughput.
-KERNEL_AGENT_METRIC = "kernel_gain_pct"
-# Storage session the accumulating kernel-agent record lives under.
-#
-# Readers resolve an identity through its champion session, but this record
-# accumulates instead of competing: a run that adds a second kernel without
-# raising the best gain scores no higher than the incumbent, so a per-run
-# session would leave the merged document on a session the champion never moves
-# to, invisible to every later read. Writing every merge back to one session
-# keeps the champion pointing at the accumulated document whatever the server
-# does with an equal-valued promotion. The contributing run stays recorded in
-# the document's provenance.
-KERNEL_AGENT_SESSION_ID = "hyperloom-kernel-agent"
-
-
-def kernel_agent_canonical_id(recipe_canonical_id: str) -> str:
-    """Map an ``inference:`` recipe id to the sibling ``kernel:`` identity.
-
-    Hyperloom's kernel-agent KB is an INDEPENDENT KB Store record under the
-    ``kernel:`` scheme. It is deliberately not part of the recipe document, so
-    it is never gated by the recipe's end-to-end throughput champion nor wiped
-    when a higher-throughput run with empty kernel columns wins the recipe.
-
-    The slug is prefixed with the producer. KernelForge publishes its own
-    ``kernel:`` records, and this record is graded on a different metric and
-    written with ``mode="replace"`` — sharing a slug would let either side
-    overwrite the other's document, or make the champion unreadable because the
-    two metrics are not comparable.
-    """
-    cid = str(recipe_canonical_id or "").strip()
-    if not cid:
-        # An unknown workload has no kernel identity either; returning "kernel:"
-        # would publish this session under a junk shared id.
-        return ""
-    slug = cid[len("inference:") :] if cid.startswith("inference:") else cid
-    if slug.startswith("kernel:"):
-        slug = slug[len("kernel:") :]
-    if slug.startswith(_KERNEL_ID_PREFIX):
-        return "kernel:" + slug
-    return f"kernel:{_KERNEL_ID_PREFIX}{slug}"
-
-
-def _kernel_agent_score(value: Mapping[str, Any]) -> float:
-    """Best kernel end-to-end gain across accepted gemm/fusion/rewrite records.
-
-    Used as the kernel-agent KB's own keep-if-better metric so a kernel
-    optimization is stored whenever it beats what the kernel-agent KB already
-    holds — independent of recipe serving throughput. Only end-to-end gain
-    percentages are compared: a micro-benchmark speedup is a different unit and
-    would always outrank a real E2E gain.
-    """
-    best = 0.0
-    gemm = value.get("gemm") if isinstance(value, Mapping) else {}
-    optimizations = (gemm or {}).get("optimizations", []) if isinstance(gemm, Mapping) else []
-    for opt in optimizations:
-        if isinstance(opt, Mapping):
-            best = max(
-                best,
-                _number(opt.get("e2e_gain_pct")),
-                _number(opt.get("gain_pct")),
-            )
-    for col in ("fusion", "rewrite"):
-        node = value.get(col) if isinstance(value, Mapping) else {}
-        items = (node or {}).get("items", []) if isinstance(node, Mapping) else []
-        for it in items:
-            if isinstance(it, Mapping):
-                e2e = it.get("e2e") if isinstance(it.get("e2e"), Mapping) else {}
-                best = max(
-                    best,
-                    _number(it.get("e2e_gain_pct")),
-                    _number(e2e.get("gain_pct")),
-                )
-    return best
-
-
-_KERNEL_COLUMN_LISTS = (("gemm", "optimizations"), ("fusion", "items"), ("rewrite", "items"))
-
-
-def _kernel_record_key(column: str, record: Mapping[str, Any]) -> str:
-    """Identify the optimization a record describes, within its column.
-
-    Two sessions optimizing the same kernel compete for one slot; two sessions
-    optimizing different kernels must both survive the merge.
-    """
-    if column == "gemm":
-        candidates = (
-            record.get("variant_name"),
-            record.get("task_id"),
-            Path(str(record.get("tuned_file") or "")).name,
-        )
-    else:
-        candidates = (
-            record.get("kernel_name"),
-            record.get("best_pattern"),
-            record.get("id"),
-        )
-    for candidate in candidates:
-        text = str(candidate or "").strip()
-        if text:
-            return f"{column}:{text}"
-    return f"{column}:{hashlib.sha256(repr(sorted(record.items())).encode()).hexdigest()[:10]}"
-
-
-def _kernel_record_score(record: Mapping[str, Any]) -> float:
-    """How good one recorded optimization was, in end-to-end gain percent."""
-    e2e = record.get("e2e") if isinstance(record.get("e2e"), Mapping) else {}
-    return max(
-        _number(record.get("e2e_gain_pct")),
-        _number(record.get("gain_pct")),
-        _number(e2e.get("gain_pct")),
-    )
-
-
-def merge_kernel_columns(
-    published: Mapping[str, Any] | None,
-    incoming: Mapping[str, Any],
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Keep the better recording of each optimization, not the better document.
-
-    The kernel-agent record accumulates across sessions: a run that only tuned
-    GEMM must not erase a rewrite an earlier run learned. Records are matched
-    per column by the optimization they describe and the higher end-to-end gain
-    wins, so a session contributes exactly what it improved.
-
-    Returns the merged columns and the records inherited from the published
-    document. The caller has to re-upload those records' artifacts for their
-    refs to keep resolving, and the returned dicts are the ones inside
-    ``merged``, so rewriting a ref on one updates the document.
-    """
-    merged: dict[str, Any] = {}
-    inherited: list[dict[str, Any]] = []
-    published = published if isinstance(published, Mapping) else {}
-    for column, list_key in _KERNEL_COLUMN_LISTS:
-        prior_node = published.get(column)
-        prior = list((prior_node or {}).get(list_key) or []) if isinstance(prior_node, Mapping) else []
-        fresh_node = incoming.get(column)
-        fresh = list((fresh_node or {}).get(list_key) or []) if isinstance(fresh_node, Mapping) else []
-        by_key: dict[str, tuple[Mapping[str, Any], bool]] = {}
-        order: list[str] = []
-        for record in prior:
-            if not isinstance(record, Mapping):
-                continue
-            key = _kernel_record_key(column, record)
-            if key not in by_key:
-                order.append(key)
-            by_key[key] = (record, True)
-        for record in fresh:
-            if not isinstance(record, Mapping):
-                continue
-            key = _kernel_record_key(column, record)
-            held = by_key.get(key)
-            if held is None:
-                order.append(key)
-                by_key[key] = (record, False)
-            elif _kernel_record_score(record) > _kernel_record_score(held[0]):
-                by_key[key] = (record, False)
-        rows = []
-        for key in order:
-            record, from_published = by_key[key]
-            row = dict(record)
-            rows.append(row)
-            if from_published:
-                inherited.append(row)
-        merged[column] = {list_key: rows}
-    return merged, inherited
-
-
-def kernel_record_refs(record: Mapping[str, Any]) -> set[str]:
-    """Artifact refs one record depends on.
-
-    Delegates to the same extractor the bundle validates with, so a record
-    cannot depend on a ref the caller forgot to carry: hand-listing key names
-    missed nested sections and the report/artifact paths a real record carries.
-    """
-    return extract_knowledge_artifact_refs(record)
-
-
-def build_kernel_agent_knowledge(
-    state: Any,
-    files_dir: str | Path,
-    *,
-    sections: Any = None,
-) -> tuple[KnowledgeBundle, float]:
-    """Build the standalone kernel-agent KB document and its keep-if-better score.
-
-    The document holds only the kernel sub-columns (gemm/fusion/rewrite),
-    published under the ``kernel:`` identity. Columns the kernel backends staged
-    during the run win over the CLOSE-time scrape, so a run that recorded its
-    work as it happened publishes that record rather than one reconstructed at
-    the end. The score is the best kernel end-to-end gain across the columns.
-    """
-    root = Path(files_dir)
-    root.mkdir(parents=True, exist_ok=True)
-    files = _Files(root)
-    # Merge against the section's own shape ({"kernel": {...}}) so the staged
-    # overlay is the one build_remote_knowledge uses, then publish it flat: this
-    # record's whole subject is the kernel agent.
-    nested = {
-        _KERNEL_SECTION: {
-            "gemm": build_kernel_gemm_value(state, files),
-            "fusion": build_kernel_fusion_value(state, files),
-            "rewrite": build_kernel_rewrite_value(state, files),
-        }
-    }
-    staged_sections = (
-        merge_staged_sections(nested, sections, files, only={_KERNEL_SECTION})
-        if sections is not None
-        else []
-    )
-    value = nested[_KERNEL_SECTION]
-    score = _kernel_agent_score(value)
-    knowledge = sanitize_shared_knowledge(
-        {
-            "knowledge_schema_version": 2,
-            # This record is graded on kernel gain, not serving throughput; the
-            # field is named for what it holds so a consumer cannot misread it.
-            KERNEL_AGENT_METRIC: score,
-            "value": value,
-            "provenance": {
-                "producer": "hyperloom-kernel-agent",
-                "phase": "CLOSE",
-                "session_id": str(
-                    getattr(state, "recipe_kb_session_id", "")
-                    or getattr(state, "session_id", "")
-                ),
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-                "staged_sections": staged_sections,
-            },
-        }
-    )
-    bundle = KnowledgeBundle(knowledge=knowledge, artifacts=files.artifacts)
-    bundle.validate()
-    return bundle, score
-
-
-def convert_v1_recipe_to_knowledge(recipe: Mapping[str, Any]) -> dict[str, Any]:
-    """Wrap one legacy RecipeKB row for migration/backfill tooling.
-
-    Runtime reads use :func:`envelope_to_v1_recipe`; the production CLOSE
-    writer emits the current knowledge schema.
-    """
-    legacy = dict(recipe)
-    best_config = _mapping(legacy.get("best_config"))
-    if best_config:
-        legacy["best_config"] = {
-            "extra_server_args": str(
-                best_config.get("extra_server_args")
-                or best_config.get("args")
-                or ""
-            ),
-            "extra_envs": _mapping(
-                best_config.get("extra_envs") or best_config.get("envs")
-            ),
-        }
-    return sanitize_shared_knowledge(
-        {
-            "knowledge_schema_version": 1,
-            "optimized_throughput": _number(recipe.get("best_throughput")),
-            "validated_e2e_gain": _number(
-                recipe.get("validated_gain_pct") or recipe.get("gain_pct")
-            ),
-            "value": {
-                "legacy_recipe": legacy,
-            },
-            "provenance": {
-                "producer": "hyperloom-v1-converter",
-                "source_schema": 1,
-            },
-        }
-    )
-
-
-def envelope_to_v1_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
-    """Project a service envelope or flattened record into the warm Recipe shape."""
+def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and project the current Hyperloom Recipe contract for PRELUDE."""
     knowledge = _mapping(document.get("knowledge")) or dict(document)
-    value = _mapping(knowledge.get("value"))
-    raw_version = knowledge.get("knowledge_schema_version")
-    if raw_version is None:
-        raw_version = 1 if "best_config" in knowledge or "legacy_recipe" in value else 2
-    try:
-        knowledge_version = int(raw_version)
-    except (TypeError, ValueError):
-        knowledge_version = 0
-    if knowledge_version == 1:
-        legacy = _mapping(value.get("legacy_recipe")) or knowledge
-        row = dict(legacy)
-        best_config = _mapping(row.get("best_config"))
-        row["best_config"] = {
-            "extra_server_args": str(
-                best_config.get("extra_server_args")
-                or best_config.get("args")
-                or ""
-            ),
-            "extra_envs": _mapping(
-                best_config.get("extra_envs") or best_config.get("envs")
-            ),
-        }
-        row["canonical_id"] = str(
-            document.get("canonical_id") or row.get("canonical_id") or ""
-        )
-        # Remote warm replay is intentionally config/env-only in phase 1.
-        row["prs_tested"] = []
-        row["remote_session_id"] = str(document.get("session_id") or "")
-        row["remote_schema_version"] = int(document.get("schema_version") or 2)
-        row["knowledge_schema_version"] = 1
-        return row
-    if knowledge_version not in (2, 3):
+    version = knowledge.get("knowledge_schema_version")
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version != CURRENT_KNOWLEDGE_SCHEMA_VERSION
+    ):
         raise RemoteRecipeValidationError(
-            f"unsupported knowledge_schema_version: {raw_version!r}"
+            "record knowledge_schema_version does not match the current "
+            f"Hyperloom contract ({CURRENT_KNOWLEDGE_SCHEMA_VERSION})"
         )
-    replay_config = _mapping(value.get("replay_config"))
-    if knowledge_version == 3 and not replay_config:
+    if knowledge.get("record_kind") != RECORD_KIND_HYPERLOOM_RECIPE:
         raise RemoteRecipeValidationError(
-            "knowledge schema v3 is missing value.replay_config"
+            f"record_kind must be {RECORD_KIND_HYPERLOOM_RECIPE!r}"
         )
-    replay_args = str(replay_config.get("extra_server_args") or "").strip()
-    replay_envs = {
-        str(key): str(value)
-        for key, value in _mapping(replay_config.get("extra_envs")).items()
-    }
+    raw_value = knowledge.get("value")
+    if not isinstance(raw_value, Mapping):
+        raise RemoteRecipeValidationError("current Recipe is missing value")
+    value = dict(raw_value)
+    for section in ("explore", "framework", "kernel"):
+        if not isinstance(value.get(section), Mapping):
+            raise RemoteRecipeValidationError(
+                f"current Recipe is missing value.{section}"
+            )
+    raw_timeline = value.get("patch_timeline")
+    if not isinstance(raw_timeline, list) or not all(
+        isinstance(ref, str) for ref in raw_timeline
+    ):
+        raise RemoteRecipeValidationError(
+            "current Recipe value.patch_timeline must be a flat string list"
+        )
+    for ref in raw_timeline:
+        validate_relative_path(ref)
     session_id = str(document.get("session_id") or "")
     validated_gain = _number(knowledge.get("validated_e2e_gain"))
     return {
         "canonical_id": str(document.get("canonical_id") or ""),
-        "best_config": {
-            "extra_server_args": replay_args,
-            "extra_envs": replay_envs,
-        },
         "best_throughput": _number(knowledge.get("optimized_throughput")),
         "validated_gain_pct": validated_gain,
         "what_worked": list(knowledge.get("what_worked") or []),
@@ -1358,9 +1231,6 @@ def envelope_to_v1_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         "remaining_gaps": list(knowledge.get("remaining_gaps") or []),
         "lessons": list(knowledge.get("lessons") or []),
         "pitfalls": list(knowledge.get("pitfalls") or []),
-        # Phase 1 intentionally replays config/env only. Omitting historical PR
-        # payloads keeps the unchanged replay executor out of its patch path.
-        "prs_tested": [],
         "sessions": (
             [{"session_id": session_id, "gain_pct": validated_gain}]
             if session_id
@@ -1369,24 +1239,22 @@ def envelope_to_v1_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         "provenance": _mapping(knowledge.get("provenance")),
         "remote_session_id": session_id,
         "remote_schema_version": int(document.get("schema_version") or 2),
-        "knowledge_schema_version": knowledge_version,
+        "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+        "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
     }
 
 
 __all__ = [
+    "CURRENT_KNOWLEDGE_SCHEMA_VERSION",
+    "RECORD_KIND_HYPERLOOM_RECIPE",
     "build_explore_value",
     "build_framework_value",
     "build_kernel_fusion_value",
     "build_kernel_gemm_value",
-    "build_kernel_agent_knowledge",
     "build_kernel_rewrite_value",
     "build_remote_knowledge",
-    "convert_v1_recipe_to_knowledge",
-    "envelope_to_v1_recipe",
+    "knowledge_to_warm_recipe",
     "has_new_keep",
-    "kernel_agent_canonical_id",
-    "kernel_record_refs",
-    "merge_kernel_columns",
     "match_rewrite_attempt",
     "merge_staged_sections",
 ]

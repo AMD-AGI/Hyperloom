@@ -909,7 +909,7 @@ def _apply_warm_patches(
     via ``git apply`` in the target repo. Skips patches that appear in the
     blocklist. Returns list of successfully applied patch metadata dicts.
 
-    Schema-v3 timelines set ``required_patch_timeline``. Those patches are
+    Current-contract timelines set ``required_patch_timeline``. Those patches are
     sequential and fail closed: first failure stops the sequence and restores
     the starting tree. Legacy patch lists retain best-effort skip semantics.
     """

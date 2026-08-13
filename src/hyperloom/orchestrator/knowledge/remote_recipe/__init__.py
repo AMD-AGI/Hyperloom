@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""KB Store Recipe read/write plus a config-only legacy warm-replay adapter."""
+"""Current Hyperloom inference Recipe contract, reader, and CLOSE writer."""
 
 from __future__ import annotations
 
@@ -24,20 +24,13 @@ from .client import (
 from .models import (
     RemoteRecipeValidationError,
     RemoteWriteResult,
-    validate_relative_path,
 )
 from .values import (
-    KERNEL_AGENT_METRIC,
-    KERNEL_AGENT_SESSION_ID,
-    _kernel_agent_score,
-    build_kernel_agent_knowledge,
+    CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+    RECORD_KIND_HYPERLOOM_RECIPE,
     build_remote_knowledge,
-    convert_v1_recipe_to_knowledge,
-    envelope_to_v1_recipe,
     has_new_keep,
-    kernel_agent_canonical_id,
-    kernel_record_refs,
-    merge_kernel_columns,
+    knowledge_to_warm_recipe,
 )
 
 log = logging.getLogger(__name__)
@@ -53,83 +46,10 @@ def read_remote_recipe(
     resolved = client or RemoteRecipeClient.from_env_optional()
     if resolved is None:
         return None
-    return resolved.read(canonical_id, destination)
-
-
-# Kept as a standalone API compatibility alias.
-read_remote_champion = read_remote_recipe
-
-
-def write_kernel_agent_kb(
-    state: Any,
-    kernel_canonical_id: str,
-    *,
-    client: RemoteRecipeClient | None = None,
-) -> RemoteWriteResult:
-    """Write Hyperloom's independent kernel-agent KB record (``kernel:`` scheme).
-
-    Unlike the recipe record, this write is NOT gated by end-to-end serving
-    throughput: it stores this session's kernel optimizations (gemm/fusion/
-    rewrite) into their own KB Store record and keeps whichever beats what the
-    kernel-agent KB already holds, scored by the kernel's own gain. Overlap with
-    KernelForge's ``kernel:`` records is by design and not consulted here.
-
-    The record is not written under the run's session: it accumulates across
-    runs under one storage session, see KERNEL_AGENT_SESSION_ID.
-    """
-    resolved = client or RemoteRecipeClient.from_env_optional()
-    if resolved is None:
-        return RemoteWriteResult("disabled", "KB_STORE_URL/TOKEN not configured")
-    session_id = KERNEL_AGENT_SESSION_ID
-    with tempfile.TemporaryDirectory(prefix="hyperloom-kernel-agent-") as temporary:
-        root = Path(temporary)
-        files_dir = root / "files"
-        bundle, _score = build_kernel_agent_knowledge(
-            state, files_dir, sections=KnowledgeSections.from_env()
-        )
-        value = bundle.knowledge.get("value") or {}
-        if not _has_kernel_optimization(value):
-            return RemoteWriteResult(
-                "skipped", "no_kernel_optimization", kernel_canonical_id, session_id
-            )
-        try:
-            published, published_dir = _published_kernel_record(
-                resolved, kernel_canonical_id, root / "published"
-            )
-        except Exception as exc:  # noqa: BLE001 — reported, never written past
-            log.warning(
-                "kernel-agent KB: not writing, the published record is unreadable",
-                exc_info=True,
-            )
-            return RemoteWriteResult(
-                "error",
-                f"published_record_unreadable: {exc}",
-                kernel_canonical_id,
-                session_id,
-            )
-        merged, inherited = merge_kernel_columns(published, value)
-        if merged == published:
-            # Every optimization this session recorded is already published at
-            # least as good; republishing would only churn the record.
-            return RemoteWriteResult(
-                "skipped", "not_better_than_published", kernel_canonical_id, session_id
-            )
-        if inherited:
-            unusable = _carry_published_artifacts(published_dir, files_dir, inherited)
-            if unusable:
-                _drop_records(merged, unusable)
-        bundle = _rebuild_kernel_bundle(bundle, merged, files_dir)
-        score = _kernel_agent_score(merged)
-        return resolved.write_record(
-            kernel_canonical_id,
-            session_id,
-            bundle,
-            # A first optimization must land even if its gain field is missing;
-            # real KEEPs carry a positive gain that drives keep-if-better.
-            score=score if score > 0 else 1e-6,
-            files_dir=files_dir,
-            metric=KERNEL_AGENT_METRIC,
-        )
+    document = resolved.read(canonical_id, destination)
+    if document is not None:
+        knowledge_to_warm_recipe(document)
+    return document
 
 
 def _has_kernel_optimization(value: Mapping[str, Any]) -> bool:
@@ -372,7 +292,7 @@ class HyperloomRemoteKB:
 
 
 class RemoteWarmRecipeAdapter:
-    """Read-only RecipeKB-shaped adapter for the unchanged T0 replay pipeline."""
+    """Read-only adapter that gives T0 current-record metadata and advisories."""
 
     enabled = True
     mode = "remote"
@@ -394,79 +314,7 @@ class RemoteWarmRecipeAdapter:
             if document is None:
                 self._cache[canonical_id] = None
             else:
-                row = envelope_to_v1_recipe(document)
-                # Schema 3 restores the exact flat timeline as required
-                # ``prs_tested`` rows. Missing artifacts remain represented so
-                # PRELUDE fails closed instead of silently shortening the set.
-                if int(row.get("knowledge_schema_version") or 0) >= 3:
-                    knowledge = document.get("knowledge")
-                    value = (
-                        (knowledge or {}).get("value")
-                        if isinstance(knowledge, dict)
-                        else document.get("value")
-                    )
-                    timeline = (
-                        (value or {}).get("patch_timeline")
-                        if isinstance(value, dict)
-                        else None
-                    )
-                    gain = float(row.get("validated_gain_pct") or 0.0)
-                    replayable: list[dict[str, Any]] = []
-                    if isinstance(timeline, list):
-                        files_root = self._destination / "files"
-                        if files_root.is_symlink():
-                            raise RemoteRecipeValidationError(
-                                "schema-v3 files root must not be a symlink"
-                            )
-                        resolved_root = files_root.resolve()
-                        for index, item in enumerate(timeline):
-                            ref = validate_relative_path(
-                                str(item or "").strip()
-                            )
-                            source = files_root / ref
-                            cursor = files_root
-                            for part in Path(ref).parts:
-                                cursor = cursor / part
-                                if cursor.is_symlink():
-                                    raise RemoteRecipeValidationError(
-                                        "schema-v3 timeline ref resolves through "
-                                        f"a symlink: {ref!r}"
-                                    )
-                            try:
-                                source.resolve().relative_to(resolved_root)
-                            except ValueError as exc:
-                                raise RemoteRecipeValidationError(
-                                    "schema-v3 timeline ref escapes files root: "
-                                    f"{ref!r}"
-                                ) from exc
-                            patch_content = ""
-                            if (
-                                ref
-                                and source.is_file()
-                                and not source.is_symlink()
-                                and source.stat().st_size <= 50_000
-                            ):
-                                patch_content = source.read_text(
-                                        encoding="utf-8",
-                                        errors="replace",
-                                    )
-                            replayable.append(
-                                {
-                                    "outcome": "KEEP",
-                                    "patch_file": ref,
-                                    "patch_ref": str(source),
-                                    "patch_content": patch_content,
-                                    "measured_gain_pct": gain if gain > 0 else 1e-6,
-                                    "required": True,
-                                    "timeline_index": index,
-                                }
-                            )
-                    row["prs_tested"] = replayable
-                    row["patch_timeline"] = [
-                        str(item or "") for item in (timeline or [])
-                    ]
-                    row["required_patch_timeline"] = True
-                self._cache[canonical_id] = row
+                self._cache[canonical_id] = knowledge_to_warm_recipe(document)
         return self._cache[canonical_id]
 
     def get_authoritative_recipe(
@@ -491,7 +339,7 @@ class RemoteWarmRecipeAdapter:
         return self._read(canonical_id)
 
     def search(self, **_kwargs: Any) -> list[dict[str, Any]]:
-        """Return no cross-identity donors in the config-only migration phase."""
+        """Return no cross-identity donors; current reads are exact-identity only."""
         if not self._search_notice_emitted:
             log.info(
                 "Remote Recipe KB cross-identity search is unsupported; "
@@ -510,6 +358,8 @@ class RemoteWarmRecipeAdapter:
 
 
 __all__ = [
+    "CURRENT_KNOWLEDGE_SCHEMA_VERSION",
+    "RECORD_KIND_HYPERLOOM_RECIPE",
     "HyperloomRemoteKB",
     "KBStoreClient",
     "KBStoreError",
@@ -518,16 +368,9 @@ __all__ = [
     "RemoteRecipeConfigurationError",
     "RemoteWarmRecipeAdapter",
     "SectionContent",
-    "KERNEL_AGENT_METRIC",
-    "build_kernel_agent_knowledge",
     "build_remote_knowledge",
-    "convert_v1_recipe_to_knowledge",
-    "envelope_to_v1_recipe",
+    "knowledge_to_warm_recipe",
     "has_new_keep",
-    "kernel_agent_canonical_id",
-    "merge_kernel_columns",
-    "read_remote_champion",
     "read_remote_recipe",
     "write_final_remote_recipe",
-    "write_kernel_agent_kb",
 ]
