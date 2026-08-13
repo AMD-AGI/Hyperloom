@@ -39,6 +39,7 @@ from .coordinator_helpers import (
     action_fits_time_budget,
     coerce_needs_gpu,
     expected_action_cost_minutes,
+    measured_baseline_runtime_sec,
 )
 
 from .coordinator import (
@@ -1365,6 +1366,11 @@ class DispatcherCollaborator:
         keeps the refusal out of the failure ledgers — no task row is created, so
         nothing teaches the KB that the action failed.
 
+        What the action is expected to cost is anchored on this session's own
+        baseline round once one exists, the way PRELUDE's affordability gate
+        already is; see :func:`expected_action_cost_minutes` for why a
+        catalogue-anchored gate admits arms a real model cannot pay for.
+
         Args:
             action_name: The proposed/delegated/inline action name.
 
@@ -1381,7 +1387,10 @@ class DispatcherCollaborator:
         meta = reg.get(action) if reg is not None else None
         if meta is None:
             return None
-        expected_min = expected_action_cost_minutes(meta)
+        expected_min = expected_action_cost_minutes(
+            meta,
+            measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state),
+        )
         usable_sec = self.shared_state.session_budget_usable_sec()
         if action_fits_time_budget(
             usable_sec=usable_sec,

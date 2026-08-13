@@ -36,6 +36,8 @@ __all__ = [
     "_MIN_KERNEL_ENGAGED_GAIN_PCT",
     "action_fits_time_budget",
     "coerce_needs_gpu",
+    "expected_action_cost_minutes",
+    "measured_baseline_runtime_sec",
 ]
 
 
@@ -229,27 +231,98 @@ TIME_BUDGET_EXEMPT_ACTIONS: frozenset[str] = frozenset(
     }
 )
 
+# The lanes that serialize GPU work: an action requiring one of them spends its
+# time running a benchmark round, so what this session measured says more about
+# it than a catalogue estimate does.
+_GPU_BENCH_LANES: frozenset[str] = frozenset(
+    {
+        "benchmark_lane",
+        "profile_lane",
+    }
+)
 
-def expected_action_cost_minutes(meta: Any | None) -> float:
-    """Read an action's expected cost out of its catalogue metadata.
 
-    Both budget guards go through here so the field is named once. Reading it
+def measured_baseline_runtime_sec(shared_state: Any | None) -> float:
+    """Read this session's own measured baseline round, in seconds.
+
+    Args:
+        shared_state (Any | None): The session ``SharedState``, or ``None`` when
+            the caller has no session context.
+
+    Returns:
+        float: The measured baseline runtime; ``0.0`` when the session has not
+            landed a baseline yet, which every caller reads as "no measurement".
+    """
+    try:
+        return max(0.0, float(getattr(shared_state, "baseline_runtime_sec", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _action_benches_on_gpu(meta: Any | None) -> bool:
+    """Whether an action's cost is dominated by a benchmark round on the GPU.
+
+    Read off the lanes the action must hold rather than off a list of names, so
+    an action added to the catalogue is classified by what it does. The
+    benchmark and profile lanes are exactly the two that serialize GPU work; an
+    action holding neither (``report``, ``target_analysis``, ``specialist``)
+    costs what its own bookkeeping costs and has nothing to do with model size.
+
+    Args:
+        meta (Any | None): The action's catalogue metadata.
+
+    Returns:
+        bool: ``True`` when the action runs at least one benchmark round.
+    """
+    lanes = getattr(meta, "requires_lanes", ()) or ()
+    try:
+        return any(str(lane) in _GPU_BENCH_LANES for lane in lanes)
+    except TypeError:
+        return False
+
+
+def expected_action_cost_minutes(
+    meta: Any | None,
+    *,
+    measured_baseline_sec: float = 0.0,
+) -> float:
+    """Read an action's expected cost, preferring what this session measured.
+
+    Every budget guard goes through here so the field is named once. Reading it
     inline with a ``getattr`` default turned the catalogue's move off YAML —
     which renamed the field — into a gate that admitted everything without a
     word, because "no estimate on record" and "the field moved" look the same
     from a default.
 
+    The catalogue's estimates are calibrated on small models (``baseline`` 5
+    min, ``roofline`` 10 min) while the two sessions that motivated the
+    wall-clock work measured 51 and 125 minutes of baseline and an 81-minute
+    roofline. A guard anchored on the catalogue alone therefore admits arms the
+    session cannot pay for — it would not have stopped either field run. So one
+    measured baseline round is taken as a *floor* on any action that runs a
+    benchmark round of its own: it is this model on this GPU under this
+    workload, which is what those actions spend their time doing. It is a floor
+    rather than a replacement because an action that benches several variants
+    costs more than one round, never less, and the catalogue is the only thing
+    that knows how many.
+
     Args:
         meta (Any | None): The action's catalogue metadata, or ``None`` for an
             action the catalogue does not carry.
+        measured_baseline_sec (float): This session's measured baseline runtime
+            in seconds, from :func:`measured_baseline_runtime_sec`; ``0.0``
+            before a baseline lands, which leaves the catalogue in charge.
 
     Returns:
         float: The expected cost in minutes; ``0.0`` when nothing is on record.
     """
     try:
-        return float(getattr(meta, "typical_runtime_min", 0.0) or 0.0)
+        catalogue_min = float(getattr(meta, "typical_runtime_min", 0.0) or 0.0)
     except (TypeError, ValueError):
-        return 0.0
+        catalogue_min = 0.0
+    if measured_baseline_sec <= 0.0 or not _action_benches_on_gpu(meta):
+        return catalogue_min
+    return max(catalogue_min, measured_baseline_sec / 60.0)
 
 
 def action_fits_time_budget(
