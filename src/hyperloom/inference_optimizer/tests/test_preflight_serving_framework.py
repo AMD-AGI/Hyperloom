@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 
 import pytest
@@ -80,6 +81,15 @@ def test_missing_serving_framework_exits_with_guidance(monkeypatch, capsys):
     assert "rocm/hyperloom" in err
     assert "HYPERLOOM_RUN_MODE=docker" in err
     assert _SKIP_ENV in err
+
+
+def test_image_hint_names_a_family_not_pinned_tags():
+    """Pinned tags in an error path rot unnoticed and would send users to a
+    nonexistent image; the install doc stays the single source of versions."""
+    family = preflight._FRAMEWORK_IMAGE_FAMILY
+
+    assert preflight._FRAMEWORK_IMAGE_DOCS.endswith("install.md")
+    assert not re.search(r"v\d+\.\d+", family), f"pinned version in image family: {family}"
 
 
 def test_importable_framework_proceeds(monkeypatch, capsys):
