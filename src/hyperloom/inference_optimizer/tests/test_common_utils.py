@@ -1667,38 +1667,26 @@ def test_paths_helpers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_dispatcher_inline_whitelist_filters_and_registry_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dispatcher_inline_whitelist_filters_denied_unregistered_and_lane_holding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 
-    reg = SimpleNamespace(names=lambda: ["report", "missing", "lane_action", "ok_action"])
     coord = SimpleNamespace(
-        action_registry=reg,
+        action_registry={name: object() for name in ("report", "missing", "lane_action", "ok_action")},
         sub=SimpleNamespace(executor_registry={"lane_action": object(), "ok_action": object()}),
         _INLINE_ACTION_DENY=frozenset({"report"}),
     )
     disp = DispatcherCollaborator(coord)
     monkeypatch.setattr(disp, "_registry_lanes_ttl", lambda name: (["gpu"] if name == "lane_action" else [], 60))
+    # report is denied, missing has no executor, lane_action holds a lane.
     assert disp._inline_action_whitelist() == frozenset({"ok_action"})
 
-    coord.action_registry = SimpleNamespace(names=lambda: (_ for _ in ()).throw(RuntimeError("bad registry")))
+    coord.action_registry = {}
     assert disp._inline_action_whitelist() == frozenset()
 
     coord.action_registry = None
     assert disp._inline_action_whitelist() == frozenset()
-
-
-def test_dispatcher_inline_whitelist_all_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
-
-    reg = SimpleNamespace(all=lambda: [SimpleNamespace(name="from_all")])
-    coord = SimpleNamespace(
-        action_registry=reg,
-        sub=SimpleNamespace(executor_registry={"from_all": object()}),
-        _INLINE_ACTION_DENY=frozenset(),
-    )
-    disp = DispatcherCollaborator(coord)
-    monkeypatch.setattr(disp, "_registry_lanes_ttl", lambda _name: ([], 60))
-    assert disp._inline_action_whitelist() == frozenset({"from_all"})
 
 
 def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch: pytest.MonkeyPatch) -> None:

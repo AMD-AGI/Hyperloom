@@ -1249,21 +1249,11 @@ class DispatcherCollaborator:
         """
         coord = object.__getattribute__(self, "_coord")
         reg = getattr(coord, "action_registry", None)
-        if reg is None:
+        if not reg:
             return frozenset()
         executors = getattr(coord.sub, "executor_registry", {}) or {}
-        names_fn = getattr(reg, "names", None)
-        try:
-            if callable(names_fn):
-                names = list(names_fn())
-            else:
-                all_fn = getattr(reg, "all", None)
-                metas = list(all_fn()) if callable(all_fn) else []
-                names = [str(getattr(meta, "name", "") or "") for meta in metas]
-        except Exception:  # noqa: BLE001 — defensive
-            names = []
         allowed: set[str] = set()
-        for name in names:
+        for name in reg:
             if name in self._INLINE_ACTION_DENY:
                 continue
             if name not in executors:
