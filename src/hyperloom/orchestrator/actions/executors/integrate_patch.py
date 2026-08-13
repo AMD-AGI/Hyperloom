@@ -59,7 +59,11 @@ from ._grid_runner import (
 )
 from . import _framework_switch_manifest as _switch_manifest
 from ._grid_server_args import compose_server_args
-from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
+from ._stack_rebench import (
+    DEFAULT_STACK_STABLE_PCT,
+    StackRebenchResult,
+    measure_stack_rebench,
+)
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -4294,24 +4298,12 @@ class IntegratePatchExecutor:
         _rt_rb = params.get("runtime_override")
         if isinstance(_rt_rb, dict) and _rt_rb:
             variant.runtime_override = dict(_rt_rb)
-        # A confirmation rebench must remain a stability check, not become a
-        # stricter second discovery gate as the per-cycle KEEP threshold decays.
-        # An explicit lower per-task floor remains valid, but it cannot exceed
-        # half of the threshold that admitted this patch.
-        keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
-        requested_stable_threshold_pct = float(
-            params.get("rebench_stable_threshold_pct", DEFAULT_STACK_STABLE_PCT)
-        )
-        stable_threshold_pct = min(
-            requested_stable_threshold_pct,
-            max(0.0, keep_threshold_pct / 2.0),
-        )
         rebench = await measure_stack_rebench(
             config_path=config_path,
             base_extra_args=base_extra_args,
             variant=variant,
             base_tput=base_tput,
-            stable_threshold_pct=stable_threshold_pct,
+            stable_threshold_pct=self._rebench_stable_threshold_pct(params),
             output_slot=output_root / "stack_rebench",
             variant_timeout_sec=int(params.get("variant_timeout_sec", self.variant_timeout_sec)),
             model_path=resolved_model or None,
@@ -4323,6 +4315,46 @@ class IntegratePatchExecutor:
             session_deadline_sec=session_deadline_sec,
             variant_expected_sec=variant_expected_sec,
         )
+        return self._graded_rebench(rebench, params=params, override_result_dir=override_result_dir)
+
+    def _rebench_stable_threshold_pct(self, params: dict[str, Any]) -> float:
+        """The floor a confirmation rebench's throughput is graded against.
+
+        A confirmation must remain a stability check rather than become a
+        stricter second discovery gate as the per-cycle KEEP threshold decays. An
+        explicit lower per-task floor stays valid, but it cannot exceed half of
+        the threshold that admitted this patch in the first place.
+
+        Args:
+            params: The task parameters, read for the per-task overrides.
+
+        Returns:
+            float: The stability floor as a percentage over the base throughput.
+        """
+        keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
+        requested_stable_threshold_pct = float(params.get("rebench_stable_threshold_pct", DEFAULT_STACK_STABLE_PCT))
+        return min(requested_stable_threshold_pct, max(0.0, keep_threshold_pct / 2.0))
+
+    def _graded_rebench(
+        self,
+        rebench: StackRebenchResult,
+        *,
+        params: dict[str, Any],
+        override_result_dir: str | None,
+    ) -> dict[str, Any]:
+        """Grade a finished confirmation round and shape its verdict for the caller.
+
+        Args:
+            rebench: The confirmation round's measurement.
+            params: The task parameters, read for the accuracy baseline and
+                framework.
+            override_result_dir: An explicit ``$RESULT_DIR``, which wins over the
+                round's own workspace when grading accuracy.
+
+        Returns:
+            dict[str, Any]: ``stable`` / ``tput`` / ``workspace`` / ``warnings`` /
+                ``stable_floor`` / ``accuracy_pass``.
+        """
         # See ``_bench_patch``: lm-eval writes to the grid slot (the parent of
         # ``rebench.workspace``), so grade from there, honoring ``result_dir``.
         rebench_eval_root = override_result_dir or (str(Path(rebench.workspace).parent) if rebench.workspace else "")
