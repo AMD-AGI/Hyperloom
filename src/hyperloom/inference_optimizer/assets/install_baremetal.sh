@@ -270,20 +270,29 @@ check_rocm_toolchain_alignment() {
 }
 
 # Human GPU label from arch, refined by rocm-smi product name when available.
+# An unrecognised arch reports the probed gfx id, and an undetectable one
+# reports "unknown"; neither falls back to a real MI part number. The label is
+# substituted into the operator prompt as "GPU: <label>", so a fabricated
+# MI300X on non-MI hardware is copied into --gpu-type, which selects the wrong
+# Magpie runner scripts and keys recipe-KB rows to hardware the run never used.
 detect_gpu_label() {
   local gfx="$1" product=""
   if command -v rocm-smi >/dev/null 2>&1; then
-    product="$(rocm-smi --showproductname 2>/dev/null | grep -oiE 'MI[0-9]{3}[A-Z]?' | head -1)"
+    # `|| true` keeps a no-match grep from tripping pipefail/set -e on non-MI
+    # hardware; harmless today because every caller uses `$(...)`, but the
+    # function is one direct call away from aborting the installer.
+    product="$(rocm-smi --showproductname 2>/dev/null | grep -oiE 'MI[0-9]{3}[A-Z]?' | head -1 || true)"
   fi
   if [ -n "$product" ]; then echo "$product"; return 0; fi
   case "$gfx" in
     gfx942) echo "MI300X" ;;
     gfx950) echo "MI355X" ;;
-    *) echo "MI300X" ;;
+    "") echo "unknown" ;;
+    *) echo "$gfx" ;;
   esac
 }
 
-DETECTED_GPU="MI300X"
+DETECTED_GPU="unknown"
 
 base_preflight() {
   local rc=0
