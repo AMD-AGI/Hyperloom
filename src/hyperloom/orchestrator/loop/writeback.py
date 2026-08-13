@@ -25,6 +25,7 @@ from ..state.optimization_journal import (
     summarize_change,
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
+from ..actions.stop_attribution import stopped_by_the_run_class
 from ..state.shared_state import SharedState, resolve_grading_anchor_tput
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
@@ -891,6 +892,13 @@ class WritebackCollaborator:
         # Only arm/streak while no baseline has succeeded yet (tput <= 0).
         if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
             err_class = result_payload.get("error_class", "")
+            # A round the run itself stopped -- the session budget reaped it, or
+            # the orchestrator cancelled the action -- measured nothing, so it
+            # says nothing about whether this baseline boots. Charging it to the
+            # streaks would let three stops the run chose end the session as
+            # ``baseline_failed``, blaming the model for the clock. The executor
+            # already refuses to grade such a round; the ledger has to agree.
+            stopped_by_the_run = stopped_by_the_run_class(err_class) is not None
             # While a serial enablement is actively engaged, baseline boots
             # re-fail on purpose (each round clears a deeper gap), so the
             # ``baseline_failed`` fast-fail must NOT fire here; the
@@ -946,7 +954,15 @@ class WritebackCollaborator:
             )
             if eval_failed:
                 self._persist_eval_failure(result_payload)
-            if err_class == "fast_exit_arg_error":
+            if stopped_by_the_run:
+                log.warning(
+                    "baseline %s was stopped by the run (%s); the failure streak stays at %d "
+                    "because nothing about the baseline was measured",
+                    task.task_id,
+                    err_class,
+                    self.shared_state.baseline_failure_streak,
+                )
+            elif err_class == "fast_exit_arg_error":
                 self.shared_state.baseline_arg_error_streak += 1
                 if self.shared_state.baseline_arg_error_streak >= 2:
                     self.shared_state.set_stop_reason("baseline_arg_error")
@@ -957,7 +973,8 @@ class WritebackCollaborator:
                     self.shared_state.set_stop_reason("baseline_failed")
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.
-            self.shared_state.baseline_total_failures += 1
+            if not stopped_by_the_run:
+                self.shared_state.baseline_total_failures += 1
             if (
                 self.shared_state.baseline_total_failures >= _BASELINE_MAX_TOTAL_FAILURES
                 and not self.shared_state.stop_reason

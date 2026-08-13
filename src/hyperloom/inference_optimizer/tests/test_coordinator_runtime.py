@@ -1179,6 +1179,56 @@ async def test_handle_unpromotable_baseline_third_failure_sets_stop_reason(
         await c.stop()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_class", ["session_time_exhausted", "orchestrator_cancelled"])
+async def test_baseline_rounds_the_run_stopped_do_not_charge_the_failure_streak(session_dir, error_class):
+    """Three rounds the run stopped are not three baselines that failed.
+
+    The executor refuses to grade a reaped round because it would put a verdict
+    on a model the round never reached; the streak has to agree, or the session
+    stops as ``baseline_failed`` on the evidence of its own clock.
+    """
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        for i in range(3):
+            await c._handle_unpromotable_result(
+                _mk_task("baseline", f"t-stopped-{error_class}-{i}"),
+                {
+                    "status": "failed",
+                    "error_class": error_class,
+                    "error": "the run stopped this round before it measured anything",
+                },
+            )
+        assert c.shared_state.baseline_failure_streak == 0
+        assert c.shared_state.baseline_total_failures == 0
+        assert c.shared_state.stop_reason in ("", None)
+        # The rounds are still recorded: not charging them is not hiding them.
+        assert len(c.shared_state.last_action_failures) == 3
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_baseline_round_does_not_clear_a_real_failure_streak(session_dir):
+    """A stop the run chose neither charges the streak nor forgives what preceded it."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        await c._handle_unpromotable_result(
+            _mk_task("baseline", "t-real"),
+            {"status": "failed", "error_class": "no_report", "error": "missing"},
+        )
+        await c._handle_unpromotable_result(
+            _mk_task("baseline", "t-stopped"),
+            {"status": "failed", "error_class": "session_time_exhausted", "error": "reaped"},
+        )
+        assert c.shared_state.baseline_failure_streak == 1
+        assert c.shared_state.baseline_total_failures == 1
+    finally:
+        await c.stop()
+
+
 def _eval_failed_result() -> dict:
     return {
         "status": "failed",
