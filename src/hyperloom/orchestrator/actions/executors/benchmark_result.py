@@ -264,10 +264,16 @@ def snapshot_workspaces(root: Path) -> frozenset[Path]:
 
 
 def select_run_workspace(root: Path, *, known_before: frozenset[Path]) -> Path | None:
-    """Return the newest ``benchmark_*`` workspace this run created in ``root``.
+    """Return the ``benchmark_*`` workspace this run created in ``root``.
 
     Workspaces present in ``known_before`` belong to an earlier attempt and are
     never selected, so a failed run cannot adopt a prior attempt's report.
+
+    A round runs Magpie once against its own slot, so exactly one workspace is
+    fresh. ``max`` breaks a hypothetical tie by name, which is creation order
+    here: Magpie names workspaces ``benchmark_{framework}_{%Y%m%d_%H%M%S}`` and
+    a session is single-framework, so the prefix is constant and the timestamp
+    fixed-width.
 
     Args:
         root: Directory holding Magpie workspaces.
