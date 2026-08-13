@@ -11,11 +11,12 @@ import os
 from collections.abc import Collection
 from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from typing import Any
+from typing import Any, NamedTuple
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     KERNEL_AGENT_OWNED_ACTIONS,
 )
+from ..actions.cancel_channel import CancelScope, use_cancel_scope
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..kernel.request_handlers import get_handler
@@ -47,6 +48,29 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
+# How long a cancel waits for work that is listening on its cancel scope to stop
+# itself. Sized on what stopping actually costs: the poll the blocking side
+# checks the scope at, plus the SIGTERM grace before the tree is SIGKILLed, plus
+# the drain of the child's pipes. Past that the coroutine is cancelled anyway,
+# which is where this started -- the wait buys the guarantee when the work can
+# give it, and never turns a shutdown into a hang when it cannot.
+_COOPERATIVE_CANCEL_GRACE_SEC: float = 10.0
+
+# How long a cancel waits for anything to start listening before deciding
+# nothing will. Work that is already blocking is listening before the cancel is
+# raised; the window is for the gap between an action starting and reaching the
+# call that watches the scope, so it is sized on the same poll interval rather
+# than on how long the work takes.
+_CANCEL_NOTICE_SEC: float = 0.5
+
+
+class _InflightAction(NamedTuple):
+    """A running action's handle: what it is, its task, and how to ask it to stop."""
+
+    kind: str
+    atask: asyncio.Task[Any]
+    scope: CancelScope
+
 
 class DispatcherCollaborator:
     """Extracted collaborator; delegates unknown attrs to its Coordinator."""
@@ -56,13 +80,13 @@ class DispatcherCollaborator:
         # Task ids already charged a failure by the dead-holder reclaim path, so
         # a late normal result for the same task cannot double-count it.
         self._dead_holder_accounted: set[str] = set()
-        # Handles on the actions currently running, ``task_id -> (kind, task)``.
+        # Handles on the actions currently running, ``task_id -> _InflightAction``.
         # Kept on the collaborator and not only in the pump's frame: an action
         # whose handle lives in a frame can only be stopped by the frame that is
         # already blocked awaiting it, which is precisely the situation shutdown
         # and an exhausted wall-clock budget have to break. Entries remove
         # themselves in :meth:`_run_dispatched_with_gpu_release`.
-        self._inflight_actions: dict[str, tuple[str, asyncio.Task[Any]]] = {}
+        self._inflight_actions: dict[str, _InflightAction] = {}
 
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
@@ -137,21 +161,33 @@ class DispatcherCollaborator:
         exempt: frozenset[str] = frozenset(),
         only_task_ids: Collection[str] | None = None,
     ) -> list[str]:
-        """Cancel the running dispatched actions and wait for them to unwind.
+        """Stop the running dispatched actions and wait for them to unwind.
 
         The last of the wall-clock defences, and the only one that reaches work
         already under way: admission refuses what cannot fit, the timeout clamp
         bounds what does, and the subprocess reaper stops the child trees that
-        were handed a session deadline -- an executor that never takes that
-        argument, or that is not spending its time in a subprocess at all, has
-        nothing stopping it before it finishes.
+        were handed a session deadline.
 
-        Cancellation is cooperative: every cancel is delivered before the first
-        await, so a caller that is itself being cancelled still leaves no action
-        running unattended.
+        Cancelling the action's task is not by itself enough to stop it. Every
+        benchmark executor spends its time inside ``asyncio.to_thread``, and a
+        thread that has started cannot be cancelled: the ``await`` raises here
+        while the subprocess runs on, so the lanes and the GPU lease would be
+        released, and the database closed, under a benchmark still holding the
+        card. So the cancel goes out on the action's :class:`CancelScope` first
+        -- the channel the blocking side polls -- and work that is listening on
+        it is given :data:`_COOPERATIVE_CANCEL_GRACE_SEC` to stop itself and
+        return through its own ``finally`` blocks. Whatever is still running
+        after that is cancelled the old way, which is no worse than not having
+        asked.
+
+        Every scope is cancelled before the first await, so a caller that is
+        itself being cancelled still leaves no action running unattended: the
+        work that can hear the channel stops on it even if this coroutine never
+        reaches the wait.
 
         Args:
-            reason: Short cause, logged and used as evidence.
+            reason: Short cause, logged, used as evidence, and carried to the
+                blocking side so it can attribute its own stop.
             exempt: Action kinds to leave running -- the closing actions, when
                 the trigger is a budget that already reserved time for them.
             only_task_ids: Restrict the cancel to these ids, for a caller that
@@ -160,12 +196,14 @@ class DispatcherCollaborator:
                 spent budget needs.
 
         Returns:
-            list[str]: Task ids that were cancelled (empty when nothing ran).
+            list[str]: Task ids that were stopped (empty when nothing ran).
         """
         victims = [
-            (task_id, kind, atask)
-            for task_id, (kind, atask) in self._inflight_actions.items()
-            if kind not in exempt and not atask.done() and (only_task_ids is None or task_id in only_task_ids)
+            (task_id, entry)
+            for task_id, entry in self._inflight_actions.items()
+            if entry.kind not in exempt
+            and not entry.atask.done()
+            and (only_task_ids is None or task_id in only_task_ids)
         ]
         if not victims:
             return []
@@ -173,12 +211,46 @@ class DispatcherCollaborator:
             "dispatcher: cancelling %d in-flight action(s) [%s]: %s",
             len(victims),
             reason,
-            ", ".join(f"{kind}/{task_id[:12]}" for task_id, kind, _ in victims),
+            ", ".join(f"{entry.kind}/{task_id[:12]}" for task_id, entry in victims),
         )
-        for _task_id, _kind, atask in victims:
-            atask.cancel()
-        await asyncio.gather(*(atask for _tid, _kind, atask in victims), return_exceptions=True)
-        return [task_id for task_id, _kind, _atask in victims]
+        for _task_id, entry in victims:
+            entry.scope.cancel(reason=reason)
+        try:
+            await self._wait_for_cooperative_stop(victims)
+        finally:
+            for _task_id, entry in victims:
+                if not entry.atask.done():
+                    entry.atask.cancel()
+        await asyncio.gather(*(entry.atask for _task_id, entry in victims), return_exceptions=True)
+        return [task_id for task_id, _entry in victims]
+
+    async def _wait_for_cooperative_stop(self, victims: list[tuple[str, _InflightAction]]) -> None:
+        """Give already-cancelled work the chance to stop itself and return.
+
+        Only work watching its scope can be waited for: waiting on the rest
+        would trade a thread that outlives the cancel for a shutdown that blocks
+        on one, and the second is the worse failure. So the wait ends at
+        whichever comes first -- every victim unwound, the grace spent, or the
+        notice window closing with nothing listening.
+
+        Args:
+            victims: The ``(task_id, handle)`` pairs whose scopes were just
+                cancelled.
+        """
+        loop = asyncio.get_running_loop()
+        notice_deadline = loop.time() + _CANCEL_NOTICE_SEC
+        grace_deadline = loop.time() + _COOPERATIVE_CANCEL_GRACE_SEC
+        listening = False
+        while True:
+            alive = [entry.atask for _task_id, entry in victims if not entry.atask.done()]
+            if not alive:
+                return
+            listening = listening or any(entry.scope.has_listeners for _task_id, entry in victims)
+            now = loop.time()
+            deadline = grace_deadline if listening else notice_deadline
+            if now >= deadline:
+                return
+            await asyncio.wait(alive, timeout=deadline - now, return_when=asyncio.FIRST_COMPLETED)
 
     async def _cancel_inflight_that_outlived_the_session(self) -> bool:
         """Stop in-flight actions the session can no longer wait for.
@@ -674,6 +746,7 @@ class DispatcherCollaborator:
                     )
             except Exception:  # noqa: BLE001 - audit must never affect dispatch
                 pass
+            cancel_scope = CancelScope()
             atask = asyncio.create_task(
                 self._run_dispatched_with_gpu_release(
                     task,
@@ -681,9 +754,10 @@ class DispatcherCollaborator:
                     extra_context=extra_context,
                     gpu_lease=gpu_lease,
                     gpu_specialist_lease=gpu_specialist_lease,
+                    cancel_scope=cancel_scope,
                 ),
             )
-            self._inflight_actions[task.task_id] = (task.kind, atask)
+            self._inflight_actions[task.task_id] = _InflightAction(task.kind, atask, cancel_scope)
             spawned.append((task, atask, gpu_lease))
         return spawned
 
@@ -695,6 +769,7 @@ class DispatcherCollaborator:
         extra_context: dict[str, Any],
         gpu_lease: Any,
         gpu_specialist_lease: Any = None,
+        cancel_scope: CancelScope | None = None,
     ) -> "SubAgentResult":
         """Run a dispatched task, releasing its GPU lease in a structured finally.
 
@@ -717,16 +792,20 @@ class DispatcherCollaborator:
             gpu_specialist_lease: The Ray ``GpuSpecialistLease`` to close
                 (release the ``num_gpus`` actor lease), or None on the local
                 path.
+            cancel_scope: The action's cancel channel, published here rather
+                than at the call site because a task copies its context when it
+                is created and never sees a value set afterwards.
 
         Returns:
             SubAgentResult: The result from ``sub.run_task``.
         """
         try:
-            return await self.sub.run_task(
-                task,
-                prebound_lease=prebound_lease,
-                extra_context=extra_context,
-            )
+            with use_cancel_scope(cancel_scope):
+                return await self.sub.run_task(
+                    task,
+                    prebound_lease=prebound_lease,
+                    extra_context=extra_context,
+                )
         finally:
             self._inflight_actions.pop(task.task_id, None)
             if gpu_lease is not None:
@@ -1671,10 +1750,12 @@ class DispatcherCollaborator:
         # is this coroutine's own task: cancelling it drops the audit publication
         # below, which the runner's terminal transition already accounts for.
         inline_handle = asyncio.current_task()
+        cancel_scope = CancelScope()
         if inline_handle is not None:
-            self._inflight_actions[task.task_id] = (task.kind, inline_handle)
+            self._inflight_actions[task.task_id] = _InflightAction(task.kind, inline_handle, cancel_scope)
         try:
-            result = await self.sub.run_task(task)
+            with use_cancel_scope(cancel_scope):
+                result = await self.sub.run_task(task)
         finally:
             self._inflight_actions.pop(task.task_id, None)
         result_payload = {

@@ -19,8 +19,10 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
+    ORCHESTRATOR_CANCELLED_RETURNCODE,
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -362,6 +364,92 @@ class TestSessionDeadline:
         )
         assert cp.returncode == 0
         assert "done" in (cp.stdout or "")
+
+
+class TestAnOrchestratorCancelReachesTheChild:
+    """The last defence has to stop the child, not just the coroutine above it.
+
+    The executor blocks in a worker thread, so cancelling its task frees the
+    lanes and the GPU lease while the benchmark is still running. The cancel
+    scope is the channel the thread checks, at the poll it already runs.
+    """
+
+    def test_a_cancel_raised_before_the_call_reaps_the_tree(self):
+        scope = CancelScope()
+        scope.cancel(reason="shutdown_requested")
+        start = time.monotonic()
+        with use_cancel_scope(scope):
+            cp = run_with_session_kill(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                timeout=60,
+            )
+        elapsed = time.monotonic() - start
+        assert cp.returncode == ORCHESTRATOR_CANCELLED_RETURNCODE
+        assert elapsed < 10.0, f"cancel path took {elapsed:.2f}s"
+
+    def test_a_cancel_that_arrives_mid_run_still_reaches_it(self):
+        """The interesting case: nothing is wrong when the child is launched."""
+        scope = CancelScope()
+        timer = threading.Timer(0.5, lambda: scope.cancel(reason="session_time_exhausted"))
+        timer.start()
+        start = time.monotonic()
+        try:
+            with use_cancel_scope(scope):
+                cp = run_with_session_kill(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    timeout=60,
+                )
+        finally:
+            timer.cancel()
+        elapsed = time.monotonic() - start
+        assert cp.returncode == ORCHESTRATOR_CANCELLED_RETURNCODE
+        assert elapsed < 10.0, f"mid-run cancel took {elapsed:.2f}s"
+
+    def test_a_scope_nobody_cancelled_leaves_the_child_alone(self):
+        """The channel must cost nothing on the path every healthy round takes."""
+        with use_cancel_scope(CancelScope()):
+            cp = run_with_session_kill(
+                [sys.executable, "-c", "import time; time.sleep(1); print('done')"],
+                timeout=60,
+            )
+        assert cp.returncode == 0
+        assert "done" in (cp.stdout or "")
+
+    def test_a_spent_budget_keeps_its_own_attribution(self):
+        """Both are true at once whenever the budget is what triggered the cancel.
+
+        The budget is a fact about the run and the cancel is only the dispatcher
+        acting on it, so the ledger gets the cause, not the mechanism.
+        """
+        scope = CancelScope()
+        scope.cancel(reason="session_time_exhausted")
+        with use_cancel_scope(scope):
+            cp = run_with_session_kill(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                timeout=60,
+                session_deadline_sec=time.monotonic() - 1.0,
+            )
+        assert cp.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
+
+    def test_the_call_registers_as_a_listener_while_the_child_lives(self):
+        """The canceller waits only for work that can hear it, so this is load-bearing."""
+        scope = CancelScope()
+        seen: list[bool] = []
+        timer = threading.Timer(
+            0.5,
+            lambda: (seen.append(scope.has_listeners), scope.cancel(reason="test")),
+        )
+        timer.start()
+        try:
+            with use_cancel_scope(scope):
+                run_with_session_kill(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    timeout=60,
+                )
+        finally:
+            timer.cancel()
+        assert seen == [True]
+        assert not scope.has_listeners
 
 
 class TestSessionDeadlineCrossesAProcessBoundary:

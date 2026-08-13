@@ -28,6 +28,8 @@ from typing import Callable, NamedTuple
 
 from .bypass_analysis import parse_server_log_throughput
 
+from ..cancel_channel import CancelScope, cancel_scope_listener
+
 log = logging.getLogger(__name__)
 
 
@@ -267,6 +269,17 @@ EVAL_PROBE_UNPATCHABLE_RETURNCODE: int = -914
 # which says nothing about the variant at all. Sharing a code would teach the KB
 # that a variant is slow whenever a session happened to end during it.
 SESSION_TIME_EXHAUSTED_RETURNCODE: int = -915
+
+# -916 is ``_ray_serving._ACTOR_TIMEOUT_RC``.
+
+# Sentinel ``returncode`` when the orchestrator cancelled the action this child
+# was launched for -- a shutdown, or a budget that is spent. Distinct from
+# ``SESSION_TIME_EXHAUSTED_RETURNCODE`` because the two causes are told apart at
+# the source: that one is the round's own deadline elapsing where it runs, this
+# one is a decision taken outside it, and only one of them is still true when the
+# same session resumes. Distinct from ``OVERTIME_KILL_RETURNCODE`` for the reason
+# that one already carries: neither says anything about the variant.
+ORCHESTRATOR_CANCELLED_RETURNCODE: int = -917
 
 # Server-ready markers: their appearance in ``server.log`` means the server has
 # finished startup and is accepting traffic. Only after one is observed does the
@@ -748,6 +761,13 @@ def run_with_session_kill(
     eval-start boundary is meaningful for "is this variant abnormally slow" and
     meaningless for "is the run out of time".
 
+    The cancel scope published by the dispatcher (:mod:`..cancel_channel`) is
+    watched for as long as the child lives, so an orchestrator that cancels the
+    action reaches the tree rather than just the coroutine awaiting this call.
+    Every cause that reaps the tree is reported as its own sentinel
+    ``returncode``, which is all a caller of a subprocess gets to tell them apart
+    by.
+
     Args:
         on_output: Called from a reader thread each time the child produces
             output, so a caller can report a long step alive on the child's own
@@ -779,125 +799,102 @@ def run_with_session_kill(
     proc: subprocess.Popen | None = None
     capture: _StreamCapture | None = None
     try:
-        proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=text,
-            env=env,
-            cwd=cwd,
-            **new_session_kwargs(),
-        )
-        capture = _StreamCapture(proc, text=text, on_output=on_output)
-        capture.start()
-        try:
-            stdout, stderr = _communicate_with_soft_deadline(
-                proc,
-                hard_timeout=timeout,
-                soft_deadline_sec=soft_deadline_sec,
-                server_log_path=server_log_path,
-                server_dead_grace_sec=server_dead_grace_sec,
-                detok_stall_grace_sec=detok_stall_grace_sec,
-                capture=capture,
-                server_already_ready=server_already_ready,
-                session_deadline_sec=session_deadline_sec,
+        with cancel_scope_listener() as cancel_scope:
+            proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=text,
+                env=env,
+                cwd=cwd,
+                **new_session_kwargs(),
             )
-        except subprocess.TimeoutExpired:
-            kill_my_spawned_server(proc)
-            if capture is not None:
-                capture.finish(timeout=2.0)
-            raise
-        except _ServerDeadDetected as exc:
-            kill_my_spawned_server(proc)
-            stdout, stderr = (
-                capture.finish(timeout=2.0) if capture is not None else ("" if text else b"", "" if text else b"")
-            )
-            log.warning(
-                "_subprocess_kill: server-liveness watchdog reaped tree — "
-                "engine/worker init died but parent hung (marker=%r, "
-                "grace=%.1fs, elapsed=%.1fs); returncode=%d.",
-                exc.marker,
-                exc.grace_sec,
-                exc.elapsed_sec,
-                SERVER_DEAD_RETURNCODE,
-            )
+            capture = _StreamCapture(proc, text=text, on_output=on_output)
+            capture.start()
+            try:
+                stdout, stderr = _communicate_with_soft_deadline(
+                    proc,
+                    hard_timeout=timeout,
+                    soft_deadline_sec=soft_deadline_sec,
+                    server_log_path=server_log_path,
+                    server_dead_grace_sec=server_dead_grace_sec,
+                    detok_stall_grace_sec=detok_stall_grace_sec,
+                    capture=capture,
+                    server_already_ready=server_already_ready,
+                    session_deadline_sec=session_deadline_sec,
+                    cancel_scope=cancel_scope,
+                )
+            except subprocess.TimeoutExpired:
+                kill_my_spawned_server(proc)
+                if capture is not None:
+                    capture.finish(timeout=2.0)
+                raise
+            except _ReapedByWatchdog as exc:
+                kill_my_spawned_server(proc)
+                stdout, stderr = _finish_capture(capture, text=text)
+                log.log(
+                    exc.log_level,
+                    "_subprocess_kill: %s; reaped the tree with sentinel returncode=%d.",
+                    exc,
+                    exc.returncode,
+                )
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=exc.returncode,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            empty: str | bytes = "" if text else b""
             return subprocess.CompletedProcess(
                 args=cmd,
-                returncode=SERVER_DEAD_RETURNCODE,
-                stdout=stdout if stdout is not None else ("" if text else b""),
-                stderr=stderr if stderr is not None else ("" if text else b""),
+                returncode=proc.returncode,
+                stdout=stdout if stdout is not None else empty,
+                stderr=stderr if stderr is not None else empty,
             )
-        except _ServerStalledDetected as exc:
-            kill_my_spawned_server(proc)
-            stdout, stderr = (
-                capture.finish(timeout=2.0) if capture is not None else ("" if text else b"", "" if text else b"")
-            )
-            log.warning(
-                "_subprocess_kill: detokenizer-stall watchdog reaped tree — "
-                "server reported ready but emitted no log output (grace=%.1fs, "
-                "elapsed=%.1fs); returncode=%d.",
-                exc.grace_sec,
-                exc.elapsed_sec,
-                DETOKENIZER_STALL_RETURNCODE,
-            )
-            return subprocess.CompletedProcess(
-                args=cmd,
-                returncode=DETOKENIZER_STALL_RETURNCODE,
-                stdout=stdout if stdout is not None else ("" if text else b""),
-                stderr=stderr if stderr is not None else ("" if text else b""),
-            )
-        except _SessionDeadlineExceeded as exc:
-            kill_my_spawned_server(proc)
-            stdout, stderr = (
-                capture.finish(timeout=2.0) if capture is not None else ("" if text else b"", "" if text else b"")
-            )
-            log.warning(
-                "_subprocess_kill: session wall-clock budget exhausted %.1fs ago "
-                "(round elapsed=%.1fs); reaped tree with sentinel returncode=%d.",
-                exc.overrun_sec,
-                exc.elapsed_sec,
-                SESSION_TIME_EXHAUSTED_RETURNCODE,
-            )
-            return subprocess.CompletedProcess(
-                args=cmd,
-                returncode=SESSION_TIME_EXHAUSTED_RETURNCODE,
-                stdout=stdout if stdout is not None else ("" if text else b""),
-                stderr=stderr if stderr is not None else ("" if text else b""),
-            )
-        except _SoftDeadlineExceeded as exc:
-            kill_my_spawned_server(proc)
-            stdout, stderr = (
-                capture.finish(timeout=2.0) if capture is not None else ("" if text else b"", "" if text else b"")
-            )
-            log.info(
-                "_subprocess_kill: soft_deadline_sec=%.1fs exceeded "
-                "(elapsed=%.1fs); reaped tree with sentinel returncode=%d.",
-                exc.deadline_sec,
-                exc.elapsed_sec,
-                OVERTIME_KILL_RETURNCODE,
-            )
-            return subprocess.CompletedProcess(
-                args=cmd,
-                returncode=OVERTIME_KILL_RETURNCODE,
-                stdout=stdout if stdout is not None else ("" if text else b""),
-                stderr=stderr if stderr is not None else ("" if text else b""),
-            )
-        return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=proc.returncode,
-            stdout=stdout if stdout is not None else ("" if text else b""),
-            stderr=stderr if stderr is not None else ("" if text else b""),
-        )
     finally:
         kill_my_spawned_server(proc)
 
 
-class _SessionDeadlineExceeded(Exception):
-    """Internal sentinel: the session wall-clock budget ran out mid-round.
+def _finish_capture(capture: _StreamCapture | None, *, text: bool) -> tuple[str | bytes, str | bytes]:
+    """Drain the capture threads of a reaped child, never returning ``None``.
 
-    Never bubbles past :func:`run_with_session_kill` (converted to a
-    ``CompletedProcess`` carrying ``SESSION_TIME_EXHAUSTED_RETURNCODE``).
+    Args:
+        capture: The stream capture to finish, or ``None`` when the child's
+            output was not captured.
+        text: Whether the streams are ``str`` (``True``) or ``bytes``, which
+            decides what an absent stream reads as.
+
+    Returns:
+        tuple[str | bytes, str | bytes]: The captured ``(stdout, stderr)``.
     """
+    empty: str | bytes = "" if text else b""
+    if capture is None:
+        return empty, empty
+    stdout, stderr = capture.finish(timeout=2.0)
+    return (
+        stdout if stdout is not None else empty,
+        stderr if stderr is not None else empty,
+    )
+
+
+class _ReapedByWatchdog(Exception):
+    """Internal base for a cause that reaps the tree and names itself.
+
+    None of these bubble past :func:`run_with_session_kill`: each is converted
+    to a ``CompletedProcess`` carrying the subclass's own ``returncode``, since
+    a returncode is the only thing that survives the trip back to a caller of a
+    subprocess. Subclasses build their own message and declare how much the
+    event is worth logging.
+    """
+
+    returncode: int = -1
+    log_level: int = logging.WARNING
+
+
+class _SessionDeadlineExceeded(_ReapedByWatchdog):
+    """Internal sentinel: the session wall-clock budget ran out mid-round."""
+
+    returncode = SESSION_TIME_EXHAUSTED_RETURNCODE
 
     def __init__(self, *, overrun_sec: float, elapsed_sec: float) -> None:
         """Record how far past the session deadline the round got.
@@ -906,15 +903,44 @@ class _SessionDeadlineExceeded(Exception):
             overrun_sec (float): Seconds past the session deadline at trip time.
             elapsed_sec (float): Wall-clock elapsed for this round at trip time.
         """
-        super().__init__(f"session budget exhausted {overrun_sec:.1f}s ago (round elapsed={elapsed_sec:.1f}s)")
+        super().__init__(
+            f"the session wall-clock budget was exhausted {overrun_sec:.1f}s ago "
+            f"(round elapsed={elapsed_sec:.1f}s)"
+        )
         self.overrun_sec = float(overrun_sec)
         self.elapsed_sec = float(elapsed_sec)
 
 
-class _SoftDeadlineExceeded(Exception):
-    """Internal sentinel for an elapsed soft deadline. Never bubbles
-    past :func:`run_with_session_kill` (converted to a ``CompletedProcess``).
+class _OrchestratorCancelled(_ReapedByWatchdog):
+    """Internal sentinel: the orchestrator cancelled the action this child serves.
+
+    The cause is a decision taken outside the round -- a shutdown, or a budget
+    the dispatcher found spent -- which is why it carries the caller's reason
+    rather than a measurement of its own.
     """
+
+    returncode = ORCHESTRATOR_CANCELLED_RETURNCODE
+
+    def __init__(self, *, reason: str, elapsed_sec: float) -> None:
+        """Record who asked for the stop and how far the round had got.
+
+        Args:
+            reason (str): Short cause from the canceller, e.g. ``shutdown_requested``.
+            elapsed_sec (float): Wall-clock elapsed for this round at trip time.
+        """
+        super().__init__(
+            f"the orchestrator cancelled this action ({reason or 'no reason given'}; "
+            f"round elapsed={elapsed_sec:.1f}s)"
+        )
+        self.reason = str(reason)
+        self.elapsed_sec = float(elapsed_sec)
+
+
+class _SoftDeadlineExceeded(_ReapedByWatchdog):
+    """Internal sentinel for an elapsed soft deadline."""
+
+    returncode = OVERTIME_KILL_RETURNCODE
+    log_level = logging.INFO
 
     def __init__(self, *, deadline_sec: float, elapsed_sec: float) -> None:
         """Record the deadline and actual elapsed time on the sentinel.
@@ -923,17 +949,17 @@ class _SoftDeadlineExceeded(Exception):
             deadline_sec (float): The soft deadline that was exceeded.
             elapsed_sec (float): The actual wall-clock elapsed at trip time.
         """
-        super().__init__(f"soft deadline {deadline_sec:.1f}s elapsed (actual={elapsed_sec:.1f}s)")
+        super().__init__(f"soft_deadline_sec={deadline_sec:.1f}s elapsed (actual={elapsed_sec:.1f}s)")
         self.deadline_sec = float(deadline_sec)
         self.elapsed_sec = float(elapsed_sec)
 
 
-class _ServerDeadDetected(Exception):
+class _ServerDeadDetected(_ReapedByWatchdog):
     """Internal sentinel: the server-liveness watchdog saw a terminal engine /
-    worker init marker that persisted past the grace window. Never bubbles past
-    :func:`run_with_session_kill` (converted to a ``CompletedProcess`` carrying
-    ``SERVER_DEAD_RETURNCODE``).
+    worker init marker that persisted past the grace window.
     """
+
+    returncode = SERVER_DEAD_RETURNCODE
 
     def __init__(
         self,
@@ -950,7 +976,7 @@ class _ServerDeadDetected(Exception):
             elapsed_sec: Actual wall-clock elapsed at trip time.
         """
         super().__init__(
-            f"server init died (marker={marker!r}) and parent hung past "
+            f"server init died (marker={marker!r}) and the parent hung past "
             f"grace {grace_sec:.1f}s (elapsed={elapsed_sec:.1f}s)"
         )
         self.marker = marker
@@ -958,12 +984,12 @@ class _ServerDeadDetected(Exception):
         self.elapsed_sec = float(elapsed_sec)
 
 
-class _ServerStalledDetected(Exception):
+class _ServerStalledDetected(_ReapedByWatchdog):
     """Internal sentinel: the detokenizer-stall watchdog saw the server report
-    ready and then produce no generation progress for the grace window. Never
-    bubbles past :func:`run_with_session_kill` (converted to a
-    ``CompletedProcess`` carrying ``DETOKENIZER_STALL_RETURNCODE``).
+    ready and then produce no generation progress for the grace window.
     """
+
+    returncode = DETOKENIZER_STALL_RETURNCODE
 
     def __init__(
         self,
@@ -998,6 +1024,7 @@ def _communicate_with_soft_deadline(
     capture: _StreamCapture | None = None,
     server_already_ready: bool = False,
     session_deadline_sec: float | None = None,
+    cancel_scope: CancelScope | None = None,
 ) -> tuple[str | bytes, str | bytes]:
     """Communicate with a child while enforcing soft and server-log watchdogs."""
     watchdog_active = bool(server_log_path) and (
@@ -1006,9 +1033,13 @@ def _communicate_with_soft_deadline(
     stall_active = bool(server_log_path) and (detok_stall_grace_sec is not None and float(detok_stall_grace_sec) > 0.0)
     soft_active = soft_deadline_sec is not None and float(soft_deadline_sec) > 0.0
     session_active = session_deadline_sec is not None
-    if capture is None and not soft_active and not watchdog_active and not stall_active and not session_active:
+    # A cancel scope is polled like any other gate, so its presence rules out the
+    # single-wait fast paths below: a call that blocks until the child exits
+    # cannot notice a cancel that arrives while it is blocked.
+    gated = soft_active or watchdog_active or stall_active or session_active or cancel_scope is not None
+    if capture is None and not gated:
         return proc.communicate(timeout=hard_timeout)
-    if capture is not None and not soft_active and not watchdog_active and not stall_active and not session_active:
+    if capture is not None and not gated:
         proc.wait(timeout=hard_timeout)
         return capture.finish()
 
@@ -1060,6 +1091,15 @@ def _communicate_with_soft_deadline(
         if session_active and session_deadline_sec is not None and now >= session_deadline_sec:
             raise _SessionDeadlineExceeded(
                 overrun_sec=now - float(session_deadline_sec),
+                elapsed_sec=elapsed,
+            )
+        # Orchestrator cancellation. Checked after the session deadline so a
+        # round that was already out of time keeps that reason: the budget is a
+        # fact about the run, while the cancel is only the dispatcher acting on
+        # it, and the more specific of the two is the one worth recording.
+        if cancel_scope is not None and cancel_scope.cancelled:
+            raise _OrchestratorCancelled(
+                reason=cancel_scope.reason,
                 elapsed_sec=elapsed,
             )
         # Advance the log scan, latching the server-ready, last-activity
@@ -1162,6 +1202,7 @@ __all__ = [
     "AGENTX_PREFLIGHT_RETURNCODE",
     "DETOKENIZER_STALL_RETURNCODE",
     "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
+    "ORCHESTRATOR_CANCELLED_RETURNCODE",
     "OVERTIME_KILL_RETURNCODE",
     "SERVER_DEAD_RETURNCODE",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
