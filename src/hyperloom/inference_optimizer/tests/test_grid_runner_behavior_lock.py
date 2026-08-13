@@ -29,6 +29,8 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 )
 from hyperloom.orchestrator.trace.task_progress import progress_scope
 
+from .conftest import chatty_child, suppression_window_s
+
 
 @pytest.fixture(autouse=True)
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
@@ -584,17 +586,17 @@ class TestResolveMnEffectiveServerArgs:
 class TestVariantHeartbeat:
     """A grid that runs for hours must be distinguishable from one that hung."""
 
-    def _run_capture_progress(self, run_side_effect, base, out, *, grid_n=2, notes=None):
+    def _run_capture_progress(self, run_side_effect, base, out, *, grid_n=2, notes=None, sink=None):
         notes = [] if notes is None else notes
 
-        async def _sink(**note):
+        async def _collect(**note):
             notes.append(note)
 
         async def _no_pulse(**_kwargs):
             return None
 
         with (
-            progress_scope(_sink),
+            progress_scope(sink or _collect),
             patch.object(gr, "_robustness_pulse", side_effect=_no_pulse),
             patch(
                 "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
@@ -671,3 +673,35 @@ class TestVariantHeartbeat:
             ("c0:variant", "started"),
             ("c0:benchmark", "started"),
         ]
+
+    def test_a_variant_keeps_reporting_while_its_benchmark_blocks(
+        self,
+        tmp_path,
+        monkeypatch,
+        progress_cadence,
+    ):
+        """Entry markers alone leave the row silent for a whole variant timeout.
+
+        The benchmark is the longest single block in the session; bounding the
+        gap between notes is the only assertion a dropped liveness callback
+        cannot pass.
+        """
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+
+        def _ok(cmd, *_a, **_k):
+            out_idx = cmd.index("--output-dir")
+            _valid_workspace(Path(cmd[out_idx + 1]))
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        results, _notes = self._run_capture_progress(
+            chatty_child(progress_cadence, _ok, blocks_for_s=600.0, line_every_s=30.0),
+            base,
+            tmp_path / "out",
+            grid_n=1,
+            sink=progress_cadence.sink(),
+        )
+
+        assert [r.status for r in results] == ["succeeded"]
+        assert progress_cadence.widest_silence() < suppression_window_s()

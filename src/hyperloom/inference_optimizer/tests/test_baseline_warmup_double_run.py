@@ -33,6 +33,8 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.trace.task_progress import progress_scope
 
+from .conftest import chatty_child, enable_multi_node, suppression_window_s
+
 
 @pytest.fixture(autouse=True)
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
@@ -257,6 +259,53 @@ def test_a_round_is_handed_the_liveness_callback_its_heartbeat_needs(tmp_path):
 
     assert result["status"] == "succeeded"
     assert [callable(cb) for cb in seen] == [True]
+
+
+def _cadence_ctx(tmp_path) -> SimpleNamespace:
+    """A single-round baseline context for the cadence tests."""
+    return _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
+
+
+def test_a_round_keeps_reporting_while_its_benchmark_blocks(tmp_path, progress_cadence):
+    """A round blocks for the better part of an hour; entry markers cannot cover that."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    inner, _state = _cold_then_hot_fake_run()
+    executor = _executor(base, tmp_path, baseline_double_run=False)
+
+    with (
+        progress_scope(progress_cadence.sink()),
+        patch(
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            side_effect=chatty_child(progress_cadence, inner, blocks_for_s=600.0, line_every_s=30.0),
+        ),
+    ):
+        result = _run(executor(_cadence_ctx(tmp_path)))
+
+    assert result["status"] == "succeeded"
+    assert progress_cadence.widest_silence() < suppression_window_s()
+
+
+def test_the_multi_node_warmup_pass_keeps_reporting_too(tmp_path, monkeypatch, progress_cadence):
+    """The discarded MN warmup is a full benchmark pass and blocks just as long."""
+    enable_multi_node(monkeypatch)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    inner, state = _cold_then_hot_fake_run()
+    executor = _executor(base, tmp_path, baseline_double_run=False)
+
+    with (
+        progress_scope(progress_cadence.sink()),
+        patch(
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            side_effect=chatty_child(progress_cadence, inner, blocks_for_s=600.0, line_every_s=30.0),
+        ),
+    ):
+        result = _run(executor(_cadence_ctx(tmp_path)))
+
+    assert result["status"] == "succeeded"
+    assert state["calls"] == 2  # the discarded warmup pass, then the measured one
+    assert progress_cadence.widest_silence() < suppression_window_s()
 
 
 def test_a_failing_warmup_round_still_reported_that_it_started(tmp_path):

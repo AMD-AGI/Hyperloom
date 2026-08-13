@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 import signal
 import time
-from typing import Callable
 
 import pytest
 
@@ -19,6 +18,9 @@ from hyperloom.orchestrator.roles._llm_stability_env import (
     apply_llm_stability_env,
 )
 from hyperloom.orchestrator.kernel.request_handlers import _run_subprocess, _tool_label
+from hyperloom.orchestrator.trace.task_progress import progress_scope
+
+from .conftest import PROGRESS_TIME_SCALE, suppression_window_s
 
 
 def test_apply_llm_stability_env_sets_defaults():
@@ -69,12 +71,22 @@ async def test_run_subprocess_counts_the_lines_its_child_emits(monkeypatch):
     """The heartbeat above it reports only when this tally moves."""
     from hyperloom.orchestrator.actions.executors import _subprocess_kill
 
-    seen: list[Callable[[], None]] = []
+    counted: list[int] = []
     real = _subprocess_kill.run_with_session_kill
 
     def _spy(cmd, **kwargs):
-        seen.append(kwargs.get("on_output"))
-        return real(cmd, **kwargs)
+        calls = 0
+        reported = kwargs.pop("on_output")
+
+        def _count() -> None:
+            nonlocal calls
+            calls += 1
+            reported()
+
+        try:
+            return real(cmd, on_output=_count, **kwargs)
+        finally:
+            counted.append(calls)
 
     monkeypatch.setattr(_subprocess_kill, "run_with_session_kill", _spy)
     await _run_subprocess(
@@ -82,8 +94,29 @@ async def test_run_subprocess_counts_the_lines_its_child_emits(monkeypatch):
         timeout_sec=30,
     )
 
-    assert len(seen) == 1
-    assert callable(seen[0])
+    assert counted == [2]
+
+
+async def test_a_kernel_tool_keeps_reporting_while_its_child_works(progress_cadence):
+    """A trace analysis blocks for the better part of an hour behind one ``await``.
+
+    Bounding the gap between notes is what a dropped liveness callback fails;
+    asserting that a callback was passed is not.
+    """
+    line_every_s = 30.0
+    child = (
+        "import time\n"
+        "for i in range(20):\n"
+        f"    time.sleep({line_every_s / PROGRESS_TIME_SCALE})\n"
+        "    print(i)\n"
+    )
+
+    with progress_scope(progress_cadence.sink()):
+        progress_cadence.start()
+        rc, _stdout, _stderr = await _run_subprocess(["python3", "-c", child], timeout_sec=30)
+
+    assert rc == 0
+    assert progress_cadence.widest_silence() < suppression_window_s()
 
 
 def test_a_tool_is_named_after_the_script_it_runs():
