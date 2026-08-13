@@ -36,6 +36,7 @@ class _BareState:
     recipe_finalize_attempts: int = 0
     recipe_finalize_outcome: dict[str, Any] = field(default_factory=dict)
     phase_history: list[dict[str, Any]] = field(default_factory=list)
+    max_minutes: int = 0
     save_count: int = 0
 
     def save(self, _session_dir: Path | None) -> None:
@@ -329,6 +330,96 @@ async def test_a_terminal_task_is_reported_not_run(coord):
 
     assert state == "succeeded"
     assert coord.sub.run_calls == []
+
+
+class _FinishesWhileWaiting(_StubTaskRegistry):
+    """Registry whose running row lands terminal once the sequencer looks again."""
+
+    def __init__(self, terminal_state: str):
+        super().__init__()
+        self._terminal_state = terminal_state
+        self.gets = 0
+
+    async def get(self, task_id):
+        row = await super().get(task_id)
+        self.gets += 1
+        if self.gets >= 2:
+            row.state = self._terminal_state
+        return row
+
+
+def _running_report_row(coord) -> _StubTaskRow:
+    """Register a report the wall-clock deadline path already enqueued AND dispatched."""
+    row = _StubTaskRow(
+        task_id="wallclock-report",
+        kind="report",
+        state="running",
+        params={},
+        idempotency_key="closing-report-1234",
+    )
+    coord.tasks._by_id[row.task_id] = row
+    return row
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_state", ["succeeded", "failed"])
+async def test_a_running_task_is_waited_for_not_re_run(coord, terminal_state: str):
+    """``running -> running`` is not a transition the registry has; asking for it kills the step.
+
+    The deadline path dispatches the report before CLOSE is entered, so the
+    sequencer routinely meets its own step already under way. It was documented
+    as "the sequencer will wait for it" and implemented as a second dispatch.
+    """
+    coord.tasks = _FinishesWhileWaiting(terminal_state)
+    coord._dispatcher_poll_sec = 0.01
+    coord.shared_state.max_minutes = 60
+
+    state = await coord._run_close_task(_running_report_row(coord), step="1 (report)")
+
+    assert state == terminal_state
+    assert coord.sub.run_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_running_task_that_never_lands_is_reported_not_waited_on_forever(coord):
+    """The closing grace window is the budget for this work, so it is also the bound."""
+    coord._dispatcher_poll_sec = 0.01
+    # Resolves to a 1.2s grace window, the same arithmetic a real session uses.
+    coord.shared_state.max_minutes = 1
+
+    state = await coord._run_close_task(_running_report_row(coord), step="1 (report)")
+
+    assert state == "running"
+    assert coord.sub.run_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_zero_grace_window_buys_no_wait_at_all(coord):
+    """The row is still looked at once: no window is not the same as no answer."""
+    coord.shared_state.max_minutes = 0  # no budget -> no grace window
+
+    state = await coord._run_close_task(_running_report_row(coord), step="1 (report)")
+
+    assert state == "running"
+    assert coord.sub.run_calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_sequencer_records_the_state_a_running_report_ended_in(coord):
+    """End to end: the waited-for report is reported like any other outcome."""
+    coord.tasks = _FinishesWhileWaiting("succeeded")
+    coord._dispatcher_poll_sec = 0.01
+    coord.shared_state.max_minutes = 60
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    _running_report_row(coord)
+    coord.shared_state.closing_report_task_id = "wallclock-report"
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
+    report = next(r for r in rows if r["step"] == "report")
+    assert report["status"] == "done"
+    assert "wallclock-report" not in [t.task_id for t in coord.sub.run_calls]
 
 
 @pytest.mark.asyncio
