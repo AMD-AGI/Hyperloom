@@ -11,14 +11,13 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
-from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-import _nccl_summary_candidates as nccl_candidates  # type: ignore[import-not-found]
 from _nccl_summary_candidates import (  # type: ignore[import-not-found]
     _itanium_components,
     _prorated_totals,
@@ -147,7 +146,7 @@ class SymbolLocationTests(unittest.TestCase):
                 source_reads += 1
             return original_read_text(path, *args, **kwargs)
 
-        with mock.patch.object(Path, "read_text", counted_read_text):
+        with unittest.mock.patch.object(Path, "read_text", counted_read_text):
             index, truncated = index_device_symbols(
                 ["first_collective", "second_collective"],
                 [str(self.root)],
@@ -165,7 +164,10 @@ class SymbolLocationTests(unittest.TestCase):
             "__global__ void late_collective(int* p) {}\n",
         )
 
-        with mock.patch.object(nccl_candidates, "_MAX_SCANNED_FILES", 1):
+        with unittest.mock.patch(
+            f"{index_device_symbols.__module__}._MAX_SCANNED_FILES",
+            1,
+        ):
             index, truncated = index_device_symbols(
                 ["late_collective"],
                 [str(self.root)],
@@ -342,7 +344,7 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             "input_dtypes": ["bf16"],
         }
 
-        with mock.patch.dict(
+        with unittest.mock.patch.dict(
             os.environ,
             {"HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES": ""},
         ):
@@ -379,7 +381,10 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         }
         warnings: list[dict] = []
 
-        with mock.patch.object(nccl_candidates, "_MAX_SCANNED_FILES", 1):
+        with unittest.mock.patch(
+            f"{index_device_symbols.__module__}._MAX_SCANNED_FILES",
+            1,
+        ):
             out = _inject_collective_candidates(
                 self.tl,
                 [exact],
@@ -449,7 +454,7 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             "input_shapes": [{"shape": "(4096, 7168)"}],
             "input_dtypes": ["bf16"],
         }
-        with mock.patch.dict(
+        with unittest.mock.patch.dict(
             os.environ,
             {"HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES": "1"},
         ):
@@ -497,7 +502,7 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             },
         ]
 
-        with mock.patch.dict(
+        with unittest.mock.patch.dict(
             os.environ,
             {"HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES": "true"},
         ):
@@ -541,7 +546,7 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             },
         ]
 
-        with mock.patch.dict(
+        with unittest.mock.patch.dict(
             os.environ,
             {"HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES": "yes"},
         ):
