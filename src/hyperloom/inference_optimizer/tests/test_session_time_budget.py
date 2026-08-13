@@ -26,12 +26,25 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.actions.cancel_channel import (
+    CancelScope,
+    current_cancel_scope,
+    use_cancel_scope,
+)
+from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+    ORCHESTRATOR_CANCELLED_RETURNCODE,
+    run_with_session_kill,
+)
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.dispatcher import _COOPERATIVE_CANCEL_GRACE_SEC
 from hyperloom.orchestrator.loop.coordinator_helpers import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
@@ -406,10 +419,16 @@ def _never_finishes(started: asyncio.Event):
     return _run
 
 
-async def _queue_action(coord: Coordinator, *, kind: str, key: str) -> tuple[Task, asyncio.Event]:
-    """Queue an action that only ends by being cancelled, with its real lanes."""
+async def _queue_action(
+    coord: Coordinator,
+    *,
+    kind: str,
+    key: str,
+    make_executor: Callable[[asyncio.Event], Any] = _never_finishes,
+) -> tuple[Task, asyncio.Event]:
+    """Queue an action with its real lanes; ``make_executor`` shapes what it does."""
     started = asyncio.Event()
-    coord.sub.register_executor(kind, _never_finishes(started))
+    coord.sub.register_executor(kind, make_executor(started))
     lanes, ttl_sec = coord.dispatcher._registry_lanes_ttl(kind)
     task, _ = await coord.tasks.create_or_return_existing(
         kind=kind,
@@ -421,9 +440,15 @@ async def _queue_action(coord: Coordinator, *, kind: str, key: str) -> tuple[Tas
     return task, started
 
 
-async def _start_action(coord: Coordinator, *, kind: str, key: str) -> tuple[Task, asyncio.Task]:
+async def _start_action(
+    coord: Coordinator,
+    *,
+    kind: str,
+    key: str,
+    make_executor: Callable[[asyncio.Event], Any] = _never_finishes,
+) -> tuple[Task, asyncio.Task]:
     """Dispatch the action with no pump running, for the pieces under it."""
-    task, started = await _queue_action(coord, kind=kind, key=key)
+    task, started = await _queue_action(coord, kind=kind, key=key, make_executor=make_executor)
     spawned = await coord.dispatcher._spawn_fitting_queued(exclude_ids=set())
     assert [t.task_id for t, _, _ in spawned] == [task.task_id]
     await asyncio.wait_for(started.wait(), timeout=5.0)
@@ -459,7 +484,9 @@ class TestInflightHandles:
     async def test_a_running_action_is_reachable_by_task_id(self, coord: Coordinator):
         task, atask = await _start_action(coord, kind=_CHEAP_ACTION, key="h-live")
         try:
-            assert coord.dispatcher._inflight_actions[task.task_id] == (_CHEAP_ACTION, atask)
+            entry = coord.dispatcher._inflight_actions[task.task_id]
+            assert (entry.kind, entry.atask) == (_CHEAP_ACTION, atask)
+            assert not entry.scope.cancelled
         finally:
             atask.cancel()
             await _settle(atask)
@@ -527,6 +554,138 @@ class TestCancellingInflightActions:
         assert (await coord.locks.lane_holders()).get(_CHEAP_ACTION_LANE, 0) == 1
         await coord.dispatcher.cancel_inflight_actions(reason="test")
         assert (await coord.locks.lane_holders()).get(_CHEAP_ACTION_LANE, 0) == 0
+
+
+# Long enough that a round which ran to completion is unmistakable in the
+# elapsed time, short enough that an abandoned thread cannot outlive the suite.
+_BLOCKING_SEC = 30
+
+
+def _blocks_in_a_thread(started: asyncio.Event, *, outcome: dict[str, Any]):
+    """Build an executor shaped like every benchmark one: a subprocess in a thread.
+
+    ``asyncio.to_thread`` is where all of them spend their time, and a thread
+    that has started cannot be cancelled, so this is the shape the last defence
+    actually has to stop. ``outcome`` is written after the thread returns, which
+    is what makes "the work is over" observable rather than inferred.
+    """
+
+    async def _run(_ctx) -> dict:
+        started.set()
+        proc = await asyncio.to_thread(
+            run_with_session_kill,
+            ["sleep", str(_BLOCKING_SEC)],
+            timeout=_BLOCKING_SEC * 4,
+        )
+        outcome["returncode"] = proc.returncode
+        return {"returncode": proc.returncode}
+
+    return _run
+
+
+def _sleeps_in_a_thread(started: asyncio.Event, *, seconds: float = 2.0):
+    """Build an executor whose thread has no way to hear a cancel."""
+
+    async def _run(_ctx) -> dict:
+        started.set()
+        await asyncio.to_thread(time.sleep, seconds)
+        return {}
+
+    return _run
+
+
+class TestTheCancelChannel:
+    """The channel itself: what it carries, and how far it reaches."""
+
+    @pytest.mark.asyncio
+    async def test_a_worker_thread_sees_the_scope_of_the_task_that_started_it(self):
+        """The whole idiom rests on ``to_thread`` copying the context."""
+        scope = CancelScope()
+        with use_cancel_scope(scope):
+            seen = await asyncio.to_thread(current_cancel_scope)
+        assert seen is scope
+
+    @pytest.mark.asyncio
+    async def test_code_outside_an_action_finds_no_scope(self):
+        """A Ray worker and a bare call are the same case: nothing to check."""
+        assert await asyncio.to_thread(current_cancel_scope) is None
+
+    def test_the_first_reason_is_the_one_kept(self):
+        """A blanket cancel arriving second must not overwrite the specific cause."""
+        scope = CancelScope()
+        scope.cancel(reason="session_time_exhausted")
+        scope.cancel(reason="dispatcher_pump_exit")
+        assert scope.cancelled
+        assert scope.reason == "session_time_exhausted"
+
+    def test_a_scope_reports_whether_anything_is_watching_it(self):
+        scope = CancelScope()
+        assert not scope.has_listeners
+        with scope.listening():
+            assert scope.has_listeners
+        assert not scope.has_listeners
+
+
+class TestCancellingWorkThatBlocksInAThread:
+    """Cancelling the coroutine does not stop the thread it is waiting on.
+
+    The canceller gets a clean ``CancelledError`` off the ``await`` while the
+    subprocess runs on to its own hard timeout, so the lanes and the GPU lease
+    are released, and the database closed, with the benchmark still holding the
+    card. Stopping it takes a channel the thread itself checks.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_work_is_over_before_the_cancel_returns(self, coord: Coordinator):
+        outcome: dict[str, Any] = {}
+        task, atask = await _start_action(
+            coord,
+            kind=_CHEAP_ACTION,
+            key="c-thread",
+            make_executor=lambda started: _blocks_in_a_thread(started, outcome=outcome),
+        )
+        began = time.monotonic()
+
+        assert await coord.dispatcher.cancel_inflight_actions(reason="test") == [task.task_id]
+
+        assert outcome, "the cancel returned while the thread was still running"
+        assert time.monotonic() - began < _BLOCKING_SEC
+        await _settle(atask)
+
+    @pytest.mark.asyncio
+    async def test_the_stop_is_attributed_to_the_orchestrator(self, coord: Coordinator):
+        """A cancel is not a timeout and not a slow variant; the ledger reads returncodes."""
+        outcome: dict[str, Any] = {}
+        await _start_action(
+            coord,
+            kind=_CHEAP_ACTION,
+            key="c-thread-rc",
+            make_executor=lambda started: _blocks_in_a_thread(started, outcome=outcome),
+        )
+
+        await coord.dispatcher.cancel_inflight_actions(reason="test_reason")
+
+        assert outcome["returncode"] == ORCHESTRATOR_CANCELLED_RETURNCODE
+
+    @pytest.mark.asyncio
+    async def test_a_thread_with_nothing_listening_is_still_not_waited_for(self, coord: Coordinator):
+        """The channel is cooperative, so work that cannot hear it is left behind.
+
+        Waiting on it anyway would trade a leaked thread for a shutdown that
+        hangs on one, which is the worse of the two.
+        """
+        _task, atask = await _start_action(
+            coord,
+            kind=_CHEAP_ACTION,
+            key="c-deaf",
+            make_executor=_sleeps_in_a_thread,
+        )
+        began = time.monotonic()
+
+        await coord.dispatcher.cancel_inflight_actions(reason="test")
+
+        assert time.monotonic() - began < _COOPERATIVE_CANCEL_GRACE_SEC
+        assert atask.cancelled()
 
 
 class TestTheRunnerRecordsACancellation:
