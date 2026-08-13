@@ -28,6 +28,7 @@ from hyperloom.orchestrator.kernel.conc_sweep import (
     _flush_partial_conc_sweep_report,
     _has_optimization,
     _order_concs_desc,
+    conc_sweep_declined_to_run,
     run_conc_sweep,
 )
 from hyperloom.common.gain_math import conc_pair_comparison as _build_comparison
@@ -710,6 +711,8 @@ def test_run_conc_sweep_skips_when_initial_budget_below_variant_timeout(
     assert payload["skip_reason"] == "budget_exhausted_no_successful_pairs"
     assert payload["budget_exhausted"] is True
     assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
+    # This sweep started; only the pre-flight envelope means "declined to run".
+    assert conc_sweep_declined_to_run(payload) is False
 
 
 # ActionExecutor integration (SWEEP-phase dispatch)
@@ -875,6 +878,7 @@ def test_conc_sweep_executor_remaps_skip_to_succeeded(
     assert result["status"] == "succeeded"
     assert result["was_skipped"] is True
     assert result["skip_reason"] == "no_baseline_tput"
+    assert conc_sweep_declined_to_run(result) is True
 
 
 # record_conc_sweep writes state.last_conc_sweep for SWEEP completion detection.
