@@ -993,6 +993,11 @@ def _check_gfx_arch_resolvable(gpu_type: str | None = None) -> None:
 
     Warn-only, and it names the three ways to fix it, because null provenance is
     only cheap to correct before the run rather than after.
+
+    Called from the CLI after ``--gpu-type`` is resolved rather than from
+    ``_preflight``, which runs first: ``gpu_type`` is the second source in the
+    resolution order, so asking before it is settled turns this into a warning
+    about hosts that are fine.
     """
     if detect_gfx_arch(os.environ, gpu_type=gpu_type):
         return
@@ -1578,7 +1583,6 @@ def _preflight(
     _check_gpu_visibility()
     _check_shm_disk()
     _check_platform_tuning()
-    _check_gfx_arch_resolvable(getattr(args, "gpu_type", None))
 
     # --- Runtime dep install ---
     # 1. Ray — used broadly (multi-node scheduling, kernel/profile/recover
