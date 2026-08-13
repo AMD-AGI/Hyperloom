@@ -61,8 +61,18 @@ def test_evaluate_stall_no_activity_no_symptom() -> None:
 
 
 def _progress(agent: str, *, unix: float, task: str) -> dict:
-    """A ``local_task_progress`` snapshot holding one agent's heartbeat."""
-    return {"running": 1, "by_agent": {agent: {"last_progress_unix": unix, "task": task}}}
+    """A ``local_task_progress`` snapshot holding one agent's single heartbeat."""
+    return {
+        "running": 1,
+        "by_agent": {
+            agent: {
+                "last_progress_unix": unix,
+                "task": task,
+                "oldest_progress_unix": unix,
+                "oldest_task": task,
+            }
+        },
+    }
 
 
 def test_work_still_reporting_units_withholds_the_accusation() -> None:
@@ -83,6 +93,37 @@ def test_a_withheld_accusation_still_leaves_a_trace() -> None:
     assert out[0].name == "agent_stall"
     assert out[0].subject == {"agent": "orchestration"}
     assert "explore" in out[0].summary and "withheld" in out[0].summary
+
+
+def test_a_quiet_sibling_unit_is_named_even_though_a_busy_one_holds_the_accusation() -> None:
+    """Two units of one agent: one reporting, one quiet for hours.
+
+    One unit reporting still answers the question the signal asks, so the
+    accusation stays withheld — a Ray-backed round has no liveness callback and
+    is quiet by design. What the snapshot must not do is lose the quiet one.
+    """
+    ctx = ReactorContext(inbox=[_item("orchestration", ts=9_600.0)], now_unix=10_000.0)
+    progress = _progress("orchestration", unix=9_950.0, task="explore")
+    progress["by_agent"]["orchestration"].update(oldest_progress_unix=2_800.0, oldest_task="baseline")
+    progress["running"] = 2
+    out = evaluate_stall_signals(
+        ctx,
+        SourceData(local_task_progress=progress),
+        config=StallConfig(stall_timeout_s=300.0),
+    )
+    assert out[0].evidence["accusation_withheld"] is True
+    assert out[0].evidence["in_flight_work"] == "explore"
+    assert out[0].evidence["quiet_in_flight_work"] == "baseline"
+    assert out[0].evidence["quiet_in_flight_work_idle_seconds"] == 7_200
+
+
+def test_a_lone_reporting_unit_is_not_reported_as_its_own_quiet_sibling() -> None:
+    """With one unit the freshest and the quietest note are the same note."""
+    ctx = ReactorContext(inbox=[_item("orchestration", ts=9_800.0)], now_unix=10_000.0)
+    data = SourceData(local_task_progress=_progress("orchestration", unix=9_950.0, task="explore"))
+    out = evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=100.0))
+    assert out[0].evidence["accusation_withheld"] is True
+    assert "quiet_in_flight_work" not in out[0].evidence
 
 
 def test_busy_work_of_one_agent_does_not_silence_another() -> None:

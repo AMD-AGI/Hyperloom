@@ -98,7 +98,8 @@ class SourceData:
     # TRACELENS_ROOT / TRACELENS_INTERNAL_ROOT / INFERENCEX_PATH), ``tracelens_cli``.
     local_external_deps: dict[str, Any] = field(default_factory=dict)
     coordinator_events: list[dict[str, Any]] = field(default_factory=list)
-    # In-flight work: ``{running, by_agent: {agent: {last_progress_unix, task}}}``.
+    # In-flight work: ``{running, by_agent: {agent: {last_progress_unix, task,
+    # oldest_progress_unix, oldest_task}}}``.
     # A composite task reports a heartbeat per internal unit, so this answers
     # "is *this agent's* dispatched work still moving" for an agent that is
     # legitimately quiet while it waits on one.

@@ -21,6 +21,11 @@ exactly the healthy runs it was written to stay quiet about. What bounds it
 instead is the freshness of the evidence: the moment the work stops reporting,
 the next tick accuses. A long wait still shows up, as a withheld accusation that
 rises from LOW to MEDIUM past :attr:`StallConfig.severity_high_after_s`.
+
+One reporting unit is enough to withhold even when the agent owns several, since
+a quiet unit is not an agent fault and has the lease watchdog behind it. It is
+still named in the evidence, so the healthy sibling stops being the only thing
+an operator can see.
 """
 
 from __future__ import annotations
@@ -152,6 +157,15 @@ def _stall_symptom(
     if work_idle_s is not None:
         evidence["in_flight_work_idle_seconds"] = int(work_idle_s)
         evidence["in_flight_work"] = work_task
+        evidence.update(
+            _quiet_sibling_evidence(
+                data.local_task_progress,
+                agent=agent,
+                now_unix=now_unix,
+                fresh_idle_s=work_idle_s,
+                cfg=cfg,
+            )
+        )
     withheld = work_idle_s is not None and work_idle_s < cfg.stall_timeout_s
     if not withheld:
         severity = SymptomSeverity.HIGH if idle_s >= cfg.severity_high_after_s else SymptomSeverity.MEDIUM
@@ -188,8 +202,10 @@ def _agent_in_flight_work(
     *,
     agent: str,
     now_unix: float,
+    ts_key: str = "last_progress_unix",
+    task_key: str = "task",
 ) -> tuple[float, str] | None:
-    """Seconds since ``agent``'s own dispatched work last reported a unit.
+    """Seconds since one of ``agent``'s own dispatched units reported.
 
     Progress belonging to another agent is deliberately invisible here: one
     busy task must not vouch for an agent it has nothing to do with.
@@ -198,6 +214,10 @@ def _agent_in_flight_work(
         task_progress (dict[str, Any]): :attr:`SourceData.local_task_progress`.
         agent (str): The agent under accusation.
         now_unix (float): Current time.
+        ts_key (str): Snapshot key holding the timestamp to read — the agent's
+            freshest note by default, ``"oldest_progress_unix"`` for its
+            quietest.
+        task_key (str): Snapshot key naming the unit ``ts_key`` belongs to.
 
     Returns:
         tuple[float, str] | None: ``(idle_seconds, task_kind)``, or ``None``
@@ -207,10 +227,57 @@ def _agent_in_flight_work(
     entry = (task_progress.get("by_agent") or {}).get(agent) if task_progress else None
     if not isinstance(entry, dict):
         return None
-    ts = to_unix(entry.get("last_progress_unix"))
+    ts = to_unix(entry.get(ts_key))
     if ts is None:
         return None
-    return max(0.0, now_unix - ts), str(entry.get("task") or "")
+    return max(0.0, now_unix - ts), str(entry.get(task_key) or "")
+
+
+def _quiet_sibling_evidence(
+    task_progress: dict[str, Any],
+    *,
+    agent: str,
+    now_unix: float,
+    fresh_idle_s: float,
+    cfg: StallConfig,
+) -> dict[str, Any]:
+    """Name the agent's quietest unit when a busier sibling is speaking for it.
+
+    One unit reporting still answers the question this signal asks — is this
+    agent's work progressing — so the accusation stays withheld. Declining to
+    withhold instead would fire on healthy runs: a Ray-backed baseline round has
+    no liveness callback to give it, and reports on entry and then not again
+    until it returns. What must not happen is the quiet unit leaving no trace,
+    which is what a snapshot carrying only the freshest heartbeat did.
+
+    Args:
+        task_progress (dict[str, Any]): :attr:`SourceData.local_task_progress`.
+        agent (str): The agent under accusation.
+        now_unix (float): Current time.
+        fresh_idle_s (float): Idle seconds of the agent's freshest unit.
+        cfg (StallConfig): Thresholds.
+
+    Returns:
+        dict[str, Any]: ``{quiet_in_flight_work,
+        quiet_in_flight_work_idle_seconds}`` when a strictly quieter unit of the
+        same agent is past the stall window, otherwise empty.
+    """
+    quietest = _agent_in_flight_work(
+        task_progress,
+        agent=agent,
+        now_unix=now_unix,
+        ts_key="oldest_progress_unix",
+        task_key="oldest_task",
+    )
+    if quietest is None:
+        return {}
+    idle_s, task = quietest
+    if idle_s <= fresh_idle_s or idle_s < cfg.stall_timeout_s:
+        return {}
+    return {
+        "quiet_in_flight_work": task,
+        "quiet_in_flight_work_idle_seconds": int(idle_s),
+    }
 
 
 def _collect_last_seen(

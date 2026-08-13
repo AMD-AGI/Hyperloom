@@ -363,8 +363,9 @@ def _read_task_progress(db_path: Path | None) -> dict[str, Any]:
 
     Returns:
         dict[str, Any]: ``{running, by_agent}`` where ``by_agent`` maps an
-        owning agent to ``{last_progress_unix, task}`` for its freshest
-        heartbeat, or ``{}`` when the DB is unreadable or nothing is running.
+        owning agent to ``{last_progress_unix, task, oldest_progress_unix,
+        oldest_task}`` — the freshest and the quietest of the units it owns —
+        or ``{}`` when the DB is unreadable or nothing is running.
     """
     if db_path is None or not db_path.exists():
         return {}
@@ -393,12 +394,47 @@ def _read_task_progress(db_path: Path | None) -> dict[str, Any]:
             continue
         ts, agent = note
         task = str((row["kind"] if "kind" in keys else row["task_id"]) or "")
-        known = by_agent.get(agent)
-        if known is None or ts > known["last_progress_unix"]:
-            by_agent[agent] = {"last_progress_unix": ts, "task": task}
+        _merge_agent_progress(by_agent, agent=agent, ts=ts, task=task)
     if by_agent:
         out["by_agent"] = by_agent
     return out
+
+
+def _merge_agent_progress(
+    by_agent: dict[str, dict[str, Any]],
+    *,
+    agent: str,
+    ts: float,
+    task: str,
+) -> None:
+    """Fold one unit's heartbeat into ``agent``'s freshest/quietest pair.
+
+    Both ends are kept because the dispatcher runs units concurrently. The
+    freshest answers "is this agent's work progressing"; keeping only that one
+    left a sibling unit that had not reported in hours with no trace in the
+    snapshot at all.
+
+    Args:
+        by_agent (dict[str, dict[str, Any]]): Accumulator, updated in place.
+        agent (str): The agent the note attributed itself to.
+        ts (float): Unix timestamp of the note.
+        task (str): Kind (or id) of the unit that reported it.
+    """
+    known = by_agent.get(agent)
+    if known is None:
+        by_agent[agent] = {
+            "last_progress_unix": ts,
+            "task": task,
+            "oldest_progress_unix": ts,
+            "oldest_task": task,
+        }
+        return
+    if ts > known["last_progress_unix"]:
+        known["last_progress_unix"] = ts
+        known["task"] = task
+    if ts < known["oldest_progress_unix"]:
+        known["oldest_progress_unix"] = ts
+        known["oldest_task"] = task
 
 
 def _latest_progress_note(history_json: Any) -> tuple[float, str] | None:
