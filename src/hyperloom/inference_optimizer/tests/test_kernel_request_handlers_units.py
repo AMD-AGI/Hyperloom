@@ -1167,7 +1167,9 @@ class TestForgeGemmHelperCoverage:
         workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
         written = json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
         shapes = json.loads(Path(written["shapes_json"]).read_text(encoding="utf-8"))
-        assert shapes == [{"M": 64, "N": 10240, "K": 3072}]
+        # Traced shapes are re-keyed onto aiter's power-of-two lookup ladder.
+        assert {(row["N"], row["K"]) for row in shapes} == {(10240, 3072)}
+        assert {row["M"] for row in shapes} == {16, 32, 64}
 
     @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_tags_engine_forge(self, tmp_path, monkeypatch):
@@ -1309,7 +1311,10 @@ class TestForgeGemmHelperCoverage:
             assert captured["shapes_json"] == ""
         else:
             assert captured["untuned_csv"] == ""
-            assert captured["shapes_json"] == str(profile_shapes)
+            # The fresh profile wins over the specialist CSV; the path handed to
+            # forge is that profile re-keyed onto aiter's lookup ladder.
+            assert captured["shapes_json"].endswith("forge_shapes.aiter_aligned.json")
+            assert json.loads(Path(captured["shapes_json"]).read_text(encoding="utf-8"))
 
 
 def _ensure_torch_module(monkeypatch):
@@ -2488,7 +2493,13 @@ class TestRunGemmTuningHandler:
 
         assert captured_input["framework"] == "vllm-aiter"
         shapes_path = Path(captured_input["shapes_json"])
-        assert json.loads(shapes_path.read_text()) == [{"K": 5120, "M": 4149, "N": 34816}]
+        # The traced M=4149 is re-keyed onto the padded M aiter looks up, plus a
+        # power-of-two ladder so the rows stay reachable for the M values the
+        # profile never sampled.
+        aligned = json.loads(shapes_path.read_text())
+        assert {row["N"] for row in aligned} == {34816}
+        assert {row["M"] for row in aligned} == {16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 4224, 8192}
+        assert result["shape_alignment"]["applied"] is True
         assert captured_input["untuned_csv"] == ""
         assert result["shape_capture"]["capture_mode"] == "roofline_profile_reuse"
         assert result["shape_capture"]["source_profile_trace"] == str(steady_trace)
@@ -2616,7 +2627,9 @@ class TestRunGemmTuningHandler:
 
         assert roofline_calls == 1
         assert captured_input["framework"] == "vllm-aiter"
-        assert json.loads(Path(captured_input["shapes_json"]).read_text()) == [{"K": 5120, "M": 64, "N": 34816}]
+        captured_shapes = json.loads(Path(captured_input["shapes_json"]).read_text())
+        assert {(row["N"], row["K"]) for row in captured_shapes} == {(34816, 5120)}
+        assert {row["M"] for row in captured_shapes} == {16, 32, 64}
         assert result["shape_capture"]["capture_mode"] == "block_fp8_profile"
         assert result["shape_capture"]["source_profile_trace"] == str(selected_trace)
 
@@ -2932,7 +2945,11 @@ class TestRunGemmTuningHandler:
         result = asyncio.run(krh.run_gemm_tuning_handler({"task_id": "capture"}, session_dir=tmp_path))
 
         assert captured_input["framework"] == "vllm-aiter"
-        assert captured_input["shapes_json"] == str(shapes_path)
+        # Captured shapes are routed to the aiter family, then re-keyed onto the
+        # padded M values the runtime actually looks up.
+        assert result["shape_alignment"]["source_shapes_json"] == str(shapes_path)
+        aligned = json.loads(Path(captured_input["shapes_json"]).read_text())
+        assert {row["M"] for row in aligned} == {16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 4224, 8192}
         assert captured_input["untuned_csv"] == ""
         assert captured_input["tunableop_input"] == ""
         assert result["shape_capture"]["shape_count"] == 1
