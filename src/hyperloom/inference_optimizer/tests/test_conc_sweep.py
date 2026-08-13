@@ -953,6 +953,36 @@ def test_exit_normal_sweep_returns_conc_sweep_done():
     assert evidence.get("conc_sweep_status") == "failed"
 
 
+def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
+    """``was_skipped`` covers both outcomes, so the row must carry what tells them apart."""
+    from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
+
+    state = SharedState(
+        phase="SWEEP",
+        phase_started_ts="2026-06-02T10:00:00+00:00",
+        max_minutes=360,
+        phase_budget_pct={"SWEEP": 0.50},
+    )
+    state.record_conc_sweep(
+        {"status": "skipped", "was_skipped": True, "skip_reason": "no_optimization_to_compare"}
+    )
+    _, declined = exit_normal_sweep(state)
+    assert declined["conc_sweep_was_skipped"] is True
+    assert declined["conc_sweep_budget_exhausted"] is False
+
+    state.record_conc_sweep(
+        {
+            "status": "skipped",
+            "was_skipped": True,
+            "budget_exhausted": True,
+            "skip_reason": "budget_exhausted_no_successful_pairs",
+        }
+    )
+    _, spent = exit_normal_sweep(state)
+    assert spent["conc_sweep_was_skipped"] is True
+    assert spent["conc_sweep_budget_exhausted"] is True
+
+
 def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
     """Bug #7: KERNEL→SWEEP must drain pending KEEP integrates before closeout."""
     from unittest.mock import AsyncMock, MagicMock
