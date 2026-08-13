@@ -88,7 +88,8 @@ cd "$REPO_ROOT"
 # caller values, matching install.sh's restore rule.
 _dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
 if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
-eval "$_dotenv_prev" 2>/dev/null || true; unset _dotenv_prev
+eval "$_dotenv_prev" 2>/dev/null || echo "warning: could not restore the caller's environment" >&2
+unset _dotenv_prev
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
 export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
