@@ -66,6 +66,7 @@ htmlcov/
 # PR description scratchpads and local review notes.
 pr.md
 pr_*.md
+*.issue.md
 Specialist.discuss.md
 specialist.discuss*.md
 specialist.info.md
