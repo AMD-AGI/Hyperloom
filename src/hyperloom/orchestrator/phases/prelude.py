@@ -1688,10 +1688,10 @@ class PreludePhase(PhaseHandler):
     ) -> None:
         """Interpret a combined Recipe+Kernel ``replay_warm_recipe`` result.
 
-        Measured uplift promotes the warm config (or, for a partial replay, the
-        Config/Env-only subset) onto ``optimization_stack`` and ``current_best``.
-        Failures roll back both halves fail-closed, set an outcome status, and
-        never propagate.
+        Measured uplift promotes the warm config onto ``optimization_stack`` and
+        ``current_best``. Failures (including a failed required patch timeline)
+        roll back both halves fail-closed, set an outcome status, and never
+        propagate.
 
         Args:
             result: The ``replay_warm_recipe`` task result dict (status,
@@ -1815,62 +1815,34 @@ class PreludePhase(PhaseHandler):
                 )
         if reproduced:
             params = (task.params if task is not None else {}) or {}
-            partial = (
-                dict(result.get("warm_replay_partial") or {})
-                if isinstance(result.get("warm_replay_partial"), dict)
-                else {}
+            persisted, persistence = self._persist_required_recipe_keep(
+                result,
+                task,
             )
-            if partial and not bool(
-                isinstance(partial.get("rollback"), dict)
-                and partial["rollback"].get("ok") is True
-            ):
-                outcome["status"] = "rollback_failed"
-                outcome["reason"] = "partial replay lacks verified rollback"
-                outcome["rollback"] = partial.get("rollback") or {}
-                state.warm_replay_outcome = outcome
-                if hasattr(state, "set_stop_reason"):
-                    state.set_stop_reason("warm_replay_rollback_failed")
-                state.save(self.session_dir)
-                return
-            if not partial:
-                persisted, persistence = self._persist_required_recipe_keep(
+            if not persisted:
+                if not self._require_combined_warm_rollback(
                     result,
                     task,
-                )
-                if not persisted:
-                    if not self._require_combined_warm_rollback(
-                        result,
-                        task,
-                        outcome,
-                    ):
-                        return
-                    outcome["status"] = "persistence_failed"
-                    outcome["reason"] = str(
-                        persistence.get("failure")
-                        or "canonical required patch persistence failed"
-                    )
-                    outcome["canonical_patch_result"] = persistence
-                    kernel_outcome = {
-                        "status": "reverted",
-                        "reason": "recipe_persistence_failed",
-                        "validation": "combined_recipe_kernel",
-                    }
-                    outcome["kernel"] = kernel_outcome
-                    state.warm_replay_outcome = outcome
-                    state.save(self.session_dir)
+                    outcome,
+                ):
                     return
-            warm_args = str(
-                result.get("promoted_extra_server_args")
-                if partial
-                else params.get("extra_server_args")
-                or ""
-            ).strip()
-            warm_envs = dict(
-                result.get("promoted_extra_envs")
-                if partial
-                else params.get("extra_envs")
-                or {}
-            )
+                outcome["status"] = "persistence_failed"
+                outcome["reason"] = str(
+                    persistence.get("failure")
+                    or "canonical required patch persistence failed"
+                )
+                outcome["canonical_patch_result"] = persistence
+                kernel_outcome = {
+                    "status": "reverted",
+                    "reason": "recipe_persistence_failed",
+                    "validation": "combined_recipe_kernel",
+                }
+                outcome["kernel"] = kernel_outcome
+                state.warm_replay_outcome = outcome
+                state.save(self.session_dir)
+                return
+            warm_args = str(params.get("extra_server_args") or "").strip()
+            warm_envs = dict(params.get("extra_envs") or {})
             replayed_patch_refs = [
                 str(item.get("patch_file") or "")
                 for item in (result.get("warm_patches_applied") or [])
@@ -1908,9 +1880,7 @@ class PreludePhase(PhaseHandler):
                 state.warm_replay_outcome = outcome
                 state.save(self.session_dir)
                 return
-            outcome["status"] = "partial_reproduced" if partial else "reproduced"
-            if partial:
-                outcome["partial"] = partial
+            outcome["status"] = "reproduced"
             outcome.pop("replayed_patch_refs", None)
             if replayed_patch_refs:
                 outcome["replayed_patch_refs"] = replayed_patch_refs
@@ -1933,35 +1903,25 @@ class PreludePhase(PhaseHandler):
                 "source_tier": outcome.get("warm_recipe_tier", ""),
                 "source_confidence": outcome.get("warm_recipe_conf", 0.0),
             }
-            if partial:
-                stack_entry["partial"] = partial
-                state.warm_replay_pending = {}
-                kernel_outcome = {
-                    "status": "skipped",
-                    "reason": "required_recipe_patch_failed",
+            kernel_outcome = self._book_combined_kernel_keep(result, task)
+            outcome["kernel"] = dict(kernel_outcome)
+            if kernel_outcome.get("kept"):
+                stack_entry["kernel_replay"] = {
                     "validation": "combined_recipe_kernel",
+                    "count": kernel_outcome["kept"],
+                    "columns": sorted(
+                        {
+                            str(entry.get("column") or "")
+                            for entry in state.warm_kernel_kb_plan
+                            if isinstance(entry, dict)
+                        }
+                    ),
                 }
-                outcome["kernel"] = kernel_outcome
-            else:
-                kernel_outcome = self._book_combined_kernel_keep(result, task)
-                outcome["kernel"] = dict(kernel_outcome)
-                if kernel_outcome.get("kept"):
-                    stack_entry["kernel_replay"] = {
-                        "validation": "combined_recipe_kernel",
-                        "count": kernel_outcome["kept"],
-                        "columns": sorted(
-                            {
-                                str(entry.get("column") or "")
-                                for entry in state.warm_kernel_kb_plan
-                                if isinstance(entry, dict)
-                            }
-                        ),
-                    }
-                patch_result = result.get("warm_patch_result")
-                if isinstance(patch_result, dict):
-                    stack_entry["recipe_patch_statuses"] = list(
-                        patch_result.get("patches") or []
-                    )
+            patch_result = result.get("warm_patch_result")
+            if isinstance(patch_result, dict):
+                stack_entry["recipe_patch_statuses"] = list(
+                    patch_result.get("patches") or []
+                )
             if replayed_patch_refs:
                 stack_entry["replayed_patch_refs"] = replayed_patch_refs
             # Resume safety: do not clobber existing stack entries.

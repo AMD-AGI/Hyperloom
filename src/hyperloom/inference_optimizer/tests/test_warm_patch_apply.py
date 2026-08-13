@@ -678,23 +678,22 @@ def test_real_git_three_way_merge_succeeds(tmp_path, output_dir):
 
 
 @pytest.mark.asyncio
-async def test_required_failure_runs_one_config_only_fallback(monkeypatch):
+async def test_required_failure_does_not_run_config_only_fallback(monkeypatch):
     executor = object.__new__(BaselineExecutor)
     calls: list[dict] = []
 
     async def _run_once(ctx, **_kwargs):
         calls.append(dict(ctx.task.params))
-        if len(calls) == 1:
-            return {
-                "status": "required_patch_failed",
-                "failed_patch_ref": "bad.patch",
-                "required_patch_failure": {"patches": [{"status": "failed"}]},
-                "warm_replay_rollback": {"ok": True, "errors": []},
-            }
-        return {"status": "succeeded", "output_throughput": 10.0}
+        return {
+            "status": "required_patch_failed",
+            "failed_patch_ref": "bad.patch",
+            "required_patch_failure": {"patches": [{"status": "failed"}]},
+            "warm_replay_rollback": {"ok": True, "errors": []},
+        }
 
     executor._run_once = _run_once  # type: ignore[method-assign]
     executor._maybe_stop_on_missing_baseline_accuracy = lambda *_a: None  # type: ignore[method-assign]
+    executor._is_moe_runner_rooted_failure = lambda _r: False  # type: ignore[method-assign]
     ctx = SimpleNamespace(
         task=SimpleNamespace(
             kind="replay_warm_recipe",
@@ -706,54 +705,23 @@ async def test_required_failure_runs_one_config_only_fallback(monkeypatch):
                 "recipe_extra_server_args": "--recipe",
                 "recipe_extra_envs": {"RECIPE": "1"},
                 "warm_kernel_apply_results": [{"status": "ok"}],
+                "disable_run_eval": True,
             },
         )
     )
 
     result = await executor(ctx)
 
-    assert len(calls) == 2
-    assert calls[1]["patches"] == []
-    assert calls[1]["extra_server_args"] == "--recipe"
-    assert calls[1]["extra_envs"] == {"RECIPE": "1"}
-    assert result["warm_replay_partial"]["kernel_skipped"] is True
-
-
-@pytest.mark.asyncio
-async def test_empty_recipe_config_skips_fallback_benchmark():
-    executor = object.__new__(BaselineExecutor)
-    calls = 0
-
-    async def _run_once(_ctx, **_kwargs):
-        nonlocal calls
-        calls += 1
-        return {
-            "status": "required_patch_failed",
-            "failed_patch_ref": "bad.patch",
-            "warm_replay_rollback": {"ok": True, "errors": []},
-        }
-
-    executor._run_once = _run_once  # type: ignore[method-assign]
-    ctx = SimpleNamespace(
-        task=SimpleNamespace(
-            kind="replay_warm_recipe",
-            params={
-                "recipe_extra_server_args": "",
-                "recipe_extra_envs": {},
-                "warm_kernel_apply_results": [{"manifest_path": "/tmp/m"}],
-            },
-        )
-    )
-
-    result = await executor(ctx)
-
-    assert calls == 1
+    # No Config/Env-only salvage: the failed timeline is returned as-is so
+    # PRELUDE marks the warm replay failed and optimizes from the clean tree.
+    assert len(calls) == 1
     assert result["status"] == "required_patch_failed"
-    assert result["warm_replay_partial"]["reason"] == "empty_recipe_config"
+    assert "warm_replay_partial" not in result
+    assert "promoted_extra_server_args" not in result
 
 
 @pytest.mark.asyncio
-async def test_config_fallback_aborts_when_rollback_is_not_verified():
+async def test_required_rollback_failure_is_returned_unchanged():
     executor = object.__new__(BaselineExecutor)
     calls = 0
 
@@ -769,18 +737,24 @@ async def test_config_fallback_aborts_when_rollback_is_not_verified():
         }
 
     executor._run_once = _run_once  # type: ignore[method-assign]
+    executor._maybe_stop_on_missing_baseline_accuracy = lambda *_a: None  # type: ignore[method-assign]
+    executor._is_moe_runner_rooted_failure = lambda _r: False  # type: ignore[method-assign]
     ctx = SimpleNamespace(
         task=SimpleNamespace(
             kind="replay_warm_recipe",
             params={
                 "recipe_extra_server_args": "--safe-only",
                 "recipe_extra_envs": {"VLLM_SAFE": "1"},
+                "disable_run_eval": True,
             },
         )
     )
 
     result = await executor(ctx)
 
+    # The unverified rollback is surfaced verbatim; PRELUDE's combined rollback
+    # guard is what stops the run on a dirty tree.
     assert calls == 1
-    assert result["warm_replay_partial"]["status"] == "aborted"
-    assert result["warm_replay_partial"]["reason"] == "rollback_not_verified"
+    assert result["status"] == "required_patch_rollback_failed"
+    assert result["warm_replay_rollback"]["ok"] is False
+    assert "warm_replay_partial" not in result
