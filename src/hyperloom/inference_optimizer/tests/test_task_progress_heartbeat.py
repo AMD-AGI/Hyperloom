@@ -391,6 +391,71 @@ async def test_a_cancelled_progress_write_leaves_the_connection_usable(tmp_path,
     assert [note.get("label") for note in _progress_notes(await sub.tasks.get(task.task_id))] == ["after"]
 
 
+@pytest.mark.asyncio
+async def test_the_loop_keeps_running_while_a_cancelled_write_rolls_back(tmp_path, monkeypatch):
+    """The rollback waits on a lock a worker thread holds; the loop must not wait with it.
+
+    In production that worker is the abandoned ``BEGIN IMMEDIATE``, blocked for
+    up to ``busy_timeout`` while another writer holds the database and holding
+    ``_sync_lock`` the whole time. Rolling back from the except handler on the
+    event-loop thread queues behind it and stops the entire orchestrator —
+    including the shutdown path that issued the cancel, which is exactly when
+    this fires.
+
+    The worker here holds the lock until the loop proves it is still ticking
+    rather than for a wall-clock interval, so the assertion is a count on a
+    loaded machine as much as an idle one.
+    """
+    sub = _runner(tmp_path, monkeypatch)
+    task = await sub.tasks.create(kind="explore", params={}, idempotency_key="loop-liveness")
+    await sub.tasks.transition(task.task_id, "running")
+
+    tick_s = 0.01
+    ticks_required = 5
+    lock_backstop_s = 5.0
+    db = sub.tasks.db
+    holding = threading.Event()
+    cancelled = threading.Event()
+    loop_alive = threading.Event()
+    real_begin = db._begin_immediate
+
+    def _begin_and_keep_the_lock():
+        """Begin, then hold ``_sync_lock`` past the cancel like a contended BEGIN does."""
+        with db._sync_lock:
+            cur = real_begin()
+            holding.set()
+            loop_alive.wait(lock_backstop_s)
+            return cur
+
+    monkeypatch.setattr(db, "_begin_immediate", _begin_and_keep_the_lock)
+
+    async def _tick_until_the_rollback_may_proceed() -> None:
+        """Count loop ticks once the cancel has landed, then free the worker's lock."""
+        ticks = 0
+        while ticks < ticks_required:
+            await asyncio.sleep(tick_s)
+            if cancelled.is_set():
+                ticks += 1
+        loop_alive.set()
+
+    ticker = asyncio.create_task(_tick_until_the_rollback_may_proceed())
+    writing = asyncio.create_task(sub.tasks.record_progress(task.task_id, {"unit": "variant"}))
+    await asyncio.to_thread(holding.wait, lock_backstop_s)
+    writing.cancel()
+    cancelled.set()
+    with pytest.raises(asyncio.CancelledError):
+        await writing
+    ticker.cancel()
+    await asyncio.gather(ticker, return_exceptions=True)
+
+    assert loop_alive.is_set(), "the event loop stopped while the rollback waited for the worker's lock"
+    # And the rollback is awaited, not fired and forgotten: ``transaction()``
+    # cannot return while the connection is still inside one, or the next
+    # ``BEGIN IMMEDIATE`` would fail the way it did before the rollback existed.
+    assert not db.raw.in_transaction
+    await sub.tasks.record_progress(task.task_id, {"unit": "variant", "label": "after"})
+
+
 def test_the_tally_is_safe_to_advance_from_reader_threads() -> None:
     """The pump threads write it; the event loop reads it."""
     activity = OutputActivity()

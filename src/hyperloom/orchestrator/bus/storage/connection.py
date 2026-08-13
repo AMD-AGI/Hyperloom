@@ -231,7 +231,7 @@ class SqliteConnection:
                 # connection then stays inside a transaction for the rest of
                 # the session and every later write fails with "cannot start a
                 # transaction within a transaction".
-                self._rollback_quietly()
+                await self._rollback_off_loop()
                 raise
             finally:
                 if cur is not None:
@@ -261,19 +261,31 @@ class SqliteConnection:
         with self._sync_lock:
             self._conn.rollback()
 
-    def _rollback_quietly(self) -> None:
-        """Roll back an open transaction on the way out of a failed body.
+    async def _rollback_off_loop(self) -> None:
+        """Roll back a failed transaction on a worker thread, uncancellably.
 
-        Runs inline rather than on a worker thread: the exception being handled
-        is often this task's own cancellation, and an ``await`` there can be
-        cancelled in turn — which is precisely how the connection would stay
-        wedged. A rollback that itself fails is logged and swallowed so the
-        caller's original exception is the one that propagates.
+        Two constraints meet here. The rollback must not run on the event-loop
+        thread, because it takes ``_sync_lock``, and when the failure was a
+        cancellation the worker that cancel abandoned still holds that lock —
+        parked inside its own ``BEGIN IMMEDIATE`` for as long as another writer
+        holds the database, up to ``busy_timeout``. An inline rollback queues
+        behind it and stops the whole loop for that window, which is the
+        shutdown or budget-exhaustion window that issued the cancel. And the
+        rollback must not itself be cancellable, because a bare ``await`` in a
+        handler for this task's own cancellation is the way the connection stays
+        wedged inside a transaction for the rest of the session.
+
+        :func:`asyncio.shield` gives both: the rollback runs to completion on a
+        worker no matter what happens to this task, and awaiting it keeps
+        ``_async_lock`` held until the connection is clean, so no later writer
+        can find a transaction still open. A further cancel arriving while we
+        wait abandons the wait, not the rollback. A rollback that fails outright
+        is logged, never allowed to mask the caller's original exception.
         """
         try:
-            self._rollback()
-        except sqlite3.Error as exc:
-            log.warning("rollback after a failed transaction failed: %r", exc)
+            await asyncio.shield(asyncio.to_thread(self._rollback))
+        except BaseException as exc:  # noqa: BLE001 — the caller's exception wins
+            log.warning("rollback after a failed transaction did not complete: %r", exc)
 
     def close(self) -> None:
         """Close the underlying connection under the sync lock."""
