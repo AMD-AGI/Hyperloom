@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env import forge_explicitly_enabled
+from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.state.shared_state import SharedState
 from .parser import (
     DEFAULT_ISL,
@@ -405,6 +406,43 @@ def _print_final_summary(
     print(f"  crash_count          : {state.crash_count}")
     _print_kernel_opt_summary_line(state)
     print("===============================================")
+
+
+def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
+    """Mark the start of a resumed run leg on ``state`` (caller persists).
+
+    Every resume stamps :attr:`SharedState.resumed_ts`. The previous leg's
+    CLOSE transition stays in ``phase_history`` and would otherwise keep
+    speaking for the resumed run — a report reads it as the session's stop
+    reason and end time — and this boundary is what dates it as a previous
+    leg's.
+
+    Only a previous leg that stopped for a recorded reason, or crashed
+    repeatedly, re-anchors the wall-clock budget. After a clean stop
+    ``start_ts`` is deliberately kept, so ``--max-hours`` still counts from the
+    original session start and the earlier legs' wall-clock stays spent.
+
+    Args:
+        state (SharedState): The loaded session state, mutated in place.
+        reanchor_budget (bool): Whether the budget restarts from this leg.
+
+    Returns:
+        str: The timestamp stamped as this leg's boundary.
+    """
+    state.resumed_ts = now_iso()
+    if reanchor_budget:
+        # CRITICAL: clear the leftover stop_reason or Orchestration heartbeats
+        # forever think the work is done.
+        state.stop_reason = ""
+        state.stop_ts = ""
+        state.closing_phase = False
+        state.closing_started_unix = 0.0
+        state.closing_report_task_id = ""
+        # Reset persisted crash_count so a fresh resume isn't immediately tripped into "emergency".
+        state.crash_count = 0
+        # Reset start_ts to now so resume budget isn't seen as already-over-budget by the LLM.
+        state.start_ts = state.resumed_ts
+    return state.resumed_ts
 
 
 def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:

@@ -588,6 +588,30 @@ def test_a_resumed_session_is_not_reported_as_stopped_by_the_previous_legs_close
     assert 29.0 <= bd["session"]["elapsed_minutes"] <= 31.0
 
 
+def test_a_session_resumed_after_a_clean_stop_is_still_reported_as_running(tmp_path):
+    """A clean stop keeps ``start_ts``, so the previous leg's CLOSE sits inside the window."""
+    now = datetime.now(timezone.utc)
+    state = {
+        "session_id": "sess-1178",
+        "start_ts": (now - timedelta(hours=3)).isoformat(),
+        "stop_reason": "",
+        "phase": "CLOSE",
+        "resumed_ts": (now - timedelta(hours=2)).isoformat(),
+        "phase_history": [
+            {
+                "to_phase": "CLOSE",
+                "reason": "time_exhausted",
+                "ts": (now - timedelta(hours=2, minutes=30)).isoformat(),
+            }
+        ],
+    }
+
+    section = sessions.collect_session(tmp_path, state, {}, [])
+    assert section["stop_reason"] == ""
+    assert section["ended_at_utc"] == ""
+    assert 179.0 <= section["elapsed_minutes"] <= 181.0
+
+
 def test_a_close_the_state_file_never_recorded_still_supplies_the_end(tmp_path):
     """The fallback's own case: the run stopped and only ``phase_history`` knows why."""
     now = datetime.now(timezone.utc)

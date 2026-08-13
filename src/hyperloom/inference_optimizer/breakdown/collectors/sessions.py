@@ -496,6 +496,31 @@ def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
     return None
 
 
+def _leg_start_ts(state: dict[str, Any], start_ts: str) -> str:
+    """When the session's current run leg began.
+
+    ``start_ts`` alone does not answer this. A resume re-anchors it only after
+    a crash or a stop with a reason; a resume after a clean stop deliberately
+    keeps it, so that ``--max-hours`` still counts from the original start.
+    ``state.resumed_ts`` is stamped by every resume, so the later of the two is
+    the boundary on both paths.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+        start_ts (str): The session's resolved start (see
+            :func:`collect_session`).
+
+    Returns:
+        str: The later of the two timestamps, or whichever one is parseable.
+    """
+    resumed_ts = str(state.get("resumed_ts") or "")
+    dated = [(to_unix(ts), ts) for ts in (start_ts, resumed_ts)]
+    parseable = [(at, ts) for at, ts in dated if at is not None]
+    if not parseable:
+        return start_ts
+    return max(parseable)[1]
+
+
 def _close_phase_stop_reason(state: dict[str, Any], *, leg_start_ts: str) -> tuple[str, str]:
     """Recover terminal reason/time from the current leg's CLOSE transition (next-best when ``state.stop_reason`` wasn't mirrored).
 
@@ -512,9 +537,8 @@ def _close_phase_stop_reason(state: dict[str, Any], *, leg_start_ts: str) -> tup
 
     Args:
         state (dict[str, Any]): Parsed ``state.json``.
-        leg_start_ts (str): Start of the current leg (``state.start_ts``, the
-            same anchor ``elapsed_minutes`` is measured from); ``""`` when the
-            session recorded none.
+        leg_start_ts (str): Start of the current leg (see
+            :func:`_leg_start_ts`); ``""`` when the session recorded none.
 
     Returns:
         tuple[str, str]: ``(reason, ts)`` from the most recent CLOSE
@@ -723,7 +747,7 @@ def collect_session(
     """
     start_ts = str(state.get("start_ts") or manifest.get("created_at_utc") or "")
     stop_reason = str(state.get("stop_reason") or "").strip()
-    close_stop_reason, close_ts = _close_phase_stop_reason(state, leg_start_ts=start_ts)
+    close_stop_reason, close_ts = _close_phase_stop_reason(state, leg_start_ts=_leg_start_ts(state, start_ts))
     if _should_use_close_stop_reason(stop_reason, close_stop_reason):
         stop_reason = close_stop_reason
     ended_at_utc = ""

@@ -541,6 +541,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "model_name",
         "model_class",
         "start_ts",
+        # Where the current run leg begins; a forged value hands a previous
+        # leg's CLOSE transition back the right to speak for this one.
+        "resumed_ts",
         "max_minutes",
         # fact-layer KEEP ledger; Coordinator is the sole writer.
         "optimization_stack",
