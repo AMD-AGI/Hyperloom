@@ -86,8 +86,13 @@ async def test_resume_rolls_back_recipe_checkout_and_kernel(
             or {"status": "ok"}
         ),
     )
+    task = await coord.tasks.create(
+        kind="replay_warm_recipe",
+        params={},
+        idempotency_key="resume-warm",
+    )
     coord.shared_state.warm_replay_pending = {
-        "task_id": "warm-1",
+        "task_id": task.task_id,
         "recipe_patch_target": "/mirror",
         "recipe_patch_pre_sha": "mirror-sha",
         "recipe_patch_snapshot_manifest": {"manifest_path": "/mirror.json"},
@@ -101,6 +106,8 @@ async def test_resume_rolls_back_recipe_checkout_and_kernel(
     assert kernel_restores == [{"manifest_path": "/tmp/m"}]
     assert coord.shared_state.warm_replay_pending == {}
     assert report["fixes"][0]["kind"] == "recovered_pending_warm_replay"
+    assert report["fixes"][0]["task_state"] == "cancelled"
+    assert (await coord.tasks.get(task.task_id)).state == "cancelled"
 
 
 @pytest.mark.asyncio

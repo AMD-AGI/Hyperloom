@@ -11,12 +11,16 @@ import pytest
 
 from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _cascade_warm_start_search,
+    _donor_is_trustworthy,
     _framework_version_is_compatible,
     _hardware_fallback_values,
     _hardware_is_compatible,
     _parse_hardware_topology,
     _precision_is_compatible,
     _rank_warm_candidates,
+)
+from hyperloom.orchestrator.knowledge.recipe_kb.local_store import (
+    _matches_labels,
 )
 
 
@@ -57,6 +61,9 @@ def _candidate(
     return {
         "canonical_id": "inference:" + ":".join(dimensions.values()),
         **dimensions,
+        "conc": 64,
+        "isl": 128,
+        "osl": 128,
         "replayable": True,
         "view_source": "current",
         "replay_material_available": True,
@@ -182,6 +189,9 @@ def test_precision_whitelist(
         ("1.2.5", "1.2.6", False),
         ("1.2.5", "1.1.99", False),
         ("1.2.5", "2.2.1", False),
+        ("0.4.6.post5", "0.4.6.post4", True),
+        ("0.11.0", "0.11.0rc2", True),
+        ("0.10.1.dev2+gabc", "0.10.1.dev1+gdef", True),
         ("unknown_version", "1.2.4", False),
     ],
 )
@@ -191,6 +201,34 @@ def test_framework_semver_direction_and_minor(
     compatible: bool,
 ) -> None:
     assert _framework_version_is_compatible(target, candidate) is compatible
+
+
+def test_local_framework_name_filter_matches_canonical_rows() -> None:
+    assert _matches_labels(
+        {"framework_name": "vllm"},
+        {"framework_name": "vllm"},
+    )
+
+
+def test_borrowed_donor_requires_matching_workload_shape() -> None:
+    donor = _candidate("shape-donor")
+    assert _donor_is_trustworthy(
+        donor,
+        target_arch_slug=TARGET["architectures"],
+        target_model_type=TARGET["model_type"],
+        target_conc=64,
+        target_isl=128,
+        target_osl=128,
+    )
+    donor.pop("conc")
+    assert not _donor_is_trustworthy(
+        donor,
+        target_arch_slug=TARGET["architectures"],
+        target_model_type=TARGET["model_type"],
+        target_conc=64,
+        target_isl=128,
+        target_osl=128,
+    )
 
 
 def test_exact_and_each_fallback_confidence_order() -> None:

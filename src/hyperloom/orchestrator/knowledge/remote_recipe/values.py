@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
 import re
@@ -69,6 +70,27 @@ def _number(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     return number if math.isfinite(number) else 0.0
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        resolved = int(value)
+    except (TypeError, ValueError):
+        return None
+    return resolved if resolved > 0 else None
+
+
+def _workload_shape(state: Any) -> dict[str, int]:
+    """Return the replay-sensitive workload dimensions."""
+    extra = _mapping(getattr(state, "baseline_workload_extra", {}))
+    shape: dict[str, int] = {}
+    for key in ("conc", "isl", "osl"):
+        value = _positive_int(getattr(state, key, None))
+        if value is None:
+            value = _positive_int(extra.get(key))
+        if value is not None:
+            shape[key] = value
+    return shape
 
 
 class _Files:
@@ -188,6 +210,56 @@ class _Files:
         )
         self.refs.add(rel)
         return rel
+
+    def adopt_with_rename(self, source: Path, rel: str) -> str:
+        """Adopt an existing ref, renaming only a content conflict."""
+        if source.is_symlink() or not source.is_file():
+            raise RemoteRecipeValidationError(
+                f"artifact source must be a regular file: {source}"
+            )
+        if source.stat().st_size > MAX_FILE_BYTES:
+            raise RemoteRecipeValidationError(
+                f"artifact {source} exceeds the {MAX_FILE_BYTES}-byte KB Store limit"
+            )
+        normalized = validate_relative_path(rel)
+        if normalized not in self.refs:
+            return self.adopt(source, normalized)
+        existing = next(
+            (
+                artifact.source
+                for artifact in self.artifacts
+                if artifact.path == normalized
+            ),
+            None,
+        )
+        if (
+            existing is not None
+            and existing.stat().st_size == source.stat().st_size
+            and existing.read_bytes() == source.read_bytes()
+        ):
+            return normalized
+        path = Path(normalized)
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()[:10]
+        candidate = path.with_name(
+            f"{path.stem}-{digest}{path.suffix}"
+        ).as_posix()
+        index = 1
+        while candidate in self.refs:
+            occupied = next(
+                (
+                    artifact.source
+                    for artifact in self.artifacts
+                    if artifact.path == candidate
+                ),
+                None,
+            )
+            if occupied is not None and occupied.read_bytes() == source.read_bytes():
+                return candidate
+            candidate = path.with_name(
+                f"{path.stem}-{digest}-{index}{path.suffix}"
+            ).as_posix()
+            index += 1
+        return self.adopt(source, candidate)
 
     def write(self, text: str, *, rel: str, kind: str) -> str:
         destination = self.root / rel
@@ -773,10 +845,7 @@ def _adopt_replayed_prior(
         member_index += 1
 
 
-def _patch_timeline(
-    value: Mapping[str, Any],
-    _stack: list[dict[str, Any]],
-) -> list[str]:
+def _patch_timeline(value: Mapping[str, Any]) -> list[str]:
     """Build the global replay order from section overlay refs."""
     rows: list[tuple[int, int, str, str]] = []
     seen: set[str] = set()
@@ -785,8 +854,14 @@ def _patch_timeline(
         for raw_ref in node.get("patches") or []:
             ref = str(raw_ref or "")
             match = _OVERLAY_REF_RE.match(ref)
-            if match is None or ref in seen:
-                continue
+            if match is None or match.group(1) != owner:
+                raise RemoteRecipeValidationError(
+                    f"value.{owner}.patches contains an invalid overlay ref: {ref!r}"
+                )
+            if ref in seen:
+                raise RemoteRecipeValidationError(
+                    f"owner patch refs contain a duplicate: {ref!r}"
+                )
             seen.add(ref)
             stack_index = int(match.group(2))
             member_index = int(match.group(3))
@@ -795,69 +870,58 @@ def _patch_timeline(
     return [ref for _stack_index, _member_index, _owner, ref in rows]
 
 
-def _adopt_replayed_kernel(
-    state: Any,
+def _remap_artifact_refs(value: Any, refs: Mapping[str, str]) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _remap_artifact_refs(item, refs)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_remap_artifact_refs(item, refs) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_remap_artifact_refs(item, refs) for item in value)
+    if isinstance(value, str):
+        return refs.get(value, value)
+    return value
+
+
+def _unique_rows(rows: list[Any]) -> list[Any]:
+    seen: set[str] = set()
+    merged: list[Any] = []
+    for row in rows:
+        key = json.dumps(row, sort_keys=True, separators=(",", ":"), default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(row)
+    return merged
+
+
+def _adopt_prior_kernel(
     sections: Any,
     value: dict[str, Any],
     files: "_Files",
-    stack: list[dict[str, Any]],
 ) -> None:
-    """Carry the kernel rows accepted by the combined Recipe replay forward."""
-    outcome = _mapping(getattr(state, "warm_replay_outcome", {}))
-    kernel_outcome = _mapping(outcome.get("kernel"))
-    if (
-        str(outcome.get("status") or "") != "reproduced"
-        or str(kernel_outcome.get("status") or "") != "kept"
-        or not any(_mapping(item.get("kernel_replay")) for item in stack)
-    ):
-        return
-    plan = [
-        dict(entry)
-        for entry in (getattr(state, "warm_kernel_kb_plan", []) or [])
-        if isinstance(entry, Mapping)
-    ]
-    if not plan:
-        raise RemoteRecipeValidationError(
-            "combined replay kept kernel content without a carry-forward plan"
-        )
+    """Carry prior kernel knowledge into the next throughput champion."""
     prior = sections.read("kernel")
     if prior is None:
-        raise RemoteRecipeValidationError(
-            "combined replay kept kernel content but the inference Recipe "
-            "has no kernel section"
-        )
+        return
     files_root = Path(sections.warm_start_dir) / "files"
     prior_paths = {
         source.relative_to(files_root).as_posix()
         for source in prior.files
         if source.is_file() and not source.is_symlink()
     }
-    adopted: set[str] = set()
-    rows_by_column: dict[str, list[dict[str, Any]]] = {
-        "gemm": [],
-        "fusion": [],
-        "rewrite": [],
-    }
-    for entry in plan:
-        column = str(entry.get("column") or "")
-        row = entry.get("recipe_row")
-        if column not in rows_by_column or not isinstance(row, Mapping):
-            raise RemoteRecipeValidationError(
-                "combined replay kernel plan cannot reproduce its exact Recipe row"
-            )
-        copied_row = dict(row)
-        refs = extract_knowledge_artifact_refs(copied_row, prior_paths)
-        for ref in sorted(refs):
-            source = files_root / validate_relative_path(ref)
-            if ref not in prior_paths:
-                raise RemoteRecipeValidationError(
-                    f"combined replay kernel artifact is missing: {ref!r}"
-                )
-            if ref not in adopted:
-                files.validate_adoption(source, ref)
-                files.adopt(source, ref)
-                adopted.add(ref)
-        rows_by_column[column].append(copied_row)
+    referenced = extract_knowledge_artifact_refs(prior.knowledge, prior_paths)
+    missing = referenced - prior_paths
+    if missing:
+        raise RemoteRecipeValidationError(
+            f"prior kernel artifacts are missing: {sorted(missing)!r}"
+        )
+    remapped: dict[str, str] = {}
+    for ref in sorted(referenced):
+        source = files_root / validate_relative_path(ref)
+        remapped[ref] = files.adopt_with_rename(source, ref)
 
     kernel = _mapping(value.get("kernel"))
     list_keys = {
@@ -865,28 +929,23 @@ def _adopt_replayed_kernel(
         "fusion": "items",
         "rewrite": "items",
     }
-    for column, accepted_rows in rows_by_column.items():
-        if not accepted_rows:
+    prior_kernel = _mapping(_remap_artifact_refs(prior.knowledge, remapped))
+    for column, list_key in list_keys.items():
+        prior_column = _mapping(prior_kernel.get(column))
+        if not prior_column:
             continue
-        list_key = list_keys[column]
-        prior_column = _mapping(prior.knowledge.get(column))
         current_column = _mapping(kernel.get(column))
-        combined_rows = [
-            *(
-                current_column.get(list_key)
-                if isinstance(current_column.get(list_key), list)
-                else []
-            ),
-            *accepted_rows,
-        ]
+        prior_rows = prior_column.get(list_key)
+        current_rows = current_column.get(list_key)
         kernel[column] = {
-            **{
-                key: item
-                for key, item in prior_column.items()
-                if key not in {list_key, "files"}
-            },
+            **prior_column,
             **current_column,
-            list_key: combined_rows,
+            list_key: _unique_rows(
+                [
+                    *(prior_rows if isinstance(prior_rows, list) else []),
+                    *(current_rows if isinstance(current_rows, list) else []),
+                ]
+            ),
         }
     value["kernel"] = kernel
 
@@ -899,16 +958,7 @@ def merge_staged_sections(
     only: Collection[str] | None = None,
     required: Collection[str] | None = None,
 ) -> list[str]:
-    """Overlay agent-staged sections onto the values scraped from the stack.
-
-    An agent that stages a section owns the keys it wrote; keys it left alone
-    keep whatever the stack scrape produced. That is what lets a section-aware
-    agent and a not-yet-migrated one publish into the same document.
-
-    ``only`` restricts the overlay to named sections. A document that carries
-    one agent's columns must not adopt another's files, which would land as
-    artifacts nothing in the knowledge references.
-    """
+    """Merge staged patch and artifact refs into their owner sections."""
     merged: list[str] = []
     required_names = set(required or ())
     for name in sections.sections():
@@ -1064,7 +1114,7 @@ def build_remote_knowledge(
     }
     if sections is not None:
         _adopt_replayed_prior(state, sections, value, files, stack)
-        _adopt_replayed_kernel(state, sections, value, files, stack)
+        _adopt_prior_kernel(sections, value, files)
     staged_sections = (
         merge_staged_sections(
             value,
@@ -1082,13 +1132,14 @@ def build_remote_knowledge(
             "required staged owner sections are missing: "
             f"{sorted(missing_required_owners)!r}"
         )
-    value["patch_timeline"] = _patch_timeline(value, stack)
+    value["patch_timeline"] = _patch_timeline(value)
     knowledge = sanitize_shared_knowledge(
         {
             "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
             "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
             "optimized_throughput": optimized_throughput,
             "validated_e2e_gain": validated_gain,
+            "workload_shape": _workload_shape(state),
             "value": value,
             "what_worked": worked,
             "what_failed": _experience(state, "last_action_failures"),
@@ -1196,7 +1247,7 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(view.get("replayable"), bool)
         else True
     )
-    return {
+    row = {
         "canonical_id": str(document.get("canonical_id") or ""),
         "best_throughput": _number(knowledge.get("optimized_throughput")),
         "validated_gain_pct": validated_gain,
@@ -1225,6 +1276,12 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
             view.get("replay_disabled_reason") or ""
         ),
     }
+    for key, value in _mapping(knowledge.get("workload_shape")).items():
+        if key in {"conc", "isl", "osl"}:
+            resolved = _positive_int(value)
+            if resolved is not None:
+                row[key] = resolved
+    return row
 
 
 __all__ = [

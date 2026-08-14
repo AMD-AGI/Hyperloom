@@ -477,9 +477,6 @@ class RemoteRecipeClient:
             limit=limit,
         )
 
-    # Compatibility name for callers that explicitly describe the selection.
-    read_champion = read
-
     def write_if_better(
         self,
         canonical_id: str,

@@ -1051,7 +1051,8 @@ def _apply_warm_patches(
                     "pre_sha": pre_sha,
                     "target_repo": target_repo,
                     "snapshot_manifest": snapshot_manifest,
-                    "rolled_back": False,
+                    "rollback": {"ok": True, "errors": []},
+                    "rolled_back": True,
                 }
     failed_ref = ""
     failure = ""
@@ -2692,7 +2693,7 @@ class BaselineExecutor:
                     try:
                         live_shared_state.save(self.session_dir)
                     except Exception:  # noqa: BLE001
-                        log.debug(
+                        log.warning(
                             "combined warm replay cleanup persist failed",
                             exc_info=True,
                         )

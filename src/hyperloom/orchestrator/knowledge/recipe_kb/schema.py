@@ -306,7 +306,7 @@ class Recipe:
     created_at: str = ""
     updated_at: str = ""
 
-    # ----- 5-tuple identity (arbor 2-tuple is model + hardware) -----
+    # ----- 7-tuple identity -----
     model: str = ""
     hardware: str = ""
     framework_name: str = ""
@@ -342,7 +342,7 @@ class Recipe:
     def to_dict(self) -> dict[str, Any]:
         """Serialise the recipe to the on-disk ``recipe.json`` shape.
 
-        Nested sub-shapes (findings, failures, gaps, PRs, pitfalls,
+        Nested sub-shapes (findings, failures, gaps, pitfalls,
         lessons, sessions, kernel optimizations, stack fingerprint)
         are expanded to plain dicts, and free-form ``extras`` are
         splatted at the top level without shadowing well-known keys.

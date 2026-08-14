@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from packaging.version import InvalidVersion, Version
+
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     RecipeKB,
     cid_to_path_components,
@@ -234,7 +236,7 @@ def _donor_is_trustworthy(
     * a replayable champion config (args or envs);
     * a positive validated/session gain (rejects zero-gain donors);
     * a concrete architecture (not ``unknown``) equal to the target's;
-    * no explicit workload-shape (conc/isl/osl) mismatch with the target.
+    * complete, matching workload-shape fields when the target declares them.
 
     This is only applied to BORROWED donors — a true-self (identity ``exact``)
     replay is never gated, preserving the "reproduce my own champion" contract.
@@ -264,8 +266,11 @@ def _donor_is_trustworthy(
     # Require a concrete architecture matching the target.
     from hyperloom.inference_optimizer.recipe_snapshot_constants import _architectures_slug
 
-    donor_arch = _architectures_slug(donor.get("architectures") or [])
-    donor_mt = str(donor.get("model_type") or "").strip().lower()
+    donor_arch_value = donor.get("architectures")
+    if donor_arch_value in (None, "", []):
+        donor_arch_value = _candidate_dimension(donor, "architectures")
+    donor_arch = _architectures_slug(donor_arch_value)
+    donor_mt = _candidate_dimension(donor, "model_type")
     _unknown = {"", "unknown", "unknown_arch", "unknown_model_type"}
     if donor_arch in _unknown or donor_mt in _unknown:
         return False
@@ -275,18 +280,26 @@ def _donor_is_trustworthy(
     if tgt_mt and donor_mt and donor_mt != tgt_mt:
         return False
 
-    # Reject an explicit workload-shape mismatch (only when both are known).
-    def _shape_conflict(target_val: Any, donor_key: str) -> bool:
+    def _shape_matches(target_val: Any, donor_key: str) -> bool:
         try:
             tv = int(target_val)
+        except (TypeError, ValueError):
+            return True
+        if tv <= 0:
+            return True
+        try:
             dv = int(donor.get(donor_key))
         except (TypeError, ValueError):
             return False
-        if tv <= 0 or dv <= 0:
-            return False
-        return tv != dv
+        return dv > 0 and tv == dv
 
-    if _shape_conflict(target_conc, "conc") or _shape_conflict(target_isl, "isl") or _shape_conflict(target_osl, "osl"):
+    if not all(
+        (
+            _shape_matches(target_conc, "conc"),
+            _shape_matches(target_isl, "isl"),
+            _shape_matches(target_osl, "osl"),
+        )
+    ):
         return False
     return True
 
@@ -386,14 +399,14 @@ def _find_config_donor(
     same-architecture class, same GPU ISA, compatible precision, then nearest
     non-newer framework version. Each candidate must additionally clear
     :func:`_donor_is_trustworthy` (positive validated gain, concrete matching
-    architecture, no workload-shape conflict) so a borrowed config is both
+    architecture, matching workload shape) so a borrowed config is both
     stack-compatible and evidence-backed. Returns
     ``(donor_row, donor_tier, donor_confidence)`` or ``(None, "", 0.0)``.
     """
     if not (model_type or arch_slug):
         return None, "", 0.0
     common = {
-        "framework": framework or "",
+        "framework_name": framework or "",
         "model_type": model_type,
         "architectures": arch_slug,
     }
@@ -418,11 +431,12 @@ def _find_config_donor(
             if value and value not in ("unknown_model_type", "unknown_arch")
         }
         usable: list[Mapping[str, Any]] = []
-        for candidate in _search_warm_candidates(
+        candidates = _search_warm_candidates(
             kb,
             labels=labels,
             hardware_in=hardware_in,
-        ):
+        )
+        for candidate in candidates:
             candidate_id = str(candidate.get("canonical_id") or "")
             if not candidate_id or candidate_id in seen:
                 continue
@@ -454,6 +468,12 @@ def _find_config_donor(
                 target_osl=target_osl,
             ):
                 usable.append(candidate)
+        if candidates and not usable:
+            log.info(
+                "warm-start config donor tier %s rejected all %d candidates",
+                tier,
+                len(candidates),
+            )
         ranked = _rank_warm_candidates(
             usable,
             target_framework_version=framework_version,
@@ -473,7 +493,7 @@ def _build_warm_start_context(
     recipe: Mapping[str, Any] | None,
     config_donor: Mapping[str, Any] | None = None,
     config_donor_tier: str = "",
-    config_donor_confidence: float = 0.0,
+    config_donor_confidence: float | None = None,
     model_architectures: "list[str] | None" = None,
     hardware: str = "",
     framework: str = "",
@@ -534,7 +554,8 @@ def _build_warm_start_context(
     ):
         donor = recipe
         config_donor_tier = config_donor_tier or "self"
-        config_donor_confidence = config_donor_confidence or confidence
+        if config_donor_confidence is None:
+            config_donor_confidence = confidence
     if donor is not None:
         args, envs = _config_replay_args_envs(donor)
         if args or envs:
@@ -567,7 +588,11 @@ def _build_warm_start_context(
                 "best_throughput": best_tput,
                 "config_source": str(donor.get("canonical_id") or ""),
                 "config_tier": config_donor_tier or "self",
-                "config_confidence": float(config_donor_confidence or confidence),
+                "config_confidence": float(
+                    confidence
+                    if config_donor_confidence is None
+                    else config_donor_confidence
+                ),
             }
             donor_canonical_id = str(donor.get("canonical_id") or "")
             donor_model = str(donor.get("model") or "")
@@ -911,11 +936,6 @@ _TOPOLOGY_SUFFIX_RE = re.compile(
     r"_ws[1-9]\d*(?:_pd[1-9]\d*p[1-9]\d*d)?"
     r"(?:_tp[1-9]\d*)?(?:_ep[1-9]\d*)?(?:_[a-z0-9-]+)?$"
 )
-_SEMVER_RE = re.compile(
-    r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
-    r"(?:-([0-9a-z.-]+))?(?:\+[0-9a-z.-]+)?$",
-    re.IGNORECASE,
-)
 
 
 def _parse_hardware_topology(hardware: str) -> tuple[str, str, str] | None:
@@ -970,30 +990,19 @@ def _precision_is_compatible(target: str, candidate: str) -> bool:
     return {target_value, candidate_value} == {"bf16", "fp16"}
 
 
-def _framework_semver(
-    version: str,
-) -> tuple[int, int, int, int, tuple[tuple[int, int | str], ...]] | None:
-    """Parse strict semver into a comparison key."""
-    match = _SEMVER_RE.fullmatch(str(version or "").strip())
-    if match is None:
+def _framework_semver(version: str) -> Version | None:
+    """Parse a framework's PEP 440 version."""
+    value = str(version or "").strip()
+    if not value:
         return None
-    major, minor, patch = (int(match.group(index)) for index in range(1, 4))
-    prerelease = match.group(4)
-    tokens: list[tuple[int, int | str]] = []
-    if prerelease:
-        for token in prerelease.split("."):
-            if token.isdigit():
-                if len(token) > 1 and token.startswith("0"):
-                    return None
-                tokens.append((0, int(token)))
-            else:
-                tokens.append((1, token.lower()))
-    stable = 0 if prerelease else 1
-    return major, minor, patch, stable, tuple(tokens)
+    try:
+        return Version(value)
+    except InvalidVersion:
+        return None
 
 
 def _framework_version_is_compatible(target: str, candidate: str) -> bool:
-    """Accept exact or nearest-not-newer semver in the same major/minor."""
+    """Accept exact or nearest non-newer PEP 440 version in one release line."""
     target_value = str(target or "").strip().lower()
     candidate_value = str(candidate or "").strip().lower()
     if candidate_value == target_value:
@@ -1003,7 +1012,7 @@ def _framework_version_is_compatible(target: str, candidate: str) -> bool:
     return bool(
         target_key
         and candidate_key
-        and candidate_key[:2] == target_key[:2]
+        and candidate_key.release[:2] == target_key.release[:2]
         and candidate_key <= target_key
     )
 
@@ -1115,7 +1124,7 @@ def _rank_warm_candidates(
             )
             else None
         )
-        or (-1, -1, -1, -1, ()),
+        or Version("0.dev0"),
         reverse=True,
     )
     return ranked
@@ -1214,7 +1223,7 @@ def _cascade_warm_start_search(
         target_framework_version = str(fw_version or "")
         target_precision = str(precision or "")
     common = {
-        "framework": target_framework,
+        "framework_name": target_framework,
         "model_type": target_model_type,
         "architectures": target_architecture,
     }
@@ -1274,6 +1283,12 @@ def _cascade_warm_start_search(
             ):
                 continue
             usable.append(candidate)
+        if rows and not usable:
+            log.info(
+                "warm-start tier %s rejected all %d candidates",
+                tier,
+                len(rows),
+            )
         for candidate in _rank_warm_candidates(
             usable,
             target_framework_version=target_framework_version,
@@ -1574,9 +1589,20 @@ def run_t0_anchor(
             model_type=_model_type_val,
         )
         if kg_donor is not None:
-            config_donor = kg_donor
-            config_donor_tier = "kg_cross_model"
-            config_donor_conf = float(kg_donor.get("confidence") or 0.0)
+            if _donor_is_trustworthy(
+                kg_donor,
+                target_arch_slug=_arch_slug,
+                target_model_type=_model_type_val,
+                target_conc=_tgt_conc,
+                target_isl=_tgt_isl,
+                target_osl=_tgt_osl,
+            ):
+                config_donor = kg_donor
+                config_donor_tier = "kg_cross_model"
+                try:
+                    config_donor_conf = float(kg_donor.get("confidence"))
+                except (TypeError, ValueError):
+                    config_donor_conf = 0.0
     if config_donor is None and warm_point and not current_remote_point:
         donor, dtier, dconf = _find_config_donor(
             kb,

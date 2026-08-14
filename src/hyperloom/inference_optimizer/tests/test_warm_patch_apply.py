@@ -417,6 +417,32 @@ def test_required_patch_failure_rolls_back_and_stops(
     assert "later = True" not in content
 
 
+def test_pending_state_persist_failure_needs_no_file_rollback(
+    fake_repo,
+    output_dir,
+) -> None:
+    result = _apply_warm_patches(
+        {
+            "patches": [
+                {"patch_file": "p.patch", "patch_content": VALID_PATCH}
+            ],
+            "required_patch_timeline": True,
+        },
+        str(fake_repo),
+        output_dir,
+        before_mutation=lambda _manifest: False,
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure"] == "pending_state_persist_failed"
+    assert result["applied"] == []
+    assert result["rollback"] == {"ok": True, "errors": []}
+    assert result["rolled_back"] is True
+    assert "patched = True" not in (
+        fake_repo / "vllm" / "fp8.py"
+    ).read_text()
+
+
 def test_required_patch_refuses_repo_without_head(tmp_path, output_dir):
     repo = tmp_path / "unborn"
     repo.mkdir()

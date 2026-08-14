@@ -111,9 +111,7 @@ class KnowledgeConfig:
         env.pop("GBRAIN_BASE_URL", None)
         env.pop("GBRAIN_TOKEN", None)
         env["KERNELFORGE_GBRAIN_ENABLED"] = "false"
-        # The section draft belongs to this run's inference document. A
-        # KernelForge child publishes its own ``kernel:`` record, so letting it
-        # inherit these would stage its sections into the wrong document.
+        # Section drafts are owned by the parent inference Recipe publisher.
         env.pop("KB_DRAFT_DIR", None)
         env.pop("KB_WARM_START_DIR", None)
 

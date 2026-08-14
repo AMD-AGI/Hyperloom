@@ -197,6 +197,37 @@ def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> 
     assert '"files": [' not in serialized
 
 
+def test_remote_recipe_projects_workload_shape_for_donor_gating(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path)
+    state.conc = 64
+    state.isl = 1024
+    state.osl = 256
+    bundle = build_remote_knowledge(state, tmp_path / "files-shape")
+
+    row = knowledge_to_warm_recipe(
+        {
+            "canonical_id": "inference:m:h:f:mt:a:v:p",
+            "session_id": "session-1",
+            "schema_version": 2,
+            "knowledge": bundle.knowledge,
+            "view": {"replayable": True},
+        }
+    )
+
+    assert bundle.knowledge["workload_shape"] == {
+        "conc": 64,
+        "isl": 1024,
+        "osl": 256,
+    }
+    assert {key: row[key] for key in ("conc", "isl", "osl")} == {
+        "conc": 64,
+        "isl": 1024,
+        "osl": 256,
+    }
+
+
 def test_publish_sanitizer_allows_only_safe_replay_envs_and_args() -> None:
     envs = sanitize_publish_env_mapping(
         {
@@ -308,6 +339,110 @@ def test_micro_keep_without_integrate_stack_is_not_written(tmp_path: Path) -> No
     ]
     bundle = build_remote_knowledge(state, tmp_path / "files-no-integrate")
     assert bundle.knowledge["value"]["kernel"]["rewrite"]["items"] == []
+
+
+def test_prior_kernel_survives_a_higher_throughput_non_kernel_run(
+    tmp_path: Path,
+) -> None:
+    prior_root = tmp_path / "prior"
+    prior_ref = "kernel/gemm/artifacts/tuned.csv"
+    prior_file = prior_root / "files" / prior_ref
+    prior_file.parent.mkdir(parents=True)
+    prior_file.write_text("prior\n", encoding="utf-8")
+    (prior_root / "recipe.json").write_text(
+        json.dumps(
+            {
+                "value": {
+                    "kernel": {
+                        "gemm": {
+                            "optimizations": [
+                                {"id": "prior-gemm", "tuned_file": prior_ref}
+                            ]
+                        },
+                        "fusion": {"items": []},
+                        "rewrite": {"items": []},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = _state(tmp_path)
+    state.optimization_stack = [
+        row
+        for row in state.optimization_stack
+        if row.get("source_phase") != "KERNEL_AGENT"
+    ]
+    state.last_gemm_tuning = {}
+    state.last_fusion = {}
+    state.last_fusion_integrate = {}
+    state.kernel_opt_task_attempts = {}
+    sections = KnowledgeSections(
+        tmp_path / "draft",
+        warm_start_dir=prior_root,
+    )
+
+    bundle = build_remote_knowledge(
+        state,
+        tmp_path / "files-prior-kernel",
+        sections=sections,
+    )
+
+    optimizations = bundle.knowledge["value"]["kernel"]["gemm"][
+        "optimizations"
+    ]
+    assert optimizations == [{"id": "prior-gemm", "tuned_file": prior_ref}]
+    assert {artifact.path for artifact in bundle.artifacts} == {prior_ref}
+
+
+def test_prior_kernel_artifact_conflict_is_renamed_and_remapped(
+    tmp_path: Path,
+) -> None:
+    prior_root = tmp_path / "prior-conflict"
+    prior_ref = "kernel/gemm/artifacts/tuned.csv"
+    prior_file = prior_root / "files" / prior_ref
+    prior_file.parent.mkdir(parents=True)
+    prior_file.write_text("prior\n", encoding="utf-8")
+    (prior_root / "recipe.json").write_text(
+        json.dumps(
+            {
+                "value": {
+                    "kernel": {
+                        "gemm": {
+                            "optimizations": [
+                                {"id": "prior-gemm", "tuned_file": prior_ref}
+                            ]
+                        },
+                        "fusion": {"items": []},
+                        "rewrite": {"items": []},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = _state(tmp_path)
+    sections = KnowledgeSections(
+        tmp_path / "draft-conflict",
+        warm_start_dir=prior_root,
+    )
+
+    bundle = build_remote_knowledge(
+        state,
+        tmp_path / "files-conflict",
+        sections=sections,
+    )
+
+    optimizations = bundle.knowledge["value"]["kernel"]["gemm"][
+        "optimizations"
+    ]
+    refs = [row["tuned_file"] for row in optimizations]
+    assert prior_ref in refs
+    assert len(refs) == 2
+    assert len(set(refs)) == 2
+    assert set(refs).issubset(
+        {artifact.path for artifact in bundle.artifacts}
+    )
 
 
 def test_micro_keep_with_e2e_revert_but_no_integrate_stack_is_not_written(
@@ -1420,21 +1555,53 @@ def test_a_staged_file_is_published_under_its_own_section(tmp_path: Path) -> Non
     patch = tmp_path / "authored.patch"
     patch.write_text("authored", encoding="utf-8")
     sections = _sections(tmp_path)
-    sections.write(
-        "framework",
-        {
-            "note": "one",
-            "patches": ["framework/patches/authored.patch"],
-        },
-        files=[patch],
-        kind="patches",
+    refs = FrameworkAgentKB(sections).stage_patches(
+        [patch],
+        stack_index=2,
     )
     bundle = build_remote_knowledge(
         _state(tmp_path), tmp_path / "files", sections=sections
     )
     published = {artifact.path for artifact in bundle.artifacts}
-    assert "framework/patches/authored.patch" in published
-    assert (tmp_path / "files" / "framework" / "patches" / "authored.patch").is_file()
+    assert refs[0] in published
+    assert (tmp_path / "files" / refs[0]).is_file()
+
+
+def test_non_overlay_owner_patch_ref_fails_before_publish(
+    tmp_path: Path,
+) -> None:
+    patch = tmp_path / "invalid-owner-ref.patch"
+    patch.write_text("invalid", encoding="utf-8")
+    sections = _sections(tmp_path)
+    sections.write(
+        "framework",
+        {"patches": ["framework/patches/invalid-owner-ref.patch"]},
+        files=[patch],
+        kind="patches",
+    )
+
+    with pytest.raises(
+        RemoteRecipeValidationError,
+        match="invalid overlay ref",
+    ):
+        build_remote_knowledge(
+            _state(tmp_path),
+            tmp_path / "files-invalid-owner-ref",
+            sections=sections,
+        )
+
+
+def test_missing_workspace_does_not_scan_current_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "unrelated.diff").write_text("unrelated", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    sources, missing = WritebackCollaborator._keep_patch_sources({}, None)
+
+    assert sources == []
+    assert missing == []
 
 
 def test_orphaned_required_staged_file_fails_close(tmp_path: Path) -> None:
@@ -1985,6 +2152,27 @@ def test_remote_adapter_forwards_hardware_in(tmp_path: Path) -> None:
     assert remote.kwargs["match"] == {"framework_name": "sglang"}
 
 
+def test_remote_adapter_stops_on_empty_page_with_next_offset(
+    tmp_path: Path,
+) -> None:
+    class _Remote:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def search_identities(self, **_kwargs):
+            self.calls += 1
+            return {"items": [], "next_offset": self.calls * 100}
+
+    remote = _Remote()
+    adapter = RemoteWarmRecipeAdapter(  # type: ignore[arg-type]
+        remote,
+        tmp_path / "empty-page",
+    )
+
+    assert adapter.search(label_match={}, limit=100) == []
+    assert remote.calls == 1
+
+
 def test_remote_adapter_caps_metadata_scan_without_downloading(
     tmp_path: Path,
 ) -> None:
@@ -2149,6 +2337,7 @@ def test_obsolete_remote_contract_exports_are_removed() -> None:
     ):
         assert not hasattr(remote_recipe, name)
     assert not hasattr(ExploreAgentKB, "write_snapshot")
+    assert not hasattr(RemoteRecipeClient, "read_champion")
 
 
 def test_vendored_sdk_exposes_view_and_identity_search() -> None:
@@ -2157,6 +2346,15 @@ def test_vendored_sdk_exposes_view_and_identity_search() -> None:
     view_source = inspect.getsource(RemoteRecipeClient.get_view)
     assert "get_hyperloom_recipe_view" in view_source
     assert "get_best_record" not in view_source
+
+
+def test_vendored_sdk_matches_upstream_git_blob() -> None:
+    path = Path(kb_store_client.__file__)
+    content = path.read_bytes()
+    digest = hashlib.sha1(
+        f"blob {len(content)}\0".encode() + content
+    ).hexdigest()
+    assert digest == "a1511c2d6d891220400057619901006aca1242bc"
 
 
 def test_vendored_sdk_uses_new_view_and_search_routes() -> None:

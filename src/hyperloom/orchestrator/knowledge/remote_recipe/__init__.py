@@ -188,6 +188,7 @@ class RemoteWarmRecipeAdapter:
     mode = "remote"
     backend_name = "kb-store"
     search_candidate_cap = 200
+    search_page_cap = 10
 
     def __init__(
         self,
@@ -354,8 +355,14 @@ class RemoteWarmRecipeAdapter:
 
         page_size = min(100, max(1, int(limit or 10)))
         offset = 0
+        pages_scanned = 0
+        has_more = False
         rows: list[dict[str, Any]] = []
-        while len(self._scanned_candidate_ids) < self.search_candidate_cap:
+        while (
+            len(self._scanned_candidate_ids) < self.search_candidate_cap
+            and pages_scanned < self.search_page_cap
+        ):
+            has_more = False
             result = self._remote_kb.search_identities(
                 scheme="inference",
                 match=translated,
@@ -363,11 +370,14 @@ class RemoteWarmRecipeAdapter:
                 offset=offset,
                 limit=page_size,
             )
+            pages_scanned += 1
             items = result.get("items")
             if not isinstance(items, list):
                 raise RemoteRecipeValidationError(
                     "KB Store identity search items must be a list"
                 )
+            if not items:
+                break
             for item in items:
                 if not isinstance(item, dict):
                     continue
@@ -426,6 +436,12 @@ class RemoteWarmRecipeAdapter:
                     "KB Store identity search pagination did not advance"
                 )
             offset = resolved_offset
+            has_more = True
+        if pages_scanned >= self.search_page_cap and has_more:
+            log.warning(
+                "remote Recipe candidate search stopped after %d pages",
+                self.search_page_cap,
+            )
         return rows
 
     def select_candidate(self, row: Mapping[str, Any]) -> bool:
