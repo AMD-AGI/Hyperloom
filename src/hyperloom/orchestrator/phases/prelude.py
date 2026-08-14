@@ -808,8 +808,20 @@ class PreludePhase(PhaseHandler):
         # whole (potentially hour-long) set on resume.
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — best-effort persistence
-            log.debug("warm-kernel KB: state save failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "warm-kernel KB: one-shot state save failed",
+                exc_info=True,
+            )
+            return self._set_warm_kernel_outcome(
+                {
+                    "status": "error",
+                    "reason": (
+                        "kernel_attempt_state_persist_failed:"
+                        f"{type(exc).__name__}"
+                    ),
+                }
+            )
         if kb is None:
             try:
                 kb = self._open_warm_kernel_section()
@@ -1020,8 +1032,51 @@ class PreludePhase(PhaseHandler):
         )
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — best-effort persistence
-            log.debug("warm-kernel KB: state save failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "warm-kernel KB: prepared state save failed",
+                exc_info=True,
+            )
+            persist_rollback = self._revert_warm_kernel_patches(
+                applied,
+                kernel_snapshots,
+            )
+            for entry in pending:
+                entry["decision"] = "ROLLED_BACK"
+            if persist_rollback.get("ok"):
+                state.warm_replay_pending = {}
+                failed_status = "error"
+            else:
+                state.warm_replay_pending = {
+                    **dict(state.warm_replay_pending or {}),
+                    "status": "rollback_failed",
+                    "rollback_errors": list(
+                        persist_rollback.get("errors") or []
+                    ),
+                }
+                failed_status = "rollback_failed"
+            outcome = {
+                **outcome,
+                "status": failed_status,
+                "reason": (
+                    "kernel_prepared_state_persist_failed:"
+                    f"{type(exc).__name__}"
+                ),
+                "pending": [],
+                "applied": [] if persist_rollback.get("ok") else applied,
+                "rollback": persist_rollback,
+                "dirty": not bool(persist_rollback.get("ok")),
+                "extra_envs": {},
+                "extra_server_args": "",
+            }
+            self._set_warm_kernel_outcome(outcome)
+            try:
+                state.save(self.session_dir)
+            except Exception:  # noqa: BLE001
+                log.warning(
+                    "warm-kernel KB: rollback state save failed",
+                    exc_info=True,
+                )
         return outcome
 
     @staticmethod
