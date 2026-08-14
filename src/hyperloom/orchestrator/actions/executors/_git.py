@@ -5,7 +5,7 @@
 
 ``_run_git`` → ``(ok, stdout, stderr)``; ``_run_git_cp`` → the raw
 CompletedProcess (or None on spawn/timeout) for callers that must inspect
-returncode.
+returncode. Both carry a ``safe.directory`` exception for the target checkout.
 """
 
 from __future__ import annotations
@@ -13,51 +13,16 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from hyperloom.common.git_safety import safe_directory_args
+
 __all__ = ["_run_git", "_run_git_cp"]
-
-
-def _repo_root(target: str) -> str | None:
-    """Nearest ancestor of ``target`` holding a ``.git`` entry, else None.
-
-    ``.git`` is a file in linked worktrees, so existence is the test. Returns
-    None outside any checkout, where no exception should be invented.
-    """
-    try:
-        current = Path(target).expanduser().resolve()
-    except OSError:
-        return None
-    for candidate in (current, *current.parents):
-        try:
-            if (candidate / ".git").exists():
-                return str(candidate)
-        except OSError:
-            continue
-    return None
-
-
-def _safe_directory_args(args: list[str]) -> list[str]:
-    """Prepend a ``safe.directory`` exception for the repo ``args`` targets.
-
-    A bind-mounted checkout owned by another uid makes git refuse every
-    operation on it, reads included. git honours ``safe.directory`` from command
-    config, resolves ownership against the repository root rather than the
-    ``-C`` path, and ignores a ``-c`` placed after the subcommand.
-    """
-    try:
-        target = args[args.index("-C") + 1]
-    except (ValueError, IndexError):
-        return args
-    root = _repo_root(target)
-    if root is None:
-        return args
-    return ["-c", f"safe.directory={root}", *args]
 
 
 def _run_git(args: list[str], *, timeout: float = 120.0) -> tuple[bool, str, str]:
     """Run ``git <args>`` capturing output; returns ``(ok, stdout, stderr)``, never raises."""
     try:
         cp = subprocess.run(
-            ["git", *_safe_directory_args(args)],
+            ["git", *safe_directory_args(args)],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -70,11 +35,23 @@ def _run_git(args: list[str], *, timeout: float = 120.0) -> tuple[bool, str, str
     return True, cp.stdout or "", cp.stderr or ""
 
 
-def _run_git_cp(args: list[str], *, timeout: float = 120.0) -> subprocess.CompletedProcess | None:
-    """Run ``git <args>`` returning the raw CompletedProcess, or None on spawn/timeout."""
+def _run_git_cp(
+    args: list[str],
+    *,
+    timeout: float = 120.0,
+    cwd: str | Path | None = None,
+    input: str | None = None,  # noqa: A002 - mirrors subprocess.run's keyword
+) -> subprocess.CompletedProcess | None:
+    """Run ``git <args>`` returning the raw CompletedProcess, or None on spawn/timeout.
+
+    ``cwd`` locates the checkout for callers that do not pass ``-C``; ``input``
+    feeds a patch on stdin.
+    """
     try:
         return subprocess.run(
-            ["git", *_safe_directory_args(args)],
+            ["git", *safe_directory_args(args, cwd=cwd)],
+            cwd=cwd,
+            input=input,
             capture_output=True,
             text=True,
             timeout=timeout,

@@ -17,6 +17,7 @@ import subprocess
 
 import pytest
 
+from hyperloom.common import git_safety
 from hyperloom.orchestrator.actions.executors import _git
 
 
@@ -109,13 +110,13 @@ def test_a_path_outside_any_repo_is_left_alone(tmp_path, monkeypatch):
     plain = tmp_path / "plain"
     plain.mkdir()
 
-    assert _git._repo_root(str(plain)) is None
-    assert _git._safe_directory_args(["-C", str(plain), "status"]) == ["-C", str(plain), "status"]
+    assert git_safety.repo_root(str(plain)) is None
+    assert git_safety.safe_directory_args(["-C", str(plain), "status"]) == ["-C", str(plain), "status"]
 
 
 def test_the_exception_precedes_the_subcommand(foreign_repo):
     """git ignores -c placed after the subcommand."""
-    args = _git._safe_directory_args(["-C", str(foreign_repo), "rev-parse", "HEAD"])
+    args = git_safety.safe_directory_args(["-C", str(foreign_repo), "rev-parse", "HEAD"])
 
     assert args[0] == "-c"
     assert args[1] == f"safe.directory={foreign_repo}"
@@ -123,7 +124,7 @@ def test_the_exception_precedes_the_subcommand(foreign_repo):
 
 
 def test_caller_supplied_c_options_survive(foreign_repo):
-    args = _git._safe_directory_args(["-c", "user.name=hl", "-C", str(foreign_repo), "commit", "-m", "x"])
+    args = git_safety.safe_directory_args(["-c", "user.name=hl", "-C", str(foreign_repo), "commit", "-m", "x"])
 
     assert "user.name=hl" in args
     assert f"safe.directory={foreign_repo}" in args
