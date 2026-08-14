@@ -59,6 +59,7 @@ from ._grid_runner import (
     sanitize_script_name,
     session_clamped_timeout_sec,
     session_grid_bounds,
+    session_warmup_cap_sec,
     stopped_by_the_run,
 )
 from ._subprocess_kill import (
@@ -274,6 +275,31 @@ def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:
     if framework_registry.is_scriptable(framework):
         return None
     return str(output_dir / "server.log")
+
+
+def _logged_session_clamp(timeout_sec: int, clamped: int, *, output_dir: Path) -> int:
+    """Announce a round's cap being cut by the session budget, and return the cut.
+
+    Every pass of a baseline round derives its cap from the same budget but on its
+    own terms, so the line names the round it belongs to.
+
+    Args:
+        timeout_sec: The cap the round would have had on an unbounded budget.
+        clamped: The cap the budget leaves it; equal to ``timeout_sec`` when the
+            budget was never the binding constraint, which logs nothing.
+        output_dir: The round's workspace, whose name identifies the pass.
+
+    Returns:
+        int: ``clamped``, unchanged.
+    """
+    if clamped != timeout_sec:
+        log.info(
+            "baseline_executor: timeout clamped %ds -> %ds by the session budget (round=%s)",
+            timeout_sec,
+            clamped,
+            output_dir.name,
+        )
+    return clamped
 
 
 def _stopped_round_result(
@@ -1774,7 +1800,6 @@ class BaselineExecutor:
         session_deadline_sec: float | None,
         *,
         output_dir: Path,
-        reserve_sec: float = 0.0,
     ) -> int:
         """``timeout_sec`` reduced to what the session can still pay for.
 
@@ -1783,33 +1808,69 @@ class BaselineExecutor:
         of the session is left. A round granted more than the budget has runs
         past the end of the session and takes the closing phase with it.
 
-        ``reserve_sec`` holds back what the passes still to come need, so an
-        earlier pass cannot spend the budget a later one was counting on. This is
-        the baseline's spelling of :func:`~._grid_runner._round_timeout_sec`'s
-        reserve, and it is kept for the same pass: the measured round is the only
-        one that yields a data point, so a discarded warmup that overruns is the
-        cheaper thing to cut short.
+        Nothing is held back here, which is what keeps the cap sitting past the
+        session deadline: the measured round is the last pass of the round, and a
+        cap the session watchdog reaches first is a cap whose kill is attributed
+        to the budget rather than to the model. The pass that does hold budget
+        back is the discarded warmup, in :meth:`_mn_warmup_capped_timeout`.
 
         Args:
             timeout_sec: The timeout this round would get on an unbounded budget.
             session_deadline_sec: Monotonic-clock session deadline, or ``None``
                 when there is no budget to respect.
             output_dir: The round's workspace, for the log line.
-            reserve_sec: Seconds held back for the passes that must still follow
-                this one. Zero for the last pass of a round.
 
         Returns:
             int: The hard timeout to grant this round, in seconds.
         """
-        clamped = session_clamped_timeout_sec(timeout_sec, session_deadline_sec, reserve_sec=reserve_sec)
-        if clamped != timeout_sec:
-            log.info(
-                "baseline_executor: timeout clamped %ds -> %ds by the session budget (round=%s)",
-                timeout_sec,
-                clamped,
+        return _logged_session_clamp(
+            timeout_sec,
+            session_clamped_timeout_sec(timeout_sec, session_deadline_sec),
+            output_dir=output_dir,
+        )
+
+    @staticmethod
+    def _mn_warmup_capped_timeout(
+        timeout_sec: int,
+        session_deadline_sec: float | None,
+        *,
+        output_dir: Path,
+        measured_expected_sec: float | None,
+    ) -> int | None:
+        """The multi-node warmup pass's cap, or ``None`` when it should be skipped.
+
+        The decision itself is :func:`~._grid_runner.session_warmup_cap_sec`, so
+        both benching arms hold back the same seconds for the measured round they
+        discard a pass in front of; this adds the baseline's log lines.
+
+        Args:
+            timeout_sec: The timeout this pass would get on an unbounded budget.
+            session_deadline_sec: Monotonic-clock session deadline, or ``None``
+                when there is no budget to respect.
+            output_dir: The warmup pass's workspace, for the log line.
+            measured_expected_sec: Seconds the measured round is expected to take,
+                or ``None`` when this session has not measured one yet.
+
+        Returns:
+            int | None: The hard timeout for the warmup pass, or ``None`` when the
+                remaining budget cannot fit it and the measured round after it.
+        """
+        expected_sec = float(measured_expected_sec or 0.0)
+        clamped = session_warmup_cap_sec(
+            timeout_sec,
+            session_deadline_sec,
+            measured_expected_sec=expected_sec,
+        )
+        if clamped is None:
+            log.warning(
+                "baseline_executor: skipping the MN warmup pass — what is left of the "
+                "session budget cannot fit both it and the measured round's expected "
+                "%.0fs, and a warmup capped under one pass warms nothing (round=%s)",
+                expected_sec,
                 output_dir.name,
             )
-        return clamped
+            return None
+        return _logged_session_clamp(timeout_sec, clamped, output_dir=output_dir)
 
     @staticmethod
     def _inferencex_root_from_config(config_path: Path) -> str:
@@ -3727,7 +3788,9 @@ class BaselineExecutor:
         # The session's wall-clock budget, resolved per round rather than once
         # per task: a baseline runs up to three of them, and a warmup that
         # overran has already spent budget the ones after it were counting on.
-        session_deadline_sec, _ = session_grid_bounds(ctx_extra.get("shared_state") or self.shared_state)
+        session_deadline_sec, measured_expected_sec = session_grid_bounds(
+            ctx_extra.get("shared_state") or self.shared_state
+        )
         timeout_sec = self._session_capped_timeout(timeout_sec, session_deadline_sec, output_dir=output_dir)
         if not ctx_extra.get("mn_round_restarted"):
             try:
@@ -3792,19 +3855,26 @@ class BaselineExecutor:
             mn_bench_warmup_enabled as _mn_warm,
         )
 
-        if _mn_imn() and _mn_warm() and not ctx_extra.get("mn_round_restarted"):
-            _mn_warm_dir = output_dir / "mn_warmup"
-            # The measured round's whole cap is held back from the warmup. Handed
-            # the same cap, a slow warmup can spend the budget the measured round
-            # is then admitted without -- so the round that could never finish is
-            # the one launched and reaped, and the baseline is reported as
-            # ``session_time_exhausted`` after a warmup that actually succeeded.
-            _mn_warm_timeout_sec = self._session_capped_timeout(
+        _mn_warm_dir = output_dir / "mn_warmup"
+        # What the measured round is expected to need is held back from the
+        # warmup, the same reserve the grid builds from the same number. Handed
+        # the whole cap, a slow warmup can spend the budget the measured round is
+        # then admitted without -- so the round that could never finish is the one
+        # launched and reaped, and the baseline is reported as
+        # ``session_time_exhausted`` after a warmup that actually succeeded.
+        # ``None`` means what is left cannot fit both passes, and the warmup is
+        # the one to drop.
+        _mn_warm_timeout_sec = (
+            self._mn_warmup_capped_timeout(
                 timeout_sec,
                 session_deadline_sec,
                 output_dir=_mn_warm_dir,
-                reserve_sec=timeout_sec,
+                measured_expected_sec=measured_expected_sec,
             )
+            if (_mn_imn() and _mn_warm() and not ctx_extra.get("mn_round_restarted"))
+            else None
+        )
+        if _mn_warm_timeout_sec is not None:
             _mn_warm_started_unix = time.time()
             # The measurement is discarded, but the returncode is not: this pass
             # is a full benchmark round, so a stop here ends the baseline round.

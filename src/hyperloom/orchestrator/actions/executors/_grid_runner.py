@@ -1295,6 +1295,16 @@ def session_clamped_timeout_sec(
     measured. The watchdog's sentinel says the run ran out of time, which is what
     actually happened.
 
+    A non-zero ``reserve_sec`` is the only thing that can move the returned cap
+    earlier than the session deadline: with no reserve the grace puts the cap at
+    least ``_SESSION_KILL_GRACE_SEC`` past it, so the watchdog always gets there
+    first. Every caller that reserves therefore re-opens the spurious-timeout
+    window the grace exists to close, and owes a reason its round cannot be reaped
+    by its own cap -- either an admission gate built from the same number
+    (:func:`run_grid` refuses a variant whose rounds do not fit before it reserves
+    for them) or the decision to skip the round instead of starting one that will
+    be killed (:func:`session_warmup_cap_sec`).
+
     Args:
         cap: The timeout the caller would grant with an unbounded budget.
         session_deadline_sec: Monotonic-clock session deadline, or ``None`` when
@@ -1309,6 +1319,52 @@ def session_clamped_timeout_sec(
         return int(cap)
     usable = int(session_deadline_sec - time.monotonic() - max(0.0, reserve_sec)) + _SESSION_KILL_GRACE_SEC
     return int(cap) if usable >= int(cap) else max(1, usable)
+
+
+def session_warmup_cap_sec(
+    cap: int,
+    session_deadline_sec: float | None,
+    *,
+    measured_expected_sec: float,
+) -> int | None:
+    """The hard cap for a discarded warmup pass, or ``None`` when it must be skipped.
+
+    A warmup is the pass whose measurement is thrown away, so it is the pass whose
+    budget is given up first: it holds back what the measured round after it is
+    expected to need. That reserve is also the only thing that can pull a cap
+    before the session deadline (see :func:`session_clamped_timeout_sec`), so the
+    same number decides whether to launch at all. A warmup granted less than one
+    full pass warms nothing: it is killed at its cap, both arms swallow that as
+    best-effort, and the measured round then runs against a server nothing ever
+    drove -- and its throughput is what the session anchors every later gain on.
+    A skipped warmup is a shape both arms already support; a warmup killed at its
+    cap is not.
+
+    ``measured_expected_sec`` is the measured baseline runtime from
+    :func:`session_grid_bounds` -- what a normally-behaving pass of the same
+    workload needs, and what the admission gates upstream judge on. Zero means the
+    session has not measured a round yet, which leaves the warmup with no
+    hold-back: there is no number to reserve, and without a reserve the cap cannot
+    be pulled before the deadline, so the watchdog stays the thing that stops the
+    pass and attributes it to the budget. An unbounded budget is the same case for
+    the same reason -- nothing is being held back from anyone, so there is nothing
+    for the warmup to be short of, whatever its declared cap.
+
+    Args:
+        cap: The timeout the caller would grant with an unbounded budget.
+        session_deadline_sec: Monotonic-clock session deadline, or ``None`` when
+            the budget is unbounded, which leaves ``cap`` untouched.
+        measured_expected_sec: Seconds one measured pass of this workload is
+            expected to take; ``0`` when the session has not measured one.
+
+    Returns:
+        int | None: The hard timeout for the warmup pass, or ``None`` when what is
+            left cannot fit both it and the measured round it reserves for.
+    """
+    if session_deadline_sec is None or measured_expected_sec <= 0:
+        return session_clamped_timeout_sec(cap, session_deadline_sec)
+    clamped = session_clamped_timeout_sec(cap, session_deadline_sec, reserve_sec=measured_expected_sec)
+    return clamped if clamped >= measured_expected_sec else None
 
 
 def session_grid_bounds(shared_state: Any) -> tuple[float | None, float | None]:
@@ -1866,6 +1922,19 @@ async def run_grid(
 
             warmup_workspaces_before = snapshot_workspaces(warmup_slot)
             warmup_started_unix = time.time()
+            # Held in a local because the abort line below has to name the cap the
+            # round was actually granted: the declared one is a hang backstop, and
+            # a round killed at the reserved cap logged as a two-hour timeout reads
+            # as a variant that hangs rather than a budget that ran out. The
+            # admission gate above is what keeps this reserve from starving the
+            # round -- it refuses a variant whose passes do not fit before any of
+            # them is reserved for.
+            warmup_cap_sec = _round_timeout_sec(
+                i,
+                variant.name,
+                round_label="warmup",
+                reserve_sec=float(variant_expected_sec or 0.0) * (1 + _mn_warmup_rounds),
+            )
             try:
                 warmup_rc, warmup_stdout, warmup_stderr = await _reported_magpie(
                     i,
@@ -1873,12 +1942,7 @@ async def run_grid(
                     magpie_python=magpie_python,
                     config_path=warmup_cfg_path,
                     output_dir=warmup_slot,
-                    timeout_sec=_round_timeout_sec(
-                        i,
-                        variant.name,
-                        round_label="warmup",
-                        reserve_sec=float(variant_expected_sec or 0.0) * (1 + _mn_warmup_rounds),
-                    ),
+                    timeout_sec=warmup_cap_sec,
                     cwd=cwd,
                     result_dir=result_dir,
                     soft_deadline_sec=None,
@@ -1899,7 +1963,7 @@ async def run_grid(
                     i + 1,
                     len(grid),
                     variant.name,
-                    variant_timeout_sec,
+                    warmup_cap_sec,
                     exc,
                 )
                 _write_variant_abort_marker(
