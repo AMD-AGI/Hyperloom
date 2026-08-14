@@ -19,6 +19,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from uuid import uuid4
 
 from hyperloom.common.timeutil import utc_now_compact
 
@@ -151,9 +152,14 @@ def session_dir() -> Path:
 def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
     """Create the session directory + per-session + workspace-shared
     skeletons. With a ``model_name`` the session_dir is
-    ``<workspace_root>/<model>/<UTC_ts>/`` and is pinned via
+    ``<workspace_root>/<model>/<UTC_ts>-<rand8>/`` and is pinned via
     ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR``; otherwise it is
     workspace_root. Idempotent.
+
+    The random suffix is what makes the directory unique: the timestamp is
+    second-granular, so two launches of one model within the same second would
+    otherwise share a session dir (and, via ``session_dir.name``, a session id).
+    The fixed-width timestamp prefix keeps lexical order chronological.
 
     Args:
         model_name: Model name selecting the per-model subtree, or ``None``
@@ -169,8 +175,7 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
 
     if model_name:
         basename = _sanitize_model_basename(model_name)
-        ts = utc_now_compact()
-        sd = ws / basename / ts
+        sd = ws / basename / f"{utc_now_compact()}-{uuid4().hex[:8]}"
     else:
         sd = ws
 

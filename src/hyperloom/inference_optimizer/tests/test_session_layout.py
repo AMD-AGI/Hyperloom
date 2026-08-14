@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 import pytest
@@ -78,11 +79,11 @@ def test_make_session_dir_per_model_ts_layout(tmp_path, monkeypatch):
     """Default: per-model/per-launch subdir + pin propagation."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir(model_name="/path/models/DeepSeek-R1-0528")
-    # Layout: <ws>/DeepSeek-R1-0528/<UTC ts>/
+    # Layout: <ws>/DeepSeek-R1-0528/<UTC ts>-<rand8>/
     assert sd.parent.parent == tmp_path
     assert sd.parent.name == "DeepSeek-R1-0528"
-    # Timestamp shape: YYYYMMDDTHHMMSSZ
-    assert len(sd.name) == 16 and sd.name.endswith("Z") and "T" in sd.name
+    # Name shape: YYYYMMDDTHHMMSSZ-<8 hex>
+    assert re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{8}", sd.name), sd.name
     import os as _os
 
     assert _os.environ[paths.ENV_CURRENT_SESSION_DIR] == str(sd)
@@ -93,6 +94,23 @@ def test_make_session_dir_per_model_ts_layout(tmp_path, monkeypatch):
     for sub in paths._WORKSPACE_SKELETON:
         assert (tmp_path / sub).is_dir()
         assert not (sd / sub).exists()
+
+
+def test_make_session_dir_same_second_launches_get_distinct_dirs(tmp_path, monkeypatch):
+    """Two launches of one model inside the same UTC second must not share a dir.
+
+    The timestamp is second-granular, so uniqueness has to come from the random
+    suffix. A shared dir would also mean a shared ``session_dir.name``, which is
+    the de-facto session id for KB fact writes and per-session sinks.
+    """
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    monkeypatch.setattr(paths, "utc_now_compact", lambda: "20260814T073026Z")
+    first = paths.make_session_dir(model_name="DeepSeek-R1-0528")
+    second = paths.make_session_dir(model_name="DeepSeek-R1-0528")
+    assert first != second
+    assert first.parent == second.parent
+    # Fixed-width ts prefix is shared, so lex order stays chronological.
+    assert first.name[:16] == second.name[:16] == "20260814T073026Z"
 
 
 def test_make_session_dir_sanitises_model_basename(tmp_path, monkeypatch):
