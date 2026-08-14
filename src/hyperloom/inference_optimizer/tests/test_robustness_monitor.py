@@ -247,9 +247,11 @@ def test_monitor_handles_leading_zero_wait_sec(tmp_path):
 
 
 def test_monitor_resume_is_pinned_to_resolved_session_dir():
-    """Crash recovery must never use bare --resume, which auto-picks the latest session."""
+    """Crash recovery must name the session explicitly, never let the CLI choose one."""
     text = MONITOR.read_text(encoding="utf-8")
-    assert '--resume --resume-from "$session_dir"' in text
+    assert '--resume-from "$session_dir"' in text
+    assert "--resume " not in text
+    assert "--resume\n" not in text
 
 
 @pytest.mark.skipif(not _HAS_PROC, reason="liveness probe reads /proc (Linux)")
