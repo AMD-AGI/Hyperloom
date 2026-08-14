@@ -47,6 +47,12 @@ from ._aiter_jit import (
     probe_aiter_jit_cache as _probe_aiter_jit_cache,
     sweep_stale_aiter_locks_if_dead,
 )
+# The grid module is the namespace the helpers both benching arms share ended up
+# in: how a sentinel returncode reads back, how a round's cap is clamped to the
+# budget, how the two session bounds are resolved, and the hygiene every launch
+# needs. Imported rather than restated here so a baseline round and a grid round
+# are priced the same way. The returncode decoder's class-side sibling is in
+# ``..stop_attribution``, which says why the two sides sit where they do.
 from ._grid_runner import (
     _kill_stale_servers,
     sanitize_result_dir,

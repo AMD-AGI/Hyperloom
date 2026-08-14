@@ -17,9 +17,16 @@ otherwise file "the run ran out of time" as a verdict about the model. So the
 notion lives here, in a leaf every one of them can import, rather than as three
 local judgements that can drift apart.
 
-The returncode side of the same distinction lives in
-:mod:`..executors._subprocess_kill`, which owns the sentinel space; this module
-is the error-class side, which is what the ledgers carry.
+This module is the error-class side, which is what the ledgers carry. The
+returncode side of the same distinction is deliberately not here, and is itself
+in two pieces: the two sentinel codes are allocated in
+:mod:`..executors._subprocess_kill`, beside every other code that space hands
+out so that a collision is visible in one file, and ``stopped_by_the_run``, the
+function that reads a code back, sits with the session-budget helpers in
+``..executors._grid_runner`` that both benching arms already share. Neither
+piece can move here: this leaf is imported by the executors package, so naming
+a returncode would close an import cycle. A reader following a sentinel
+returncode therefore starts there and arrives at the classes below.
 """
 
 from __future__ import annotations
