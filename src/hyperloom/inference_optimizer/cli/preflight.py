@@ -664,6 +664,10 @@ def _ensure_framework_deps(args, python_exe: str, pip_extra: list[str]) -> None:
 # install_baremetal.sh's --skip-base-check.
 SKIP_FRAMEWORK_CHECK_ENV = "HYPERLOOM_SKIP_FRAMEWORK_CHECK"
 
+#: Frameworks ``install_baremetal.sh --install-framework`` accepts; it exits 2 on
+#: anything else. A test asserts this stays equal to the installer's own list.
+_SETUP_INSTALLABLE_FRAMEWORKS = frozenset({"sglang", "vllm"})
+
 
 # Rootfs markers the runtimes drop: Docker writes the first, podman the second.
 _CONTAINER_MARKER_FILES = ("/.dockerenv", "/run/.containerenv")
@@ -956,6 +960,17 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
         return
 
     probed = "\n".join(f"  - {python_exe}" for python_exe in interpreters)
+    if framework not in _SETUP_INSTALLABLE_FRAMEWORKS:
+        # Blocking needs a remedy that works. setup cannot install this one, so
+        # say so and let the run reach whatever the framework itself reports.
+        print(
+            f"Preflight: WARNING — {framework} is not importable by:\n"
+            f"{probed}{_probe_detail_block(probe.detail)}\n"
+            f"setup cannot install {framework}, so it has to come from the image or an\n"
+            "existing checkout on this host. Continuing; the benchmark will fail if it\n"
+            f"genuinely needs {framework} here."
+        )
+        return
     if _in_container():
         remedy = (
             "This process already runs in a container, so its image does not ship\n"

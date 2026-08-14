@@ -542,3 +542,40 @@ def test_in_container_prefers_container_when_no_signal_is_readable(monkeypatch):
     _fake_container_fs(monkeypatch, cgroup=None)
 
     assert preflight._in_container() is True
+
+
+_SETUP_INSTALLER = "inference_optimizer/assets/install_baremetal.sh"
+
+
+def test_a_framework_setup_cannot_install_is_not_blocked(monkeypatch, capsys):
+    """atom is a serving framework with no installer path.
+
+    install_baremetal.sh takes only none|sglang|vllm and exits 2 on anything
+    else, and never probes atom at all, so blocking the run and naming
+    ``--install-framework atom`` walks the reader into a second wall.
+    """
+    _probe_result(monkeypatch, importable=False)
+    monkeypatch.setattr(preflight, "_in_container", lambda: False)
+
+    preflight._check_serving_framework(_args("atom"), "/usr/bin/python3")
+
+    out = capsys.readouterr().out
+    assert "atom" in out
+    assert "--install-framework atom" not in out
+
+
+def test_the_installable_set_matches_the_installer():
+    """Two lists that must agree, in different languages, with nothing else
+    tying them together."""
+    from pathlib import Path
+
+    import hyperloom
+
+    source = (Path(hyperloom.__file__).parent / _SETUP_INSTALLER).read_text(encoding="utf-8")
+    accepted = re.search(r"^\s*(none\|[a-z|]+)\)\s*;;", source, re.MULTILINE)
+    assert accepted, "could not find the --install-framework case arm"
+    declared = {value for value in accepted.group(1).split("|") if value != "none"}
+
+    assert declared == set(preflight._SETUP_INSTALLABLE_FRAMEWORKS), (
+        f"installer accepts {declared}, preflight believes {set(preflight._SETUP_INSTALLABLE_FRAMEWORKS)}"
+    )
