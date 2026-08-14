@@ -60,7 +60,6 @@ from ._inferencex_patcher import (
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
-    _MAGPIE_CWD_DEFAULT as _MAGPIE_CWD_DEFAULT,
     _VARIANT_TIMEOUT_SEC_DEFAULT as _VARIANT_TIMEOUT_SEC_DEFAULT,
     GridVariant as GridVariant,
     coerce_extra_envs as coerce_extra_envs,
@@ -1232,7 +1231,6 @@ async def run_grid(
     grid: list[GridVariant],
     output_root: Path,
     magpie_python: str | None = None,
-    cwd: str = _MAGPIE_CWD_DEFAULT,
     variant_timeout_sec: int = _VARIANT_TIMEOUT_SEC_DEFAULT,
     keep_going_on_failure: bool = True,
     model_path: str | None = None,
@@ -1262,6 +1260,13 @@ async def run_grid(
     session budget; a variant is skipped once the remaining budget cannot fit
     another ``variant_timeout_sec`` worst-case run, so a wall-clock timeout stops
     the grid mid-way and the last variant never overruns the close window.
+
+    Every pass runs with ``output_root`` as its working directory, the way the
+    baseline arm anchors Magpie to its own output dir. That is what marks the
+    benchmark subtree as this session's on a shared node: the robustness reactor
+    only believes a load generator that it can tie to the session, and a grid
+    launched from the system temp directory carried no such tie, so a server
+    dying mid-variant read as the idle gap between two variants.
     """
     if not magpie_python:
         # Backend-aware: bypass uses a plain python3, not Magpie's venv.
@@ -1274,6 +1279,8 @@ async def run_grid(
         warmup_before_measure = _run_grid_warmup_enabled()
     auto_warmup_requested = bool(warmup_before_measure and server_lifecycle is None)
     results: list[VariantResult] = []
+    output_root.mkdir(parents=True, exist_ok=True)
+    cwd = str(output_root)
 
     # Reap orphaned aiter JIT build locks before booting any server. A prior GPU
     # process killed mid-``hipcc`` (e.g. an OOM'd co-scheduled server, or a
