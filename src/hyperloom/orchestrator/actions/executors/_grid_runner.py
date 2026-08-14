@@ -1301,10 +1301,9 @@ def session_clamped_timeout_sec(
     least ``_SESSION_KILL_GRACE_SEC`` past it, so the watchdog always gets there
     first. Every caller that reserves therefore re-opens the spurious-timeout
     window the grace exists to close, and owes a reason its round cannot be reaped
-    by its own cap -- either an admission gate built from the same number
-    (:func:`run_grid` refuses a variant whose rounds do not fit before it reserves
-    for them) or the decision to skip the round instead of starting one that will
-    be killed (:func:`session_warmup_cap_sec`).
+    by its own cap: :func:`run_grid` refuses a variant whose rounds do not fit,
+    both before the per-variant server restart and again after it, so what it
+    reserves for is a round it has just re-checked there is room for.
 
     Args:
         cap: The timeout the caller would grant with an unbounded budget.
@@ -1320,52 +1319,6 @@ def session_clamped_timeout_sec(
         return int(cap)
     usable = int(session_deadline_sec - time.monotonic() - max(0.0, reserve_sec)) + _SESSION_KILL_GRACE_SEC
     return int(cap) if usable >= int(cap) else max(1, usable)
-
-
-def session_warmup_cap_sec(
-    cap: int,
-    session_deadline_sec: float | None,
-    *,
-    measured_expected_sec: float,
-) -> int | None:
-    """The hard cap for a discarded warmup pass, or ``None`` when it must be skipped.
-
-    A warmup is the pass whose measurement is thrown away, so it is the pass whose
-    budget is given up first: it holds back what the measured round after it is
-    expected to need. That reserve is also the only thing that can pull a cap
-    before the session deadline (see :func:`session_clamped_timeout_sec`), so the
-    same number decides whether to launch at all. A warmup granted less than one
-    full pass warms nothing: it is killed at its cap, both arms swallow that as
-    best-effort, and the measured round then runs against a server nothing ever
-    drove -- and its throughput is what the session anchors every later gain on.
-    A skipped warmup is a shape both arms already support; a warmup killed at its
-    cap is not.
-
-    ``measured_expected_sec`` is the measured baseline runtime from
-    :func:`session_grid_bounds` -- what a normally-behaving pass of the same
-    workload needs, and what the admission gates upstream judge on. Zero means the
-    session has not measured a round yet, which leaves the warmup with no
-    hold-back: there is no number to reserve, and without a reserve the cap cannot
-    be pulled before the deadline, so the watchdog stays the thing that stops the
-    pass and attributes it to the budget. An unbounded budget is the same case for
-    the same reason -- nothing is being held back from anyone, so there is nothing
-    for the warmup to be short of, whatever its declared cap.
-
-    Args:
-        cap: The timeout the caller would grant with an unbounded budget.
-        session_deadline_sec: Monotonic-clock session deadline, or ``None`` when
-            the budget is unbounded, which leaves ``cap`` untouched.
-        measured_expected_sec: Seconds one measured pass of this workload is
-            expected to take; ``0`` when the session has not measured one.
-
-    Returns:
-        int | None: The hard timeout for the warmup pass, or ``None`` when what is
-            left cannot fit both it and the measured round it reserves for.
-    """
-    if session_deadline_sec is None or measured_expected_sec <= 0:
-        return session_clamped_timeout_sec(cap, session_deadline_sec)
-    clamped = session_clamped_timeout_sec(cap, session_deadline_sec, reserve_sec=measured_expected_sec)
-    return clamped if clamped >= measured_expected_sec else None
 
 
 def session_grid_bounds(shared_state: Any) -> tuple[float | None, float | None]:
@@ -1736,36 +1689,60 @@ async def run_grid(
         _mn_warmup_rounds = 1 if (_mn_is_multi_node() and _mn_bench_warmup_enabled()) else 0
     variant_rounds = 1 + (1 if auto_warmup_requested else 0) + _mn_warmup_rounds
 
+    def _skip_rest_for_budget(idx: int, *, spent_on: str) -> bool:
+        """Skip variant ``idx`` and every one after it, or say the budget still fits.
+
+        Checked twice per variant, because the two things that spend the budget
+        between the check and the launch are not under any cap: the per-variant
+        multi-node server restart, and the variant before this one overrunning.
+        Once a variant does not fit, none after it does either -- the clock only
+        shrinks -- so this ends the batch rather than trying the next name.
+
+        Args:
+            idx: Zero-based index of the variant about to run.
+            spent_on: What has been spent since the last check, for the log line.
+
+        Returns:
+            bool: ``True`` when the batch is over and nothing more was launched.
+        """
+        if session_deadline_sec is None:
+            return False
+        remaining_sec = session_deadline_sec - time.monotonic()
+        # Falls back to a single ``variant_timeout_sec`` when no estimate was
+        # given, which is what callers that cannot estimate already got.
+        required_sec = (
+            float(variant_expected_sec) * variant_rounds
+            if variant_expected_sec is not None
+            else float(variant_timeout_sec)
+        )
+        if remaining_sec >= required_sec:
+            return False
+        log.warning(
+            "grid_runner: %.0fs left cannot fit this variant's %d round(s) of %.0fs "
+            "(spent on: %s); skipping %d remaining variant(s) rather than launching a "
+            "pass whose measured round cannot follow it",
+            max(0.0, remaining_sec),
+            variant_rounds,
+            required_sec,
+            spent_on,
+            len(grid) - idx,
+        )
+        for skipped_variant in grid[idx:]:
+            results.append(
+                _not_run_skip_result(
+                    skipped_variant,
+                    _STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_RETURNCODE],
+                )
+            )
+        return True
+
     for i, variant in enumerate(grid):
         # Session-budget stop: skip the remaining variants once the wall-clock
         # deadline is reached or the remaining budget cannot fit another variant,
         # so a timeout halts the grid instead of draining it (and the last variant
         # cannot overrun the close window).
-        if session_deadline_sec is not None:
-            remaining_sec = session_deadline_sec - time.monotonic()
-            # Falls back to a single ``variant_timeout_sec`` when no estimate was
-            # given, which is what callers that cannot estimate already got.
-            required_sec = (
-                float(variant_expected_sec) * variant_rounds
-                if variant_expected_sec is not None
-                else float(variant_timeout_sec)
-            )
-            if remaining_sec < required_sec:
-                log.warning(
-                    "grid_runner: session budget exhausted (%.0fs left < %.0fs needed); "
-                    "skipping %d remaining variant(s)",
-                    max(0.0, remaining_sec),
-                    required_sec,
-                    len(grid) - i,
-                )
-                for skipped_variant in grid[i:]:
-                    results.append(
-                        _not_run_skip_result(
-                            skipped_variant,
-                            _STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_RETURNCODE],
-                        )
-                    )
-                break
+        if _skip_rest_for_budget(i, spent_on="the variants before this one"):
+            break
         await _unit_started(i, "variant")
         slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
         server_log = slot / "server.log"
@@ -2190,6 +2167,12 @@ async def run_grid(
             if not keep_going_on_failure:
                 break
             continue
+
+        # The restart above is a launch of its own and is under no cap, so the
+        # budget admitted at the top of the loop may no longer be there. Booting
+        # a large model can take longer than a benchmark pass.
+        if _skip_rest_for_budget(i, spent_on="this variant's server restart"):
+            break
 
         # Multi-node client warmup: one discarded benchmark pass against the
         # just-restarted, persistent remote server to warm JIT / steady-state
