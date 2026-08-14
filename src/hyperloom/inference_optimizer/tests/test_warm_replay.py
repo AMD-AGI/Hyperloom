@@ -1052,6 +1052,81 @@ async def test_failed_replay_clears_in_flight_via_full_routing(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_failure_rolls_back_preapplied_warm_kernel(tmp_path):
+    """A dispatch-time policy failure must restore the live framework target."""
+    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
+    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
+    from hyperloom.orchestrator.phases.machine_state import (
+        warm_replay_in_flight,
+    )
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    dispatcher = DispatcherCollaborator(coord)
+
+    class _Bus:
+        async def append_and_seq(self, _message):
+            return 1
+
+    dispatcher.bus = _Bus()
+    coord.shared_state.baseline_tput = 600.0
+    target = tmp_path / "site-packages/vllm/prefix_prefill.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("patched\n", encoding="utf-8")
+    backup = tmp_path / "warm_kernel_snapshots/0000.bin"
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    backup.write_text("original\n", encoding="utf-8")
+    snapshots = [
+        {
+            "target": str(target),
+            "existed": True,
+            "backup": str(backup),
+            "mode": 0o644,
+        }
+    ]
+    applied = [{"status": "ok", "target_file": str(target)}]
+    coord.shared_state.warm_replay_pending = {
+        "status": "in_flight",
+        "task_id": "task-warm-1",
+        "kernel_apply_results": applied,
+        "kernel_snapshots": snapshots,
+    }
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "expected_gain_pct": 25.0,
+        "replay_task_id": "task-warm-1",
+    }
+    task = _StubTask(
+        task_id="task-warm-1",
+        params={
+            "warm_kernel_apply_results": applied,
+            "warm_kernel_snapshots": snapshots,
+        },
+    )
+
+    await dispatcher._reap_dispatched_task(
+        task,
+        SubAgentResult(
+            task_id=task.task_id,
+            state="failed",
+            result={},
+            error=(
+                "replay_warm_recipe target_file='/usr/local/vllm.py' "
+                "escapes session_dir"
+            ),
+        ),
+        None,
+    )
+
+    assert target.read_text(encoding="utf-8") == "original\n"
+    assert coord.shared_state.warm_replay_pending == {}
+    assert warm_replay_in_flight(coord.shared_state) is False
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == "failed"
+    assert outcome["error_class"] == "dispatch_failed"
+    assert "escapes session_dir" in outcome["reason"]
+
+
+@pytest.mark.asyncio
 async def test_prelude_initial_analysis_deferred_while_warm_replay_in_flight(
     tmp_path,
 ):
