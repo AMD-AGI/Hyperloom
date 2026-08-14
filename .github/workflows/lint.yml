@@ -105,7 +105,10 @@ jobs:
           # scripts/ is included deliberately: platform_audit_bmc.py mints BMC
           # credentials and runs privileged subprocesses, so it is exactly the
           # code a security scanner should see, even though it ships outside the
-          # package.
+          # package. This widens the full-tree invocation only -- pre-commit's
+          # Bandit hook is passed explicit filenames and already covered
+          # scripts/ -- and the step stays advisory (continue-on-error), so it
+          # reports rather than gates.
           bandit -r src/hyperloom scripts -x "*/tests/*" -q --severity-level medium
 
       - name: Advisory notice when Bandit failed
