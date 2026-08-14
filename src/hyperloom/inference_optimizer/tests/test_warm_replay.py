@@ -349,6 +349,21 @@ def _patch_current_sdk_readers(
     class _Replay:
         active = True
 
+        def read_config(self):
+            configs = [explore_config or {}, framework_config or {}]
+            return {
+                "extra_server_args": " ".join(
+                    str(config.get("extra_server_args") or "").strip()
+                    for config in configs
+                    if str(config.get("extra_server_args") or "").strip()
+                ),
+                "extra_envs": {
+                    str(key): str(value)
+                    for config in configs
+                    for key, value in (config.get("extra_envs") or {}).items()
+                },
+            }
+
         def read_patch_timeline(self):
             return list(timeline)
 

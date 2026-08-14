@@ -1,47 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The kernel agent's own columns of this run's knowledge document.
-
-This module defines the handoff surface only. GEMM, fusion and rewrite
-production call sites are intentionally owned by their agent implementations
-and are not wired by the Remote Recipe migration itself.
-
-The document keeps one column per producer, and the kernel column keeps one
-sub-column per kernel backend::
-
-    "kernel": {"gemm": {...}, "fusion": {...}, "rewrite": {...}}
-
-Each backend hands over the complete picture of its sub-column plus the files
-that belong to it, and gets back the refs to record for those files::
-
-    kb = KernelAgentKB.open()
-    prior = kb.read_rewrite()
-    refs = kb.write_rewrite({"items": [...]}, files=[patch_path])
-
-``refs`` comes back positionally — one slot per file passed, empty when that
-artifact could not be staged — so a caller that needs a ref inside its own
-metadata writes twice: once to stage the files, once with the refs folded into
-the payload. A caller that does not can ignore the return
-value, because the same refs are recorded under the column's ``files`` key.
-
-The write replaces the sub-column: what an agent hands over is the whole
-picture of that sub-column, not a patch against the last call. Files already
-staged for that sub-column remain referenced when a later write supplies no new
-files. Sibling sub-columns and every other column in the document are left
-untouched, so a section-aware backend and a not-yet-migrated one publish into
-one record.
-
-Wiring is unconditional. A run with no draft directory -- local knowledge
-mode, or a run that never publishes -- leaves the facade inactive and turns
-every call into a no-op, so a caller never has to branch on whether the KB is
-on. Nothing here raises into the agent: knowledge is advisory, and a failure
-to record must not fail an optimization.
-"""
+"""Agent facades for Recipe config, patch overlays, and prior Kernel columns."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -54,13 +17,11 @@ from .remote_recipe._vendor.kb_store_client import (
     FILES_MEMBER_ROOT,
     KBStoreError,
     KnowledgeSections,
-    _same_bytes,
 )
 
 log = logging.getLogger(__name__)
 
 KERNEL_SECTION = "kernel"
-KERNEL_COLUMNS = ("gemm", "fusion", "rewrite")
 EXPLORE_SECTION = "explore"
 FRAMEWORK_SECTION = "framework"
 
@@ -156,43 +117,6 @@ class _ConfigPatchAgentKB:
             for ref in patches
             if isinstance(ref, str) and str(ref).strip()
         ]
-
-    def write_config(
-        self,
-        extra_server_args: str | Mapping[str, Any] = "",
-        extra_envs: Mapping[str, Any] | None = None,
-    ) -> bool:
-        """Replace this owner's final config/env snapshot, preserving patches.
-
-        A current-best-like mapping is accepted as a convenience for writeback;
-        callers may also pass the two fields directly.
-        """
-        if self._sections is None:
-            return False
-        if isinstance(extra_server_args, Mapping):
-            snapshot = extra_server_args
-            args = str(
-                snapshot.get("effective_extra_server_args")
-                or snapshot.get("extra_server_args")
-                or ""
-            )
-            raw_envs = snapshot.get("extra_envs")
-            envs = dict(raw_envs) if isinstance(raw_envs, Mapping) else {}
-        else:
-            args = str(extra_server_args or "")
-            envs = dict(extra_envs or {})
-        try:
-            staged = self._sections.staged(self.SECTION)
-            document = dict(staged.knowledge) if staged is not None else {}
-            document["extra_server_args"] = args
-            document["extra_envs"] = {
-                str(key): str(value) for key, value in envs.items()
-            }
-            self._sections.write(self.SECTION, document, mode="replace")
-        except (KBStoreError, OSError, TypeError, ValueError) as exc:
-            log.warning("%s kb: cannot record config: %s", self.SECTION, exc)
-            return False
-        return True
 
     def stage_patches(
         self,
@@ -331,13 +255,13 @@ class _ConfigPatchAgentKB:
 
 
 class ExploreAgentKB(_ConfigPatchAgentKB):
-    """Read/write EXPLORE's final config and accepted source overlays."""
+    """Read legacy EXPLORE config and stage accepted source overlays."""
 
     SECTION = EXPLORE_SECTION
 
 
 class FrameworkAgentKB(_ConfigPatchAgentKB):
-    """Read/write FRAMEWORK_AGENT's final config and accepted overlays."""
+    """Read legacy FRAMEWORK config and stage accepted source overlays."""
 
     SECTION = FRAMEWORK_SECTION
 
@@ -364,13 +288,12 @@ class RecipeReplayKB:
             and self._sections.warm_start_dir is not None
         )
 
-    def read_patch_timeline(self) -> list[str]:
-        """Return the exact flat global timeline, rejecting malformed records."""
+    def _read_value(self) -> dict[str, Any]:
+        """Return the validated current Recipe value object."""
         if not self.active:
-            return []
+            return {}
         from .remote_recipe.models import (
             RemoteRecipeValidationError,
-            validate_relative_path,
         )
         from .remote_recipe.values import (
             CURRENT_KNOWLEDGE_SCHEMA_VERSION,
@@ -398,6 +321,34 @@ class RecipeReplayKB:
                 "downloaded Recipe does not match the current knowledge contract"
             )
         value = knowledge.get("value")
+        if not isinstance(value, Mapping):
+            raise RemoteRecipeValidationError(
+                "downloaded Recipe value must be an object"
+            )
+        return dict(value)
+
+    def read_config(self) -> dict[str, Any]:
+        """Return the single final replay config, or ``{}`` for legacy records."""
+        config = self._read_value().get("config")
+        if not isinstance(config, Mapping):
+            return {}
+        return {
+            "extra_server_args": str(config.get("extra_server_args") or ""),
+            "extra_envs": (
+                dict(config.get("extra_envs") or {})
+                if isinstance(config.get("extra_envs"), Mapping)
+                else {}
+            ),
+        }
+
+    def read_patch_timeline(self) -> list[str]:
+        """Return the exact flat global timeline, rejecting malformed records."""
+        from .remote_recipe.models import (
+            RemoteRecipeValidationError,
+            validate_relative_path,
+        )
+
+        value = self._read_value()
         timeline = value.get("patch_timeline") if isinstance(value, Mapping) else None
         if not isinstance(timeline, list) or not all(
             isinstance(ref, str) for ref in timeline
@@ -409,7 +360,7 @@ class RecipeReplayKB:
 
 
 class KernelAgentKB:
-    """Read and write the ``gemm``/``fusion``/``rewrite`` sub-columns."""
+    """Read prior ``gemm``/``fusion``/``rewrite`` sub-columns."""
 
     def __init__(self, sections: KnowledgeSections | None) -> None:
         self._sections = sections
@@ -426,7 +377,7 @@ class KernelAgentKB:
 
     @property
     def active(self) -> bool:
-        """True when this run collects sections and the calls below do something."""
+        """True when section-backed prior reads are available."""
         return self._sections is not None
 
     # -- read ----------------------------------------------------------------
@@ -447,34 +398,6 @@ class KernelAgentKB:
         """Resolve a ref recorded in prior knowledge to its downloaded file."""
         return _prior_member(self._sections, ref, owner=KERNEL_SECTION)
 
-    # -- write ---------------------------------------------------------------
-
-    def write_gemm(
-        self,
-        knowledge: Mapping[str, Any],
-        files: Iterable[str | Path] = (),
-    ) -> list[str]:
-        """Record the complete ``gemm`` sub-column and its files."""
-        return self._write("gemm", knowledge, files)
-
-    def write_fusion(
-        self,
-        knowledge: Mapping[str, Any],
-        files: Iterable[str | Path] = (),
-    ) -> list[str]:
-        """Record the complete ``fusion`` sub-column and its files."""
-        return self._write("fusion", knowledge, files)
-
-    def write_rewrite(
-        self,
-        knowledge: Mapping[str, Any],
-        files: Iterable[str | Path] = (),
-    ) -> list[str]:
-        """Record the complete ``rewrite`` sub-column and its files."""
-        return self._write("rewrite", knowledge, files)
-
-    # -- internals -----------------------------------------------------------
-
     def _read(self, column: str) -> dict[str, Any]:
         if self._sections is None:
             return {}
@@ -488,88 +411,12 @@ class KernelAgentKB:
         node = content.knowledge.get(column)
         return dict(node) if isinstance(node, Mapping) else {}
 
-    def _write(
-        self,
-        column: str,
-        knowledge: Mapping[str, Any],
-        files: Iterable[str | Path],
-    ) -> list[str]:
-        if self._sections is None:
-            return []
-        if not isinstance(knowledge, Mapping):
-            log.warning("kernel kb: %s knowledge must be a mapping", column)
-            return []
-        # Positional: a caller folds these back into its own metadata by index,
-        # so a failed stage keeps an empty placeholder rather than shifting every
-        # later artifact one slot up.
-        refs = [self._stage(column, source) for source in files]
-        payload = dict(knowledge)
-        try:
-            staged = self._sections.staged(KERNEL_SECTION)
-            prefix = f"{KERNEL_SECTION}/{column}/"
-            column_refs = (
-                sorted(
-                    path.relative_to(self._sections.files_dir).as_posix()
-                    for path in staged.files
-                    if path.relative_to(self._sections.files_dir)
-                    .as_posix()
-                    .startswith(prefix)
-                )
-                if staged is not None
-                else []
-            )
-            if column_refs:
-                payload["files"] = column_refs
-            document = dict(staged.knowledge) if staged is not None else {}
-            document[column] = payload
-            self._sections.write(KERNEL_SECTION, document, mode="replace")
-        except (KBStoreError, OSError, ValueError) as exc:
-            log.warning("kernel kb: cannot record %s: %s", column, exc)
-            return []
-        return refs
-
-    def _stage(self, column: str, source: str | Path) -> str:
-        """Copy one artifact into the draft and return the ref that names it."""
-        try:
-            staged = self._sections.staged(KERNEL_SECTION)
-            self._sections.write(
-                KERNEL_SECTION,
-                staged.knowledge if staged is not None else {},
-                files=[source],
-                kind=column,
-                mode="merge",
-            )
-        except (KBStoreError, OSError, ValueError) as exc:
-            log.warning("kernel kb: cannot stage %s for %s: %s", source, column, exc)
-            return ""
-        return self._staged_ref(column, source)
-
-    def _staged_ref(self, column: str, source: str | Path) -> str:
-        """Name the copy this artifact just landed as, by the draft's own rule.
-
-        The draft keeps ``{section}/{kind}/{name}`` and only falls back to a
-        digest-suffixed name when that path is already taken by different bytes.
-        Deriving the ref from the files on disk — rather than from whether the
-        staged list happened to grow — is what keeps a re-staged artifact from
-        being handed the ref of a same-named neighbour.
-        """
-        src = Path(str(source))
-        files_dir = self._sections.files_dir
-        plain = f"{KERNEL_SECTION}/{column}/{src.name}"
-        landed = files_dir / plain
-        if landed.is_file() and _same_bytes(src, landed):
-            return plain
-        digest = hashlib.sha256(str(src.resolve()).encode()).hexdigest()[:10]
-        suffixed = f"{KERNEL_SECTION}/{column}/{src.stem}-{digest}{src.suffix}"
-        return suffixed if (files_dir / suffixed).is_file() else ""
-
 
 __all__ = [
     "EXPLORE_SECTION",
     "ExploreAgentKB",
     "FRAMEWORK_SECTION",
     "FrameworkAgentKB",
-    "KERNEL_COLUMNS",
     "KERNEL_SECTION",
     "KernelAgentKB",
     "RecipeReplayKB",

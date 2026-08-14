@@ -938,9 +938,6 @@ class _FakeStore:
         self.calls.append(("get_hyperloom_recipe_view", canonical_id))
         return self.envelope
 
-    def get_best_record(self, canonical_id):
-        raise AssertionError(f"raw endpoint used for {canonical_id}")
-
     def put_dir(self, canonical_id, session_id, files_dir):
         self.calls.append(("put_dir", canonical_id, session_id, Path(files_dir)))
         root = Path(files_dir)
@@ -1020,111 +1017,6 @@ def test_write_order_replace_metric_and_409_retry(tmp_path: Path) -> None:
     assert store.published_knowledge is not None
     assert "kernel" in store.published_knowledge["value"]
     assert result.status == "written"
-
-
-def test_close_merges_replayed_and_new_staged_rewrite_on_one_page(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    identity = "inference:m:h:f:mt:a:v:p"
-    prior_ref = "kernel/rewrite/prior.py"
-    new_source = tmp_path / "new.py"
-    new_source.write_text("new optimized", encoding="utf-8")
-    warm = tmp_path / "warm"
-    prior_source = warm / "files" / prior_ref
-    prior_source.parent.mkdir(parents=True)
-    prior_source.write_text("prior optimized", encoding="utf-8")
-    prior_row = {
-        "id": "prior",
-        "kernel_name": "prior",
-        "source_files": [prior_ref],
-    }
-    (warm / "recipe.json").write_text(
-        json.dumps(
-            {
-                "value": {
-                    "kernel": {
-                        "rewrite": {
-                            "items": [prior_row],
-                            "files": [prior_ref],
-                        }
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    draft = tmp_path / "draft"
-    sections = KnowledgeSections(draft, warm_start_dir=warm)
-    kernel = KernelAgentKB(sections)
-    new_ref = kernel.write_rewrite({"items": []}, files=[new_source])[0]
-    new_row = {
-        "id": "new",
-        "kernel_name": "new",
-        "source_files": [new_ref],
-    }
-    kernel.write_rewrite({"items": [new_row]})
-    monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
-    monkeypatch.setenv("KB_WARM_START_DIR", str(warm))
-    state = SimpleNamespace(
-        optimization_stack=[
-            {
-                "action": "replay_warm_recipe",
-                "kernel_replay": {
-                    "validation": "combined_recipe_kernel",
-                    "count": 1,
-                    "columns": ["rewrite"],
-                },
-            },
-            {"action": "kernel_validated_keep"},
-        ],
-        warm_replay_outcome={
-            "status": "reproduced",
-            "kernel": {
-                "status": "kept",
-                "kept": 1,
-                "validation": "combined_recipe_kernel",
-            },
-        },
-        warm_kernel_kb_plan=[
-            {"column": "rewrite", "recipe_row": prior_row}
-        ],
-        current_best={
-            "tput": 130.0,
-            "extra_server_args": "--combined",
-            "extra_envs": {},
-        },
-        cumulative_gain_validated=30.0,
-        kernel_opt_task_attempts={},
-        last_gemm_tuning={},
-        session_id="session-1",
-        recipe_kb_session_id="session-1",
-    )
-    store = _FakeStore()
-
-    result = write_final_remote_recipe(
-        state,
-        identity,
-        "session-1",
-        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
-    )
-
-    assert result.status == "written"
-    assert store.published_knowledge is not None
-    rewrite = store.published_knowledge["value"]["kernel"]["rewrite"]
-    assert [row["id"] for row in rewrite["items"]] == ["prior", "new"]
-    assert rewrite["files"] == sorted([prior_ref, new_ref])
-    assert store.uploaded_paths == {prior_ref, new_ref}
-    assert len([call for call in store.calls if call[0] == "put_knowledge"]) == 1
-    assert all(
-        call[1] == identity
-        for call in store.calls
-        if call[0] in {"put_dir", "put_knowledge", "set_champion"}
-    )
-    champion = [call for call in store.calls if call[0] == "set_champion"]
-    assert champion == [
-        ("set_champion", identity, "session-1", "optimized_throughput", 130.0)
-    ]
 
 
 def test_write_boundary_sanitizes_directly_constructed_bundle(tmp_path: Path) -> None:
@@ -1531,68 +1423,6 @@ def _sections(tmp_path: Path):
     return kb_store_client.KnowledgeSections(tmp_path / "draft")
 
 
-def test_an_agent_staged_section_overrides_what_the_stack_scrape_guessed(
-    tmp_path: Path,
-) -> None:
-    sections = _sections(tmp_path)
-    sections.write("framework", {"extra_server_args": "--authored-by-the-agent"})
-    bundle = build_remote_knowledge(
-        _state(tmp_path), tmp_path / "files", sections=sections
-    )
-    framework = bundle.knowledge["value"]["framework"]
-    assert framework["extra_server_args"] == "--authored-by-the-agent"
-    # Keys the agent did not stage still come from the scrape.
-    assert framework["extra_envs"] == {"VLLM_FRAMEWORK_TEST": "1"}
-    assert bundle.knowledge["provenance"]["staged_sections"] == ["framework"]
-
-
-def test_agent_staged_sections_are_sanitized_at_publish_boundary(
-    tmp_path: Path,
-) -> None:
-    sections = _sections(tmp_path)
-    source = tmp_path / "kernel.py"
-    source.write_text("pass\n", encoding="utf-8")
-    sections.write(
-        "kernel",
-        {
-            "rewrite": {
-                "extra_envs": {
-                    "SGLANG_SAFE_TOGGLE": "1",
-                    "ANTHROPIC_API_KEY": "secret",
-                },
-                "workspace": "/home/operator/private/session",
-                "access_token": "secret",
-                "source_file": "kernel/rewrite/kernel.py",
-            }
-        },
-        files=[source],
-        kind="rewrite",
-    )
-
-    bundle = build_remote_knowledge(
-        _state(tmp_path),
-        tmp_path / "files",
-        sections=sections,
-    )
-
-    rewrite = bundle.knowledge["value"]["kernel"]["rewrite"]
-    assert rewrite["extra_envs"] == {"SGLANG_SAFE_TOGGLE": "1"}
-    assert rewrite["source_file"] == "kernel/rewrite/kernel.py"
-    assert "workspace" not in rewrite
-    assert "access_token" not in rewrite
-
-
-def test_a_section_nobody_staged_is_left_to_the_stack_scrape(tmp_path: Path) -> None:
-    sections = _sections(tmp_path)
-    sections.write("framework", {"extra_server_args": "--authored"})
-    bundle = build_remote_knowledge(
-        _state(tmp_path), tmp_path / "files", sections=sections
-    )
-    explore = bundle.knowledge["value"]["explore"]
-    assert explore["extra_envs"] == {"VLLM_EXPLORE_TEST": "1"}
-    assert bundle.knowledge["provenance"]["staged_sections"] == ["framework"]
-
-
 def test_a_staged_file_is_published_under_its_own_section(tmp_path: Path) -> None:
     patch = tmp_path / "authored.patch"
     patch.write_text("authored", encoding="utf-8")
@@ -1614,32 +1444,6 @@ def test_a_staged_file_is_published_under_its_own_section(tmp_path: Path) -> Non
     assert (tmp_path / "files" / "framework" / "patches" / "authored.patch").is_file()
 
 
-def test_agent_column_free_text_is_not_treated_as_an_artifact_ref(
-    tmp_path: Path,
-) -> None:
-    sections = _sections(tmp_path)
-    sections.write(
-        "kernel",
-        {
-            "gemm": {
-                "optimizations": [{"id": "g1"}],
-                "report": "tuned 3 shapes, 1.4x on the hot GEMM",
-                "patch": "inlined the epilogue",
-            }
-        },
-    )
-
-    bundle = build_remote_knowledge(
-        _state(tmp_path),
-        tmp_path / "files-free-text",
-        sections=sections,
-    )
-
-    gemm = bundle.knowledge["value"]["kernel"]["gemm"]
-    assert gemm["report"] == "tuned 3 shapes, 1.4x on the hot GEMM"
-    assert gemm["patch"] == "inlined the epilogue"
-
-
 def test_orphaned_required_staged_file_fails_close(tmp_path: Path) -> None:
     patch = tmp_path / "orphan.patch"
     patch.write_text("orphan", encoding="utf-8")
@@ -1657,48 +1461,6 @@ def test_orphaned_required_staged_file_fails_close(tmp_path: Path) -> None:
             tmp_path / "files-orphan",
             sections=sections,
         )
-
-
-def test_conflicting_required_staged_artifact_fails_close(tmp_path: Path) -> None:
-    staged_patch = tmp_path / "staged" / "explore.patch"
-    staged_patch.parent.mkdir()
-    staged_patch.write_text("different", encoding="utf-8")
-    sections = _sections(tmp_path)
-    ExploreAgentKB(sections).stage_patches([staged_patch], stack_index=0)
-    state = _state(tmp_path)
-    state.optimization_stack[0]["kb_required_owner"] = "EXPLORE"
-
-    with pytest.raises(
-        RemoteRecipeValidationError,
-        match="conflicting artifact content",
-    ):
-        build_remote_knowledge(
-            state,
-            tmp_path / "files-conflict",
-            sections=sections,
-        )
-
-
-def test_the_kernel_column_keeps_the_sub_columns_the_agent_left_alone(
-    tmp_path: Path,
-) -> None:
-    sections = _sections(tmp_path)
-    sections.write("kernel", {"gemm": {"authored": True}})
-    bundle = build_remote_knowledge(
-        _state(tmp_path), tmp_path / "files", sections=sections
-    )
-    kernel = bundle.knowledge["value"]["kernel"]
-    assert kernel["gemm"] == {"authored": True}
-    assert "rewrite" in kernel and "fusion" in kernel
-
-
-def test_no_draft_at_all_publishes_exactly_what_it_used_to(tmp_path: Path) -> None:
-    without = build_remote_knowledge(_state(tmp_path), tmp_path / "a")
-    with_empty = build_remote_knowledge(
-        _state(tmp_path), tmp_path / "b", sections=_sections(tmp_path)
-    )
-    assert without.knowledge["value"] == with_empty.knowledge["value"]
-    assert without.knowledge["provenance"]["staged_sections"] == []
 
 
 def test_a_record_without_a_selection_reason_still_reads(tmp_path: Path) -> None:

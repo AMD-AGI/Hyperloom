@@ -198,28 +198,6 @@ class KBStoreClient:
                 return None
             raise
 
-    def get_record(self, rid: str) -> dict[str, Any] | None:
-        """Fetch a record by UUID alone, or ``None`` when it does not exist."""
-        try:
-            return self._request("GET", f"/v1/records/{self._quote(rid)}")
-        except KBStoreError as exc:
-            if "HTTP 404" in str(exc):
-                return None
-            raise
-
-    def get_best_record(self, canonical_id: str) -> dict[str, Any] | None:
-        """The record to act on for an identity, or ``None`` if there is none.
-
-        Answers from the v1 recipe page when an identity predates this store,
-        so a caller does not have to know which plane its data lives in.
-        """
-        try:
-            return self._request("GET", f"/v1/kb/{self._quote(canonical_id)}")
-        except KBStoreError as exc:
-            if "HTTP 404" in str(exc):
-                return None
-            raise
-
     def get_hyperloom_recipe_view(
         self, canonical_id: str
     ) -> dict[str, Any] | None:
@@ -263,16 +241,6 @@ class KBStoreClient:
             if "HTTP 404" in str(exc):
                 return None
             raise
-
-    def list_identity_files(
-        self, canonical_id: str, *, kind: str = ""
-    ) -> list[dict[str, Any]]:
-        """Artifacts across all sessions of an identity, deduped by digest."""
-        path = f"/v1/kb/{self._quote(canonical_id)}/files"
-        if kind:
-            path += "?" + urllib.parse.urlencode({"kind": kind})
-        result = self._request("GET", path) or {}
-        return list(result.get("files") or [])
 
     def set_champion(
         self, canonical_id: str, session_id: str, *, metric: str = "throughput", value: float = 0.0

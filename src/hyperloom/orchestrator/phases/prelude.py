@@ -1047,15 +1047,26 @@ class PreludePhase(PhaseHandler):
         if not all((explore.active, framework.active, kernel.active, replay.active)):
             raise ValueError("current Recipe SDK readers are unavailable")
 
-        args, envs = _merge_current_recipe_configs(
-            (explore_config := explore.read_config()),
-            (framework_config := framework.read_config()),
-        )
+        config = replay.read_config()
+        if config:
+            args = str(config.get("extra_server_args") or "")
+            envs = dict(config.get("extra_envs") or {})
+        else:
+            # Existing schema-v1 records stored config under owner sections.
+            args, envs = _merge_current_recipe_configs(
+                explore.read_config(),
+                framework.read_config(),
+            )
+            config = {
+                "extra_server_args": args,
+                "extra_envs": envs,
+            }
         kernel_config = self._preview_current_kernel_config(kernel)
-        combined_args, combined_envs = _merge_current_recipe_configs(
-            explore_config,
-            framework_config,
-            kernel_config,
+        combined_args, combined_envs = _merge_named_current_recipe_configs(
+            [
+                ("config", config),
+                ("kernel", kernel_config),
+            ]
         )
         owner_kbs = {"explore": explore, "framework": framework}
         owner_ref_lists = {

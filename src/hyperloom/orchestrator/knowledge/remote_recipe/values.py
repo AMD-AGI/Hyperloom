@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import math
 import re
@@ -264,6 +263,21 @@ def _config_from(entries: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _config_from_current_best(state: Any) -> dict[str, Any]:
+    current = _mapping(getattr(state, "current_best", {}))
+    args = str(
+        current.get("effective_extra_server_args")
+        or current.get("extra_server_args")
+        or ""
+    ).strip()
+    return {
+        "extra_server_args": sanitize_publish_server_args(args),
+        "extra_envs": sanitize_publish_env_mapping(
+            _mapping(current.get("extra_envs"))
+        ),
+    }
+
+
 def _entry_files(entries: list[dict[str, Any]], files: _Files, category: str) -> tuple[list[str], list[str]]:
     patches: list[str] = []
     artifacts: list[str] = []
@@ -326,10 +340,9 @@ def build_explore_value(
     entries: list[dict[str, Any]],
     files: _Files,
 ) -> dict[str, Any]:
-    """Build final cumulative EXPLORE config and EXPLORE-origin file references."""
+    """Build EXPLORE-origin patch and artifact references."""
     patches, artifacts = _entry_files(entries, files, "explore")
     return {
-        **_config_from(entries),
         "patches": patches,
         "artifacts": artifacts,
     }
@@ -340,10 +353,9 @@ def build_framework_value(
     entries: list[dict[str, Any]],
     files: _Files,
 ) -> dict[str, Any]:
-    """Build final FRAMEWORK config/env and FRAMEWORK-origin file references."""
+    """Build FRAMEWORK-origin patch and artifact references."""
     patches, artifacts = _entry_files(entries, files, "framework")
     return {
-        **_config_from(entries),
         "patches": patches,
         "artifacts": artifacts,
     }
@@ -668,19 +680,6 @@ def _adopt_replayed_prior(
         knowledge = _mapping(document.get("knowledge"))
         prior_value = _mapping(knowledge.get("value"))
 
-    # Config/env is part of what replay proved. Preserve it when no newer
-    # section-owned snapshot has replaced that field.
-    for owner in ("explore", "framework"):
-        prior = _mapping(prior_value.get(owner))
-        current = _mapping(value.get(owner))
-        if not current.get("extra_server_args") and prior.get("extra_server_args"):
-            current["extra_server_args"] = str(prior.get("extra_server_args") or "")
-        prior_envs = _mapping(prior.get("extra_envs"))
-        current_envs = _mapping(current.get("extra_envs"))
-        if prior_envs:
-            current["extra_envs"] = {**prior_envs, **current_envs}
-        value[owner] = current
-
     replay_index = next(
         (
             index
@@ -892,81 +891,6 @@ def _adopt_replayed_kernel(
     value["kernel"] = kernel
 
 
-_KERNEL_ROW_LIST_KEYS = {
-    "gemm": "optimizations",
-    "fusion": "items",
-    "rewrite": "items",
-}
-
-
-def _kernel_row_identity(
-    column: str,
-    row: Mapping[str, Any],
-) -> tuple[str, ...]:
-    """Return a stable identity for deduping one kernel optimization row."""
-    for key in ("id", "integration_id", "task_group_key"):
-        value = str(row.get(key) or "").strip()
-        if value:
-            return ("id", key, value)
-    ref_keys = {
-        "gemm": ("tuned_file",),
-        "fusion": ("patch", "source_file"),
-        "rewrite": ("patch", "source_files"),
-    }[column]
-    refs: list[str] = []
-    for key in ref_keys:
-        raw = row.get(key)
-        values = raw if isinstance(raw, list) else [raw]
-        refs.extend(str(value) for value in values if str(value or "").strip())
-    if refs:
-        return ("refs", *refs)
-    for key in ("variant_name", "kernel_name", "kernel_id", "name"):
-        value = str(row.get(key) or "").strip()
-        if value:
-            return ("name", key, value)
-    return (
-        "content",
-        json.dumps(dict(row), sort_keys=True, separators=(",", ":"), default=str),
-    )
-
-
-def _merge_kernel_section(
-    current: Mapping[str, Any],
-    staged: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Deep-merge kernel sub-columns, with newly staged duplicate rows winning."""
-    combined = {**dict(current), **dict(staged)}
-    for column, list_key in _KERNEL_ROW_LIST_KEYS.items():
-        before = _mapping(current.get(column))
-        after = _mapping(staged.get(column))
-        if not before and not after:
-            continue
-        if column in staged and list_key not in after:
-            combined[column] = dict(after)
-            continue
-        rows: dict[tuple[str, ...], dict[str, Any]] = {}
-        for source in (before, after):
-            candidates = source.get(list_key)
-            if not isinstance(candidates, list):
-                continue
-            for row in candidates:
-                if isinstance(row, Mapping):
-                    copied = dict(row)
-                    rows[_kernel_row_identity(column, copied)] = copied
-        merged_column = {
-            **{key: value for key, value in before.items() if key != "files"},
-            **{key: value for key, value in after.items() if key != "files"},
-            list_key: list(rows.values()),
-        }
-        refs = sorted(
-            extract_knowledge_artifact_refs({list_key: list(rows.values())})
-        )
-        if refs:
-            merged_column["files"] = refs
-        combined[column] = merged_column
-    return combined
-
-
 def merge_staged_sections(
     value: dict[str, Any],
     sections: Any,
@@ -1036,18 +960,19 @@ def merge_staged_sections(
             for source, rel in staged_files:
                 files.adopt(source, rel)
             current = value.get(name)
-            if name == "kernel":
-                combined = _merge_kernel_section(
-                    current if isinstance(current, Mapping) else {},
-                    staged.knowledge,
-                )
-            else:
-                combined = {
-                    **(current if isinstance(current, Mapping) else {}),
-                    **staged.knowledge,
-                }
-            # Config snapshots replace their fields, while patch/artifact refs
-            # accumulate across KEEPs and warm replay.
+            combined = {
+                "patches": (
+                    list(current.get("patches") or [])
+                    if isinstance(current, Mapping)
+                    else []
+                ),
+                "artifacts": (
+                    list(current.get("artifacts") or [])
+                    if isinstance(current, Mapping)
+                    else []
+                ),
+            }
+            # Owner sections contain patch/artifact refs only.
             for ref_key in ("patches", "artifacts"):
                 before = (
                     list(current.get(ref_key) or [])
@@ -1117,9 +1042,20 @@ def build_remote_knowledge(
     )
     gains = list(getattr(state, "gain_per_stack_entry", []) or [])
     worked = _experience(state, "what_worked") or _worked_from_stack(stack, gains)
+    if sections is None:
+        # Legacy callers without section staging retain their stack-derived
+        # owner snapshots; remote current records use value.config below.
+        explore_value = build_explore_value(state, explore_entries, files)
+        framework_value = build_framework_value(state, framework_entries, files)
+        explore_value.update(_config_from(explore_entries))
+        framework_value.update(_config_from(framework_entries))
+    else:
+        explore_value = {"patches": [], "artifacts": []}
+        framework_value = {"patches": [], "artifacts": []}
     value = {
-        "explore": build_explore_value(state, explore_entries, files),
-        "framework": build_framework_value(state, framework_entries, files),
+        "config": _config_from_current_best(state),
+        "explore": explore_value,
+        "framework": framework_value,
         "kernel": {
             "gemm": build_kernel_gemm_value(state, files),
             "fusion": build_kernel_fusion_value(state, files),
@@ -1134,6 +1070,7 @@ def build_remote_knowledge(
             value,
             sections,
             files,
+            only=("explore", "framework"),
             required=required_patch_owners,
         )
         if sections is not None
@@ -1183,6 +1120,13 @@ def has_replay_material(document: Mapping[str, Any]) -> bool:
     value = _mapping(knowledge.get("value"))
     if not value:
         return False
+    config = _mapping(value.get("config"))
+    if (
+        str(config.get("extra_server_args") or "").strip()
+        or _mapping(config.get("extra_envs"))
+    ):
+        return True
+    # Legacy records stored config under owner sections.
     for section_name in ("explore", "framework"):
         section = _mapping(value.get(section_name))
         if not section:
