@@ -1518,6 +1518,69 @@ class TestSessionGridBounds:
         assert _grid_runner.session_grid_bounds(state) == (None, 600.0)
 
 
+class TestTheWarmupHoldBack:
+    """The other half of ``session_grid_bounds``' contract: what a pass holds back.
+
+    Both benching arms discard a warmup pass in front of a measured round, so both
+    have to hold back the same seconds for it. And because a reserve is the only
+    thing that can pull a cap before the session deadline, the same number decides
+    whether the warmup is worth launching at all.
+    """
+
+    def test_the_measured_rounds_expected_runtime_is_held_back(self):
+        cap = _grid_runner.session_warmup_cap_sec(
+            7800,
+            time.monotonic() + 3600.0,
+            measured_expected_sec=600.0,
+        )
+        assert cap == pytest.approx(3600 - 600 + _SESSION_KILL_GRACE_SEC, abs=2)
+
+    def test_a_budget_that_fits_the_declared_cap_leaves_it_alone(self):
+        assert (
+            _grid_runner.session_warmup_cap_sec(
+                600,
+                time.monotonic() + 36000.0,
+                measured_expected_sec=600.0,
+            )
+            == 600
+        )
+
+    def test_a_warmup_that_cannot_fit_is_refused_rather_than_starved(self):
+        """Two passes do not fit in 800s, and the 1s floor is not a warmup."""
+        assert (
+            _grid_runner.session_warmup_cap_sec(
+                7800,
+                time.monotonic() + 800.0,
+                measured_expected_sec=600.0,
+            )
+            is None
+        )
+
+    def test_an_unmeasured_session_holds_nothing_back(self):
+        """Zero is "no round measured yet", not "the next round needs no time".
+
+        With nothing known to reserve the cap stays past the deadline, which leaves
+        the session watchdog -- the only thing that attributes a budget kill
+        correctly -- as what stops the pass.
+        """
+        cap = _grid_runner.session_warmup_cap_sec(
+            7800,
+            time.monotonic() + 800.0,
+            measured_expected_sec=0.0,
+        )
+        assert cap == pytest.approx(800 + _SESSION_KILL_GRACE_SEC, abs=2)
+
+    def test_an_unbounded_budget_leaves_the_cap_alone(self):
+        """Not even a cap smaller than the pass is this function's business here.
+
+        Nothing is being held back from anyone, so there is nothing for the warmup
+        to be short of; a declared cap under the measured runtime is a fact about
+        the cap, and refusing the pass over it would be this helper deciding
+        something the budget never asked it to.
+        """
+        assert _grid_runner.session_warmup_cap_sec(600, None, measured_expected_sec=900.0) == 600
+
+
 class TestSessionBudgetAdmission:
     """A variant is admitted on what it is expected to need, not on its backstop.
 
@@ -1987,11 +2050,61 @@ class TestSessionBudgetWarmupRounds:
         by_round = launches_by_round_slot(recorded)
         warmup = next(int(c["timeout"]) for c in recorded if "warmup" in c["round_slot"])
         measure = next(int(c["timeout"]) for c in recorded if "warmup" not in c["round_slot"])
+        assert warmup >= 60, f"a warmup capped under the 60s a pass takes is launched to be killed, got {warmup}"
         assert warmup <= 240 + _SESSION_KILL_GRACE_SEC, (
             f"warmup cap must hold back the measured round's 60s, got {warmup}"
         )
-        assert warmup < measure, "the warmup must be granted less than the round it reserves budget for"
+        assert warmup <= measure, "the warmup is never granted more than the round it holds budget back for"
         assert len(by_round) == 2, f"expected a warmup and a measured round, got {list(by_round)}"
+
+    @pytest.mark.asyncio
+    async def test_a_warmup_killed_at_a_clamped_cap_is_logged_with_the_cap_it_got(self, tmp_path, caplog):
+        """The abort line is the only record of how long the round was allowed.
+
+        The declared cap is a hang backstop; what the warmup was granted is that
+        cap minus the reserve, and a round killed after four minutes logged as a
+        two-hour timeout reads as a variant that hangs rather than a budget that
+        ran out.
+        """
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        recorded: list[dict] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            if "--output-dir" not in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "ok", "")
+            slot = Path(cmd[cmd.index("--output-dir") + 1])
+            recorded.append({"round_slot": slot.name, **kwargs})
+            raise subprocess.TimeoutExpired(cmd, float(kwargs.get("timeout") or 0.0))
+
+        with (
+            patch(
+                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                side_effect=fake_run,
+            ),
+            patch(
+                "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+                return_value={"eligible": True, "framework": "sglang", "port": 30000, "reason": ""},
+            ),
+            caplog.at_level("WARNING"),
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=7800,
+                session_deadline_sec=time.monotonic() + 300.0,
+                variant_expected_sec=60.0,
+                warmup_before_measure=True,
+            )
+
+        granted = int(recorded[0]["timeout"])
+        assert granted < 7800, f"this test needs a clamped cap to be about, got {granted}"
+        aborts = [r.message for r in caplog.records if "warmup timeout" in r.message]
+        assert aborts, f"the warmup abort was not logged: {[r.message for r in caplog.records]}"
+        assert f"timeout_sec={granted}" in aborts[0], f"the abort line reports a cap the round never had: {aborts[0]}"
+        assert results[0].error_class == "warmup_magpie_timeout"
 
 
 class TestCompactJsonServerArgs:
