@@ -396,8 +396,8 @@ def _find_config_donor(
     cross-model lookup may have come up empty. The identity row still
     supplies priors, but the active warm-replay needs a champion config to
     apply. Search and compatibility checks match the main T0 cascade:
-    same-architecture class, same GPU ISA, compatible precision, then nearest
-    non-newer framework version. Each candidate must additionally clear
+    same-architecture class, same GPU ISA, then nearest non-newer framework
+    version at the target precision. Each candidate must additionally clear
     :func:`_donor_is_trustworthy` (positive validated gain, concrete matching
     architecture, matching workload shape) so a borrowed config is both
     stack-compatible and evidence-backed. Returns
@@ -417,12 +417,12 @@ def _find_config_donor(
         precision=precision,
     )
     seen = {cid}
+    target_precision = str(precision or "").strip().lower()
     for (
         tier,
         confidence,
         labels,
         hardware_in,
-        relax_precision,
         relax_framework_version,
     ) in tiers:
         labels = {
@@ -446,9 +446,9 @@ def _find_config_donor(
                 _candidate_dimension(candidate, "hardware"),
             ):
                 continue
-            if relax_precision and not _precision_is_compatible(
-                precision,
-                _candidate_dimension(candidate, "precision"),
+            if (
+                _candidate_dimension(candidate, "precision")
+                != target_precision
             ):
                 continue
             if (
@@ -980,16 +980,6 @@ def _hardware_is_compatible(target: str, candidate: str) -> bool:
         and target_parsed[2] == candidate_parsed[2]
     )
 
-
-def _precision_is_compatible(target: str, candidate: str) -> bool:
-    """Allow exact precision plus the first bf16/fp16 compatibility pair."""
-    target_value = str(target or "").strip().lower()
-    candidate_value = str(candidate or "").strip().lower()
-    if candidate_value == target_value:
-        return bool(target_value)
-    return {target_value, candidate_value} == {"bf16", "fp16"}
-
-
 def _framework_semver(version: str) -> Version | None:
     """Parse a framework's PEP 440 version."""
     value = str(version or "").strip()
@@ -1024,7 +1014,7 @@ def _warm_search_tiers(
     framework_version: str,
     precision: str,
 ) -> tuple[
-    tuple[str, float, dict[str, str], list[str] | None, bool, bool],
+    tuple[str, float, dict[str, str], list[str] | None, bool],
     ...,
 ]:
     """Build the shared ordered seven-tuple degradation tiers."""
@@ -1041,7 +1031,6 @@ def _warm_search_tiers(
             },
             None,
             False,
-            False,
         ),
         (
             "same_gpu_isa",
@@ -1053,22 +1042,12 @@ def _warm_search_tiers(
             },
             hardware_values,
             False,
-            False,
-        ),
-        (
-            "compatible_precision",
-            0.78,
-            {**common, "framework_version": framework_version},
-            hardware_values,
-            True,
-            False,
         ),
         (
             "compatible_framework_version",
             0.72,
-            common,
+            {**common, "precision": precision},
             hardware_values,
-            True,
             True,
         ),
     )
@@ -1234,12 +1213,12 @@ def _cascade_warm_start_search(
         precision=target_precision,
     )
     seen = {cid}
+    target_precision_value = str(target_precision or "").strip().lower()
     for (
         tier,
         confidence,
         labels,
         hardware_in,
-        relax_precision,
         relax_framework_version,
     ) in tiers:
         rows = _search_warm_candidates(
@@ -1260,9 +1239,9 @@ def _cascade_warm_start_search(
                 _candidate_dimension(candidate, "hardware"),
             ):
                 continue
-            if relax_precision and not _precision_is_compatible(
-                target_precision,
-                _candidate_dimension(candidate, "precision"),
+            if (
+                _candidate_dimension(candidate, "precision")
+                != target_precision_value
             ):
                 continue
             if (

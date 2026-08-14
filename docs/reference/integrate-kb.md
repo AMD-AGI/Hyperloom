@@ -98,6 +98,12 @@ back to local Recipe data. Runtime amendments are skipped and CLOSE performs
 one best-effort final write. Optional `GBRAIN_*` credentials remain available
 only to non-Recipe KG and Framework PR capabilities.
 
+Configuration replay requires an exact precision match. A bf16 run does not
+select an fp16 record, or vice versa, during degraded warm-start search. If an
+accepted owner patch disappears before staging, that owner section moves to
+the durable dead letter and CLOSE still publishes the final config, other
+owner sections, and Kernel knowledge.
+
 Records written before the unified Recipe contract are not rewritten in place.
 An incompatible record is skipped during View validation; a later successful
 CLOSE publishes the current document and artifacts.

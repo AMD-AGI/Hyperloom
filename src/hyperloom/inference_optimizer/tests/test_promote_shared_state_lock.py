@@ -800,12 +800,14 @@ def test_outbox_drain_acknowledges_only_confirmed_success(
     monkeypatch,
 ):
     coord = _coord(session_dir)
+    patch = session_dir / "accepted.patch"
+    patch.write_text("patch", encoding="utf-8")
     row = {
         "id": "FRAMEWORK_AGENT:0",
         "owner": "FRAMEWORK_AGENT",
         "stack_index": 0,
         "include_patches": True,
-        "patch_sources": ["/tmp/accepted.patch"],
+        "patch_sources": [str(patch)],
         "missing_patch_sources": [],
     }
     coord.shared_state.kb_stage_outbox = [row]
@@ -818,6 +820,38 @@ def test_outbox_drain_acknowledges_only_confirmed_success(
     coord.writeback._drain_agent_keep_outbox()
 
     assert coord.shared_state.kb_stage_outbox == [row]
+
+
+def test_outbox_dead_letters_missing_patch_without_blocking_close(
+    session_dir,
+) -> None:
+    coord = _coord(session_dir)
+    coord.shared_state.optimization_stack = [
+        {
+            "action": "framework",
+            "kb_required_owner": "FRAMEWORK_AGENT",
+        }
+    ]
+    row = {
+        "id": "FRAMEWORK_AGENT:0",
+        "owner": "FRAMEWORK_AGENT",
+        "stack_index": 0,
+        "include_patches": True,
+        "patch_sources": [str(session_dir / "gone.patch")],
+        "missing_patch_sources": [],
+    }
+    coord.shared_state.kb_stage_outbox = [row]
+
+    coord.writeback._drain_agent_keep_outbox()
+
+    assert coord.shared_state.kb_stage_outbox == []
+    assert coord.shared_state.kb_stage_dead_letter[0]["id"] == row["id"]
+    assert coord.shared_state.kb_stage_dead_letter[0]["reason"] == (
+        "patch_source_missing"
+    )
+    assert "kb_required_owner" not in (
+        coord.shared_state.optimization_stack[0]
+    )
 
 
 @pytest.mark.asyncio

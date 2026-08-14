@@ -353,11 +353,29 @@ def test_current_kernel_config_merge_fails_closed_on_conflict(
         )
 
 
-def test_close_fails_with_incomplete_required_section(tmp_path: Path) -> None:
+def test_close_drops_permanently_missing_owner_section(tmp_path: Path) -> None:
     state = _state([])
     state.kb_stage_outbox = [
-        {"id": "FRAMEWORK_AGENT:0", "missing_patch_sources": ["missing.patch"]}
+        {
+            "id": "FRAMEWORK_AGENT:0",
+            "owner": "FRAMEWORK_AGENT",
+            "stack_index": 0,
+            "missing_patch_sources": ["missing.patch"],
+        }
     ]
+
+    bundle = build_remote_knowledge(state, tmp_path / "files")
+
+    assert bundle.knowledge["provenance"]["dropped_staged_sections"] == [
+        "FRAMEWORK_AGENT:0"
+    ]
+
+
+def test_close_fails_with_transient_incomplete_required_section(
+    tmp_path: Path,
+) -> None:
+    state = _state([])
+    state.kb_stage_outbox = [{"id": "FRAMEWORK_AGENT:0"}]
 
     with pytest.raises(
         RemoteRecipeValidationError,

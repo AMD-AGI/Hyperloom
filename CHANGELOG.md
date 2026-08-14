@@ -65,6 +65,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   champion. Local Recipe storage and non-Recipe GBrain integrations remain
   unchanged.
 
+- Degraded configuration donors now require exact precision, and a permanently
+  missing owner patch is dead-lettered without blocking publication of the
+  remaining Recipe sections.
+
 - `_geak_enabled` no longer falls back to the persisted
   `shared_state.kernel_optimizer` field, so `KERNEL_OPT_BACKEND_ORDER` is the
   single source of truth for the kernel backend on a resume as well. The field
