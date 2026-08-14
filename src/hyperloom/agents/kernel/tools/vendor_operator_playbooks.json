@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "_comment": [
+    "Sibling registry to the (retired) op_to_source.json, but for a different",
+    "class of hot kernel: a closed-source vendor operator with no rewritable",
+    "device source, where a KernelForge forge-loop TASK BUNDLE (not a source",
+    "file) has already been validated to tune it. See KernelForge PR #88",
+    "('feat(mori): add mori knowledge base, wire optional KB injection, refresh",
+    "example') for the design rationale and the measured A/B evidence behind",
+    "the mori entry below.",
+    "",
+    "classify_patchability() in tracelens_analysis.py checks this registry",
+    "before the vendor_binary rejection; a match marks the candidate",
+    "reusable_native_kernel=True with patch_strategy='vendor_playbook'.",
+    "forge_submit.py then copies task_bundle (resolved under $FORGE_PATH,",
+    "KernelForge's checkout) into the forge worktree instead of doing a",
+    "source-file rewrite, and includes kb_path in the fellow's context."
+  ],
+  "playbooks": [
+    {
+      "id": "mori_ep_dispatch_combine",
+      "description": "mori EP dispatch/combine all-to-all (pip-installed compiled library called through Python bindings; no rewritable device source). Tunes the 6 documented launch-config knobs via the validated examples/mori_ep_dispatch_combine forge-loop task bundle instead of a source rewrite.",
+      "match": {
+        "any_marker": ["mori"],
+        "name_any": ["dispatch", "combine"]
+      },
+      "task_bundle": "examples/mori_ep_dispatch_combine",
+      "kernel_anchor": "mori_ep_config.py",
+      "driver": "driver.py",
+      "program_md": "program.md",
+      "kb_path": "local_knowledge/framework/mori",
+      "fellow": "aiter-fellow",
+      "target_functions": ["get_ep_launch_config", "dispatch", "combine"],
+      "tunable_params": [
+        "dispatch_block_num",
+        "dispatch_warp_per_block",
+        "combine_block_num",
+        "combine_warp_per_block",
+        "kernel_type",
+        "combine_zero_copy"
+      ],
+      "snr_threshold": 30.0,
+      "env": {
+        "KERNELFORGE_INCLUDE_MORI_KB": "1",
+        "HSA_NO_SCRATCH_RECLAIM": "1"
+      },
+      "min_gpu_pct_floor": 10.0
+    }
+  ]
+}
