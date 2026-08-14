@@ -1322,11 +1322,24 @@ ensure_forge_claude_cli() {
   # still serves (e.g. retired Opus 4). When unset, keep the legacy behaviour:
   # install the latest only when the CLI is absent.
   if command -v npm >/dev/null 2>&1; then
+    # A global install needs a writable prefix. Off root /usr/local is not one,
+    # and `run` has no failure path, so this would abort the whole installer.
+    local _npm_prefix="/usr/local" _npm_home
+    if [ ! -w /usr/local/lib ]; then
+      _npm_home="$(_home_dir || true)"
+      if [ -z "$_npm_home" ]; then
+        warn "no writable npm prefix (/usr/local and HOME both unavailable); forge claude CLI unavailable"
+        return 0
+      fi
+      # ~/.local/bin is where the CLI probe in write_env_file already looks.
+      _npm_prefix="${_npm_home}/.local"
+      mkdir -p "${_npm_prefix}/lib" "${_npm_prefix}/bin"
+    fi
     if [ -n "${HYPERLOOM_CLAUDE_CODE_VERSION:-}" ]; then
-      run npm config set prefix /usr/local
+      run npm config set prefix "${_npm_prefix}"
       run npm install -g "@anthropic-ai/claude-code@${HYPERLOOM_CLAUDE_CODE_VERSION}"
     elif ! command -v claude >/dev/null 2>&1; then
-      run npm config set prefix /usr/local
+      run npm config set prefix "${_npm_prefix}"
       run npm install -g @anthropic-ai/claude-code
     fi
   fi
