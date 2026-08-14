@@ -66,21 +66,35 @@ log = _logging.getLogger(__name__)
 #   :data:`COOPERATIVE_REAP_BUDGET_SEC`, through a Ray actor it is
 #   :data:`CANCEL_ROUND_GRACE_SEC`, and whichever path this action took, only the
 #   longer of the two bounds it;
-# * release what the round held -- the driver-side teardown of a server it left
-#   behind (:data:`TERM_GRACE_SECONDS`) or the release of the Ray lease it ran in
-#   (:data:`CLOSE_STOP_TIMEOUT_SEC`). Alternatives, not a sequence: a round's
-#   server is reaped by whichever of the two owned it.
+# * release what the round held -- the driver-side teardown of the server it left
+#   behind (:data:`TERM_GRACE_SECONDS`) and then the release of the Ray lease it
+#   ran in (:data:`CLOSE_STOP_TIMEOUT_SEC`). A sequence, not alternatives: the
+#   server is reaped BEFORE the lease is dropped so that no GPU process outlives
+#   it (§4.2), and on the Ray path a single unwind pays both -- in the explore
+#   executor the per-variant ``finally`` tears the server down and the enclosing
+#   one then closes the round's lease; the baseline executor does the same two
+#   calls in one ``finally``.
 #
 # Derived rather than picked, because these three windows only mean anything
 # together. Each was plausible on its own at ten, eight and five seconds, and
 # composed they said the dispatcher gives up a good five seconds before the work
 # it is waiting for can finish -- so the honest sentinel the round was about to
 # return was discarded for a hard ``CancelledError`` every time, which is exactly
-# what the cooperative channel exists to avoid. Past this window the coroutine is
-# cancelled anyway, and the window is only ever spent when work is still
-# unwinding: the wait ends the moment the last victim is done.
-_COOPERATIVE_CANCEL_GRACE_SEC: float = max(COOPERATIVE_REAP_BUDGET_SEC, CANCEL_ROUND_GRACE_SEC) + max(
-    TERM_GRACE_SECONDS, CLOSE_STOP_TIMEOUT_SEC
+# what the cooperative channel exists to avoid. Taking the longer of the two
+# release terms instead of both reproduced that shortfall exactly, on the path
+# that pays the most: the teardown a Ray round owes is not an alternative to
+# closing its lease, it is what it does first.
+#
+# Past this window the coroutine is cancelled anyway, and the window is only ever
+# spent when work is still unwinding: the wait ends the moment the last victim is
+# done, so covering the teardown term costs a round that stops promptly nothing.
+# What the budget case pays for it is five more seconds before the run crosses its
+# deadline, because this wait runs inside the reserve the admission gate holds
+# back. It does not come out of the closing phase, whose grace window is measured
+# from the moment it starts, and five seconds of overshoot is cheaper than the
+# attributed sentinel a hard cancel destroys.
+_COOPERATIVE_CANCEL_GRACE_SEC: float = (
+    max(COOPERATIVE_REAP_BUDGET_SEC, CANCEL_ROUND_GRACE_SEC) + TERM_GRACE_SECONDS + CLOSE_STOP_TIMEOUT_SEC
 )
 
 # How long a cancel waits for anything to start listening before deciding
