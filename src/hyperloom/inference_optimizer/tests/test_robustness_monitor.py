@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -250,8 +251,7 @@ def test_monitor_resume_is_pinned_to_resolved_session_dir():
     """Crash recovery must name the session explicitly, never let the CLI choose one."""
     text = MONITOR.read_text(encoding="utf-8")
     assert '--resume-from "$session_dir"' in text
-    assert "--resume " not in text
-    assert "--resume\n" not in text
+    assert re.search(r"--resume(?!-from)", text) is None
 
 
 @pytest.mark.skipif(not _HAS_PROC, reason="liveness probe reads /proc (Linux)")

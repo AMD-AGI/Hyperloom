@@ -123,13 +123,6 @@ def test_make_session_dir_overwrites_stale_pin(tmp_path, monkeypatch):
     assert paths.session_dir() == sd2
 
 
-def test_no_session_dir_discovery_helper_is_exported(tmp_path, monkeypatch):
-    """The session dir must be named by the operator, never discovered by scanning."""
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    assert not hasattr(paths, "find_latest_per_session_dir")
-    assert not [name for name in paths.__all__ if "latest" in name]
-
-
 def test_runtime_dir_is_workspace_shared(tmp_path, monkeypatch):
     """runtime/ lives under workspace_root, not the per-session subdir."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))

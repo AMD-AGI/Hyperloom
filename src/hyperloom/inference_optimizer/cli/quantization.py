@@ -99,6 +99,7 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         prompt = resolve_scheme_prompt(scheme)
     if not prompt:
         return
+
     # Deterministic master switch: quantization runs ONLY when
     # $HYPERLOOM_QUANTIZE_ENABLED is truthy, regardless of the flags. Absent /
     # false => skip and continue on the un-quantized model (detectable via the

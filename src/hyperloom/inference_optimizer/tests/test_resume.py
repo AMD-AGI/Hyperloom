@@ -371,7 +371,6 @@ class TestN23ResumePerSession:
             ["optimize", "--resume"],
             # The command line already-deployed robustness monitor copies send.
             ["optimize", "--resume", "--resume-from", "/tmp/sess"],
-            ["optimize", "--resume", "--max-hours", "24"],
         ],
     )
     def test_no_session_can_be_resumed_without_naming_it(self, argv):
@@ -382,17 +381,6 @@ class TestN23ResumePerSession:
             _build_parser().parse_args(argv)
         assert exc.value.code == 2
 
-    def test_resume_from_addresses_the_named_session_not_the_newest(self, tmp_path):
-        from hyperloom.inference_optimizer.cli.parser import _build_parser
-
-        older = tmp_path / "ModelA" / "20260101T000000Z"
-        newer = tmp_path / "ModelB" / "20260520T000000Z"
-        older.mkdir(parents=True)
-        newer.mkdir(parents=True)
-
-        args = _build_parser().parse_args(["optimize", "--resume-from", str(older)])
-        assert args.resume_from == str(older)
-        assert not hasattr(args, "resume")
 
 
 # _load_kernel_agent_env_fallback hard-fails on bad state

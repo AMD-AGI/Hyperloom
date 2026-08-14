@@ -1587,9 +1587,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     )
 
     if args.resume_from:
-        # Resume mode: USER_DATA_PATH stays at workspace level and the operator
-        # names the per-session subdir. Pin
-        # INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR for consistent resolution.
+        # USER_DATA_PATH stays at the workspace root; --resume-from names a subdir under it.
         from ..session.paths import (
             ENV_CURRENT_SESSION_DIR,
             workspace_root,

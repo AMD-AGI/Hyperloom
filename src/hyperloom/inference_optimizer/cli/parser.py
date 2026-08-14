@@ -589,10 +589,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "prior event log + state.json. Must be an absolute path under "
         "$USER_DATA_PATH (workspace_root), which MUST stay at workspace "
         "level (/shared/hyperloom-sessions, not the per-session subdir) so "
-        "runtime/ resolution works. Read the path from the launch-info JSON "
-        "(--launch-info-file), else the HYPERLOOM_LAUNCH session_dir=… line "
-        "the CLI printed at launch, else by inspecting "
-        "$USER_DATA_PATH/<model>/<UTC ts>/manifest.json.",
+        "runtime/ resolution works.",
     )
     opt.add_argument(
         "--force-resume",
@@ -604,7 +601,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Without this flag the resume aborts (Issue-G guard, per "
             "SKILL.md 'Run-time signals': that terminal requires an "
             "operator-side workload / strategy change before resuming). "
-            "No-op outside a resume."
+            "No-op without ``--resume-from``."
         ),
     )
     opt.add_argument(
