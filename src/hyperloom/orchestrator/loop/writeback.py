@@ -397,11 +397,58 @@ class WritebackCollaborator:
         if not pending:
             return
         retained: list[dict[str, Any]] = []
+        dead_letter = [
+            dict(row)
+            for row in (
+                getattr(self.shared_state, "kb_stage_dead_letter", []) or []
+            )
+            if isinstance(row, dict)
+        ]
+        stack = list(self.shared_state.optimization_stack or [])
         for row in pending:
             if not isinstance(row, dict):
                 continue
-            if row.get("missing_patch_sources"):
-                retained.append(row)
+            missing = [
+                str(path)
+                for path in (row.get("missing_patch_sources") or [])
+                if str(path).strip()
+            ]
+            if row.get("include_patches"):
+                missing.extend(
+                    str(path)
+                    for path in (row.get("patch_sources") or [])
+                    if str(path).strip()
+                    and not Path(str(path)).is_file()
+                )
+            missing = list(dict.fromkeys(missing))
+            if missing:
+                failed = {
+                    **dict(row),
+                    "missing_patch_sources": missing,
+                    "reason": "patch_source_missing",
+                }
+                dead_letter = [
+                    item
+                    for item in dead_letter
+                    if item.get("id") != failed.get("id")
+                ]
+                dead_letter.append(failed)
+                index = int(row.get("stack_index") or 0)
+                owner = str(row.get("owner") or "").upper()
+                if (
+                    0 <= index < len(stack)
+                    and isinstance(stack[index], dict)
+                    and str(stack[index].get("kb_required_owner") or "").upper()
+                    == owner
+                ):
+                    stack[index].pop("kb_required_owner", None)
+                log.warning(
+                    "%s kb: dropping owner section %s because patch sources "
+                    "are unavailable: %s",
+                    owner,
+                    row.get("id"),
+                    missing,
+                )
                 continue
             task = SimpleNamespace(params={})
             if not self._stage_agent_keep(
@@ -413,6 +460,8 @@ class WritebackCollaborator:
             ):
                 retained.append(row)
         self.shared_state.kb_stage_outbox = retained
+        self.shared_state.kb_stage_dead_letter = dead_letter[-200:]
+        self.shared_state.optimization_stack = stack
         self.shared_state.save(self.session_dir)
 
     def _record_kernel_opt_partial(self, result: dict[str, Any]) -> None:

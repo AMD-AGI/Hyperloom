@@ -1058,10 +1058,27 @@ def build_remote_knowledge(
     pending_sections = list(
         getattr(state, "kb_stage_outbox", []) or []
     )
-    if pending_sections:
+    blocking_sections = [
+        row
+        for row in pending_sections
+        if not (
+            isinstance(row, Mapping)
+            and row.get("missing_patch_sources")
+        )
+    ]
+    dropped_sections = [
+        row
+        for row in [
+            *pending_sections,
+            *(getattr(state, "kb_stage_dead_letter", []) or []),
+        ]
+        if isinstance(row, Mapping)
+        and row.get("missing_patch_sources")
+    ]
+    if blocking_sections:
         raise RemoteRecipeValidationError(
             "required section staging is incomplete: "
-            f"{[row.get('id') for row in pending_sections if isinstance(row, Mapping)]!r}"
+            f"{[row.get('id') for row in blocking_sections if isinstance(row, Mapping)]!r}"
         )
     root = Path(files_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -1075,12 +1092,22 @@ def build_remote_knowledge(
         "EXPLORE": "explore",
         "FRAMEWORK_AGENT": "framework",
     }
+    dropped_entries: set[tuple[str, int]] = set()
+    for row in dropped_sections:
+        try:
+            stack_index = int(row.get("stack_index") or 0)
+        except (TypeError, ValueError):
+            continue
+        dropped_entries.add(
+            (str(row.get("owner") or "").upper(), stack_index)
+        )
     required_patch_owners = {
         owner_names[owner]
         for item in stack
         if (
             owner := str(item.get("kb_required_owner") or "").upper()
         ) in owner_names
+        and (owner, int(item["__stack_index"])) not in dropped_entries
     }
     explore_entries = [item for item in stack if _entry_origin(item) == "explore"]
     framework_entries = [item for item in stack if _entry_origin(item) == "framework"]
@@ -1156,6 +1183,13 @@ def build_remote_knowledge(
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "optimization_stack_length": len(stack),
                 "staged_sections": staged_sections,
+                "dropped_staged_sections": list(
+                    dict.fromkeys(
+                        str(row.get("id") or "")
+                        for row in dropped_sections
+                        if str(row.get("id") or "")
+                    )
+                ),
             },
         }
     )

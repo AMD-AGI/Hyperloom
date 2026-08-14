@@ -16,7 +16,6 @@ from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _hardware_fallback_values,
     _hardware_is_compatible,
     _parse_hardware_topology,
-    _precision_is_compatible,
     _rank_warm_candidates,
 )
 from hyperloom.orchestrator.knowledge.recipe_kb.local_store import (
@@ -162,28 +161,6 @@ def test_hardware_fallback_preserves_topology_and_isa() -> None:
 @pytest.mark.parametrize(
     ("target", "candidate", "compatible"),
     [
-        ("bf16", "bf16", True),
-        ("bf16", "fp16", True),
-        ("fp16", "bf16", True),
-        ("fp8", "fp8", True),
-        ("fp8", "bf16", False),
-        ("mxfp4", "mxfp8", False),
-        ("int8", "awq", False),
-        ("gptq", "awq", False),
-        ("unknown_precision", "bf16", False),
-    ],
-)
-def test_precision_whitelist(
-    target: str,
-    candidate: str,
-    compatible: bool,
-) -> None:
-    assert _precision_is_compatible(target, candidate) is compatible
-
-
-@pytest.mark.parametrize(
-    ("target", "candidate", "compatible"),
-    [
         ("1.2.5", "1.2.5", True),
         ("1.2.5", "1.2.4", True),
         ("1.2.5", "1.2.6", False),
@@ -251,22 +228,6 @@ def test_exact_and_each_fallback_confidence_order() -> None:
                     _candidate(
                         "alias-a",
                         hardware="mi325x_ws16_pd1p1d_tp8_ep2_rayjob",
-                        precision="fp16",
-                    )
-                ],
-            ],
-            ("compatible_precision", 0.78),
-        ),
-        (
-            [
-                [],
-                [],
-                [],
-                [
-                    _candidate(
-                        "alias-a",
-                        hardware="mi325x_ws16_pd1p1d_tp8_ep2_rayjob",
-                        precision="fp16",
                         framework_version="1.2.4",
                     )
                 ],
@@ -353,7 +314,7 @@ def test_final_tier_rejects_newer_and_wrong_minor_then_chooses_nearest() -> None
     newer = _candidate("newer", framework_version="1.2.6", gain=100.0)
     wrong_minor = _candidate("minor", framework_version="1.1.99", gain=100.0)
     row, tier, confidence = _cascade(
-        _RemoteKB([[], [], [], [valid_old, newer, wrong_minor, valid_near]])
+        _RemoteKB([[], [], [valid_old, newer, wrong_minor, valid_near]])
     )
     assert row["canonical_id"] == valid_near["canonical_id"]
     assert (tier, confidence) == ("compatible_framework_version", 0.72)
@@ -374,7 +335,7 @@ def test_selected_tier_never_searches_lower_runtime_fallbacks() -> None:
 
 
 def test_hardware_search_passes_exact_same_isa_values() -> None:
-    kb = _RemoteKB([[], [], [], []])
+    kb = _RemoteKB([[], [], []])
     assert _cascade(kb)[1:] == ("miss", 0.0)
     assert "hardware_in" not in kb.search_calls[0]
     for call in kb.search_calls[1:]:

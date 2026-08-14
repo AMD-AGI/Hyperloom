@@ -559,6 +559,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "warm_start_lessons",
         "warm_start_ts",
         "warm_start_context",
+        "kb_stage_outbox",
+        "kb_stage_dead_letter",
         # KB tag completeness (Coordinator-populated; LLM reads via prompt).
         "stack_fingerprint_meta",
         "baseline_workload_extra",
