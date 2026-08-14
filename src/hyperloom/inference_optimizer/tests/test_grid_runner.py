@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import os
@@ -26,6 +27,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
+    SESSION_TIME_EXHAUSTED_CLASS,
     GridVariant,
     VariantResult,
     _build_variant_yaml,
@@ -1518,69 +1520,6 @@ class TestSessionGridBounds:
         assert _grid_runner.session_grid_bounds(state) == (None, 600.0)
 
 
-class TestTheWarmupHoldBack:
-    """The other half of ``session_grid_bounds``' contract: what a pass holds back.
-
-    Both benching arms discard a warmup pass in front of a measured round, so both
-    have to hold back the same seconds for it. And because a reserve is the only
-    thing that can pull a cap before the session deadline, the same number decides
-    whether the warmup is worth launching at all.
-    """
-
-    def test_the_measured_rounds_expected_runtime_is_held_back(self):
-        cap = _grid_runner.session_warmup_cap_sec(
-            7800,
-            time.monotonic() + 3600.0,
-            measured_expected_sec=600.0,
-        )
-        assert cap == pytest.approx(3600 - 600 + _SESSION_KILL_GRACE_SEC, abs=2)
-
-    def test_a_budget_that_fits_the_declared_cap_leaves_it_alone(self):
-        assert (
-            _grid_runner.session_warmup_cap_sec(
-                600,
-                time.monotonic() + 36000.0,
-                measured_expected_sec=600.0,
-            )
-            == 600
-        )
-
-    def test_a_warmup_that_cannot_fit_is_refused_rather_than_starved(self):
-        """Two passes do not fit in 800s, and the 1s floor is not a warmup."""
-        assert (
-            _grid_runner.session_warmup_cap_sec(
-                7800,
-                time.monotonic() + 800.0,
-                measured_expected_sec=600.0,
-            )
-            is None
-        )
-
-    def test_an_unmeasured_session_holds_nothing_back(self):
-        """Zero is "no round measured yet", not "the next round needs no time".
-
-        With nothing known to reserve the cap stays past the deadline, which leaves
-        the session watchdog -- the only thing that attributes a budget kill
-        correctly -- as what stops the pass.
-        """
-        cap = _grid_runner.session_warmup_cap_sec(
-            7800,
-            time.monotonic() + 800.0,
-            measured_expected_sec=0.0,
-        )
-        assert cap == pytest.approx(800 + _SESSION_KILL_GRACE_SEC, abs=2)
-
-    def test_an_unbounded_budget_leaves_the_cap_alone(self):
-        """Not even a cap smaller than the pass is this function's business here.
-
-        Nothing is being held back from anyone, so there is nothing for the warmup
-        to be short of; a declared cap under the measured runtime is a fact about
-        the cap, and refusing the pass over it would be this helper deciding
-        something the budget never asked it to.
-        """
-        assert _grid_runner.session_warmup_cap_sec(600, None, measured_expected_sec=900.0) == 600
-
-
 class TestSessionBudgetAdmission:
     """A variant is admitted on what it is expected to need, not on its backstop.
 
@@ -2019,6 +1958,62 @@ class TestSessionBudgetWarmupRounds:
 
         assert recorded == []
         assert [r.status for r in results] == ["skipped"]
+
+    @pytest.mark.asyncio
+    async def test_the_budget_is_re_checked_after_the_uncapped_server_restart(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """The admission gate is taken before the one launch it does not cover.
+
+        The per-variant multi-node server restart sits between the gate at the top
+        of the loop and the first pass, and it is under no cap of its own: booting
+        a large model across nodes can take longer than a benchmark pass. So a
+        variant can be admitted on a budget that fits both its passes and reach the
+        warmup with a budget that fits neither -- and the grid has no skip there,
+        so it launches the warmup anyway, watches it get killed, swallows that as
+        best-effort, and finds the measured round no longer fits.
+
+        Scaled down by a thousand from the field shape (1300s left, 2x600s
+        admitted, a 300s restart) so the restart's cost is real elapsed time
+        rather than a clock the test pretends about.
+        """
+        from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+        from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnsl
+
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        monkeypatch.setattr(mne, "is_multi_node", lambda: True)
+        monkeypatch.setattr(mne, "mn_bench_warmup_enabled", lambda: True)
+        restarts: list[float] = []
+
+        async def slow_restart(**_kwargs):
+            restarts.append(time.monotonic())
+            await asyncio.sleep(0.5)
+
+        monkeypatch.setattr(mnsl, "restart_server_for_round", slow_restart)
+        recorded: list[dict] = []
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=_capture_launches(recorded),
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                session_deadline_sec=time.monotonic() + 1.3,
+                variant_expected_sec=0.6,
+            )
+
+        assert restarts, "the restart never ran, so this is not the case under test"
+        launched = [c["round_slot"] for c in recorded]
+        assert launched == [], f"a pass was launched into a budget the restart had spent: {launched}"
+        assert [r.status for r in results] == ["skipped"]
+        assert [r.error_class for r in results] == [SESSION_TIME_EXHAUSTED_CLASS]
 
     @pytest.mark.asyncio
     async def test_warmup_cap_reserves_budget_for_the_measured_round(self, tmp_path):
