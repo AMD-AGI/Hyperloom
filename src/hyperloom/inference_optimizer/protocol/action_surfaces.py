@@ -18,7 +18,9 @@ action-name lists.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 
 # Actions owned by the Kernel role; requested via request{target_agent="kernel_agent"}.
@@ -34,11 +36,15 @@ KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
 # Kernel-owned action name -> the request ``kind`` its handler is registered
 # under in ``request_handlers.KERNEL_REQUEST_HANDLERS``. The two differ, so the
 # prompt must advertise the kind.
-KERNEL_ACTION_REQUEST_KINDS: dict[str, str] = {
-    "kernel_opt": "run_optimization",
-    "gemm_tuning": "run_gemm_tuning",
-    "integrate": "integrate",
-}
+KERNEL_ACTION_REQUEST_KINDS: Mapping[str, str] = MappingProxyType(
+    {
+        "kernel_opt": "run_optimization",
+        "gemm_tuning": "run_gemm_tuning",
+        "integrate": "integrate",
+    }
+)
+
+assert set(KERNEL_ACTION_REQUEST_KINDS) == KERNEL_AGENT_OWNED_ACTIONS
 
 
 # Request-kind aliases that route to a kernel-owned handler. apply_patch is
@@ -48,6 +54,18 @@ KERNEL_ACTION_REQUEST_KINDS: dict[str, str] = {
 KERNEL_REQUEST_KIND_ALIASES: dict[str, str] = {
     "apply_patch": "integrate",
 }
+
+
+# Request kinds the Coordinator dispatches itself at KERNEL entry; PolicyGate
+# rejects them from an LLM, which would bypass the lane's gate and accounting.
+# Unlike ``COORDINATOR_INTERNAL_ACTIONS`` these are request kinds, not actions:
+# they have no executor and no prompt entry.
+COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
+    {
+        "run_fusion",
+        "run_collective",
+    }
+)
 
 
 # Coordinator-managed actions that agents should not directly propose.
@@ -132,7 +150,7 @@ class ActionMetadata:
     requires_lanes: tuple[str, ...] = ()
 
 
-ACTION_CATALOGUE: dict[str, ActionMetadata] = {
+ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType({
     "baseline": ActionMetadata(
         name="baseline",
         family="prep",
@@ -447,13 +465,14 @@ ACTION_CATALOGUE: dict[str, ActionMetadata] = {
             "'no_target_gpu_configured' marker. Advisory only."
         ),
     ),
-}
+})
 
 
 __all__ = [
     "ACTION_CATALOGUE",
     "ActionMetadata",
     "COORDINATOR_INTERNAL_ACTIONS",
+    "COORDINATOR_OWNED_KERNEL_REQUEST_KINDS",
     "FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES",
     "FULL_ENABLED_ACTIONS",
     "INTERNAL_ONLY_ACTION_NAMES",

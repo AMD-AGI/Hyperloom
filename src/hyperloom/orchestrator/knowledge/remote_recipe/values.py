@@ -718,6 +718,17 @@ _KERNEL_SECTION = "kernel"
 _KERNEL_ID_PREFIX = "hyperloom-"
 # Champion metric for the kernel-agent record: a percentage, not a throughput.
 KERNEL_AGENT_METRIC = "kernel_gain_pct"
+# Storage session the accumulating kernel-agent record lives under.
+#
+# Readers resolve an identity through its champion session, but this record
+# accumulates instead of competing: a run that adds a second kernel without
+# raising the best gain scores no higher than the incumbent, so a per-run
+# session would leave the merged document on a session the champion never moves
+# to, invisible to every later read. Writing every merge back to one session
+# keeps the champion pointing at the accumulated document whatever the server
+# does with an equal-valued promotion. The contributing run stays recorded in
+# the document's provenance.
+KERNEL_AGENT_SESSION_ID = "hyperloom-kernel-agent"
 
 
 def kernel_agent_canonical_id(recipe_canonical_id: str) -> str:
@@ -778,6 +789,108 @@ def _kernel_agent_score(value: Mapping[str, Any]) -> float:
                     _number(e2e.get("gain_pct")),
                 )
     return best
+
+
+_KERNEL_COLUMN_LISTS = (("gemm", "optimizations"), ("fusion", "items"), ("rewrite", "items"))
+
+
+def _kernel_record_key(column: str, record: Mapping[str, Any]) -> str:
+    """Identify the optimization a record describes, within its column.
+
+    Two sessions optimizing the same kernel compete for one slot; two sessions
+    optimizing different kernels must both survive the merge.
+    """
+    if column == "gemm":
+        candidates = (
+            record.get("variant_name"),
+            record.get("task_id"),
+            Path(str(record.get("tuned_file") or "")).name,
+        )
+    else:
+        candidates = (
+            record.get("kernel_name"),
+            record.get("best_pattern"),
+            record.get("id"),
+        )
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return f"{column}:{text}"
+    return f"{column}:{hashlib.sha256(repr(sorted(record.items())).encode()).hexdigest()[:10]}"
+
+
+def _kernel_record_score(record: Mapping[str, Any]) -> float:
+    """How good one recorded optimization was, in end-to-end gain percent."""
+    e2e = record.get("e2e") if isinstance(record.get("e2e"), Mapping) else {}
+    return max(
+        _number(record.get("e2e_gain_pct")),
+        _number(record.get("gain_pct")),
+        _number(e2e.get("gain_pct")),
+    )
+
+
+def merge_kernel_columns(
+    published: Mapping[str, Any] | None,
+    incoming: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Keep the better recording of each optimization, not the better document.
+
+    The kernel-agent record accumulates across sessions: a run that only tuned
+    GEMM must not erase a rewrite an earlier run learned. Records are matched
+    per column by the optimization they describe and the higher end-to-end gain
+    wins, so a session contributes exactly what it improved.
+
+    Returns the merged columns and the records inherited from the published
+    document. The caller has to re-upload those records' artifacts for their
+    refs to keep resolving, and the returned dicts are the ones inside
+    ``merged``, so rewriting a ref on one updates the document.
+    """
+    merged: dict[str, Any] = {}
+    inherited: list[dict[str, Any]] = []
+    published = published if isinstance(published, Mapping) else {}
+    for column, list_key in _KERNEL_COLUMN_LISTS:
+        prior_node = published.get(column)
+        prior = list((prior_node or {}).get(list_key) or []) if isinstance(prior_node, Mapping) else []
+        fresh_node = incoming.get(column)
+        fresh = list((fresh_node or {}).get(list_key) or []) if isinstance(fresh_node, Mapping) else []
+        by_key: dict[str, tuple[Mapping[str, Any], bool]] = {}
+        order: list[str] = []
+        for record in prior:
+            if not isinstance(record, Mapping):
+                continue
+            key = _kernel_record_key(column, record)
+            if key not in by_key:
+                order.append(key)
+            by_key[key] = (record, True)
+        for record in fresh:
+            if not isinstance(record, Mapping):
+                continue
+            key = _kernel_record_key(column, record)
+            held = by_key.get(key)
+            if held is None:
+                order.append(key)
+                by_key[key] = (record, False)
+            elif _kernel_record_score(record) > _kernel_record_score(held[0]):
+                by_key[key] = (record, False)
+        rows = []
+        for key in order:
+            record, from_published = by_key[key]
+            row = dict(record)
+            rows.append(row)
+            if from_published:
+                inherited.append(row)
+        merged[column] = {list_key: rows}
+    return merged, inherited
+
+
+def kernel_record_refs(record: Mapping[str, Any]) -> set[str]:
+    """Artifact refs one record depends on.
+
+    Delegates to the same extractor the bundle validates with, so a record
+    cannot depend on a ref the caller forgot to carry: hand-listing key names
+    missed nested sections and the report/artifact paths a real record carries.
+    """
+    return extract_knowledge_artifact_refs(record)
 
 
 def build_kernel_agent_knowledge(
@@ -961,6 +1074,8 @@ __all__ = [
     "envelope_to_v1_recipe",
     "has_new_keep",
     "kernel_agent_canonical_id",
+    "kernel_record_refs",
+    "merge_kernel_columns",
     "match_rewrite_attempt",
     "merge_staged_sections",
 ]

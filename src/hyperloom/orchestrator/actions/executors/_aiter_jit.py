@@ -34,6 +34,8 @@ log = logging.getLogger(__name__)
 
 # < N .so files under aiter jit/ ⇒ COLD start (first-time JIT compile pending).
 COLD_START_KERNEL_THRESHOLD = 20
+# COLD-start benchmark cap, including first-time compilation and graph capture.
+BASELINE_COLD_START_TIMEOUT_SEC = 9000
 
 # Fallback probe paths for aiter's JIT cache dir; first existing wins. Override
 # via env `INFERENCE_OPTIMIZER_AITER_JIT_DIR` (tried first).
@@ -100,6 +102,53 @@ def _resolve_aiter_jit_dir_dynamic() -> list[str]:
         str(aiter_root / "jit"),
         str(aiter_root / "jit" / "build"),
     ]
+
+
+def probe_aiter_jit_cache() -> dict[str, Any]:
+    """Inspect aiter's JIT cache and classify the next start as cold or warm."""
+    info: dict[str, Any] = {
+        "path": None,
+        "kernel_count": 0,
+        "size_mb": 0,
+        "is_cold": None,
+        "probe_status": "not_found",
+    }
+    candidates: list[str] = []
+    override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
+    if override:
+        candidates.append(override)
+    candidates.extend(_resolve_aiter_jit_dir_dynamic())
+    candidates.extend(AITER_JIT_PROBE_PATHS)
+
+    try:
+        chosen: Path | None = None
+        for raw in candidates:
+            path = Path(raw)
+            if path.exists() and path.is_dir():
+                chosen = path
+                break
+        if chosen is None:
+            return info
+        info["path"] = str(chosen)
+
+        total_bytes = 0
+        kernel_count = 0
+        for so_path in chosen.rglob("*.so"):
+            try:
+                total_bytes += so_path.stat().st_size
+                kernel_count += 1
+            except OSError:
+                continue
+        info["kernel_count"] = kernel_count
+        info["size_mb"] = total_bytes // (1024 * 1024)
+        info["is_cold"] = kernel_count < COLD_START_KERNEL_THRESHOLD
+        info["probe_status"] = "found"
+        return info
+    except Exception as exc:  # noqa: BLE001
+        log.warning("aiter_jit: cache probe failed: %s", exc)
+        info["probe_status"] = "error"
+        info["is_cold"] = None
+        return info
 
 
 def _any_live_compiler(
@@ -447,10 +496,12 @@ __all__ = [
     "AITER_CPP_BUILD_PROBE_PATHS",
     "AITER_JIT_PROBE_PATHS",
     "AITER_LOCK_STALE_MINUTES",
+    "BASELINE_COLD_START_TIMEOUT_SEC",
     "COLD_START_KERNEL_THRESHOLD",
     "COMPILER_PROCESS_NAMES",
     "clean_stale_aiter_locks",
     "find_aiter_baton_wait",
+    "probe_aiter_jit_cache",
     "sweep_stale_aiter_locks_if_dead",
     "_any_live_compiler",
     "_resolve_aiter_jit_dir_dynamic",

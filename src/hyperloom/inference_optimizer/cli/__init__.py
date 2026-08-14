@@ -18,6 +18,7 @@ import os
 import shlex
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -263,7 +264,7 @@ def _build_orchestration_prompt(
     cycle_directive: str = "",
     phase: str = "",
     transport: str = TRANSPORT_TOOLS,
-    action_registry: dict[str, ActionMetadata] | None = None,
+    action_registry: Mapping[str, ActionMetadata] | None = None,
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides).
 
@@ -280,7 +281,7 @@ def _build_orchestration_prompt(
             behaviour that phase cannot reach. Empty renders every module.
         transport (str): How the orchestration backend carries an intent; omits
             the prompt modules describing a tool surface it does not mount.
-        action_registry (dict[str, ActionMetadata] | None): The action
+        action_registry (Mapping[str, ActionMetadata] | None): The action
             catalogue to use; defaults to :data:`ACTION_CATALOGUE`.
 
     Returns:

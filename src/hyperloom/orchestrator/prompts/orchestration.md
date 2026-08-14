@@ -256,8 +256,8 @@ while any KEEP is pending silently omits its contribution.
 
 **No actionable kernel lever → `skip_to_sweep`, do not stall.** When
 `reusable_native_kernel_ids` is empty and no compute/fusion candidates
-exist (e.g. dominant kernels are RCCL collectives or closed CK/hipBLASLt
-GEMMs), drain `pending_keep_kernels` then emit
+exist (e.g. dominant kernels are vendor RCCL/NCCL binaries or closed
+CK/hipBLASLt GEMMs), drain `pending_keep_kernels` then emit
 `escalate_strategy_change{next_action_hint='skip_to_sweep'}`. Config/env
 tuning is an EXPLORE lever — `integrate` no-ops on configs; the cyclic
 reloop gives EXPLORE another round.
@@ -266,6 +266,17 @@ reloop gives EXPLORE another round.
 crash uncovered during KERNEL_AGENT does not need to wait for a reloop;
 `delegate{action_name='specialist', params={scope='freeform', ...}}`
 is allowed here and uses the same GPU pool / lane isolation as in EXPLORE.
+
+**Empty `reusable_native_kernel_ids` does NOT by itself mean the collective
+lever is gone.** Vendor RCCL/NCCL kernels are opaque binaries and stay
+unoptimizable, but a source-resolvable custom collective (e.g. a framework's
+own fused all-reduce) is withheld from `reusable_native_kernel_ids` on
+purpose: it belongs to the Coordinator's collective lane, not to
+`kernel_opt`. So an empty list can coexist with a collective campaign that
+is queued or already running. Before you call the phase exhausted, check
+whether a `run_collective_done` / `collective_integrate_done` response is
+still outstanding for this KERNEL entry; skipping while one is in flight
+throws away its gain.
 
 **Never fabricate a measurement.** Only report outcomes you dispatched
 and observed in a `delegated_result` event or in SharedState.
@@ -351,11 +362,22 @@ on the next tick.
 ### Kernel request kinds
 
 * `kind` MUST be EXACTLY one of `trace_analyze` / `run_gemm_tuning` /
-  `run_optimization` / `integrate` / `apply_patch` (these have
-  programmatic handlers). `kernel_opt` is NOT a recognised kind — never
+  `run_optimization` / `integrate` / `apply_patch` — the kinds you may
+  request. `kernel_opt` is NOT a recognised kind — never
   use it as a request kind. Use `trace_analyze` for candidate analysis.
   `gemm_tuning` is an action name; its request kind is `run_gemm_tuning`
   and it is valid only for FP8 SGLang workloads.
+* `run_fusion` and `run_collective` ALSO have programmatic handlers but are
+  NOT yours to request: they are Coordinator-owned deterministic lanes,
+  dispatched at KERNEL entry once their own gate passes. PolicyGate REJECTS
+  either kind from you (`phase_incompatible`) because a direct request
+  bypasses that gate, the lane's SharedState accounting and its integrate
+  step. You only OBSERVE them — outcomes land in your inbox as
+  `run_fusion_done` / `run_collective_done`, followed by
+  `fusion_integrate_done` / `collective_integrate_done` once a KEEP is
+  integrated, at which point `optimization_stack` carries a
+  `fusion:forge_fusion` / `collective:forge_collective` entry. Read them as
+  progress; to act on a source-level kernel yourself, propose `kernel_opt`.
 * Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`
   verbatim.
 

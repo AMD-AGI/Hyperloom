@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
+import shutil
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -18,15 +21,26 @@ from .client import (
     RemoteRecipeClient,
     RemoteRecipeConfigurationError,
 )
-from .models import RemoteRecipeValidationError, RemoteWriteResult
+from .models import (
+    Artifact,
+    KnowledgeBundle,
+    RemoteRecipeValidationError,
+    RemoteWriteResult,
+    extract_knowledge_artifact_refs,
+)
+from .sanitize import sanitize_shared_knowledge
 from .values import (
     KERNEL_AGENT_METRIC,
+    KERNEL_AGENT_SESSION_ID,
+    _kernel_agent_score,
     build_kernel_agent_knowledge,
     build_remote_knowledge,
     convert_v1_recipe_to_knowledge,
     envelope_to_v1_recipe,
     has_new_keep,
     kernel_agent_canonical_id,
+    kernel_record_refs,
+    merge_kernel_columns,
 )
 
 log = logging.getLogger(__name__)
@@ -52,7 +66,6 @@ read_remote_champion = read_remote_recipe
 def write_kernel_agent_kb(
     state: Any,
     kernel_canonical_id: str,
-    session_id: str,
     *,
     client: RemoteRecipeClient | None = None,
 ) -> RemoteWriteResult:
@@ -63,36 +76,211 @@ def write_kernel_agent_kb(
     rewrite) into their own KB Store record and keeps whichever beats what the
     kernel-agent KB already holds, scored by the kernel's own gain. Overlap with
     KernelForge's ``kernel:`` records is by design and not consulted here.
+
+    The record is not written under the run's session: it accumulates across
+    runs under one storage session, see KERNEL_AGENT_SESSION_ID.
     """
     resolved = client or RemoteRecipeClient.from_env_optional()
     if resolved is None:
         return RemoteWriteResult("disabled", "KB_STORE_URL/TOKEN not configured")
+    session_id = KERNEL_AGENT_SESSION_ID
     with tempfile.TemporaryDirectory(prefix="hyperloom-kernel-agent-") as temporary:
-        files_dir = Path(temporary) / "files"
-        bundle, score = build_kernel_agent_knowledge(
+        root = Path(temporary)
+        files_dir = root / "files"
+        bundle, _score = build_kernel_agent_knowledge(
             state, files_dir, sections=KnowledgeSections.from_env()
         )
         value = bundle.knowledge.get("value") or {}
-        has_opt = bool(
-            (value.get("gemm") or {}).get("optimizations")
-            or (value.get("fusion") or {}).get("items")
-            or (value.get("rewrite") or {}).get("items")
-        )
-        if not has_opt:
+        if not _has_kernel_optimization(value):
             return RemoteWriteResult(
                 "skipped", "no_kernel_optimization", kernel_canonical_id, session_id
             )
-        # Ensure a first kernel optimization always lands even if its gain field
-        # is missing; real KEEPs carry a positive gain that drives keep-if-better.
-        score_value = score if score > 0 else 1e-6
-        return resolved.write_if_better(
+        try:
+            published, published_dir = _published_kernel_record(
+                resolved, kernel_canonical_id, root / "published"
+            )
+        except Exception as exc:  # noqa: BLE001 — reported, never written past
+            log.warning(
+                "kernel-agent KB: not writing, the published record is unreadable",
+                exc_info=True,
+            )
+            return RemoteWriteResult(
+                "error",
+                f"published_record_unreadable: {exc}",
+                kernel_canonical_id,
+                session_id,
+            )
+        merged, inherited = merge_kernel_columns(published, value)
+        if merged == published:
+            # Every optimization this session recorded is already published at
+            # least as good; republishing would only churn the record.
+            return RemoteWriteResult(
+                "skipped", "not_better_than_published", kernel_canonical_id, session_id
+            )
+        if inherited:
+            unusable = _carry_published_artifacts(published_dir, files_dir, inherited)
+            if unusable:
+                _drop_records(merged, unusable)
+        bundle = _rebuild_kernel_bundle(bundle, merged, files_dir)
+        score = _kernel_agent_score(merged)
+        return resolved.write_record(
             kernel_canonical_id,
             session_id,
             bundle,
-            optimized_throughput=score_value,
+            # A first optimization must land even if its gain field is missing;
+            # real KEEPs carry a positive gain that drives keep-if-better.
+            score=score if score > 0 else 1e-6,
             files_dir=files_dir,
             metric=KERNEL_AGENT_METRIC,
         )
+
+
+def _has_kernel_optimization(value: Mapping[str, Any]) -> bool:
+    return bool(
+        (value.get("gemm") or {}).get("optimizations")
+        or (value.get("fusion") or {}).get("items")
+        or (value.get("rewrite") or {}).get("items")
+    )
+
+
+def _published_kernel_record(
+    client: RemoteRecipeClient,
+    canonical_id: str,
+    destination: Path,
+) -> tuple[dict[str, Any] | None, Path | None]:
+    """Download what the kernel-agent KB already holds for this identity.
+
+    Raises when the record cannot be read. It is the base every merge builds
+    on, and the write replaces the accumulated document wholesale: treating an
+    unreadable incumbent as an absent one would publish this run's columns
+    alone, destroying every kernel this identity has ever learned. One 500,
+    one timeout or one failed digest check is not a licence to do that.
+    """
+    document = client.read(canonical_id, destination)
+    if not isinstance(document, dict):
+        return None, None
+    value = document.get("value")
+    return (dict(value) if isinstance(value, Mapping) else None), destination
+
+
+def _carry_published_artifacts(
+    published_dir: Path | None,
+    files_dir: Path,
+    inherited: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Re-stage the artifacts of records inherited from the published document.
+
+    The record is replaced wholesale on write, so an inherited entry's files
+    have to be uploaded again for its refs to keep resolving. Refs are only
+    ``category/kind/<basename>``, so an inherited file regularly collides with a
+    same-named one this session produced; the inherited copy then takes a
+    digest-suffixed ref and the record that owns it is rewritten to match.
+    Leaving it to resolve to this session's bytes would silently replay the
+    wrong table or patch under the inherited record's measured gain.
+
+    Returns the inherited records whose files could not be re-staged, which the
+    caller drops: one undownloadable artifact must not fail the whole write.
+    """
+    source_root = None if published_dir is None else published_dir / "files"
+    unusable: list[dict[str, Any]] = []
+    for record in inherited:
+        for ref in sorted(kernel_record_refs(record)):
+            source = None if source_root is None else source_root / ref
+            if source is None or not source.is_file():
+                unusable.append(record)
+                break
+            target = files_dir / ref
+            if target.exists() and not _same_bytes(source, target):
+                displaced = _displaced_ref(ref, source)
+                _rewrite_record_ref(record, ref, displaced)
+                ref = displaced
+                target = files_dir / ref
+            if target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+    if unusable:
+        log.warning(
+            "kernel-agent KB: dropping %d inherited record(s) whose artifacts are unavailable",
+            len(unusable),
+        )
+    return unusable
+
+
+def _drop_records(merged: dict[str, Any], drops: list[dict[str, Any]]) -> None:
+    """Remove specific record objects from the merged columns, by identity."""
+    dropped = {id(record) for record in drops}
+    for column in merged.values():
+        if not isinstance(column, dict):
+            continue
+        for key, rows in column.items():
+            if isinstance(rows, list):
+                column[key] = [row for row in rows if id(row) not in dropped]
+
+
+def _same_bytes(left: Path, right: Path) -> bool:
+    return left.stat().st_size == right.stat().st_size and left.read_bytes() == right.read_bytes()
+
+
+def _displaced_ref(ref: str, source: Path) -> str:
+    """Name a colliding inherited artifact after its own content."""
+    original = Path(ref)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()[:10]
+    return (original.parent / f"{original.stem}-{digest}{original.suffix}").as_posix()
+
+
+def _rewrite_record_ref(record: Any, old_ref: str, new_ref: str) -> None:
+    """Repoint the refs in one record that are exactly ``old_ref``.
+
+    Matching on the whole ref, not its basename: a record can name two files
+    that share a basename across directories, and repointing the other one at
+    this file would leave its own bytes referenced by nothing, dropped from the
+    upload, and replayed as the wrong kind of artifact.
+    """
+    if isinstance(record, dict):
+        for key, value in record.items():
+            if isinstance(value, str):
+                if value == old_ref:
+                    record[key] = new_ref
+            else:
+                _rewrite_record_ref(value, old_ref, new_ref)
+        return
+    if isinstance(record, list):
+        for index, item in enumerate(record):
+            if isinstance(item, str):
+                if item == old_ref:
+                    record[index] = new_ref
+            else:
+                _rewrite_record_ref(item, old_ref, new_ref)
+
+
+def _rebuild_kernel_bundle(
+    bundle: KnowledgeBundle, merged: dict[str, Any], files_dir: Path
+) -> KnowledgeBundle:
+    """Re-describe the bundle around the merged columns and the files they name.
+
+    Only files the merged document actually references are uploaded: this
+    session stages every record it produced before the merge decides which of
+    them survive, and a record that lost its slot would otherwise leave its
+    files behind as artifacts nothing references.
+    """
+    knowledge = dict(bundle.knowledge)
+    knowledge["value"] = merged
+    knowledge[KERNEL_AGENT_METRIC] = _kernel_agent_score(merged)
+    knowledge = sanitize_shared_knowledge(knowledge)
+    referenced = extract_knowledge_artifact_refs(knowledge)
+    artifacts = []
+    for path in sorted(files_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(files_dir).as_posix()
+        if rel in referenced:
+            artifacts.append(Artifact(path=rel, source=path))
+        else:
+            path.unlink()
+    rebuilt = KnowledgeBundle(knowledge=knowledge, artifacts=artifacts)
+    rebuilt.validate()
+    return rebuilt
 
 
 def write_final_remote_recipe(
@@ -267,6 +455,7 @@ __all__ = [
     "envelope_to_v1_recipe",
     "has_new_keep",
     "kernel_agent_canonical_id",
+    "merge_kernel_columns",
     "read_remote_champion",
     "read_remote_recipe",
     "write_final_remote_recipe",

@@ -11,6 +11,7 @@ import os
 import signal
 import time
 import traceback
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -971,6 +972,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_auto_enqueue_pending_integrations": "phase_kernel_stack",
         "_maybe_reprofile_for_kernel": "phase_kernel",
         "_geak_enabled": "phase_kernel",
+        "_collective_required_before_kernel_opt": "phase_kernel",
         "_on_enter_kernel": "phase_kernel",
         "_run_bf16_dense_gemm_fallback": "phase_kernel",
         "_should_run_bf16_dense_gemm_fallback": "phase_kernel",
@@ -1382,7 +1384,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     # Action catalogue mapping action_name -> metadata. Class-level so a
     # partially-built Coordinator still resolves it.
-    action_registry: dict[str, ActionMetadata] = ACTION_CATALOGUE
+    action_registry: Mapping[str, ActionMetadata] = ACTION_CATALOGUE
 
     # Inline fast-action execution; deny report/session_breakdown (CLOSE artifacts).
     _INLINE_ACTION_DENY: frozenset[str] = frozenset(
@@ -1471,7 +1473,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     # optimization_stack actions warranting a post-opt roofline; pure
     # param-search (explore/sweep) is excluded.
-    _POST_OPT_ROOFLINE_ACTIONS = frozenset({"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
+    _POST_OPT_ROOFLINE_ACTIONS = frozenset(
+        {"collective", "integrate", "integrate_patch", "gemm_tuning", "geak_e2e"}
+    )
 
     async def tick(self, n: int = 1) -> None:
         """Run exactly ``n`` reactor passes for every agent; dispatcher pumps at pass end, lazy resume replay on tick 1.
@@ -1829,7 +1833,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 max_turns=0,
             )
         except BackendError as exc:
-            self._trace_mcp_setup(agent_name=agent_name, backend=backend)
             if isinstance(exc, LLMCallFailed) and not backend_self_traces:
                 self._trace_reactor_llm_failure(
                     agent_name,
@@ -1844,7 +1847,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
             await self._track_backend_error_streak(agent_name, exc)
             return
         except NoIntentEmitted as exc:
-            self._trace_mcp_setup(agent_name=agent_name, backend=backend)
             # No parseable intents; surface as observation so the next tick self-corrects.
             await self._record_observation(
                 "coordinator",
@@ -1853,7 +1855,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
             return
         except Exception as exc:  # noqa: BLE001
-            self._trace_mcp_setup(agent_name=agent_name, backend=backend)
             # Catch-all so one agent's bad turn never stops the loop.
             log.exception("reactor pass for %s raised", agent_name)
             await self._record_observation(
@@ -1867,13 +1868,14 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 exc=exc,
             )
             return
+        finally:
+            self._trace_mcp_setup(agent_name=agent_name, backend=backend)
         # Reset the streak — a successful turn proves the backend is alive again.
         if self._backend_error_streak.get(agent_name):
             self._backend_error_streak[agent_name] = 0
             self._backend_error_alarm_armed[agent_name] = True
         # Record this reactor turn's token spend on the unified ledger.
         latency_ms = int((time.perf_counter() - _t0) * 1000)
-        self._trace_mcp_setup(agent_name=agent_name, backend=backend)
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
         self._record_reactor_conversation(agent_name, result)

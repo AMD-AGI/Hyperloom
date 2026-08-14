@@ -510,6 +510,45 @@ class TestN24KernelAgentEnvHardFail:
         assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/from/file"
         assert _os.environ["KERNEL_AGENT_LOG_LEVEL"] == "DEBUG"
 
+    def test_credential_fallback_block_parses_without_warnings(
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
+    ):
+        """The installer emits credentials as a conditional block (#1169).
+
+        The comparison line inside it contains ``=`` without being an
+        assignment, so a parser that splits on ``=`` alone would invent a key
+        and warn about it on every launch.
+        """
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
+        (runtime / "kernel-agent.env.sh").write_text(
+            "export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\n"
+            'if [ -n "${ANTHROPIC_API_KEY:-}" ]; then\n'
+            "  [ \"${ANTHROPIC_API_KEY}\" = 'ak-install-time' ] || \\\n"
+            "    echo '[kernel-agent] ANTHROPIC_API_KEY differs' >&2\n"
+            "else\n"
+            "  export ANTHROPIC_API_KEY='ak-install-time'\n"
+            "fi\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        import os as _os
+
+        try:
+            cli_preflight._load_kernel_agent_env_fallback()
+            loaded_key = _os.environ.get("ANTHROPIC_API_KEY")
+        finally:
+            # The loader writes straight into os.environ, which monkeypatch
+            # cannot roll back; a leaked credential reshapes later auth tests.
+            _os.environ.pop("ANTHROPIC_API_KEY", None)
+
+        assert loaded_key == "ak-install-time"
+        assert "unsupported kernel-agent env key" not in capsys.readouterr().err
+
     def test_explicit_kernel_agent_env_overrides_user_data_path(
         self,
         tmp_path,

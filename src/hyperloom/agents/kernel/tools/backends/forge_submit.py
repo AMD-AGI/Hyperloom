@@ -104,27 +104,28 @@ _FORGE_MIN_BUDGET_SEC = 3600
 _FORGE_SHUTDOWN_GRACE_SEC = 30
 
 
-def _forge_e2e_pct(candidate: dict) -> float | None:
-    """Return a finite 0..100 GPU-time share for Forge's E2E projection.
+def _forge_failure_tail(output: str, *, max_chars: int = 500) -> str:
+    """Summarize why the forge child failed, for the error the caller reads.
 
-    A task group represents every traced row affected by one source-level patch,
-    so its aggregate share is authoritative. The primary row is only a fallback
-    for legacy candidates without task-group metadata.
+    The whole transcript already goes to the forge log, which nobody opens while
+    the only thing reaching the orchestrator is a return code -- so a producer
+    that rejected its own argv looked identical to one that crashed measuring.
+
+    A usage error outranks the tail: the CLI names it on one line and exits
+    before emitting any of the progress output the tail would otherwise capture.
+    Result sentinels are skipped because one such line is a whole JSON document
+    and would crowd out everything else.
     """
-    group = candidate.get("task_group")
-    if isinstance(group, dict) and group.get("aggregate_gpu_pct") is not None:
-        raw_value = group.get("aggregate_gpu_pct")
-    else:
-        raw_value = candidate.get("gpu_pct")
-    if raw_value is None:
-        return None
-    try:
-        value = float(raw_value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(value) or not 0.0 <= value <= 100.0:
-        return None
-    return value
+    lines = [
+        line.strip()
+        for line in (output or "").splitlines()
+        if line.strip() and "__FORGE_RESULT__" not in line
+    ]
+    if not lines:
+        return "no output"
+    flagged = [line for line in lines if line.startswith(("Error:", "Usage:"))]
+    text = " | ".join(flagged or lines[-3:])
+    return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
 
 
 class ForgeLoopOutcome(NamedTuple):
@@ -1021,7 +1022,13 @@ def _release_repo_lock(lock: _RepoLock | None) -> None:
         pass
 
 
-def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[str, str, dict] | None:
+def _prepare_inplace(
+    source_file: str,
+    kernel_repo: str,
+    branch: str,
+    *,
+    lock_fd: _RepoLock | None = None,
+) -> tuple[str, str, dict] | None:
     """In-place mode (Option 1): edit the LIVE repo so an editable-finder import
     sees the changes. Snapshots the original branch/HEAD + source bytes for a
     per-file restore in finally. Returns (workspace=repo, kernel_file=source_file,
@@ -1034,26 +1041,32 @@ def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[s
         pristine baseline (falls back to skip only if the default branch can't
         be resolved),
       - hold a per-repo lock so concurrent forge runs never interleave,
-      - dirty working trees are allowed: restore only touches the source_file
-        (per-file write-back, no ``reset --hard``), so other uncommitted changes
-        in the repo are never destroyed.
+      - dirty working trees are allowed and preserved: the caller may record a
+        tracked-baseline patch and the untracked inventory, which
+        ``_restore_inplace`` replays so uncommitted work survives the campaign.
+        Files the campaign itself created are removed on restore; there is
+        still no ``reset --hard``.
     """
     repo = kernel_repo or _git_toplevel(source_file)
     if not repo or not (Path(repo) / ".git").exists():
+        _release_repo_lock(lock_fd)
         return None
     if not Path(source_file).is_file():
+        _release_repo_lock(lock_fd)
         return None
     try:
         relpath = str(Path(source_file).resolve().relative_to(Path(repo).resolve()))
     except ValueError:
+        _release_repo_lock(lock_fd)
         return None  # source not inside repo
 
     # Serialize in-place runs on this repo before touching any git state.
-    lock_fd = _acquire_repo_lock(repo)
+    lock_fd = lock_fd or _acquire_repo_lock(repo)
     if lock_fd is None:
         return None  # another forge in-place run holds this repo; skip cleanly
 
     def _skip() -> None:
+        """Release the lock and report the repo as unusable."""
         _release_repo_lock(lock_fd)
         return None
 
@@ -1120,6 +1133,86 @@ def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[s
     return repo, source_file, restore
 
 
+def _untracked_paths(repo: str) -> set[str]:
+    """Return untracked repository paths without shell quoting."""
+    proc = _run(
+        [
+            "git",
+            "-C",
+            repo,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"could not inspect untracked files in {repo}")
+    return {
+        path
+        for path in (proc.stdout or "").split("\0")
+        if path
+    }
+
+
+def _remove_new_untracked(repo: str, baseline: set[str]) -> None:
+    """Remove only untracked paths created after the baseline."""
+    root = Path(repo)
+    created = _untracked_paths(repo) - baseline
+    for relpath in sorted(
+        created,
+        key=lambda value: len(Path(value).parts),
+        reverse=True,
+    ):
+        relative = Path(relpath)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError(f"unsafe untracked path: {relpath}")
+        target = root / relative
+        try:
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+        except OSError as exc:
+            raise RuntimeError(
+                f"could not remove campaign file: {target}"
+            ) from exc
+        parent = target.parent
+        while parent != root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
+
+def _apply_tracked_baseline(repo: str, patch: bytes) -> None:
+    """Restore a journaled tracked baseline patch to the working tree."""
+    if not patch:
+        return
+    proc = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo,
+            "apply",
+            "--binary",
+            "--whitespace=nowarn",
+            "-",
+        ],
+        input=patch,
+        capture_output=True,
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or b"").decode(
+            "utf-8",
+            errors="replace",
+        ).strip()
+        raise RuntimeError(
+            f"could not restore tracked repository baseline: {detail}"
+        )
+
+
 def _restore_inplace(restore: dict) -> None:
     """Restore the live repo after in-place editing: revert EVERY file the agent
     changed back to its pre-forge content, return to the original branch/HEAD,
@@ -1130,8 +1223,13 @@ def _restore_inplace(restore: dict) -> None:
     loop's ``git add -u`` commits mean those edits live on the temp branch.
     ``base_commit`` holds the exact pre-forge tree (including any pre-existing
     dirty content snapshotted at prepare time), so checking files out of it
-    restores precisely what was there before forge ran. Untracked files (build
-    artifacts) are never touched (no ``reset --hard``).
+    restores precisely what was there before forge ran.
+
+    Untracked files are handled by inventory, not by ``reset --hard``: when the
+    caller recorded ``baseline_untracked`` at prepare time, untracked paths that
+    did NOT exist then are deleted, because a campaign's leftover artifacts
+    (notably ``forge_experiments/``) otherwise make the next run refuse to
+    start. Untracked files present in the baseline are preserved.
     """
     if not restore:
         return
@@ -1161,17 +1259,49 @@ def _restore_inplace(restore: dict) -> None:
     # Reset the index to match orig_head (without touching working tree).
     if orig_head:
         _run_git(["-C", repo, "reset", orig_head, "--", "."], timeout=30)
-    # Ensure the primary source_file is exactly the pre-forge bytes even if the
-    # git restore above raced or partially applied.
+    # Any baseline failure below must still drop the temp branch and release the
+    # per-repo lock, otherwise the next in-place session cannot run.
     try:
-        Path(restore["source_file"]).write_bytes(restore["backup"])
-    except OSError:
-        pass
-    # Delete the temp branch (safe now that HEAD points elsewhere).
-    if restore.get("branch"):
-        _run_git(["-C", repo, "branch", "-D", restore["branch"]], timeout=30)
-    # Release the per-repo in-place lock last, after full restore.
-    _release_repo_lock(restore.get("lock_fd"))
+        baseline_patch = restore.get("baseline_tracked_patch")
+        if baseline_patch is not None:
+            if not isinstance(baseline_patch, bytes):
+                raise RuntimeError("invalid tracked repository baseline")
+            baseline_in_base_commit = restore.get(
+                "baseline_in_base_commit",
+                False,
+            )
+            if not isinstance(baseline_in_base_commit, bool):
+                raise RuntimeError("invalid tracked baseline commit marker")
+            if baseline_patch and not baseline_in_base_commit:
+                _apply_tracked_baseline(repo, baseline_patch)
+        # Ensure the primary source_file is exactly the pre-forge bytes even if
+        # the git restore above raced or partially applied.
+        try:
+            Path(restore["source_file"]).write_bytes(restore["backup"])
+        except OSError as exc:
+            # Best-effort rewrite; the git restore above already reverted it.
+            # Surfaced rather than swallowed: if it fires alongside a failed
+            # git restore, the file is the one the caller must inspect.
+            log.warning(
+                "in-place restore could not rewrite %s: %s",
+                restore.get("source_file"),
+                exc,
+            )
+        baseline_untracked = restore.get("baseline_untracked")
+        if baseline_untracked is not None:
+            if not isinstance(baseline_untracked, list) or any(
+                not isinstance(path, str) or not path
+                for path in baseline_untracked
+            ):
+                raise RuntimeError("invalid in-place untracked baseline")
+            _remove_new_untracked(repo, set(baseline_untracked))
+    finally:
+        # Delete the temp branch (safe now that HEAD points elsewhere).
+        if restore.get("branch"):
+            _run_git(["-C", repo, "branch", "-D", restore["branch"]], timeout=30)
+        # Release the per-repo in-place lock last, after full restore.
+        _release_repo_lock(restore.get("lock_fd"))
+        restore["lock_fd"] = None
 
 
 def _remove_worktree(kernel_repo: str, source_file: str, wt: str, branch: str) -> None:
@@ -2616,6 +2746,15 @@ def _validated_forge_checkpoint(
     # else; vetoing on absence discards every salvageable best from a timeout.
     actual_coverage = checkpoint.get("case_coverage")
     if actual_coverage and expected_coverage and actual_coverage != expected_coverage:
+        # Discarding a best the producer already validated and committed is too
+        # expensive an outcome to leave to a return value nobody can attribute.
+        log.warning(
+            "forge recovery: dropping checkpoint for %s -- case coverage "
+            "mismatch: expected %r, checkpoint reported %r",
+            best_commit[:12],
+            expected_coverage,
+            actual_coverage,
+        )
         return None
     normalized = dict(checkpoint)
     normalized["best_commit"] = best_commit
@@ -2721,7 +2860,6 @@ def _run_loop_via_cli(
     worktree_kernel: str,
     driver: str,
     workspace: str,
-    shapes: dict,
     snr_threshold: float,
     max_iters: int,
     max_hours: float,
@@ -2735,7 +2873,6 @@ def _run_loop_via_cli(
     forge_log: Path,
     timeout_s: int,
     deadline_unix: float = 0.0,
-    e2e_pct: float | None = None,
     operator_name: str = "",
     experience_id: str = "",
     framework: str = "",
@@ -2798,8 +2935,6 @@ def _run_loop_via_cli(
         driver,
         "--workspace",
         workspace,
-        "--shapes-json",
-        _json.dumps(shapes),
         "--snr-threshold",
         str(snr_threshold),
         "--max-iters",
@@ -2845,10 +2980,6 @@ def _run_loop_via_cli(
         cmd += ["--program-md-file", str(program_md_file)]
     if invocation_spec_file and Path(invocation_spec_file).is_file():
         cmd += ["--invocation-spec-file", str(Path(invocation_spec_file).resolve())]
-    # Forward the kernel's E2E time share so forge-loop's baseline profile can
-    # project a per-kernel end-to-end optimization potential.
-    if e2e_pct is not None:
-        cmd += ["--e2e-pct", str(e2e_pct)]
     if operator_name:
         cmd += ["--operator-name", operator_name]
     if target_functions:
@@ -2888,7 +3019,8 @@ def _run_loop_via_cli(
         if proc.returncode != 0:
             if loop_exc is None:
                 loop_exc = RuntimeError(
-                    f"forge-loop exited rc={proc.returncode}"
+                    f"forge-loop exited rc={proc.returncode}: "
+                    f"{_forge_failure_tail(out)}"
                 )
     except Exception as exc:  # noqa: BLE001
         loop_exc = exc
@@ -3016,9 +3148,9 @@ def _run_rewrite_via_cli(
     builds the producer's own argv rather than stripping options off the
     generic one, and reads only the caller-chosen result file.
 
-    ``shapes`` is a list of per-case dimension mappings, not the generic
-    forge-loop selector dict: the rewrite producer coerces this argument with
-    ``list()``, so a mapping would degrade into a list of its keys.
+    ``shapes`` is a list of per-case dimension mappings, not the selector dict
+    Hyperloom carries internally: the rewrite producer coerces this argument
+    with ``list()``, so a mapping would degrade into a list of its keys.
 
     ``invocation_spec_file`` is the evidence the producer's driver-preparation
     stage reads when the handed-over driver does not conform. A synthesized
@@ -3144,7 +3276,10 @@ def _run_rewrite_via_cli(
                 f"forge rewrite exceeded absolute deadline after {timeout_s}s"
             )
         if proc.returncode != 0 and run_exc is None:
-            run_exc = RuntimeError(f"forge rewrite exited rc={proc.returncode}")
+            run_exc = RuntimeError(
+                f"forge rewrite exited rc={proc.returncode}: "
+                f"{_forge_failure_tail(out)}"
+            )
     except Exception as exc:  # noqa: BLE001
         run_exc = exc
 
@@ -3774,8 +3909,10 @@ def submit(
                 logical_operator or worktree_kernel,
                 driver,
             )
-        elif requires_multi_case_driver:
-            if not _invocation_spec_covers_cases(
+        else:
+            # A grouped task must carry every shape before the preparer sees it;
+            # a single-shape task has nothing to check.
+            if requires_multi_case_driver and not _invocation_spec_covers_cases(
                 invocation_spec_file,
                 grouped_cases,
             ):
@@ -3787,13 +3924,10 @@ def submit(
                 )
             driver = _write_generated_driver(workspace, _TASK_PREPARER_PLACEHOLDER)
             log.info(
-                "forge driver: delegating grouped task with %d distinct shapes to task-preparer -> %s",
+                "forge driver: delegating %d-shape task to forge-loop task-preparer -> %s",
                 len(grouped_cases),
                 driver,
             )
-        else:
-            driver = _write_generated_driver(workspace, _TASK_PREPARER_PLACEHOLDER)
-            log.info("forge driver: delegating driver authoring to forge-loop task-preparer -> %s", driver)
         # GPU_TARGET is passed via the forge-loop child env (not the parent
         # os.environ, which would leak to sibling ladder backends).
         forge_log = output_dir / "forge_loop.log"
@@ -3815,28 +3949,6 @@ def submit(
                 )
                 max_iters = _compiled_cap
         snr_threshold = float((candidate.get("targets") or {}).get("snr_db", 30.0))
-
-        # Forward the task group's aggregate trace GPU-time share as the best
-        # available Amdahl approximation. Absent/invalid -> leave the optional
-        # E2E projection unavailable.
-        e2e_pct = _forge_e2e_pct(candidate)
-        task_group = candidate.get("task_group")
-        aggregate_gpu_pct = (
-            task_group.get("aggregate_gpu_pct")
-            if isinstance(task_group, dict)
-            else None
-        )
-        if (
-            candidate.get("gpu_pct") is not None
-            or aggregate_gpu_pct is not None
-        ) and e2e_pct is None:
-            log.warning(
-                "forge: ignoring invalid GPU-time share for optional E2E "
-                "projection: kernel_id=%s gpu_pct=%r aggregate_gpu_pct=%r",
-                candidate.get("kernel_id", ""),
-                candidate.get("gpu_pct"),
-                aggregate_gpu_pct,
-            )
 
         # Run the loop in an isolated, hard-killable subprocess so a hung fellow
         # can never freeze the orchestrator. Fellow stability env defaults are
@@ -3885,7 +3997,6 @@ def submit(
             worktree_kernel=worktree_kernel,
             driver=driver,
             workspace=workspace,
-            shapes=shapes,
             snr_threshold=snr_threshold,
             max_iters=max_iters,
             max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),
@@ -3902,7 +4013,6 @@ def submit(
                 time.time() + 1.0,
                 started + timeout_s,
             ),
-            e2e_pct=e2e_pct,
             operator_name=logical_operator,
             experience_id=output_dir.name,
             framework=source_framework,

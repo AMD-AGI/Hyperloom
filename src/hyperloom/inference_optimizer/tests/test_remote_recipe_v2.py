@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -43,13 +44,17 @@ from hyperloom.orchestrator.knowledge.remote_recipe.models import (
     KnowledgeBundle,
     RemoteRecipeValidationError,
     RemoteWriteResult,
+    extract_knowledge_artifact_refs,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe.sanitize import (
     sanitize_publish_env_mapping,
     sanitize_publish_server_args,
     sanitize_shared_knowledge,
 )
-from hyperloom.orchestrator.knowledge.remote_recipe.values import _Files
+from hyperloom.orchestrator.knowledge.remote_recipe.values import (
+    KERNEL_AGENT_SESSION_ID,
+    _Files,
+)
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 
 _DOWNLOAD_BYTES = b"verified artifact"
@@ -847,6 +852,7 @@ class _FakeStore:
         metric: str | None = "optimized_throughput",
     ) -> None:
         self.champion = champion
+        self.champion_session = "champion-session"
         self.conflict = conflict
         self.metric = metric
         self.calls: list[tuple] = []
@@ -887,7 +893,7 @@ class _FakeStore:
 
     def get_rollup(self, canonical_id):
         self.calls.append(("get_rollup", canonical_id))
-        champion = {"session_id": "champion-session", "value": self.champion}
+        champion = {"session_id": self.champion_session, "value": self.champion}
         if self.metric is not None:
             champion["metric"] = self.metric
         return {"champion": champion}
@@ -913,8 +919,11 @@ class _FakeStore:
         self.calls.append(("set_champion", canonical_id, session_id, metric, value))
         if self.conflict:
             self.conflict = False
-            self.champion = value - 1
             raise KBStoreError("POST champion -> HTTP 409: write_conflict")
+        # The store promotes whatever it is told: measured against the real
+        # service, it accepts an equal or even a lower value.
+        self.champion = value
+        self.champion_session = session_id
 
     def list_session_files(self, canonical_id, session_id, *, kind=""):
         self.calls.append(("list_session_files", canonical_id, session_id, kind))
@@ -1860,8 +1869,15 @@ def _kernel_state(tmp_path: Path, *, gain: float = 12.5):
 
 
 def _kernel_client(store):
+    """A client for an identity the kernel-agent KB holds nothing for yet.
+
+    The fake store's envelope belongs to a recipe identity, and a read that
+    fails is no longer treated as an empty record, so say "nothing published"
+    the way the store does: an absent best record.
+    """
     client = RemoteRecipeClient.__new__(RemoteRecipeClient)
     client.store = store
+    client.read = lambda cid, dest: None  # type: ignore[method-assign]
     return client
 
 
@@ -1871,7 +1887,6 @@ def test_kernel_agent_write_publishes_under_the_kernel_metric(tmp_path):
     result = write_kernel_agent_kb(
         _kernel_state(tmp_path),
         "kernel:hyperloom-m:h:vllm:mt:a:0.1:fp8",
-        "sess-1",
         client=_kernel_client(store),
     )
 
@@ -1883,19 +1898,87 @@ def test_kernel_agent_write_publishes_under_the_kernel_metric(tmp_path):
     assert store.published_knowledge["kernel_gain_pct"] == 12.5
 
 
-def test_kernel_agent_write_skips_a_weaker_champion(tmp_path):
+def test_kernel_agent_write_skips_when_it_improves_nothing(tmp_path):
+    """Already published, and better: republishing would only churn the record."""
     store = _FakeStore(champion=30.0, metric="kernel_gain_pct")
+    client = _kernel_client(store)
+    published = {
+        "value": {
+            "gemm": {
+                "optimizations": [
+                    {"variant_name": "forge_a8w8_blockscale", "e2e_gain_pct": 30.0}
+                ]
+            },
+            "fusion": {"items": []},
+            "rewrite": {"items": []},
+        }
+    }
+    client.read = lambda cid, dest: published  # type: ignore[method-assign]
 
     result = write_kernel_agent_kb(
-        _kernel_state(tmp_path, gain=12.5),
-        "kernel:hyperloom-m:h",
-        "sess-1",
-        client=_kernel_client(store),
+        _kernel_state(tmp_path, gain=12.5), "kernel:hyperloom-m:h", client=client
     )
 
     assert result.status == "skipped"
-    assert result.reason == "not_better_than_champion"
+    assert result.reason == "not_better_than_published"
     assert not [c for c in store.calls if c[0] == "put_knowledge"]
+
+
+def test_kernel_agent_write_keeps_another_column_it_did_not_touch(tmp_path):
+    """A GEMM-only session must not erase a rewrite an earlier run learned."""
+    store = _FakeStore(champion=5.0, metric="kernel_gain_pct")
+    client = _kernel_client(store)
+    published_dir = tmp_path / "published"
+    carried = published_dir / "files" / "kernel" / "rewrite" / "k1.py"
+    carried.parent.mkdir(parents=True, exist_ok=True)
+    carried.write_text("print('earlier rewrite')", encoding="utf-8")
+    published = {
+        "value": {
+            "gemm": {"optimizations": []},
+            "fusion": {"items": []},
+            "rewrite": {
+                "items": [
+                    {
+                        "kernel_name": "k1",
+                        "e2e_gain_pct": 5.0,
+                        "patch": "kernel/rewrite/k1.py",
+                        "source_files": ["kernel/rewrite/k1.py"],
+                    }
+                ]
+            },
+        }
+    }
+
+    def _read(cid, dest):
+        shutil.copytree(published_dir, dest, dirs_exist_ok=True)
+        return published
+
+    client.read = _read  # type: ignore[method-assign]
+    # The upload directory is temporary, so record what it held at upload time.
+    uploaded_paths: list[str] = []
+    inner_put_dir = store.put_dir
+
+    def _put_dir(canonical_id, session_id, files_dir):
+        uploaded_paths.extend(
+            path.relative_to(files_dir).as_posix()
+            for path in sorted(Path(files_dir).rglob("*"))
+            if path.is_file()
+        )
+        return inner_put_dir(canonical_id, session_id, files_dir)
+
+    store.put_dir = _put_dir  # type: ignore[method-assign]
+
+    result = write_kernel_agent_kb(
+        _kernel_state(tmp_path, gain=12.5), "kernel:hyperloom-m:h", client=client
+    )
+
+    assert result.status == "written"
+    value = store.published_knowledge["value"]
+    # This session's GEMM lands ...
+    assert len(value["gemm"]["optimizations"]) == 1
+    # ... and the rewrite it never touched survives, with its artifact re-uploaded.
+    assert [item["kernel_name"] for item in value["rewrite"]["items"]] == ["k1"]
+    assert "kernel/rewrite/k1.py" in uploaded_paths
 
 
 def test_kernel_agent_write_skips_a_session_without_kernel_work(tmp_path):
@@ -1911,7 +1994,7 @@ def test_kernel_agent_write_skips_a_session_without_kernel_work(tmp_path):
     )
 
     result = write_kernel_agent_kb(
-        state, "kernel:hyperloom-m:h", "sess-1", client=_kernel_client(store)
+        state, "kernel:hyperloom-m:h", client=_kernel_client(store)
     )
 
     assert result.status == "skipped"
@@ -1932,9 +2015,9 @@ def test_kernel_agent_write_runs_even_when_the_recipe_write_failed(tmp_path):
     )
     written: list[tuple] = []
 
-    def _fake_write(state, kernel_cid, session_id):
-        written.append((kernel_cid, session_id))
-        return RemoteWriteResult("written", "", kernel_cid, session_id, 12.5)
+    def _fake_write(state, kernel_cid):
+        written.append(kernel_cid)
+        return RemoteWriteResult("written", "", kernel_cid, "sid", 12.5)
 
     with mock.patch.dict(
         os.environ,
@@ -1950,4 +2033,342 @@ def test_kernel_agent_write_runs_even_when_the_recipe_write_failed(tmp_path):
     ), mock.patch.object(remote_recipe, "write_kernel_agent_kb", _fake_write):
         WritebackCollaborator(coordinator).finalize_recipe_and_journal()
 
-    assert written == [("kernel:hyperloom-m:h:vllm:mt:a:0.1:fp8", "s1")]
+    assert written == ["kernel:hyperloom-m:h:vllm:mt:a:0.1:fp8"]
+
+
+def _published_kernel_client(store, published: dict, published_dir: Path):
+    """A client whose read() serves ``published`` plus its downloaded files."""
+    client = RemoteRecipeClient.__new__(RemoteRecipeClient)
+    client.store = store
+
+    def _read(cid, dest):
+        shutil.copytree(published_dir, dest, dirs_exist_ok=True)
+        return published
+
+    client.read = _read  # type: ignore[method-assign]
+    return client
+
+
+def _capture_uploads(store) -> dict[str, bytes]:
+    """Record what each write actually uploads; the staging dir is temporary."""
+    uploaded: dict[str, bytes] = {}
+    inner_put_dir = store.put_dir
+
+    def _put_dir(canonical_id, session_id, files_dir):
+        uploaded.clear()
+        uploaded.update(
+            {
+                path.relative_to(files_dir).as_posix(): path.read_bytes()
+                for path in sorted(Path(files_dir).rglob("*"))
+                if path.is_file()
+            }
+        )
+        return inner_put_dir(canonical_id, session_id, files_dir)
+
+    store.put_dir = _put_dir  # type: ignore[method-assign]
+    return uploaded
+
+
+def test_kernel_agent_write_carries_every_ref_an_inherited_record_declares(tmp_path):
+    """A real GEMM record names its report too, not just the tuned table.
+
+    Carrying only a hand-listed subset of ref keys leaves the rest dangling and
+    the whole write dies in validation, silently, at the caller's except.
+    """
+    store = _FakeStore(champion=40.0, metric="kernel_gain_pct")
+    published_dir = tmp_path / "published"
+    files = published_dir / "files" / "kernel" / "gemm" / "artifacts"
+    files.mkdir(parents=True, exist_ok=True)
+    (files / "other.csv").write_text("OLD-TUNED-TABLE\n", encoding="utf-8")
+    (files / "report.md").write_text("# earlier report\n", encoding="utf-8")
+    published = {
+        "value": {
+            "gemm": {
+                "optimizations": [
+                    {
+                        "variant_name": "other_variant",
+                        "e2e_gain_pct": 40.0,
+                        "tuned_file": "kernel/gemm/artifacts/other.csv",
+                        "final_report_path": "kernel/gemm/artifacts/report.md",
+                    }
+                ]
+            },
+            "fusion": {"items": []},
+            "rewrite": {"items": []},
+        }
+    }
+    client = _published_kernel_client(store, published, published_dir)
+    uploaded = _capture_uploads(store)
+
+    result = write_kernel_agent_kb(
+        _kernel_state(tmp_path, gain=12.5), "kernel:hyperloom-m:h", client=client
+    )
+
+    assert result.status == "written"
+    assert "kernel/gemm/artifacts/report.md" in uploaded
+
+
+def test_kernel_agent_write_uploads_nothing_the_merged_record_dropped(tmp_path):
+    """This session stages before the merge rules on it; a losing record's
+    files would otherwise be uploaded with nothing referencing them."""
+    store = _FakeStore(champion=40.0, metric="kernel_gain_pct")
+    published_dir = tmp_path / "published"
+    gemm_files = published_dir / "files" / "kernel" / "gemm" / "artifacts"
+    gemm_files.mkdir(parents=True, exist_ok=True)
+    (gemm_files / "won.csv").write_text("WINNING-TABLE\n", encoding="utf-8")
+    published = {
+        "value": {
+            # Same variant as the session's, and better: the session's GEMM loses.
+            "gemm": {
+                "optimizations": [
+                    {
+                        "variant_name": "forge_a8w8_blockscale",
+                        "e2e_gain_pct": 40.0,
+                        "tuned_file": "kernel/gemm/artifacts/won.csv",
+                    }
+                ]
+            },
+            "fusion": {"items": []},
+            "rewrite": {"items": []},
+        }
+    }
+    client = _published_kernel_client(store, published, published_dir)
+    uploaded = _capture_uploads(store)
+    state = _kernel_state(tmp_path, gain=12.5)
+    # A new rewrite keeps the write alive past the "nothing improved" early exit.
+    rewrite_patch = tmp_path / "k2.patch"
+    rewrite_patch.write_text("--- a/k2.py\n+++ b/k2.py\n", encoding="utf-8")
+    rewrite_source = tmp_path / "k2.py"
+    rewrite_source.write_text("print('new rewrite')", encoding="utf-8")
+    state.optimization_stack.append(
+        {
+            "action": "integrate",
+            "decision": "KEEP",
+            "kernel_id": "k2",
+            "kernel_name": "k2",
+            "gain_pct": 3.0,
+            "tput": 6700.0,
+            "patch_path": str(rewrite_patch),
+            "target_file": str(rewrite_source),
+        }
+    )
+
+    result = write_kernel_agent_kb(state, "kernel:hyperloom-m:h", client=client)
+
+    assert result.status == "written"
+    referenced = extract_knowledge_artifact_refs(store.published_knowledge)
+    assert set(uploaded) <= referenced
+    # The beaten record's tuned table is not carried along as an orphan.
+    assert "kernel/gemm/artifacts/tuned.csv" not in uploaded
+
+
+def test_kernel_agent_write_gives_a_colliding_inherited_file_its_own_ref(tmp_path):
+    """Refs are ``category/kind/<basename>``, so ``tuned.csv`` collides across
+    sessions. Resolving an inherited record to this session's bytes would make
+    PRELUDE replay the wrong table under someone else's measured gain."""
+    store = _FakeStore(champion=40.0, metric="kernel_gain_pct")
+    published_dir = tmp_path / "published"
+    files = published_dir / "files" / "kernel" / "gemm" / "artifacts"
+    files.mkdir(parents=True, exist_ok=True)
+    (files / "tuned.csv").write_text("OLD-TUNED-TABLE\n", encoding="utf-8")
+    published = {
+        "value": {
+            "gemm": {
+                "optimizations": [
+                    {
+                        "variant_name": "other_variant",
+                        "e2e_gain_pct": 40.0,
+                        "tuned_file": "kernel/gemm/artifacts/tuned.csv",
+                    }
+                ]
+            },
+            "fusion": {"items": []},
+            "rewrite": {"items": []},
+        }
+    }
+    client = _published_kernel_client(store, published, published_dir)
+    uploaded = _capture_uploads(store)
+
+    result = write_kernel_agent_kb(
+        _kernel_state(tmp_path, gain=12.5), "kernel:hyperloom-m:h", client=client
+    )
+
+    assert result.status == "written"
+    records = {
+        item["variant_name"]: item
+        for item in store.published_knowledge["value"]["gemm"]["optimizations"]
+    }
+    inherited_ref = records["other_variant"]["tuned_file"]
+    session_ref = records["forge_a8w8_blockscale"]["tuned_file"]
+    assert inherited_ref != session_ref
+    # Each record still resolves to the bytes it was measured on.
+    assert uploaded[inherited_ref] == b"OLD-TUNED-TABLE\n"
+    assert uploaded[session_ref] == b"M,N,K\n16,512,7168\n"
+
+
+def test_kernel_agent_write_accumulates_under_one_session(tmp_path):
+    """Readers resolve an identity through its champion. An accumulating record
+    that adds a kernel without raising the best gain scores no higher than the
+    incumbent, so parking it on a per-run session would hide it forever."""
+    store = _FakeStore(champion=0.0, metric="kernel_gain_pct")
+
+    write_kernel_agent_kb(
+        _kernel_state(tmp_path), "kernel:hyperloom-m:h", client=_kernel_client(store)
+    )
+
+    sessions = {call[2] for call in store.calls if call[0] == "put_knowledge"}
+    assert sessions == {KERNEL_AGENT_SESSION_ID}
+
+
+def test_kernel_agent_write_accepts_a_refused_promotion_it_already_holds(tmp_path):
+    """Re-publishing the accumulated record at an unchanged score need not move
+    the champion: it already points at the session being written."""
+    store = _FakeStore(champion=12.5, conflict=True, metric="kernel_gain_pct")
+    store.champion_session = KERNEL_AGENT_SESSION_ID
+
+    result = write_kernel_agent_kb(
+        _kernel_state(tmp_path), "kernel:hyperloom-m:h", client=_kernel_client(store)
+    )
+
+    assert result.status == "written"
+    # One refused attempt, and no retry: the incumbent is this same record.
+    assert len([c for c in store.calls if c[0] == "set_champion"]) == 1
+
+
+def test_kernel_agent_write_refuses_to_publish_over_an_unreadable_record(tmp_path):
+    """The published record is the base of every merge, and the write replaces
+    the document wholesale: merging against a failed read would publish this
+    run's columns alone and destroy the identity's accumulated kernels."""
+    store = _FakeStore(champion=40.0, metric="kernel_gain_pct")
+    client = _kernel_client(store)
+
+    def _read(cid, dest):
+        raise KBStoreError("GET best-record -> HTTP 500")
+
+    client.read = _read  # type: ignore[method-assign]
+
+    result = write_kernel_agent_kb(
+        _kernel_state(tmp_path), "kernel:hyperloom-m:h", client=client
+    )
+
+    assert result.status == "error"
+    assert "published_record_unreadable" in result.reason
+    assert not [c for c in store.calls if c[0] in ("put_knowledge", "put_dir")]
+    assert store.published_knowledge is None
+
+
+def test_kernel_agent_write_displaces_one_ref_without_touching_its_namesake(tmp_path):
+    """A record can name two files sharing a basename across directories. Moving
+    the colliding one must not repoint the other, whose bytes would then be
+    referenced by nothing, dropped from the upload, and replayed as a patch."""
+    store = _FakeStore(champion=40.0, metric="kernel_gain_pct")
+    published_dir = tmp_path / "published"
+    patches = published_dir / "files" / "kernel" / "rewrite" / "patches"
+    sources = published_dir / "files" / "kernel" / "rewrite" / "source"
+    patches.mkdir(parents=True, exist_ok=True)
+    sources.mkdir(parents=True, exist_ok=True)
+    (patches / "x.py").write_text("OLD-PATCH", encoding="utf-8")
+    (sources / "x.py").write_text("OLD-SOURCE", encoding="utf-8")
+    published = {
+        "value": {
+            "gemm": {"optimizations": []},
+            "fusion": {"items": []},
+            "rewrite": {
+                "items": [
+                    {
+                        "kernel_name": "kOLD",
+                        "e2e_gain_pct": 40.0,
+                        "patch": "kernel/rewrite/patches/x.py",
+                        "source_files": ["kernel/rewrite/source/x.py"],
+                    }
+                ]
+            },
+        }
+    }
+    client = _published_kernel_client(store, published, published_dir)
+    uploaded = _capture_uploads(store)
+    state = _kernel_state(tmp_path, gain=12.5)
+    # This session's own rewrite collides on the patch basename only.
+    session_patch = tmp_path / "x.py"
+    session_patch.write_text("NEW-PATCH", encoding="utf-8")
+    session_source = tmp_path / "target.py"
+    session_source.write_text("print('new')", encoding="utf-8")
+    state.optimization_stack.append(
+        {
+            "action": "integrate",
+            "decision": "KEEP",
+            "kernel_id": "kNEW",
+            "kernel_name": "kNEW",
+            "gain_pct": 3.0,
+            "tput": 6700.0,
+            "patch_path": str(session_patch),
+            "target_file": str(session_source),
+        }
+    )
+
+    result = write_kernel_agent_kb(state, "kernel:hyperloom-m:h", client=client)
+
+    assert result.status == "written"
+    inherited = next(
+        item
+        for item in store.published_knowledge["value"]["rewrite"]["items"]
+        if item["kernel_name"] == "kOLD"
+    )
+    # The displaced patch moved; the same-named source kept its own ref.
+    assert inherited["patch"] != "kernel/rewrite/patches/x.py"
+    assert inherited["source_files"] == ["kernel/rewrite/source/x.py"]
+    assert uploaded[inherited["patch"]] == b"OLD-PATCH"
+    assert uploaded["kernel/rewrite/source/x.py"] == b"OLD-SOURCE"
+
+
+def test_kernel_agent_write_takes_over_an_equally_scored_foreign_champion(tmp_path):
+    """Records written before this scheme sit on per-run sessions. Adding a
+    kernel that does not raise the best gain leaves the score equal, so without
+    an equal-score takeover the accumulated document stays off-champion and no
+    reader ever sees it. The store promotes whatever it is told, so a conflict
+    is worth retrying at an unchanged score."""
+    store = _FakeStore(champion=12.5, conflict=True, metric="kernel_gain_pct")
+    store.champion_session = "old-run-session"
+
+    result = write_kernel_agent_kb(
+        _kernel_state(tmp_path), "kernel:hyperloom-m:h", client=_kernel_client(store)
+    )
+
+    assert result.status == "written"
+    promotions = [c for c in store.calls if c[0] == "set_champion"]
+    assert len(promotions) == 2  # the refused one, then the takeover
+    assert promotions[-1][2] == KERNEL_AGENT_SESSION_ID
+    assert store.champion_session == KERNEL_AGENT_SESSION_ID
+
+
+def test_recipe_write_leaves_an_equally_scored_champion_alone(tmp_path):
+    """The recipe record competes rather than accumulates: an equal throughput
+    is not a reason to displace a concurrent winner and churn the identity."""
+    store = _FakeStore(champion=100.0, conflict=True)
+    store.champion_session = "other-session"
+    client = RemoteRecipeClient(store)  # type: ignore[arg-type]
+    # Gating sees the old champion; the conflict re-read sees a concurrent
+    # winner that landed exactly this run's score.
+    values = [100.0, 130.0]
+
+    def _rollup(canonical_id):
+        store.calls.append(("get_rollup", canonical_id))
+        value = values.pop(0) if len(values) > 1 else values[0]
+        return {
+            "champion": {
+                "session_id": "other-session",
+                "value": value,
+                "metric": "optimized_throughput",
+            }
+        }
+
+    store.get_rollup = _rollup  # type: ignore[method-assign]
+
+    result = write_final_remote_recipe(
+        _state(tmp_path), "inference:m:h:f:mt:a:v:p", "session-1", client=client
+    )
+
+    assert result.status == "written"
+    # One refused promotion, and no retry over the equal-scored incumbent.
+    assert len([c for c in store.calls if c[0] == "set_champion"]) == 1
+    assert store.champion_session == "other-session"
