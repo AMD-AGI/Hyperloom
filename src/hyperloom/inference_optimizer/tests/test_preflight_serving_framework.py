@@ -179,18 +179,29 @@ def test_isolated_vllm_venv_is_probed(isolated_vllm, monkeypatch):
     assert isolated_vllm in [c[0] for c in calls]
 
 
-def test_a_bare_venv_root_is_not_enough_to_probe_it(monkeypatch):
-    """$VLLM_VENV_ROOT alone is not the installer's condition.
-
-    It also requires FRAMEWORK_ENV=isolated and an executable python there, so
-    probing on the variable alone would claim a mirror the installer never made.
-    """
-    monkeypatch.setenv("VLLM_VENV_ROOT", "/opt/hyperloom/vllm-venv")
-    monkeypatch.delenv("FRAMEWORK_ENV", raising=False)
+def test_a_venv_root_without_a_python_is_not_probed(monkeypatch):
+    """The variable can outlive the venv, and a stale path is not a candidate."""
+    monkeypatch.setenv("VLLM_VENV_ROOT", "/opt/hyperloom/vllm-venv-that-is-gone")
 
     probed = preflight._framework_probe_interpreters("vllm", "/usr/bin/python3")
 
     assert not any("vllm-venv" in candidate for candidate in probed)
+
+
+def test_the_install_mode_flag_does_not_gate_the_probe(isolated_vllm, monkeypatch):
+    """The installer keeps that flag under a name nothing else reads.
+
+    install_baremetal.sh persists it as HYPERLOOM_FRAMEWORK_ENV, and only
+    env_safety mentions it; framework.paths discovers the venv without it. Gating
+    on a plain FRAMEWORK_ENV made this probe dead code and sent a host that had
+    just installed vLLM back to the command it had already run.
+    """
+    monkeypatch.delenv("FRAMEWORK_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_FRAMEWORK_ENV", raising=False)
+
+    probed = preflight._framework_probe_interpreters("vllm", "/usr/bin/python3")
+
+    assert probed[0] == isolated_vllm
 
 
 def test_no_other_framework_probes_the_vllm_venv(isolated_vllm, monkeypatch):
@@ -274,7 +285,7 @@ def isolated_vllm(monkeypatch, tmp_path):
     python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     python.chmod(0o755)
     monkeypatch.setenv("VLLM_VENV_ROOT", str(venv))
-    monkeypatch.setenv("FRAMEWORK_ENV", "isolated")
+
     return str(python)
 
 
