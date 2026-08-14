@@ -52,10 +52,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.sanitize import (
     sanitize_publish_server_args,
     sanitize_shared_knowledge,
 )
-from hyperloom.orchestrator.knowledge.remote_recipe.values import (
-    KERNEL_AGENT_SESSION_ID,
-    _Files,
-)
+from hyperloom.orchestrator.knowledge.remote_recipe.values import _Files
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 
 _DOWNLOAD_BYTES = b"verified artifact"
@@ -865,7 +862,6 @@ class _FakeStore:
         metric: str | None = "optimized_throughput",
     ) -> None:
         self.champion = champion
-        self.champion_session = "champion-session"
         self.conflict = conflict
         self.metric = metric
         self.calls: list[tuple] = []
@@ -929,7 +925,7 @@ class _FakeStore:
 
     def get_rollup(self, canonical_id):
         self.calls.append(("get_rollup", canonical_id))
-        champion = {"session_id": self.champion_session, "value": self.champion}
+        champion = {"session_id": "champion-session", "value": self.champion}
         if self.metric is not None:
             champion["metric"] = self.metric
         return {"champion": champion}
@@ -960,11 +956,8 @@ class _FakeStore:
         self.calls.append(("set_champion", canonical_id, session_id, metric, value))
         if self.conflict:
             self.conflict = False
+            self.champion = value - 1
             raise KBStoreError("POST champion -> HTTP 409: write_conflict")
-        # The store promotes whatever it is told: measured against the real
-        # service, it accepts an equal or even a lower value.
-        self.champion = value
-        self.champion_session = session_id
 
     def list_session_files(self, canonical_id, session_id, *, kind=""):
         self.calls.append(("list_session_files", canonical_id, session_id, kind))

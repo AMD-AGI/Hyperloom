@@ -167,6 +167,16 @@ async def test_resume_retains_pending_when_any_restore_fails(
     assert report["fixes"] == []
 
 
+def test_collective_resume_gate_is_delegated_to_kernel_phase() -> None:
+    """Writeback resume must resolve the Collective gate."""
+    assert (
+        Coordinator._DELEGATED.get(
+            "_collective_required_before_kernel_opt"
+        )
+        == "phase_kernel"
+    )
+
+
 @pytest.fixture
 def coord(session_dir) -> Coordinator:
     return Coordinator(session_dir, backends=_build_backends())
