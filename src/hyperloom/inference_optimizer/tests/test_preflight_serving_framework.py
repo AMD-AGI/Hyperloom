@@ -645,3 +645,26 @@ def test_preflight_still_invokes_the_gate():
     }
 
     assert "_check_serving_framework" in called
+
+
+@pytest.mark.parametrize("framework", sorted(preflight._SETUP_INSTALLABLE_FRAMEWORKS))
+def test_the_remedy_matches_the_documented_setup_invocation(framework):
+    """Printing a command promises it runs.
+
+    The skill's form carries PYTHONPATH and --yes, and vLLM needs the isolated
+    env; a remedy missing any of them fails or hangs on a prompt -- the same
+    shape of dead end as naming a framework setup cannot install.
+    """
+    from pathlib import Path as _Path
+
+    import hyperloom
+
+    skill = (_Path(hyperloom.__file__).parent / "skills/hyperloom-setup/SKILL.md").read_text(encoding="utf-8")
+    documented = [
+        line.strip()
+        for line in skill.splitlines()
+        if "inference_optimizer.setup" in line and f"--install-framework {framework}" in line
+    ]
+    assert documented, f"no documented setup line for {framework}"
+
+    assert preflight._setup_install_command(framework) in documented

@@ -669,6 +669,19 @@ SKIP_FRAMEWORK_CHECK_ENV = "HYPERLOOM_SKIP_FRAMEWORK_CHECK"
 _SETUP_INSTALLABLE_FRAMEWORKS = frozenset({"sglang", "vllm"})
 
 
+def _setup_install_command(framework: str) -> str:
+    """The documented setup invocation for ``framework``, verbatim in shape.
+
+    Printing a command means promising it runs: it needs PYTHONPATH and --yes,
+    and vLLM needs the isolated env. A test pins these against the setup skill.
+    """
+    extra = " --framework-env isolated" if framework == "vllm" else ""
+    return (
+        'PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- '
+        f"--install-framework {framework}{extra} --yes"
+    )
+
+
 # Rootfs markers the runtimes drop: Docker writes the first, podman the second.
 _CONTAINER_MARKER_FILES = ("/.dockerenv", "/run/.containerenv")
 
@@ -806,7 +819,8 @@ def _probe_rocm_build(framework: str, python_exe: str) -> _Probe:
         "except Exception:",
         "    sys.exit(3)",
         "hip = getattr(torch.version, 'hip', None)",
-        "sys.exit(1) if not hip else None",
+        "if not hip:",
+        "    sys.exit(1)",
     ]
     if framework == "vllm":
         # vLLM carries its own platform verdict, so a ROCm torch beside a CUDA
@@ -970,8 +984,7 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
             f"\nERROR: {framework} is importable ({found}) but {evidence} says it is NOT a ROCm build.\n\n"
             "The wheels on PyPI are the CUDA build: they import fine and then fail\n"
             "at GPU init. Reinstall the ROCm stack:\n"
-            "    python3 -m hyperloom.inference_optimizer.setup -- "
-            f"--install-framework {framework}\n\n"
+            f"    {_setup_install_command(framework)}\n\n"
             f"To proceed anyway, set {SKIP_FRAMEWORK_CHECK_ENV}=1.",
             file=sys.stderr,
         )
@@ -981,16 +994,14 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
         remedy = (
             "This process already runs in a container, so its image does not ship\n"
             f"{framework}. Restart it from a ROCm image that does, or install it here:\n"
-            "    python3 -m hyperloom.inference_optimizer.setup -- "
-            f"--install-framework {framework}"
+            f"    {_setup_install_command(framework)}"
         )
     else:
         remedy = (
             "Pick ONE of:\n"
             f"  1. Install it on this host (ROCm {framework} is NOT on PyPI; setup pulls\n"
             "     it from the ROCm wheel index instead):\n"
-            "       python3 -m hyperloom.inference_optimizer.setup -- "
-            f"--install-framework {framework}\n"
+            f"       {_setup_install_command(framework)}\n"
             "  2. Run Hyperloom inside a ROCm image that already ships it: set\n"
             "     HYPERLOOM_RUN_MODE=docker before setup, which hands image choice\n"
             "     and container startup to the demo skill.\n"
