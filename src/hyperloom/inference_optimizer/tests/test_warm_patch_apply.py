@@ -586,7 +586,11 @@ def test_three_way_residue_fails_and_rolls_back(
             return SimpleNamespace(returncode=1, stdout=b"", stderr=b"no")
         if command[:3] == ["git", "apply", "--3way"]:
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
-        if command[:3] == ["git", "ls-files", "-u"]:
+        if (
+            "ls-files" in command
+            and command[command.index("ls-files") :][:2]
+            == ["ls-files", "-u"]
+        ):
             residue_checks += 1
             return SimpleNamespace(
                 returncode=0,

@@ -722,7 +722,13 @@ def _create_patch_snapshot(
         if existed:
             backup.write_bytes(target.read_bytes())
         index_result = subprocess.run(
-            ["git", "ls-files", "-s", "--", rel],
+            [
+                "git",
+                *safe_directory_args(
+                    ["ls-files", "-s", "--", rel],
+                    cwd=repo_path,
+                ),
+            ],
             cwd=repo_path,
             capture_output=True,
             timeout=15,
@@ -800,7 +806,13 @@ def _restore_patch_snapshot(manifest: Any) -> dict[str, Any]:
             elif target.exists() or target.is_symlink():
                 raise OSError("removed path still exists after restore")
             actual_index = subprocess.run(
-                ["git", "ls-files", "-s", "--", rel],
+                [
+                    "git",
+                    *safe_directory_args(
+                        ["ls-files", "-s", "--", rel],
+                        cwd=repo,
+                    ),
+                ],
                 cwd=repo,
                 capture_output=True,
                 timeout=15,
@@ -875,7 +887,13 @@ def _revert_patches(
     if pre_sha:
         try:
             head = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
+                [
+                    "git",
+                    *safe_directory_args(
+                        ["rev-parse", "HEAD"],
+                        cwd=caller_repo,
+                    ),
+                ],
                 cwd=caller_repo,
                 capture_output=True,
                 text=True,
@@ -919,7 +937,13 @@ def _three_way_residue_snapshot(
     """Capture pre-existing residue only for this patch's paths."""
     root = Path(repo_path).resolve()
     unmerged = subprocess.run(
-        ["git", "ls-files", "-u", "--", *touched],
+        [
+            "git",
+            *safe_directory_args(
+                ["ls-files", "-u", "--", *touched],
+                cwd=repo_path,
+            ),
+        ],
         cwd=repo_path,
         capture_output=True,
         timeout=15,
@@ -951,7 +975,13 @@ def _verify_three_way_clean(
     """Reject only residue newly introduced on this patch's paths."""
     try:
         unmerged = subprocess.run(
-            ["git", "ls-files", "-u", "--", *touched],
+            [
+                "git",
+                *safe_directory_args(
+                    ["ls-files", "-u", "--", *touched],
+                    cwd=repo_path,
+                ),
+            ],
             cwd=repo_path,
             capture_output=True,
             timeout=15,
