@@ -297,6 +297,9 @@ def _enqueue_self(**state_kw):
         Coordinator._maybe_enqueue_enablement_baseline_revalidation, fake
     )
     fake._open_revalidation_row = types.MethodType(Coordinator._open_revalidation_row, fake)
+    fake._open_row_past_spent_generations = types.MethodType(
+        Coordinator._open_row_past_spent_generations, fake
+    )
     # Admission on the session wall-clock is exercised in test_coordinator_runtime
     # against a real coordinator; here nothing is ever denied for want of budget.
     fake._time_budget_denial_for_action = lambda _action: None
