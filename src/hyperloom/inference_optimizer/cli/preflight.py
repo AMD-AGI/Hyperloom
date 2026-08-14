@@ -740,11 +740,25 @@ def _probe_stderr_tail(stderr: str | None) -> str:
 
 
 def _probe_detail_block(detail: str) -> str:
-    """Indent a probe's stderr tail under a preflight line, or return ``""``."""
+    """Indent a probe's diagnostics under a preflight line, or return ``""``."""
     if not detail:
         return ""
     body = "\n".join(f"    {line}" for line in detail.splitlines())
-    return f"\n  last lines of the probe's stderr:\n{body}"
+    return f"\n  probe diagnostics:\n{body}"
+
+
+def _probe_failure_detail(exc: BaseException) -> str:
+    """One-line reason a probe reached no verdict (no argv dump)."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"probe timed out after {exc.timeout}s"
+    return f"{type(exc).__name__}: {exc}"
+
+
+# Probe budgets. find_spec only stats the filesystem; importing torch matches
+# build_utils.probe_torch_abi's 30s, and vLLM's platform import costs far more.
+_IMPORT_PROBE_TIMEOUT_SEC = 20
+_ROCM_PROBE_TIMEOUT_SEC = 30
+_VLLM_ROCM_PROBE_TIMEOUT_SEC = 120
 
 
 class _Probe(NamedTuple):
@@ -752,6 +766,7 @@ class _Probe(NamedTuple):
 
     verdict: bool | None
     detail: str = ""
+    timed_out: bool = False
 
 
 def _probe_rocm_build(framework: str, python_exe: str) -> _Probe:
@@ -784,12 +799,13 @@ def _probe_rocm_build(framework: str, python_exe: str) -> _Probe:
         ]
     else:
         probe.append("sys.exit(0)")
+    timeout = _VLLM_ROCM_PROBE_TIMEOUT_SEC if framework == "vllm" else _ROCM_PROBE_TIMEOUT_SEC
     try:
         proc = subprocess.run(
-            [python_exe, "-c", "\n".join(probe)], capture_output=True, text=True, errors="replace", timeout=180
+            [python_exe, "-c", "\n".join(probe)], capture_output=True, text=True, errors="replace", timeout=timeout
         )
     except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired) as exc:
-        return _Probe(None, _probe_stderr_tail(f"{type(exc).__name__}: {exc}"))
+        return _Probe(None, _probe_failure_detail(exc), isinstance(exc, subprocess.TimeoutExpired))
     detail = _probe_stderr_tail(getattr(proc, "stderr", ""))
     if proc.returncode == 0:
         return _Probe(True, detail)
@@ -806,9 +822,15 @@ def _framework_importable(framework: str, python_exe: str) -> _Probe:
     """
     probe = f"import importlib.util as u, sys; sys.exit(0 if u.find_spec({framework!r}) else 1)"
     try:
-        proc = subprocess.run([python_exe, "-c", probe], capture_output=True, text=True, errors="replace", timeout=60)
+        proc = subprocess.run(
+            [python_exe, "-c", probe],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=_IMPORT_PROBE_TIMEOUT_SEC,
+        )
     except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired) as exc:
-        return _Probe(False, _probe_stderr_tail(f"{type(exc).__name__}: {exc}"))
+        return _Probe(False, _probe_failure_detail(exc), isinstance(exc, subprocess.TimeoutExpired))
     return _Probe(proc.returncode == 0, _probe_stderr_tail(getattr(proc, "stderr", "")))
 
 
@@ -818,13 +840,16 @@ def _resolve_framework_build(framework: str, interpreters: list[str]) -> tuple[s
     Scanning all of them, rather than stopping at the first import, is what lets
     an isolated ROCm venv outrank a stray CUDA wheel earlier in the list. An
     inconclusive verdict outranks a refuted one so the gate blocks only when
-    every importable candidate is provably the wrong build.
+    every importable candidate is provably the wrong build. The scan stops at
+    the first timeout: a host slow enough to blow one budget blows the rest too.
     """
     refuted: tuple[str, _Probe] | None = None
     inconclusive: tuple[str, _Probe] | None = None
     missing = _Probe(False)
     for python_exe in interpreters:
         found = _framework_importable(framework, python_exe)
+        if found.timed_out:
+            return inconclusive or (None, found)
         if not found.verdict:
             # Keep the first probe that said something: a framework that is
             # installed yet unreachable shows up only here.
@@ -833,6 +858,8 @@ def _resolve_framework_build(framework: str, interpreters: list[str]) -> tuple[s
         probe = _probe_rocm_build(framework, python_exe)
         if probe.verdict is True:
             return python_exe, probe
+        if probe.timed_out:
+            return inconclusive or (python_exe, probe)
         if probe.verdict is None:
             inconclusive = inconclusive or (python_exe, probe)
         else:
@@ -902,6 +929,14 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
+
+    if probe.timed_out:
+        # A timeout proves nothing, so blocking here would fail a merely slow host.
+        print(
+            f"Preflight: WARNING — the {framework} probe timed out; proceeding without verifying it"
+            f"{_probe_detail_block(probe.detail)}"
+        )
+        return
 
     probed = "\n".join(f"  - {python_exe}" for python_exe in interpreters)
     if _in_container():

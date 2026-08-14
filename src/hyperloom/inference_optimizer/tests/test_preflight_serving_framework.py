@@ -374,6 +374,42 @@ def test_probe_stderr_tail_is_bounded(monkeypatch):
     assert "line-0 " not in tail
 
 
+def _timing_out_probe(monkeypatch, *, importable: bool) -> list[float]:
+    """Record every probe timeout; time out on the probe under test."""
+    budget: list[float] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _run(cmd, *_args, **kwargs):
+        timeout = kwargs.get("timeout") or 0
+        budget.append(timeout)
+        if importable and "find_spec" in cmd[-1]:
+            return _Proc()
+        raise preflight.subprocess.TimeoutExpired(cmd, timeout)
+
+    monkeypatch.setattr(preflight.subprocess, "run", _run)
+    return budget
+
+
+@pytest.mark.parametrize("importable", [False, True])
+def test_a_probe_timeout_stops_the_interpreter_scan(monkeypatch, capsys, importable):
+    """Paying a timeout per candidate turned preflight into a 12-minute wait.
+
+    A host slow enough to blow one budget will blow the next two as well, and a
+    timeout proves nothing, so the scan stops and the run proceeds unverified.
+    """
+    monkeypatch.setenv("VLLM_VENV_ROOT", _ISOLATED_VENV)
+
+    budget = _timing_out_probe(monkeypatch, importable=importable)
+    preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    assert sum(budget) <= 150, f"worst-case probe budget too large: {budget}"
+    assert "timed out" in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------------
 # _in_container signals
 # ---------------------------------------------------------------------------
