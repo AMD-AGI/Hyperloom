@@ -324,6 +324,38 @@ def _operator_extra_env() -> dict[str, str]:
     return {str(k).strip(): str(v) for k, v in parsed.items() if str(k).strip()}
 
 
+def _session_reference_server_args() -> str:
+    """Return the session's ``--reference-script`` server args, or ``""``.
+
+    Session-scoped fallback for callers that do not pass
+    ``reference_server_args`` explicitly. The CLI projects it here from the
+    persisted SharedState.
+    """
+    return os.environ.get("INFERENCE_OPTIMIZER_REFERENCE_SERVER_ARGS", "").strip()
+
+
+def _session_reference_envs() -> dict[str, str]:
+    """Return the session's ``--reference-script`` env exports, or ``{}``.
+
+    Session-scoped fallback for callers that do not pass ``reference_envs``
+    explicitly. Fail-soft on a malformed payload: dropping the reference base
+    silently degrades a benchmark, but crashing the materializer takes the run
+    down, and the payload is machine-written so a parse failure is a bug
+    elsewhere.
+    """
+    raw = os.environ.get("INFERENCE_OPTIMIZER_REFERENCE_ENVS", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        log.warning("ignoring unparseable INFERENCE_OPTIMIZER_REFERENCE_ENVS")
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(k).strip(): str(v) for k, v in parsed.items() if str(k).strip()}
+
+
 def _apply_custom_runtime_defaults(
     bench: dict[str, Any],
     envs: dict[str, Any],
@@ -1180,7 +1212,18 @@ def materialize_config_with_envs(
     # Seed the framework server-args env + envs from a reference recipe below
     # the YAML base and any per-task extra_server_args (reference flags leftmost,
     # so last-wins lets later merges override them).
-    ref_args = (reference_server_args or "").strip()
+    # Only ``baseline`` passes the reference recipe explicitly; every other
+    # caller used to inherit it by luck, via a ``params.config_path`` pointing at
+    # baseline's already-rendered YAML. Nothing guaranteed that pointer, so an
+    # explore round that fell through to the shipped YAML silently benchmarked
+    # without the operator's recipe and measured a ~45% regression as if it were
+    # real. Fall back to the session-scoped value so the base is caller-independent.
+    # Empty counts as "not supplied" for both, so the two stay in step: the
+    # session value is derived from the same SharedState the explicit params come
+    # from, so they never disagree, and a caller that drops one no longer half-applies
+    # the recipe.
+    ref_args = (reference_server_args or "").strip() or _session_reference_server_args()
+    reference_envs = dict(reference_envs or {}) or _session_reference_envs()
     if ref_args:
         from ._grid_runner import merge_server_args
 

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -870,6 +871,84 @@ def test_reference_envs_do_not_clobber_existing(tmp_path):
     # extra_envs (CLI) wins over reference; the new reference key still lands.
     assert envs["VLLM_ROCM_USE_AITER"] == "1"
     assert envs["VLLM_FP8_PADDING"] == "1"
+
+
+def test_session_reference_fallback_reaches_a_caller_that_passes_nothing(tmp_path, monkeypatch):
+    """A caller that passes no reference recipe still gets the session's.
+
+    Only ``baseline`` passes it explicitly; ``explore`` / ``sweep`` / ``conc_sweep``
+    / ``integrate_patch`` / ``framework_agent`` / ``rebench`` used to inherit it
+    only when ``params.config_path`` happened to point at baseline's rendered
+    YAML. When a second-cycle explore round fell through to the shipped YAML it
+    benchmarked without the operator's recipe and read the resulting ~45%
+    regression as a real measurement.
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_REFERENCE_SERVER_ARGS", "--enable-prefix-caching")
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_REFERENCE_ENVS",
+        json.dumps({"AITER_SITUV2_A8W4": "1", "AITER_BF16_FP8_MOE_BOUND": "0"}),
+    )
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm", model="/path/models/X")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    materialized = materialize_config_with_envs(
+        base,
+        out,
+        model_path="/path/models/X",
+        gpu_type="mi300x",
+    )
+
+    assert "--enable-prefix-caching" in _fw_args(materialized)
+    envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
+    assert envs["AITER_SITUV2_A8W4"] == "1"
+    assert envs["AITER_BF16_FP8_MOE_BOUND"] == "0"
+
+
+def test_explicit_reference_wins_over_the_session_fallback(tmp_path, monkeypatch):
+    """An explicit recipe is authoritative; the fallback only fills a gap."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_REFERENCE_SERVER_ARGS", "--block-size 64")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_REFERENCE_ENVS", json.dumps({"FROM_SESSION": "1"}))
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm", model="/path/models/X")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    materialized = materialize_config_with_envs(
+        base,
+        out,
+        model_path="/path/models/X",
+        gpu_type="mi300x",
+        reference_server_args="--block-size 128",
+        reference_envs={"FROM_CALLER": "1"},
+    )
+
+    args = _fw_args(materialized)
+    assert "--block-size 128" in args
+    assert "--block-size 64" not in args
+    envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
+    assert envs["FROM_CALLER"] == "1"
+    assert "FROM_SESSION" not in envs
+
+
+def test_malformed_session_reference_envs_degrade_quietly(tmp_path, monkeypatch):
+    """A corrupt payload drops the reference base instead of killing the run."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_REFERENCE_ENVS", "{not json")
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_REFERENCE_SERVER_ARGS", raising=False)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm", model="/path/models/X")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    materialized = materialize_config_with_envs(
+        base,
+        out,
+        model_path="/path/models/X",
+        gpu_type="mi300x",
+    )
+
+    assert materialized.is_file()
 
 
 def test_empty_reference_is_byte_identical(tmp_path):

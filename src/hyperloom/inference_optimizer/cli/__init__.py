@@ -1340,6 +1340,34 @@ def _export_workload_envs_for_optimize(
     os.environ["EP"] = str(max(1, int(ep_resolved or 1)))
 
 
+def _export_reference_recipe(state: Any) -> None:
+    """Project the persisted ``--reference-script`` recipe into env.
+
+    ``materialize_config_with_envs`` takes the recipe as explicit parameters, but
+    only the ``baseline`` executor passes them; ``explore`` / ``sweep`` /
+    ``conc_sweep`` / ``integrate_patch`` / ``framework_agent`` / ``rebench``
+    inherited it by luck, via a ``params.config_path`` pointing at baseline's
+    already-rendered YAML. Nothing guaranteed that pointer, and when a
+    second-cycle explore round fell through to the shipped YAML it benchmarked
+    without the operator's recipe — reading a ~45% regression as a real
+    measurement. This env is the session-scoped fallback those callers resolve,
+    so the reference base no longer depends on which caller renders the YAML.
+
+    Args:
+        state: The SharedState carrying the resolved reference recipe.
+    """
+    args_str = str(getattr(state, "reference_server_args", "") or "").strip()
+    envs = dict(getattr(state, "reference_envs", None) or {})
+    if args_str:
+        os.environ["INFERENCE_OPTIMIZER_REFERENCE_SERVER_ARGS"] = args_str
+    else:
+        os.environ.pop("INFERENCE_OPTIMIZER_REFERENCE_SERVER_ARGS", None)
+    if envs:
+        os.environ["INFERENCE_OPTIMIZER_REFERENCE_ENVS"] = json.dumps(envs)
+    else:
+        os.environ.pop("INFERENCE_OPTIMIZER_REFERENCE_ENVS", None)
+
+
 def _export_operator_launch_shape(
     *,
     server_args: str,
@@ -2152,6 +2180,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     robustness_agent_root: Path | None = None
     robustness_options = resolve_robustness_options(args, state)
     state.robustness_options = dict(robustness_options)
+    # Both paths converge here with a final SharedState, which is the only point
+    # where the reference recipe is known on a resume as well as a fresh launch.
+    _export_reference_recipe(state)
     # Persist the launch shape resolved above (and, on resume, the flags the
     # resume block folded back in) before the Coordinator reads SharedState off
     # disk — otherwise these stay in-memory only and the *next* resume falls
