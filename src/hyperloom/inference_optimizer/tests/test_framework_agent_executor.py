@@ -764,6 +764,80 @@ async def test_executor_cancelled_bench_reverts_and_re_raises(tmp_path: Path):
     assert scratch.read_text(encoding="utf-8") == "user work in progress\n"
 
 
+def _stash_list(repo: Path) -> str:
+    """What ``git stash list`` reports for ``repo``."""
+    return subprocess.run(
+        ["git", "-C", str(repo), "stash", "list"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bench_tput,verdict", [(900.0, "revert"), (1100.0, "keep")])
+async def test_a_cancel_at_the_kb_writeback_still_hands_the_stash_back(
+    tmp_path: Path,
+    bench_tput: float,
+    verdict: str,
+):
+    """The last await a candidate crosses is the KB writeback, not the bench.
+
+    Both verdicts record their outcome after the verdict is decided and before
+    the stash restore that returns it. A cancel arrives at whatever await the
+    action happens to be at, and a spent wall-clock budget is exactly what makes
+    it arrive at an arbitrary one -- so if that window is unguarded the
+    operator's uncommitted work stays in ``git stash`` for the rest of the
+    session with nothing saying so.
+    """
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    patch_path = tmp_path / "p.patch"
+    patch_path.write_text(_VALID_PATCH, encoding="utf-8")
+    scratch = repo / "user_scratch.txt"
+    scratch.write_text("user work in progress\n", encoding="utf-8")
+
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
+
+    async def fake_bench(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
+        return (
+            {"status": "succeeded", "output_throughput": bench_tput},
+            {"accuracy_pass": None},
+        )
+
+    async def cancelled_writeback(self, **_kwargs):  # noqa: ARG001
+        raise asyncio.CancelledError
+
+    ctx = _make_ctx(
+        f"t-fp-kb-cancel-{verdict}",
+        {
+            "candidate": _make_candidate(),
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+        },
+    )
+    with (
+        patch.object(FrameworkAgentExecutor, "_bench_candidate", new=fake_bench),
+        patch.object(FrameworkAgentExecutor, "_write_kb_record", new=cancelled_writeback),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await executor(ctx)
+
+    assert scratch.read_text(encoding="utf-8") == "user work in progress\n", (
+        "the user's uncommitted work was left in the stash"
+    )
+    assert _stash_list(repo) == "", "the auto-stash was never popped"
+    # A KEEP that is cancelled before its result reaches the Coordinator is a
+    # KEEP the session does not record, so the commit must not survive either.
+    assert (repo / "src.py").read_text().endswith("return 1\n"), (
+        "the ungraded candidate was left in the framework tree"
+    )
+
+
 _PATCH_B_ADDS_FILE = """\
 diff --git a/new.py b/new.py
 new file mode 100644

@@ -712,6 +712,27 @@ class FrameworkAgentExecutor:
         applied: list[Path] = []
         apply_errors: list[dict[str, str]] = []
         apply_feedbacks: list[ApplyFeedback] = []
+
+        def _undo_candidate() -> None:
+            """Take the candidate back out of the tree and hand the stash back.
+
+            What a stop owes, as opposed to a verdict. The dispatcher cancels
+            in-flight actions on shutdown and on a spent wall-clock budget, and
+            ``CancelledError`` is not an ``Exception``, so none of the REVERT
+            handlers below see one. Unhandled it leaves the candidate applied and
+            the operator's uncommitted work in ``git stash`` indefinitely -- the
+            budget case does not end the process, so CLOSE would go on to report
+            against a tree carrying a patch nothing ever graded.
+
+            Reverting past a KEEP that was already committed is deliberate: the
+            result carrying that KEEP never reaches the Coordinator, so leaving
+            the commit would leave the tree claiming a win the session does not
+            record. Every step is synchronous, so no second cancel can be
+            delivered part-way through the undo.
+            """
+            self._revert_patches(framework_root, applied, pre_apply_sha=pre_apply_sha)
+            _restore_stash_logged(framework_root, stash_state, stash_note)
+
         # Structural safety gate on the (remote / untrusted) diff before it is
         # applied to the live framework tree: reject non-diff blobs and any
         # header path that escapes the tree (absolute / ``..``). Stale /
@@ -859,13 +880,10 @@ class FrameworkAgentExecutor:
                 },
             )
         except BaseException:
-            # A stop, not a verdict: the dispatcher cancels in-flight actions on
-            # shutdown and on a spent wall-clock budget, and ``CancelledError``
-            # is not an ``Exception``, so the REVERT above never sees it. Undo
-            # the candidate here and let the stop through -- graded as a REVERT
-            # it would read as the patch having failed a bench that never ran.
-            self._revert_patches(framework_root, applied, pre_apply_sha=pre_apply_sha)
-            _restore_stash_logged(framework_root, stash_state, stash_note)
+            # A stop, not a verdict: let it through rather than grading it, since
+            # as a REVERT it would read as the patch having failed a bench that
+            # never ran. See :func:`_undo_candidate` for what the stop owes.
+            _undo_candidate()
             raise
 
         # KEEP / REVERT decision.
@@ -901,6 +919,34 @@ class FrameworkAgentExecutor:
         gate_pass = tput_ok and not acc_block
         acc_delta_pct = _accuracy_delta_pct(gate_evidence.get("accuracy"), params.get("accuracy_baseline"))
 
+        async def _record_outcome(outcome: str) -> None:
+            """Write this candidate's KB record, undoing it if the write is stopped.
+
+            Both verdicts record the same measurements and differ only in the
+            outcome label, and both record them after the verdict is decided and
+            before the ``_with_stash_restore`` that returns it. That await is the
+            last one the candidate crosses while the auto-stash is still on the
+            stack, and no handler stands between it and the caller: a cancel
+            delivered here -- which is what a spent budget delivers, at whatever
+            await the action happens to be at -- would strand the operator's work
+            in the stash with nothing in the session saying so.
+
+            Args:
+                outcome: The KB outcome label for the verdict just decided.
+            """
+            try:
+                await self._write_kb_record(
+                    candidate=candidate,
+                    outcome=outcome,
+                    tps_delta_pct=float(delta_pct or 0.0),
+                    patch_path=str(applied[0]) if applied else "",
+                    extra=extra,
+                    accuracy_delta_pct=acc_delta_pct,
+                )
+            except BaseException:
+                _undo_candidate()
+                raise
+
         if not gate_pass:
             reverted = self._revert_patches(
                 framework_root,
@@ -919,14 +965,7 @@ class FrameworkAgentExecutor:
             revert_status = (
                 "accuracy_unavailable_reject" if (acc_block and accuracy_pass is None and tput_ok) else "reverted"
             )
-            await self._write_kb_record(
-                candidate=candidate,
-                outcome=OUTCOME_REVERTED_SMOKE_FAIL,
-                tps_delta_pct=float(delta_pct or 0.0),
-                patch_path=str(applied[0]) if applied else "",
-                extra=extra,
-                accuracy_delta_pct=acc_delta_pct,
-            )
+            await _record_outcome(OUTCOME_REVERTED_SMOKE_FAIL)
             return _with_stash_restore(
                 framework_root,
                 stash_state,
@@ -986,14 +1025,7 @@ class FrameworkAgentExecutor:
                     },
                 )
 
-        await self._write_kb_record(
-            candidate=candidate,
-            outcome=OUTCOME_INTEGRATED,
-            tps_delta_pct=float(delta_pct or 0.0),
-            patch_path=str(applied[0]) if applied else "",
-            extra=extra,
-            accuracy_delta_pct=acc_delta_pct,
-        )
+        await _record_outcome(OUTCOME_INTEGRATED)
         return _with_stash_restore(
             framework_root,
             stash_state,
