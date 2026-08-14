@@ -48,7 +48,9 @@ def _merge_named_current_recipe_configs(
     owners: list[tuple[str, Mapping[str, Any]]],
 ) -> tuple[str, dict[str, str]]:
     """Merge named config snapshots with exact duplicate conflict checks."""
-    from ..loop.coordinator_helpers import tokenize_server_args_preserving_json
+    from ..actions.executors._grid_server_args import (
+        tokenize_server_args_preserving_json,
+    )
 
     pairs: dict[str, tuple[str, ...]] = {}
     order: list[str] = []

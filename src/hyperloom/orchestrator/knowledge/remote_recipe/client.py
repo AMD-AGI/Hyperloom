@@ -516,69 +516,6 @@ class RemoteRecipeClient:
                 session_id,
                 optimized_throughput,
             )
-        return self._publish(
-            canonical_id,
-            session_id,
-            bundle,
-            score=optimized_throughput,
-            files_dir=files_dir,
-            metric=metric,
-        )
-
-    def write_record(
-        self,
-        canonical_id: str,
-        session_id: str,
-        bundle: KnowledgeBundle,
-        *,
-        score: float,
-        files_dir: Path,
-        metric: str,
-    ) -> RemoteWriteResult:
-        """Publish a record whose contents were already reconciled by the caller.
-
-        An identity that accumulates — where a session contributes some entries
-        and inherits the rest — cannot be gated on a single document score:
-        adding a second kernel does not raise the best gain, yet still has to be
-        published. Such a caller decides what survives and hands the result
-        here.
-        """
-        if not math.isfinite(score):
-            raise RemoteRecipeValidationError(f"score must be finite, got {score!r}")
-        bundle.knowledge = sanitize_shared_knowledge(bundle.knowledge)
-        return self._publish(
-            canonical_id,
-            session_id,
-            bundle,
-            score=score,
-            files_dir=files_dir,
-            metric=metric,
-            supersede_equal=True,
-        )
-
-    def _publish(
-        self,
-        canonical_id: str,
-        session_id: str,
-        bundle: KnowledgeBundle,
-        *,
-        score: float,
-        files_dir: Path,
-        metric: str,
-        supersede_equal: bool = False,
-    ) -> RemoteWriteResult:
-        """Upload the files, replace the knowledge, then move the champion.
-
-        The store promotes whatever it is told — it accepts an equal or even a
-        lower value and moves the champion down — so keep-if-better lives here,
-        and a 409 means a concurrent write, not a refused value.
-
-        ``supersede_equal`` re-promotes over an equally scored incumbent after
-        such a conflict. A record that accumulates entries needs it: adding a
-        kernel that does not raise the best gain leaves the score unchanged, and
-        leaving the champion on the older session would hide the addition from
-        every reader. Records that merely compete keep the strict comparison.
-        """
         expected = {artifact.path for artifact in bundle.artifacts}
         if expected:
             refs = self.store.put_dir(canonical_id, session_id, files_dir)
@@ -600,28 +537,30 @@ class RemoteRecipeClient:
                 canonical_id,
                 session_id,
                 metric=metric,
-                value=score,
+                value=optimized_throughput,
             )
         except KBStoreError as exc:
             if "HTTP 409" not in str(exc):
                 raise
-            incumbent, winner, _ = _champion(
+            _, winner, _ = _champion(
                 self.store.get_rollup(canonical_id),
                 validate_metric=True,
                 expected_metric=metric,
             )
-            if incumbent == session_id:
-                # The record just written is already the one readers resolve to,
-                # so a refused promotion changes nothing.
-                return RemoteWriteResult("written", "", canonical_id, session_id, score)
-            if winner < score or (supersede_equal and winner == score):
+            if winner < optimized_throughput:
                 self.store.set_champion(
                     canonical_id,
                     session_id,
                     metric=metric,
-                    value=score,
+                    value=optimized_throughput,
                 )
-        return RemoteWriteResult("written", "", canonical_id, session_id, score)
+        return RemoteWriteResult(
+            "written",
+            "",
+            canonical_id,
+            session_id,
+            optimized_throughput,
+        )
 
 
 __all__ = [
