@@ -26,6 +26,9 @@ log = logging.getLogger(__name__)
 
 DEFAULT_SESSION_DIR = Path("/workspace/hyperloom")
 ENV_USER_DATA_PATH = "USER_DATA_PATH"
+#: Mirrored verbatim in agents/kernel/tools/_paths.py and agents/framework/kb.py,
+#: which cannot import this module. Keep the three in step.
+POD_LOCAL_WORKSPACE = Path("/workspace")
 ENV_OVERRIDE_ASSET_ROOT = "INFERENCE_OPTIMIZER_ASSET_ROOT"
 ENV_CURRENT_SESSION_DIR = "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"
 ENV_CACHE_DIR = "HYPERLOOM_CACHE_DIR"
@@ -87,6 +90,19 @@ class AssetRootNotFound(RuntimeError):
     """Raised when an explicit asset root override points at a missing dir."""
 
 
+def default_workspace_root() -> Path:
+    """The workspace to use when ``$USER_DATA_PATH`` is unset.
+
+    Container images ship a writable ``/workspace``; a bare-metal non-root host
+    has neither that directory nor permission to create it, and the mkdir would
+    abort installation. Falling back to the caller's directory also matches what
+    the setup skill offers.
+    """
+    if os.access(POD_LOCAL_WORKSPACE, os.W_OK):
+        return DEFAULT_SESSION_DIR
+    return Path.cwd() / "session"
+
+
 def workspace_root() -> Path:
     """Operator-facing workspace root: ``$USER_DATA_PATH`` (else
     ``DEFAULT_SESSION_DIR``), regardless of layout mode. Workspace-shared
@@ -106,12 +122,12 @@ def workspace_root() -> Path:
             "%s is not set; falling back to %s. All session/run artefacts "
             "will be written there, NOT to an operator-chosen location. "
             "Export %s to the intended workspace root before launching to "
-            "avoid silently writing to the pod-local default.",
+            "avoid silently writing to the default.",
             ENV_USER_DATA_PATH,
-            DEFAULT_SESSION_DIR,
+            default_workspace_root(),
             ENV_USER_DATA_PATH,
         )
-    return DEFAULT_SESSION_DIR
+    return default_workspace_root()
 
 
 def _sanitize_model_basename(model_name: str | os.PathLike[str]) -> str:

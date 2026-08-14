@@ -1426,7 +1426,12 @@ main() {
   # Precedence: --user-data-path > process env > .env > default. The .env value
   # is honored so the setup skill's written USER_DATA_PATH is not silently lost.
   user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-$(read_dotenv_var USER_DATA_PATH)}}"
-  user_data="${user_data:-/workspace/hyperloom}"
+# Container images ship a writable /workspace; a bare-metal host off root has
+# neither it nor permission to create it, so the mkdir below would abort.
+_default_workspace_root() {
+  if [ -w /workspace ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
+}
+  user_data="${user_data:-$(_default_workspace_root)}"
   export USER_DATA_PATH="$user_data"
   export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
 
