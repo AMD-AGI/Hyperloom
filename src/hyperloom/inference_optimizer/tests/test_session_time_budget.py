@@ -712,6 +712,17 @@ class TestTheCooperativeStopWindowsCompose:
         # for the answer to be seen, then up to 10s to release the lease it held.
         assert _COOPERATIVE_CANCEL_GRACE_SEC >= 8.5 + 0.25 + 10.0
 
+    def test_reaping_a_server_and_dropping_its_lease_are_both_paid(self):
+        """The two release waits are a sequence, so the window has to cover both.
+
+        A Ray round's unwind reaps the server it left behind and only then closes
+        the lease it ran in -- that order is a requirement, not an accident, so no
+        GPU process outlives the lease. Taking the longer of the two leaves the
+        window five seconds short of what that unwind costs, which is the same
+        shortfall these windows were derived to remove.
+        """
+        assert _COOPERATIVE_CANCEL_GRACE_SEC >= 8.5 + 0.25 + 5.0 + 10.0
+
     def test_the_notice_window_is_the_poll_the_scope_is_checked_at(self):
         """Nothing is listening yet is a claim about the poll, not about the work."""
         assert _CANCEL_NOTICE_SEC >= STOP_GATE_POLL_SECONDS
