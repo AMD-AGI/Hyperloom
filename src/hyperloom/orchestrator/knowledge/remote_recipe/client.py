@@ -441,6 +441,7 @@ class RemoteRecipeClient:
             score=score,
             files_dir=files_dir,
             metric=metric,
+            supersede_equal=True,
         )
 
     def _publish(
@@ -452,8 +453,20 @@ class RemoteRecipeClient:
         score: float,
         files_dir: Path,
         metric: str,
+        supersede_equal: bool = False,
     ) -> RemoteWriteResult:
-        """Upload the files, replace the knowledge, then move the champion."""
+        """Upload the files, replace the knowledge, then move the champion.
+
+        The store promotes whatever it is told — it accepts an equal or even a
+        lower value and moves the champion down — so keep-if-better lives here,
+        and a 409 means a concurrent write, not a refused value.
+
+        ``supersede_equal`` re-promotes over an equally scored incumbent after
+        such a conflict. A record that accumulates entries needs it: adding a
+        kernel that does not raise the best gain leaves the score unchanged, and
+        leaving the champion on the older session would hide the addition from
+        every reader. Records that merely compete keep the strict comparison.
+        """
         expected = {artifact.path for artifact in bundle.artifacts}
         if expected:
             refs = self.store.put_dir(canonical_id, session_id, files_dir)
@@ -489,7 +502,7 @@ class RemoteRecipeClient:
                 # The record just written is already the one readers resolve to,
                 # so a refused promotion changes nothing.
                 return RemoteWriteResult("written", "", canonical_id, session_id, score)
-            if winner < score:
+            if winner < score or (supersede_equal and winner == score):
                 self.store.set_champion(
                     canonical_id,
                     session_id,
