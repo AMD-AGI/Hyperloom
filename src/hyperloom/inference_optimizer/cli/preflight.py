@@ -974,7 +974,10 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
         f"\nERROR: serving framework {framework!r} is not importable by any candidate interpreter:\n"
         f"{probed}{_probe_detail_block(probe.detail)}\n\n"
         f"{remedy}\n\n"
-        f"To proceed anyway (e.g. the server lives elsewhere), set {SKIP_FRAMEWORK_CHECK_ENV}=1.",
+        "If the server already runs elsewhere, benchmark against it instead:\n"
+        "    export BENCHMARK_BASE_URL=http://<serving-host>:<port>\n"
+        f"which skips this check. As a last resort, {SKIP_FRAMEWORK_CHECK_ENV}=1 drops it\n"
+        "for a local run that is expected to serve from somewhere unprobed.",
         file=sys.stderr,
     )
     sys.exit(2)

@@ -374,6 +374,24 @@ def test_probe_stderr_tail_is_bounded(monkeypatch):
     assert "line-0 " not in tail
 
 
+def test_a_remote_server_is_pointed_at_benchmark_base_url(monkeypatch, capsys):
+    """A server that lives elsewhere is configured, not waved through.
+
+    BENCHMARK_BASE_URL is an exemption in this very function, so steering that
+    user into disabling the check hides the supported path.
+    """
+    _probe_result(monkeypatch, importable=False)
+    monkeypatch.setattr(preflight, "_in_container", lambda: False)
+
+    with pytest.raises(SystemExit):
+        preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    err = capsys.readouterr().err
+    assert "BENCHMARK_BASE_URL" in err
+    assert err.index("BENCHMARK_BASE_URL") < err.index(_SKIP_ENV)
+    assert "last resort" in err
+
+
 @pytest.mark.parametrize(
     ("framework", "evidence"),
     [("vllm", "vllm platform"), ("sglang", "torch.version.hip")],
