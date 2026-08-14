@@ -2078,6 +2078,51 @@ def _session_usable_seconds(state: Any) -> float | None:
     return session_remaining_seconds(state)
 
 
+def prelude_affordable_seconds(
+    state: Any,
+    *,
+    now_unix: float | None = None,
+) -> tuple[float | None, dict[str, Any]]:
+    """Seconds PRELUDE may still spend, and the numbers the figure is built from.
+
+    Two bounds apply and the tighter wins: what is left of PRELUDE's own share
+    (:data:`PRELUDE_SPEND_CEILING_PCT`), and what is left of the session once
+    the optimization phases' reserve (:data:`OPTIMIZATION_RESERVE_PCT`) is held
+    back. Work that fits neither is not work the session needed — it is work
+    the session could not have used the result of.
+
+    Read directly by callers that have to *size* a unit of work rather than
+    judge one they can already price, which is the position a first baseline is
+    in: it has no measured runtime to judge against, but the share it may spend
+    is known before anything runs.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        now_unix (float | None): Override for the current time.
+
+    Returns:
+        tuple[float | None, dict[str, Any]]: The affordable seconds — which may
+        be negative once the share is overspent — or ``None`` on an unbounded
+        budget, plus the evidence behind it.
+    """
+    max_sec = _max_minutes(state) * 60.0
+    usable = _session_usable_seconds(state)
+    if max_sec <= 0.0 or usable is None:
+        return None, {"reason": "unbounded_budget"}
+    spent = phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix)
+    phase_headroom = max_sec * PRELUDE_SPEND_CEILING_PCT - spent
+    session_headroom = usable - max_sec * OPTIMIZATION_RESERVE_PCT
+    affordable_sec = min(phase_headroom, session_headroom)
+    return affordable_sec, {
+        "prelude_spent_sec": round(spent, 1),
+        "prelude_ceiling_sec": round(max_sec * PRELUDE_SPEND_CEILING_PCT, 1),
+        "optimization_reserve_sec": round(max_sec * OPTIMIZATION_RESERVE_PCT, 1),
+        "session_usable_sec": round(usable, 1),
+        "affordable_sec": round(affordable_sec, 1),
+        "bound": "prelude_ceiling" if phase_headroom <= session_headroom else "optimization_reserve",
+    }
+
+
 def prelude_can_afford(
     state: Any,
     *,
@@ -2086,11 +2131,8 @@ def prelude_can_afford(
 ) -> tuple[bool, dict[str, Any]]:
     """Decide whether PRELUDE can still buy an optional arm costing ``expected_cost_sec``.
 
-    Two bounds apply and the tighter wins: what is left of PRELUDE's own share
-    (:data:`PRELUDE_SPEND_CEILING_PCT`), and what is left of the session once
-    the optimization phases' reserve (:data:`OPTIMIZATION_RESERVE_PCT`) is held
-    back. An arm that fits neither is not refused work the session needed — it
-    is refused work the session could not have used the result of.
+    The share itself is :func:`prelude_affordable_seconds`; this judges one cost
+    against it.
 
     Args:
         state (Any): Frozen SharedState view.
@@ -2106,24 +2148,11 @@ def prelude_can_afford(
         and the phase record.
     """
     cost = max(0.0, float(expected_cost_sec or 0.0))
-    max_sec = _max_minutes(state) * 60.0
-    usable = _session_usable_seconds(state)
-    if max_sec <= 0.0 or usable is None:
-        return True, {"reason": "unbounded_budget", "expected_cost_sec": round(cost, 1)}
-    spent = phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix)
-    phase_headroom = max_sec * PRELUDE_SPEND_CEILING_PCT - spent
-    session_headroom = usable - max_sec * OPTIMIZATION_RESERVE_PCT
-    affordable_sec = min(phase_headroom, session_headroom)
-    evidence: dict[str, Any] = {
-        "expected_cost_sec": round(cost, 1),
-        "prelude_spent_sec": round(spent, 1),
-        "prelude_ceiling_sec": round(max_sec * PRELUDE_SPEND_CEILING_PCT, 1),
-        "optimization_reserve_sec": round(max_sec * OPTIMIZATION_RESERVE_PCT, 1),
-        "session_usable_sec": round(usable, 1),
-        "affordable_sec": round(affordable_sec, 1),
-        "bound": "prelude_ceiling" if phase_headroom <= session_headroom else "optimization_reserve",
-    }
-    return affordable_sec >= cost, evidence
+    affordable_sec, evidence = prelude_affordable_seconds(state, now_unix=now_unix)
+    priced = {"expected_cost_sec": round(cost, 1), **evidence}
+    if affordable_sec is None:
+        return True, priced
+    return affordable_sec >= cost, priced
 
 
 def exit_time_exhausted_prelude(
@@ -3368,6 +3397,7 @@ __all__ = [
     "exit_terminal_prelude",
     "exit_time_exhausted_prelude",
     "append_phase_evidence_row",
+    "prelude_affordable_seconds",
     "prelude_can_afford",
     "prelude_exit_viability",
     "is_action_allowed_in_phase",

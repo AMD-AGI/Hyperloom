@@ -37,7 +37,11 @@ from ...framework.paths import resolve_session_framework_root
 from ...loop.sub_agent_runner import RunnerContext
 from ...trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
-from ..stop_attribution import StoppedByTheRun
+from ..stop_attribution import (
+    SESSION_BUDGET_BELOW_ONE_ROUND_CLASS,
+    STOPPED_BY_THE_RUN,
+    StoppedByTheRun,
+)
 from . import _server_lifecycle as _lifecycle
 from ._file_lock import best_effort_file_lock
 from ._aiter_jit import (
@@ -59,7 +63,6 @@ from ._grid_runner import (
     sanitize_script_name,
     session_clamped_timeout_sec,
     session_grid_bounds,
-    session_warmup_cap_sec,
     stopped_by_the_run,
 )
 from ._subprocess_kill import (
@@ -109,6 +112,10 @@ _EVAL_FAILURE_MARKERS = (
 )
 # Bounded per-file read so log scanning never slurps a multi-GB server.log.
 _LOG_SCAN_MAX_BYTES = 262_144
+# The measured pass ran as the first traffic against a freshly restarted server,
+# because the warmup that exists to drive it did not. Its throughput is a cold
+# number, and the session anchors every later gain on it.
+_MN_WARMUP_DID_NOT_WARM_WARNING = "baseline_mn_warmup_did_not_run"
 
 # The cold-start guard's two round directories. The warmup round is the only one
 # that measures accuracy (``RUN_EVAL=true``); the measured round is hot
@@ -310,6 +317,8 @@ def _stopped_round_result(
     runtime_sec: float,
     output_dir: Path,
     capture_meta: dict[str, Any],
+    never_started: bool = False,
+    evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the result for a round the run itself stopped.
 
@@ -332,26 +341,118 @@ def _stopped_round_result(
         runtime_sec: Wall-clock seconds the round had run for.
         output_dir: The task workspace, echoed onto the result.
         capture_meta: Config/eval-contract facts every failure result carries.
+        never_started: Whether the round was refused before it launched, which
+            is the other half of every cause here and reads differently in a
+            ledger: no GPU time was spent, so there is not even a partial round
+            to look for.
+        evidence: The numbers behind the stop, when the cause is one the run
+            computed rather than observed.
 
     Returns:
         dict[str, Any]: The failed result carrying the stop's own error class.
     """
+    detail = stopped.never_started if never_started else stopped.interrupted
     log.warning(
-        "baseline_executor: %s reaped after %.1fs: %s; error_class=%s.",
+        "baseline_executor: %s %s after %.1fs: %s; error_class=%s.",
         round_label,
+        "refused" if never_started else "reaped",
         runtime_sec,
-        stopped.interrupted,
+        detail,
         stopped.error_class,
     )
-    return {
+    result = {
         "status": "failed",
         "error_class": stopped.error_class,
         "returncode": returncode,
-        "error": stopped.interrupted,
+        "error": detail,
         "subprocess_runtime_sec": round(runtime_sec, 2),
         "output_dir": str(output_dir),
         **capture_meta,
     }
+    if evidence is not None:
+        result["budget_shortfall"] = evidence
+    return result
+
+
+def _round_headroom_sec(state: Any, session_deadline_sec: float | None) -> tuple[float | None, dict[str, Any]]:
+    """Seconds this round's budget may still spend, and the numbers behind it.
+
+    In PRELUDE that is the phase's own share
+    (:func:`~...phases.machine_state.prelude_affordable_seconds`), which is the
+    same figure the post-warmup gate judges the measured round against. Outside
+    it a re-baseline answers to what is left before the session deadline, the
+    only bound the round is under there.
+
+    Args:
+        state: The session ``SharedState``, or ``None`` when the caller has no
+            session context (direct executor invocation, tests).
+        session_deadline_sec: Monotonic-clock session deadline, or ``None``.
+
+    Returns:
+        tuple[float | None, dict[str, Any]]: The headroom, or ``None`` when the
+            round is under no budget at all, plus the evidence behind it.
+    """
+    if state is None:
+        outside: dict[str, Any] = {"reason": "no_session_state"}
+    else:
+        phase = str(getattr(state, "phase", "") or "").strip().upper()
+        if phase == _phase_state.PHASE_PRELUDE:
+            return _phase_state.prelude_affordable_seconds(state)
+        outside = {"reason": "not_prelude", "phase": phase}
+    if session_deadline_sec is None:
+        return None, outside
+    remaining_sec = max(0.0, session_deadline_sec - time.monotonic())
+    return remaining_sec, {**outside, "bound": "session_deadline", "affordable_sec": round(remaining_sec, 1)}
+
+
+def warmup_pass_cap_sec(
+    cap: int,
+    *,
+    headroom_sec: float | None,
+    measured_expected_sec: float = 0.0,
+) -> int | None:
+    """The hard cap for a discarded warmup pass, or ``None`` when it must not run.
+
+    A round is two passes of the same workload -- a warmup whose throughput is
+    thrown away and the measured pass that re-attaches to the server it left
+    hot -- so the warmup may claim at most half of what the round has to spend.
+    That is not an estimate of anything: it is the pre-image of the gate that
+    runs after the warmup, which asks whether what is left still covers a pass
+    costing what the warmup cost. Both bounds behind ``headroom_sec`` fall by
+    exactly the wall-clock the warmup burns, so a warmup that survives this cap
+    is exactly a warmup that gate will pass, and one killed by it is exactly one
+    that gate would have refused after paying for it in full.
+
+    The half is what makes the rule work on a session's first baseline, where
+    nothing has been measured and there is therefore nothing to predict a pass
+    from. Pricing the pair at the declared cap instead would refuse a baseline
+    in every default session: the caps are hang backstops of 7800s warm and
+    9000s cold, each longer than the whole two-hour default the phase gets 40%
+    of.
+
+    ``measured_expected_sec`` is what a later baseline knows a pass of this
+    workload costs. It only ever refuses the pass earlier than the cap would --
+    a round already known not to fit is not worth half a round of GPU time to
+    re-discover -- and it is deliberately not consulted the other way: a
+    declared cap below one pass is a fact about the cap, not about the budget.
+
+    Args:
+        cap: The timeout the caller would grant with an unbounded budget.
+        headroom_sec: Seconds this round may still spend, from
+            :func:`_round_headroom_sec`; ``None`` when it is under no budget.
+        measured_expected_sec: Seconds one pass of this workload is known to
+            take, or ``0`` when this session has not measured one.
+
+    Returns:
+        int | None: The hard timeout for the warmup pass, or ``None`` when what
+            is left cannot fit both it and the measured round it warms for.
+    """
+    if headroom_sec is None:
+        return int(cap)
+    share_sec = headroom_sec / 2.0
+    if share_sec < 1.0 or (measured_expected_sec > 0.0 and share_sec < measured_expected_sec):
+        return None
+    return min(int(cap), int(share_sec))
 
 
 def _disable_cuda_graph_flag(framework: str) -> str:
@@ -1812,7 +1913,7 @@ class BaselineExecutor:
         session deadline: the measured round is the last pass of the round, and a
         cap the session watchdog reaches first is a cap whose kill is attributed
         to the budget rather than to the model. The pass that does hold budget
-        back is the discarded warmup, in :meth:`_mn_warmup_capped_timeout`.
+        back is the discarded warmup, in :meth:`_warmup_pass_timeout`.
 
         Args:
             timeout_sec: The timeout this round would get on an unbounded budget.
@@ -1830,47 +1931,50 @@ class BaselineExecutor:
         )
 
     @staticmethod
-    def _mn_warmup_capped_timeout(
+    def _warmup_pass_timeout(
         timeout_sec: int,
-        session_deadline_sec: float | None,
         *,
         output_dir: Path,
+        headroom_sec: float | None,
         measured_expected_sec: float | None,
+        evidence: dict[str, Any],
     ) -> int | None:
-        """The multi-node warmup pass's cap, or ``None`` when it should be skipped.
+        """The warmup pass's cap, or ``None`` when the round must not be started.
 
-        The decision itself is :func:`~._grid_runner.session_warmup_cap_sec`, so
-        both benching arms hold back the same seconds for the measured round they
-        discard a pass in front of; this adds the baseline's log lines.
+        The decision itself is :func:`warmup_pass_cap_sec`, shared by both
+        two-pass shapes a baseline has -- the single-node cold+hot double run and
+        the multi-node client warmup -- so a round is sized the same way whoever
+        launches it; this adds the log lines.
 
         Args:
             timeout_sec: The timeout this pass would get on an unbounded budget.
-            session_deadline_sec: Monotonic-clock session deadline, or ``None``
-                when there is no budget to respect.
             output_dir: The warmup pass's workspace, for the log line.
-            measured_expected_sec: Seconds the measured round is expected to take,
-                or ``None`` when this session has not measured one yet.
+            headroom_sec: Seconds this round may still spend, or ``None`` when it
+                is under no budget.
+            measured_expected_sec: Seconds one pass of this workload is known to
+                take, or ``None`` when this session has not measured one.
+            evidence: The numbers behind ``headroom_sec``, for the log line.
 
         Returns:
-            int | None: The hard timeout for the warmup pass, or ``None`` when the
-                remaining budget cannot fit it and the measured round after it.
+            int | None: The hard timeout for the warmup pass, or ``None`` when
+                what is left cannot fit both passes of the round.
         """
-        expected_sec = float(measured_expected_sec or 0.0)
-        clamped = session_warmup_cap_sec(
+        capped = warmup_pass_cap_sec(
             timeout_sec,
-            session_deadline_sec,
-            measured_expected_sec=expected_sec,
+            headroom_sec=headroom_sec,
+            measured_expected_sec=float(measured_expected_sec or 0.0),
         )
-        if clamped is None:
+        if capped is None:
             log.warning(
-                "baseline_executor: skipping the MN warmup pass — what is left of the "
-                "session budget cannot fit both it and the measured round's expected "
-                "%.0fs, and a warmup capped under one pass warms nothing (round=%s)",
-                expected_sec,
+                "baseline_executor: not starting the round — a round is two passes "
+                "and %.0fs of budget is left for it (bound=%s), so the pass it could "
+                "pay for is the one whose number nothing may use (round=%s)",
+                float(headroom_sec or 0.0),
+                evidence.get("bound", ""),
                 output_dir.name,
             )
             return None
-        return _logged_session_clamp(timeout_sec, clamped, output_dir=output_dir)
+        return _logged_session_clamp(timeout_sec, capped, output_dir=output_dir)
 
     @staticmethod
     def _inferencex_root_from_config(config_path: Path) -> str:
@@ -3164,13 +3268,44 @@ class BaselineExecutor:
                 "baseline_executor: cold-start guard — warmup round (discarded, boots persistent server) in %s",
                 warmup_dir,
             )
+            # The warmup may claim at most half of what the round has, so a round
+            # that cannot fit both passes is refused before it spends the first
+            # one, and a warmup that survives its cap is one the gate below will
+            # pass. ``None`` is a budget under a whole round.
+            warmup_cap_sec, budget_evidence = self._double_run_warmup_budget(
+                ctx_extra=extra,
+                timeout_sec=timeout_sec,
+                warmup_dir=warmup_dir,
+            )
+            round_meta = {"materialized_config": str(materialized_config_path)}
+            if warmup_cap_sec is None:
+                return _stopped_round_result(
+                    STOPPED_BY_THE_RUN[SESSION_BUDGET_BELOW_ONE_ROUND_CLASS],
+                    round_label="cold+hot double round",
+                    returncode=None,
+                    runtime_sec=0.0,
+                    output_dir=output_dir,
+                    capture_meta=round_meta,
+                    never_started=True,
+                    evidence=budget_evidence,
+                )
             warmup_result = await self._run_reported_round(
                 label="warmup",
                 config_path=warmup_cfg,
                 output_dir=warmup_dir,
-                **common,
+                **{**common, "timeout_sec": warmup_cap_sec},
             )
             if warmup_result.get("status") != "succeeded":
+                if warmup_cap_sec < timeout_sec and warmup_result.get("error_class") == "timeout":
+                    return _stopped_round_result(
+                        STOPPED_BY_THE_RUN[SESSION_BUDGET_BELOW_ONE_ROUND_CLASS],
+                        round_label="cold+hot warmup round",
+                        returncode=None,
+                        runtime_sec=float(warmup_result.get("subprocess_runtime_sec") or 0.0),
+                        output_dir=output_dir,
+                        capture_meta=round_meta,
+                        evidence={**budget_evidence, "warmup_cap_sec": warmup_cap_sec},
+                    )
                 # Warmup failure almost certainly recurs, so skip the
                 # measured round.
                 warmup_result.setdefault("nonfatal_warnings", [])
@@ -3208,26 +3343,31 @@ class BaselineExecutor:
             )
 
             if not defer_accuracy_until_after_measure:
-                affordable, budget_evidence = self._measure_round_affordable(
+                affordable, gate_evidence = self._measure_round_affordable(
                     warmup_runtime_sec=warmup_runtime,
                     ctx_extra=extra,
                 )
                 if not affordable:
                     log.warning(
-                        "baseline_executor: skipping the measured round — the warmup "
-                        "took %.0fs and only %.0fs of preparation budget is left "
-                        "(bound=%s). Keeping the warmup as the baseline; it is the "
-                        "cold anchor a single-round baseline would have produced.",
+                        "baseline_executor: the warmup took %.0fs and only %.0fs of "
+                        "preparation budget is left (bound=%s), so the measured round "
+                        "cannot follow it. The warmup is not kept: its throughput is "
+                        "the cold-start number the round exists to discard, and an "
+                        "anchor measured that way depresses every gain the session "
+                        "goes on to report against it.",
                         float(warmup_runtime or 0.0),
-                        budget_evidence.get("affordable_sec", 0.0),
-                        budget_evidence.get("bound", ""),
+                        gate_evidence.get("affordable_sec", 0.0),
+                        gate_evidence.get("bound", ""),
                     )
-                    warmup_result.setdefault("nonfatal_warnings", [])
-                    warmup_result["nonfatal_warnings"].append(
-                        "baseline_measure_round_dropped_low_budget",
+                    return _stopped_round_result(
+                        STOPPED_BY_THE_RUN[SESSION_BUDGET_BELOW_ONE_ROUND_CLASS],
+                        round_label="cold+hot measured round",
+                        returncode=None,
+                        runtime_sec=float(warmup_runtime or 0.0),
+                        output_dir=output_dir,
+                        capture_meta=round_meta,
+                        evidence=gate_evidence,
                     )
-                    warmup_result["measure_round_dropped"] = budget_evidence
-                    return warmup_result
 
             # Round 2 (measured): re-attach to the hot server (client only).
             # Warm re-attach is intentional — all comparison points (baseline,
@@ -3395,6 +3535,40 @@ class BaselineExecutor:
             if bench_lease is not None:
                 bench_lease.close()
 
+    def _double_run_warmup_budget(
+        self,
+        *,
+        ctx_extra: dict[str, Any] | None,
+        timeout_sec: int,
+        warmup_dir: Path,
+    ) -> tuple[int | None, dict[str, Any]]:
+        """The cold round's cap and the numbers behind it, or ``None`` to not start.
+
+        The single-node half of the same decision the multi-node warmup makes in
+        :meth:`_mn_warmup_pass`: both shapes discard a pass in front of the one
+        that is measured, so both size that pass out of the same headroom.
+
+        Args:
+            ctx_extra: The runner context extras carrying ``shared_state``.
+            timeout_sec: The round's cap on an unbounded budget.
+            warmup_dir: The cold round's workspace, for the log line.
+
+        Returns:
+            tuple[int | None, dict[str, Any]]: The cap, or ``None`` when what is
+                left cannot fit both passes, plus the evidence behind it.
+        """
+        state = (ctx_extra or {}).get("shared_state") or self.shared_state
+        session_deadline_sec, measured_expected_sec = session_grid_bounds(state)
+        headroom_sec, evidence = _round_headroom_sec(state, session_deadline_sec)
+        cap_sec = self._warmup_pass_timeout(
+            timeout_sec,
+            output_dir=warmup_dir,
+            headroom_sec=headroom_sec,
+            measured_expected_sec=measured_expected_sec,
+            evidence=evidence,
+        )
+        return cap_sec, evidence
+
     def _measure_round_affordable(
         self,
         *,
@@ -3403,17 +3577,15 @@ class BaselineExecutor:
     ) -> tuple[bool, dict[str, Any]]:
         """Whether PRELUDE's remaining budget still covers the measured round.
 
-        The double-run exists to keep the baseline off cold-start numbers, and
-        on a normal model it costs minutes. On a large one it does not: two
-        field sessions spent 51 and 125 minutes on the pair, and in both the
-        cold and hot figures landed within 1% of each other — a correction the
-        session then had no time left to use. Dropping the second round when it
-        no longer fits leaves the single-round baseline the codebase already
-        supports and treats as valid, rather than a new half-measured state.
+        The confirmation of what :func:`warmup_pass_cap_sec` sized the warmup
+        against, priced with the runtime the warmup actually had rather than the
+        share it was allowed: the round spends wall-clock either side of that
+        pass -- the server restart, the teardown -- which the cap does not bound.
+        The warmup's own runtime is the estimate for the round that follows it,
+        and an upper bound rather than a guess, because the measured round
+        re-attaches to a server the warmup has already booted.
 
-        The warmup's own runtime is the estimate: the measured round re-attaches
-        to the hot server, so it is an upper bound rather than a guess. Only
-        PRELUDE is guarded — a re-baseline in a later phase answers to that
+        Only PRELUDE is guarded — a re-baseline in a later phase answers to that
         phase's budget.
 
         Args:
@@ -3424,16 +3596,14 @@ class BaselineExecutor:
             tuple[bool, dict[str, Any]]: ``(affordable, evidence)``.
         """
         state = (ctx_extra or {}).get("shared_state") or self.shared_state
-        if state is None:
-            return True, {"reason": "no_session_state"}
-        phase = str(getattr(state, "phase", "") or "").strip().upper()
-        if phase != _phase_state.PHASE_PRELUDE:
-            return True, {"reason": "not_prelude", "phase": phase}
+        headroom_sec, evidence = _round_headroom_sec(state, None)
+        if headroom_sec is None:
+            return True, evidence
         try:
             cost = float(warmup_runtime_sec or 0.0)
         except (TypeError, ValueError):
             cost = 0.0
-        return _phase_state.prelude_can_afford(state, expected_cost_sec=cost)
+        return headroom_sec >= cost, {"expected_cost_sec": round(cost, 1), **evidence}
 
     def _double_run_enabled(
         self,
@@ -3666,8 +3836,126 @@ class BaselineExecutor:
             config_path=config_path,
             output_dir=output_dir,
             **common,
-        )
+        )    async def _mn_warmup_pass(
+        self,
+        *,
+        cmd: list[str],
+        env: dict[str, str],
+        output_dir: Path,
+        framework: str,
+        declared_timeout_sec: int,
+        timeout_sec: int,
+        session_deadline_sec: float | None,
+        measured_expected_sec: float | None,
+        state: Any,
+        capture_meta: dict[str, Any],
+        round_warnings: list[str],
+    ) -> dict[str, Any] | None:
+        """Run the discarded multi-node client warmup against the restarted server.
 
+        The pass exists because the restart just above it left a cold server and
+        this is the only thing that drives it before the measured pass. So the
+        two are one round: skipping the warmup does not save the round's cost,
+        it moves the round's measurement onto a cold server and anchors the
+        session's every later gain on it. A budget that cannot pay for both
+        therefore buys nothing here, and says so.
+
+        Args:
+            cmd: The measured pass's command, re-pointed at the warmup slot.
+            env: The measured pass's environment, re-pointed the same way.
+            output_dir: The round's workspace; the warmup runs in a slot under it.
+            framework: Framework name, for the watchdog's server log.
+            declared_timeout_sec: The round's cap before any budget touched it,
+                which is what tells a hang apart from a budget-shortened pass.
+            timeout_sec: The round's cap after the session clamp.
+            session_deadline_sec: Monotonic-clock session deadline, or ``None``.
+            measured_expected_sec: Seconds one pass is known to take, or ``None``.
+            state: The session ``SharedState``, for the round's headroom.
+            capture_meta: Config/eval-contract facts every failure result carries.
+            round_warnings: Collected onto the round's result, for a warmup that
+                did not run and did not end the round.
+
+        Returns:
+            dict[str, Any] | None: The round's result when the round is over,
+                else ``None`` to go on to the measured pass.
+        """
+        warm_dir = output_dir / "mn_warmup"
+        headroom_sec, headroom_evidence = _round_headroom_sec(state, session_deadline_sec)
+        warm_timeout_sec = self._warmup_pass_timeout(
+            timeout_sec,
+            output_dir=warm_dir,
+            headroom_sec=headroom_sec,
+            measured_expected_sec=measured_expected_sec,
+            evidence=headroom_evidence,
+        )
+        if warm_timeout_sec is None:
+            return _stopped_round_result(
+                STOPPED_BY_THE_RUN[SESSION_BUDGET_BELOW_ONE_ROUND_CLASS],
+                round_label="multi-node round",
+                returncode=None,
+                runtime_sec=0.0,
+                output_dir=output_dir,
+                capture_meta=capture_meta,
+                never_started=True,
+                evidence=headroom_evidence,
+            )
+        started_unix = time.time()
+        # The measurement is discarded, but the returncode is not: this pass is a
+        # full benchmark round, so a stop here ends the baseline round. Going on
+        # to the measured pass would spend a second round of GPU time the run has
+        # already been told to stop spending.
+        warm_rc: int | None = None
+        try:
+            warm_dir.mkdir(parents=True, exist_ok=True)
+            warm_cmd = [str(warm_dir) if c == str(output_dir) else c for c in cmd]
+            warm_env = dict(env)
+            warm_env["RESULT_DIR"] = str(warm_dir)
+            warm_env["EVAL_RESULT_DIR"] = str(warm_dir / "eval_output")
+            warm_env["SERVER_LOG"] = str(warm_dir / "server.log")
+            warm_env["GPU_METRICS_CSV"] = str(warm_dir / "gpu_metrics.csv")
+            async with heartbeat_while_output_flows(
+                unit="baseline_round",
+                label="mn_warmup",
+            ) as warm_activity:
+                warm_proc = await asyncio.to_thread(
+                    run_with_session_kill,
+                    warm_cmd,
+                    env=warm_env,
+                    cwd=str(warm_dir),
+                    timeout=warm_timeout_sec,
+                    server_log_path=_watchdog_server_log_path(warm_dir, framework),
+                    on_output=warm_activity.note,
+                    session_deadline_sec=session_deadline_sec,
+                )
+            warm_rc = warm_proc.returncode
+            log.info("baseline_executor: MN warmup pass done (discarded) rc=%s", warm_rc)
+        except subprocess.TimeoutExpired as exc:
+            if warm_timeout_sec < declared_timeout_sec:
+                return _stopped_round_result(
+                    STOPPED_BY_THE_RUN[SESSION_BUDGET_BELOW_ONE_ROUND_CLASS],
+                    round_label="multi-node warmup pass",
+                    returncode=None,
+                    runtime_sec=max(0.0, time.time() - started_unix),
+                    output_dir=output_dir,
+                    capture_meta=capture_meta,
+                    evidence={**headroom_evidence, "warmup_cap_sec": warm_timeout_sec},
+                )
+            log.warning("baseline_executor: MN warmup pass hit its own hang backstop (ignored): %r", exc)
+            round_warnings.append(_MN_WARMUP_DID_NOT_WARM_WARNING)
+        except Exception as exc:  # noqa: BLE001 - a warmup that fails on its own is best-effort
+            log.warning("baseline_executor: MN warmup pass failed (ignored): %r", exc)
+            round_warnings.append(_MN_WARMUP_DID_NOT_WARM_WARNING)
+        warm_stopped = stopped_by_the_run(warm_rc)
+        if warm_stopped is not None:
+            return _stopped_round_result(
+                warm_stopped,
+                round_label="multi-node warmup pass",
+                returncode=warm_rc,
+                runtime_sec=max(0.0, time.time() - started_unix),
+                output_dir=output_dir,
+                capture_meta=capture_meta,
+            )
+        return None
     async def _run_single_benchmark(
         self,
         *,
@@ -3788,9 +4076,9 @@ class BaselineExecutor:
         # The session's wall-clock budget, resolved per round rather than once
         # per task: a baseline runs up to three of them, and a warmup that
         # overran has already spent budget the ones after it were counting on.
-        session_deadline_sec, measured_expected_sec = session_grid_bounds(
-            ctx_extra.get("shared_state") or self.shared_state
-        )
+        _session_state = ctx_extra.get("shared_state") or self.shared_state
+        session_deadline_sec, measured_expected_sec = session_grid_bounds(_session_state)
+        declared_timeout_sec = int(timeout_sec)
         timeout_sec = self._session_capped_timeout(timeout_sec, session_deadline_sec, output_dir=output_dir)
         if not ctx_extra.get("mn_round_restarted"):
             try:
@@ -3855,68 +4143,23 @@ class BaselineExecutor:
             mn_bench_warmup_enabled as _mn_warm,
         )
 
-        _mn_warm_dir = output_dir / "mn_warmup"
-        # What the measured round is expected to need is held back from the
-        # warmup, the same reserve the grid builds from the same number. Handed
-        # the whole cap, a slow warmup can spend the budget the measured round is
-        # then admitted without -- so the round that could never finish is the one
-        # launched and reaped, and the baseline is reported as
-        # ``session_time_exhausted`` after a warmup that actually succeeded.
-        # ``None`` means what is left cannot fit both passes, and the warmup is
-        # the one to drop.
-        _mn_warm_timeout_sec = (
-            self._mn_warmup_capped_timeout(
-                timeout_sec,
-                session_deadline_sec,
-                output_dir=_mn_warm_dir,
+        round_warnings: list[str] = []
+        if _mn_imn() and _mn_warm() and not ctx_extra.get("mn_round_restarted"):
+            _mn_warm_result = await self._mn_warmup_pass(
+                cmd=cmd,
+                env=env,
+                output_dir=output_dir,
+                framework=framework,
+                declared_timeout_sec=declared_timeout_sec,
+                timeout_sec=timeout_sec,
+                session_deadline_sec=session_deadline_sec,
                 measured_expected_sec=measured_expected_sec,
+                state=_session_state,
+                capture_meta=capture_meta,
+                round_warnings=round_warnings,
             )
-            if (_mn_imn() and _mn_warm() and not ctx_extra.get("mn_round_restarted"))
-            else None
-        )
-        if _mn_warm_timeout_sec is not None:
-            _mn_warm_started_unix = time.time()
-            # The measurement is discarded, but the returncode is not: this pass
-            # is a full benchmark round, so a stop here ends the baseline round.
-            # Going on to the measured pass would spend a second round of GPU
-            # time the run has already been told to stop spending.
-            _mn_warm_rc: int | None = None
-            try:
-                _mn_warm_dir.mkdir(parents=True, exist_ok=True)
-                _mn_warm_cmd = [str(_mn_warm_dir) if c == str(output_dir) else c for c in cmd]
-                _mn_warm_env = dict(env)
-                _mn_warm_env["RESULT_DIR"] = str(_mn_warm_dir)
-                _mn_warm_env["EVAL_RESULT_DIR"] = str(_mn_warm_dir / "eval_output")
-                _mn_warm_env["SERVER_LOG"] = str(_mn_warm_dir / "server.log")
-                _mn_warm_env["GPU_METRICS_CSV"] = str(_mn_warm_dir / "gpu_metrics.csv")
-                async with heartbeat_while_output_flows(
-                    unit="baseline_round",
-                    label="mn_warmup",
-                ) as _mn_warm_activity:
-                    _mn_warm_proc = await asyncio.to_thread(
-                        run_with_session_kill,
-                        _mn_warm_cmd,
-                        env=_mn_warm_env,
-                        cwd=str(_mn_warm_dir),
-                        timeout=_mn_warm_timeout_sec,
-                        server_log_path=_watchdog_server_log_path(_mn_warm_dir, framework),
-                        on_output=_mn_warm_activity.note,
-                        session_deadline_sec=session_deadline_sec,
-                    )
-                _mn_warm_rc = _mn_warm_proc.returncode
-                log.info("baseline_executor: MN warmup pass done (discarded) rc=%s", _mn_warm_rc)
-            except Exception as exc:  # noqa: BLE001 - warmup is best-effort
-                log.warning("baseline_executor: MN warmup pass failed (ignored): %r", exc)
-            _mn_warm_stopped = stopped_by_the_run(_mn_warm_rc)
-            if _mn_warm_stopped is not None:
-                return _stopped_round_result(
-                    _mn_warm_stopped,
-                    round_label="multi-node warmup pass",
-                    returncode=_mn_warm_rc,
-                    runtime_sec=max(0.0, time.time() - _mn_warm_started_unix),
-                    output_dir=output_dir,
-                    capture_meta=capture_meta,
-                )
+            if _mn_warm_result is not None:
+                return _mn_warm_result
 
         workspaces_before = snapshot_workspaces(output_dir)
         subprocess_started_unix = time.time()
@@ -4172,7 +4415,7 @@ class BaselineExecutor:
             workspace=workspace,
             subprocess_started_unix=subprocess_started_unix,
         )
-        warnings = list(measurement.pop("nonfatal_warnings", []) or [])
+        warnings = round_warnings + list(measurement.pop("nonfatal_warnings", []) or [])
         if proc_returncode != 0:
             warnings.append("magpie_nonzero_after_valid_measurement")
         for leak_src, _ in harvested:
