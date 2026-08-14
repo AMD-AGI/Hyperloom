@@ -261,7 +261,7 @@ def _validate_trace_structure(
 
     # --- Check 3 (Deval): main trace has user_annotation + execute_* ---
     # execute_* annotations = InferenceX per-step writes when
-    # roofline_annotations is honoured (distinct from check 5).
+    # detailed_annotations is honoured (distinct from check 5).
     main_traces = sorted(
         (p for p in trace_dir.glob("*.trace.json.gz") if p.is_file()),
         key=lambda p: p.stat().st_size,
@@ -295,7 +295,7 @@ def _validate_trace_structure(
                     f"[3] main trace {main_traces[0].name} has no "
                     "execute_* / user_annotation events — InferenceX "
                     "per-step annotations didn't fire. Verify "
-                    "roofline_annotations reached the framework "
+                    "detailed_annotations reached the framework "
                     "(PROFILE_EXTRA_BODY consumed; see #210)."
                 )
 
