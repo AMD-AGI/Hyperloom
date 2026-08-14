@@ -291,12 +291,9 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
     src_file = str((m.get("fusion") or {}).get("source_file") or "")
 
     if compile_pass:
-        # Claiming a framework compile pass that shipped switched off: the win is a
-        # flipped default in the framework's own source, so the patch carries it and
-        # there is no runtime flag to toggle. Its speedup is a serving tok/s ratio
-        # rather than a microbenchmark one, hence the extra fields naming where the
-        # number came from. Re-entry idempotency comes from last_fusion.status, not
-        # from env flags, so leaving them empty does not cause a re-run.
+        # The win is a flipped default in the framework's own source, so the patch
+        # carries it and there is no runtime flag. The speedup is a serving tok/s
+        # ratio, not a microbenchmark one, hence the fields naming its origin.
         speedup = compile_pass.get("speedup")
         result.update(
             {
