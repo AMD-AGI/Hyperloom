@@ -87,6 +87,14 @@ class SubAgentResult:
             * ``"crash"`` / ``"oom"`` / ``"hang"`` / ``"detokenizer_stall"``:
               exact-matched by :meth:`writeback._pitfall_severity_for` to
               classify a failure as crash-severity for the KB.
+            * ``"no_executor"``: no runner registered for the task's
+              ``kind`` — set directly on this dataclass, same site as
+              ``policy_{rule}``, so this exit no longer collapses into
+              ``"unknown_error"`` either.
+            * The raised exception's ``__class__.__name__`` (e.g.
+              ``"TimeoutError"``): an executor raised instead of returning a
+              result. Same reasoning — a real class beats the generic
+              bucket, even though the exact name isn't enumerable up front.
             * Anything else (including empty): executors set their own
               ``error_class`` inside ``result``, or leave it unset, in which
               case the gap ledger buckets it as ``"unknown_error"``.
@@ -292,6 +300,7 @@ class SubAgentRunner:
                 state="failed",
                 result={},
                 error=f"no runner registered for kind={task.kind!r}",
+                error_class="no_executor",
             )
 
         lease: Lease | None = prebound_lease
@@ -348,6 +357,7 @@ class SubAgentRunner:
                     state="failed",
                     result={},
                     error=repr(exc),
+                    error_class=exc.__class__.__name__,
                 )
             await self._transition_resilient(
                 task.task_id,
