@@ -11,6 +11,8 @@ import pytest
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
     _apply_warm_patches,
+    _create_patch_snapshot,
+    _revert_patches,
 )
 
 
@@ -441,6 +443,79 @@ def test_pending_state_persist_failure_needs_no_file_rollback(
     assert "patched = True" not in (
         fake_repo / "vllm" / "fp8.py"
     ).read_text()
+
+
+def test_snapshot_revert_validates_repo_and_head(
+    fake_repo,
+    output_dir,
+) -> None:
+    pre_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=fake_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    manifest = _create_patch_snapshot(
+        str(fake_repo),
+        [VALID_PATCH],
+        output_dir,
+    )
+    target = fake_repo / "vllm/fp8.py"
+    target.write_text("# fp8 module\npatched = True\n")
+
+    result = _revert_patches(str(fake_repo), pre_sha, manifest)
+
+    assert result == {"ok": True, "errors": []}
+    assert "original = True" in target.read_text()
+
+
+def test_snapshot_revert_rejects_repo_mismatch(
+    fake_repo,
+    output_dir,
+    tmp_path,
+) -> None:
+    manifest = _create_patch_snapshot(
+        str(fake_repo),
+        [VALID_PATCH],
+        output_dir,
+    )
+    other_repo = tmp_path / "other"
+    other_repo.mkdir()
+
+    result = _revert_patches(str(other_repo), "", manifest)
+
+    assert result["ok"] is False
+    assert result["errors"][0].startswith("repo_mismatch:")
+
+
+def test_snapshot_revert_rejects_head_mismatch(
+    fake_repo,
+    output_dir,
+) -> None:
+    pre_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=fake_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    manifest = _create_patch_snapshot(
+        str(fake_repo),
+        [VALID_PATCH],
+        output_dir,
+    )
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "advance head"],
+        cwd=fake_repo,
+        capture_output=True,
+        check=True,
+    )
+
+    result = _revert_patches(str(fake_repo), pre_sha, manifest)
+
+    assert result["ok"] is False
+    assert result["errors"][0].startswith("head_mismatch:")
 
 
 def test_required_patch_refuses_repo_without_head(tmp_path, output_dir):
