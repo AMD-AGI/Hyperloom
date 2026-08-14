@@ -1429,7 +1429,11 @@ main() {
 # Container images ship a writable /workspace; a bare-metal host off root has
 # neither it nor permission to create it, so the mkdir below would abort.
 _default_workspace_root() {
-  if [ -w /workspace ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
+  # The nearest existing ancestor decides: -w is false for a path that does not
+  # exist yet, which would divert root off a /workspace it can still create.
+  _ws_probe=/workspace
+  while [ ! -e "$_ws_probe" ] && [ "$_ws_probe" != / ]; do _ws_probe=$(dirname "$_ws_probe"); done
+  if [ -w "$_ws_probe" ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
 }
   user_data="${user_data:-$(_default_workspace_root)}"
   export USER_DATA_PATH="$user_data"

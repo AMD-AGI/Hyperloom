@@ -223,25 +223,33 @@ def test_unreadable_fallback_tree_does_not_raise(tmp_path, monkeypatch):
     ``Path.is_dir()`` re-raises EACCES because pathlib ignores only
     ENOENT/ENOTDIR/EBADF/ELOOP, so an unreadable fallback such as root's aborted
     resolution before any of the guarded sweep I/O could count an error.
+
+    The refusal is injected rather than built from a 0o000 directory: root
+    ignores permission bits, and root in a container is the standard deployment,
+    so a real chmod would make this assert nothing exactly where it matters.
     """
-    unreadable = tmp_path / "locked"
-    unreadable.mkdir(mode=0o000)
-    monkeypatch.setattr(aj, "AITER_CPP_BUILD_PROBE_PATHS", (str(unreadable / "build"),))
+    denied = tmp_path / "locked" / "build"
+    real_is_dir = Path.is_dir
+
+    def _deny_one(self, *args, **kwargs):
+        if str(self) == str(denied):
+            raise PermissionError(13, "Permission denied")
+        return real_is_dir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_dir", _deny_one)
+    monkeypatch.setattr(aj, "AITER_CPP_BUILD_PROBE_PATHS", (str(denied),))
     for var in ("AITER_ROOT_DIR", "AITER_JIT_DIR", "INFERENCE_OPTIMIZER_AITER_JIT_DIR"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "nohome"))
     monkeypatch.setattr(aj.importlib.util, "find_spec", lambda _name: None)
 
-    try:
-        stats = aj.clean_stale_aiter_locks(stale_minutes=0)
-    finally:
-        unreadable.chmod(0o700)
+    stats = aj.clean_stale_aiter_locks(stale_minutes=0)
 
     assert stats["deleted"] == 0
     # "errors counted" is the documented contract; an all-zero stats dict would
     # read as a clean sweep of a tree that was never looked at.
     assert stats["errors"] >= 1
-    assert any(str(unreadable) in entry for entry in stats["unreadable"])
+    assert any(str(denied) in entry for entry in stats["unreadable"])
 
 
 def test_find_aiter_baton_wait_returns_bounded_evidence(tmp_path):

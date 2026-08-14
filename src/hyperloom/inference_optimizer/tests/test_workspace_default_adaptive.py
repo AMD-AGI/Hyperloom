@@ -47,6 +47,21 @@ def test_keeps_the_pod_local_path_when_workspace_is_writable(name, resolve, monk
     assert Path(resolve()) == Path("/workspace/hyperloom")
 
 
+@pytest.mark.parametrize("name,resolve", _RESOLVERS, ids=[n for n, _ in _RESOLVERS])
+def test_a_creatable_workspace_is_still_used(name, resolve, monkeypatch):
+    """``/workspace`` absent but creatable must not divert the run.
+
+    ``os.access`` is False for a path that does not exist, so testing the target
+    itself sends root -- who could have created it, and whose earlier runs did --
+    to <cwd>/session, and its existing sessions appear to vanish.
+    """
+    monkeypatch.setattr(os.path, "exists", lambda p: str(p) == "/")
+    monkeypatch.setattr(Path, "exists", lambda self: str(self) == "/")
+    monkeypatch.setattr(os, "access", lambda path, _mode: str(path) == "/")
+
+    assert Path(resolve()) == Path("/workspace/hyperloom")
+
+
 def test_the_three_mirrors_agree(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     for writable in (True, False):

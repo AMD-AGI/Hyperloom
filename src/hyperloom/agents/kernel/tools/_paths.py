@@ -31,7 +31,10 @@ def default_workspace_root() -> str:
     import: container images ship a writable ``/workspace``, a bare-metal
     non-root host has neither it nor permission to create it.
     """
-    if os.access(POD_LOCAL_WORKSPACE, os.W_OK):
+    probe = POD_LOCAL_WORKSPACE
+    while not os.path.exists(probe) and probe != os.path.dirname(probe):
+        probe = os.path.dirname(probe)
+    if os.access(probe, os.W_OK):
         return DEFAULT_WORKSPACE_ROOT
     return os.path.join(os.getcwd(), "session")
 
