@@ -919,7 +919,6 @@ class _FakeStore:
         self.calls.append(("set_champion", canonical_id, session_id, metric, value))
         if self.conflict:
             self.conflict = False
-            self.champion = value - 1
             raise KBStoreError("POST champion -> HTTP 409: write_conflict")
 
     def list_session_files(self, canonical_id, session_id, *, kind=""):
@@ -1866,8 +1865,15 @@ def _kernel_state(tmp_path: Path, *, gain: float = 12.5):
 
 
 def _kernel_client(store):
+    """A client for an identity the kernel-agent KB holds nothing for yet.
+
+    The fake store's envelope belongs to a recipe identity, and a read that
+    fails is no longer treated as an empty record, so say "nothing published"
+    the way the store does: an absent best record.
+    """
     client = RemoteRecipeClient.__new__(RemoteRecipeClient)
     client.store = store
+    client.read = lambda cid, dest: None  # type: ignore[method-assign]
     return client
 
 
@@ -2028,7 +2034,8 @@ def test_kernel_agent_write_runs_even_when_the_recipe_write_failed(tmp_path):
 
 def _published_kernel_client(store, published: dict, published_dir: Path):
     """A client whose read() serves ``published`` plus its downloaded files."""
-    client = _kernel_client(store)
+    client = RemoteRecipeClient.__new__(RemoteRecipeClient)
+    client.store = store
 
     def _read(cid, dest):
         shutil.copytree(published_dir, dest, dirs_exist_ok=True)
@@ -2222,3 +2229,89 @@ def test_kernel_agent_write_accepts_a_refused_promotion_it_already_holds(tmp_pat
     assert result.status == "written"
     # One refused attempt, and no retry: the incumbent is this same record.
     assert len([c for c in store.calls if c[0] == "set_champion"]) == 1
+
+
+def test_kernel_agent_write_refuses_to_publish_over_an_unreadable_record(tmp_path):
+    """The published record is the base of every merge, and the write replaces
+    the document wholesale: merging against a failed read would publish this
+    run's columns alone and destroy the identity's accumulated kernels."""
+    store = _FakeStore(champion=40.0, metric="kernel_gain_pct")
+    client = _kernel_client(store)
+
+    def _read(cid, dest):
+        raise KBStoreError("GET best-record -> HTTP 500")
+
+    client.read = _read  # type: ignore[method-assign]
+
+    result = write_kernel_agent_kb(
+        _kernel_state(tmp_path), "kernel:hyperloom-m:h", client=client
+    )
+
+    assert result.status == "error"
+    assert "published_record_unreadable" in result.reason
+    assert not [c for c in store.calls if c[0] in ("put_knowledge", "put_dir")]
+    assert store.published_knowledge is None
+
+
+def test_kernel_agent_write_displaces_one_ref_without_touching_its_namesake(tmp_path):
+    """A record can name two files sharing a basename across directories. Moving
+    the colliding one must not repoint the other, whose bytes would then be
+    referenced by nothing, dropped from the upload, and replayed as a patch."""
+    store = _FakeStore(champion=40.0, metric="kernel_gain_pct")
+    published_dir = tmp_path / "published"
+    patches = published_dir / "files" / "kernel" / "rewrite" / "patches"
+    sources = published_dir / "files" / "kernel" / "rewrite" / "source"
+    patches.mkdir(parents=True, exist_ok=True)
+    sources.mkdir(parents=True, exist_ok=True)
+    (patches / "x.py").write_text("OLD-PATCH", encoding="utf-8")
+    (sources / "x.py").write_text("OLD-SOURCE", encoding="utf-8")
+    published = {
+        "value": {
+            "gemm": {"optimizations": []},
+            "fusion": {"items": []},
+            "rewrite": {
+                "items": [
+                    {
+                        "kernel_name": "kOLD",
+                        "e2e_gain_pct": 40.0,
+                        "patch": "kernel/rewrite/patches/x.py",
+                        "source_files": ["kernel/rewrite/source/x.py"],
+                    }
+                ]
+            },
+        }
+    }
+    client = _published_kernel_client(store, published, published_dir)
+    uploaded = _capture_uploads(store)
+    state = _kernel_state(tmp_path, gain=12.5)
+    # This session's own rewrite collides on the patch basename only.
+    session_patch = tmp_path / "x.py"
+    session_patch.write_text("NEW-PATCH", encoding="utf-8")
+    session_source = tmp_path / "target.py"
+    session_source.write_text("print('new')", encoding="utf-8")
+    state.optimization_stack.append(
+        {
+            "action": "integrate",
+            "decision": "KEEP",
+            "kernel_id": "kNEW",
+            "kernel_name": "kNEW",
+            "gain_pct": 3.0,
+            "tput": 6700.0,
+            "patch_path": str(session_patch),
+            "target_file": str(session_source),
+        }
+    )
+
+    result = write_kernel_agent_kb(state, "kernel:hyperloom-m:h", client=client)
+
+    assert result.status == "written"
+    inherited = next(
+        item
+        for item in store.published_knowledge["value"]["rewrite"]["items"]
+        if item["kernel_name"] == "kOLD"
+    )
+    # The displaced patch moved; the same-named source kept its own ref.
+    assert inherited["patch"] != "kernel/rewrite/patches/x.py"
+    assert inherited["source_files"] == ["kernel/rewrite/source/x.py"]
+    assert uploaded[inherited["patch"]] == b"OLD-PATCH"
+    assert uploaded["kernel/rewrite/source/x.py"] == b"OLD-SOURCE"

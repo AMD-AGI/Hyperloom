@@ -95,9 +95,21 @@ def write_kernel_agent_kb(
             return RemoteWriteResult(
                 "skipped", "no_kernel_optimization", kernel_canonical_id, session_id
             )
-        published, published_dir = _published_kernel_record(
-            resolved, kernel_canonical_id, root / "published"
-        )
+        try:
+            published, published_dir = _published_kernel_record(
+                resolved, kernel_canonical_id, root / "published"
+            )
+        except Exception as exc:  # noqa: BLE001 — reported, never written past
+            log.warning(
+                "kernel-agent KB: not writing, the published record is unreadable",
+                exc_info=True,
+            )
+            return RemoteWriteResult(
+                "error",
+                f"published_record_unreadable: {exc}",
+                kernel_canonical_id,
+                session_id,
+            )
         merged, inherited = merge_kernel_columns(published, value)
         if merged == published:
             # Every optimization this session recorded is already published at
@@ -138,15 +150,13 @@ def _published_kernel_record(
 ) -> tuple[dict[str, Any] | None, Path | None]:
     """Download what the kernel-agent KB already holds for this identity.
 
-    Best-effort: a record that cannot be read is treated as absent, so a
-    transport failure degrades to publishing this session's own columns rather
-    than losing them.
+    Raises when the record cannot be read. It is the base every merge builds
+    on, and the write replaces the accumulated document wholesale: treating an
+    unreadable incumbent as an absent one would publish this run's columns
+    alone, destroying every kernel this identity has ever learned. One 500,
+    one timeout or one failed digest check is not a licence to do that.
     """
-    try:
-        document = client.read(canonical_id, destination)
-    except Exception:  # noqa: BLE001 — an unreadable incumbent must not block
-        log.warning("kernel-agent KB: cannot read the published record", exc_info=True)
-        return None, None
+    document = client.read(canonical_id, destination)
     if not isinstance(document, dict):
         return None, None
     value = document.get("value")
@@ -181,9 +191,10 @@ def _carry_published_artifacts(
                 break
             target = files_dir / ref
             if target.exists() and not _same_bytes(source, target):
-                ref = _displaced_ref(ref, source)
+                displaced = _displaced_ref(ref, source)
+                _rewrite_record_ref(record, ref, displaced)
+                ref = displaced
                 target = files_dir / ref
-                _rewrite_record_ref(record, source.name, ref)
             if target.exists():
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -218,23 +229,29 @@ def _displaced_ref(ref: str, source: Path) -> str:
     return (original.parent / f"{original.stem}-{digest}{original.suffix}").as_posix()
 
 
-def _rewrite_record_ref(record: Any, basename: str, new_ref: str) -> None:
-    """Point every ref in one record that names ``basename`` at ``new_ref``."""
+def _rewrite_record_ref(record: Any, old_ref: str, new_ref: str) -> None:
+    """Repoint the refs in one record that are exactly ``old_ref``.
+
+    Matching on the whole ref, not its basename: a record can name two files
+    that share a basename across directories, and repointing the other one at
+    this file would leave its own bytes referenced by nothing, dropped from the
+    upload, and replayed as the wrong kind of artifact.
+    """
     if isinstance(record, dict):
         for key, value in record.items():
             if isinstance(value, str):
-                if value.endswith(f"/{basename}"):
+                if value == old_ref:
                     record[key] = new_ref
             else:
-                _rewrite_record_ref(value, basename, new_ref)
+                _rewrite_record_ref(value, old_ref, new_ref)
         return
     if isinstance(record, list):
         for index, item in enumerate(record):
             if isinstance(item, str):
-                if item.endswith(f"/{basename}"):
+                if item == old_ref:
                     record[index] = new_ref
             else:
-                _rewrite_record_ref(item, basename, new_ref)
+                _rewrite_record_ref(item, old_ref, new_ref)
 
 
 def _rebuild_kernel_bundle(
