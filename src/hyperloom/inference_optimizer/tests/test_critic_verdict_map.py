@@ -28,6 +28,7 @@ from hyperloom.orchestrator.loop.coordinator_helpers import (
     collapse_verdicts,
     verdict_held_to_its_rule,
     verdict_map_entry_grounds,
+    verdict_map_entry_held_to_its_rule,
 )
 from hyperloom.orchestrator.policy.gate import (
     INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
@@ -968,6 +969,71 @@ def test_findings_stated_outside_the_shape_that_counts_them_are_not_one_ground(r
     assert verdict_held_to_its_rule(entry, action_name="specialist") == ("reject", "")
 
 
+@pytest.mark.parametrize(
+    "findings",
+    [
+        pytest.param(
+            {"risks": [{"severity": "blocker", "summary": "the payload carries a self-reported gain."}, ""]},
+            id="a_ground_stated_beside_an_empty_slot_is_one_ground",
+        ),
+        pytest.param({"required_evidence": [""]}, id="an_empty_slot_is_not_evidence_the_verdict_still_wants"),
+    ],
+)
+def test_an_empty_findings_slot_states_nothing(findings):
+    """A verdict serialised with its list slots padded out has stated what is
+    in them, not how many there are -- the same reading
+    ``serialize_verdict_advisory`` takes of the field set downstream. Counting
+    an empty slot as a ground would withhold the downgrade from the shape the
+    hold was built for."""
+    entry = {
+        "verdict": "reject",
+        "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+        **findings,
+    }
+
+    assert verdict_held_to_its_rule(entry, action_name="specialist") == (
+        "advise",
+        QUANTITATIVE_CLAIM_REASON_CODE,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "findings",
+    [
+        pytest.param({"risks": 1}, id="a_count_where_the_risks_go"),
+        pytest.param({"required_evidence": 1}, id="a_count_where_the_evidence_requests_go"),
+    ],
+)
+async def test_a_verdict_whose_findings_cannot_be_counted_still_decides_its_proposal(coord, findings):
+    """A number where the schema puts a list used to raise ``TypeError`` out of
+    the ground count. That reached the router's catch-all, which recorded the
+    exception and dropped the intent, leaving the proposal undecided for the
+    rest of the session. A count is not a citation the hold can act on, so the
+    verdict the Critic wrote is what the proposal is decided on."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-uncountable",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-uncountable"}},
+    )
+    coord.state.pending_proposals["msg-uncountable"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-uncountable",
+            "verdict": "reject",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+            **findings,
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.decided, pending.verdict) == (True, "reject")
+    assert coord._materialise_calls == []
+
+
 @pytest.mark.asyncio
 async def test_a_held_reject_never_lands_the_patch_it_rejected(coord):
     """The rules the hold enforces are about specialist proposal payloads, and
@@ -1209,16 +1275,41 @@ async def test_a_reject_code_the_payload_declares_outranks_a_variants_advisory_p
 
 
 @pytest.mark.asyncio
+async def test_the_one_risk_a_batch_states_is_not_the_rule_its_variants_cite(coord):
+    """A single stated risk is allowed beside a citation because on the single
+    path both come from one statement by one author. A batch states its risks
+    for the whole set and the citation belongs to the entry, so counting them
+    as one ground identifies them -- and a set refused for supplying no
+    rollback plan anywhere was dispatched on a formatting rule instead."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-one-blocker", variants=["v_a", "v_b"])
+    entry = {
+        "verdict": "reject",
+        "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: this variant carries a self-reported gain field.",
+    }
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-one-blocker",
+            "risks": [{"severity": "blocker", "summary": "no variant in this set supplies a rollback plan."}],
+            "verdict_map": {"v_a": dict(entry), "v_b": dict(entry)},
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+
+
+@pytest.mark.asyncio
 async def test_a_variant_resting_only_on_the_cited_rule_still_gives_up_its_reject(coord):
-    """The payload's grounds are inherited, not its whole advisory context:
-    remediation notes, evidence pointers and a single risk are what a verdict
-    resting on one advisory rule looks like, so the hold still applies."""
+    """A finding is what holds a variant, not the batch's whole advisory
+    context: remediation notes and evidence pointers say what to do next and
+    where to look, so a variant resting on nothing but its cited rule still
+    gives up its reject."""
     pending = _seed_explore_proposal(coord, msg_id="msg-map-only", variants=["v_a", "v_b"])
     intent = Intent(
         type=IntentType.REVIEW_VERDICT,
         payload={
             "target_proposal_msg_id": "msg-map-only",
-            "risks": [{"severity": "blocker", "summary": "the variant carries a prohibited gain field."}],
             "notes": ["Resubmit without predicted_gain_pct."],
             "packet_evidence": ["proposal_set[0].predicted_gain_pct"],
             "verdict_map": {
@@ -1519,8 +1610,8 @@ async def test_a_batch_code_no_rule_declares_withholds_the_downgrade(coord):
         pytest.param(
             {"verdict": "reject"},
             {"risks": [{"severity": "blocker"}], "required_evidence": ["a bench"]},
-            {"verdict": "reject", "risks": [{"severity": "blocker"}], "required_evidence": ["a bench"]},
-            id="findings_with_no_per_variant_slot_are_inherited",
+            {"verdict": "reject"},
+            id="the_batchs_findings_are_not_moved_onto_the_entry",
         ),
         pytest.param(
             {"verdict": "reject", "failure_reason_code": "variant_code"},
@@ -1551,46 +1642,36 @@ async def test_a_batch_code_no_rule_declares_withholds_the_downgrade(coord):
             id="a_code_that_can_only_hold_the_reject_is_inherited",
         ),
         pytest.param(
-            {"verdict": "reject"},
-            {"risks": [{"summary": "no rollback plan"}, {"summary": "the patch does not apply"}]},
-            {"verdict": "reject", "risks": [{"summary": "no rollback plan"}, {"summary": "the patch does not apply"}]},
-            id="every_finding_that_binds_is_inherited_not_just_the_first",
-        ),
-        pytest.param(
-            {"verdict": "reject"},
-            {
-                "risks": [{"summary": "v_b has no rollback plan"}, {"summary": "v_c: the patch does not apply"}],
-                "verdict_map": {"v_a": {}, "v_b": {}, "v_c": {}},
-            },
-            {
-                "verdict": "reject",
-                "risks": [{"summary": "v_b has no rollback plan"}, {"summary": "v_c: the patch does not apply"}],
-            },
-            id="a_name_in_a_findings_prose_does_not_take_it_off_this_variants_grounds",
-        ),
-        pytest.param(
             {"verdict": "reject", "risks": [{"summary": "its own"}]},
             {"risks": [{"summary": "the batch's"}]},
-            {"verdict": "reject", "risks": [{"summary": "its own"}, {"summary": "the batch's"}]},
-            id="an_entry_stating_its_own_findings_is_held_on_those_and_the_batchs",
+            {"verdict": "reject", "risks": [{"summary": "its own"}]},
+            id="an_entrys_own_findings_are_left_as_the_entry_stated_them",
         ),
-        pytest.param(
-            {"verdict": "reject"},
-            {"risks": "stated as one sentence, not a list"},
-            {"verdict": "reject", "risks": "stated as one sentence, not a list"},
-            id="findings_in_an_undocumented_shape_are_inherited_as_stated",
-        ),
-        pytest.param(
-            {"verdict": "reject", "required_evidence": "a matched benchmark"},
-            {"required_evidence": ["a rollback plan"]},
-            {"verdict": "reject", "required_evidence": ["a matched benchmark", ["a rollback plan"]]},
-            id="findings_two_shapes_cannot_be_joined_in_stay_two_statements",
-        ),
-        pytest.param("reject", {"risks": [{"severity": "blocker"}]}, {}, id="a_non_dict_entry_states_nothing"),
+        pytest.param("reject", {"failure_reason_code": "payload_code"}, {}, id="a_non_dict_entry_states_nothing"),
     ],
 )
-def test_the_grounds_an_entry_rests_on_join_its_own_to_the_ones_stated_for_it(entry, payload, expected):
+def test_an_entry_inherits_only_a_code_that_can_hold_its_reject(entry, payload, expected):
+    """A finding the batch states is read where it is stated, as a hold on the
+    whole set; moving one onto an entry would put it back in the count the
+    ``<= 1`` allowance runs on, which is what identified the batch's ground
+    with the entry's rule."""
     assert verdict_map_entry_grounds(entry, payload) == expected
+
+
+def test_a_batch_that_states_nothing_readable_leaves_its_entry_on_its_own_grounds():
+    """Both halves of the batch reading -- what an entry inherits and what
+    holds it -- ask a payload what it states, so both have to answer for one
+    that is not a payload at all. It states no findings and no code, which
+    leaves the entry judged on what it wrote itself."""
+    entry = {
+        "verdict": "reject",
+        "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: carries a self-reported gain field.",
+    }
+
+    assert verdict_map_entry_held_to_its_rule(entry, "not a payload", action_name="specialist") == (
+        "advise",
+        QUANTITATIVE_CLAIM_REASON_CODE,
+    )
 
 
 def test_a_map_of_verdicts_none_of_which_decides_asks_for_review():

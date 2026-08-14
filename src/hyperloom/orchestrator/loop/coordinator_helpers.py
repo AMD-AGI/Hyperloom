@@ -682,6 +682,11 @@ def verdict_rests_on_one_ground(entry: dict[str, Any]) -> bool:
     ground and asks for nothing further: at most one risk entry, and no
     outstanding evidence request.
 
+    The allowance rests on the citation and the risk being one statement by one
+    author, which is what makes the risk the cited rule's. Findings a *batch*
+    states are neither, so they are read where they are stated rather than
+    counted here (:func:`verdict_map_entry_held_to_its_rule`).
+
     ``risks`` is a list in the schema. A verdict that states it as one sentence
     instead has stated grounds whose number cannot be read off — "the patch
     does not apply and there is no rollback plan" is two — so an unlisted
@@ -709,35 +714,26 @@ def verdict_rests_on_one_ground(entry: dict[str, Any]) -> bool:
     return len([risk for risk in risks if risk]) <= 1
 
 
-# The findings a verdict lists outside its prose: the evidence it still wants
-# and the further risks it names. A ``verdict_map`` entry is
+# The findings a review lists outside its prose: the evidence it still wants
+# and the risks it names. A ``verdict_map`` entry is
 # ``{verdict, rationale?, failure_reason_code?}`` -- the shape PolicyGate
 # documents -- so these have nowhere to live but the payload, where a batch
 # review states them once for every variant it looked at.
-_VERDICT_INHERITED_FINDING_KEYS: tuple[str, ...] = ("required_evidence", "risks")
+_VERDICT_FINDING_KEYS: tuple[str, ...] = ("required_evidence", "risks")
 
 
-def _joined_findings(own: Any, stated: Any) -> Any:
-    """Return the findings of one key, an entry's own joined to the batch's.
-
-    Attribution says what a finding *is* about, never what it is not: an entry
-    filing risks under its own key has not answered for the ones the batch
-    filed under none, so the two are added rather than one replacing the other.
+def _batch_states_findings(payload: dict[str, Any]) -> bool:
+    """Return whether a batch review states a finding of its own.
 
     Args:
-        own: What the entry states for this key; may be absent or empty.
-        stated: What the payload states for the same key, known non-empty.
+        payload: The ``review_verdict`` payload a ``verdict_map`` arrived in.
 
     Returns:
-        ``stated`` when the entry states nothing, the two lists joined when
-        both are lists, else the pair -- two statements of findings, which
-        :func:`verdict_rests_on_one_ground` reads as more than one ground.
+        True when the payload names any risk or asks for any evidence.
     """
-    if not _states_findings(own):
-        return stated
-    if isinstance(own, (list, tuple)) and isinstance(stated, (list, tuple)):
-        return [*own, *stated]
-    return [own, stated]
+    if not isinstance(payload, dict):
+        return False
+    return any(_states_findings(payload.get(key)) for key in _VERDICT_FINDING_KEYS)
 
 
 def _inheritable_reason_code(payload: dict[str, Any]) -> str:
@@ -766,59 +762,50 @@ def _inheritable_reason_code(payload: dict[str, Any]) -> str:
 def verdict_map_entry_grounds(entry: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     """Return the grounds one ``verdict_map`` entry rests on.
 
-    Reading the entry alone left the hold's safeguards looking for keys the
-    per-variant shape has no slot for, so both answered "nothing further
-    stated" whatever the Critic wrote: a reject listing blockers and asking for
-    evidence was held to a rule its rationale merely mentioned. The payload is
-    where a batch states those findings, once for every variant it looked at.
-
-    Nothing attributes one of them to one variant. ``verdict_map`` appears in
-    no version of the Critic's output schema, so nothing asks the Critic to
-    spell a variant's key inside its findings, and reading the prose for a name
-    answers the question by guess. The two guesses do not cost the same: a
-    finding bound to a variant it was not about withholds a downgrade, leaving
-    the reject the Critic wrote, while a finding dropped from a variant it was
-    about downgrades a reject stated on grounds and dispatches it. So every
-    batch finding binds every entry, and an entry filing findings of its own
-    adds to them rather than answering for them (:func:`_joined_findings`).
-
-    That is one rule with two faces: what the batch states can add to the
-    grounds a variant is held on, never supply the grounds it is softened on.
+    An entry is ``{verdict, rationale?, failure_reason_code?}`` -- the shape
+    PolicyGate documents -- so what it states of its own is nearly all it has.
     Prose is not inherited, and neither is a ``failure_reason_code`` naming an
-    advisory rule -- a declared code outranks the entry's own rationale rather
-    than competing with it. A code that can only withhold the downgrade is
-    inherited (:func:`_inheritable_reason_code`), because the two mistakes
-    cost different amounts (see :data:`_CITATION_OPENER`).
+    advisory rule: the batch's citation is a claim about the batch's verdict,
+    and a declared code outranks the entry's own rationale rather than
+    competing with it, so lending one would stop the entry's grounds being read
+    at all. A code that can only withhold the downgrade is inherited
+    (:func:`_inheritable_reason_code`), because the two mistakes cost different
+    amounts (see :data:`_CITATION_OPENER`).
 
-    Known limitation: a batch stating two risks, or any required evidence,
-    holds every reject in the set -- including one resting on nothing but an
-    advisory rule, which the hold exists to downgrade. That entry keeps its
-    reject and the set collapses to it, the outcome the feature replaced.
-    Recovering it needs attribution the Critic is asked for, i.e. the batch
-    shape documented in the output schema; guessing it from prose is what this
-    reading gives up.
+    The findings a batch states are not inherited either. They are read where
+    they are stated, as a hold on every entry in the set
+    (:func:`verdict_map_entry_held_to_its_rule`).
 
     Args:
         entry: One ``verdict_map`` entry.
         payload: The ``review_verdict`` payload that entry arrived in.
 
     Returns:
-        The entry's own keys, with every finding the payload states for the
-        batch added to them; ``{}`` when ``entry`` is not a dict.
+        The entry's own keys, plus a declared reason code that can only hold its
+        reject; ``{}`` when ``entry`` is not a dict.
     """
     if not isinstance(entry, dict):
         return {}
     grounds = dict(entry)
     if not isinstance(payload, dict):
         return grounds
-    for key in _VERDICT_INHERITED_FINDING_KEYS:
-        if _states_findings(payload.get(key)):
-            grounds[key] = _joined_findings(grounds.get(key), payload[key])
     if not grounds.get("failure_reason_code"):
         code = _inheritable_reason_code(payload)
         if code:
             grounds["failure_reason_code"] = code
     return grounds
+
+
+def _stated_verdict(entry: dict[str, Any]) -> str:
+    """Return the verdict ``entry`` states, whatever a hold makes of it.
+
+    Args:
+        entry: A ``review_verdict`` payload or one ``verdict_map`` entry.
+
+    Returns:
+        The stated verdict, stripped; ``""`` when the entry states none.
+    """
+    return str(entry.get("verdict") or "").strip()
 
 
 def verdict_held_to_its_rule(entry: dict[str, Any], *, action_name: str) -> tuple[str, str]:
@@ -850,7 +837,7 @@ def verdict_held_to_its_rule(entry: dict[str, Any], *, action_name: str) -> tupl
     """
     if not isinstance(entry, dict):
         return "", ""
-    verdict = str(entry.get("verdict") or "").strip()
+    verdict = _stated_verdict(entry)
     if verdict != _REJECT_VERDICT:
         return verdict, ""
     if not advisory_rules_govern(action_name):
@@ -861,6 +848,59 @@ def verdict_held_to_its_rule(entry: dict[str, Any], *, action_name: str) -> tupl
     if reason_code:
         return ADVISE_VERDICT, reason_code
     return verdict, ""
+
+
+def verdict_map_entry_held_to_its_rule(
+    entry: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    action_name: str,
+) -> tuple[str, str]:
+    """Return the verdict one ``verdict_map`` entry carries, and why it moved.
+
+    :func:`verdict_rests_on_one_ground` allows a verdict one stated risk beside
+    its citation, because on the single path the two are one statement by one
+    author -- "the proposal claims a 12% gain and has no rollback plan" names
+    the rule and the risk in the same breath. A batch states its risks once for
+    the whole set while the citation belongs to the entry, and nothing connects
+    them: counting them together would identify the batch's one ground with the
+    entry's rule, which is attribution in the direction that dispatches. A set
+    refused because no variant in it supplies a rollback plan would run on the
+    strength of a formatting rule its rationales happen to cite.
+
+    So a finding the batch states holds every reject in the set, whatever its
+    count, and only an entry's own grounds can support a downgrade. That is the
+    rule the batch path already had -- what the batch states adds to the grounds
+    a variant is held on, never supplies the grounds it is softened on -- with
+    arithmetic that claimed more than it could tell taken out of it.
+
+    Known limitation: the downgrade now needs a payload that states no findings
+    at all. That is the batch shape the runtime teaches --
+    ``{target_proposal_msg_id, verdict_map: {name: {verdict, rationale?,
+    failure_reason_code?}}}``, the only batch payload spelled out anywhere in
+    ``src`` (PolicyGate's repair hint) and all
+    ``references/intent_envelope.md`` asks for. It is not the reject shape
+    ``references/verdict_schema.md`` documents: that states one risk *and* one
+    required-evidence item, as both reject exemplars in
+    ``critic/tests/expected_outputs.json`` do, so a batch written in the
+    single-verdict style keeps every reject it wrote -- including one resting on
+    nothing but an advisory rule. Recovering that needs attribution the Critic
+    is asked for, i.e. a batch shape in the output schema; guessing it from
+    prose is what this reading gives up.
+
+    Args:
+        entry: One ``verdict_map`` entry.
+        payload: The ``review_verdict`` payload that entry arrived in.
+        action_name: The reviewed proposal's action name.
+
+    Returns:
+        A ``(verdict, reason_code)`` pair, as :func:`verdict_held_to_its_rule`
+        returns it.
+    """
+    grounds = verdict_map_entry_grounds(entry, payload)
+    if _batch_states_findings(payload):
+        return _stated_verdict(grounds), ""
+    return verdict_held_to_its_rule(grounds, action_name=action_name)
 
 
 # Minimum over-baseline gain a same-harness revalidation must show to count as

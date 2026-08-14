@@ -30,7 +30,7 @@ from .coordinator_helpers import (
     format_exc_brief,
     serialize_verdict_advisory,
     verdict_held_to_its_rule,
-    verdict_map_entry_grounds,
+    verdict_map_entry_held_to_its_rule,
 )
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -214,22 +214,20 @@ class IntentRouter:
                 },
             )
             return
-        verdict = await self._verdict_held_to_its_rule(
-            intent.payload,
+        verdict = await self._record_verdict_hold(
+            verdict_held_to_its_rule(intent.payload, action_name=pending.action_name),
             target=target,
-            action_name=pending.action_name,
         )
         authored = str(single_verdict or "").strip()
         if not verdict and isinstance(verdict_map, dict) and verdict_map:
             # Per entry before the collapse below: a variant rejected on an
             # advisory-only rule must not out-rank its siblings' advice. Each
-            # entry is read together with the grounds the payload states for
-            # the batch, which is where a per-variant shape can carry none.
+            # entry is read against the findings the payload states for the
+            # batch, which hold every reject in the set.
             sub_verdicts = [
-                await self._verdict_held_to_its_rule(
-                    verdict_map_entry_grounds(entry, intent.payload),
+                await self._record_verdict_hold(
+                    verdict_map_entry_held_to_its_rule(entry, intent.payload, action_name=pending.action_name),
                     target=target,
-                    action_name=pending.action_name,
                     variant=str(name),
                 )
                 for name, entry in verdict_map.items()
@@ -260,36 +258,33 @@ class IntentRouter:
             advisory=serialize_verdict_advisory(intent.payload),
         )
 
-    async def _verdict_held_to_its_rule(
+    async def _record_verdict_hold(
         self,
-        entry: dict[str, Any],
+        held: tuple[str, str],
         *,
         target: str,
-        action_name: str,
         variant: str = "",
     ) -> str:
-        """Return ``entry``'s verdict, held to the verdict its cited rule declared.
+        """Return the verdict to act on, recording any hold to a cited rule.
 
         A rule that declares ``advise`` does so because rejecting on it discards
         the whole proposal set over a format or strategy hint. Enforcing the
-        declaration here means the Critic cannot spend a round's proposals on a
-        rule that never asked for a rejection; the downgrade is recorded so the
-        drift is visible rather than silently corrected.
+        declaration means the Critic cannot spend a round's proposals on a rule
+        that never asked for a rejection; the downgrade is recorded so the drift
+        is visible rather than silently corrected.
 
         Args:
-            entry: The ``review_verdict`` payload, or one ``verdict_map``
-                entry's grounds (:func:`verdict_map_entry_grounds`).
+            held: The ``(verdict, reason_code)`` pair
+                :func:`verdict_held_to_its_rule` returned for a single verdict,
+                or :func:`verdict_map_entry_held_to_its_rule` for one variant's.
             target: The target proposal msg_id, for the audit record.
-            action_name: The reviewed proposal's action name; only the kinds
-                those rules are about can be held (see
-                :func:`verdict_held_to_its_rule`).
-            variant: The ``verdict_map`` key when ``entry`` is one variant's
-                verdict; empty for a single verdict.
+            variant: The ``verdict_map`` key when the verdict is one variant's;
+                empty for a single verdict.
 
         Returns:
             The verdict to act on.
         """
-        verdict, downgraded_from_code = verdict_held_to_its_rule(entry, action_name=action_name)
+        verdict, downgraded_from_code = held
         if not downgraded_from_code:
             return verdict
         log.warning(
