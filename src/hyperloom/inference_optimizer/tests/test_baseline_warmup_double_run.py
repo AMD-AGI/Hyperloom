@@ -28,11 +28,8 @@ import yaml
 from hyperloom.orchestrator.actions.executors.baseline import (
     BASELINE_COLD_START_TIMEOUT_SEC,
     BASELINE_DEFAULT_TIMEOUT_SEC,
+    MEASURE_ROUND_DROPPED_WARNING,
     BaselineExecutor,
-    warmup_pass_cap_sec,
-)
-from hyperloom.orchestrator.actions.stop_attribution import (
-    SESSION_BUDGET_BELOW_ONE_ROUND_CLASS,
 )
 from hyperloom.orchestrator.actions.executors.profile import (
     PROFILE_DEFAULT_TIMEOUT_SEC,
@@ -383,39 +380,37 @@ def _run_double_run_baseline(tmp_path, shared_state) -> dict:
     return result
 
 
-def test_a_budget_below_one_round_produces_no_anchor_at_all(tmp_path):
-    """The MiniMax-M2 shape: preparation has spent the share the round needs.
+def test_a_budget_that_cannot_pay_for_the_measured_round_keeps_the_cold_warmup(tmp_path):
+    """Preparation has spent the share the second pass needs; the first still ran.
 
-    The warmup carries a throughput figure and it is tempting to keep it -- it
-    is the number a single-round baseline would have produced. But the round runs
-    twice precisely because that number is cold-contaminated, and every later
-    comparison the session makes is computed against whatever is anchored here.
-    Promoting the discarded pass would depress the anchor and inflate every gain
-    reported against it, for the whole run, to save one round. So the round
-    produces nothing, and says why.
+    Nothing is predicted before the warmup, so the round starts and the warmup's
+    GPU time is spent before the shortfall is known. Refusing to keep its figure
+    would throw that away and leave the session with no anchor at all, which is
+    strictly worse than the cold anchor a single-round baseline would have
+    produced. So the warmup is promoted and marked: the number is depressed, and
+    the marker is what tells a reader of the session's later gains that their
+    denominator is.
     """
     result = _run_double_run_baseline(
         tmp_path,
         _prelude_shared_state(spent_sec=10_000.0, usable_sec=500.0),
     )
 
-    assert result["status"] == "failed"
-    assert result["error_class"] == SESSION_BUDGET_BELOW_ONE_ROUND_CLASS
-    assert result["_rounds_run"] == 0, "GPU time was spent on a round known not to fit"
-    assert result.get("output_throughput") is None, "the cold warmup was promoted as the anchor"
-    assert result["budget_shortfall"]["bound"] == "prelude_ceiling"
+    assert result["status"] == "succeeded"
+    assert result["_rounds_run"] == 1, "the measured round ran on a budget that cannot pay for it"
+    assert result["output_throughput"] == pytest.approx(_COLD_TPUT)
+    assert MEASURE_ROUND_DROPPED_WARNING in result["nonfatal_warnings"]
+    assert result["measure_round_dropped"]["bound"] == "prelude_ceiling"
 
 
 def test_a_round_whose_overheads_spend_the_share_is_caught_after_the_warmup(tmp_path):
-    """The cap bounds the warmup pass; the gate after it bounds the whole round.
+    """The gate prices the round on what it spent, not on what its cap allowed.
 
-    A cap of half the phase's headroom is exactly the pre-image of that gate --
-    both bounds behind the headroom fall by the wall-clock the warmup burns, so a
-    pass that survives its cap is one the gate passes. What the cap does not
-    bound is the rest of the round: the server boot in front of the pass and the
-    teardown behind it are wall-clock too. Here the pass keeps well inside its
-    cap and the round still spends the share, which the gate sees because it
-    prices on what was actually spent rather than on what was allowed.
+    A warmup can keep well inside its own timeout and still leave the round
+    unable to pay for a second pass: the server boot in front of the pass and
+    the teardown behind it are wall-clock the cap never bounded. Asking after
+    the pass, against the clock rather than against the cap, is what catches
+    that -- and is why nothing is predicted before the pass instead.
     """
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
@@ -437,9 +432,8 @@ def test_a_round_whose_overheads_spend_the_share_is_caught_after_the_warmup(tmp_
     assert [c["round_slot"] for c in calls] == ["warmup_round"], (
         f"the measured round ran on a budget the round had already spent: {[c['round_slot'] for c in calls]}"
     )
-    assert result["status"] == "failed"
-    assert result["error_class"] == SESSION_BUDGET_BELOW_ONE_ROUND_CLASS
-    assert result.get("output_throughput") is None
+    assert result["status"] == "succeeded"
+    assert MEASURE_ROUND_DROPPED_WARNING in result["nonfatal_warnings"]
 
 
 def test_measured_round_survives_a_budget_that_still_covers_it(tmp_path):
@@ -2127,38 +2121,6 @@ def _launch_one_grid_variant_under_budget(
     return calls
 
 
-class TestHowMuchAWarmupPassMayClaim:
-    """The arithmetic behind the round-level behaviour, at its boundaries."""
-
-    def test_the_warmup_may_claim_half_of_what_the_round_has(self):
-        """Two passes of comparable cost, so the discarded one gets half."""
-        assert warmup_pass_cap_sec(7800, headroom_sec=2880.0) == 1440
-
-    def test_a_declared_cap_under_the_share_is_left_alone(self):
-        """The share is a ceiling on the pass, not a grant to spend up to."""
-        assert warmup_pass_cap_sec(600, headroom_sec=2880.0) == 600
-
-    def test_an_overspent_share_starts_nothing(self):
-        assert warmup_pass_cap_sec(7800, headroom_sec=-720.0) is None
-
-    def test_a_known_pass_that_does_not_fit_the_share_is_refused_before_it_runs(self):
-        """History turns the cap into a prediction, which is cheaper than finding out."""
-        assert warmup_pass_cap_sec(7800, headroom_sec=800.0, measured_expected_sec=600.0) is None
-
-    def test_a_known_pass_that_fits_is_not_refused(self):
-        assert warmup_pass_cap_sec(7800, headroom_sec=2880.0, measured_expected_sec=600.0) == 1440
-
-    def test_a_declared_cap_under_a_known_pass_is_not_the_budgets_business(self):
-        """The first baseline runs under the 9000s cold cap and promotes its runtime;
-        every later one is given the 7800s warm cap, so an anchor in between sits
-        above the cap forever. Refusing the warmup over that would disable it for
-        the rest of the run and name the session budget as the reason."""
-        assert warmup_pass_cap_sec(7800, headroom_sec=1_000_000.0, measured_expected_sec=8000.0) == 7800
-
-    def test_no_budget_at_all_leaves_the_cap_alone(self):
-        assert warmup_pass_cap_sec(600, headroom_sec=None, measured_expected_sec=900.0) == 600
-
-
 class TestTheSessionBudgetReachesTheBaselineRound:
     """The arm #1146 names as the largest hole, and the one that motivated it.
 
@@ -2299,18 +2261,17 @@ class TestTheSessionBudgetReachesTheBaselineRound:
         tmp_path,
         monkeypatch,
     ):
-        """The regime three rounds of this mechanism have failed in, pinned directly.
+        """The regime several rounds of this mechanism have failed in, pinned directly.
 
-        A session's first baseline has measured nothing, so there is no history to
-        predict a pass from -- and the only other number available, the round's
-        declared cap, is a hang backstop of 7800s warm and 9000s cold, each longer
-        than the whole two-hour default session PRELUDE gets 40% of. Pricing the
-        pair at that cap refuses a baseline in essentially every run, which turns
-        "produce nothing rather than a cold anchor" into "produce nothing".
+        A session's first baseline has measured nothing, so every rule that
+        shortens a pass by predicting the next one is guessing here. Each guess
+        tried so far killed a round that fit: the cold pass pays weight load and
+        graph capture, which the same file's cold-start cap sizes at up to 9000s,
+        so any share-of-the-budget cap lands under it on a default session.
 
-        So the warmup is sized at half of what the phase can still spend, which
-        needs no history, and this ten-minute workload is nowhere near it: both
-        passes run and the round yields the warm anchor it exists to produce.
+        No pass is shortened now. The warmup is granted the round's own cap, and
+        this ten-minute workload runs both passes and yields the warm anchor the
+        round exists to produce.
         """
         enable_multi_node(monkeypatch)
         pass_sec = 600.0
@@ -2326,140 +2287,13 @@ class TestTheSessionBudgetReachesTheBaselineRound:
         assert result["status"] == "succeeded", f"a first baseline was refused a default session: {result}"
         assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
         assert set(launches) >= set(_BASELINE_ROUND_SLOTS), f"the round did not run both passes: {list(launches)}"
+        remaining_sec = _DEFAULT_SESSION_MINUTES * 60.0
         warmup = _mn_warmup_cap_sec(calls)
-        assert warmup is not None and warmup >= pass_sec, (
-            f"the warmup was capped under the {pass_sec}s this pass takes, so it could only be killed: {warmup}"
+        assert warmup is not None and warmup >= remaining_sec, (
+            f"the warmup's cap was moved in front of the session deadline, so the "
+            f"pass can now be killed by its own timeout before the watchdog reaches "
+            f"it: {warmup}s against {remaining_sec}s left"
         )
-
-    def test_a_first_baseline_too_big_for_its_budget_costs_one_share_to_find_out(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        """With nothing measured, the shortfall is discovered by the cap, not predicted.
-
-        Nothing this session measured says what a pass of this workload costs, and
-        the two numbers that could stand in for it both lie: the declared cap is a
-        hang backstop longer than the session, and the static per-action estimates
-        are calibrated on small models. So the warmup is launched with its share
-        and the cap is what finds out -- which bounds the cost of finding out to
-        that share.
-
-        The alternative is what a warmup with no hold-back does: it is granted
-        more than the whole remaining budget, runs to completion, and leaves the
-        measured round to be admitted with nothing and reaped, so the session pays
-        for both passes and keeps neither.
-        """
-        enable_multi_node(monkeypatch)
-        remaining_sec = 3600.0
-        result, calls = _run_baseline_under_budget(
-            tmp_path,
-            remaining_sec=remaining_sec,
-            timeout_sec=BASELINE_DEFAULT_TIMEOUT_SEC,
-            measured_expected_sec=0.0,
-            pass_duration_sec=2000.0,
-        )
-        launches = launches_by_round_slot(calls)
-
-        assert _MEASURED_ROUND_SLOT not in launches, "a measured round was launched into a budget that cannot pay"
-        warmup = _mn_warmup_cap_sec(calls)
-        assert warmup is not None and warmup <= remaining_sec / 2.0, (
-            f"the warmup was allowed more than its share of what is left: {warmup}s of {remaining_sec}s"
-        )
-        assert result["status"] == "failed"
-        assert result["error_class"] == SESSION_BUDGET_BELOW_ONE_ROUND_CLASS, (
-            f"the shortfall was reported as something else: {result.get('error_class')}"
-        )
-        assert result["budget_shortfall"]["bound"] == "prelude_ceiling"
-
-    def test_a_warmup_that_does_not_fit_leaves_no_anchor_rather_than_a_cold_one(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        """Dropping the warmup does not drop the harm the warmup exists to prevent.
-
-        The per-round server restart runs under the same condition as the warmup,
-        so whenever the warmup would have run, the server was just restarted and
-        the warmup is the only thing that drives it. Running the measured pass
-        without it makes that pass the first traffic against a cold server, and
-        its throughput becomes the anchor every later gain is reported against --
-        recorded as a plain success, with nothing saying so.
-        """
-        enable_multi_node(monkeypatch)
-        pass_sec = 600.0
-        result, calls = _run_baseline_under_budget(
-            tmp_path,
-            remaining_sec=800.0,
-            timeout_sec=BASELINE_DEFAULT_TIMEOUT_SEC,
-            measured_expected_sec=pass_sec,
-            pass_duration_sec=pass_sec,
-        )
-
-        assert calls == [], (
-            f"the round it already knows does not fit was launched anyway: {[c['round_slot'] for c in calls]}"
-        )
-        assert result["status"] == "failed"
-        assert result["error_class"] == SESSION_BUDGET_BELOW_ONE_ROUND_CLASS
-        assert result.get("output_throughput") is None, "a cold anchor was persisted anyway"
-
-    def test_a_declared_cap_below_one_pass_is_not_blamed_on_the_budget(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        """A cap smaller than the workload is a fact about the cap, not the clock.
-
-        The first baseline of a session runs under the 9000s cold-start cap and
-        promotes its runtime; every later one runs under the 7800s warm cap. An
-        anchor runtime in between therefore sits above the cap the next round is
-        given, permanently -- and a rule that refuses the warmup whenever its cap
-        is under one measured pass disables it for the rest of the run while
-        naming the session budget as the reason, with a week of clock left.
-        """
-        enable_multi_node(monkeypatch)
-        _result, calls = _run_baseline_under_budget(
-            tmp_path,
-            remaining_sec=7.0 * 24 * 3600,
-            timeout_sec=BASELINE_DEFAULT_TIMEOUT_SEC,
-            measured_expected_sec=BASELINE_COLD_START_TIMEOUT_SEC - 1000.0,
-        )
-
-        assert _mn_warmup_cap_sec(calls) == BASELINE_DEFAULT_TIMEOUT_SEC, (
-            "the warmup was refused over its own declared cap while the session had a week left"
-        )
-
-    def test_neither_benching_arm_launches_a_pass_its_measured_round_cannot_follow(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        """The contract the two arms share, which is about outcomes, not seconds.
-
-        They answer from different information -- the grid always knows what a
-        pass of this workload costs, a session's first baseline never does -- so
-        pinning them to the same number would pin one of them to a rule it has no
-        basis for. What must hold either way is that a discarded pass is never
-        started when the round it warms for cannot follow it: that is the only
-        shape in which the GPU time buys nothing at all.
-        """
-        enable_multi_node(monkeypatch)
-        remaining_sec, declared_cap_sec, expected_sec = 800.0, 7200, 600.0
-        _result, baseline_calls = _run_baseline_under_budget(
-            tmp_path,
-            remaining_sec=remaining_sec,
-            timeout_sec=declared_cap_sec,
-            measured_expected_sec=expected_sec,
-        )
-        grid_calls = _launch_one_grid_variant_under_budget(
-            tmp_path / "grid_arm",
-            remaining_sec=remaining_sec,
-            variant_timeout_sec=declared_cap_sec,
-            variant_expected_sec=expected_sec,
-        )
-
-        assert _mn_warmup_cap_sec(baseline_calls) is None, "the baseline arm launched a doomed warmup"
-        assert _mn_warmup_cap_sec(grid_calls) is None, "the grid arm launched a doomed warmup"
 
     def test_the_profile_arm_gets_all_of_it(self, tmp_path):
         """Profile is the same executor with a four-hour default -- longer than
