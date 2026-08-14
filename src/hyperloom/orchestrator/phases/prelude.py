@@ -539,20 +539,101 @@ class PreludePhase(PhaseHandler):
         (with a backup manifest that :meth:`_revert_warm_kernel_patches` uses to
         roll the whole set back when the set does not win).
         """
-        from ..kernel.request_handlers import _maybe_apply_kernel_patch
+        from ..kernel.request_handlers import (
+            _maybe_apply_kernel_patch,
+            materialize_unified_patch_snapshot,
+        )
 
-        replacement = (entry.get("source_paths") or [entry.get("patch_path")])[0]
+        # A rewrite record may carry both a deploy patch and source snapshots
+        # used as authoring context.  The patch is authoritative: copying the
+        # first source snapshot onto the resolved target can replace an
+        # unrelated framework file (for example attention.py over
+        # prefix_prefill.py).  Source-only records retain the legacy fallback.
+        replacement = entry.get("patch_path") or (
+            entry.get("source_paths") or [None]
+        )[0]
         kernel_id = str((entry.get("meta") or {}).get("kernel_name") or "warm_kernel")
+        payload: dict[str, Any] = {
+            "patch_path": replacement,
+            "target_file": target,
+            "source_file": target,
+            "kernel_id": kernel_id,
+            # Champion targets live in the installed framework tree, which is
+            # not a known patch repo root.
+            "allow_unknown_target": True,
+        }
+
+        patch_path = Path(str(replacement or ""))
+        try:
+            patch_text = (
+                patch_path.read_text(encoding="utf-8", errors="replace")
+                if patch_path.is_file()
+                else ""
+            )
+        except OSError:
+            patch_text = ""
+        from ..specialists.patch_safety import is_unified_diff
+
+        if patch_text and is_unified_diff(patch_text):
+            relative_target = self._parse_diff_target(str(patch_path))
+            target_path = Path(target).resolve()
+            relative_path = Path(relative_target)
+            if (
+                not relative_target
+                or relative_path.is_absolute()
+                or ".." in relative_path.parts
+            ):
+                return {
+                    "status": "failed",
+                    "error": (
+                        "warm replay unified diff has no safe target path: "
+                        f"{patch_path}"
+                    ),
+                }
+            repo_root = target_path
+            for _part in relative_path.parts:
+                repo_root = repo_root.parent
+            try:
+                resolved_from_patch = (repo_root / relative_path).resolve()
+            except (OSError, RuntimeError):
+                resolved_from_patch = Path()
+            if resolved_from_patch != target_path:
+                return {
+                    "status": "failed",
+                    "error": (
+                        "warm replay diff target does not resolve to target_file: "
+                        f"diff={relative_target!r} target={target!r}"
+                    ),
+                }
+            safe_kernel_id = "".join(
+                ch if ch.isalnum() or ch in "._-" else "_"
+                for ch in kernel_id
+            )[:96] or "warm_kernel"
+            snapshot_dir = (
+                Path(self.session_dir)
+                / "runtime"
+                / "warm_kernel_materialized"
+                / safe_kernel_id
+            )
+            try:
+                materialized = materialize_unified_patch_snapshot(
+                    patch_path=patch_path,
+                    repo_root=repo_root,
+                    snapshot_dir=snapshot_dir,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "status": "failed",
+                    "error": (
+                        "warm replay unified diff materialization failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                }
+            payload["snapshot_dir"] = materialized
+            payload["kernel_repo"] = str(repo_root)
+
         return _maybe_apply_kernel_patch(
-            {
-                "patch_path": replacement,
-                "target_file": target,
-                "source_file": target,
-                "kernel_id": kernel_id,
-                # Champion targets live in the installed framework tree, which is
-                # not a known patch repo root.
-                "allow_unknown_target": True,
-            },
+            payload,
             session_dir=self.session_dir,
             kernel_id=kernel_id,
         )

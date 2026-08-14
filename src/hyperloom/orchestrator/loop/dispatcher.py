@@ -993,17 +993,33 @@ class DispatcherCollaborator:
                         "apply_fail retry drain failed for task=%s",
                         task.task_id,
                     )
-            # Auto-promote succeeded results into CORE_STATE_FIELDS (Coordinator-only writer).
-            kept = result.state == "succeeded" and self._is_promotable_result(task.kind, result.result or {})
+            # Auto-promote succeeded results into CORE_STATE_FIELDS
+            # (Coordinator-only writer).  Warm replay is deliberately routed
+            # through its promote handler even when dispatch itself failed:
+            # that handler owns rollback of pre-applied framework patches and
+            # clears the PRELUDE ``in_flight`` gate.
+            result_payload = dict(result.result or {})
+            replay_needs_cleanup = (
+                task.kind == "replay_warm_recipe"
+                and result.state != "succeeded"
+            )
+            if replay_needs_cleanup:
+                result_payload.setdefault("status", "failed")
+                result_payload.setdefault("error_class", "dispatch_failed")
+                if result.error:
+                    result_payload.setdefault("error", str(result.error))
+            kept = (
+                result.state == "succeeded" or replay_needs_cleanup
+            ) and self._is_promotable_result(task.kind, result_payload)
             try:
                 if kept:
                     await self._promote_to_shared_state(
                         task.kind,
-                        result.result,
+                        result_payload,
                         task=task,
                     )
                 elif task.task_id not in self._dead_holder_accounted:
-                    await self._handle_unpromotable_result(task, result.result)
+                    await self._handle_unpromotable_result(task, result_payload)
             except Exception as exc:  # noqa: BLE001
                 log.exception(
                     "dispatcher: promotion/unpromotable handling failed for task=%s",

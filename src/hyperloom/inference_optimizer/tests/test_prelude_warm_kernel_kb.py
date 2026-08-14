@@ -155,6 +155,109 @@ def test_warm_kernel_envs_empty_without_a_recorded_env_var() -> None:
     assert PreludePhase._warm_kernel_extra_envs(entry) == {}
 
 
+def test_warm_kernel_apply_prefers_deploy_patch_over_source_snapshot(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Authoring source context must never overwrite the deploy patch target."""
+    captured: dict = {}
+    materialized: dict = {}
+
+    def _apply(payload, *, session_dir, kernel_id):
+        captured.update(payload)
+        captured["session_dir"] = session_dir
+        captured["kernel_id_arg"] = kernel_id
+        return {"status": "ok"}
+
+    def _materialize(*, patch_path, repo_root, snapshot_dir):
+        materialized.update(
+            {
+                "patch_path": Path(patch_path),
+                "repo_root": Path(repo_root),
+                "snapshot_dir": Path(snapshot_dir),
+            }
+        )
+        return str(snapshot_dir)
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers._maybe_apply_kernel_patch",
+        _apply,
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers.materialize_unified_patch_snapshot",
+        _materialize,
+    )
+    session_dir = tmp_path / "session"
+    framework_root = tmp_path / "framework"
+    relative_target = Path("vllm/v1/attention/ops/prefix_prefill.py")
+    target = framework_root / relative_target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("original\n", encoding="utf-8")
+    deploy_patch = session_dir / "deploy.patch"
+    deploy_patch.parent.mkdir(parents=True, exist_ok=True)
+    deploy_patch.write_text(
+        "\n".join(
+            [
+                f"diff --git a/{relative_target} b/{relative_target}",
+                f"--- a/{relative_target}",
+                f"+++ b/{relative_target}",
+                "@@ -1 +1 @@",
+                "-original",
+                "+patched",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    source_snapshot = tmp_path / "attention.py"
+
+    PreludePhase._apply_warm_kernel_patch(
+        SimpleNamespace(
+            session_dir=session_dir,
+            _parse_diff_target=PreludePhase._parse_diff_target,
+        ),
+        {
+            "patch_path": str(deploy_patch),
+            "source_paths": [str(source_snapshot)],
+            "meta": {"kernel_name": "k008"},
+        },
+        str(target),
+    )
+
+    assert captured["patch_path"] == str(deploy_patch)
+    assert captured["patch_path"] != str(source_snapshot)
+    assert captured["target_file"] == str(target)
+    assert captured["snapshot_dir"] == str(materialized["snapshot_dir"])
+    assert captured["kernel_repo"] == str(framework_root)
+    assert materialized["patch_path"] == deploy_patch
+    assert materialized["repo_root"] == framework_root
+
+
+def test_warm_kernel_apply_keeps_source_only_fallback(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict = {}
+
+    def _apply(payload, **_kwargs):
+        captured.update(payload)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers._maybe_apply_kernel_patch",
+        _apply,
+    )
+    source_snapshot = tmp_path / "replacement.py"
+
+    PreludePhase._apply_warm_kernel_patch(
+        SimpleNamespace(session_dir=tmp_path),
+        {"source_paths": [str(source_snapshot)], "meta": {}},
+        str(tmp_path / "target.py"),
+    )
+
+    assert captured["patch_path"] == str(source_snapshot)
+
+
 @pytest.mark.asyncio
 async def test_inactive_without_record(tmp_path: Path) -> None:
     # No inference Recipe section is available (cold start / KB not configured).
