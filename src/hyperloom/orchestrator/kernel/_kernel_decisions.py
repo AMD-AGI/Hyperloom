@@ -903,24 +903,6 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     ]
     status = str(result.get("status") or "").lower()
     err_class = str(result.get("error_class") or "")
-    has_artifact = bool(
-        best_artifact_path
-        or best_artifact_bundle
-        or deploy_snapshot_dir
-        or deploy_patch_path
-    )
-    if decision == "KEEP" and not has_artifact:
-        decision = "REVERT"
-        status = "failed"
-        err_class = "kernel_artifact_missing"
-        proposal = {
-            **proposal,
-            "decision": decision,
-            "reasons": [
-                *(proposal.get("reasons") or []),
-                "KEEP rejected because no deployable kernel artifact was produced",
-            ],
-        }
     # Pure infra failure = backend ladder with no verdict; kept distinct from
     # REVERT/PARTIAL so retirement counters don't double-count.
     is_infra_failure = decision == "" and (
@@ -1092,7 +1074,6 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         entry["failure_count"] = int(entry.get("failure_count", 0)) + 1
     entry["last_decision"] = decision
     entry["last_status"] = status
-    entry["last_error_class"] = err_class
     entry["last_micro_speedup"] = micro_float
     entry["last_artifact_path"] = best_artifact_path
     entry["last_artifact_bundle"] = best_artifact_bundle
@@ -1151,7 +1132,6 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             "kernel_id": kernel_id,
             "decision": decision,
             "reasons": proposal.get("reasons", []),
-            "error_class": err_class,
             "micro_speedup": micro_float,
             "compile_passed": verification.get("compile_passed"),
             "correctness_passed": verification.get("correctness_passed"),

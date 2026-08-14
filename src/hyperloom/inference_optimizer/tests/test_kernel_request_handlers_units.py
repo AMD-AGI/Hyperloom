@@ -1104,27 +1104,98 @@ class TestForgeGemmHelperCoverage:
             "resolve_local_model_dir",
             lambda _model_path: snapshot,
         )
+        durable = {}
+
+        def _capture_durable_envs(extra_envs, *, model_path, session_dir):
+            durable["model_path"] = model_path
+            return extra_envs, ""
+
+        monkeypatch.setattr(
+            krh,
+            "_persist_forge_gemm_csv_durably",
+            _capture_durable_envs,
+        )
 
         async def _fake_subprocess(_cmd, *, timeout_sec):
-            return 1, "", ""
+            sentinel = (
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps(
+                    {
+                        "status": "ok",
+                        "micro_decision": "candidate",
+                        "recommended_env": {
+                            "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tmp/tuned.csv"
+                        },
+                    }
+                )
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+            )
+            return 0, sentinel, ""
 
         monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
         payload = {"task_id": "deepseek-gemm"}
 
-        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+        result = await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
 
         workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
         written = json.loads(
             (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
         )
         assert written["model_path"] == str(snapshot)
+        assert result["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
+        assert durable["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "model_path",
+        [
+            "amd/Unavailable-Model",
+            "/missing/models/unavailable",
+        ],
+    )
+    async def test_run_forge_gemm_tuning_rejects_unavailable_model_path(
+        self,
+        tmp_path,
+        monkeypatch,
+        model_path,
+    ):
+        from hyperloom.inference_optimizer import model_config_utils
+
+        SharedState(
+            precision="mxfp4",
+            framework="vllm",
+            model_path=model_path,
+            gpu_type="mi355x",
+        ).save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(
+            model_config_utils,
+            "resolve_local_model_dir",
+            lambda _model_path: None,
+        )
+        subprocess_called = False
+
+        async def _unexpected_subprocess(_cmd, *, timeout_sec):
+            nonlocal subprocess_called
+            subprocess_called = True
+            return 1, "", ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _unexpected_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "model_path_unavailable"
+        assert subprocess_called is False
 
     @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_maps_failed_micro_decision(self, tmp_path, monkeypatch):
+        model_dir = tmp_path / "qwen"
+        model_dir.mkdir()
         state = SharedState(
             precision="bf16",
             framework="sglang",
-            model_path="/models/qwen",
+            model_path=str(model_dir),
             gpu_type="mi300x",
             tp=1,
             conc=64,
@@ -1176,10 +1247,12 @@ class TestForgeGemmHelperCoverage:
             ),
             encoding="utf-8",
         )
+        model_dir = tmp_path / "qwen"
+        model_dir.mkdir()
         state = SharedState(
             precision="fp8",
             framework="vllm",
-            model_path="/models/qwen",
+            model_path=str(model_dir),
             gpu_type="mi355x",
             tp=1,
             conc=64,
@@ -1218,10 +1291,12 @@ class TestForgeGemmHelperCoverage:
     @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_tags_engine_forge(self, tmp_path, monkeypatch):
         """Forge runs must carry ``engine='forge'`` so the breakdown attributes them correctly."""
+        model_dir = tmp_path / "qwen"
+        model_dir.mkdir()
         state = SharedState(
             precision="bf16",
             framework="sglang",
-            model_path="/models/qwen",
+            model_path=str(model_dir),
             gpu_type="mi300x",
             tp=1,
             conc=64,
@@ -3159,10 +3234,12 @@ class TestRunGemmTuningHandler:
     def test_forge_uses_runtime_fp8_blockscale_for_aiter_backend(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        model_dir = tmp_path / "qwen"
+        model_dir.mkdir()
         state = SharedState(
             precision="bf16",
             framework="sglang",
-            model_path="/models/qwen",
+            model_path=str(model_dir),
             gpu_type="mi300x",
             tp=1,
             conc=256,
@@ -3211,10 +3288,12 @@ class TestRunGemmTuningHandler:
 
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        model_dir = tmp_path / "qwen"
+        model_dir.mkdir()
         state = SharedState(
             precision="bf16",
             framework="sglang",
-            model_path="/models/qwen",
+            model_path=str(model_dir),
             gpu_type="mi300x",
             tp=1,
             conc=256,
@@ -3257,10 +3336,12 @@ class TestRunGemmTuningHandler:
     def test_forge_uses_per_token_only_for_explicit_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        model_dir = tmp_path / "qwen"
+        model_dir.mkdir()
         state = SharedState(
             precision="bf16",
             framework="sglang",
-            model_path="/models/qwen",
+            model_path=str(model_dir),
             gpu_type="mi300x",
             tp=1,
             conc=256,
@@ -3303,10 +3384,12 @@ class TestRunGemmTuningHandler:
         """When current_best has no --quantization, fall back to state.precision."""
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        model_dir = tmp_path / "moe"
+        model_dir.mkdir()
         state = SharedState(
             precision="bf16",
             framework="sglang",
-            model_path="/models/moe",
+            model_path=str(model_dir),
             gpu_type="mi300x",
             tp=1,
             conc=256,
