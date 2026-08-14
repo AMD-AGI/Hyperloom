@@ -1210,50 +1210,6 @@ async def test_baseline_rounds_the_run_stopped_do_not_charge_the_failure_streak(
 
 
 @pytest.mark.asyncio
-async def test_a_baseline_the_budget_cannot_fit_closes_the_run_naming_the_budget(session_dir):
-    """One shortfall is terminal, and it is not the model's fault.
-
-    A baseline round is two passes and what is left cannot buy both. That is a
-    fact about the clock, not about this attempt, and the clock only shrinks --
-    so a retry re-derives the same answer having spent more on the asking. The
-    two shapes already here both get it wrong. Left as a stop the run chose, the
-    streak stays at zero and the reactor keeps proposing baselines until the
-    session clock genuinely dies, which it need not do for hours after PRELUDE's
-    own share is gone. Counted as a failure, three of them close the run as
-    ``baseline_failed``, which reads as a model that cannot boot.
-
-    So it closes on the first one, with the word the vocabulary already has for
-    preparation running out of clock -- and ``abort_prelude`` already routes that
-    word to CLOSE, so nothing new had to be taught how to end a run.
-    """
-    from hyperloom.orchestrator.phases.machine_state import PHASE_CLOSE, compute_next_phase
-
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        await c._handle_unpromotable_result(
-            _mk_task("baseline", "t-below-one-round"),
-            {
-                "status": "failed",
-                "error_class": "session_budget_below_one_round",
-                "error": "the remaining budget cannot fit both passes of this round",
-            },
-        )
-        assert c.shared_state.stop_reason == "time_exhausted_during_prelude"
-        assert c.shared_state.baseline_failure_streak == 0, "the clock was charged to the model"
-        assert c.shared_state.baseline_total_failures == 0
-        assert len(c.shared_state.last_action_failures) == 1, "the round was not recorded"
-
-        c.shared_state.phase = "PRELUDE"
-        transition = compute_next_phase(c.shared_state)
-        assert transition is not None, "the run had no way to reach a terminal state"
-        assert transition[0] == PHASE_CLOSE
-        assert transition[1] == "time_exhausted_during_prelude"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_a_stopped_baseline_round_does_not_clear_a_real_failure_streak(session_dir):
     """A stop the run chose neither charges the streak nor forgives what preceded it."""
     c = Coordinator(session_dir, backends=_silent_backends())

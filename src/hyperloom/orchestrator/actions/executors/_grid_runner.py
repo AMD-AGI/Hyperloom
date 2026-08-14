@@ -1689,7 +1689,7 @@ async def run_grid(
         _mn_warmup_rounds = 1 if (_mn_is_multi_node() and _mn_bench_warmup_enabled()) else 0
     variant_rounds = 1 + (1 if auto_warmup_requested else 0) + _mn_warmup_rounds
 
-    def _skip_rest_for_budget(idx: int, *, spent_on: str) -> bool:
+    def _skip_rest_for_budget(idx: int, *, spent_on: str, rounds_left: int = variant_rounds) -> bool:
         """Skip variant ``idx`` and every one after it, or say the budget still fits.
 
         Checked twice per variant, because the two things that spend the budget
@@ -1698,9 +1698,16 @@ async def run_grid(
         Once a variant does not fit, none after it does either -- the clock only
         shrinks -- so this ends the batch rather than trying the next name.
 
+        ``rounds_left`` is what makes the second check a different question from
+        the first rather than the same one asked with less clock. A pass this
+        variant has already run is paid for, and charging for it again refuses a
+        variant that fits and throws away the GPU time already spent on it.
+
         Args:
             idx: Zero-based index of the variant about to run.
             spent_on: What has been spent since the last check, for the log line.
+            rounds_left: Passes of this variant still to launch. Defaults to all
+                of them, which is right for the check before any has run.
 
         Returns:
             bool: ``True`` when the batch is over and nothing more was launched.
@@ -1711,18 +1718,18 @@ async def run_grid(
         # Falls back to a single ``variant_timeout_sec`` when no estimate was
         # given, which is what callers that cannot estimate already got.
         required_sec = (
-            float(variant_expected_sec) * variant_rounds
+            float(variant_expected_sec) * rounds_left
             if variant_expected_sec is not None
             else float(variant_timeout_sec)
         )
         if remaining_sec >= required_sec:
             return False
         log.warning(
-            "grid_runner: %.0fs left cannot fit this variant's %d round(s) of %.0fs "
-            "(spent on: %s); skipping %d remaining variant(s) rather than launching a "
-            "pass whose measured round cannot follow it",
+            "grid_runner: %.0fs left cannot fit this variant's %d remaining round(s) "
+            "of %.0fs (spent on: %s); skipping %d remaining variant(s) rather than "
+            "launching a pass whose measured round cannot follow it",
             max(0.0, remaining_sec),
-            variant_rounds,
+            rounds_left,
             required_sec,
             spent_on,
             len(grid) - idx,
@@ -1950,13 +1957,7 @@ async def run_grid(
                     session_deadline_sec=session_deadline_sec,
                 )
             except subprocess.TimeoutExpired as exc:
-                from ._server_lifecycle import teardown_lifecycle_server
-
-                teardown_lifecycle_server(
-                    pid_dir=slot,
-                    framework=str(lifecycle.get("framework") or ""),
-                    port=int(lifecycle.get("port") or 0),
-                )
+                _teardown_variant_server(slot, lifecycle)
                 log.warning(
                     "grid_runner: variant %d/%d name=%s aborted: warmup timeout (timeout_sec=%d): %s",
                     i + 1,
@@ -1993,13 +1994,7 @@ async def run_grid(
 
             warmup_stopped = stopped_by_the_run(warmup_rc)
             if warmup_stopped is not None:
-                from ._server_lifecycle import teardown_lifecycle_server
-
-                teardown_lifecycle_server(
-                    pid_dir=slot,
-                    framework=str(lifecycle.get("framework") or ""),
-                    port=int(lifecycle.get("port") or 0),
-                )
+                _teardown_variant_server(slot, lifecycle)
                 grid_is_over = _record_round_stop(
                     warmup_stopped,
                     idx=i,
@@ -2034,13 +2029,7 @@ async def run_grid(
                     subprocess_started_unix=warmup_started_unix,
                 )
             if warmup_rc != 0 or not warmup_measurement.get("valid_measurement"):
-                from ._server_lifecycle import teardown_lifecycle_server
-
-                teardown_lifecycle_server(
-                    pid_dir=slot,
-                    framework=str(lifecycle.get("framework") or ""),
-                    port=int(lifecycle.get("port") or 0),
-                )
+                _teardown_variant_server(slot, lifecycle)
                 warmup_error = (
                     server_log_death_excerpt(str(warmup_server_log))
                     or redact_secret_values((warmup_stderr or warmup_stdout)[-2000:])
@@ -2170,8 +2159,17 @@ async def run_grid(
 
         # The restart above is a launch of its own and is under no cap, so the
         # budget admitted at the top of the loop may no longer be there. Booting
-        # a large model can take longer than a benchmark pass.
-        if _skip_rest_for_budget(i, spent_on="this variant's server restart"):
+        # a large model can take longer than a benchmark pass. Only the passes
+        # still ahead are charged for: the auto warmup above this point has
+        # already run, and re-charging it here would end the batch over time
+        # that is spent either way.
+        if _skip_rest_for_budget(
+            i,
+            spent_on="this variant's server restart",
+            rounds_left=1 + _mn_warmup_rounds,
+        ):
+            if auto_warmup:
+                _teardown_variant_server(slot, lifecycle)
             break
 
         # Multi-node client warmup: one discarded benchmark pass against the
@@ -2306,13 +2304,7 @@ async def run_grid(
             continue
         finally:
             if auto_warmup:
-                from ._server_lifecycle import teardown_lifecycle_server
-
-                teardown_lifecycle_server(
-                    pid_dir=slot,
-                    framework=str(lifecycle.get("framework") or ""),
-                    port=int(lifecycle.get("port") or 0),
-                )
+                _teardown_variant_server(slot, lifecycle)
 
         # Eval bounds could not be installed for a variant that runs eval, so
         # nothing launched. Labelled rather than left to the generic path, which
@@ -2692,6 +2684,28 @@ async def run_grid(
         )
         await _pulse_after_variant(i)
     return results
+
+
+def _teardown_variant_server(slot: Path, lifecycle: dict[str, Any]) -> None:
+    """Stop the server this variant booted for its own rounds.
+
+    Every path out of a variant that booted one owes this call, including the
+    ones that leave over the budget rather than over a result: the process
+    outlives the loop iteration that started it, and the next variant boots its
+    own. Kept in one function so a new exit path is one line rather than a
+    four-line block someone can leave out.
+
+    Args:
+        slot: The variant's workspace, which is also its pid directory.
+        lifecycle: The variant's resolved lifecycle, carrying framework and port.
+    """
+    from ._server_lifecycle import teardown_lifecycle_server
+
+    teardown_lifecycle_server(
+        pid_dir=slot,
+        framework=str(lifecycle.get("framework") or ""),
+        port=int(lifecycle.get("port") or 0),
+    )
 
 
 def _not_run_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> VariantResult:

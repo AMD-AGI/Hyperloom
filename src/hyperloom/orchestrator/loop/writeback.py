@@ -25,7 +25,7 @@ from ..state.optimization_journal import (
     summarize_change,
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
-from ..actions.stop_attribution import SESSION_BUDGET_BELOW_ONE_ROUND_CLASS, stopped_by_the_run_class
+from ..actions.stop_attribution import stopped_by_the_run_class
 from ..state.shared_state import SharedState, resolve_grading_anchor_tput
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
@@ -1014,27 +1014,7 @@ class WritebackCollaborator:
             )
             if eval_failed:
                 self._persist_eval_failure(result_payload)
-            if err_class == SESSION_BUDGET_BELOW_ONE_ROUND_CLASS:
-                # Terminal on the first one. A baseline round is two passes and
-                # what is left cannot buy both, which is a fact about the clock
-                # rather than about this attempt: retrying re-derives the same
-                # answer from a budget that has only shrunk since. The two shapes
-                # already here both get it wrong -- a stop the run chose keeps the
-                # reactor proposing baselines until the session clock genuinely
-                # dies, which it need not do for hours after PRELUDE's own share
-                # is gone, and three counted failures close the run as
-                # ``baseline_failed``, blaming the model for the budget. The
-                # vocabulary already has the honest word for preparation running
-                # out of clock, and ``abort_prelude`` already routes it to CLOSE.
-                log.warning(
-                    "baseline %s was refused by the budget (%s); closing as "
-                    "time_exhausted_during_prelude rather than retrying a round the "
-                    "clock can only afford less of",
-                    task.task_id,
-                    err_class,
-                )
-                self.shared_state.set_stop_reason("time_exhausted_during_prelude")
-            elif stopped_by_the_run:
+            if stopped_by_the_run:
                 log.warning(
                     "baseline %s was stopped by the run (%s); the failure streak stays at %d "
                     "because nothing about the baseline was measured",
