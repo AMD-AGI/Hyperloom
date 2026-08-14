@@ -39,6 +39,7 @@ from hyperloom.inference_optimizer.session.paths import asset_root, deps_cache_r
 from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
 from hyperloom.orchestrator.framework.paths import GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.orchestrator.framework.paths import flydsl_extra_source_dirs
+from ._accuracy_gate import _RUN_EVAL_FALSE_VALUES
 from ._grid_runner import (
     compact_json_server_args,
     dedup_vllm_server_args,
@@ -405,10 +406,6 @@ def _remove_moe_runner_backend_arg(args: str) -> str:
 
 # Warn once per process when the accuracy gate is disabled.
 _RUN_EVAL_DISABLED_WARN_EMITTED = False
-
-# Truthy-false spellings that disable the accuracy gate.
-_RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
-
 
 def _model_requires_remote_code(model_path: str | None) -> bool:
     """Return whether benchmark server/client must trust custom HF code.

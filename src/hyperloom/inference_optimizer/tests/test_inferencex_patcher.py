@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -597,6 +598,25 @@ def _write_eval_start_lib(root: Path) -> Path:
     return lib
 
 
+def _write_full_lib(root: Path) -> Path:
+    """Write a ``benchmark_lib.sh`` carrying every anchor, as a checkout does.
+
+    The single-purpose fixtures above are the right scope for testing one patcher
+    directly. The executor hook is different: it verifies the contract as a whole
+    before launch, and against a one-anchor stub it would correctly report the
+    other patches as no longer appliable.
+    """
+    bench_dir = root / "benchmarks"
+    bench_dir.mkdir(parents=True)
+    lib = bench_dir / "benchmark_lib.sh"
+    bodies = [
+        fixture.split("\n", 1)[1] if fixture.startswith("#!") else fixture
+        for fixture in (_UPSTREAM_FIXTURE, _EVAL_DEST_FIXTURE, _EVAL_START_FIXTURE)
+    ]
+    lib.write_text("#!/usr/bin/env bash\n" + "\n".join(bodies), encoding="utf-8")
+    return lib
+
+
 def test_eval_start_patch_emits_marker_before_lm_eval(tmp_path, monkeypatch):
     """The marker must land after the EVAL_RESULT_DIR export and before lm_eval,
     so the soft-deadline watcher sees it exactly when the eval begins."""
@@ -641,7 +661,7 @@ def test_baseline_after_materialize_applies_eval_start_patch(tmp_path, monkeypat
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
     ix_root = tmp_path / "InferenceX@deadbeef"
-    lib = _write_eval_start_lib(ix_root)
+    lib = _write_full_lib(ix_root)
     config_path = tmp_path / "baseline.yaml"
     config_path.write_text(
         yaml.safe_dump({"benchmark": {"inferencex_path": str(ix_root)}}),
@@ -869,3 +889,188 @@ def test_baseline_after_materialize_applies_eval_probe(tmp_path, monkeypatch):
 
     assert out is None
     assert "HYPERLOOM_EVAL_PROBE" in target.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Anchor contract
+# ---------------------------------------------------------------------------
+# The probe is absent here by design: it is appended to a real file and has no
+# anchor left to rot. These cover the four patches that still locate exact
+# upstream text, where a False return is indistinguishable from "nothing to do".
+
+
+def _write_baseline_config(tmp_path: Path, ix_root: Path, *, run_eval: bool = True) -> Path:
+    """Write the materialized Magpie YAML the hook reads its root from."""
+    import yaml
+
+    benchmark: dict[str, Any] = {"inferencex_path": str(ix_root)}
+    if not run_eval:
+        benchmark["envs"] = {"RUN_EVAL": "false"}
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text(yaml.safe_dump({"benchmark": benchmark}), encoding="utf-8")
+    return config_path
+
+
+def test_verify_patch_anchors_finds_every_anchor_on_a_pristine_checkout(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import verify_patch_anchors
+
+    _write_full_lib(tmp_path)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    statuses = verify_patch_anchors(tmp_path)
+
+    assert {s.name for s in statuses} == {"num_prompts", "eval_dest", "eval_start"}
+    assert all(s.ok and s.hits == 1 and not s.patched for s in statuses)
+
+
+def test_verify_patch_anchors_omits_files_that_do_not_exist(tmp_path, monkeypatch):
+    """A tree with no benchmark_serving.py has nothing to patch there, which the
+    ensure_* functions already treat as a skip rather than a failure."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import verify_patch_anchors
+
+    _write_full_lib(tmp_path)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    assert "profile_extra_body" not in {s.name for s in verify_patch_anchors(tmp_path)}
+
+
+def test_failed_patch_anchors_flags_text_upstream_rewrote(tmp_path, monkeypatch):
+    """The regression this exists to catch: upstream rewrites the line without
+    changing its meaning, so the patch stops applying and nothing says so."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import failed_patch_anchors
+
+    lib = _write_full_lib(tmp_path)
+    lib.write_text(
+        lib.read_text(encoding="utf-8").replace(
+            'mv -f "$jf" ./ ', 'mv --force "$jf" ./ '
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    broken = failed_patch_anchors(tmp_path)
+
+    assert [s.name for s in broken] == ["eval_dest"]
+    assert broken[0].hits == 0
+    assert "ANCHOR MISSING" in broken[0].describe()
+
+
+def test_failed_patch_anchors_flags_an_anchor_that_matches_twice(tmp_path, monkeypatch):
+    """Every patch here rewrites one site, so an ambiguous anchor means the file
+    drifted into a shape the patcher was never written for."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import failed_patch_anchors
+
+    lib = _write_full_lib(tmp_path)
+    lib.write_text(lib.read_text(encoding="utf-8") + _EVAL_START_FIXTURE, encoding="utf-8")
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    broken = failed_patch_anchors(tmp_path)
+
+    assert [s.name for s in broken] == ["eval_start"]
+    assert broken[0].hits == 2
+    assert "AMBIGUOUS" in broken[0].describe()
+
+
+def test_verify_patch_anchors_accepts_an_already_patched_file(tmp_path, monkeypatch):
+    """Patching consumes the anchor, so a second call must not read as rot."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        ensure_benchmark_lib_eval_dest_patched,
+        failed_patch_anchors,
+        verify_patch_anchors,
+    )
+
+    _write_full_lib(tmp_path)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+    assert ensure_benchmark_lib_eval_dest_patched(tmp_path) is True
+
+    dest = next(s for s in verify_patch_anchors(tmp_path) if s.name == "eval_dest")
+    assert dest.patched and dest.hits == 0 and dest.ok
+    assert failed_patch_anchors(tmp_path) == []
+
+
+def test_baseline_hook_fails_loudly_when_an_eval_critical_anchor_rots(tmp_path, monkeypatch):
+    """Without eval_dest the results file lands in the benchmark's cwd, where the
+    accuracy parser never looks, so the gate would see no score at all."""
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    ix_root = tmp_path / "InferenceX@deadbeef"
+    lib = _write_full_lib(ix_root)
+    _write_eval_probe_target(ix_root)
+    lib.write_text(
+        lib.read_text(encoding="utf-8").replace('mv -f "$jf" ./ ', 'mv --force "$jf" ./ '),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    out = BaselineExecutor()._after_materialize_config(
+        _write_baseline_config(tmp_path, ix_root), tmp_path / "out"
+    )
+
+    assert isinstance(out, dict)
+    assert out["error_class"] == "inferencex_patch_anchor_broken"
+    assert "eval_dest" in out["error"]
+
+
+def test_baseline_hook_proceeds_when_only_a_non_critical_anchor_rots(tmp_path, monkeypatch):
+    """eval_start is a log breadcrumb for the soft-deadline watcher: worth
+    reporting, never worth aborting a run for."""
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    ix_root = tmp_path / "InferenceX@deadbeef"
+    lib = _write_full_lib(ix_root)
+    _write_eval_probe_target(ix_root)
+    lib.write_text(
+        lib.read_text(encoding="utf-8").replace('export EVAL_RESULT_DIR="$results_dir"', "true"),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    out = BaselineExecutor()._after_materialize_config(
+        _write_baseline_config(tmp_path, ix_root), tmp_path / "out"
+    )
+
+    assert out is None
+
+
+def test_baseline_hook_ignores_anchors_it_does_not_own(tmp_path, monkeypatch):
+    """ProfileExecutor replaces this hook entirely and validates NUM_PROMPTS
+    itself, so a rotted num_prompts anchor must not fail a baseline."""
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    ix_root = tmp_path / "InferenceX@deadbeef"
+    lib = _write_full_lib(ix_root)
+    _write_eval_probe_target(ix_root)
+    lib.write_text(
+        lib.read_text(encoding="utf-8").replace('        num_prompts="$max_concurrency"', "        true"),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    out = BaselineExecutor()._after_materialize_config(
+        _write_baseline_config(tmp_path, ix_root), tmp_path / "out"
+    )
+
+    assert out is None
+
+
+def test_baseline_hook_skips_the_anchor_check_when_eval_is_off(tmp_path, monkeypatch):
+    """A throughput-only run does not care where lm-eval would have written."""
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    ix_root = tmp_path / "InferenceX@deadbeef"
+    lib = _write_full_lib(ix_root)
+    lib.write_text(
+        lib.read_text(encoding="utf-8").replace('mv -f "$jf" ./ ', 'mv --force "$jf" ./ '),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    out = BaselineExecutor()._after_materialize_config(
+        _write_baseline_config(tmp_path, ix_root, run_eval=False), tmp_path / "out"
+    )
+
+    assert out is None

@@ -55,9 +55,18 @@ HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}
 # can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
 # or empty, which is exactly the case the :- default below would absorb.
 _user_data_was_set="${USER_DATA_PATH:+1}"
-USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
+# Container images ship a writable /workspace; a bare-metal host off root has
+# neither it nor permission to create it, so the mkdir below would abort.
+_default_workspace_root() {
+  # The nearest existing ancestor decides: -w is false for a path that does not
+  # exist yet, which would divert root off a /workspace it can still create.
+  _ws_probe=/workspace
+  while [ ! -e "$_ws_probe" ] && [ "$_ws_probe" != / ]; do _ws_probe=$(dirname "$_ws_probe"); done
+  if [ -w "$_ws_probe" ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
+}
+USER_DATA_PATH="${USER_DATA_PATH:-$(_default_workspace_root)}"
 if [ -z "${_user_data_was_set}" ]; then
-  echo "[install WARN] USER_DATA_PATH not set; defaulting to /workspace/hyperloom. Set USER_DATA_PATH to persist artifacts under your data root." >&2
+  echo "[install WARN] USER_DATA_PATH not set; defaulting to ${USER_DATA_PATH}. Set USER_DATA_PATH to persist artifacts under your data root." >&2
 fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
@@ -167,6 +176,20 @@ _canonicalize_path() {
   local p="${1:-}"
   [ -z "$p" ] && return 0
   readlink -f -- "$p" 2>/dev/null || printf '%s' "${p%/}"
+}
+# Mirror Path.home() (posixpath.expanduser) so paths written here land where the
+# Python readers look: a *present* HOME wins even when empty, else the uid's passwd entry.
+_home_dir() {
+  local h
+  if [ -n "${HOME+x}" ]; then
+    h="${HOME}"
+  else
+    h="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
+    # Nothing left to resolve; Path.home() raises on this same input.
+    [ -n "$h" ] || return 1
+  fi
+  while [ -n "$h" ] && [ "${h%/}" != "$h" ]; do h="${h%/}"; done
+  printf '%s' "${h:-/}"
 }
 # Resolve a git ref to a commit SHA (7-40 hex passes through; branch/tag via
 # ls-remote, falling back to the raw ref). The SHA keys the per-revision cache.
@@ -1075,6 +1098,28 @@ write_env_file() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
   fi
+  # Emit one credential into the env file as a fallback, not an override.
+  #
+  # Credentials are runtime input owned by .env / the caller; the paths beside
+  # them in that file are install-time results owned by this script. Every
+  # documented launch sources .env first and the env file second, and only the
+  # first install runs install.sh -- so a credential re-exported unconditionally
+  # outranks a key the operator just rotated, on every later launch, with nothing
+  # to show for it (#1169). Assigning only when unset keeps the snapshot useful
+  # for the slurm/Ray paths that source the env file alone, and announces a
+  # mismatch (never a value) so a rotation that has not reached this file stays
+  # visible at launch. Defined here so the emitted block travels with the
+  # function body.
+  _emit_credential_fallback() {
+    local _name="$1"
+    local _value="$2"
+    echo "if [ -n \"\${${_name}:-}\" ]; then"
+    echo "  [ \"\${${_name}}\" = '${_value}' ] || \\"
+    echo "    echo '[kernel-agent] ${_name} differs from the install-time snapshot in this file; keeping the value already in the environment (re-run install.sh to refresh it)' >&2"
+    echo "else"
+    echo "  export ${_name}='${_value}'"
+    echo "fi"
+  }
   # Strict protocol-side separation: each side keeps its own canonical values;
   # GEAK aliases are never written back to provider slots.
   local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-}"
@@ -1110,12 +1155,12 @@ write_env_file() {
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
     # The kernel-agent drives Claude Code, so only the Anthropic side is
     # exported here; gateway/OpenAI credentials are never persisted.
-    [ -n "${_anthropic_url}" ] && echo "export ANTHROPIC_BASE_URL='${_anthropic_url}'"
-    [ -n "${_anthropic_key}" ] && echo "export ANTHROPIC_API_KEY='${_anthropic_key}'"
+    [ -n "${_anthropic_url}" ] && _emit_credential_fallback ANTHROPIC_BASE_URL "${_anthropic_url}"
+    [ -n "${_anthropic_key}" ] && _emit_credential_fallback ANTHROPIC_API_KEY "${_anthropic_key}"
     # A subscription token is the Anthropic side on its own: an oauth-only host
     # resolves neither URL nor key, so without this line sourcing the file
     # leaves the kernel-agent with no Anthropic credential at all.
-    [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && echo "export CLAUDE_CODE_OAUTH_TOKEN='${CLAUDE_CODE_OAUTH_TOKEN}'"
+    [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && _emit_credential_fallback CLAUDE_CODE_OAUTH_TOKEN "${CLAUDE_CODE_OAUTH_TOKEN}"
     # Pin TRACELENS_ROOT and TRACELENS_INTERNAL_ROOT to the (possibly
     # mirrored) values resolved by ensure_tracelens(). This is what lets
     # setsid nohup python -m hyperloom.inference_optimizer.cli optimize →
@@ -1135,7 +1180,9 @@ write_env_file() {
     # Pin the claude binary the GEAK SDK path uses (else claude_agent_sdk may
     # fall back to its older bundled CLI). run_e2e.py maps this to cli_path.
     _geak_claude_bin=""
-    for _c in "${HOME}/.local/bin/claude" "/usr/local/bin/claude" "$(command -v claude 2>/dev/null || true)"; do
+    local _probe_home
+    _probe_home="$(_home_dir || true)"
+    for _c in "${_probe_home:+${_probe_home}/.local/bin/claude}" "/usr/local/bin/claude" "$(command -v claude 2>/dev/null || true)"; do
       if [ -n "${_c}" ] && [ -x "${_c}" ]; then _geak_claude_bin="${_c}"; break; fi
     done
     [ -n "${_geak_claude_bin}" ] && echo "export GEAK_CLAUDE_BIN='${_geak_claude_bin}'"
@@ -1306,22 +1353,42 @@ ensure_forge_claude_cli() {
   # still serves (e.g. retired Opus 4). When unset, keep the legacy behaviour:
   # install the latest only when the CLI is absent.
   if command -v npm >/dev/null 2>&1; then
+    # A global install needs a writable prefix. Off root /usr/local is not one,
+    # and `run` has no failure path, so this would abort the whole installer.
+    local _npm_prefix="/usr/local" _npm_home
+    if [ ! -w /usr/local/lib ]; then
+      _npm_home="$(_home_dir || true)"
+      if [ -z "$_npm_home" ]; then
+        warn "no writable npm prefix (/usr/local and HOME both unavailable); forge claude CLI unavailable"
+        return 0
+      fi
+      # ~/.local/bin is where the CLI probe in write_env_file already looks.
+      _npm_prefix="${_npm_home}/.local"
+      mkdir -p "${_npm_prefix}/lib" "${_npm_prefix}/bin"
+    fi
     if [ -n "${HYPERLOOM_CLAUDE_CODE_VERSION:-}" ]; then
-      run npm config set prefix /usr/local
+      run npm config set prefix "${_npm_prefix}"
       run npm install -g "@anthropic-ai/claude-code@${HYPERLOOM_CLAUDE_CODE_VERSION}"
     elif ! command -v claude >/dev/null 2>&1; then
-      run npm config set prefix /usr/local
+      run npm config set prefix "${_npm_prefix}"
       run npm install -g @anthropic-ai/claude-code
     fi
   fi
   # ~/.claude authenticates the Claude Code CLI for Anthropic-compatible flows.
+  # Its readers resolve Path.home(), so ~ must come from _home_dir here too.
   local _claude_key="${_ANTHROPIC_KEY_VAL:-}"
   if [ -n "$_claude_key" ]; then
-    mkdir -p /root/.claude
+    local _claude_home
+    _claude_home="$(_home_dir || true)"
+    if [ -z "$_claude_home" ]; then
+      warn "no home directory for uid $(id -u) (HOME unset, no passwd entry); ~/.claude/config.json not written"
+      return 0
+    fi
+    mkdir -p "${_claude_home}/.claude"
     local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-}"
     _anthropic_url="${_anthropic_url%/}"
     _anthropic_url="${_anthropic_url%/v1}"
-    cat > /root/.claude/config.json <<EOF
+    cat > "${_claude_home}/.claude/config.json" <<EOF
 {
   "theme": "dark",
   "hasCompletedOnboarding": true,
@@ -1329,7 +1396,8 @@ ensure_forge_claude_cli() {
   "customApiUrl": "${_anthropic_url}"
 }
 EOF
-    chmod 600 /root/.claude/config.json
+    chmod 600 "${_claude_home}/.claude/config.json"
+    log "wrote ${_claude_home}/.claude/config.json"
   elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     log "subscription token in use; ~/.claude/config.json left alone (primaryApiKey would override it)"
   else

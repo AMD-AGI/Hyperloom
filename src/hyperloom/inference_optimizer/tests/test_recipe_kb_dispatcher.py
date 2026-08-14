@@ -11,6 +11,7 @@ import pytest
 
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
+    Recipe,
     RecipeKB,
     recipe_canonical_id,
 )
@@ -24,6 +25,18 @@ def _cid() -> str:
         framework_version="0.4.5",
         precision="fp8",
     )
+
+
+def test_removed_prs_tested_field_does_not_round_trip() -> None:
+    recipe = Recipe.from_dict(
+        {
+            "canonical_id": _cid(),
+            "prs_tested": [{"url": "https://example.test/pr/1"}],
+        }
+    )
+
+    assert "prs_tested" not in recipe.extras
+    assert "prs_tested" not in recipe.to_dict()
 
 
 @pytest.fixture
@@ -54,15 +67,6 @@ def test_attempt_api_delegates_locally(kb: RecipeKB) -> None:
         row["outcome"]
         for row in kb.list_attempts(canonical_id=cid, session_id="s2")
     ] == ["reverted"]
-
-
-def test_prefer_reranks_local_search_without_dropping(kb: RecipeKB) -> None:
-    first = _cid()
-    second = first.replace(":m:", ":m2:")
-    kb.put_recipe(canonical_id=first, model="m", extras={"tp": 4})
-    kb.put_recipe(canonical_id=second, model="m2", extras={"tp": 8})
-    rows = kb.search(prefer={"tp": 8})
-    assert [row["canonical_id"] for row in rows] == [second, first]
 
 
 def test_audit_is_local_and_best_effort(kb: RecipeKB) -> None:

@@ -17,14 +17,14 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.actions.registry import ActionRegistry
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.framework import client as _fa_client
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
 
-_ACTION_REGISTRY = ActionRegistry().load()
+_ACTION_REGISTRY = ACTION_CATALOGUE
 
 
 # Cross-cutting framework parametrisation; add new frameworks here.

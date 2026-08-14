@@ -81,19 +81,13 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
 
 
 def _add_kb_opts(cmd: list[str], args: dict[str, Any]) -> None:
-    """Forward optional GEMM KB quality and compatibility controls."""
-    accept = args.get("kb_accept_candidate")
-    if accept is None:
-        accept = os.environ.get("FORGE_GEMM_TUNE_KB_ACCEPT_CANDIDATE", "")
-    if truthy(accept):
-        cmd.append("--kb-accept-candidate")
+    """Forward the backend lib version recorded as artifact provenance.
 
-    strict = args.get("kb_strict_lib")
-    if strict is None:
-        strict = os.environ.get("FORGE_GEMM_TUNE_KB_STRICT_LIB", "")
-    if truthy(strict):
-        cmd.append("--kb-strict-lib")
-
+    Tuning no longer carries a knowledge base, so the options that read from one
+    or judged a candidate against it are gone: forwarding them would abort the
+    run on an unrecognised argument. What remains records which backend build
+    produced an artifact, which is provenance rather than knowledge.
+    """
     cur_lib = args.get("kb_current_lib")
     if cur_lib in (None, ""):
         cur_lib = os.environ.get("FORGE_GEMM_TUNE_KB_CURRENT_LIB", "")

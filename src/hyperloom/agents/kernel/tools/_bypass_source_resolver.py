@@ -5,107 +5,47 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Independent op -> editable-source resolver for the bypass analysis backend.
+"""Op -> editable-source resolver for the bypass analysis backend.
 
 Used by the bypass route (``HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass``) to populate
 ``source_file`` on hot-kernel candidates so the downstream kernel optimizer can
 dispatch a rewrite (it filters out candidates with no ``source_file``).
 
-A compact, independent reimplementation of the op->source lookup that reads only
-the shared data file
-``src/hyperloom/agents/kernel/tools/data/op_to_source.json`` and never imports
-TraceLens.
+Resolution runs entirely against the *currently installed* framework trees --
+there is no static op_to_source map. Three complementary mechanisms are exposed
+(the bypass report tries them in this order):
 
-The dictionary maps a CPU op name to the device kernels seen per container
-(``vllm`` / ``sglang``), each ``{device_kernel_name: {kernel_source_path,
-kernel_kind, patchable}}`` plus a top-level ``kind`` (``single`` / ``dispatch`` /
-``composite``). An op resolves to an *editable* source when its selected
-container holds a ``patchable`` kernel whose source is native
-(``.cu``/``.cuh``/``.hip``/``.h``) or a repo-resident (non-inductor, non-``/tmp``)
-Triton ``.py``.
+* :func:`resolve_triton_py` -- Triton ``.py`` kernels: resolved from the
+  trace-provided ``kernel_file``, pinning the exact ``@triton.jit`` def line via
+  AST (no import of the kernel required).
+* :func:`resolve_source` -- native (``.cu``/``.hip``) kernels: delegates to the
+  active finder (:mod:`source_resolver`), which demangles the device kernel
+  symbol and looks it up in a live ``__global__`` index (method
+  ``"symbol_index"``).
+* :func:`resolve_by_kernel_name` -- repo-scan fallback by demangled kernel name.
+
+This module also hosts the shared editability helpers
+(:func:`is_editable_source`, :func:`editable_trace_source`) reused by the finder.
+It never imports TraceLens.
 """
 
 from __future__ import annotations
 
+import ast
 import functools
 import importlib.util
-import json
 import logging
 import os
 import re
 import time
 from pathlib import Path
-from typing import Any
 
 from hyperloom.common.env import is_truthy
 
 log = logging.getLogger(__name__)
 
-_OP_TO_SOURCE_JSON = Path(__file__).resolve().parent / "data" / "op_to_source.json"
-
-# Steady-state phase suffix stamped onto some op names (e.g. "aten::mm (decode)").
-_PHASE_SUFFIX_RE = re.compile(r"\s*\((?:prefill|decode|prefilldecode|mixed)\)\s*$")
-
 # Editable source extensions: native device code plus repo-resident Triton .py.
 _NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip", ".h")
-# dist-packages root; relative JSON paths are absolutized against it.
-_PY_DIST_ROOT = "/usr/local/lib/python3.12/dist-packages/"
-
-
-@functools.lru_cache(maxsize=1)
-def _load_mapping() -> dict[str, Any]:
-    """Load and cache the shared ``op_to_source.json`` (``{}`` on any failure)."""
-    try:
-        with open(_OP_TO_SOURCE_JSON, encoding="utf-8") as fh:
-            data = json.load(fh)
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-@functools.lru_cache(maxsize=1)
-def _aiter_csrc_root() -> str:
-    """Best-effort live aiter ``csrc/`` root via find-spec (no import), else ``""``.
-
-    Discovering the live root lets the remap below recover CK/aiter native sources
-    when aiter lives outside the JSON's build-time path. ``find_spec`` locates the
-    package without importing it.
-    """
-    try:
-        spec = importlib.util.find_spec("aiter")
-    except (ImportError, ValueError, ModuleNotFoundError):
-        return ""
-    if spec is None:
-        return ""
-    for loc in list(getattr(spec, "submodule_search_locations", None) or []):
-        cand = os.path.join(loc, "csrc")
-        if os.path.isdir(cand):
-            return cand + "/"
-    return ""
-
-
-def _remap_aiter_meta(path: str) -> str:
-    """Remap a build-time ``…/aiter_meta/csrc/`` path to the live aiter root.
-
-    No-op when the path is not an ``aiter_meta`` path, the live root is unknown,
-    or the remapped path does not exist on disk (keeps the original then).
-    """
-    if not path or "aiter_meta/csrc/" not in path:
-        return path
-    live = _aiter_csrc_root()
-    if not live:
-        return path
-    tail = path[path.find("aiter_meta/csrc/") + len("aiter_meta/csrc/") :]
-    remapped = live.rstrip("/") + "/" + tail
-    return remapped if os.path.exists(remapped) else path
-
-
-def _absolutize(path: str) -> str:
-    """Absolutize a JSON source path (prepend dist-root if relative) + aiter remap."""
-    if not path:
-        return path
-    abs_path = path if path.startswith("/") else _PY_DIST_ROOT + path
-    return _remap_aiter_meta(abs_path)
 
 
 def is_editable_source(path: str | None, kernel_kind: str | None = None) -> bool:
@@ -117,8 +57,8 @@ def is_editable_source(path: str | None, kernel_kind: str | None = None) -> bool
     path).
 
     Args:
-        path: Candidate source path (from the JSON or a trace ``kernel_file``).
-        kernel_kind: Optional kernel-kind hint from the JSON leaf.
+        path: Candidate source path (from a trace ``kernel_file`` or the finder).
+        kernel_kind: Optional kernel-kind hint.
 
     Returns:
         ``True`` when the path is an editable source, else ``False``.
@@ -145,102 +85,42 @@ def _exists(path: str) -> bool:
         return False
 
 
-def _container_sources(container: dict[str, Any] | None) -> list[str]:
-    """Editable, patchable, absolutized source paths for one container (deduped)."""
-    out: list[str] = []
-    seen: set[str] = set()
-    for info in (container or {}).values():
-        if not isinstance(info, dict) or not info.get("patchable"):
-            continue
-        raw = info.get("kernel_source_path")
-        if not is_editable_source(raw, info.get("kernel_kind")):
-            continue
-        abs_path = _absolutize(str(raw))
-        if abs_path in seen:
-            continue
-        seen.add(abs_path)
-        out.append(abs_path)
-    return out
-
-
-def _select_container_sources(entry: dict[str, Any], framework: str) -> list[str]:
-    """Pick the editable source list from the better container.
-
-    Prefer whichever container is present on disk; otherwise honor the
-    ``framework`` hint (only ``vllm`` / ``sglang`` recognized); else default to
-    sglang, then vllm.
-    """
-    sgl = _container_sources(entry.get("sglang"))
-    vll = _container_sources(entry.get("vllm"))
-    if not (sgl or vll):
-        return []
-    sgl_present = any(_exists(p) for p in sgl)
-    vll_present = any(_exists(p) for p in vll)
-    if sgl_present and not vll_present:
-        return sgl
-    if vll_present and not sgl_present:
-        return vll
-    fw = (framework or "").strip().lower()
-    if fw == "vllm" and vll:
-        return vll
-    if fw == "sglang" and sgl:
-        return sgl
-    return sgl or vll
-
-
-def _dispatch_sources(entry: dict[str, Any], framework: str, device_kernel_name: str) -> list[str]:
-    """Resolve a ``dispatch`` op: the one kernel whose name matches the trace.
-
-    Falls back to container selection when the device kernel name is unknown or
-    not found (a dictionary that types the op as dispatch but lacks that exact
-    kernel still yields its editable sources).
-    """
-    if device_kernel_name:
-        for cont_name in ("vllm", "sglang"):
-            info = (entry.get(cont_name) or {}).get(device_kernel_name)
-            if isinstance(info, dict) and info.get("patchable"):
-                raw = info.get("kernel_source_path")
-                if is_editable_source(raw, info.get("kernel_kind")):
-                    return [_absolutize(str(raw))]
-    return _select_container_sources(entry, framework)
-
-
 def resolve_source(
     op_name: str,
     *,
     framework: str = "",
     device_kernel_name: str = "",
 ) -> tuple[str, str]:
-    """Resolve a CPU op name to an editable source file.
+    """Resolve a native kernel to its live installed source via the active finder.
+
+    This is the deterministic op->source tier for the bypass route: it delegates
+    to :func:`source_resolver.resolve_source`, which demangles the device kernel
+    symbol and looks it up in a live ``__global__`` index (method
+    ``"symbol_index"``). There is no static op_to_source map; any import/lookup
+    failure yields ``("", "unresolved")`` so the caller can fall back to the
+    repo-scan tier.
 
     Args:
-        op_name: The launching op name (e.g. ``_C::silu_and_mul``).
-        framework: Serving framework hint for container selection.
-        device_kernel_name: Device kernel name (used for ``dispatch`` ops).
+        op_name: The launching op name (carried for reporting, not lookup).
+        framework: Serving framework hint used to rank multi-tree matches.
+        device_kernel_name: Device kernel symbol from the trace (authoritative).
 
     Returns:
-        ``(source_file, "op_to_source")`` on a hit (an on-disk source is
-        preferred when several editable sources exist), or ``("", "unresolved")``
-        on a dictionary miss / no editable source.
+        ``(source_file, "symbol_index")`` on a hit, else ``("", "unresolved")``
+        / ``("", "non_patchable")``.
     """
-    mapping = _load_mapping()
-    if not mapping or not op_name:
+    if not device_kernel_name:
         return "", "unresolved"
-    key = _PHASE_SUFFIX_RE.sub("", op_name)
-    entry = mapping.get(key)
-    if not isinstance(entry, dict):
+    try:
+        try:  # package import (TraceLens route / tests)
+            from . import source_resolver
+        except ImportError:  # flat top-level import (bypass route puts tools/ on sys.path)
+            import source_resolver  # type: ignore[no-redef]
+
+        return source_resolver.resolve_source(op_name, framework=framework, device_kernel_name=device_kernel_name)
+    except (ImportError, OSError, ValueError) as exc:
+        log.debug("bypass resolve_source failed for %r: %s", device_kernel_name, exc)
         return "", "unresolved"
-    kind = str(entry.get("kind") or "single")
-    if kind == "dispatch":
-        sources = _dispatch_sources(entry, framework, device_kernel_name)
-    else:  # single / composite both dedup the selected container's editable src
-        sources = _select_container_sources(entry, framework)
-    if not sources:
-        return "", "unresolved"
-    for p in sources:
-        if _exists(p):
-            return p, "op_to_source"
-    return sources[0], "op_to_source"
 
 
 # Triton kernel definition: @triton.jit then optional decorators then def NAME.
@@ -405,4 +285,143 @@ def editable_trace_source(kernel_file: str, kernel_kind: str = "") -> str:
     return kf if is_editable_source(kf, kernel_kind or None) else ""
 
 
-__all__ = ["resolve_source", "resolve_by_kernel_name", "editable_trace_source", "is_editable_source"]
+# ---------------------------------------------------------------------------
+# Triton .py AST pinning: resolve the exact @triton.jit def line from the trace's
+# kernel_file. Native .cu/.hip kernels are resolved by :func:`resolve_source`
+# (the active finder); Triton .py kernels come from the trace directly, so the
+# report tries this first, then the finder, then the repo scan.
+# ---------------------------------------------------------------------------
+
+# Triton decorators marking a device-kernel def (``@triton.jit`` / ``@jit`` and
+# the autotune/heuristics wrappers that sit on top of a jit'd kernel).
+_TRITON_DECORATORS = frozenset({"jit", "autotune", "heuristics"})
+
+# Launcher-path forms a trace ``kernel_file`` may carry instead of a bare path:
+# ``<path>(<line>): <func>``, ``<path>:<line>:<func>``, or ``<path>#L<line>``.
+_LAUNCHER_PATH_RE = re.compile(
+    r"^(?P<path>.+?\.py)"
+    r"(?:\((?P<pline>\d+)\)|[:#]L?(?P<cline>\d+))"
+    r"(?::?\s*(?P<func>[A-Za-z_]\w*))?\s*$"
+)
+
+
+def _parse_launcher_form(raw: str) -> tuple[str, int | None, str]:
+    """Split a trace ``kernel_file`` into ``(py_path, line, func)``.
+
+    Handles the plain-path case (no line/func) and the launcher forms
+    ``a.py(12): foo`` / ``a.py:12:foo`` / ``a.py#L12``. Non-``.py`` inputs are
+    returned unchanged with no line/func.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return "", None, ""
+    match = _LAUNCHER_PATH_RE.match(text)
+    if match:
+        line_str = match.group("pline") or match.group("cline")
+        return (
+            match.group("path").strip(),
+            int(line_str) if line_str else None,
+            match.group("func") or "",
+        )
+    return text, None, ""
+
+
+def _is_triton_kernel_def(node: ast.AST) -> bool:
+    """Return whether an AST function node carries a Triton kernel decorator."""
+    for dec in getattr(node, "decorator_list", []):
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        name = getattr(target, "attr", None) or getattr(target, "id", None)
+        if name in _TRITON_DECORATORS:
+            return True
+    return False
+
+
+def _normalize_symbol(symbol: str) -> str:
+    """Reduce a device kernel symbol to a bare identifier core for matching.
+
+    Triton device symbols often wrap the ``@triton.jit`` function name with a
+    leading ``triton_``/``_`` prefix and a trailing autotune/hash suffix
+    (e.g. ``_fwd_kernel_0d1d2``). Strip the common decorations so a fuzzy match
+    against the def name has a chance.
+    """
+    core = re.sub(r"[^0-9A-Za-z_].*$", "", str(symbol or "").strip())
+    core = re.sub(r"_+\d[\dA-Za-z]*$", "", core)  # drop trailing autotune/hash suffix
+    return core.strip("_").lower()
+
+
+def triton_def_line(py_path: str, *, func: str = "", symbol: str = "") -> int | None:
+    """Find a Triton kernel's ``def`` line in a ``.py`` via AST (no import).
+
+    Matching precedence: (1) exact ``func`` name; (2) a ``@triton.jit`` def whose
+    name matches the normalized device ``symbol`` (exact then substring); (3) the
+    sole ``@triton.jit`` def in the file when unambiguous. Returns ``None`` when
+    the file is unreadable/unparseable or no confident match is found.
+    """
+    try:
+        tree = ast.parse(Path(py_path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+        return None
+
+    jit_defs: dict[str, int] = {}
+    all_defs: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            all_defs.setdefault(node.name, node.lineno)
+            if _is_triton_kernel_def(node):
+                jit_defs.setdefault(node.name, node.lineno)
+
+    if func and func in all_defs:
+        return all_defs[func]
+
+    core = _normalize_symbol(symbol)
+    if core:
+        for name, line in jit_defs.items():
+            if name.lower() == core:
+                return line
+        for name, line in jit_defs.items():
+            low = name.lower()
+            if core in low or low in core:
+                return line
+
+    if len(jit_defs) == 1:
+        return next(iter(jit_defs.values()))
+    return None
+
+
+def resolve_triton_py(
+    kernel_file: str,
+    kernel_kind: str = "",
+    *,
+    symbol: str = "",
+) -> tuple[str, int | None, str]:
+    """Resolve a trace ``kernel_file`` to an editable Triton ``.py`` plus def line.
+
+    Extends :func:`editable_trace_source` with two AST-backed behaviours:
+    launcher-form paths (``a.py:12:foo``) are parsed down to the bare ``.py``,
+    and the exact ``@triton.jit`` def line is pinned via :func:`triton_def_line`.
+    The AST step is a pure refinement: a resolved file is returned even when the
+    def line cannot be pinned. ``method`` is ``"trace_kernel_file_ast"`` (path +
+    pinned line), ``"trace_kernel_file"`` (path only), or ``"unresolved"``.
+    """
+    path, line, func = _parse_launcher_form(kernel_file)
+    if not path:
+        return "", None, "unresolved"
+    source = editable_trace_source(path, kernel_kind)
+    if not source:
+        return "", None, "unresolved"
+    ast_line: int | None = None
+    if source.lower().endswith(".py") and os.path.isfile(source):
+        ast_line = triton_def_line(source, func=func, symbol=symbol)
+    def_line = ast_line if ast_line is not None else line
+    method = "trace_kernel_file_ast" if ast_line is not None else "trace_kernel_file"
+    return source, def_line, method
+
+
+__all__ = [
+    "resolve_source",
+    "resolve_by_kernel_name",
+    "editable_trace_source",
+    "resolve_triton_py",
+    "triton_def_line",
+    "is_editable_source",
+]

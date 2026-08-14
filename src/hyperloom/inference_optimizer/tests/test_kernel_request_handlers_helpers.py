@@ -94,32 +94,16 @@ def test_optimization_wrapper_timeout_adds_grace() -> None:
 # -- _backend_order --------------------------------------------------------
 def test_backend_order_ignores_payload_forge_without_explicit_env(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     assert krh._backend_order({"backend_order": "FORGE,foo,unknown"}) == []
-
-
-def test_backend_order_legacy_alias_cannot_enable_forge(monkeypatch) -> None:
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    monkeypatch.setenv("KERNEL_OPT_BACKENDS", "forge")
-    assert krh._backend_order({}) == []
 
 
 def test_backend_order_exact_env_forge_opt_in(monkeypatch) -> None:
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    monkeypatch.setenv("KERNEL_OPT_BACKENDS", "geak")
     assert krh._backend_order({}) == ["forge"]
-
-
-def test_backend_order_unknown_backends_yield_empty(monkeypatch) -> None:
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    # Unknown backends leave nothing to run and no legacy fallback.
-    monkeypatch.setenv("KERNEL_OPT_BACKENDS", "foo,bar")
-    assert krh._backend_order({}) == []
 
 
 def test_backend_order_default_is_empty_because_geak_owns_phase(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     out = krh._backend_order({})
     assert out == []
 
@@ -127,34 +111,29 @@ def test_backend_order_default_is_empty_because_geak_owns_phase(monkeypatch) -> 
 def test_backend_order_drops_geak_from_per_kernel_ladder(monkeypatch) -> None:
     # geak is a phase-level delegate, never a per-kernel backend.
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     assert krh._backend_order({"backend_order": "geak,forge"}) == []
     assert krh._backend_order({"backend_order": "geak"}) == []
 
 
 # -- geak_selected ---------------------------------------------------------
 def test_geak_selected_from_env_order(monkeypatch) -> None:
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "geak")
     assert krh.geak_selected() is True
 
 
 def test_geak_selected_owns_phase_when_mixed(monkeypatch) -> None:
     # Mixed values are not the exact forge opt-in, so GEAK remains the owner.
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge,GEAK")
     assert krh.geak_selected() is True
 
 
 def test_geak_selected_true_by_default(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     assert krh.geak_selected() is True
 
 
 def test_geak_selected_false_only_for_exact_env_forge(monkeypatch) -> None:
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     assert krh.geak_selected({"backend_order": "geak"}) is False
 
 

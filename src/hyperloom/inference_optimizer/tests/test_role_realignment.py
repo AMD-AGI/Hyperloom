@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.actions.registry import ActionRegistry
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.loop.coordinator_helpers import _parse_iso_unix
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -30,8 +30,8 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 
 
 @pytest.fixture
-def registry() -> ActionRegistry:
-    return ActionRegistry().load()
+def registry() -> dict:
+    return ACTION_CATALOGUE
 
 
 # Static system prompts carry phase semantics

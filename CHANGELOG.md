@@ -5,13 +5,82 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-### Added
+### Removed
 
-- **Remote Recipe knowledge now uses KB Store.** Remote mode reads one
-  identity-addressed best record for T0 Explore config/env replay and publishes
-  one final CLOSE session with verified artifacts. Local Recipe storage and
-  non-Recipe GBrain integrations remain unchanged; agent section staging is an
-  interface surface and is not yet wired by the kernel backends.
+- **BREAKING — `kernel_optimization.py` no longer accepts `--test-command` or
+  `--test-harness-path`.** The unittest-harness contract they fed had no
+  reachable caller; an external invoker still passing either flag now fails in
+  argparse rather than being silently ignored.
+
+- **BREAKING — four write-only artifacts are no longer produced**:
+  `agent_transcript.jsonl`, `orchestration_turns.jsonl`,
+  `mn_input_params_*.json`, and the work_dir copy of `semantic_audit.json`.
+  None had a reader. The first three also persisted secrets or raw LLM
+  transcripts past a redactor that inspected values but not keys.
+
+- **BREAKING — Magpie leak salvage no longer defaults to `/workspace/`.** It
+  runs only when `$INFERENCE_OPTIMIZER_RESCUE_PATHS` is set. Note the blast
+  radius: the generic `{framework}_{gpu_type}.sh` scripts respect `$RESULT_DIR`
+  and never needed salvage, but a script pinned through
+  `params.benchmark_script` that hardcodes `/workspace/` was previously rescued
+  and now fails the task with `no_report`. Set the env explicitly to keep the
+  old behaviour.
+
+- **BREAKING — the `vendor_kernel_config`, `operator_tuning` and
+  `deep_kernel_analysis` actions are gone.** None of them ever had an executor
+  or a `KERNEL_REQUEST_HANDLERS` kind, so every request for them was answered
+  with `unknown_kernel_kind`; they were authored for the `kernel_agent` LLM
+  role that PR #1095 retired. Sessions recorded under the old build may carry
+  these names in `state.json` / `coordinator.db`; they are no longer resumable
+  and no migration is provided.
+
+- **BREAKING — `actions/_meta/*.yaml` and `orchestrator/actions/registry.py`
+  are removed.** Action metadata is now `ACTION_CATALOGUE` in
+  `inference_optimizer/protocol/action_surfaces.py`. Editing a yaml no longer
+  changes anything because there is no yaml. The `preferred_backend`,
+  `preferred_model` and `max_turns` fields are dropped outright: no runtime
+  code ever read them, so changing them never had an effect. The
+  `params_schema` blocks are dropped for the same reason. `verdict_class`,
+  which the old docs described as advisory, is genuinely operational and is
+  kept.
+
+- Kernel-owned actions no longer get a no-op executor. A delegate or
+  `propose_action` naming one was already denied by PolicyGate
+  (`rule=kernel_owned_by_kernel_agent`); the stub only stood ready to report an
+  unexecuted action as `succeeded`.
+
+- `run_fusion` is no longer registered in `KERNEL_REQUEST_HANDLERS`. It is
+  invoked directly by `KernelPhase`, so no request ever carried that kind.
+
+- The `KERNEL_OPT_BACKENDS` environment variable is gone. No production code
+  read it; `KERNEL_OPT_BACKEND_ORDER` is the sole backend switch, and only an
+  exact `forge` opts out of the default GEAK phase.
+
+### Changed
+
+- **Remote Recipe knowledge now uses one current KB Store contract.** Remote
+  mode reads one identity-addressed inference Recipe containing replay config,
+  the ordered patch timeline, and nested kernel columns, then publishes one
+  final CLOSE session with verified artifacts under the same throughput
+  champion. Local Recipe storage and non-Recipe GBrain integrations remain
+  unchanged.
+
+- Degraded configuration donors now require exact precision, and a permanently
+  missing owner patch is dead-lettered without blocking publication of the
+  remaining Recipe sections.
+
+- `_geak_enabled` no longer falls back to the persisted
+  `shared_state.kernel_optimizer` field, so `KERNEL_OPT_BACKEND_ORDER` is the
+  single source of truth for the kernel backend on a resume as well. The field
+  itself is unchanged and still feeds the session breakdown.
+
+## [v1.0.0b1] - 2026-08-11
+Current packaged version (`pyproject.toml`). See
+[release notes](docs/release-notes.md) and the
+[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b1)
+for the user-facing summary.
+
+### Added
 
 - **`--no-eval` turns the accuracy eval off for a whole run.** Setting
   `RUN_EVAL=false` by hand leaves the baseline with no accuracy reference, which
@@ -145,8 +214,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Rules) are not carried over; refer to the individual reference docs for those.
 
 ## [v1.0.0a3] - 2026-08-05
-Current packaged version (`pyproject.toml`). See
-[release notes](docs/release-notes.md) and the
+See [release notes](docs/release-notes.md) and the
 [GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a3)
 for the user-facing summary.
 
@@ -293,7 +361,8 @@ user-facing summary.
 - Vendor kernel configuration guidance and updated kernel-manager skills/actions (including local-test flow).
 - Launcher scripts refinements for orchestrator/kernel manager panes.
 
-[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.0.0a3...HEAD
+[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.0.0b1...HEAD
+[v1.0.0b1]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b1
 [v1.0.0a3]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a3
 [v1.0.0a2]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a2
 [v1.0.0a1]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a1

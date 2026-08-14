@@ -40,6 +40,17 @@ def _make_isolated_aiter(tmp_path: Path) -> tuple[Path, Path]:
     return venv_root, aiter_pkg
 
 
+def _make_editable_aiter(tmp_path: Path) -> tuple[Path, Path]:
+    """Build the ``/sgl-workspace/aiter`` shape: a checkout, not site-packages."""
+    checkout = tmp_path / "sgl-workspace" / "aiter"
+    aiter_pkg = checkout / "aiter"
+    (aiter_pkg / "jit" / "build").mkdir(parents=True)
+    (aiter_pkg / "__init__.py").write_text("", encoding="utf-8")
+    (aiter_pkg / "jit" / "__init__.py").write_text("", encoding="utf-8")
+    (checkout / "csrc" / "kernels").mkdir(parents=True)
+    return checkout, aiter_pkg
+
+
 def test_jit_build_dir_falls_back_to_isolated_venv(akp, tmp_path, monkeypatch):
     venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
     monkeypatch.setenv("VLLM_VENV_ROOT", str(venv_root))
@@ -137,6 +148,100 @@ def test_detect_strategy_sgl_workspace_aiter_unchanged(akp, monkeypatch):
     assert strat["rebuild_mode"] == "command"
     assert strat["rebuild_command"] == ["/opt/venv/bin/python", "setup.py", "develop"]
     assert strat["jit_build_dir"] == "/sgl-workspace/aiter/aiter/jit/build"
+    assert Path(strat["jit_build_dir"]) == akp._EDITABLE_AITER_ROOT / "aiter" / "jit" / "build"
+
+
+def test_installed_wheel_jit_build_dir_stays_trusted(akp, tmp_path):
+    _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+
+    assert akp._trusted_aiter_jit_build_dir(aiter_pkg / "jit" / "build") is True
+
+
+def test_jit_build_dir_outside_every_known_root_is_rejected(
+    akp,
+    tmp_path,
+    monkeypatch,
+):
+    """A forged manifest naming an aiter-shaped tree is still an rmtree target."""
+    checkout, _aiter_pkg = _make_editable_aiter(tmp_path)
+    monkeypatch.setattr(akp, "_EDITABLE_AITER_ROOT", checkout)
+    forged = tmp_path / "attacker" / "aiter"
+    (forged / "jit" / "build").mkdir(parents=True)
+    (forged / "__init__.py").write_text("", encoding="utf-8")
+    (forged / "jit" / "__init__.py").write_text("", encoding="utf-8")
+
+    assert akp._trusted_aiter_jit_build_dir(forged / "jit" / "build") is False
+
+
+def test_editable_root_without_package_markers_is_rejected(
+    akp,
+    tmp_path,
+    monkeypatch,
+):
+    """A bare directory tree is not an importable aiter package."""
+    checkout = tmp_path / "sgl-workspace" / "aiter"
+    (checkout / "aiter" / "jit" / "build").mkdir(parents=True)
+    monkeypatch.setattr(akp, "_EDITABLE_AITER_ROOT", checkout)
+
+    assert (
+        akp._trusted_aiter_jit_build_dir(checkout / "aiter" / "jit" / "build")
+        is False
+    )
+
+
+def test_symlinked_site_packages_wheel_stays_trusted(akp, tmp_path):
+    """site-packages is commonly a symlink; the wheel behind it is still a wheel."""
+    _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+    linked_site = tmp_path / "linked" / "lib" / "python3.12"
+    linked_site.mkdir(parents=True)
+    (linked_site / "site-packages").symlink_to(aiter_pkg.parent)
+
+    trusted = akp._trusted_aiter_jit_build_dir(
+        linked_site / "site-packages" / "aiter" / "jit" / "build"
+    )
+
+    assert trusted is True
+
+
+def test_symlink_loop_in_the_manifest_path_is_rejected(akp, tmp_path):
+    """An untrusted path that cannot be resolved is not trusted, and does not raise."""
+    loop = tmp_path / "loop"
+    other = tmp_path / "other"
+    loop.symlink_to(other)
+    other.symlink_to(loop)
+
+    assert akp._trusted_aiter_jit_build_dir(loop / "aiter" / "jit" / "build") is False
+
+
+def test_editable_jit_build_survives_invalidate_then_restore(
+    akp,
+    tmp_path,
+    monkeypatch,
+):
+    """The round trip an editable aiter revert performs, end to end."""
+    checkout, aiter_pkg = _make_editable_aiter(tmp_path)
+    monkeypatch.setattr(akp, "_EDITABLE_AITER_ROOT", checkout)
+    jit_build = aiter_pkg / "jit" / "build"
+    (jit_build / "baseline.so").write_text("baseline", encoding="utf-8")
+    backup_root = tmp_path / "backups"
+
+    invalidated = akp._invalidate_aiter_jit_build(
+        checkout / "csrc" / "kernels" / "foo.cu",
+        backup_root,
+        jit_build_dir=jit_build,
+    )
+    assert invalidated["status"] == "ok", invalidated
+    assert not jit_build.exists()
+
+    restored = akp._restore_aiter_jit_build(
+        invalidated,
+        expected_jit_build_dir=str(jit_build),
+        backup_root=backup_root,
+    )
+
+    assert restored["status"] == "ok", restored
+    assert restored["restored_to"] == str(jit_build)
+    assert (jit_build / "baseline.so").read_text(encoding="utf-8") == "baseline"
 
 
 @pytest.mark.parametrize(

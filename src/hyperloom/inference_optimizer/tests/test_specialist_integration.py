@@ -102,7 +102,7 @@ async def test_register_executors_registers_specialist_kind(tmp_path: Path):
     )
     _register_executors(
         coord,
-        no_kernel=True,  # skip kernel-only kinds
+         # skip kernel-only kinds
         session_dir=tmp_path,
         specialist_executor=spec_exec,
     )
@@ -133,8 +133,7 @@ async def test_register_executors_omits_specialist_when_capacity_zero(
     # specialist_executor=None mirrors cli's gating when capacity == 0.
     _register_executors(
         coord,
-        no_kernel=True,
-        session_dir=tmp_path,
+                session_dir=tmp_path,
         specialist_executor=None,
     )
     assert "specialist" not in coord.sub.registry

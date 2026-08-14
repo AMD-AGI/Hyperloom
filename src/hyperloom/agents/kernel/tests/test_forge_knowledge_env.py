@@ -55,6 +55,41 @@ def test_local_child_env_strips_remote_credentials(
     assert "KB_STORE_TOKEN" not in env
 
 
+def test_child_env_carries_the_card_the_run_measured_on() -> None:
+    """KernelForge files its experience under the card, not the gfx target.
+
+    Several cards build for one target, so the target cannot stand in for the
+    model. Without the model KernelForge declines to read or write, and the run
+    accumulates nothing while still looking healthy.
+    """
+    env: dict[str, str] = {}
+    forge_submit._apply_gpu_type_env(env, "mi355x")
+
+    assert env["GPU_TYPE"] == "mi355x"
+
+
+def test_child_env_drops_an_inherited_gpu_type_that_names_a_target() -> None:
+    """``GPU_TYPE`` is also accepted here as a way to name a gfx target.
+
+    Inherited unchecked, the child would file its experience under ``gfx950`` as
+    though a compilation target were a card. Better to hand over nothing: the
+    refusal is reported, a wrong address is not.
+    """
+    env = {"GPU_TYPE": "gfx950"}
+    forge_submit._apply_gpu_type_env(env, "")
+
+    assert "GPU_TYPE" not in env
+
+
+def test_the_card_is_resolved_from_the_candidate_when_the_environment_is_silent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GPU_TYPE", raising=False)
+
+    assert forge_submit._resolve_gpu_type({"platform": "MI300X"}) == "mi300x"
+    assert forge_submit._resolve_gpu_type({"arch": "gfx942"}) == ""
+
+
 def test_remote_child_env_forwards_kb_store_alone_when_gbrain_is_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

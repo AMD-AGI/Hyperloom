@@ -69,6 +69,7 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             # Coordinator-internal; integrate_patch is the Critic-gated consume side.
             "framework_agent",
             "integrate_patch",
+            "specialist",
             "roofline",
             "profile",
             "recover",
@@ -90,15 +91,14 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         {
             "kernel_opt",
             "integrate",
-            "deep_kernel_analysis",
-            "operator_tuning",
-            "vendor_kernel_config",
             "gemm_tuning",
+            "specialist",
             "roofline",
             "profile",
             "recover",
         }
     ),
+    # No specialist below: SWEEP is the validation window and CLOSE only reports.
     PHASE_SWEEP: frozenset(
         {
             # conc_sweep: Coordinator-internal post-sweep CONC-ladder benchmark.
@@ -271,6 +271,8 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "recipe_kb_t0_failed",
         "recipe_kb_drain_failed",
         "recipe_kb_commit_failed",
+        "warm_replay_rollback_failed",
+        "active_inferencex_checkout_missing",
         "plateau_explore",
         "plateau_kernel",
         "no_kernel_skipped",
@@ -410,10 +412,33 @@ DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 5
 # Safety ceiling on macro-cycles (defense against a pathological tight loop).
 DEFAULT_MAX_MACRO_CYCLES: int = 1000
 
+# Share of a bounded session's total budget that must remain to open a cycle.
+_CYCLE_RELOOP_BUDGET_RATIO: float = 0.15
+
+
+def _default_cycle_reloop_min_remaining_sec() -> float:
+    """Absolute reloop floor in seconds; env-overridable via
+    ``INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC``.
+
+    Default 3 h. It is the only floor for unbounded runs; bounded runs take the
+    smaller of it and :data:`_CYCLE_RELOOP_BUDGET_RATIO` of their total budget,
+    so a short session is not blocked by a threshold it can never satisfy.
+    """
+    raw = (_os_fw_ratio.environ.get("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", "") or "").strip()
+    if raw:
+        try:
+            v = float(raw)
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass  # malformed env override; fall through to the 3 h default
+    return 10800.0
+
+
 # Minimum session wall-clock (seconds) that must remain to justify opening a new
 # macro-cycle; below this we wind down to CLOSE instead of starting a cycle we
 # cannot meaningfully use.
-DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = 10800.0  # 3 h
+DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = _default_cycle_reloop_min_remaining_sec()
 
 # R7 global convergence: number of consecutive no-gain macro-cycles after which
 # the run is considered converged (stop looping → CLOSE).
@@ -521,8 +546,11 @@ def should_reloop_to_explore(
         now_unix (float | None): Override for the current time; defaults to
             wall-clock resolution when None.
         max_cycles (int): Safety ceiling on macro-cycles.
-        min_remaining_sec (float): Minimum session seconds that must remain to
-            justify opening a new cycle.
+        min_remaining_sec (float): Absolute floor on the session seconds that
+            must remain to justify a new cycle. A bounded session instead uses
+            the smaller of this and :data:`_CYCLE_RELOOP_BUDGET_RATIO` of its
+            total budget; the applied value is reported as
+            ``evidence["min_remaining_sec_effective"]``.
         no_gain_cycles (int): Consecutive no-gain cycles that mark global
             convergence (R7).
         min_gain_pct (float | None): Per-cycle gain bar; ``None`` uses the
@@ -569,9 +597,18 @@ def should_reloop_to_explore(
         evidence["reloop_blocked"] = "global_converged"
         return False, evidence
 
-    # Budget remaining must justify a fresh cycle.
+    # Budget remaining must justify a fresh cycle. A bounded session scales the
+    # floor to its own length so it is never blocked by an unreachable bar.
+    effective_min_remaining = float(min_remaining_sec)
+    max_minutes = _max_minutes(state)
+    if max_minutes > 0:
+        effective_min_remaining = min(
+            effective_min_remaining,
+            max_minutes * 60.0 * _CYCLE_RELOOP_BUDGET_RATIO,
+        )
+    evidence["min_remaining_sec_effective"] = round(effective_min_remaining, 2)
     remaining = session_remaining_seconds(state, now_unix=now_unix)
-    if remaining is not None and remaining < float(min_remaining_sec):
+    if remaining is not None and remaining < effective_min_remaining:
         evidence["reloop_blocked"] = "insufficient_remaining"
         evidence["session_remaining_seconds"] = round(remaining, 2)
         return False, evidence
@@ -1669,6 +1706,11 @@ def compute_kernel_progress_fingerprint(
     last_opt = last_opt if isinstance(last_opt, dict) else {}
     stack = getattr(state, "optimization_stack", None)
     pending = getattr(state, "pending_kernel_integrations", None)
+    last_collective = getattr(state, "last_collective", None)
+    if last_collective is None:
+        last_collective = {}
+    if not isinstance(last_collective, dict):
+        raise ValueError("last_collective must be a mapping")
     payload = {
         "attempts": attempts,
         "inflight": sorted(str(task_id) for task_id in (inflight_task_ids or ())),
@@ -1676,9 +1718,38 @@ def compute_kernel_progress_fingerprint(
         "pending_integrations": sorted(str(key) for key in pending) if isinstance(pending, dict) else [],
         "rejected": sorted(str(kid) for kid in (getattr(state, "rejected_kernel_ids", None) or [])),
         "stack_len": len(stack) if isinstance(stack, list) else 0,
+        "last_collective": [
+            str(last_collective.get(field, ""))
+            for field in (
+                "collective_attempt_id",
+                "status",
+                "decision",
+                "integration_status",
+                "integration_decision",
+                "integration_recovery_action",
+                "integration_revert_status",
+                "integration_finalize_status",
+            )
+        ],
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+
+
+def collective_integration_pending(state: Any) -> bool:
+    """Return whether a kept collective still requires terminal E2E handling."""
+    last = getattr(state, "last_collective", None)
+    if last in (None, {}):
+        return False
+    if not isinstance(last, dict):
+        raise ValueError("last_collective must be a mapping")
+    kept = last.get("kept", False)
+    requires_e2e = last.get("requires_e2e_validation", False)
+    if not isinstance(kept, bool) or not isinstance(requires_e2e, bool):
+        raise ValueError("collective E2E flags must be boolean")
+    if kept != requires_e2e:
+        raise ValueError("collective E2E flags are inconsistent")
+    return kept and str(last.get("integration_status") or "") != "complete"
 
 
 def kernel_work_pending(state: Any) -> bool:
@@ -1690,14 +1761,19 @@ def kernel_work_pending(state: Any) -> bool:
     hot reusable kernels that have not received a kernel_opt attempt. Hard
     time/budget exits are still handled by :func:`exit_normal_kernel`.
 
-    Short-circuits in order: a terminal GEAK phase answers on its own (True only
-    while an ``ok`` result has an ``awaiting_rebench`` pending with a
-    revalidation task, else False); then the optional
-    ``has_keep_pending_integrate`` and ``untried_hot_reusable_kernels`` capability
-    probes, whose failures are treated as 'not available'; then the kernel_opt
-    attempt ledger, filtered by task group, source file, integration status and
-    rejected kernel ids.
+    Short-circuits in order: a pending collective integration keeps the phase
+    open; ``collective_only_mode`` then answers False because no other lane may
+    run; a terminal GEAK phase answers on its own (True only while an ``ok``
+    result has an ``awaiting_rebench`` pending with a revalidation task, else
+    False); then the optional ``has_keep_pending_integrate`` and
+    ``untried_hot_reusable_kernels`` capability probes, whose failures are
+    treated as 'not available'; then the kernel_opt attempt ledger, filtered by
+    task group, source file, integration status and rejected kernel ids.
     """
+    if collective_integration_pending(state):
+        return True
+    if bool(getattr(state, "collective_only_mode", False)):
+        return False
     if _geak_phase_terminal(state):
         result = getattr(state, "geak_result", None) or {}
         pending = getattr(state, "geak_pending", None) or {}
@@ -1732,7 +1808,7 @@ def kernel_work_pending(state: Any) -> bool:
     for entry in getattr(state, "optimization_stack", None) or []:
         if not isinstance(entry, dict):
             continue
-        if str(entry.get("action") or "") == "integrate":
+        if str(entry.get("action") or "") in {"integrate", "collective"}:
             integrated_entries.append(entry)
             source_file = str(entry.get("target_file") or entry.get("source_file") or "")
             if source_file:
@@ -2696,6 +2772,7 @@ LIFECYCLE_STEP_LABELS: dict[str, str] = {
     "trace_analyze": "TraceLens",
     "run_gemm_tuning": "GEMM tuning",
     "run_optimization": "GEAK",
+    "run_collective": "Collective optimization",
     "integrate": "Integrate",
     "apply_patch": "Integrate",
     "explore": "Validate (stack rebench)",
@@ -3024,6 +3101,7 @@ __all__ = [
     "is_valid_phase_exit_reason",
     "is_valid_stop_reason",
     "compute_kernel_progress_fingerprint",
+    "collective_integration_pending",
     "kernel_work_pending",
     "make_history_row",
     "explore_elapsed_seconds",

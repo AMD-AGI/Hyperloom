@@ -479,6 +479,41 @@ def test_geak_terminal_skip_to_sweep_ignores_per_kernel_pending_work():
     assert reason == "kernel_no_more_leverage"
 
 
+def test_collective_only_terminal_ignores_untried_regular_kernels():
+    """A completed directed Collective lane must advance directly to SWEEP."""
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.collective_only_mode = True
+    state.last_collective = {
+        "status": "ok",
+        "kept": True,
+        "requires_e2e_validation": True,
+        "integration_status": "complete",
+    }
+    state.untried_hot_reusable_kernels = lambda: ["k017"]
+
+    assert kernel_work_pending(state) is False
+    out = compute_next_phase(state, kernel_enabled=True)
+    assert out is not None
+    target, reason, _ = out
+    assert target == PHASE_SWEEP
+    assert reason == "kernel_no_more_leverage"
+
+
+def test_collective_only_waits_for_pending_integration():
+    """A crash checkpoint must keep KERNEL open until Collective E2E finishes."""
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.collective_only_mode = True
+    state.last_collective = {
+        "status": "ok",
+        "kept": True,
+        "requires_e2e_validation": True,
+        "integration_status": "pending",
+    }
+
+    assert kernel_work_pending(state) is True
+    assert compute_next_phase(state, kernel_enabled=True) is None
+
+
 def test_kernel_skip_to_sweep_waits_for_retryable_failed_kernel():
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.kernel_opt_attempts = {

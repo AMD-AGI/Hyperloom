@@ -148,6 +148,19 @@ def _all_markers_present(path: Path, markers: tuple[str, ...]) -> bool:
     return all(m in text for m in markers)
 
 
+def _safe_directory_args(args: tuple[str, ...], cwd: Path) -> list[str]:
+    """Prepend a ``safe.directory`` exception for the checkout at ``cwd``.
+
+    The pod copy of this script is heredoc'd in and run by a bare ``python3``,
+    so the import is lazy and optional: without hyperloom the plain argv stands.
+    """
+    try:
+        from hyperloom.common.git_safety import safe_directory_args  # noqa: PLC0415 - standalone import-light
+    except ImportError:
+        return list(args)
+    return safe_directory_args(list(args), cwd=cwd)
+
+
 def _run_git(args: tuple[str, ...], cwd: Path) -> tuple[int, str, str]:
     """Run ``git <args>``; return ``(rc, stdout, stderr)`` (never raises on non-zero exit).
 
@@ -159,7 +172,7 @@ def _run_git(args: tuple[str, ...], cwd: Path) -> tuple[int, str, str]:
         tuple[int, str, str]: The ``(returncode, stdout, stderr)`` triple.
     """
     proc = subprocess.run(  # noqa: S603
-        ["git", *args],
+        ["git", *_safe_directory_args(args, cwd)],
         cwd=str(cwd),
         capture_output=True,
         text=True,

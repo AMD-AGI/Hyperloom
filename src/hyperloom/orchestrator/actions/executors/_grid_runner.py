@@ -33,8 +33,11 @@ from hyperloom.common.env_safety import (
 )
 
 from ...roles.robustness_pulse import pulse as _robustness_pulse
+from ._accuracy_gate import materialized_run_eval_disabled
 from ._subprocess_kill import (
+    AGENTX_PREFLIGHT_RETURNCODE,
     DETOKENIZER_STALL_RETURNCODE,
+    EVAL_PROBE_UNPATCHABLE_RETURNCODE,
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     run_with_session_kill,
@@ -44,11 +47,14 @@ from .benchmark_result import (
     estimate_killed_variant_throughput,
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
+    select_run_workspace,
+    snapshot_workspaces,
 )
 from .benchmark_backend import build_benchmark_command
 from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_start_patched,
     ensure_eval_probe_patched,
+    eval_probe_targets_exist,
 )
 
 # Re-exported from sibling modules to keep the module namespace intact.
@@ -988,10 +994,34 @@ def _run_magpie(
         env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
         # Baseline patches its own checkout, but explore / sweep never pass
         # through that hook: re-assert here so a resumed session or a re-cloned
-        # checkout still emits the eval-start marker and installs the
-        # generation-pathology probe. Both idempotent.
+        # checkout still emits the eval-start marker. Idempotent.
         ensure_benchmark_lib_eval_start_patched(Path(inferencex_path))
-        ensure_eval_probe_patched(Path(inferencex_path))
+
+    # The generation bounds + pathology probe are asserted whether or not
+    # ``$INFERENCEX_PATH`` is set: unset falls back to the same env discovery the
+    # baseline arm uses ($MAGPIE_PATH/InferenceX). Gating this on that variable
+    # is what allowed a bounded baseline to be compared against an unbounded
+    # candidate -- the differential accuracy gate subtracts the two arms, so it
+    # only means something when both truncate at the same place. A target that is
+    # present but unpatchable therefore fails this variant with the same
+    # ``eval_probe_unpatchable`` class the baseline arm raises, instead of
+    # silently benching without bounds. A target that is absent entirely stays a
+    # warning: that is an unrecognized layout, not a broken contract, and the
+    # baseline arm makes the same distinction.
+    probe_root = Path(inferencex_path) if inferencex_path else None
+    if not ensure_eval_probe_patched(probe_root) and not materialized_run_eval_disabled(config_path):
+        eval_bounds_msg = (
+            "eval generation bounds + pathology probe are not installed "
+            "(utils/evals/patches/lm_eval_sitecustomize.py, inferencex="
+            f"{inferencex_path or '<unset>'}, INFERENCEX_PATH="
+            f"{os.environ.get('INFERENCEX_PATH', '') or '<unset>'}); this "
+            "variant runs eval, so it would be scored against a baseline that "
+            "truncated at a different point"
+        )
+        if eval_probe_targets_exist(probe_root):
+            log.error("grid_runner: %s; failing this benchmark", eval_bounds_msg)
+            return (EVAL_PROBE_UNPATCHABLE_RETURNCODE, "", eval_bounds_msg)
+        log.warning("grid_runner: %s", eval_bounds_msg)
     # AgentX: deploy the aiperf client into InferenceX ``benchmarks/`` + preflight
     # aiperf right before Magpie runs it, via the shared helper (also used by the
     # baseline/profile shell-out). No-op under pytest / when AgentX is off (the
@@ -1448,6 +1478,7 @@ async def run_grid(
                     break
                 continue
 
+            warmup_workspaces_before = snapshot_workspaces(warmup_slot)
             warmup_started_unix = time.time()
             try:
                 warmup_rc, warmup_stdout, warmup_stderr = await asyncio.to_thread(
@@ -1504,13 +1535,13 @@ async def run_grid(
                     break
                 continue
 
-            warmup_candidates = sorted(warmup_slot.glob("benchmark_*"))
-            warmup_workspace = warmup_candidates[-1] if warmup_candidates else warmup_slot
+            warmup_run_ws = select_run_workspace(warmup_slot, known_before=warmup_workspaces_before)
+            warmup_workspace = warmup_run_ws if warmup_run_ws is not None else warmup_slot
             warmup_harvested = harvest_leaked_artifacts(
                 warmup_workspace,
                 subprocess_started_unix=warmup_started_unix,
             )
-            if warmup_candidates:
+            if warmup_run_ws is not None:
                 _, warmup_measurement = await _settled_measurement(
                     warmup_workspace,
                     subprocess_started_unix=warmup_started_unix,
@@ -1557,7 +1588,7 @@ async def run_grid(
                         extra_server_args=variant.extra_server_args,
                         extra_envs=dict(variant.extra_envs),
                         status="failed",
-                        workspace=str(warmup_workspace) if warmup_candidates else None,
+                        workspace=str(warmup_workspace) if warmup_run_ws is not None else None,
                         report_path=(
                             str(warmup_workspace / "benchmark_report.json")
                             if (warmup_workspace / "benchmark_report.json").exists()
@@ -1696,6 +1727,7 @@ async def run_grid(
 
         # Snapshot wall-clock before launch so the salvage path can mtime-gate
         # leak destinations per-variant.
+        slot_workspaces_before = snapshot_workspaces(slot)
         variant_started_unix = time.time()
         try:
             rc, stdout, stderr = await asyncio.to_thread(
@@ -1713,8 +1745,7 @@ async def run_grid(
             )
         except subprocess.TimeoutExpired as exc:
             # Harvest pre-timeout leaks.
-            to_candidates = sorted(slot.glob("benchmark_*"))
-            to_destination = to_candidates[-1] if to_candidates else slot
+            to_destination = select_run_workspace(slot, known_before=slot_workspaces_before) or slot
             to_harvested = harvest_leaked_artifacts(
                 to_destination,
                 subprocess_started_unix=variant_started_unix,
@@ -1765,6 +1796,46 @@ async def run_grid(
                     port=int(lifecycle.get("port") or 0),
                 )
 
+        # Eval bounds could not be installed for a variant that runs eval, so
+        # nothing launched. Labelled rather than left to the generic path, which
+        # would call it ``no_benchmark_workspace`` and hide an eval-contract gap
+        # behind a missing-directory message. ``keep_going_on_failure`` is
+        # honoured: the install is flock-serialized, so a transient loss can
+        # succeed on the next variant.
+        if rc == EVAL_PROBE_UNPATCHABLE_RETURNCODE:
+            variant_runtime_sec = round(max(0.0, time.time() - variant_started_unix), 2)
+            log.error(
+                "grid_runner: variant %d/%d name=%s aborted: eval_probe_unpatchable: %s",
+                i + 1,
+                len(grid),
+                variant.name,
+                stderr,
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class="eval_probe_unpatchable",
+                error_summary=stderr,
+                extra_args=variant.extra_server_args,
+            )
+            results.append(
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="failed",
+                    returncode=rc,
+                    runtime_sec=variant_runtime_sec,
+                    error=stderr,
+                    error_class="eval_probe_unpatchable",
+                    note=variant.note,
+                )
+            )
+            await _pulse_after_variant(i)
+            if not keep_going_on_failure:
+                break
+            continue
+
         # Server-liveness watchdog fired: engine/worker bootstrap died but the
         # parent hung. Record a fast failure so the round proceeds; harvest the
         # crash server.log.
@@ -1773,8 +1844,7 @@ async def run_grid(
                 max(0.0, time.time() - variant_started_unix),
                 2,
             )
-            sd_candidates = sorted(slot.glob("benchmark_*"))
-            sd_destination = sd_candidates[-1] if sd_candidates else slot
+            sd_destination = select_run_workspace(slot, known_before=slot_workspaces_before) or slot
             sd_harvested = harvest_leaked_artifacts(
                 sd_destination,
                 subprocess_started_unix=variant_started_unix,
@@ -1826,8 +1896,7 @@ async def run_grid(
                 max(0.0, time.time() - variant_started_unix),
                 2,
             )
-            ds_candidates = sorted(slot.glob("benchmark_*"))
-            ds_destination = ds_candidates[-1] if ds_candidates else slot
+            ds_destination = select_run_workspace(slot, known_before=slot_workspaces_before) or slot
             ds_harvested = harvest_leaked_artifacts(
                 ds_destination,
                 subprocess_started_unix=variant_started_unix,
@@ -1878,8 +1947,7 @@ async def run_grid(
                 max(0.0, time.time() - variant_started_unix),
                 2,
             )
-            ok_candidates = sorted(slot.glob("benchmark_*"))
-            ok_destination = ok_candidates[-1] if ok_candidates else slot
+            ok_destination = select_run_workspace(slot, known_before=slot_workspaces_before) or slot
             ok_harvested = harvest_leaked_artifacts(
                 ok_destination,
                 subprocess_started_unix=variant_started_unix,
@@ -1927,11 +1995,10 @@ async def run_grid(
                 break
             continue
 
-        # Locate workspace inside slot.
-        candidates = sorted(slot.glob("benchmark_*"))
+        workspace = select_run_workspace(slot, known_before=slot_workspaces_before)
         # Always-on artifact harvest so each slot keeps its server.log /
         # gpu_metrics / profile relay for Robustness RCA.
-        harvest_destination = candidates[-1] if candidates else slot
+        harvest_destination = workspace if workspace is not None else slot
         harvested = harvest_leaked_artifacts(
             harvest_destination,
             subprocess_started_unix=variant_started_unix,
@@ -1943,7 +2010,7 @@ async def run_grid(
                 len(harvested),
                 ", ".join(src.name for src, _ in harvested),
             )
-        if not candidates:
+        if workspace is None:
             harvest_tags = [f"harvested_leaked_artifact:{src}" for src, _ in harvested]
             no_ws_error_summary = server_log_death_excerpt(str(server_log)) or (
                 redact_secret_values((stderr or stdout)[-2000:]) if rc != 0 else "no benchmark_* workspace produced"
@@ -1980,7 +2047,6 @@ async def run_grid(
             if rc != 0 and not keep_going_on_failure:
                 break
             continue
-        workspace = candidates[-1]
         report_path = workspace / "benchmark_report.json"
         # A clean exit is worth waiting on: the report is written during shutdown
         # and the reader runs the moment the subprocess is reaped.

@@ -62,7 +62,7 @@ directory. Tell the user to open the intended dedicated workspace in the agent
 and install Hyperloom into that current directory:
 
 ```bash
-python3 -m pip install https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0a3/hyperloom_inference_optimizer-1.0.0a3-py3-none-any.whl --target .
+pip install hyperloom-inference-optimizer==1.0.0b1 --target .
 ```
 
 Then stop and ask the user to rerun `/hyperloom-setup` from that workspace.
@@ -268,6 +268,11 @@ For `sglang`:
 export REPO_ROOT="$(pwd -P)"
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
 ```
+
+Skipping the framework install leaves the host without one, and `optimize` then
+stops at preflight rather than failing later inside the benchmark. Install it here,
+or point `BENCHMARK_BASE_URL` at a server that already runs elsewhere. As a last
+resort `HYPERLOOM_SKIP_FRAMEWORK_CHECK=1` drops that check.
 
 ### `docker`
 

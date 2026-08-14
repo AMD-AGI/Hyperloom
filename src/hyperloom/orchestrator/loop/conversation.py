@@ -23,6 +23,11 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
+# Per-variant failure lines expanded by get_recent_outcomes, and the total cap
+# that keeps a wide top_k from flooding the turn.
+_RECENT_OUTCOMES_VARIANT_ROWS = 12
+_RECENT_OUTCOMES_LINE_CAP = 120
+
 
 class ConversationCollaborator:
     """Extracted collaborator; delegates unknown attrs to its Coordinator."""
@@ -251,9 +256,14 @@ class ConversationCollaborator:
 
         # Flip newest-first query to newest-last for chronological reading.
         msgs = [Message.from_row(r) for r in rows][::-1]
-        lines = ["=== Recent action outcomes (newest last) ==="]
-        lines.extend(_format_inbox_event(m) for m in msgs)
-        return "\n".join(lines)
+        header = "=== Recent action outcomes (newest last) ==="
+        body_lines: list[str] = []
+        body_lines.extend(_format_inbox_event(m, max_variant_rows=_RECENT_OUTCOMES_VARIANT_ROWS) for m in msgs)
+        rendered = "\n".join(body_lines).splitlines()
+        if len(rendered) > _RECENT_OUTCOMES_LINE_CAP:
+            rendered = rendered[-_RECENT_OUTCOMES_LINE_CAP:]
+            return "\n".join([header] + rendered + [f"(truncated at {_RECENT_OUTCOMES_LINE_CAP} lines; re-query with a smaller top_k)"])
+        return "\n".join([header] + rendered)
 
     def _context_running_tasks_reader(self) -> str:
         """Synchronous projection of in-flight tasks with their held resources.
@@ -736,8 +746,10 @@ class ConversationCollaborator:
             rendered = await self._augment_critic_inbox_with_pending(rendered)
         if rendered:
             sections.append(f"=== Inbox for {agent_name} (newest last) ===")
+            # Only Orchestration acts on variant-level failures; the reviewers do not.
+            variant_rows = 3 if agent_name == "orchestration" else 0
             for m in rendered:
-                sections.append(f"  {_format_inbox_event(m)}")
+                sections.append(f"  {_format_inbox_event(m, max_variant_rows=variant_rows)}")
         else:
             sections.append(f"=== Inbox for {agent_name} ===")
             sections.append("(no new messages)")

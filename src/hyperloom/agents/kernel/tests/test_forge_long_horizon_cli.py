@@ -110,7 +110,6 @@ def _checkpoint(base_commit: str, best_commit: str, **overrides) -> dict:
 
 def _stub_submit_environment(monkeypatch) -> None:
     """Neutralize everything submit does outside the loop/recovery contract."""
-    monkeypatch.setenv("FORGE_BASELINE_GATE", "0")
     monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
 
 
@@ -300,7 +299,6 @@ def test_warm_start_best_is_exported_without_a_later_keep(tmp_path, monkeypatch)
         source_file=str(source),
         prompt_file=prompt,
         output_dir=output_dir,
-        test_command="python -c 'print(\"allclose: True\")'",
         source_type="triton",
         candidate={
             "name": "direct_kernel",
@@ -377,7 +375,6 @@ def test_nonzero_exit_with_sidecar_timings_never_exports_dirty_worktree(
         source_file=str(source),
         prompt_file=prompt,
         output_dir=output_dir,
-        test_command="python -c 'print(\"allclose: True\")'",
         source_type="triton",
         candidate={
             "operation": "direct_kernel",
@@ -394,49 +391,26 @@ def test_nonzero_exit_with_sidecar_timings_never_exports_dirty_worktree(
     assert not (output_dir / "optimized_versions").exists()
 
 
-def test_generated_drivers_stage_in_the_workspace_without_clobbering(tmp_path):
-    """Both driver generators write a hidden, unique driver into the workspace.
+def test_placeholder_driver_stages_in_workspace_without_clobbering(tmp_path):
+    """The delegated driver is staged as a hidden unique file in the workspace.
 
     ``campaign_config._relative_file`` rejects a ``--driver`` outside
-    ``--workspace``, so a generated driver parked in the attempt output dir
-    kills every forge-loop run with "driver must be inside workspace". Staging
-    it in the workspace is therefore mandatory, and the ``.forge_driver_``
-    mkstemp naming is what keeps that safe: a unique hidden name can never
-    clobber a tracked file, ``git diff`` of tracked paths keeps it out of the
-    keep/revert patch, and ``_finalize_forge_workspace`` deletes it by prefix.
+    ``--workspace``, so every staged driver must live inside it. The
+    ``.forge_driver_`` prefix keeps it out of the keep/revert patch, and
+    ``_finalize_forge_workspace`` cleans it up by prefix after the run.
     """
     workspace = tmp_path / "worktree"
     workspace.mkdir()
     tracked_driver = workspace / "forge_driver.py"
     tracked_driver.write_text("TRACKED_DRIVER\n")
-    output_dir = tmp_path / "attempt"
-    output_dir.mkdir()
 
-    adapter = Path(
-        forge_submit._build_driver_adapter(
-            "python test.py",
-            str(workspace),
-        )
-    )
-    generated = Path(
-        forge_submit._autogen_forge_driver(
-            {"operation": "gemm"},
-            str(workspace / "kernel.py"),
-            workspace,
-        )
-    )
+    staged = Path(forge_submit._write_generated_driver(workspace, forge_submit._TASK_PREPARER_PLACEHOLDER))
 
-    assert {adapter.parent, generated.parent} == {workspace}
-    assert adapter.name.startswith(".forge_driver_")
-    assert generated.name.startswith(".forge_driver_")
-    assert adapter.name != generated.name
-    assert adapter.is_file() and generated.is_file()
-    # The tracked file is untouched and the attempt dir stays clean.
+    assert staged.parent == workspace
+    assert staged.name.startswith(".forge_driver_")
+    assert staged.is_file()
+    assert "task-preparer placeholder" in staged.read_text()
     assert tracked_driver.read_text() == "TRACKED_DRIVER\n"
-    assert list(output_dir.iterdir()) == []
-    assert sorted(path.name for path in workspace.iterdir()) == sorted(
-        ["forge_driver.py", adapter.name, generated.name]
-    )
 
 
 def test_finalize_removes_staged_drivers_from_the_live_repo(tmp_path):
@@ -685,12 +659,12 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         worktree_kernel=str(kernel),
         driver=str(driver),
         workspace=str(workspace),
-        shapes={"primary": {"M": 128}},
         snr_threshold=30.0,
         max_iters=8,
         max_hours=1.0,
         branch="forge/session/kernel",
         gpu_target="gfx950",
+        gpu_type="mi355x",
         fellow="triton-fellow",
         program_md_file=str(program),
         invocation_spec_file="",
@@ -742,12 +716,12 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         "--kernel": str(kernel),
         "--driver": str(driver),
         "--workspace": str(workspace),
-        "--shapes-json": json.dumps({"primary": {"M": 128}}),
         "--snr-threshold": "30.0",
         "--max-iters": "8",
         "--max-hours": "1.0",
         "--git-branch": "forge/session/kernel",
         "--gpu-target": "gfx950",
+        "--gpu-type": "mi355x",
         "--fellow": "triton-fellow",
         "--experiments-dir": str(experiments),
         "--experiment-id": "hyperloom",
@@ -762,9 +736,18 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     for flag, value in expected_flags.items():
         assert flag in command, flag
         assert command[command.index(flag) + 1] == value, flag
-    assert "--kernel-kind" not in command
+    # An option forge-loop does not declare is never worth sending: a producer
+    # that tolerates it drops it silently, and one that does not aborts the child
+    # before the campaign starts. Either way the value never reaches the loop, so
+    # the argv must not imply otherwise. Shapes travel in the invocation spec.
+    for unsupported in ("--kernel-kind", "--shapes-json", "--e2e-pct"):
+        assert unsupported not in command, unsupported
 
     assert captured["env"]["GPU_TARGET"] == "gfx950"
+    # The card, alongside the target it builds for: KernelForge addresses a
+    # kernel's experience by the former, and declines to read or write without
+    # it, so a run that carried only the target would accumulate nothing.
+    assert captured["env"]["GPU_TYPE"] == "mi355x"
     assert captured["env"]["PYTHONPATH"].startswith("/forge/src")
     # Isolated process group -- the timeout kill signals the group, not just pid.
     assert captured["popen_kwargs"]["start_new_session"] is True
@@ -774,6 +757,91 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     # The subprocess wait is bounded by the absolute deadline, not by wall time
     # already spent before the loop started.
     assert 100.0 < captured["communicate_timeout"] <= 120.0
+
+
+def test_failure_tail_prefers_the_usage_error_over_the_transcript():
+    """A producer that rejected its own argv must say so in the raised error.
+
+    A usage error is the shape cross-repo option drift takes, and the CLI prints
+    it instead of the progress output a plain tail would capture.
+    """
+    tail = forge_submit._forge_failure_tail(
+        "  [prepare] task already conforms\n"
+        "Usage: main forge-loop [OPTIONS]\n"
+        "Error: No such option '--shapes-json'.\n"
+    )
+
+    assert "No such option '--shapes-json'" in tail
+    assert "[prepare]" not in tail
+
+
+def test_failure_tail_falls_back_to_the_last_lines_and_skips_result_blobs():
+    payload = "__FORGE_RESULT__" + json.dumps({"x": "y" * 400}) + "__FORGE_RESULT__"
+    tail = forge_submit._forge_failure_tail(
+        f"first\n{payload}\nsegfault in driver\nlast line\n"
+    )
+
+    assert "__FORGE_RESULT__" not in tail
+    assert "segfault in driver" in tail
+    assert "last line" in tail
+    assert forge_submit._forge_failure_tail("") == "no output"
+    assert len(forge_submit._forge_failure_tail("z" * 900)) <= 500
+
+
+def test_nonzero_exit_reports_the_child_reason_not_only_the_code(
+    tmp_path,
+    monkeypatch,
+):
+    """The orchestrator sees the raised error, never the forge log.
+
+    Reporting only ``rc=2`` made a producer that refused its own argv look
+    identical to one that crashed while measuring, which is how a cross-repo
+    option removal stayed invisible.
+    """
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    (workspace / "kernel.py").write_text("pass\n")
+    (workspace / "driver.py").write_text("pass\n")
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
+
+    class RejectingProcess:
+        returncode = 2
+        pid = 99
+
+        def communicate(self, timeout=None):
+            return "", "Error: No such option '--future-option'.\n"
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(
+        forge_submit.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: RejectingProcess(),
+    )
+
+    outcome = forge_submit._run_loop_via_cli(
+        worktree_kernel=str(workspace / "kernel.py"),
+        driver=str(workspace / "driver.py"),
+        workspace=str(workspace),
+        snr_threshold=30.0,
+        max_iters=8,
+        max_hours=1.0,
+        branch="b",
+        gpu_target="gfx950",
+        gpu_type="mi355x",
+        fellow="triton-fellow",
+        program_md_file="",
+        invocation_spec_file="",
+        experiments_dir=experiments,
+        forge_log=tmp_path / "forge.log",
+        timeout_s=60,
+    )
+
+    assert outcome.error is not None
+    message = str(outcome.error)
+    assert "rc=2" in message
+    assert "No such option '--future-option'" in message
 
 
 def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
@@ -898,12 +966,12 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             worktree_kernel=str(case["kernel"]),
             driver=str(driver),
             workspace=str(workspace),
-            shapes={},
             snr_threshold=30.0,
             max_iters=1,
             max_hours=1.0,
             branch=f"forge/test/{index}",
             gpu_target="gfx950",
+            gpu_type="mi355x",
             fellow=fellow,
             program_md_file="",
             invocation_spec_file="",
@@ -991,12 +1059,12 @@ def test_cli_timeout_recovers_only_this_run_s_checkpoint(tmp_path, monkeypatch):
         worktree_kernel=str(kernel),
         driver=str(driver),
         workspace=str(workspace),
-        shapes={},
         snr_threshold=30.0,
         max_iters=8,
         max_hours=1.0,
         branch="forge/session/kernel",
         gpu_target="gfx950",
+        gpu_type="mi355x",
         fellow="triton-fellow",
         program_md_file="",
         invocation_spec_file="",
@@ -1207,7 +1275,6 @@ def test_disagreeing_recovery_channels_keep_the_published_manifest(
             source_file=str(source),
             prompt_file=prompt,
             output_dir=output_dir,
-            test_command="python -c 'print(\"allclose: True\")'",
             source_type="triton",
             candidate={"platform": "mi355x"},
             timeout_s=10,
@@ -1316,7 +1383,6 @@ def test_submit_timeout_salvages_only_the_validated_best_commit(
         source_file=str(source),
         prompt_file=prompt,
         output_dir=output_dir,
-        test_command="python -c 'print(\"allclose: True\")'",
         source_type="triton",
         candidate={"platform": "mi355x"},
         timeout_s=10,
@@ -1407,7 +1473,6 @@ def test_submit_timeout_export_failure_writes_no_promotable_artifacts(
         source_file=str(source),
         prompt_file=prompt,
         output_dir=output_dir,
-        test_command="python -c 'print(\"allclose: True\")'",
         source_type="triton",
         candidate={"platform": "mi355x"},
         timeout_s=10,
@@ -1458,7 +1523,6 @@ def test_submit_timeout_without_validated_recovery_discards_measurements(
         source_file=str(source),
         prompt_file=prompt,
         output_dir=output_dir,
-        test_command="python -c 'print(\"allclose: True\")'",
         source_type="triton",
         candidate={"platform": "mi355x"},
         timeout_s=10,
@@ -1508,7 +1572,6 @@ def test_submit_non_timeout_error_fails_and_uses_unique_retained_branch(
             source_file=str(source),
             prompt_file=prompt,
             output_dir=tmp_path / "results" / f"attempt-{attempt}",
-            test_command="python -c 'print(\"allclose: True\")'",
             source_type="triton",
             candidate={"platform": "mi355x"},
             timeout_s=10,
@@ -1578,7 +1641,6 @@ def test_finalization_failure_does_not_swallow_the_forge_result(
             source_file=str(source),
             prompt_file=prompt,
             output_dir=output_dir,
-            test_command="python -c 'print(\"allclose: True\")'",
             source_type="triton",
             candidate={"platform": "mi355x"},
             timeout_s=10,
@@ -1630,6 +1692,48 @@ def test_nogit_scratch_bootstraps_a_committable_scratch_repo(tmp_path):
     # The live (non-git) source tree is never converted into a repo.
     assert not (source_root / ".git").exists()
     assert source.read_text() == "pass\n"
+
+
+def test_nogit_scratch_keeps_regenerated_bytecode_out_of_the_patch(tmp_path):
+    """Caches written while the loop runs must not reach the published diff.
+
+    The scratch copy skips pre-existing caches, but the loop imports what it
+    edits and writes new ones. Committed, they reach the patch as binary hunks
+    with no full index line, which ``git apply`` refuses — so a solution
+    published to the KB could not be replayed.
+    """
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = source_root / "kernel.py"
+    source.write_text("pass\n")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    prepared = forge_submit._prepare_worktree_nogit(
+        str(source),
+        str(source_root),
+        output_dir,
+        "forge/session/kernel-attempt",
+    )
+
+    assert prepared is not None
+    workspace, kernel, base_commit = prepared
+
+    # Stands in for the import that happens the moment the loop benchmarks its
+    # edit, which is what actually produced the unappliable patch.
+    cache = Path(workspace) / "__pycache__"
+    cache.mkdir()
+    (cache / "kernel.cpython-312.pyc").write_bytes(b"\xcb\x0d\x0d\x0a\x00binary")
+
+    Path(kernel).write_text("OPTIMIZED\n")
+    _git(workspace, "add", "-A")
+    _git(workspace, "commit", "-m", "iter1")
+
+    patch = _git(workspace, "diff", "--binary", base_commit, "HEAD")
+    assert "__pycache__" not in patch
+    assert "kernel.py" in patch
+    # Excluded, not merely unstaged: a later `add -A` cannot pick it up either.
+    assert _git(workspace, "status", "--porcelain") == ""
 
 
 def test_inplace_campaign_state_never_lands_in_the_live_repo(tmp_path, monkeypatch):
@@ -1690,7 +1794,6 @@ def test_inplace_campaign_state_never_lands_in_the_live_repo(tmp_path, monkeypat
         source_file=str(source),
         prompt_file=prompt,
         output_dir=output_dir,
-        test_command="python -c 'print(\"allclose: True\")'",
         source_type="triton",
         candidate={"platform": "mi355x"},
         timeout_s=10,
@@ -1787,7 +1890,6 @@ def test_inplace_restore_failure_is_surfaced_without_losing_the_result(
             source_file=str(source),
             prompt_file=prompt,
             output_dir=output_dir,
-            test_command="python -c 'print(\"allclose: True\")'",
             source_type="triton",
             candidate={"platform": "mi355x"},
             timeout_s=10,
@@ -1840,7 +1942,6 @@ def test_retained_worktree_collision_skips_without_delete_or_nogit_fallback(
         source_file=str(source),
         prompt_file=prompt,
         output_dir=output_dir,
-        test_command="python test.py",
         source_type="triton",
         candidate={"platform": "mi355x"},
         timeout_s=10,
@@ -1890,12 +1991,12 @@ def test_unclearable_stale_artifact_aborts_before_starting_a_campaign(
             worktree_kernel=str(kernel),
             driver=str(driver),
             workspace=str(workspace),
-            shapes={},
             snr_threshold=30.0,
             max_iters=8,
             max_hours=1.0,
             branch="forge/session/kernel",
             gpu_target="gfx950",
+            gpu_type="mi355x",
             fellow="triton-fellow",
             program_md_file="",
             invocation_spec_file="",
@@ -1983,7 +2084,6 @@ def test_same_iteration_recovery_conflict_resolves_wholly_to_the_manifest(
             source_file=str(source),
             prompt_file=prompt,
             output_dir=output_dir,
-            test_command="python -c 'print(\"allclose: True\")'",
             source_type="triton",
             candidate={"platform": "mi355x"},
             timeout_s=10,
@@ -2790,7 +2890,6 @@ def _submit_with_rewrite_route(tmp_path, monkeypatch, captured=None, **submit_ov
         "source_file": str(source),
         "prompt_file": prompt,
         "output_dir": output_dir,
-        "test_command": "python -c 'print(\"allclose: True\")'",
         "source_type": "triton",
         "candidate": {
             "name": "fused_gemm",
@@ -3163,6 +3262,7 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         driver_preparation=True,
         snr_threshold=30.0,
         gpu_target="gfx950",
+        gpu_type="mi355x",
         max_iters=8,
         max_hours=2.0,
         branch="forge/session/fused-gemm",
@@ -3188,6 +3288,7 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         "--invocation-spec-file": str(invocation_spec),
         "--snr-threshold": "30.0",
         "--gpu-target": "gfx950",
+        "--gpu-type": "mi355x",
         "--max-iters": "8",
         "--framework": "vllm",
         "--git-branch": "forge/session/fused-gemm",
@@ -3198,6 +3299,9 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         assert command[command.index(flag) + 1] == value, flag
     # A boolean switch carries no value, so it is checked apart from the pairs.
     assert "--prepare-driver" in command
+    # The rewrite producer files its port under the same identity scheme, so it
+    # needs the card as much as the loop does.
+    assert captured["popen_kwargs"]["env"]["GPU_TYPE"] == "mi355x"
     # The producer is aimed one reserve short of this process's hard kill, so it
     # publishes the apply-back inside its own budget instead of racing the kill.
     producer_deadline = float(command[command.index("--deadline-unix") + 1])
@@ -3215,7 +3319,6 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         "--fellow",
         "--experiment-id",
         "--experience-id",
-        "--e2e-pct",
         "--operator-name",
         "--source-files",
         "--program-md-file",
@@ -3275,6 +3378,7 @@ def test_rewrite_cli_hard_kills_the_producer_at_the_deadline(tmp_path, monkeypat
         driver_preparation=False,
         snr_threshold=30.0,
         gpu_target="gfx942",
+        gpu_type="mi300x",
         max_iters=4,
         max_hours=1.0,
         branch="forge/session/op",
@@ -3328,6 +3432,7 @@ def test_rewrite_cli_prefers_the_caller_named_result_file(tmp_path, monkeypatch)
         driver_preparation=False,
         snr_threshold=30.0,
         gpu_target="gfx942",
+        gpu_type="mi300x",
         max_iters=4,
         max_hours=1.0,
         branch="forge/session/op",
