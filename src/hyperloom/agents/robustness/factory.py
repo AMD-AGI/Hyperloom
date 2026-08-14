@@ -47,7 +47,6 @@ from .signals.crash import CrashConfig
 from .signals.decision_audit import DecisionAuditConfig
 from .signals.event import EventConfig
 from .signals.gpu_leak import GpuLeakConfig
-from .signals.health import HealthConfig
 from .signals.critic_health import CriticHealthConfig
 from .signals.external_deps import ExternalDepsConfig
 from .signals.kernel_pipeline import KernelPipelineConfig
@@ -216,7 +215,6 @@ def build_reactor_components(
         "event": EventConfig(
             idempotency_replay_threshold=config.idempotency_replay_threshold,
         ),
-        "health": HealthConfig(),
         "local_health": LocalHealthConfig(
             gpu_temp_warn_c=config.gpu_temp_warn_c,
             disk_used_warn_pct=config.disk_used_warn_pct,

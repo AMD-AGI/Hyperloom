@@ -43,14 +43,14 @@ def _sym(
 async def test_low_severity_yields_observation_send_message():
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("pod_no_metrics", SymptomSeverity.LOW)],
+        [_sym("inbox_bloat", SymptomSeverity.LOW)],
         tick_index=0,
         now_unix=1.0,
     )
     assert len(out.intents) == 1
     assert out.intents[0].type is IntentType.SEND_MESSAGE
     assert out.intents[0].payload["topic"] == "observation"
-    assert out.findings and out.findings[0].symptom_name == "pod_no_metrics"
+    assert out.findings and out.findings[0].symptom_name == "inbox_bloat"
 
 
 async def test_medium_severity_yields_alert_only():

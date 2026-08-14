@@ -23,7 +23,6 @@ from hyperloom.agents.robustness.signals import (
 )
 from hyperloom.agents.robustness.signals.crash import CrashConfig
 from hyperloom.agents.robustness.signals.event import EventConfig
-from hyperloom.agents.robustness.signals.health import HealthConfig
 from hyperloom.agents.robustness.signals.stall import StallConfig
 from hyperloom.agents.robustness.sources.base import SourceData
 
@@ -460,41 +459,6 @@ def test_health_silent_when_pods_running():
         session_pods=[{"pod": {"namespace": "ns", "name": "p"}, "phase": "Running"}],
     )
     assert evaluate_health_signals(_ctx(), data) == []
-
-
-def test_health_warns_no_metrics_after_threshold():
-    now = 10_000.0
-    data = SourceData(
-        session_summary={
-            "pods": [
-                {
-                    "pod": {"namespace": "ns", "name": "p1"},
-                    "role": "hands",
-                    "t_start": now - 1200.0,
-                    "available_metrics": [],
-                }
-            ]
-        }
-    )
-    out = evaluate_health_signals(_ctx(now_unix=now), data, config=HealthConfig(no_metrics_warn_s=600))
-    assert any(s.name == "pod_no_metrics" for s in out)
-
-
-def test_health_does_not_flag_recently_started_pods_with_no_metrics():
-    now = 10_000.0
-    data = SourceData(
-        session_summary={
-            "pods": [
-                {
-                    "pod": {"namespace": "ns", "name": "p2"},
-                    "role": "hands",
-                    "t_start": now - 60.0,
-                    "available_metrics": [],
-                }
-            ]
-        }
-    )
-    assert evaluate_health_signals(_ctx(now_unix=now), data, config=HealthConfig(no_metrics_warn_s=600)) == []
 
 
 # Classifier

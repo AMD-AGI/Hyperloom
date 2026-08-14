@@ -40,7 +40,7 @@ from .external_deps import (
     evaluate_external_deps_signals,
 )
 from .gpu_leak import GpuLeakConfig, GpuLeakDetector
-from .health import HealthConfig, evaluate_health_signals
+from .health import evaluate_health_signals
 from .kernel_pipeline import (
     KernelPipelineConfig,
     RayPendingDetector,
@@ -125,7 +125,7 @@ _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
     SignalSpec("stall", "stall", StallConfig, evaluator=evaluate_stall_signals),
     SignalSpec("crash", "crash", CrashConfig, evaluator=evaluate_crash_signals),
     SignalSpec("event", "event", EventConfig, evaluator=evaluate_event_signals),
-    SignalSpec("health", "health", HealthConfig, evaluator=evaluate_health_signals),
+    SignalSpec("health", None, None, evaluator=evaluate_health_signals),
     SignalSpec(
         "local_health",
         "local_health",

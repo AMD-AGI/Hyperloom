@@ -139,7 +139,6 @@ host -> subprocess -> envelope -> upstream PolicyGate path.
 | `repeated_failure` (≥ 2 same family) | medium / high (≥ prune threshold) | `alert(medium)`; HIGH tier also emits `prune_branch(family)` | M1 |
 | `pod_not_running` (Failed) | high | `alert(high)` | M1 |
 | `pod_not_running` (other non-Running) | medium | `alert(medium)` | M1 |
-| `pod_no_metrics` (≥ no_metrics_warn_s) | low | `send_message(observation)` | M1 |
 | `local_server_unreachable` (any target down) | medium / high (all down) | `alert(medium)` / `alert(high)` | M1.5 |
 | `log_error_pattern` (CUDA OOM / NCCL / segfault) | high | `alert(high)` | M1.5 |
 | `log_error_pattern` (RuntimeError / generic) | medium | `alert(medium)` | M1.5 |
@@ -164,11 +163,9 @@ Cooldown: identical `(symptom_name, subject)` keys are silenced for
 ## Data sources (M1 / M1.5)
 
 * **Primary:** `robustness-server`
-  * `/api/v1/sessions/{id}/pods`
-  * `/api/v1/sessions/{id}/events`
-  * `/api/v1/sessions/{id}/summary`
   * `/api/v1/cluster/faults` (on by default)
-  * `/api/v1/cluster/workloads/{id}/hierarchy`
+  * `/api/v1/cluster/workloads/{id}/hierarchy` — the only pod-discovery
+    route; needs `Config.workload_uid` (see the env keys below)
   * `/api/v1/cluster/pods/{ns}/{name}/metrics` — gated by
     `Config.enable_cluster_pod_metrics` (default `False`, env-settable)
 * **Fallback:** local probes

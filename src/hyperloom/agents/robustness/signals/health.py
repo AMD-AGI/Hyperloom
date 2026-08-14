@@ -1,33 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Pod-health signal driven by robustness-server's session snapshot.
+"""Pod-health signal driven by the robustness-server pod snapshot.
 
-Emits alerts when a ``session_pods`` row has a non-empty ``phase`` other than ``Running``,
-or when ``session_summary.pods`` shows empty ``available_metrics`` for a pod older than
-``no_metrics_warn_s`` (alive but no telemetry → LOW).
+Emits alerts when a ``session_pods`` row has a non-empty ``phase`` other than
+``Running``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
-
-
-@dataclass
-class HealthConfig:
-    """Tunables for :func:`evaluate_health_signals`.
-
-    Attributes:
-        no_metrics_warn_s (float): Minimum pod age in seconds before an empty
-            ``available_metrics`` list triggers a ``pod_no_metrics`` symptom.
-    """
-
-    no_metrics_warn_s: float = 600.0
 
 
 _POD_RUNNING_PHASES: frozenset[str] = frozenset(
@@ -43,26 +29,20 @@ _POD_RUNNING_PHASES: frozenset[str] = frozenset(
 def evaluate_health_signals(
     ctx: ReactorContext,
     data: SourceData,
-    *,
-    config: HealthConfig | None = None,
 ) -> list[Symptom]:
-    """Emit pod-health symptoms from the server session snapshot.
+    """Emit pod-health symptoms from the server pod snapshot.
 
-    Flags pods in a non-running phase (``pod_not_running``) and hands pods that
-    have produced no metric series for longer than the configured age
-    (``pod_no_metrics``).
+    Flags pods in a non-running phase (``pod_not_running``).
 
     Args:
-        ctx (ReactorContext): Reactor context (provides the current unix time).
-        data (SourceData): Collected source data including ``session_pods`` and
-            ``session_summary``.
-        config (HealthConfig | None): Tunables; defaults to :class:`HealthConfig`
-            when ``None``.
+        ctx (ReactorContext): Reactor context; unused, kept for the evaluator
+            signature.
+        data (SourceData): Collected source data including ``session_pods``.
 
     Returns:
         list[Symptom]: All pod-health symptoms found this tick, possibly empty.
     """
-    cfg = config or HealthConfig()
+    del ctx
     out: list[Symptom] = []
 
     for assignment in data.session_pods:
@@ -94,41 +74,6 @@ def evaluate_health_signals(
                         if phase == "Failed"
                         else "escalate_strategy_change to monitor recovery"
                     ),
-                )
-            )
-
-    summary = data.session_summary
-    if isinstance(summary, dict):
-        for entry in summary.get("pods") or []:
-            if not isinstance(entry, dict):
-                continue
-            available = entry.get("available_metrics")
-            if available not in (None, []):
-                continue
-            t_start = entry.get("t_start")
-            if not isinstance(t_start, (int, float)):
-                continue
-            age = ctx.now_unix - float(t_start)
-            if age < cfg.no_metrics_warn_s:
-                continue
-            pod = _pod_dict(entry)
-            ns = str(pod.get("namespace") or "")
-            name = str(pod.get("name") or "")
-            role = str(entry.get("role") or "")
-            out.append(
-                Symptom(
-                    name="pod_no_metrics",
-                    severity=SymptomSeverity.LOW,
-                    summary=(f"pod {ns}/{name} ({role}) has no metric series for {int(age)}s"),
-                    evidence={
-                        "namespace": ns,
-                        "name": name,
-                        "role": role,
-                        "age_seconds": int(age),
-                    },
-                    subject={"namespace": ns, "name": name, "kind": "no_metrics"},
-                    source="server",
-                    suggestion="verify exporter / cluster_proxy data path",
                 )
             )
 
@@ -164,4 +109,4 @@ def _phase(entry: dict[str, Any], pod: dict[str, Any]) -> str:
     return str(phase or "").strip()
 
 
-__all__ = ["HealthConfig", "evaluate_health_signals"]
+__all__ = ["evaluate_health_signals"]
