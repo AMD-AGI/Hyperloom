@@ -85,7 +85,6 @@ def _capture_forge_loop_argv(
         worktree_kernel=str(kernel),
         driver=str(driver),
         workspace=str(workspace),
-        shapes={},
         snr_threshold=30.0,
         max_iters=1,
         max_hours=1.0,

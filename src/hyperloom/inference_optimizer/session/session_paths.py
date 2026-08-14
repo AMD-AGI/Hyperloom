@@ -148,6 +148,10 @@ def runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
     return runs_root(session_dir) / a / tid
 
 
+# Suffix probes before unique_runs_dir gives up.
+_MAX_RUNS_DIR_ATTEMPTS: int = 200
+
+
 def unique_runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
     """Create a fresh :func:`runs_dir` workspace, suffixing ``-2``, ``-3``, …
     when earlier attempts already claimed the name. ``mkdir(exist_ok=False)``
@@ -165,17 +169,17 @@ def unique_runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
 
     Raises:
         ValueError: If ``action`` is not a recognised runs-workspace action.
+        RuntimeError: If every suffix up to ``_MAX_RUNS_DIR_ATTEMPTS`` is taken.
     """
     base = runs_dir(session_dir, action, task_id)
-    candidate = base
-    attempt = 1
-    while True:
+    for suffix in range(1, _MAX_RUNS_DIR_ATTEMPTS + 1):
+        candidate = base if suffix == 1 else base.with_name(f"{base.name}-{suffix}")
         try:
             candidate.mkdir(parents=True, exist_ok=False)
             return candidate
         except FileExistsError:
-            attempt += 1
-            candidate = base.with_name(f"{base.name}-{attempt}")
+            continue
+    raise RuntimeError(f"unique_runs_dir: {base} still taken after {_MAX_RUNS_DIR_ATTEMPTS} suffixes")
 
 
 def kernel_agent_runs_root(session_dir: Path) -> Path:
