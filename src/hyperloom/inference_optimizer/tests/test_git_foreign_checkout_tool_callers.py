@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The kernel agent's Forge backend must survive a foreign-owned checkout.
+"""The tool-side git callers must survive a foreign-owned checkout.
 
-``forge_submit.py`` builds its own argv instead of going through
-``executors/_git.py``, and the repo it drives is the framework source tree the
-documented container recipe bind-mounts. Git refuses every call on it, and the
-refusals read as facts about the repository: "no default branch", "HEAD is
-unresolvable", "the best commit does not contain the source it was validated
-on".
+The kernel agent's Forge backend, the framework explorer's isolation helpers and
+the pod-side TraceLens patcher all build their own argv instead of going through
+``executors/_git.py``, and the trees they drive are the ones the documented
+container recipe bind-mounts. Git refuses every call on them, and the refusals
+read as facts about the repository: "no default branch", "HEAD is unresolvable",
+"the best commit does not contain the source it was validated on".
 
 ``GIT_TEST_ASSUME_DIFFERENT_OWNER`` is git's own hook for this path, so the
 tests need no root and no foreign-owned directory. The repo is built first and
@@ -18,11 +18,13 @@ only then declared foreign, otherwise the fixture could not commit.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from hyperloom.agents.framework import isolation
 from hyperloom.agents.kernel.tools.backends import forge_submit
 
 _IDENT = ("-c", "user.email=t@t.local", "-c", "user.name=t")
@@ -49,6 +51,20 @@ def foreign_repo(tmp_path, monkeypatch):
     return repo
 
 
+def _multinode_patcher():
+    """Load the pod-side script by path; ``multi_node/scripts`` is not a package."""
+    import hyperloom.inference_optimizer as io_pkg
+
+    script = Path(io_pkg.__file__).parent / "multi_node" / "scripts" / "apply_tracelens_patch_multinode.py"
+    spec = importlib.util.spec_from_file_location("_tracelens_patcher_under_test", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# ---------------------------------------------------------------------------
+# forge_submit: the kernel agent's main path
+# ---------------------------------------------------------------------------
 def test_the_default_branch_is_not_reported_as_missing(foreign_repo):
     """A refusal here reads as "this repo has no default branch".
 
