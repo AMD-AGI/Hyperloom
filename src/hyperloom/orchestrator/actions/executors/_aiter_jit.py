@@ -334,7 +334,8 @@ def clean_stale_aiter_locks(
     Returns:
         dict[str, Any]: A stats dict (``dir`` — primary tree, ``dirs`` — every
             swept tree, ``scanned``, ``deleted``, ``skipped_fresh``,
-            ``errors``).
+            ``errors``, ``unreadable`` — trees that could not be stat'ed, each
+            also counted in ``errors``).
     """
     stats: dict[str, Any] = {
         "dir": None,

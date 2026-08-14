@@ -98,7 +98,12 @@ def default_workspace_root() -> Path:
     abort installation. Falling back to the caller's directory also matches what
     the setup skill offers.
     """
-    if os.access(POD_LOCAL_WORKSPACE, os.W_OK):
+    # The nearest *existing* ancestor decides: os.access is False for a path that
+    # does not exist yet, which would divert root off a /workspace it can create.
+    probe = POD_LOCAL_WORKSPACE
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    if os.access(probe, os.W_OK):
         return DEFAULT_SESSION_DIR
     return Path.cwd() / "session"
 
