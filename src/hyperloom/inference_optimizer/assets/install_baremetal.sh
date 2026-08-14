@@ -185,18 +185,34 @@ resolve_python() {
 # interpreter does not auto-load the util submodule.
 _py_has() { "$1" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$2') else 1)" 2>/dev/null; }
 
-# Print the serving framework (sglang|vllm), or nothing when none is importable.
+# The interpreter that owns a given framework. vLLM lives in its own venv under
+# FRAMEWORK_ENV=isolated; every other engine uses the shared interpreter. Every
+# framework probe goes through here so preflight, framework resolution and the
+# profiler hotfix can never disagree about where an engine is installed.
+framework_probe_python() {
+  local fw="$1" default_py="$2"
+  if [ "$fw" = "vllm" ] && [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
+    printf '%s' "${VLLM_VENV_ROOT}/bin/python"
+  else
+    printf '%s' "$default_py"
+  fi
+}
+
+# Print the serving framework to record for downstream skills, or nothing when
+# none is importable. Walks $FRAMEWORKS in order — the same list Phase 1 probes
+# — so an engine that passes preflight is always the one written to .env.
 resolve_installed_framework() {
   if [ "$INSTALL_FRAMEWORK" = "sglang" ] || [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
     printf '%s' "$INSTALL_FRAMEWORK"; return 0
   fi
-  local py; py="$(resolve_python)" || return 0
-  if _py_has "$py" sglang; then printf 'sglang'; return 0; fi
-  local vllm_py="$py"
-  if [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
-    vllm_py="${VLLM_VENV_ROOT}/bin/python"
-  fi
-  if _py_has "$vllm_py" vllm; then printf 'vllm'; return 0; fi
+  local py fw probe_py _rif_arr
+  py="$(resolve_python)" || return 0
+  IFS=',' read -r -a _rif_arr <<< "$FRAMEWORKS"
+  for fw in "${_rif_arr[@]}"; do
+    fw="$(echo "$fw" | tr -d '[:space:]')"; [ -z "$fw" ] && continue
+    probe_py="$(framework_probe_python "$fw" "$py")"
+    if _py_has "$probe_py" "$fw"; then printf '%s' "$fw"; return 0; fi
+  done
   return 0
 }
 
@@ -352,10 +368,7 @@ PY
   IFS=',' read -r -a _fw_arr <<< "$FRAMEWORKS"
   for fw in "${_fw_arr[@]}"; do
     fw="$(echo "$fw" | tr -d '[:space:]')"; [ -z "$fw" ] && continue
-    local probe_py="$py"
-    if [ "$fw" = "vllm" ] && [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
-      probe_py="${VLLM_VENV_ROOT}/bin/python"
-    fi
+    local probe_py; probe_py="$(framework_probe_python "$fw" "$py")"
     if _py_has "$probe_py" "$fw"; then
       if [ "$probe_py" != "$py" ]; then
         log "framework ${fw}: OK (isolated: ${probe_py})"
@@ -883,16 +896,18 @@ PY
     *) warn "torch.version.hip=${hip}; ROCm profiler hotfix is validated for ROCm 7.2 stacks, skipping" ; return 1 ;;
   esac
 
-  # Probe vLLM in the isolated venv when FRAMEWORK_ENV=isolated, mirroring
-  # resolve_installed_framework, so an isolated vLLM install still qualifies.
-  local vllm_py="$py"
-  if [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
-    vllm_py="${VLLM_VENV_ROOT}/bin/python"
-  fi
-  local found=""
-  _py_has "$py" sglang && found="sglang"
-  _py_has "$vllm_py" vllm && found="${found:+${found} }vllm"
-  [ -n "$found" ] || { warn "neither sglang nor vllm is importable; skipping ROCm profiler hotfix"; return 1; }
+  # The hotfix swaps the ROCm profiler libraries that torch.profiler loads, so
+  # it is engine-agnostic: gate it on "some serving framework is present", not
+  # on sglang/vllm specifically, or an atom-only host silently loses profiling.
+  # Walks $FRAMEWORKS for the same reason resolve_installed_framework does.
+  local found="" fw probe_py _hotfix_arr
+  IFS=',' read -r -a _hotfix_arr <<< "$FRAMEWORKS"
+  for fw in "${_hotfix_arr[@]}"; do
+    fw="$(echo "$fw" | tr -d '[:space:]')"; [ -z "$fw" ] && continue
+    probe_py="$(framework_probe_python "$fw" "$py")"
+    _py_has "$probe_py" "$fw" && found="${found:+${found} }${fw}"
+  done
+  [ -n "$found" ] || { warn "no serving framework importable from '${FRAMEWORKS}'; skipping ROCm profiler hotfix"; return 1; }
   log "framework imports: ${found}"
 }
 
@@ -1361,12 +1376,16 @@ resolve_credentials() {
 # VIRTUAL_ENV / VLLM_VENV_ROOT at launch (_derive_runtime_paths).
 write_runtime_dotenv() {
   if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then log "would update runtime env: ${DOTENV}"; return 0; fi
-  # FRAMEWORK for downstream demo skills; empty when none is importable.
+  # FRAMEWORK for downstream demo skills; empty when none is importable. A stale
+  # value from an earlier install on a re-imaged host would point the skills at
+  # an engine that is no longer there, so drop it rather than leave it behind.
   local detected_framework; detected_framework="$(resolve_installed_framework)"
   if [ -n "$detected_framework" ]; then
     log "detected serving framework: ${detected_framework}"
+    upsert_dotenv_var FRAMEWORK "$detected_framework"
   else
-    warn "no serving framework detected; leaving FRAMEWORK unset in ${DOTENV}"
+    warn "no serving framework detected; clearing FRAMEWORK in ${DOTENV}"
+    remove_dotenv_var FRAMEWORK
   fi
 
   upsert_dotenv_var USER_DATA_PATH "$USER_DATA_PATH"
@@ -1383,7 +1402,6 @@ write_runtime_dotenv() {
   [ -n "${HYPERLOOM_WHEEL_TAG:-}" ] && upsert_dotenv_var HYPERLOOM_WHEEL_TAG "$HYPERLOOM_WHEEL_TAG"
   [ -n "${HYPERLOOM_SKILL_PATH:-}" ] && upsert_dotenv_var HYPERLOOM_SKILL_PATH "$HYPERLOOM_SKILL_PATH"
   [ -n "${SGLANG_USE_AITER:-}" ] && upsert_dotenv_var SGLANG_USE_AITER "$SGLANG_USE_AITER"
-  [ -n "${detected_framework}" ] && upsert_dotenv_var FRAMEWORK "$detected_framework"
   upsert_dotenv_var HYPERLOOM_FRAMEWORK_ENV "$FRAMEWORK_ENV"
   if [ "$FRAMEWORK_ENV" = "isolated" ] && [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
     upsert_dotenv_var VLLM_VENV_ROOT "$VLLM_VENV_ROOT"
@@ -1395,7 +1413,13 @@ write_runtime_dotenv() {
 print_next_steps() {
   local framework_hint
   framework_hint="$INSTALL_FRAMEWORK"
-  [ "$framework_hint" = "none" ] && framework_hint="sglang"
+  if [ "$framework_hint" = "none" ]; then
+    # Nothing was installed, so the prompt must name the engine this host
+    # actually has. Falling back to a hardcoded sglang sent atom-only hosts
+    # down a framework that is not present.
+    framework_hint="$(resolve_installed_framework)"
+    [ -n "$framework_hint" ] || framework_hint="<none detected — install or pick one>"
+  fi
   cat <<EOF
 
 [install-baremetal] install complete.
