@@ -11,6 +11,7 @@ import sys
 
 import pytest
 
+from hyperloom.common import provenance
 from hyperloom.inference_optimizer.cli import preflight
 
 _SKIP_ENV = "HYPERLOOM_SKIP_FRAMEWORK_CHECK"
@@ -25,6 +26,8 @@ def _clear_env(monkeypatch):
         "VLLM_VENV_ROOT",
         "HYPERLOOM_MN_EXT_SERVICE_URL",
         "INFERENCE_OPTIMIZER_NODES",
+        "KUBERNETES_SERVICE_HOST",
+        "HYPERLOOM_IMAGE",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -329,3 +332,90 @@ def test_probe_is_inconclusive_when_torch_is_absent(monkeypatch):
     verdict = preflight._probe_rocm_build("sglang", sys.executable)
 
     assert verdict is None or verdict is True
+
+
+# ---------------------------------------------------------------------------
+# _in_container signals
+# ---------------------------------------------------------------------------
+# A systemd host puts PID 1 in a named scope; a container with a private cgroup
+# namespace sees the namespace root instead.
+_HOST_CGROUP_V2 = "0::/init.scope\n"
+_CONTAINER_CGROUP_V2 = "0::/\n"
+
+
+def _fake_container_fs(monkeypatch, *, present=(), cgroup=_HOST_CGROUP_V2):
+    """Fake every file _in_container reads; only ``present`` paths exist.
+
+    ``cgroup=None`` makes ``/proc/1/cgroup`` unreadable.
+    """
+
+    class _Node:
+        def __init__(self, path):
+            self._path = str(path)
+
+        def exists(self):
+            return self._path in present
+
+        def read_text(self, **_kwargs):
+            if self._path == "/proc/1/cgroup" and cgroup is not None:
+                return cgroup
+            raise OSError(f"unreadable: {self._path}")
+
+    monkeypatch.setattr(preflight, "Path", _Node)
+    monkeypatch.setattr(provenance, "_read_first_line", lambda _p: "")
+
+
+def test_in_container_detects_a_cgroup_v2_namespace_root(monkeypatch):
+    """Under cgroup v2 the runtime name is gone: /proc/1/cgroup is just "0::/".
+
+    Missing it tells a container user to start a container, the reversal of the
+    advice #1141 exists to fix.
+    """
+    _fake_container_fs(monkeypatch, cgroup=_CONTAINER_CGROUP_V2)
+
+    assert preflight._in_container() is True
+
+
+def test_in_container_detects_podman(monkeypatch):
+    """podman writes /run/.containerenv, never /.dockerenv."""
+    _fake_container_fs(monkeypatch, present=("/run/.containerenv",), cgroup=_CONTAINER_CGROUP_V2)
+
+    assert preflight._in_container() is True
+
+
+def test_in_container_detects_a_kubernetes_pod(monkeypatch):
+    """Every pod gets the API service env injected, whatever the cgroup shape."""
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+    _fake_container_fs(monkeypatch)
+
+    assert preflight._in_container() is True
+
+
+def test_in_container_trusts_an_on_disk_image_marker(monkeypatch):
+    """A projected/baked image marker file only exists inside the image."""
+    _fake_container_fs(monkeypatch)
+    monkeypatch.setattr(provenance, "_read_first_line", lambda p: "rocm-image" if "podinfo" in str(p) else "")
+
+    assert preflight._in_container() is True
+
+
+def test_host_image_env_is_not_container_proof(monkeypatch):
+    """The demo skills export HYPERLOOM_IMAGE on the *host* to pick an image."""
+    monkeypatch.setenv("HYPERLOOM_IMAGE", "rocm-image")
+    _fake_container_fs(monkeypatch)
+
+    assert preflight._in_container() is False
+
+
+def test_in_container_is_false_on_a_cgroup_v2_host(monkeypatch):
+    """Regression guard: the dev host is cgroup v2 and is not a container."""
+    _fake_container_fs(monkeypatch)
+
+    assert preflight._in_container() is False
+
+
+def test_in_container_prefers_container_when_no_signal_is_readable(monkeypatch):
+    """A false negative gives wrong advice; a false positive only less specific."""
+    _fake_container_fs(monkeypatch, cgroup=None)
+
+    assert preflight._in_container() is True

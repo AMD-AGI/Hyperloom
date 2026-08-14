@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common import provenance
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_dotenv_key,
@@ -657,20 +658,49 @@ def _ensure_framework_deps(args, python_exe: str, pip_extra: list[str]) -> None:
 SKIP_FRAMEWORK_CHECK_ENV = "HYPERLOOM_SKIP_FRAMEWORK_CHECK"
 
 
+# Rootfs markers the runtimes drop: Docker writes the first, podman the second.
+_CONTAINER_MARKER_FILES = ("/.dockerenv", "/run/.containerenv")
+
+# Runtime names that appear in a cgroup v1 path (v2 hides them, see below).
+_CGROUP_RUNTIME_MARKERS = ("docker", "containerd", "kubepods", "libpod")
+
+
+def _pid1_at_cgroup_root(cgroup: str) -> bool:
+    """Whether PID 1 sits at the root of every cgroup hierarchy.
+
+    A private cgroup namespace (the default for docker/podman/k8s) shows exactly
+    that -- ``0::/`` under v2 -- while a host's PID 1 lands in a named scope.
+    """
+    paths = [line.rsplit(":", 1)[-1].strip() for line in cgroup.splitlines() if line.strip()]
+    return bool(paths) and all(path == "/" for path in paths)
+
+
 def _in_container() -> bool:
     """Best-effort containerization test (never raises).
 
-    Deliberately not ``provenance.detect_image``: the demo skills export
-    ``HYPERLOOM_IMAGE`` on the *host* to pick an image, so that var cannot
-    stand in for "this process runs inside it".
+    Signals err towards True: a false negative tells a container user to start a
+    container, the reversed advice this gate exists to remove, while a false
+    positive only drops the "run it in a ROCm image" hint.
+
+    Deliberately not ``provenance.detect_image``'s env vars: the demo skills
+    export ``HYPERLOOM_IMAGE`` on the *host* to pick an image, so that var
+    cannot stand in for "this process runs inside it".
     """
-    if Path("/.dockerenv").exists():
+    if any(Path(marker).exists() for marker in _CONTAINER_MARKER_FILES):
+        return True
+    # Injected into every pod; a host that merely talks to a cluster lacks it.
+    if os.environ.get("KUBERNETES_SERVICE_HOST", "").strip():
+        return True
+    # Empty env so only the on-disk markers (projected pod / baked image) count.
+    if provenance.detect_image({}, probe=True):
         return True
     try:
-        cgroup = Path("/proc/1/cgroup").read_text(encoding="utf-8")
+        cgroup = Path("/proc/1/cgroup").read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return False
-    return any(marker in cgroup for marker in ("docker", "containerd", "kubepods", "libpod"))
+        return True
+    if any(marker in cgroup for marker in _CGROUP_RUNTIME_MARKERS):
+        return True
+    return _pid1_at_cgroup_root(cgroup)
 
 
 def _framework_probe_interpreters(framework: str, benchmark_python: str) -> list[str]:
