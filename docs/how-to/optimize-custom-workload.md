@@ -222,10 +222,10 @@ set +a
 ```
 
 **Sessions.** `USER_DATA_PATH` sets the session root, and each `optimize`
-creates a new timestamped subdirectory under it. Use `--resume` to continue an
-existing session, optionally with `--resume-from <subdir>`; `--force-resume`
-pushes past the terminal-state guard. Without `--resume` you always get a fresh
-session, so an interrupted run is never picked up by accident.
+creates a new timestamped subdirectory under it. Use
+`--resume-from <subdir>` to continue an existing session; `--force-resume`
+pushes past the terminal-state guard. Without `--resume-from` you always get a
+fresh session, so an interrupted run is never picked up by accident.
 
 ## Monitor the run and read the output
 

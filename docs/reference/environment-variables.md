@@ -59,7 +59,7 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `HYPERLOOM_ROOT`                          | No                   | `$HYPER`<br>`LOOM_R`<br>`UNTIME_`<br>`DIR/sou`<br>`rce-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the repo-local cache root (`${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}`), not this path. |
 | `HYPERLOOM`<br>`_CACHE_`<br>`DIR`                          | No                   | `$REPO_ROOT`<br>`/.cache`                      | Writable, repo-local base for auto-cloned open-source deps (TraceLens, Magpie, etc.), cloned per revision as `<name>@<sha>`. Not under `$TMPDIR` so a reaper cannot wipe it mid-run. |
 | `MAGPIE_PATH`                              | No                   | Resolved from installed `Magpie` package unless explicitly set                               | Magpie package root for benchmark wrappers and patch inspection.                                                                                                                                            |
-| `INFERENCE_`<br>`OPTIMIZER`<br>`_MODEL_PATH_ROOTS` | No | Built-in model roots such as `/models` and `/shared_nfs` | `os.pathsep`-separated allowlist for absolute model paths restored from `state.json` during `--resume`. HuggingFace-style repo IDs remain allowed. Set this when production models live outside the built-in roots. |
+| `INFERENCE_`<br>`OPTIMIZER`<br>`_MODEL_PATH_ROOTS` | No | Built-in model roots such as `/models` and `/shared_nfs` | `os.pathsep`-separated allowlist for absolute model paths restored from `state.json` during a resume. HuggingFace-style repo IDs remain allowed. Set this when production models live outside the built-in roots. |
 | `SESSION_DIR`                             | No (robustness-agent)| Scan known paths                                                   | Path containing `storage/coordinator.db`; the robustness FindingSink writes under `{session_`<br>`dir}/ag`<br>`ents/ro`<br>`bustne`<br>`ss/fin`<br>`dings/`<br>`{sess`<br>`ion_id}.jsonl`.                                       |
 | `ROBUSTNESS_SERVER_URL`                   | No (robustness-agent)| Scan known DNS                                                     | M1 primary data source; empty disables the primary path and forces local-only probes.                                                                                                |
 | `WORKSPACE_PATH` *(legacy)*               | No                   | Unset                                                              | Legacy path variable. Still consumed in two narrow spots: the CLI `setdefault`s it to the repo root for the critic subprocess's static assets, and TraceLens uses it as a `USER_DATA_PATH` fallback. Prefer `USER_DATA_PATH`. See [Upgrade Hyperloom version](upgrade.md).                            |
@@ -93,8 +93,7 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
   `--no-explore`, `--no-eval`.
 - **Agent models:** `--claude-model`, `--codex-model`.
-- **Session / resume:** `--resume`, `--resume-from`, `--force-resume`,
-  `--reset-state`.
+- **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
 
 Run `inference_optimizer optimize --help` for the exhaustive flag list.

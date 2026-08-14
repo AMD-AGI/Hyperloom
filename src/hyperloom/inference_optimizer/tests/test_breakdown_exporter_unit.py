@@ -187,7 +187,7 @@ def test_write_minimal_final_json_idempotent(tmp_path):
 
 
 def test_write_minimal_final_json_refreshes_stale_fallback(tmp_path):
-    # A prior crash-safe fallback is stale after --resume and must be
+    # A prior crash-safe fallback is stale after a resume and must be
     # overwritten with the current state, NOT preserved.
     from hyperloom.orchestrator.state.shared_state import SharedState
 

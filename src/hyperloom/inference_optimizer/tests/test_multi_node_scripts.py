@@ -114,7 +114,7 @@ def _kb_env(monkeypatch, tmp_path, **env):
 
 
 def test_resolve_kb_topology_prefers_env_over_state(monkeypatch, tmp_path):
-    """Env is exported before T0 and stable across --resume, so it outranks state."""
+    """Env is exported before T0 and stable across a resume, so it outranks state."""
     _kb_env(monkeypatch, tmp_path, TP="8", EP="4", INFERENCE_OPTIMIZER_NODES="2")
     monkeypatch.setattr(mne, "_read_state", lambda: {"nodes": 2, "tp": 2, "ep": 2})
 

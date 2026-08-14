@@ -150,7 +150,7 @@ that runs **before** `python -m hyperloom.inference_optimizer.cli optimize` is e
 ### IR-1 — GPU MUST be unoccupied before every launch
 
 Before every `python -m hyperloom.inference_optimizer.cli optimize` invocation (fresh start OR
-`--resume`), verify that every visible GPU on this pod has **zero
+`--resume-from`), verify that every visible GPU on this pod has **zero
 foreign serving PIDs and ≲ 500 MiB VRAM in use**. A leftover
 `sglang.launch_server` / `vllm.entrypoints` / `Magpie` from a previous
 run silently degrades the next `baseline` by 5–30 % (shares VRAM +
@@ -174,11 +174,10 @@ Ray head → `kernel_opt` tasks hang; missing `kernel-agent.env.sh` →
 first kernel-opt gateway call returns `401`. `install.sh --check-only` is a
 *diagnostic*, never a substitute.
 
-**Resume carve-out.** `... optimize --resume` may skip install only when
+**Resume carve-out.** `... optimize --resume-from` may skip install only when
 ALL hold: (1) `install.sh` exited 0 earlier in the *same shell*; (2)
-`kernel-agent.env.sh` is still sourced; (3) the session being resumed is
-known (explicit `--resume-from`, `$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`,
-or launch-info JSON) and its `manifest.json` exists under that session dir.
+`kernel-agent.env.sh` is still sourced; (3) `manifest.json` exists under the
+session dir passed to `--resume-from`.
 Any failure → treat as fresh launch and re-run `install.sh`.
 
 > The in-loop equivalent is `_preflight()` steps 1–12 (drift repair, not
@@ -486,7 +485,7 @@ and the operator's stated value is lost:
 | Budget | `--max-hours` | Pass the prompt's time budget. Default `2.0`. |
 | Max model len | `--max-model-len` | Optional; auto-derived from ISL+OSL+headroom when omitted. |
 | External reference GPU | `--compare-against-gpu` | Coordinator *always* hard-gates `target_analysis` to run first so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
-| Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Ignored on `--resume`. |
+| Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Never runs on a resume. |
 | Env pins | `--extra-env NAME=VALUE` | Repeatable; forward **every** one verbatim as its own flag (do not drop any or fold into the `Environment:` block). The CLI serializes them into `$INFERENCE_OPTIMIZER_EXTRA_ENV`; a dropped pin is lost silently — e.g. a missing `SGLANG_USE_AITER=0` leaves the explore aiter-MoE filter blind. |
 
 ### Step 2b — Optional quantization prelude (`--quantize`)
@@ -522,7 +521,7 @@ python3 -m hyperloom.inference_optimizer.cli optimize \
   benchmark configs, display names, and the optimization report carry the stale
   operator-supplied precision label (e.g. `fp8`/`bf16`) and **mislabel** an
   actually-quantized model. Never leave a conflicting precision when quantizing.
-- Behavior: one-shot, **skipped on `--resume`**. On a failed/unusable
+- Behavior: one-shot, **never runs on a resume**. On a failed/unusable
   quantization the run **hard-stops (`SystemExit(3)`)** — it never silently
   optimizes the un-quantized source after an explicit `--quantize`.
   The one exception is a **pre-flight scheme/GPU mismatch** via
@@ -1017,16 +1016,19 @@ exist + no early `stop_reason`.
 
 ## Resume Existing Session
 
-`--resume` auto-picks the latest `$USER_DATA_PATH/<model>/<UTC_ts>/`
-(without `--resume-from`) or an explicit path via `--resume-from`.
+`--resume-from "$SESSION_DIR"` is the only way to resume; there is no
+flag that lets the CLI choose a session for you. Get `$SESSION_DIR` from the
+authoritative sources listed under the **Session rule** above — never by
+walking `$USER_DATA_PATH/<model>/<UTC_ts>/` for the newest dir.
 `$USER_DATA_PATH` must stay at the **workspace root** so
 `runtime/kernel-agent.env.sh` resolves. The CLI refuses to start if
-`manifest.json` or `state.json` is missing in the picked session dir.
+`manifest.json` or `state.json` is missing in that session dir.
 
 Reuse the Launch template above with these diffs: drop `--model`, add
-`--resume`, set `RUN_TAG="resume-$(date +%Y%m%d_%H%M%S)"`. Resume preserves
-baseline, current best, params-search state, event history, and kernel-agent
-artifacts; the CLI clears stale `stop_reason` and `crash_count` before retrying.
+`--resume-from "$SESSION_DIR"`, set `RUN_TAG="resume-$(date +%Y%m%d_%H%M%S)"`.
+Resume preserves baseline, current best, params-search state, event history,
+and kernel-agent artifacts; the CLI clears stale `stop_reason` and
+`crash_count` before retrying.
 
 ## Robustness Monitor for Long Runs
 
@@ -1034,8 +1036,8 @@ For runs > 5 min, start a monitor in its own `setsid nohup` process. It polls
 `state.json` every 5 min, exits without resuming when the session is terminal
 (any `stop_reason` in `STOP_REASON_VOCAB`, `phase=CLOSE`, or
 `reports/final.md` present — including failure sentinels like
-`baseline_failed`), and resumes via `--resume` only when the optimizer dies
-without those markers (unexpected crash).
+`baseline_failed`), and resumes via `--resume-from` only when the optimizer
+dies without those markers (unexpected crash).
 
 ```bash
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
@@ -1229,7 +1231,7 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 - `correctness_passed=false`: do not integrate; the kernel-agent report must contain explicit correctness evidence.
 - `stop_reason=no_more_leverage`: stop and report; only resume if the user changes workload / search space / model / strategy.
 - `stop_reason=policy_loop`: a legacy stop_reason kept in the vocabulary for resuming old sessions; nothing in the runtime sets it. Repeated `policy_denied` for the same (action, rule) pair is advisory only — there is no auto-prune at streak ≥5 and no `policy_loop` stop at streak ≥10. Inspect `SharedState.policy_denial_history` via the `why_denied` tool or the `=== Recent policy denials ===` block, then change something substantive (a new `params.grid` variant, a different `benchmark_script`, or a sibling action family). Do not hand-edit `state.json`.
-- `stop_reason=time_exhausted`: resume same session (`--resume`); do not start fresh.
+- `stop_reason=time_exhausted`: resume same session (`--resume-from`); do not start fresh.
 
 ## Report Back To User
 

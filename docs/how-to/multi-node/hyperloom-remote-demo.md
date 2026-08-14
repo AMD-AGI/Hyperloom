@@ -115,7 +115,7 @@ ${NFS_SHARED_ROOT}/TraceLens-internal/     # TRACELENS_INTERNAL_ROOT (optional)
 
 A session under `$USER_DATA_PATH/<model_basename>/<UTC_timestamp>/` with launcher
 logs and a persisted `state.json` (holds `phase`, `cumulative_gain`,
-`crash_count`, `stop_reason`) for status and `--resume`. `$USER_DATA_PATH` comes
+`crash_count`, `stop_reason`) for status and `--resume-from`. `$USER_DATA_PATH` comes
 from the environment (platform-injected).
 
 ---
