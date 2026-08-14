@@ -1261,3 +1261,66 @@ async def test_cancelled_gate_reverts_the_patch_and_re_raises(tmp_path, monkeypa
         text=True,
     )
     assert stash_list.stdout.strip() == "", "the auto-stash was left on the stack"
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, monkeypatch):
+    """The apply stage stashes and mutates the tree, then awaits, same as the gate.
+
+    Each of its failure verdicts writes a KB record before the stash restore that
+    returns it, and a cancel arrives at whatever await the action happens to be
+    at -- a spent wall-clock budget is what makes it arrive at an arbitrary one.
+    Only the gate was guarded, so this window left the operator's uncommitted
+    work in ``git stash`` for the rest of the session.
+    """
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    scratch = repo / "user_scratch.txt"
+    scratch.write_text("user work in progress\n", encoding="utf-8")
+
+    def _fake_resolve(*args, **kwargs):
+        spec = ip._ArtifactSpec(
+            source=tmp_path / "tuned.json",
+            target=repo / "tuned.json",
+            rel_target="tuned.json",
+            kind="config_json",
+        )
+        return [spec], []
+
+    async def _cancel(self, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(ip, "_resolve_artifact_specs", _fake_resolve)
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_apply_artifacts",
+        lambda self, specs, *, backup_root: ([], [{"artifact": "tuned.json", "error": "disk full"}]),
+    )
+    monkeypatch.setattr(IntegratePatchExecutor, "_maybe_write_framework_kb_record", _cancel)
+
+    ex = IntegratePatchExecutor(session_dir=session)
+    with pytest.raises(asyncio.CancelledError):
+        await ex(
+            _make_ctx(
+                "t",
+                {"specialist_task_id": "spec", "framework_source_root": str(repo)},
+            )
+        )
+
+    assert scratch.read_text(encoding="utf-8") == "user work in progress\n", (
+        "the user's uncommitted work was left in the stash"
+    )
+    stash_list = subprocess.run(
+        ["git", "-C", str(repo), "stash", "list"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert stash_list.stdout.strip() == "", "the auto-stash was left on the stack"
+    assert (repo / "src.py").read_text(encoding="utf-8").endswith("return 1\n"), (
+        "the ungraded candidate was left applied in the framework tree"
+    )

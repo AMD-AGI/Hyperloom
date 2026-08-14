@@ -1676,23 +1676,33 @@ class IntegratePatchExecutor:
         if localize_early is not None:
             return localize_early
 
-        apply_result = await self._stage_apply(ctx, params, extra, specialist_task_id, shared_state, done_payload)
-        if apply_result is not None:
-            return apply_result
-
-        # _stage_apply populates these.
-        output_root: Path = ctx._ip_output_root  # type: ignore[attr-defined]
-        framework_root: Path | None = ctx._ip_framework_root  # type: ignore[attr-defined]
-        stash_state: str = ctx._ip_stash_state  # type: ignore[attr-defined]
-        stash_note: str = ctx._ip_stash_note  # type: ignore[attr-defined]
-        applied: list[Path] = ctx._ip_applied  # type: ignore[attr-defined]
-        applied_artifacts: list[dict[str, Any]] = ctx._ip_applied_artifacts  # type: ignore[attr-defined]
-        config_changes_applied: dict[str, str] = ctx._ip_config_changes_applied  # type: ignore[attr-defined]
-        extra_server_args_applied: str = ctx._ip_extra_server_args_applied  # type: ignore[attr-defined]
-        extra_envs_applied: dict[str, str] = ctx._ip_extra_envs_applied  # type: ignore[attr-defined]
-        setup_result: dict[str, Any] = ctx._ip_setup_result  # type: ignore[attr-defined]
-
+        # The apply and the gate both mutate the framework tree behind the
+        # operator's auto-stash, and both cross awaits while it is on the stack --
+        # the apply stage writes a KB record on each of its failure verdicts. So
+        # the guard spans both: whichever stage was running, the candidate is
+        # taken back out and the stash handed back, and the stop is re-raised
+        # rather than graded. Each stage publishes its tree-mutation bookkeeping
+        # to ``ctx`` as it becomes real, because that is all the handler can see
+        # when the stop arrives mid-stage.
         try:
+            apply_result = await self._stage_apply(
+                ctx, params, extra, specialist_task_id, shared_state, done_payload
+            )
+            if apply_result is not None:
+                return apply_result
+
+            # _stage_apply populates these.
+            output_root: Path = ctx._ip_output_root  # type: ignore[attr-defined]
+            framework_root: Path | None = ctx._ip_framework_root  # type: ignore[attr-defined]
+            stash_state: str = ctx._ip_stash_state  # type: ignore[attr-defined]
+            stash_note: str = ctx._ip_stash_note  # type: ignore[attr-defined]
+            applied: list[Path] = ctx._ip_applied  # type: ignore[attr-defined]
+            applied_artifacts: list[dict[str, Any]] = ctx._ip_applied_artifacts  # type: ignore[attr-defined]
+            config_changes_applied: dict[str, str] = ctx._ip_config_changes_applied  # type: ignore[attr-defined]
+            extra_server_args_applied: str = ctx._ip_extra_server_args_applied  # type: ignore[attr-defined]
+            extra_envs_applied: dict[str, str] = ctx._ip_extra_envs_applied  # type: ignore[attr-defined]
+            setup_result: dict[str, Any] = ctx._ip_setup_result  # type: ignore[attr-defined]
+
             return await self._stage_gate(
                 ctx,
                 params,
@@ -1712,16 +1722,7 @@ class IntegratePatchExecutor:
                 setup_result=setup_result,
             )
         except BaseException:
-            # The gate either returns a verdict or leaves the tree as it found
-            # it; there is no third outcome where the candidate stays applied
-            # with nothing having graded it.
-            self._undo_ungraded_candidate(
-                framework_root=framework_root,
-                stash_state=stash_state,
-                stash_note=stash_note,
-                applied=applied,
-                applied_artifacts=applied_artifacts,
-            )
+            self._undo_ungraded_candidate(ctx)
             raise
 
     # ---------------------------------------------------------------------------
@@ -2395,6 +2396,14 @@ class IntegratePatchExecutor:
         applied_artifacts: list[dict[str, Any]] = []
         apply_errors: list[dict[str, str]] = []
         apply_feedbacks: list[ApplyFeedback] = []
+        # From here on the tree is mutable and the stash is on the stack, so
+        # ``__call__``'s undo has to be able to see both before this stage
+        # returns: ``applied`` is published by identity and appended to in place.
+        ctx._ip_framework_root = framework_root  # type: ignore[attr-defined]
+        ctx._ip_stash_state = stash_state  # type: ignore[attr-defined]
+        ctx._ip_stash_note = stash_note  # type: ignore[attr-defined]
+        ctx._ip_applied = applied  # type: ignore[attr-defined]
+        ctx._ip_applied_artifacts = applied_artifacts  # type: ignore[attr-defined]
         for patch in patch_paths:
             if git_tree:
                 ok, err, fb = _git_apply_collect_feedback(framework_root, patch, three_way=False)
@@ -2450,6 +2459,7 @@ class IntegratePatchExecutor:
                 artifact_specs,
                 backup_root=output_root / "artifact_backups",
             )
+            ctx._ip_applied_artifacts = applied_artifacts  # type: ignore[attr-defined]
             if artifact_apply_errors:
                 self._revert_artifacts(applied_artifacts)
                 reverted = self._revert_patches(framework_root, applied)
@@ -2499,12 +2509,9 @@ class IntegratePatchExecutor:
                 },
             )
 
+        # The tree-mutation values are already published above, as the tree took
+        # them; what is left is what only the gate reads.
         ctx._ip_output_root = output_root  # type: ignore[attr-defined]
-        ctx._ip_framework_root = framework_root  # type: ignore[attr-defined]
-        ctx._ip_stash_state = stash_state  # type: ignore[attr-defined]
-        ctx._ip_stash_note = stash_note  # type: ignore[attr-defined]
-        ctx._ip_applied = applied  # type: ignore[attr-defined]
-        ctx._ip_applied_artifacts = applied_artifacts  # type: ignore[attr-defined]
         ctx._ip_config_changes_applied = config_changes_applied  # type: ignore[attr-defined]
         ctx._ip_extra_server_args_applied = extra_server_args_applied  # type: ignore[attr-defined]
         ctx._ip_extra_envs_applied = extra_envs_applied  # type: ignore[attr-defined]
@@ -3794,24 +3801,17 @@ class IntegratePatchExecutor:
                 exc,
             )
 
-    def _undo_ungraded_candidate(
-        self,
-        *,
-        framework_root: Path | None,
-        stash_state: str,
-        stash_note: str,
-        applied: list[Path],
-        applied_artifacts: list[dict[str, Any]],
-    ) -> None:
-        """Take the candidate back out when the gate unwound instead of returning.
+    def _undo_ungraded_candidate(self, ctx: Any) -> None:
+        """Take the candidate back out when a stage unwound instead of returning.
 
-        Every REVERT the gate itself decides hangs off an ``except Exception``,
-        and the stop that matters most here is not one of those: the dispatcher
-        cancels in-flight actions on shutdown and on a spent wall-clock budget,
-        and ``CancelledError`` derives from ``BaseException``. Unhandled, it
-        leaves the patch in the framework tree and the operator's auto-stash on
-        the stack — and the budget case does not end the process, so CLOSE would
-        report against a tree carrying a patch nothing ever graded.
+        Every REVERT the stages themselves decide hangs off an ``except
+        Exception``, and the stop that matters most here is not one of those: the
+        dispatcher cancels in-flight actions on shutdown and on a spent
+        wall-clock budget, and ``CancelledError`` derives from ``BaseException``.
+        Unhandled, it leaves the patch in the framework tree and the operator's
+        auto-stash on the stack — and the budget case does not end the process,
+        so CLOSE would report against a tree carrying a patch nothing ever
+        graded.
 
         The cancel itself is re-raised by the caller rather than turned into a
         REVERT verdict, so the run records it the way
@@ -3819,17 +3819,25 @@ class IntegratePatchExecutor:
         failed. Every step here is synchronous, so no second cancel can be
         delivered part-way through the undo.
 
+        Read from ``ctx`` rather than from arguments because a stop can arrive
+        mid-stage, before the stage has returned anything to the caller: what the
+        undo owes is exactly what the tree has already been given, and each stage
+        publishes that as it happens. A stage that has not stashed yet leaves
+        ``clean`` behind, which makes the whole undo a no-op.
+
         Args:
-            framework_root: The source root the candidate was applied to.
-            stash_state: The state :func:`_git_stash_if_dirty` returned.
-            stash_note: The auto-stash ref to restore.
-            applied: The patches applied to the tree.
-            applied_artifacts: The artifact records to undo.
+            ctx: The runner context the stages publish their ``_ip_*``
+                tree-mutation bookkeeping onto.
         """
-        self._revert_artifacts(applied_artifacts)
-        self._revert_patches(framework_root, applied)
+        framework_root: Path | None = getattr(ctx, "_ip_framework_root", None)
+        self._revert_artifacts(list(getattr(ctx, "_ip_applied_artifacts", None) or []))
+        self._revert_patches(framework_root, list(getattr(ctx, "_ip_applied", None) or []))
         if framework_root is not None:
-            _restore_stash_logged(framework_root, stash_state, stash_note)
+            _restore_stash_logged(
+                framework_root,
+                str(getattr(ctx, "_ip_stash_state", "") or "clean"),
+                str(getattr(ctx, "_ip_stash_note", "") or ""),
+            )
 
     def _revert_patches(
         self,
