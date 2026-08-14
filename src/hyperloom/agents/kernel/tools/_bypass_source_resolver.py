@@ -178,7 +178,7 @@ def _repo_scan_roots() -> tuple[str, ...]:
     """Discover live sglang/aiter source roots (and aiter csrc) without importing."""
     roots: list[str] = []
     seen: set[str] = set()
-    for pkg in ("sglang", "aiter", "vllm"):
+    for pkg in ("sglang", "aiter"):
         try:
             spec = importlib.util.find_spec(pkg)
         except (ImportError, ValueError, ModuleNotFoundError):
@@ -194,13 +194,14 @@ def _repo_scan_roots() -> tuple[str, ...]:
 
 
 @functools.lru_cache(maxsize=1)
-def _build_repo_kernel_index() -> dict[str, list[str]]:
-    """Map kernel function name -> list of source paths by scanning repo roots.
+def _build_repo_kernel_index() -> dict[str, str]:
+    """Map kernel function name -> source path by scanning repo roots once.
 
-    When a name appears in multiple files, all paths are stored so the caller
-    can rank them (framework match, arch match) rather than refusing outright.
+    A name that resolves to more than one distinct source path is ambiguous and
+    mapped to ``""`` so :func:`resolve_by_kernel_name` refuses it rather than
+    routing a rewrite at an arbitrary first-seen file.
     """
-    index: dict[str, list[str]] = {}
+    index: dict[str, str] = {}
     roots = _repo_scan_roots()
     if not roots:
         return index
@@ -229,9 +230,13 @@ def _build_repo_kernel_index() -> dict[str, list[str]]:
                     continue
                 for match in pattern.finditer(text):
                     name = match.group(1)
-                    paths = index.setdefault(name, [])
-                    if path not in paths:
-                        paths.append(path)
+                    prev = index.get(name)
+                    if prev is None:
+                        index[name] = path
+                    elif prev and prev != path:
+                        # Same kernel name in two files: ambiguous, do not guess.
+                        log.info("repo scan: kernel name %r is ambiguous (%s vs %s)", name, prev, path)
+                        index[name] = ""
     elapsed = time.monotonic() - t0
     log.info(
         "repo scan: indexed %d kernel name(s) from %d root(s) in %.2fs",
@@ -242,60 +247,19 @@ def _build_repo_kernel_index() -> dict[str, list[str]]:
     return index
 
 
-def _rank_repo_match(paths: list[str], framework: str) -> str:
-    """Pick the best path from multiple repo-scan matches.
-
-    Ranking criteria (highest priority first):
-    1. Framework match — path is under the ``framework`` package root.
-    2. Arch match — path contains ``HYPERLOOM_TARGET_ARCH``.
-
-    Falls back to the first path if no criteria distinguish the candidates.
-    """
-    if not paths:
-        return ""
-    if len(paths) == 1:
-        return paths[0]
-    arch = os.environ.get("HYPERLOOM_TARGET_ARCH", "").strip().lower()
-    fw = (framework or "").lower()
-
-    def score(p: str) -> tuple[int, int]:
-        low = p.lower()
-        fw_match = 1 if fw and f"/{fw}/" in low else 0
-        arch_match = 1 if arch and arch in low else 0
-        return (fw_match, arch_match)
-
-    scored = [(score(p), p) for p in paths]
-    scored.sort(key=lambda x: x[0], reverse=True)
-    # Only resolve if the top candidate scores strictly higher than the rest.
-    if scored[0][0] == scored[1][0]:
-        log.info(
-            "repo scan: %d paths tied for kernel name, refusing to guess: %s",
-            len(scored), [s[1] for s in scored],
-        )
-        return ""
-    log.debug(
-        "repo scan: ranked %d paths, picked %s over %s",
-        len(scored), scored[0][1], [s[1] for s in scored[1:]],
-    )
-    return scored[0][1]
-
-
-def resolve_by_kernel_name(device_kernel_name: str, *, framework: str = "") -> tuple[str, str]:
+def resolve_by_kernel_name(device_kernel_name: str) -> tuple[str, str]:
     """Resolve a device kernel name to an editable source via repo scan.
 
-    Demangles the kernel name and looks it up in the repo kernel index.  When
-    multiple files define the same name (e.g. vendored copies across packages),
-    the best match is chosen by framework and arch affinity rather than refusing.
+    Demangles the kernel name and looks it up in the repo kernel index, returning
+    ``(path, "repo_scan")`` on an unambiguous editable on-disk hit, else
+    ``("", "unresolved")`` (an empty index entry marks an ambiguous name).
     """
     if is_truthy(os.environ.get("HYPERLOOM_BYPASS_DISABLE_REPO_SCAN")):
         return "", "unresolved"
     bare = _demangle_kernel_name(device_kernel_name)
     if not bare:
         return "", "unresolved"
-    paths = _build_repo_kernel_index().get(bare)
-    if not paths:
-        return "", "unresolved"
-    path = _rank_repo_match(paths, framework)
+    path = _build_repo_kernel_index().get(bare)
     if path and is_editable_source(path) and _exists(path):
         return path, "repo_scan"
     return "", "unresolved"

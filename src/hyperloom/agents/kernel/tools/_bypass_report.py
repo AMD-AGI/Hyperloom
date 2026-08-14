@@ -474,7 +474,7 @@ def build_candidates(
         # Repo-scan is the last resort, and only for a genuine miss -- never when
         # the finder already returned an authoritative non_patchable verdict.
         if not source_file and kname and source_method != "non_patchable":
-            source_file, method = resolve_by_kernel_name(kname, framework=framework)
+            source_file, method = resolve_by_kernel_name(kname)
             if source_file:
                 source_method = method
 
