@@ -31,6 +31,7 @@ from hyperloom.common.llm_config import (
     has_anthropic_credential,
     provider_model_defaults,
 )
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.platform_probe import probe_cpu_platform
 from hyperloom.common.provenance import detect_gfx_arch
 
@@ -1001,10 +1002,11 @@ def _check_gfx_arch_resolvable(gpu_type: str | None = None) -> None:
     """
     if detect_gfx_arch(os.environ, gpu_type=gpu_type):
         return
+    boards = "/".join(sorted(AMD_GPU_DISPATCH_IDENTITIES))
     print(
         "Preflight: WARNING — GPU architecture could not be resolved; provenance "
         "will record gfx_arch as null, so an archived report will not say which "
-        "ISA produced its numbers. Pass --gpu-type (mi300x/mi308x/mi325x/mi355x), "
+        f"ISA produced its numbers. Pass --gpu-type ({boards}), "
         "set HYPERLOOM_GFX_ARCH, or put rocminfo (/opt/rocm/bin) on PATH."
     )
 

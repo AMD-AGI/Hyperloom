@@ -3,10 +3,10 @@
 
 """The supported-board list must have exactly one definition.
 
-``AMD_GPU_DISPATCH_IDENTITIES`` is that definition. The list was previously
-retyped in four other places, which meant adding a board gave it a dispatch
-identity while the resolver and the CLI still rejected it -- the copies did not
-fail loudly, they just disagreed.
+``AMD_GPU_DISPATCH_IDENTITIES`` is that definition. On ``main`` the list is
+retyped in five other places, which means adding a board there gives it a
+dispatch identity while the resolver, the CLI and the preflight warning still
+name the old set -- the copies do not fail loudly, they just disagree.
 """
 
 from __future__ import annotations
@@ -54,6 +54,23 @@ def test_every_listed_board_actually_resolves():
 
 def test_product_tags_cover_the_same_boards():
     assert set(_PRODUCT_TAGS) == {b.upper() for b in AMD_GPU_DISPATCH_IDENTITIES}
+
+
+def test_the_preflight_warning_names_the_boards_the_cli_accepts(capsys, monkeypatch):
+    """The warning tells the operator what to pass, so it has to stay true.
+
+    A hand-typed list here fails the quiet way the others did: it keeps naming
+    the old boards while ``--gpu-type`` has already moved on, and it is only
+    printed on hosts where nothing resolved, which is where it is least likely
+    to be noticed.
+    """
+    from hyperloom.inference_optimizer.cli import preflight
+
+    monkeypatch.setattr(preflight, "detect_gfx_arch", lambda *a, **k: None)
+    preflight._check_gfx_arch_resolvable(None)
+
+    out = capsys.readouterr().out
+    assert f"--gpu-type ({'/'.join(sorted(AMD_GPU_DISPATCH_IDENTITIES))})" in out
 
 
 def test_a_tag_never_precedes_one_it_is_a_prefix_of():
