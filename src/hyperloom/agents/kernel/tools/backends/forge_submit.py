@@ -484,8 +484,11 @@ def _resolve_fellow(source_type: str, kernel_kind: str) -> str | None:
 
 def _git_toplevel(path: str) -> str:
     """Return the git repo root containing `path`, or '' if not a git repo."""
+    from hyperloom.common.git_safety import safe_directory_args  # noqa: PLC0415 - standalone import-light
+
     try:
-        proc = _run(["git", "-C", str(Path(path).parent), "rev-parse", "--show-toplevel"], timeout=30)
+        args = safe_directory_args(["-C", str(Path(path).parent), "rev-parse", "--show-toplevel"])
+        proc = _run(["git", *args], timeout=30)
         if proc.returncode == 0:
             return proc.stdout.strip()
     except Exception:
