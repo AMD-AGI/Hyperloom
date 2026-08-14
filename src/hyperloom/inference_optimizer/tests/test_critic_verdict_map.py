@@ -947,6 +947,27 @@ def test_a_code_the_colon_does_not_follow_is_not_a_citation(reasoning):
     assert verdict_held_to_its_rule(entry, action_name="specialist") == ("reject", "")
 
 
+@pytest.mark.parametrize(
+    "risks",
+    [
+        pytest.param("the patch does not apply and there is no rollback plan", id="one_sentence_not_a_list"),
+        pytest.param({"severity": "blocker", "summary": "the patch does not apply"}, id="one_risk_not_in_a_list"),
+    ],
+)
+def test_findings_stated_outside_the_shape_that_counts_them_are_not_one_ground(risks):
+    """The hold is confined to a reject naming at most one risk, which means
+    counting the ``risks`` list. A verdict that states its risks in some other
+    shape has stated grounds the count cannot be read off, and reading them as
+    one would hold the whole reject to whichever rule the prose cites."""
+    entry = {
+        "verdict": "reject",
+        "reasoning": f"{QUANTITATIVE_CLAIM_REASON_CODE}: the payload carries predicted_gain_pct.",
+        "risks": risks,
+    }
+
+    assert verdict_held_to_its_rule(entry, action_name="specialist") == ("reject", "")
+
+
 @pytest.mark.asyncio
 async def test_a_held_reject_never_lands_the_patch_it_rejected(coord):
     """The rules the hold enforces are about specialist proposal payloads, and
@@ -1270,25 +1291,60 @@ async def test_the_batchs_declared_advisory_code_does_not_supply_a_variants_cita
 
 
 @pytest.mark.asyncio
-async def test_a_risk_the_batch_states_about_a_sibling_does_not_hold_this_variant(coord):
-    """A batch review lists its findings about every variant in one ``risks``
-    list. Counting a sibling's findings as this variant's grounds decides the
-    hold by how many *other* variants drew a complaint, which switched the
-    feature off for the whole batch path."""
-    pending = _seed_explore_proposal(coord, msg_id="msg-map-siblings", variants=["v_a", "v_b", "v_c"])
+@pytest.mark.parametrize(
+    ("rejected", "risks"),
+    [
+        pytest.param(
+            "v_a",
+            [
+                {"severity": "blocker", "summary": "no variant in this set gives a rollback plan (v_b included)."},
+                {"severity": "blocker", "summary": "none name the active path the flag touches; v_b is typical."},
+            ],
+            id="prose_naming_a_sibling_as_its_example",
+        ),
+        pytest.param(
+            "v_a",
+            [
+                {"severity": "blocker", "summary": "v_a: no rollback plan."},
+                {"severity": "blocker", "summary": "v_a does not name the active path the flag touches."},
+            ],
+            id="prose_naming_the_rejected_variant",
+        ),
+        pytest.param(
+            "v_a",
+            [
+                {"severity": "blocker", "summary": "the second variant gives no rollback plan; nor do the rest."},
+                {"severity": "blocker", "summary": "none name the active path the flag touches."},
+            ],
+            id="prose_naming_no_key_at_all",
+        ),
+        pytest.param(
+            "naïve",
+            [
+                {"severity": "blocker", "summary": "naïve and v_b: neither gives a rollback plan."},
+                {"severity": "blocker", "summary": "neither names the active path the flag touches."},
+            ],
+            id="prose_naming_a_key_no_json_escape_survives",
+        ),
+    ],
+)
+async def test_a_batch_blocker_binds_every_variant_whatever_name_its_prose_carries(coord, rejected, risks):
+    """A batch states its blockers once, in prose written for the whole set,
+    and nothing asks the Critic to file one under a variant's key. Reading a
+    name in that prose as "about that one, not you" removed grounds the Critic
+    stated and dispatched a set it refused; reading it the other way would let
+    the hold turn on a spelling. Neither is read: the batch's grounds hold
+    every variant that states none of its own."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-example", variants=[rejected, "v_b", "v_c"])
     intent = Intent(
         type=IntentType.REVIEW_VERDICT,
         payload={
-            "target_proposal_msg_id": "msg-map-siblings",
-            "risks": [
-                {"severity": "blocker", "summary": "v_b: the patch does not apply to the base checkout."},
-                {"severity": "blocker", "summary": "v_c has no rollback plan."},
-            ],
+            "target_proposal_msg_id": "msg-map-example",
+            "risks": risks,
             "verdict_map": {
-                "v_a": {
+                rejected: {
                     "verdict": "reject",
-                    "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
-                    "rationale": "carries a self-reported gain field; nothing else.",
+                    "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: carries a self-reported gain field.",
                 },
                 "v_b": {"verdict": "needs_review", "rationale": "re-run once the patch applies"},
                 "v_c": {"verdict": "needs_review", "rationale": "no prior on this flag"},
@@ -1297,8 +1353,164 @@ async def test_a_risk_the_batch_states_about_a_sibling_does_not_hold_this_varian
     )
     await coord._handle_review_verdict("critic", intent)
 
-    assert pending.verdict == "advise"
-    assert len(coord._materialise_calls) == 1
+    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+
+
+@pytest.mark.asyncio
+async def test_a_batch_finding_is_not_disowned_by_a_sibling_named_in_a_neighbouring_field(coord):
+    """A finding is a dict of several fields, and only one of them states what
+    the finding *is*. A remediation pointing at how a sibling was fixed, or an
+    evidence request phrased by example, says nothing about who the finding
+    binds."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-fields", variants=["v_a", "v_b"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-fields",
+            "required_evidence": ["a rollback plan of the kind v_b supplies"],
+            "risks": [
+                {
+                    "severity": "blocker",
+                    "summary": "the patch does not apply to the base checkout.",
+                    "required_fix": "rebase it the way v_b was rebased.",
+                },
+            ],
+            "verdict_map": {
+                "v_a": {
+                    "verdict": "reject",
+                    "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: carries a self-reported gain field.",
+                },
+                "v_b": {"verdict": "needs_review", "rationale": "re-run once the patch applies"},
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+
+
+@pytest.mark.asyncio
+async def test_grounds_stated_in_a_shape_the_schema_does_not_use_are_not_read_as_one(coord):
+    """``risks`` is a list in the schema. A verdict that states it as one
+    sentence has stated grounds whose count cannot be read off, and "the patch
+    does not apply and there is no rollback plan" is two of them -- so it
+    cannot be counted as the single ground the hold is confined to."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-scalar", variants=["v_a", "v_b"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-scalar",
+            "risks": "the patch does not apply and there is no rollback plan",
+            "verdict_map": {
+                "v_a": {
+                    "verdict": "reject",
+                    "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: carries a self-reported gain field.",
+                },
+                "v_b": {"verdict": "needs_review", "rationale": "no prior on this flag"},
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+
+
+@pytest.mark.asyncio
+async def test_evidence_the_batch_still_wants_holds_a_variant_resting_on_a_cited_rule(coord):
+    """``required_evidence`` is the stronger of the two inherited findings --
+    one item is a ground where ``risks`` needs two -- and a batch states it in
+    the same place, for variants whose own shape has no slot for it."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-evidence", variants=["v_a", "v_b"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-evidence",
+            "required_evidence": ["a matched benchmark for every variant here"],
+            "verdict_map": {
+                "v_a": {
+                    "verdict": "reject",
+                    "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: carries a self-reported gain field.",
+                },
+                "v_b": {"verdict": "needs_review", "rationale": "no prior on this flag"},
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+
+
+@pytest.mark.asyncio
+async def test_a_variant_that_states_a_finding_of_its_own_still_answers_for_the_batchs(coord):
+    """Filing a risk under a variant's key says that risk is about it; it does
+    not say the blocker the batch filed under no key is about someone else.
+    Letting the entry's own list stand in for the batch's would hand a variant
+    its downgrade back by writing one minor risk next to it."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-both", variants=["v_a", "v_b"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-both",
+            "risks": [{"severity": "blocker", "summary": "nothing here has a rollback plan."}],
+            "verdict_map": {
+                "v_a": {
+                    "verdict": "reject",
+                    "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: carries a self-reported gain field.",
+                    "risks": [{"severity": "minor", "summary": "carries a self-reported gain field."}],
+                },
+                "v_b": {"verdict": "needs_review", "rationale": "no prior on this flag"},
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+
+
+@pytest.mark.asyncio
+async def test_a_variant_stating_no_grounds_does_not_borrow_the_batchs_advisory_citation(coord):
+    """An entry that states nothing but its verdict has cited no rule. The
+    batch's advisory code is the batch's citation, and lending it to that
+    entry would downgrade a reject on grounds nobody wrote down."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-bare", variants=["v_a", "v_b"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-bare",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+            "verdict_map": {
+                "v_a": {"verdict": "reject"},
+                "v_b": {"verdict": "needs_review", "rationale": "no prior on this flag"},
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+
+
+@pytest.mark.asyncio
+async def test_a_batch_code_no_rule_declares_withholds_the_downgrade(coord):
+    """A code the Critic filled in with something no rule defines is not a
+    citation the hold can act on, and it is not permission to dispatch either:
+    it withholds the downgrade, at the cost this reading accepts -- the set
+    keeps the reject it would otherwise have given up."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-junk", variants=["v_a", "v_b"])
+    entry = {
+        "verdict": "reject",
+        "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: carries a self-reported gain field.",
+    }
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-junk",
+            "failure_reason_code": "N/A",
+            "verdict_map": {"v_a": dict(entry), "v_b": dict(entry)},
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
 
 
 @pytest.mark.parametrize(
@@ -1350,23 +1562,35 @@ async def test_a_risk_the_batch_states_about_a_sibling_does_not_hold_this_varian
                 "risks": [{"summary": "v_b has no rollback plan"}, {"summary": "v_c: the patch does not apply"}],
                 "verdict_map": {"v_a": {}, "v_b": {}, "v_c": {}},
             },
-            {"verdict": "reject"},
-            id="findings_about_siblings_only_are_not_this_variants_grounds",
+            {
+                "verdict": "reject",
+                "risks": [{"summary": "v_b has no rollback plan"}, {"summary": "v_c: the patch does not apply"}],
+            },
+            id="a_name_in_a_findings_prose_does_not_take_it_off_this_variants_grounds",
+        ),
+        pytest.param(
+            {"verdict": "reject", "risks": [{"summary": "its own"}]},
+            {"risks": [{"summary": "the batch's"}]},
+            {"verdict": "reject", "risks": [{"summary": "its own"}, {"summary": "the batch's"}]},
+            id="an_entry_stating_its_own_findings_is_held_on_those_and_the_batchs",
         ),
         pytest.param(
             {"verdict": "reject"},
-            {
-                "risks": [{"summary": "v_a and v_b both carry a gain field"}, {"summary": "v_c: no rollback plan"}],
-                "verdict_map": {"v_a": {}, "v_b": {}, "v_c": {}},
-            },
-            {"verdict": "reject", "risks": [{"summary": "v_a and v_b both carry a gain field"}]},
-            id="a_finding_naming_this_variant_binds_it_however_many_others_it_names",
+            {"risks": "stated as one sentence, not a list"},
+            {"verdict": "reject", "risks": "stated as one sentence, not a list"},
+            id="findings_in_an_undocumented_shape_are_inherited_as_stated",
+        ),
+        pytest.param(
+            {"verdict": "reject", "required_evidence": "a matched benchmark"},
+            {"required_evidence": ["a rollback plan"]},
+            {"verdict": "reject", "required_evidence": ["a matched benchmark", ["a rollback plan"]]},
+            id="findings_two_shapes_cannot_be_joined_in_stay_two_statements",
         ),
         pytest.param("reject", {"risks": [{"severity": "blocker"}]}, {}, id="a_non_dict_entry_states_nothing"),
     ],
 )
 def test_the_grounds_an_entry_rests_on_join_its_own_to_the_ones_stated_for_it(entry, payload, expected):
-    assert verdict_map_entry_grounds(entry, payload, variant="v_a") == expected
+    assert verdict_map_entry_grounds(entry, payload) == expected
 
 
 def test_a_map_of_verdicts_none_of_which_decides_asks_for_review():

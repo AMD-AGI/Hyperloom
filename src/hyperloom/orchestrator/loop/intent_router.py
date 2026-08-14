@@ -224,10 +224,10 @@ class IntentRouter:
             # Per entry before the collapse below: a variant rejected on an
             # advisory-only rule must not out-rank its siblings' advice. Each
             # entry is read together with the grounds the payload states for
-            # that variant, which is where a per-variant shape can carry none.
+            # the batch, which is where a per-variant shape can carry none.
             sub_verdicts = [
                 await self._verdict_held_to_its_rule(
-                    verdict_map_entry_grounds(entry, intent.payload, variant=str(name)),
+                    verdict_map_entry_grounds(entry, intent.payload),
                     target=target,
                     action_name=pending.action_name,
                     variant=str(name),

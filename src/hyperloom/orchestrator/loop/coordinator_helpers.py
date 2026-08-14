@@ -656,6 +656,22 @@ def collapse_verdicts(verdicts: Iterable[str]) -> str:
     return "needs_review"
 
 
+def _states_findings(value: Any) -> bool:
+    """Return whether a findings field states anything at all.
+
+    Args:
+        value: A ``risks`` or ``required_evidence`` value: the list the schema
+            documents, or whatever shape a verdict put there instead.
+
+    Returns:
+        True when a list holds at least one non-empty item, or when a value of
+        any other shape is non-empty.
+    """
+    if isinstance(value, (list, tuple)):
+        return any(bool(item) for item in value)
+    return bool(value)
+
+
 def verdict_rests_on_one_ground(entry: dict[str, Any]) -> bool:
     """Return whether ``entry`` refuses for a single reason.
 
@@ -665,6 +681,12 @@ def verdict_rests_on_one_ground(entry: dict[str, Any]) -> bool:
     sentence disappear, so the hold is confined to a reject that names one
     ground and asks for nothing further: at most one risk entry, and no
     outstanding evidence request.
+
+    ``risks`` is a list in the schema. A verdict that states it as one sentence
+    instead has stated grounds whose number cannot be read off — "the patch
+    does not apply and there is no rollback plan" is two — so an unlisted
+    value counts as more than one rather than as the single ground the hold is
+    confined to.
 
     Risk *severity* deliberately plays no part. ``references/risk_rules.md``
     reserves ``blocker`` for evidence and correctness failures and lists no
@@ -679,9 +701,12 @@ def verdict_rests_on_one_ground(entry: dict[str, Any]) -> bool:
         True when the verdict names at most one ground and requests no further
         evidence.
     """
-    if [item for item in (entry.get("required_evidence") or []) if item]:
+    if _states_findings(entry.get("required_evidence")):
         return False
-    return len([risk for risk in (entry.get("risks") or []) if risk]) <= 1
+    risks = entry.get("risks")
+    if not isinstance(risks, (list, tuple)):
+        return not _states_findings(risks)
+    return len([risk for risk in risks if risk]) <= 1
 
 
 # The findings a verdict lists outside its prose: the evidence it still wants
@@ -692,27 +717,40 @@ def verdict_rests_on_one_ground(entry: dict[str, Any]) -> bool:
 _VERDICT_INHERITED_FINDING_KEYS: tuple[str, ...] = ("required_evidence", "risks")
 
 
-def _finding_binds_variant(finding: Any, variant: str, siblings: Iterable[str]) -> bool:
-    """Return whether a batch-level finding is a ground ``variant`` rests on.
+def _joined_findings(own: Any, stated: Any) -> Any:
+    """Return the findings of one key, an entry's own joined to the batch's.
+
+    Attribution says what a finding *is* about, never what it is not: an entry
+    filing risks under its own key has not answered for the ones the batch
+    filed under none, so the two are added rather than one replacing the other.
 
     Args:
-        finding: One ``risks`` or ``required_evidence`` item from the payload.
-        variant: The ``verdict_map`` key being read.
-        siblings: The batch's other ``verdict_map`` keys.
+        own: What the entry states for this key; may be absent or empty.
+        stated: What the payload states for the same key, known non-empty.
 
     Returns:
-        True unless the finding names a sibling and not ``variant`` itself.
+        ``stated`` when the entry states nothing, the two lists joined when
+        both are lists, else the pair -- two statements of findings, which
+        :func:`verdict_rests_on_one_ground` reads as more than one ground.
     """
-    text = finding if isinstance(finding, str) else json.dumps(finding, default=str)
-
-    def names(name: str) -> bool:
-        return bool(name) and re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text) is not None
-
-    return names(variant) or not any(names(sibling) for sibling in siblings)
+    if not _states_findings(own):
+        return stated
+    if isinstance(own, (list, tuple)) and isinstance(stated, (list, tuple)):
+        return [*own, *stated]
+    return [own, stated]
 
 
 def _inheritable_reason_code(payload: dict[str, Any]) -> str:
     """Return the payload's declared code, when it cannot soften a variant's reject.
+
+    Any code outside the advisory set is inherited, including one no rule
+    defines. Restricting this to codes a handed rule declares would inherit
+    nothing at all -- every rule in ``review_constraints`` declares ``advise``
+    (:func:`advisory_only_reason_codes`), so the two sets do not intersect --
+    and would let a batch that declared a hard code have its variants
+    downgraded on the advisory rules their rationales cite. An unrecognised
+    string is not the Critic's permission to dispatch; it withholds the
+    downgrade, which is what the batch's own findings do.
 
     Args:
         payload: The ``review_verdict`` payload.
@@ -725,52 +763,57 @@ def _inheritable_reason_code(payload: dict[str, Any]) -> str:
     return "" if code in advisory_only_reason_codes() else code
 
 
-def verdict_map_entry_grounds(entry: dict[str, Any], payload: dict[str, Any], *, variant: str) -> dict[str, Any]:
+def verdict_map_entry_grounds(entry: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     """Return the grounds one ``verdict_map`` entry rests on.
 
     Reading the entry alone left the hold's safeguards looking for keys the
     per-variant shape has no slot for, so both answered "nothing further
     stated" whatever the Critic wrote: a reject listing blockers and asking for
     evidence was held to a rule its rationale merely mentioned. The payload is
-    where those findings are stated, in the field set the same verdict is
-    serialised from downstream (:func:`serialize_verdict_advisory`).
+    where a batch states those findings, once for every variant it looked at.
 
-    What the batch states can only add to the grounds a variant is held on; it
-    never supplies the grounds a variant is softened on. That is one rule with
-    two faces. A finding binds unless it names a sibling instead
-    (:func:`_finding_binds_variant`) -- a batch lists its findings about every
-    variant in one place, and counting a sibling's blocker would decide this
-    variant's hold by how many *others* drew a complaint. A citation is not
-    inherited at all when it could downgrade: prose because the batch's
-    grounds are not this variant's, and ``failure_reason_code`` for the same
-    reason and more forcefully, since a declared code outranks the entry's own
-    rationale rather than competing with it. A code naming a rule that asked
-    for a reject is still inherited: it withholds the downgrade rather than
-    causing one, and the two mistakes cost different amounts (see
-    :data:`_CITATION_OPENER`).
+    Nothing attributes one of them to one variant. ``verdict_map`` appears in
+    no version of the Critic's output schema, so nothing asks the Critic to
+    spell a variant's key inside its findings, and reading the prose for a name
+    answers the question by guess. The two guesses do not cost the same: a
+    finding bound to a variant it was not about withholds a downgrade, leaving
+    the reject the Critic wrote, while a finding dropped from a variant it was
+    about downgrades a reject stated on grounds and dispatches it. So every
+    batch finding binds every entry, and an entry filing findings of its own
+    adds to them rather than answering for them (:func:`_joined_findings`).
+
+    That is one rule with two faces: what the batch states can add to the
+    grounds a variant is held on, never supply the grounds it is softened on.
+    Prose is not inherited, and neither is a ``failure_reason_code`` naming an
+    advisory rule -- a declared code outranks the entry's own rationale rather
+    than competing with it. A code that can only withhold the downgrade is
+    inherited (:func:`_inheritable_reason_code`), because the two mistakes
+    cost different amounts (see :data:`_CITATION_OPENER`).
+
+    Known limitation: a batch stating two risks, or any required evidence,
+    holds every reject in the set -- including one resting on nothing but an
+    advisory rule, which the hold exists to downgrade. That entry keeps its
+    reject and the set collapses to it, the outcome the feature replaced.
+    Recovering it needs attribution the Critic is asked for, i.e. the batch
+    shape documented in the output schema; guessing it from prose is what this
+    reading gives up.
 
     Args:
         entry: One ``verdict_map`` entry.
         payload: The ``review_verdict`` payload that entry arrived in.
-        variant: The ``verdict_map`` key ``entry`` is filed under.
 
     Returns:
-        The entry's own keys, plus each ground the entry states none of and the
-        payload states for it; ``{}`` when ``entry`` is not a dict.
+        The entry's own keys, with every finding the payload states for the
+        batch added to them; ``{}`` when ``entry`` is not a dict.
     """
     if not isinstance(entry, dict):
         return {}
     grounds = dict(entry)
     if not isinstance(payload, dict):
         return grounds
-    siblings = [str(name) for name in (payload.get("verdict_map") or {}) if str(name) != variant]
-    stated = serialize_verdict_advisory(payload)
     for key in _VERDICT_INHERITED_FINDING_KEYS:
-        if grounds.get(key):
-            continue
-        bound = [item for item in stated.get(key, []) if _finding_binds_variant(item, variant, siblings)]
-        if bound:
-            grounds[key] = bound
+        if _states_findings(payload.get(key)):
+            grounds[key] = _joined_findings(grounds.get(key), payload[key])
     if not grounds.get("failure_reason_code"):
         code = _inheritable_reason_code(payload)
         if code:
