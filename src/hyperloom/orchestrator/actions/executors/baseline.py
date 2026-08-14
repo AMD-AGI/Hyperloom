@@ -37,8 +37,9 @@ from . import _server_lifecycle as _lifecycle
 from ._file_lock import best_effort_file_lock
 from ._aiter_jit import (
     AITER_JIT_PROBE_PATHS,
+    BASELINE_COLD_START_TIMEOUT_SEC,
     COLD_START_KERNEL_THRESHOLD,
-    _resolve_aiter_jit_dir_dynamic,
+    probe_aiter_jit_cache as _probe_aiter_jit_cache,
     sweep_stale_aiter_locks_if_dead,
 )
 from ._grid_runner import (
@@ -320,9 +321,8 @@ def _classify_subprocess_error(
 
 
 BASELINE_DEFAULT_TIMEOUT_SEC = 7800  # WARM-start cap, 130 min
-BASELINE_COLD_START_TIMEOUT_SEC = 9000  # COLD-start cap, 150 min (includes ~20 min cuda graph capture)
-# COLD_START_KERNEL_THRESHOLD and AITER_JIT_PROBE_PATHS live in ``_aiter_jit``;
-# re-exported below for callers/tests that import them from this module.
+# Cold-start settings and probes live in ``_aiter_jit`` and are re-exported
+# above for callers/tests that import them from this module.
 
 
 # Underscore-prefixed aliases re-exported for callers/tests; canonical
@@ -610,71 +610,6 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
         dest,
     )
     return str(dest)
-
-
-def _probe_aiter_jit_cache() -> dict[str, Any]:
-    """Inspect aiter's ``jit/`` dir to decide cold vs warm start.
-
-    Read-only filesystem probe (no subprocess / GPU). Resolution order:
-    env override → dynamic find_spec → legacy AITER_JIT_PROBE_PATHS. First
-    existing dir wins; counts ``.so`` recursively. Any IO error degrades
-    to ``probe_status="error"`` (callers fall back to the WARM timeout).
-
-    Returns:
-        dict[str, Any]: Probe info with keys:
-            path           Path that was probed, or None if nothing found.
-            kernel_count   Number of `.so` files under `path` (recursive).
-            size_mb        Total size of those `.so` files, in MiB (int).
-            is_cold        True iff kernel_count < COLD_START_KERNEL_THRESHOLD;
-                           None when the probe found nothing or failed.
-            probe_status   "found" | "not_found" | "error".
-    """
-    info: dict[str, Any] = {
-        "path": None,
-        "kernel_count": 0,
-        "size_mb": 0,
-        "is_cold": None,
-        "probe_status": "not_found",
-    }
-    candidates: list[str] = []
-    override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
-    if override:
-        candidates.append(override)
-    candidates.extend(_resolve_aiter_jit_dir_dynamic())
-    candidates.extend(AITER_JIT_PROBE_PATHS)
-
-    try:
-        chosen: Path | None = None
-        for raw in candidates:
-            p = Path(raw)
-            if p.exists() and p.is_dir():
-                chosen = p
-                break
-        if chosen is None:
-            return info
-        info["path"] = str(chosen)
-
-        total_bytes = 0
-        kernel_count = 0
-        for so_path in chosen.rglob("*.so"):
-            try:
-                total_bytes += so_path.stat().st_size
-                kernel_count += 1
-            except OSError:
-                continue
-        info["kernel_count"] = kernel_count
-        info["size_mb"] = total_bytes // (1024 * 1024)
-        info["is_cold"] = kernel_count < COLD_START_KERNEL_THRESHOLD
-        info["probe_status"] = "found"
-        return info
-    except Exception as exc:  # noqa: BLE001
-        log.warning(
-            "baseline_executor: aiter jit cache probe failed: %s",
-            exc,
-        )
-        info["probe_status"] = "error"
-        info["is_cold"] = None
-        return info
 
 
 def _git_head_sha(repo_path: str) -> str:
