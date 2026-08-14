@@ -365,11 +365,21 @@ class TestN23ResumePerSession:
         except ValueError:
             pass
 
-    def test_bare_resume_flag_is_rejected(self):
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["optimize", "--resume"],
+            # The command line already-deployed robustness monitor copies send.
+            ["optimize", "--resume", "--resume-from", "/tmp/sess"],
+            ["optimize", "--resume", "--max-hours", "24"],
+        ],
+    )
+    def test_no_session_can_be_resumed_without_naming_it(self, argv):
+        """``--resume`` cannot start a run; it exits instead of choosing a session."""
         from hyperloom.inference_optimizer.cli.parser import _build_parser
 
         with pytest.raises(SystemExit) as exc:
-            _build_parser().parse_args(["optimize", "--resume"])
+            _build_parser().parse_args(argv)
         assert exc.value.code == 2
 
     def test_resume_from_addresses_the_named_session_not_the_newest(self, tmp_path):
