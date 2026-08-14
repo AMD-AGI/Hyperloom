@@ -105,60 +105,6 @@ def _inject_author_gateway_env(agent_backend: str) -> None:
     apply_llm_stability_env(os.environ)
 
 
-def _package_root(source_file: str) -> str:
-    """Install dir above the top package containing ``source_file`` (site-packages).
-
-    Mirrors forge-fusion's export root for a non-git (pip-installed) framework so the
-    patch's package-relative paths apply here. Assumes each package level ships an
-    ``__init__.py`` (true for vLLM/sglang).
-    """
-    if not source_file:
-        return ""
-    d = Path(source_file).resolve().parent
-    while d.parent != d and (d / "__init__.py").is_file():
-        d = d.parent
-    return str(d)
-
-
-def _git_toplevel(path: str) -> str:
-    """Best-effort repo root the patch paths are relative to (for integrate's apply).
-
-    Uses the git work-tree root ONLY when ``path`` is a git-TRACKED file there. A
-    pip-installed framework often lives under a git project's ``.venv`` yet is
-    untracked; returning the project root would make the package-relative patch fail
-    to apply. In that case (and for a plain pip install) use the package root, which
-    matches the root forge-fusion exported the patch against.
-    """
-    if not path:
-        return ""
-    try:
-        parent = str(Path(path).parent)
-        r = subprocess.run(
-            ["git", "-C", parent, "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if r.returncode == 0:
-            toplevel = r.stdout.strip()
-            try:
-                rel = str(Path(path).resolve().relative_to(Path(toplevel).resolve()))
-                tracked = subprocess.run(
-                    ["git", "-C", toplevel, "ls-files", "--error-unmatch", "--", rel],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                if tracked.returncode == 0:
-                    return toplevel
-            except ValueError:
-                pass
-            return _package_root(path) or toplevel
-    except (OSError, subprocess.SubprocessError):
-        return _package_root(path)
-    return _package_root(path)
-
-
 def _load_input_json(path: str) -> dict[str, Any]:
     if not path:
         return {}
@@ -199,10 +145,6 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     # fuse_all_confirmed=false to author only the top recipe.
     if bool(args.get("fuse_all_confirmed", True)):
         cmd.append("--fuse-all-confirmed")
-    if not bool(args.get("author", True)):
-        cmd.append("--no-author")
-    if not bool(args.get("validate", True)):
-        cmd.append("--no-validate")
     if truthy(args.get("verbose", False)):
         cmd.append("--verbose")
     return cmd
@@ -362,9 +304,10 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
             "patch": artifacts.get("patch"),
             # For integrate's patch-apply path.
             "source_file": src_file,
-            # Prefer the root forge-fusion exported the patch against (authoritative,
-            # may be a site-packages dir); fall back to deriving it from src_file.
-            "kernel_repo": str(artifacts.get("repo_root") or "") or (_git_toplevel(src_file) if src_file else ""),
+            # The root the patch was exported against, which may be a
+            # site-packages dir. KernelForge sets it exactly when it sets a
+            # patch, so it is present whenever integrate needs it.
+            "kernel_repo": str(artifacts.get("repo_root") or ""),
             "best_pattern": loop.get("best_pattern"),
             "verdict": m.get("verdict"),
             # A KEPT fusion passed kernel parity + serving smoke; the orchestrator
