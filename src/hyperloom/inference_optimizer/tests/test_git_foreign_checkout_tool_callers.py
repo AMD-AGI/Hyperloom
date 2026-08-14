@@ -137,6 +137,18 @@ def test_the_validated_best_commit_is_exported_from_a_foreign_owned_repo(foreign
 
 
 # ---------------------------------------------------------------------------
+# isolation: its own _run_git, located by cwd rather than -C
+# ---------------------------------------------------------------------------
+def test_isolation_run_git_locates_the_repo_from_cwd(foreign_repo):
+    """``_run_git`` raises on a non-zero exit, so a refusal aborts provisioning.
+
+    It passes ``cwd=`` and never ``-C``, so the executors/_git.py fix could not
+    reach it and the helper has to resolve the repo from the working directory.
+    """
+    isolation._run_git(["git", "status", "--porcelain"], cwd=foreign_repo, timeout_sec=60)
+
+
+# ---------------------------------------------------------------------------
 # Static guards: forge_submit builds ~40 argv across 30 call sites
 # ---------------------------------------------------------------------------
 def _forge_submit_ast() -> tuple[ast.Module, dict[int, str]]:
