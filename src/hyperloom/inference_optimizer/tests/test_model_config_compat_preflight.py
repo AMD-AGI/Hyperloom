@@ -674,19 +674,10 @@ def test_detect_corrupt_config_blocks(tmp_path):
     assert "unparseable" in reason
 
 
-def test_detect_local_model_with_absent_config_blocks(tmp_path):
+def test_detect_absent_config_not_blocked(tmp_path):
     m = tmp_path / "no_config"
     m.mkdir(parents=True, exist_ok=True)
-    reason = cli._detect_incompatible_model_config(str(m))
-    assert reason is not None
-    assert "config.json" in reason
-
-
-def test_detect_uncached_hf_repo_with_absent_config_not_blocked(monkeypatch):
-    monkeypatch.setattr(cli, "resolve_local_model_dir", lambda _model: None)
-    assert cli._detect_incompatible_model_config(
-        "amd/DeepSeek-V4-Pro-MXFP4"
-    ) is None
+    assert cli._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_rope_in_nested_text_config(tmp_path):

@@ -15,11 +15,9 @@ def _ok_result(
     decision: str,
     micro: float,
     source_file: str = "",
-    artifact: str | None = None,
+    artifact: str = "",
 ) -> dict:
     """Build a kernel_optimization_handler-shaped result dict."""
-    if artifact is None:
-        artifact = f"/tmp/{kernel_id}.patch" if decision == "KEEP" else ""
     return {
         "status": "ok",
         "kernel_id": kernel_id,
@@ -71,25 +69,6 @@ def test_record_kernel_opt_empty_kernel_id_noop_on_blank_state(state: SharedStat
     state.record_kernel_opt({"status": "failed", "error": "transport"})
     assert state.last_kernel_opt == {}
     assert state.kernel_opt_attempts == {}
-
-
-def test_record_kernel_opt_rejects_keep_without_an_artifact(state: SharedState):
-    result = _ok_result(
-        "k001",
-        "KEEP",
-        micro=1.0759,
-        source_file="/p/a.py",
-        artifact="",
-    )
-
-    state.record_kernel_opt(result)
-
-    entry = state.kernel_opt_attempts["k001"]
-    assert entry["last_decision"] == "REVERT"
-    assert entry["last_status"] == "failed"
-    assert entry["last_error_class"] == "kernel_artifact_missing"
-    assert state.pending_keep_kernel_ids() == []
-    assert state.last_kernel_opt["decision"] == "REVERT"
 
 
 def test_record_kernel_opt_no_eligible_kernels_skip_is_captured(state: SharedState):

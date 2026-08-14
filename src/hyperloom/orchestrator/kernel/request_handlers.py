@@ -3341,32 +3341,30 @@ async def _run_forge_gemm_tuning(
     workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
     workspace.mkdir(parents=True, exist_ok=True)
 
-    model_path = str(payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
-    if not model_path:
+    raw_model_path = str(
+        payload.get("model_path")
+        or state.model_path
+        or os.environ.get("MODEL_PATH")
+        or ""
+    ).strip()
+    if not raw_model_path:
         return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
-    model_path_obj = Path(model_path).expanduser()
-    is_hf_repo_id = (
-        model_path.count("/") == 1
-        and not model_path.startswith(("/", ".", "\\"))
-        and "\\" not in model_path
+    from hyperloom.inference_optimizer.model_config_utils import (
+        resolve_local_model_dir,
     )
-    if not model_path_obj.is_dir() and is_hf_repo_id:
-        from hyperloom.inference_optimizer.model_config_utils import (
-            resolve_local_model_dir,
-        )
 
-        resolved_model_dir = resolve_local_model_dir(model_path)
-        if resolved_model_dir is None:
-            return {
-                "status": "failed",
-                "error_class": "model_cache_unavailable",
-                "error": (
-                    f"HF model repo {model_path!r} is not available in the "
-                    "shared local cache required by Forge GEMM tuning"
-                ),
-                "backend": "forge",
-            }
-        model_path = str(resolved_model_dir)
+    resolved_model_dir = resolve_local_model_dir(raw_model_path)
+    if resolved_model_dir is None:
+        return {
+            "status": "failed",
+            "error_class": "model_path_unavailable",
+            "error": (
+                f"Model path {raw_model_path!r} is neither an existing local "
+                "directory nor an available Hugging Face cache snapshot"
+            ),
+            "backend": "forge",
+        }
+    model_path = str(resolved_model_dir)
 
     tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
     conc = int(payload.get("conc") or state.conc or os.environ.get("CONC") or 64)
@@ -3485,7 +3483,7 @@ async def _run_forge_gemm_tuning(
             shape_capture.setdefault("workspace", str(workspace))
             shape_capture.setdefault("precision", precision)
             shape_capture.setdefault("framework", framework)
-            shape_capture.setdefault("model_path", model_path)
+            shape_capture.setdefault("model_path", raw_model_path)
             return shape_capture
         tunableop_input = str(shape_capture.get("tunableop_input") or "").strip()
         captured_shapes = str(shape_capture.get("shapes_json") or "").strip()
@@ -3564,7 +3562,7 @@ async def _run_forge_gemm_tuning(
     result.setdefault("precision", precision)
     result.setdefault("framework", framework)
     result.setdefault("tuning_framework", forge_framework)
-    result.setdefault("model_path", model_path)
+    result.setdefault("model_path", raw_model_path)
     if shape_alignment is not None:
         result.setdefault("shape_alignment", shape_alignment)
     if shape_capture is not None:
@@ -3602,7 +3600,9 @@ async def _run_forge_gemm_tuning(
         # repoint the env there, and snapshot it so the KEEP survives with the
         # recipe instead of referencing the ephemeral tuner-workspace path.
         _durable_envs, _snap_dir = _persist_forge_gemm_csv_durably(
-            dict(result["recommended_env"]), model_path=model_path, session_dir=session_dir
+            dict(result["recommended_env"]),
+            model_path=raw_model_path,
+            session_dir=session_dir,
         )
         result.setdefault("extra_envs", _durable_envs)
         if _snap_dir:

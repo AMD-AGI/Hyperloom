@@ -1738,9 +1738,9 @@ def _detect_incompatible_model_config(
     1. diffusers pipeline (skipped for scriptable frameworks) — must run before
        the config-absent short-circuit so a pure Diffusers repo
        (``model_index.json``, no ``config.json``) is still caught.
-    2. ``config.json`` absent in an existing local text-model directory → block
-       early; an unresolved Hub repo id still soft-degrades so the framework can
-       download it. Present-but-unparseable configs also block early.
+    2. ``config.json`` absent → ``None`` (soft-degrade; the upstream submission
+       filter + downstream loader still apply), present-but-unparseable →
+       block early because the framework would crash at config load.
     3-15. the detector registry, each returning a reason or ``None``.
 
     Args:
@@ -1771,11 +1771,6 @@ def _detect_incompatible_model_config(
     # detectors, e.g. missing-tokenizer, would false-positive on a bare dir).
     cfg_path = (resolve_local_model_dir(model_path) or Path(model_path)) / "config.json"
     if not cfg_path.is_file():
-        if Path(model_path).is_dir() and not is_scriptable_fw:
-            return (
-                f"config.json not found in local model directory {model_path}; "
-                "the framework cannot load this text model."
-            )
         return None
     data = _load_model_config_dict(model_path)
     if data is None:
