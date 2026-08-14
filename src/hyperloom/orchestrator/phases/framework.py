@@ -4549,6 +4549,17 @@ class FrameworkPhase(PhaseHandler):
                         return tracked_tid
             except Exception:  # noqa: BLE001 — defensive
                 pass
+        # Do not open a row the dispatcher would cancel on sight. A revalidation
+        # is a full baseline, and the queue scan drops a queued one the session
+        # budget can no longer fit -- which leaves a cancelled row owning this
+        # window's idempotency key, and a row cancelled at dispatch never
+        # produces a result to route, so nothing would advance the generation
+        # past it. Holding the window shut for now costs nothing: it stays open,
+        # and the resume that has budget again enqueues it.
+        denied = self._time_budget_denial_for_action("baseline")
+        if denied is not None:
+            log.info("ENABLEMENT revalidation: window held open, not enqueued -- %s", denied)
+            return ""
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": ENABLEMENT_REVALIDATION_REASON,
@@ -4574,14 +4585,9 @@ class FrameworkPhase(PhaseHandler):
             rt_override = rt_obj.to_runtime_override()
             if rt_override:
                 params["runtime_override"] = rt_override
-        # Use generation in the idempotency key so each revalidation window gets
-        # a fresh row even when a prior window's row is in a terminal state.
-        gen = int(state.enablement.revalidation_generation or 0)
-        task, _existing = await self.tasks.create_or_return_existing(
-            kind="baseline",
-            params=params,
-            idempotency_key=f"enablement_revalidation:gen{gen}",
-        )
+        task = await self._open_revalidation_row(params)
+        if task is None:
+            return ""
         task_id = str(getattr(task, "task_id", "") or "")
         # Persist the task_id so _promote_baseline can verify identity.
         if task_id and task_id != str(state.enablement.revalidation_task_id or ""):
@@ -4591,6 +4597,47 @@ class FrameworkPhase(PhaseHandler):
             except Exception:  # noqa: BLE001 — defensive
                 log.debug("enablement revalidation: save of task_id failed", exc_info=True)
         return task_id
+
+    async def _open_revalidation_row(self, params: dict[str, Any]) -> "Task | None":
+        """Resolve this revalidation window's task row, on a generation it can use.
+
+        The generation is in the idempotency key so each window gets a fresh row
+        even when a prior window's row is in a terminal state. A key that resolves
+        to a terminal row is a spent generation rather than an enqueue, and it has
+        to be recognised as one: a row cancelled at dispatch never produces a
+        result to route, so nothing downstream advances the generation past it,
+        and every later tick would resolve this window to a row that measured
+        nothing.
+
+        Args:
+            params: The baseline params for the revalidation row.
+
+        Returns:
+            The row to track, or ``None`` when this tick found only spent
+            generations -- the window stays open and the next tick tries again.
+        """
+        from ..state.task_registry import TERMINAL_STATES
+
+        state = self.shared_state
+        for _attempt in range(2):
+            gen = int(state.enablement.revalidation_generation or 0)
+            task, _existing = await self.tasks.create_or_return_existing(
+                kind="baseline",
+                params=params,
+                idempotency_key=f"enablement_revalidation:gen{gen}",
+            )
+            if str(getattr(task, "state", "") or "") not in TERMINAL_STATES:
+                return task
+            log.warning(
+                "ENABLEMENT revalidation: gen%d resolves to terminal task %s (%s); "
+                "opening generation %d so the window is not stuck on it",
+                gen,
+                getattr(task, "task_id", ""),
+                getattr(task, "state", ""),
+                gen + 1,
+            )
+            state.enablement.revalidation_generation = gen + 1
+        return None
 
     async def _pump_enablement_safely(self, *, caller: str) -> None:
         """Phase-independent enablement pump — runs every tick.

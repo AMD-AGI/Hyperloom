@@ -296,6 +296,10 @@ def _enqueue_self(**state_kw):
     fake._maybe_enqueue_enablement_baseline_revalidation = types.MethodType(
         Coordinator._maybe_enqueue_enablement_baseline_revalidation, fake
     )
+    fake._open_revalidation_row = types.MethodType(Coordinator._open_revalidation_row, fake)
+    # Admission on the session wall-clock is exercised in test_coordinator_runtime
+    # against a real coordinator; here nothing is ever denied for want of budget.
+    fake._time_budget_denial_for_action = lambda _action: None
     from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
     fake._enablement_in_flight = types.MethodType(FrameworkPhase._enablement_in_flight, fake)

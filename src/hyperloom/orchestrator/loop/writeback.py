@@ -762,6 +762,31 @@ class WritebackCollaborator:
             state.enablement.baseline_eval_evidence = evidence[:4000]
             state.enablement.launch_log = evidence
 
+    def _reopen_revalidation_window(self) -> None:
+        """Leave an enablement revalidation window open for a round the run stopped.
+
+        A round the run stopped measured nothing, so it says nothing about whether
+        the KEEP'd patch still revalidates. The window therefore stays open --
+        only an eval-origin KEEP ever opens one, and closing it here would strand
+        a patch nothing revalidated -- and the stall streak is not charged,
+        because reaching the ``enablement_stalled`` cap on the evidence of a clock
+        is exactly what the baseline failure streak already exempts this round
+        from.
+
+        The generation advances for the same reason opening a window does: the
+        next enqueue's idempotency key must not resolve to the row the run
+        stopped. The tracked id goes with it, since the row it names is spent and
+        the next enqueue records its own.
+
+        Two callers reach the same round by different routes: the writeback, when
+        the reaped row's result is routed, and the resume recovery, when the row
+        was cancelled at dispatch and so produced no result to route at all.
+        """
+        state = self.shared_state
+        state.enablement.revalidation_generation = int(state.enablement.revalidation_generation or 0) + 1
+        state.enablement.revalidation_task_id = ""
+        state.enablement.inflight_task_id = ""
+
     def _record_revalidation_not_promoted(
         self,
         *,
@@ -777,14 +802,8 @@ class WritebackCollaborator:
         toward the ``enablement_stalled`` cap so repeated KEEP-then-fail cycles
         terminate.
 
-        A round the run stopped is none of those things. It measured nothing, so
-        it is no evidence that the KEEP'd patch fails to revalidate, and charging
-        it to the stall streak reaches the cap on the evidence of a clock -- the
-        same round the baseline failure streak deliberately exempts. The window
-        therefore stays open, because only an eval-origin KEEP ever opens one and
-        closing it here would strand a patch nothing revalidated. The generation
-        advances for the same reason opening a window does: the next enqueue's
-        idempotency key must not resolve to the row the run just stopped.
+        A round the run stopped is none of those things; what it gets instead, and
+        why, is :meth:`_reopen_revalidation_window`.
 
         Args:
             task: The revalidation baseline task that came back unpromotable.
@@ -794,11 +813,10 @@ class WritebackCollaborator:
                 round saying anything about the baseline.
         """
         state = self.shared_state
-        state.enablement.revalidation_task_id = ""
         if stopped_by_the_run:
-            state.enablement.revalidation_generation = int(state.enablement.revalidation_generation or 0) + 1
-            state.enablement.inflight_task_id = ""
+            self._reopen_revalidation_window()
         else:
+            state.enablement.revalidation_task_id = ""
             state.enablement.validation_pending = False
             state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
             try:
@@ -4421,8 +4439,9 @@ class WritebackCollaborator:
         # restart, so restore both Recipe and Kernel trees before continuing.
         await self._resume_recover_pending_warm_replay(report)
         # (1d) Orphaned revalidation tasks: if enablement_validation_pending is set
-        # but the tracked revalidation task is already terminal, clear the pending
-        # flag and rearm the stall counter so a fresh revalidation can be enqueued.
+        # but the tracked revalidation task is already terminal, unstick the window
+        # so a fresh revalidation can be enqueued -- closed and charged to the
+        # stall counter, or reopened uncharged when the run cancelled the row.
         await self._resume_recover_pending_revalidation(report)
         # (2) Orphaned KEEPs: replay integrate_patch KEEPs
         # that crashed before the append landed; surface ambiguous ones loudly.
@@ -4873,12 +4892,20 @@ class WritebackCollaborator:
         report["fixes"].append(summary)
 
     async def _resume_recover_pending_revalidation(self, report: dict[str, Any]) -> None:
-        """Clear stale enablement_validation_pending when the tracked revalidation task is terminal.
+        """Unstick enablement_validation_pending when the tracked revalidation task is terminal.
 
         If the coordinator died while a revalidation baseline was running, the
         task row may already be in a terminal state on resume.  Without this
         recovery the pending flag stays set indefinitely and the next
         revalidation cannot be enqueued (tracked_tid is still the old row).
+
+        Which recovery depends on how the row ended, not on this being the resume
+        path. A row the run cancelled -- which is what the queue scan does to a
+        revalidation the wall-clock budget can no longer fit -- measured nothing
+        and produced no result to route, so it is no evidence about the baseline
+        and gets :meth:`_reopen_revalidation_window`, the same verdict the
+        writeback reaches for the same round. Anything else ended having had its
+        chance: the window closes and the round is charged to the stall streak.
         """
         state = self.shared_state
         if not bool(state.enablement.validation_pending):
@@ -4889,25 +4916,38 @@ class WritebackCollaborator:
         try:
             from ..state.task_registry import TERMINAL_STATES, TaskNotFound
 
+            row_state = ""
             try:
                 row = await self.tasks.get(tracked_tid)
-                is_terminal = row.state in TERMINAL_STATES
+                row_state = str(getattr(row, "state", "") or "")
+                is_terminal = row_state in TERMINAL_STATES
             except TaskNotFound:
                 is_terminal = True
-            if is_terminal:
-                state.enablement.validation_pending = False
-                state.enablement.revalidation_task_id = ""
-                state.enablement.stall_streak = (
-                    int(state.enablement.stall_streak or 0) + 1
-                )
-                state.enablement.inflight_task_id = ""
+            if not is_terminal:
+                return
+            if row_state == "cancelled":
+                self._reopen_revalidation_window()
                 report["fixes"].append(
-                    {"kind": "cleared_orphaned_revalidation_pending", "task_id": tracked_tid}
+                    {"kind": "reopened_revalidation_the_run_cancelled", "task_id": tracked_tid}
                 )
                 log.info(
-                    "resume: cleared stale enablement_validation_pending for terminal revalidation task %s",
+                    "resume: revalidation task %s was cancelled by the run; window left open "
+                    "at generation %d without charging the stall streak",
                     tracked_tid,
+                    int(state.enablement.revalidation_generation or 0),
                 )
+                return
+            state.enablement.validation_pending = False
+            state.enablement.revalidation_task_id = ""
+            state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
+            state.enablement.inflight_task_id = ""
+            report["fixes"].append(
+                {"kind": "cleared_orphaned_revalidation_pending", "task_id": tracked_tid}
+            )
+            log.info(
+                "resume: cleared stale enablement_validation_pending for terminal revalidation task %s",
+                tracked_tid,
+            )
         except Exception:  # noqa: BLE001 — best-effort
             log.debug("resume: revalidation pending recovery check failed", exc_info=True)
 
