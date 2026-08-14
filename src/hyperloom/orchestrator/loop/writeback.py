@@ -4249,6 +4249,21 @@ class WritebackCollaborator:
             "fixes": [],
             "warnings": [],
         }
+        active_inferencex = str(
+            getattr(state, "active_inferencex_path", "") or ""
+        ).strip()
+        if active_inferencex:
+            if Path(active_inferencex).is_dir():
+                os.environ["INFERENCEX_PATH"] = active_inferencex
+            else:
+                report["warnings"].append(
+                    {
+                        "kind": "active_inferencex_checkout_missing",
+                        "path": active_inferencex,
+                    }
+                )
+                if hasattr(state, "set_stop_reason"):
+                    state.set_stop_reason("active_inferencex_checkout_missing")
         # (1) Half-applied integrate window: replay the
         # missing stack append or roll back the partial patch BEFORE anything
         # reads the stack, so the rest of the pass sees the recovered truth.
@@ -4578,75 +4593,49 @@ class WritebackCollaborator:
         from ..actions.executors.baseline import _revert_patches
         from ..kernel.request_handlers import _maybe_revert_kernel_patch
 
-        restores = [
-            (
-                "recipe",
-                str(pending.get("recipe_patch_target") or ""),
-                str(pending.get("recipe_patch_pre_sha") or ""),
-                pending.get("recipe_patch_snapshot_manifest"),
-            ),
-            (
-                "canonical",
-                str(pending.get("canonical_patch_target") or ""),
-                str(pending.get("canonical_patch_pre_sha") or ""),
-                pending.get("canonical_patch_snapshot_manifest"),
-            ),
-        ]
         errors: list[str] = []
-        seen_restores: set[tuple[str, str]] = set()
-        for kind, target, pre_sha, manifest in restores:
-            if kind == "canonical" and not (target and manifest):
-                continue
-            if kind == "recipe" and target and not manifest:
+        target = str(pending.get("recipe_patch_target") or "")
+        pre_sha = str(pending.get("recipe_patch_pre_sha") or "")
+        manifest = pending.get("recipe_patch_snapshot_manifest")
+        if target:
+            if not manifest:
                 errors.append("recipe:missing_snapshot_manifest")
-                break
-            manifest_key = (
-                str(manifest.get("manifest_path") or "")
-                if isinstance(manifest, dict)
-                else str(manifest or "")
-            )
-            key = (target, manifest_key)
-            if key in seen_restores:
-                continue
-            seen_restores.add(key)
-            if target and manifest:
+            else:
                 restored = _revert_patches(target, pre_sha, manifest)
                 errors.extend(restored.get("errors") or [])
-                if errors:
-                    break
-        if not errors:
-            kernel_snapshots = pending.get("kernel_snapshots") or []
-            if isinstance(kernel_snapshots, list) and kernel_snapshots:
-                restored = self.phase_prelude._restore_warm_kernel_snapshots(
-                    kernel_snapshots
-                )
-                errors.extend(restored.get("errors") or [])
-            else:
-                kernel_results = pending.get("kernel_apply_results") or []
-                if not isinstance(kernel_results, list):
-                    kernel_results = []
-                for apply_result in reversed(kernel_results):
-                    if not isinstance(apply_result, dict):
-                        continue
-                    try:
-                        reverted = _maybe_revert_kernel_patch(apply_result)
-                        if reverted.get("status") != "ok":
-                            raise RuntimeError(
-                                str(
-                                    reverted.get("error")
-                                    or reverted.get("reason")
-                                    or (
-                                        "kernel revert status="
-                                        f"{reverted.get('status')}"
-                                    )
+
+        kernel_snapshots = pending.get("kernel_snapshots") or []
+        if isinstance(kernel_snapshots, list) and kernel_snapshots:
+            restored = self.phase_prelude._restore_warm_kernel_snapshots(
+                kernel_snapshots
+            )
+            errors.extend(restored.get("errors") or [])
+        else:
+            kernel_results = pending.get("kernel_apply_results") or []
+            if not isinstance(kernel_results, list):
+                kernel_results = []
+            for apply_result in reversed(kernel_results):
+                if not isinstance(apply_result, dict):
+                    continue
+                try:
+                    reverted = _maybe_revert_kernel_patch(apply_result)
+                    if reverted.get("status") != "ok":
+                        raise RuntimeError(
+                            str(
+                                reverted.get("error")
+                                or reverted.get("reason")
+                                or (
+                                    "kernel revert status="
+                                    f"{reverted.get('status')}"
                                 )
                             )
-                    except Exception as exc:  # noqa: BLE001
-                        errors.append(
-                            "kernel:"
-                            f"{apply_result.get('manifest_path')}:"
-                            f"{type(exc).__name__}:{exc}"
                         )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        "kernel:"
+                        f"{apply_result.get('manifest_path')}:"
+                        f"{type(exc).__name__}:{exc}"
+                    )
         if errors:
             state.warm_replay_pending = {
                 **dict(pending),
@@ -4660,6 +4649,8 @@ class WritebackCollaborator:
                     "errors": errors,
                 }
             )
+            if hasattr(state, "set_stop_reason"):
+                state.set_stop_reason("warm_replay_rollback_failed")
             state.save(self.session_dir)
             return
         state.warm_replay_pending = {}

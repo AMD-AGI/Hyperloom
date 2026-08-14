@@ -539,8 +539,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Structured warm-replay outcome for reports/prompts (status reproduced|drift|failed|skipped, etc.).
     warm_replay_outcome: dict = field(default_factory=dict)
     # Crash-safe rollback/bookkeeping state for the combined Recipe + Kernel
-    # PRELUDE validation. Cleared only after KEEP/REVERT/fallback settles.
+    # PRELUDE validation. Cleared only after KEEP/REVERT settles.
     warm_replay_pending: dict = field(default_factory=dict)
+    # Session-authoritative InferenceX checkout. A successful isolated warm
+    # replay promotes its already-patched checkout here without re-applying.
+    active_inferencex_path: str = ""
     # Durable post-save handoffs for section KB staging. Rows are removed only
     # after the idempotent draft write succeeds.
     kb_stage_outbox: list = field(default_factory=list)

@@ -8,6 +8,7 @@ reset, and lifecycle teardown (stop / Recipe KB T4 safety net)."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -60,7 +61,7 @@ def test_delegated_missing_attr_raises_attribute_error_not_recursion(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_resume_rolls_back_local_canonical_and_kernel(
+async def test_resume_rolls_back_recipe_checkout_and_kernel(
     coord: Coordinator,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -90,54 +91,16 @@ async def test_resume_rolls_back_local_canonical_and_kernel(
         "recipe_patch_target": "/mirror",
         "recipe_patch_pre_sha": "mirror-sha",
         "recipe_patch_snapshot_manifest": {"manifest_path": "/mirror.json"},
-        "canonical_patch_target": "/canonical",
-        "canonical_patch_pre_sha": "canonical-sha",
-        "canonical_patch_snapshot_manifest": {
-            "manifest_path": "/canonical.json"
-        },
         "kernel_apply_results": [{"manifest_path": "/tmp/m"}],
     }
     report = {"fixes": [], "warnings": []}
 
     await coord.writeback._resume_recover_pending_warm_replay(report)
 
-    assert set(restores) == {
-        ("/mirror", "mirror-sha"),
-        ("/canonical", "canonical-sha"),
-    }
+    assert restores == [("/mirror", "mirror-sha")]
     assert kernel_restores == [{"manifest_path": "/tmp/m"}]
     assert coord.shared_state.warm_replay_pending == {}
     assert report["fixes"][0]["kind"] == "recovered_pending_warm_replay"
-
-
-@pytest.mark.asyncio
-async def test_resume_ignores_unarmed_canonical_target_without_manifest(
-    coord: Coordinator,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    restores: list[tuple[str, str]] = []
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
-
-    monkeypatch.setattr(
-        baseline_module,
-        "_revert_patches",
-        lambda target, sha, manifest=None: (
-            restores.append((target, sha))
-            or {"ok": True, "errors": []}
-        ),
-    )
-    coord.shared_state.warm_replay_pending = {
-        "task_id": "warm-unarmed",
-        "canonical_patch_target": "/canonical",
-        "canonical_patch_pre_sha": "sha",
-    }
-    report = {"fixes": [], "warnings": []}
-
-    await coord.writeback._resume_recover_pending_warm_replay(report)
-
-    assert restores == []
-    assert coord.shared_state.warm_replay_pending == {}
-    assert report["warnings"] == []
 
 
 @pytest.mark.asyncio
@@ -169,7 +132,8 @@ async def test_resume_retains_pending_recipe_target_without_manifest(
     ]
     assert report["warnings"][0]["kind"] == "resume_warm_rollback_failed"
     assert report["fixes"] == []
-    assert kernel_restores == []
+    assert kernel_restores == [{"manifest_path": "/tmp/kernel"}]
+    assert coord.shared_state.stop_reason == "warm_replay_rollback_failed"
 
 
 @pytest.mark.asyncio
@@ -315,6 +279,23 @@ async def test_resume_consistency_marks_unvalidated_and_rebuilds_current_best(co
     assert coord.shared_state.current_best["extra_envs"] == {"A": "1", "B": "2"}
     assert "rebuilt_current_best_config_from_stack" in report["fixes"]
     assert any(isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
+
+
+@pytest.mark.asyncio
+async def test_resume_restores_promoted_inferencex_checkout(
+    coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    active = tmp_path / "active-inferencex"
+    active.mkdir()
+    coord._resumed_from["is_resume"] = True
+    coord.shared_state.active_inferencex_path = str(active)
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+
+    await coord._resume_consistency_pass()
+
+    assert os.environ["INFERENCEX_PATH"] == str(active)
 
 
 @pytest.mark.asyncio
