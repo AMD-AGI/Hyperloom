@@ -743,7 +743,7 @@ def materialize_config_with_envs(
         extra_envs: Overrides applied last over any computed env values.
         remove_args: Inherited framework server args to remove before launch.
         unset_envs: Inherited env names to remove before applying
-            ``extra_envs``.
+            ``extra_envs``; workload pins are refused.
         args_mode: ``"append"`` (default) or ``"replace"`` for
             ``extra_server_args``.
         model_path: Model path/id; overrides ``benchmark.model`` when set.
@@ -1503,8 +1503,7 @@ def materialize_config_with_envs(
     if remove_list:
         envs[framework_env] = remove_server_args(envs.get(framework_env, ""), remove_list)
     for key in unset_list:
-        # Unsetting a workload pin retargets the benchmark instead of toggling a
-        # knob, so the same names that may not be set may not be removed either.
+        # Unsetting a pin retargets the benchmark rather than toggling a knob.
         if str(key).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
             log.warning("Refusing to unset pinned benchmark env %s", key)
             continue
@@ -1547,8 +1546,7 @@ def materialize_config_with_envs(
             # _finalize_framework_server_args already ran, so re-apply the sink-side
             # guard it ends with rather than shipping an unvalidated string.
             envs[framework_env] = validate_server_args_shell_safe(merged)
-    # The rendered YAML is persisted, so credentials must not reach it. Workload
-    # pins and path knobs written above stay untouched.
+    # The rendered YAML is persisted, so credentials must not reach it.
     filtered_envs, dropped_credentials = filter_untrusted_env_mapping(
         envs,
         allow_predicate=lambda key: key not in BENCHMARK_SECRET_ENV_NAMES,

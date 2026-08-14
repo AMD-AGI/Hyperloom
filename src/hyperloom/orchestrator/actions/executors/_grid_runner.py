@@ -585,7 +585,8 @@ def _build_variant_yaml(
     Args:
         base_yaml_path (Path): Path to the base Magpie YAML to template from.
         base_extra_args (str): Server args merged ahead of the variant's args.
-        variant (GridVariant): The variant whose flags/envs are applied.
+        variant (GridVariant): The variant whose flags/envs are applied; its
+            ``unset_envs`` may not remove a workload pin.
         output_subdir (Path): Directory the per-variant ``config.yaml`` is
             written into.
         model_path (str | None): Overrides ``benchmark.model`` when set.
@@ -636,8 +637,7 @@ def _build_variant_yaml(
     elif extra_args_env in envs:
         envs.pop(extra_args_env, None)
     for k in getattr(variant, "unset_envs", []) or []:
-        # Unsetting a workload pin retargets the benchmark instead of toggling a
-        # knob, so the same names that may not be set may not be removed either.
+        # Unsetting a pin retargets the benchmark rather than toggling a knob.
         if str(k).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
             log.warning("grid: refusing to unset pinned env %s for variant %s", k, variant.name)
             continue

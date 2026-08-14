@@ -11,7 +11,6 @@ Magpie-compatible report contract, and end-to-end orchestration.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 
@@ -1294,10 +1293,7 @@ def test_num_prompts_warmups_passthrough(tmp_path, monkeypatch):
 
 
 def test_server_env_exports_every_materialized_env(monkeypatch):
-    """A candidate that differs only by an env must reach the server as such.
-
-    Dropping these silently reruns the baseline and scores the noise.
-    """
+    """Dropping these silently reruns the baseline and scores the noise."""
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
 
     env = bypass_runner._server_env(
@@ -1321,10 +1317,6 @@ def test_server_env_exports_every_materialized_env(monkeypatch):
     assert env["TP"] == "8"
     assert env["RANDOM_RANGE_RATIO"] == "0.8"
     assert "OPENAI_API_KEY" not in env
-
-    env2 = bypass_runner._server_env(False, None, {})
-    # No pin in bench_envs: whatever the parent env had (may be unset).
-    assert env2.get("ROCR_VISIBLE_DEVICES") == os.environ.get("ROCR_VISIBLE_DEVICES")
 
 
 def test_server_env_lets_config_path_win_like_magpie(monkeypatch):

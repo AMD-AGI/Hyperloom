@@ -258,10 +258,8 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
     )
 )
 
-# Env names a per-variant override may never set: shell/loader hijacks plus the
-# control-plane credentials a benchmark subprocess has no use for. Workload pins
-# (TP/CONC/ISL/...) stay allowed because the sweep and shape-capture grids set
-# them from code.
+# Env names a per-variant override may never set. Workload pins stay allowed:
+# the sweep and shape-capture grids set them from code.
 BLOCKED_VARIANT_ENV_NAMES: frozenset[str] = BLOCKED_UNTRUSTED_ENV_NAMES | BENCHMARK_SECRET_ENV_NAMES
 
 # Credential-shaped name fragments, so an unlisted secret cannot be persisted
@@ -370,10 +368,9 @@ def scrub_benchmark_process_env(env: dict[str, str]) -> dict[str, str]:
 
 
 def build_benchmark_env(*layers: Mapping[str, object] | None) -> dict[str, str]:
-    """Build a benchmark subprocess env: parent env under each layer, in order.
+    """Build a benchmark subprocess env: parent env under each layer, later winning.
 
-    Later layers win. Keys are upper-cased and values stringified, because the
-    materialized YAML carries them as plain scalars (``TP: 1``).
+    Keys are upper-cased and values stringified for the YAML's plain scalars.
     """
     env = os.environ.copy()
     for layer in layers:

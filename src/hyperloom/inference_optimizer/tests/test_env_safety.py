@@ -167,7 +167,6 @@ def test_build_benchmark_env_layers_over_parent_and_normalizes(monkeypatch):
 
     assert env["INHERITED_KNOB"] == "from-parent"
     assert env["SGLANG_USE_AITER"] == "1"
-    # Later layers win, and YAML scalars are stringified for putenv.
     assert env["TP"] == "4"
     assert env["RANDOM_RANGE_RATIO"] == "0.8"
     # Env names are conventionally upper case; a lower-case key would be inert.

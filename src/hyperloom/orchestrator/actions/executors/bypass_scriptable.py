@@ -97,8 +97,7 @@ def build_scriptable_env(
     Returns:
         The environment mapping for the scriptable subprocess.
     """
-    # Defaults sit under the YAML envs so a config can override them; the
-    # run-scoped values sit above so a stale config cannot redirect the run.
+    # Defaults are overridable by the YAML envs; run-scoped values are not.
     defaults: dict[str, str] = {"MODEL": str(bench.get("model") or os.environ.get("MODEL", ""))}
     if bench.get("precision"):
         defaults["PRECISION"] = str(bench["precision"])

@@ -839,17 +839,14 @@ def _server_env(
 ) -> dict[str, str]:
     """Build the server subprocess env from the materialized benchmark envs.
 
-    Magpie exports the whole ``benchmark.envs`` mapping to the server, so a
-    candidate that differs from the baseline only by an env is only a real
-    experiment if bypass does the same.
+    The whole mapping is exported, so an env-only candidate is a real experiment
+    rather than a rerun of the baseline.
     """
-    profiler_dirs: dict[str, str] = {}
-    if profile and profile_dir:
-        profiler_dirs = {
-            "VLLM_TORCH_PROFILER_DIR": profile_dir,
-            "SGLANG_TORCH_PROFILER_DIR": profile_dir,
-            "ATOM_TORCH_PROFILER_DIR": profile_dir,
-        }
+    profiler_dirs = (
+        dict.fromkeys(("VLLM_TORCH_PROFILER_DIR", "SGLANG_TORCH_PROFILER_DIR", "ATOM_TORCH_PROFILER_DIR"), profile_dir)
+        if profile and profile_dir
+        else None
+    )
     return build_benchmark_env(bench_envs, profiler_dirs)
 
 

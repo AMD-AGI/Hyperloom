@@ -80,8 +80,8 @@ class GridVariant:
         name (str): Human-readable label for the variant.
         extra_server_args (str): Backend server args appended via
             ``EXTRA_{SGLANG,VLLM,ATOM}_ARGS``. Defaults to ``""``.
-        extra_envs (dict[str, str]): Per-variant environment overrides.
-            Defaults to an empty dict.
+        extra_envs (dict[str, str]): Per-variant environment overrides, minus
+            any name in ``BLOCKED_VARIANT_ENV_NAMES``. Defaults to an empty dict.
         remove_args (list[str]): Base/server flags to remove before appending
             this variant's args. Defaults to ``[]``.
         unset_envs (list[str]): Inherited environment keys to remove before
@@ -119,7 +119,7 @@ class GridVariant:
         Args:
             name: Variant name.
             extra_server_args: Extra server CLI args for this variant.
-            extra_envs: Extra environment variables for this variant.
+            extra_envs: Extra environment variables; unsafe names are dropped.
             note: Optional reason/category note.
             remove_args: Base/server args to remove before appending this
                 variant's args.
@@ -133,8 +133,8 @@ class GridVariant:
             extra_envs,
             allow_predicate=is_allowed_variant_env_key,
         )
-        for dropped in dropped_envs:
-            log.warning("Dropping unsafe extra_envs key %s from variant %s", dropped, name)
+        if dropped_envs:
+            log.warning("Variant %s: dropping unsafe extra_envs %s", name, ", ".join(sorted(dropped_envs)))
         self.remove_args = to_str_list(remove_args)
         self.unset_envs = to_str_list(unset_envs)
         mode = str(args_mode or "append").strip().lower()
