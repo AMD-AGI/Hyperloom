@@ -40,6 +40,16 @@ Hyperloom combines:
   guided by a curated knowledge base of hardware learnings, pitfalls, and
   prior campaign artifacts.
 
+## Supported Features
+
+| Feature | Options |
+|------|-------|
+| Workload | Inference |
+| Platform | MI300X, MI325X, MI355X |
+| Framework | vLLM, SGLang |
+| Kernel Language | HIP, Triton, FlyDSL |
+| Backend | Claude |
+
 ## Get Started
 
 | Goal | Guide |
