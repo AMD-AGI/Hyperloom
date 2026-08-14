@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
+import subprocess
 import sys
 
 import pytest
@@ -204,7 +206,7 @@ def test_the_install_mode_flag_does_not_gate_the_probe(isolated_vllm, monkeypatc
     assert probed[0] == isolated_vllm
 
 
-def test_no_other_framework_probes_the_vllm_venv(isolated_vllm, monkeypatch):
+def test_no_other_framework_probes_the_vllm_venv(isolated_vllm):
     """That venv holds vLLM only, so sglang has no business being looked for there."""
     probed = preflight._framework_probe_interpreters("sglang", "/usr/bin/python3")
 
@@ -306,7 +308,7 @@ def test_isolated_venv_rocm_build_beats_a_stray_cuda_wheel(isolated_vllm, monkey
     assert isolated_vllm in capsys.readouterr().out
 
 
-def test_isolated_venv_is_probed_before_the_benchmark_interpreter(isolated_vllm, monkeypatch, capsys):
+def test_isolated_venv_is_probed_before_the_benchmark_interpreter(isolated_vllm, monkeypatch):
     """Mirror install_baremetal.sh, which switches the probe to the venv."""
     calls = _probe_per_interpreter(monkeypatch, {isolated_vllm: (True, True)})
 
@@ -369,27 +371,41 @@ def test_probe_rocm_build_reports_tri_state(monkeypatch):
         assert preflight._probe_rocm_build("vllm", "/usr/bin/python3").verdict is None
 
 
-def test_the_real_probe_agrees_with_this_host(monkeypatch):
+def _host_rocm_verdict() -> bool | None:
+    """What this host says about its own torch, resolved out of process.
+
+    Importing torch in the pytest process would put a broken ROCm stack in the
+    session itself, where a signal death on ``import torch`` takes the whole run
+    with it -- the product spawns the probe for exactly that reason. Written
+    independently of the production script so the two can disagree: no output at
+    all, from any cause, reads as "cannot say", which is its rc-3 semantics.
+    """
+    script = (
+        "import json, sys\n"
+        "try:\n"
+        "    import torch\n"
+        "except BaseException:\n"
+        "    print('null'); sys.exit(0)\n"
+        "print(json.dumps(bool(getattr(torch.version, 'hip', None))))\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=120)
+    answer = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not answer:
+        return None
+    return json.loads(answer)
+
+
+def test_the_real_probe_agrees_with_this_host():
     """Runs the probe for real, and derives the expectation from the host.
 
-    The stubbed tri-state test covers the return codes; this one covers the
-    subprocess path itself -- a real interpreter running the real script, which
-    is where "absent torch" was once mistaken for a CUDA wheel. Asserting a
-    fixed verdict instead would only hold where torch happens to be missing,
-    passing on a CI runner and failing on every ROCm host the product targets.
+    The stubbed tri-state test covers the return codes but never spawns an
+    interpreter, and the subprocess path is where absent torch was once read as
+    a CUDA wheel. A fixed verdict here would only hold where torch happens to be
+    missing: green on a CI runner, red on every ROCm host the product targets.
     """
-    import importlib.util
-
-    if importlib.util.find_spec("torch") is None:
-        expected = None  # nothing to read a platform off
-    else:
-        import torch
-
-        expected = True if getattr(torch.version, "hip", None) else False
-
     probe = preflight._probe_rocm_build("sglang", sys.executable)
 
-    assert probe.verdict is expected
+    assert probe.verdict is _host_rocm_verdict()
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +439,7 @@ def test_inconclusive_warning_surfaces_the_probe_stderr_tail(monkeypatch, capsys
     assert "noise-0" not in out
 
 
-def test_probe_stderr_tail_is_bounded(monkeypatch):
+def test_probe_stderr_tail_is_bounded():
     """A ROCm import traceback can be enormous; the warning must stay readable."""
     tail = preflight._probe_stderr_tail("\n".join(f"line-{i} " + "x" * 400 for i in range(500)))
 
@@ -500,7 +516,7 @@ def _timing_out_probe(monkeypatch, *, importable: bool) -> list[float]:
 
 
 @pytest.mark.parametrize("importable", [False, True])
-def test_a_probe_timeout_stops_the_interpreter_scan(isolated_vllm, monkeypatch, capsys, importable):
+def test_a_probe_timeout_stops_the_interpreter_scan(monkeypatch, capsys, importable):
     """Paying a timeout per candidate turned preflight into a 12-minute wait.
 
     A host slow enough to blow one budget will blow the next two as well, and a

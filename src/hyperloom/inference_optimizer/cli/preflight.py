@@ -809,30 +809,37 @@ def _probe_rocm_build(framework: str, python_exe: str) -> _Probe:
     not ``adapters.verify_torch_is_rocm``: it collapses inconclusive into
     ``False``, which cannot drive a hard gate, and its timeout is 30 minutes.
     """
-    # rc 3 == torch absent: that is "cannot answer", not "wrong build", so it must
-    # not be reported as a CUDA wheel.
+    # rc 1 means only "definitely not ROCm", so nothing else may produce it --
+    # Python exits 1 on any uncaught exception, and find_spec found the package
+    # without importing it, so "spec present but import explodes" is a normal
+    # path, not a corner. Every failure becomes rc 3, "cannot answer".
     probe = [
         "import sys",
-        "try:",
+        "def verdict():",
         "    import torch",
-        "except Exception:",
-        "    sys.exit(3)",
-        "hip = getattr(torch.version, 'hip', None)",
-        "if not hip:",
-        "    sys.exit(1)",
+        "    if not getattr(torch.version, 'hip', None):",
+        "        return 1",
     ]
     if framework == "vllm":
         # vLLM carries its own platform verdict, so a ROCm torch beside a CUDA
         # vLLM is still caught.
         probe += [
-            "import vllm",
-            "from vllm.platforms import current_platform",
-            "ck = getattr(current_platform, 'is_rocm', None)",
-            "ok = bool(ck()) if callable(ck) else 'rocm' in f'{current_platform!r}'.lower()",
-            "sys.exit(0 if ok else 1)",
+            "    import vllm",
+            "    from vllm.platforms import current_platform",
+            "    ck = getattr(current_platform, 'is_rocm', None)",
+            "    ok = bool(ck()) if callable(ck) else 'rocm' in f'{current_platform!r}'.lower()",
+            "    return 0 if ok else 1",
         ]
     else:
-        probe.append("sys.exit(0)")
+        probe.append("    return 0")
+    probe += [
+        "try:",
+        "    code = verdict()",
+        "except BaseException:",
+        "    import traceback; traceback.print_exc()",
+        "    code = 3",
+        "sys.exit(code)",
+    ]
     timeout = _VLLM_ROCM_PROBE_TIMEOUT_SEC if framework == "vllm" else _ROCM_PROBE_TIMEOUT_SEC
     try:
         proc = subprocess.run(
@@ -980,7 +987,8 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
 
     if found:
         print(
-            f"\nERROR: {framework} is importable ({found}) but {evidence} says it is NOT a ROCm build.\n\n"
+            f"\nERROR: {framework} is importable ({found}) but {evidence} says it is NOT a ROCm build."
+            f"{_probe_detail_block(probe.detail)}\n\n"
             "The wheels on PyPI are the CUDA build: they import fine and then fail\n"
             "at GPU init. Reinstall the ROCm stack:\n"
             f"    {_setup_install_command(framework)}\n\n"
