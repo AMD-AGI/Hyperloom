@@ -663,6 +663,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "pending_escalate_hint",
         "last_consumed_escalate_hint",
         "last_consumed_escalate_hint_ts",
+        "last_discarded_escalate_hint",
+        "last_discarded_escalate_hint_ts",
         "plateau_overrides",
         # CLOSE-phase sequencer flag; LLM must not toggle it.
         "close_sequence_done",
@@ -2399,6 +2401,14 @@ class PolicyGate:
             key = path_keys[-1] if path_keys else ""
             if key in SOURCE_LIKE_FIELDS:
                 if node.strip().lower() in _SOURCE_FILE_ABSENT_SENTINELS:
+                    log.info(
+                        "role=%r %s payload field %r=%r is an absent-value "
+                        "sentinel; treating as omitted and admitting the delegate",
+                        role.name,
+                        intent_type.value,
+                        key,
+                        node,
+                    )
                     return
                 if any(
                     self._path_in_source_allowlist(c) or self._path_under_session(c)
