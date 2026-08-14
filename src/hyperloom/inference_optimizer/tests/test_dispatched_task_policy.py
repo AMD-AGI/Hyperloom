@@ -21,6 +21,51 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
 
+def _warm_replay_dispatch_params(
+    session_dir: Path,
+    framework_root: Path,
+    *,
+    patch_target: str = "vllm/v1/attention/ops/prefix_prefill.py",
+    patch_path: Path | None = None,
+) -> tuple[dict, Path, Path]:
+    target = framework_root / "vllm/v1/attention/ops/prefix_prefill.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("original\n", encoding="utf-8")
+    if patch_path is None:
+        patch_path = (
+            session_dir
+            / "runtime/remote_recipe/files/kernel/rewrite/patches/warm.patch"
+        )
+    patch_path.parent.mkdir(parents=True, exist_ok=True)
+    patch_path.write_text(
+        "\n".join(
+            [
+                f"diff --git a/{patch_target} b/{patch_target}",
+                f"--- a/{patch_target}",
+                f"+++ b/{patch_target}",
+                "@@ -1 +1 @@",
+                "-original",
+                "+patched",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return (
+        {
+            "warm_kernel_plan": [
+                {
+                    "target_file": str(target),
+                    "patch_path": str(patch_path),
+                }
+            ],
+            "warm_kernel_apply_results": [{"target_file": str(target)}],
+        },
+        target,
+        patch_path,
+    )
+
+
 def _gate(tmp_path: Path, monkeypatch, *, strict_phase: bool = False) -> tuple[PolicyGate, Path]:
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
@@ -222,6 +267,147 @@ def test_validate_dispatched_task_rejects_missing_specialist_task_id(tmp_path, m
 def test_validate_dispatched_task_internal_profile_skips_delegate_body(tmp_path, monkeypatch):
     gate, _sd = _gate(tmp_path, monkeypatch)
     gate.validate_dispatched_task("profile", {"reason": "watermark_refresh"})
+
+
+def test_dispatched_warm_replay_accepts_verified_framework_target(
+    tmp_path,
+    monkeypatch,
+):
+    gate, session_dir = _gate(tmp_path, monkeypatch)
+    framework_root = tmp_path.parent / f"{tmp_path.name}-framework"
+    params, _target, _patch = _warm_replay_dispatch_params(
+        session_dir,
+        framework_root,
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.policy.gate.resolve_source_file_allowlist",
+        lambda: (str(framework_root),),
+    )
+
+    gate.validate_dispatched_task("replay_warm_recipe", params)
+
+
+def test_warm_replay_target_exception_is_not_shared_with_other_actions(
+    tmp_path,
+    monkeypatch,
+):
+    gate, session_dir = _gate(tmp_path, monkeypatch)
+    framework_root = tmp_path.parent / f"{tmp_path.name}-framework"
+    params, _target, _patch = _warm_replay_dispatch_params(
+        session_dir,
+        framework_root,
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.policy.gate.resolve_source_file_allowlist",
+        lambda: (str(framework_root),),
+    )
+
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_dispatched_task("profile", params)
+    assert exc.value.rule == "path_outside_session_dir"
+
+
+def test_dispatched_warm_replay_rejects_patch_outside_kb_download(
+    tmp_path,
+    monkeypatch,
+):
+    gate, session_dir = _gate(tmp_path, monkeypatch)
+    framework_root = tmp_path.parent / f"{tmp_path.name}-framework"
+    outside_patch = tmp_path.parent / f"{tmp_path.name}-outside.patch"
+    params, _target, _patch = _warm_replay_dispatch_params(
+        session_dir,
+        framework_root,
+        patch_path=outside_patch,
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.policy.gate.resolve_source_file_allowlist",
+        lambda: (str(framework_root),),
+    )
+
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_dispatched_task("replay_warm_recipe", params)
+    assert exc.value.rule == "warm_replay_patch_outside_kb_download"
+
+
+def test_dispatched_warm_replay_rejects_patch_target_mismatch(
+    tmp_path,
+    monkeypatch,
+):
+    gate, session_dir = _gate(tmp_path, monkeypatch)
+    framework_root = tmp_path.parent / f"{tmp_path.name}-framework"
+    params, _target, _patch = _warm_replay_dispatch_params(
+        session_dir,
+        framework_root,
+        patch_target="vllm/v1/attention/ops/different.py",
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.policy.gate.resolve_source_file_allowlist",
+        lambda: (str(framework_root),),
+    )
+
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_dispatched_task("replay_warm_recipe", params)
+    assert exc.value.rule == "warm_replay_patch_target_mismatch"
+
+
+def test_dispatched_warm_replay_rejects_undeclared_extra_patch_target(
+    tmp_path,
+    monkeypatch,
+):
+    gate, session_dir = _gate(tmp_path, monkeypatch)
+    framework_root = tmp_path.parent / f"{tmp_path.name}-framework"
+    params, _target, patch_path = _warm_replay_dispatch_params(
+        session_dir,
+        framework_root,
+    )
+    with patch_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            "\n".join(
+                [
+                    "diff --git a/vllm/other.py b/vllm/other.py",
+                    "--- a/vllm/other.py",
+                    "+++ b/vllm/other.py",
+                    "@@ -1 +1 @@",
+                    "-old",
+                    "+new",
+                    "",
+                ]
+            )
+        )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.policy.gate.resolve_source_file_allowlist",
+        lambda: (str(framework_root),),
+    )
+
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_dispatched_task("replay_warm_recipe", params)
+    assert exc.value.rule == "warm_replay_patch_target_mismatch"
+
+
+def test_dispatched_warm_replay_rejects_framework_symlink_escape(
+    tmp_path,
+    monkeypatch,
+):
+    gate, session_dir = _gate(tmp_path, monkeypatch)
+    framework_root = tmp_path.parent / f"{tmp_path.name}-framework"
+    escaped_root = tmp_path.parent / f"{tmp_path.name}-escaped"
+    escaped_target = escaped_root / "v1/attention/ops/prefix_prefill.py"
+    escaped_target.parent.mkdir(parents=True, exist_ok=True)
+    escaped_target.write_text("original\n", encoding="utf-8")
+    framework_root.mkdir(parents=True, exist_ok=True)
+    (framework_root / "vllm").symlink_to(escaped_root, target_is_directory=True)
+    params, _target, _patch = _warm_replay_dispatch_params(
+        session_dir,
+        framework_root,
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.policy.gate.resolve_source_file_allowlist",
+        lambda: (str(framework_root),),
+    )
+
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_dispatched_task("replay_warm_recipe", params)
+    assert exc.value.rule == "warm_replay_target_outside_framework_roots"
 
 
 @pytest.mark.asyncio

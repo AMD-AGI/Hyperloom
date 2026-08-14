@@ -1183,9 +1183,17 @@ def materialize_unified_patch_snapshot(
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(src.read_bytes())
 
+    # ``git apply <path>`` rejects an otherwise valid final hunk when the patch
+    # artifact lacks a trailing newline (observed in legacy KB records). Feed a
+    # normalized in-memory copy so materialization is tolerant without mutating
+    # the content-addressed downloaded artifact.
+    normalized_patch_text = (
+        patch_text if patch_text.endswith(("\n", "\r")) else f"{patch_text}\n"
+    )
     proc = subprocess.run(
-        ["git", "apply", "--unsafe-paths", str(patch)],
+        ["git", "apply", "--unsafe-paths", "-"],
         cwd=snap,
+        input=normalized_patch_text,
         capture_output=True,
         text=True,
         timeout=60,

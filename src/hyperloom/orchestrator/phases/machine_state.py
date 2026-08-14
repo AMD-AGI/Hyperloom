@@ -271,6 +271,8 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "recipe_kb_t0_failed",
         "recipe_kb_drain_failed",
         "recipe_kb_commit_failed",
+        "warm_replay_rollback_failed",
+        "active_inferencex_checkout_missing",
         "plateau_explore",
         "plateau_kernel",
         "no_kernel_skipped",

@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +21,7 @@ from .models import (
     KnowledgeBundle,
     RemoteRecipeValidationError,
     extract_knowledge_artifact_refs,
+    validate_relative_path,
 )
 from .sanitize import (
     sanitize_publish_env_mapping,
@@ -28,7 +31,10 @@ from .sanitize import (
 
 log = logging.getLogger(__name__)
 
-_PATH_KEYS = {
+CURRENT_KNOWLEDGE_SCHEMA_VERSION = 1
+RECORD_KIND_HYPERLOOM_RECIPE = "hyperloom_recipe"
+
+_PATH_KEYS = (
     "artifact_path",
     "final_report_path",
     "patch",
@@ -37,8 +43,8 @@ _PATH_KEYS = {
     "source_file",
     "target_file",
     "tuned_file",
-}
-_PATH_LIST_KEYS = {
+)
+_PATH_LIST_KEYS = (
     "artifact_files",
     "artifacts",
     "changed_files",
@@ -46,8 +52,12 @@ _PATH_LIST_KEYS = {
     "patches_applied",
     "source_files",
     "target_files",
-}
+)
 _IGNORED_ACTIONS = {"replay_warm_recipe", "profile", "roofline", "conc_sweep", "sweep"}
+_OVERLAY_REF_RE = re.compile(
+    r"^(explore|framework)/overlays/(\d{6})/(\d+)-([^/]+)\.patch$"
+)
+_OVERLAY_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -60,6 +70,27 @@ def _number(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     return number if math.isfinite(number) else 0.0
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        resolved = int(value)
+    except (TypeError, ValueError):
+        return None
+    return resolved if resolved > 0 else None
+
+
+def _workload_shape(state: Any) -> dict[str, int]:
+    """Return the replay-sensitive workload dimensions."""
+    extra = _mapping(getattr(state, "baseline_workload_extra", {}))
+    shape: dict[str, int] = {}
+    for key in ("conc", "isl", "osl"):
+        value = _positive_int(getattr(state, key, None))
+        if value is None:
+            value = _positive_int(extra.get(key))
+        if value is not None:
+            shape[key] = value
+    return shape
 
 
 class _Files:
@@ -180,6 +211,56 @@ class _Files:
         self.refs.add(rel)
         return rel
 
+    def adopt_with_rename(self, source: Path, rel: str) -> str:
+        """Adopt an existing ref, renaming only a content conflict."""
+        if source.is_symlink() or not source.is_file():
+            raise RemoteRecipeValidationError(
+                f"artifact source must be a regular file: {source}"
+            )
+        if source.stat().st_size > MAX_FILE_BYTES:
+            raise RemoteRecipeValidationError(
+                f"artifact {source} exceeds the {MAX_FILE_BYTES}-byte KB Store limit"
+            )
+        normalized = validate_relative_path(rel)
+        if normalized not in self.refs:
+            return self.adopt(source, normalized)
+        existing = next(
+            (
+                artifact.source
+                for artifact in self.artifacts
+                if artifact.path == normalized
+            ),
+            None,
+        )
+        if (
+            existing is not None
+            and existing.stat().st_size == source.stat().st_size
+            and existing.read_bytes() == source.read_bytes()
+        ):
+            return normalized
+        path = Path(normalized)
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()[:10]
+        candidate = path.with_name(
+            f"{path.stem}-{digest}{path.suffix}"
+        ).as_posix()
+        index = 1
+        while candidate in self.refs:
+            occupied = next(
+                (
+                    artifact.source
+                    for artifact in self.artifacts
+                    if artifact.path == candidate
+                ),
+                None,
+            )
+            if occupied is not None and occupied.read_bytes() == source.read_bytes():
+                return candidate
+            candidate = path.with_name(
+                f"{path.stem}-{digest}-{index}{path.suffix}"
+            ).as_posix()
+            index += 1
+        return self.adopt(source, candidate)
+
     def write(self, text: str, *, rel: str, kind: str) -> str:
         destination = self.root / rel
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -254,16 +335,62 @@ def _config_from(entries: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _config_from_current_best(state: Any) -> dict[str, Any]:
+    current = _mapping(getattr(state, "current_best", {}))
+    args = str(
+        current.get("effective_extra_server_args")
+        or current.get("extra_server_args")
+        or ""
+    ).strip()
+    return {
+        "extra_server_args": sanitize_publish_server_args(args),
+        "extra_envs": sanitize_publish_env_mapping(
+            _mapping(current.get("extra_envs"))
+        ),
+    }
+
+
 def _entry_files(entries: list[dict[str, Any]], files: _Files, category: str) -> tuple[list[str], list[str]]:
     patches: list[str] = []
     artifacts: list[str] = []
     for entry in entries:
+        try:
+            stack_index = int(entry.get("__stack_index", -1))
+        except (TypeError, ValueError):
+            stack_index = -1
+        patch_member = 0
+        seen_patch_sources: set[str] = set()
+
+        def add_value(raw: Any, *, kind: str) -> str:
+            nonlocal patch_member
+            if kind != "patches" or stack_index < 0:
+                return files.add(raw, category=category, kind=kind)
+            source = Path(str(raw or ""))
+            if not source.is_file():
+                return ""
+            source_key = str(source.resolve())
+            if source_key in seen_patch_sources:
+                return ""
+            seen_patch_sources.add(source_key)
+            stem = source.name
+            for suffix in (".patch", ".diff"):
+                if stem.lower().endswith(suffix):
+                    stem = stem[: -len(suffix)]
+                    break
+            safe_name = _OVERLAY_NAME_RE.sub("-", stem).strip("._-") or "patch"
+            rel = (
+                f"{category}/overlays/{stack_index:06d}/"
+                f"{patch_member:02d}-{safe_name}.patch"
+            )
+            patch_member += 1
+            return files.adopt(source, rel)
+
         for key in _PATH_KEYS:
             raw = entry.get(key)
             if not raw:
                 continue
             kind = "patches" if "patch" in key else "artifacts"
-            ref = files.add(raw, category=category, kind=kind)
+            ref = add_value(raw, kind=kind)
             if ref:
                 (patches if kind == "patches" else artifacts).append(ref)
         for key in _PATH_LIST_KEYS:
@@ -274,7 +401,7 @@ def _entry_files(entries: list[dict[str, Any]], files: _Files, category: str) ->
                 continue
             kind = "patches" if "patch" in key else "artifacts"
             for raw in raw_values:
-                ref = files.add(raw, category=category, kind=kind)
+                ref = add_value(raw, kind=kind)
                 if ref:
                     (patches if kind == "patches" else artifacts).append(ref)
     return list(dict.fromkeys(patches)), list(dict.fromkeys(artifacts))
@@ -285,10 +412,9 @@ def build_explore_value(
     entries: list[dict[str, Any]],
     files: _Files,
 ) -> dict[str, Any]:
-    """Build final cumulative EXPLORE config and EXPLORE-origin file references."""
+    """Build EXPLORE-origin patch and artifact references."""
     patches, artifacts = _entry_files(entries, files, "explore")
     return {
-        **_config_from(entries),
         "patches": patches,
         "artifacts": artifacts,
     }
@@ -299,10 +425,9 @@ def build_framework_value(
     entries: list[dict[str, Any]],
     files: _Files,
 ) -> dict[str, Any]:
-    """Build final FRAMEWORK config/env and FRAMEWORK-origin file references."""
+    """Build FRAMEWORK-origin patch and artifact references."""
     patches, artifacts = _entry_files(entries, files, "framework")
     return {
-        **_config_from(entries),
         "patches": patches,
         "artifacts": artifacts,
     }
@@ -585,43 +710,293 @@ def has_new_keep(state: Any) -> bool:
     return False
 
 
+def _adopt_replayed_prior(
+    state: Any,
+    sections: Any,
+    value: dict[str, Any],
+    files: _Files,
+    stack: list[dict[str, Any]],
+) -> None:
+    """Carry forward the exact prior overlays only after replay reproduced."""
+    outcome = _mapping(getattr(state, "warm_replay_outcome", {}))
+    if str(outcome.get("status") or "") != "reproduced":
+        return
+    replayed_refs = {
+        str(ref)
+        for ref in (outcome.get("replayed_patch_refs") or [])
+        if str(ref)
+    }
+    if not replayed_refs:
+        return
+    warm_root = getattr(sections, "warm_start_dir", None)
+    if warm_root is None:
+        raise RemoteRecipeValidationError(
+            "replayed prior overlays have no warm-start artifact root"
+        )
+    warm_root = Path(warm_root)
+    recipe_path = warm_root / "recipe.json"
+    if not recipe_path.is_file():
+        raise RemoteRecipeValidationError(
+            "replayed prior overlays are missing warm-start recipe.json"
+        )
+    try:
+        import json
+
+        document = json.loads(recipe_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RemoteRecipeValidationError(
+            f"cannot read replayed prior recipe: {exc}"
+        ) from exc
+    prior_value = _mapping(document.get("value"))
+    if not prior_value:
+        knowledge = _mapping(document.get("knowledge"))
+        prior_value = _mapping(knowledge.get("value"))
+
+    replay_index = next(
+        (
+            index
+            for index, entry in enumerate(stack)
+            if str(entry.get("action") or "").lower() == "replay_warm_recipe"
+        ),
+        -1,
+    )
+    if replay_index < 0:
+        raise RemoteRecipeValidationError(
+            "replayed prior overlays have no replay_warm_recipe stack entry"
+        )
+    prior_timeline = prior_value.get("patch_timeline")
+    candidates: list[tuple[str, str]] = []
+    if isinstance(prior_timeline, list):
+        for row in prior_timeline:
+            ref = str(row or "")
+            owner = ref.split("/", 1)[0].lower()
+            if owner in {"explore", "framework"} and ref in replayed_refs:
+                candidates.append((owner, ref))
+    if not candidates:
+        for owner in ("explore", "framework"):
+            for ref in _mapping(prior_value.get(owner)).get("patches") or []:
+                if str(ref) in replayed_refs:
+                    candidates.append((owner, str(ref)))
+    candidate_refs = {ref for _owner, ref in candidates}
+    missing_metadata = replayed_refs - candidate_refs
+    if missing_metadata:
+        raise RemoteRecipeValidationError(
+            "successfully replayed prior overlays are absent from prior "
+            f"knowledge: {sorted(missing_metadata)!r}"
+        )
+
+    member_index = 0
+    seen: set[str] = set()
+    files_root = warm_root / "files"
+    if files_root.is_symlink():
+        raise RemoteRecipeValidationError(
+            "replayed prior files root must not be a symlink"
+        )
+    resolved_root = files_root.resolve()
+    for owner, old_ref in candidates:
+        if old_ref in seen:
+            continue
+        seen.add(old_ref)
+        normalized_ref = validate_relative_path(old_ref)
+        source = files_root / normalized_ref
+        cursor = files_root
+        for part in Path(normalized_ref).parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise RemoteRecipeValidationError(
+                    "successfully replayed prior overlay resolves through a "
+                    f"symlink: {old_ref!r}"
+                )
+        try:
+            source.resolve().relative_to(resolved_root)
+        except ValueError as exc:
+            raise RemoteRecipeValidationError(
+                f"replayed prior overlay escapes files root: {old_ref!r}"
+            ) from exc
+        if not source.is_file():
+            raise RemoteRecipeValidationError(
+                f"successfully replayed prior overlay is missing: {old_ref!r}"
+            )
+        try:
+            source.read_bytes()
+        except OSError as exc:
+            raise RemoteRecipeValidationError(
+                f"cannot read successfully replayed prior overlay {old_ref!r}: {exc}"
+            ) from exc
+        match = _OVERLAY_REF_RE.match(old_ref)
+        old_name = match.group(4) if match else source.stem
+        safe_name = _OVERLAY_NAME_RE.sub("-", old_name).strip("._-") or "patch"
+        new_ref = (
+            f"{owner}/overlays/{replay_index:06d}/"
+            f"{member_index:02d}-{safe_name}.patch"
+        )
+        try:
+            files.adopt(source, new_ref)
+        except (OSError, ValueError) as exc:
+            raise RemoteRecipeValidationError(
+                f"cannot adopt successfully replayed prior overlay {old_ref!r}: {exc}"
+            ) from exc
+        node = _mapping(value.get(owner))
+        refs = [str(ref) for ref in (node.get("patches") or []) if str(ref)]
+        if new_ref not in refs:
+            refs.append(new_ref)
+        node["patches"] = refs
+        value[owner] = node
+        member_index += 1
+
+
+def _patch_timeline(value: Mapping[str, Any]) -> list[str]:
+    """Build the global replay order from section overlay refs."""
+    rows: list[tuple[int, int, str, str]] = []
+    seen: set[str] = set()
+    for owner in ("explore", "framework"):
+        node = _mapping(value.get(owner))
+        for raw_ref in node.get("patches") or []:
+            ref = str(raw_ref or "")
+            match = _OVERLAY_REF_RE.match(ref)
+            if match is None or match.group(1) != owner:
+                raise RemoteRecipeValidationError(
+                    f"value.{owner}.patches contains an invalid overlay ref: {ref!r}"
+                )
+            if ref in seen:
+                raise RemoteRecipeValidationError(
+                    f"owner patch refs contain a duplicate: {ref!r}"
+                )
+            seen.add(ref)
+            stack_index = int(match.group(2))
+            member_index = int(match.group(3))
+            rows.append((stack_index, member_index, owner, ref))
+    rows.sort()
+    return [ref for _stack_index, _member_index, _owner, ref in rows]
+
+
+def _remap_artifact_refs(value: Any, refs: Mapping[str, str]) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _remap_artifact_refs(item, refs)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_remap_artifact_refs(item, refs) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_remap_artifact_refs(item, refs) for item in value)
+    if isinstance(value, str):
+        return refs.get(value, value)
+    return value
+
+
+def _unique_rows(rows: list[Any]) -> list[Any]:
+    seen: set[str] = set()
+    merged: list[Any] = []
+    for row in rows:
+        key = json.dumps(row, sort_keys=True, separators=(",", ":"), default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(row)
+    return merged
+
+
+def _adopt_prior_kernel(
+    sections: Any,
+    value: dict[str, Any],
+    files: "_Files",
+) -> None:
+    """Carry prior kernel knowledge into the next throughput champion."""
+    prior = sections.read("kernel")
+    if prior is None:
+        return
+    files_root = Path(sections.warm_start_dir) / "files"
+    prior_paths = {
+        source.relative_to(files_root).as_posix()
+        for source in prior.files
+        if source.is_file() and not source.is_symlink()
+    }
+    referenced = extract_knowledge_artifact_refs(prior.knowledge, prior_paths)
+    missing = referenced - prior_paths
+    if missing:
+        raise RemoteRecipeValidationError(
+            f"prior kernel artifacts are missing: {sorted(missing)!r}"
+        )
+    remapped: dict[str, str] = {}
+    for ref in sorted(referenced):
+        source = files_root / validate_relative_path(ref)
+        remapped[ref] = files.adopt_with_rename(source, ref)
+
+    kernel = _mapping(value.get("kernel"))
+    list_keys = {
+        "gemm": "optimizations",
+        "fusion": "items",
+        "rewrite": "items",
+    }
+    prior_kernel = _mapping(_remap_artifact_refs(prior.knowledge, remapped))
+    for column, list_key in list_keys.items():
+        prior_column = _mapping(prior_kernel.get(column))
+        if not prior_column:
+            continue
+        current_column = _mapping(kernel.get(column))
+        prior_rows = prior_column.get(list_key)
+        current_rows = current_column.get(list_key)
+        kernel[column] = {
+            **prior_column,
+            **current_column,
+            list_key: _unique_rows(
+                [
+                    *(prior_rows if isinstance(prior_rows, list) else []),
+                    *(current_rows if isinstance(current_rows, list) else []),
+                ]
+            ),
+        }
+    value["kernel"] = kernel
+
+
 def merge_staged_sections(
     value: dict[str, Any],
     sections: Any,
     files: "_Files",
     *,
     only: Collection[str] | None = None,
+    required: Collection[str] | None = None,
 ) -> list[str]:
-    """Overlay agent-staged sections onto the values scraped from the stack.
-
-    An agent that stages a section owns the keys it wrote; keys it left alone
-    keep whatever the stack scrape produced. That is what lets a section-aware
-    agent and a not-yet-migrated one publish into the same document.
-
-    ``only`` restricts the overlay to named sections. A document that carries
-    one agent's columns must not adopt another's files, which would land as
-    artifacts nothing in the knowledge references.
-    """
+    """Merge staged patch and artifact refs into their owner sections."""
     merged: list[str] = []
+    required_names = set(required or ())
     for name in sections.sections():
         if only is not None and name not in only:
             continue
         try:
             staged = sections.staged(name)
-            if staged is None or not staged.knowledge:
-                continue
+            if staged is None:
+                qualifier = "required " if name in required_names else ""
+                raise RemoteRecipeValidationError(
+                    f"{qualifier}staged section {name!r} cannot be read"
+                )
+            if not staged.knowledge:
+                qualifier = "required " if name in required_names else ""
+                raise RemoteRecipeValidationError(
+                    f"{qualifier}staged section {name!r} is empty"
+                )
             staged_files = [
                 (
                     source,
                     source.relative_to(sections.files_dir).as_posix(),
                 )
                 for source in staged.files
-                if source.is_file()
+                if source.is_file() and not source.is_symlink()
             ]
             staged_paths = {rel for _, rel in staged_files}
-            staged_refs = extract_knowledge_artifact_refs(
-                staged.knowledge,
-                staged_paths,
+            staged_refs = (
+                {
+                    str(ref)
+                    for key in ("patches", "artifacts")
+                    for ref in (staged.knowledge.get(key) or [])
+                    if str(ref).strip()
+                }
+                if name in required_names
+                else extract_knowledge_artifact_refs(
+                    staged.knowledge,
+                    staged_paths,
+                )
             )
             missing = staged_refs - staged_paths
             orphaned = staged_paths - staged_refs
@@ -635,18 +1010,41 @@ def merge_staged_sections(
             for source, rel in staged_files:
                 files.adopt(source, rel)
             current = value.get(name)
-            value[name] = {
-                **(current if isinstance(current, Mapping) else {}),
-                **staged.knowledge,
+            combined = {
+                "patches": (
+                    list(current.get("patches") or [])
+                    if isinstance(current, Mapping)
+                    else []
+                ),
+                "artifacts": (
+                    list(current.get("artifacts") or [])
+                    if isinstance(current, Mapping)
+                    else []
+                ),
             }
+            # Owner sections contain patch/artifact refs only.
+            for ref_key in ("patches", "artifacts"):
+                before = (
+                    list(current.get(ref_key) or [])
+                    if isinstance(current, Mapping)
+                    else []
+                )
+                after = list(staged.knowledge.get(ref_key) or [])
+                if before or after:
+                    combined[ref_key] = list(
+                        dict.fromkeys(
+                            str(ref) for ref in [*before, *after] if str(ref)
+                        )
+                    )
+            value[name] = combined
             merged.append(name)
-        except Exception as exc:  # noqa: BLE001 - one bad column falls back
-            log.warning(
-                "remote recipe: ignoring invalid staged section %s; "
-                "falling back to CLOSE scrape: %s",
-                name,
-                exc,
-            )
+        except Exception as exc:
+            if isinstance(exc, RemoteRecipeValidationError):
+                raise
+            qualifier = "required " if name in required_names else ""
+            raise RemoteRecipeValidationError(
+                f"{qualifier}staged section {name!r} is invalid: {exc}"
+            ) from exc
     return merged
 
 
@@ -657,10 +1055,60 @@ def build_remote_knowledge(
     sections: Any = None,
 ) -> KnowledgeBundle:
     """Construct the final opaque knowledge document and temporary files tree."""
+    pending_sections = list(
+        getattr(state, "kb_stage_outbox", []) or []
+    )
+    blocking_sections = [
+        row
+        for row in pending_sections
+        if not (
+            isinstance(row, Mapping)
+            and row.get("missing_patch_sources")
+        )
+    ]
+    dropped_sections = [
+        row
+        for row in [
+            *pending_sections,
+            *(getattr(state, "kb_stage_dead_letter", []) or []),
+        ]
+        if isinstance(row, Mapping)
+        and row.get("missing_patch_sources")
+    ]
+    if blocking_sections:
+        raise RemoteRecipeValidationError(
+            "required section staging is incomplete: "
+            f"{[row.get('id') for row in blocking_sections if isinstance(row, Mapping)]!r}"
+        )
     root = Path(files_dir)
     root.mkdir(parents=True, exist_ok=True)
     files = _Files(root)
-    stack = [dict(item) for item in (getattr(state, "optimization_stack", []) or []) if isinstance(item, Mapping)]
+    stack = [
+        {**dict(item), "__stack_index": index}
+        for index, item in enumerate(getattr(state, "optimization_stack", []) or [])
+        if isinstance(item, Mapping)
+    ]
+    owner_names = {
+        "EXPLORE": "explore",
+        "FRAMEWORK_AGENT": "framework",
+    }
+    dropped_entries: set[tuple[str, int]] = set()
+    for row in dropped_sections:
+        try:
+            stack_index = int(row.get("stack_index") or 0)
+        except (TypeError, ValueError):
+            continue
+        dropped_entries.add(
+            (str(row.get("owner") or "").upper(), stack_index)
+        )
+    required_patch_owners = {
+        owner_names[owner]
+        for item in stack
+        if (
+            owner := str(item.get("kb_required_owner") or "").upper()
+        ) in owner_names
+        and (owner, int(item["__stack_index"])) not in dropped_entries
+    }
     explore_entries = [item for item in stack if _entry_origin(item) == "explore"]
     framework_entries = [item for item in stack if _entry_origin(item) == "framework"]
     current_best = _mapping(getattr(state, "current_best", {}))
@@ -671,23 +1119,54 @@ def build_remote_knowledge(
     )
     gains = list(getattr(state, "gain_per_stack_entry", []) or [])
     worked = _experience(state, "what_worked") or _worked_from_stack(stack, gains)
+    if sections is None:
+        # Legacy callers without section staging retain their stack-derived
+        # owner snapshots; remote current records use value.config below.
+        explore_value = build_explore_value(state, explore_entries, files)
+        framework_value = build_framework_value(state, framework_entries, files)
+        explore_value.update(_config_from(explore_entries))
+        framework_value.update(_config_from(framework_entries))
+    else:
+        explore_value = {"patches": [], "artifacts": []}
+        framework_value = {"patches": [], "artifacts": []}
     value = {
-        "explore": build_explore_value(state, explore_entries, files),
-        "framework": build_framework_value(state, framework_entries, files),
+        "config": _config_from_current_best(state),
+        "explore": explore_value,
+        "framework": framework_value,
         "kernel": {
             "gemm": build_kernel_gemm_value(state, files),
             "fusion": build_kernel_fusion_value(state, files),
             "rewrite": build_kernel_rewrite_value(state, files),
         },
     }
+    if sections is not None:
+        _adopt_replayed_prior(state, sections, value, files, stack)
+        _adopt_prior_kernel(sections, value, files)
     staged_sections = (
-        merge_staged_sections(value, sections, files) if sections is not None else []
+        merge_staged_sections(
+            value,
+            sections,
+            files,
+            only=("explore", "framework"),
+            required=required_patch_owners,
+        )
+        if sections is not None
+        else []
     )
+    missing_required_owners = required_patch_owners - set(staged_sections)
+    if missing_required_owners:
+        raise RemoteRecipeValidationError(
+            "required staged owner sections are missing: "
+            f"{sorted(missing_required_owners)!r}"
+        )
+    value["patch_timeline"] = _patch_timeline(value)
     knowledge = sanitize_shared_knowledge(
         {
-            "knowledge_schema_version": 2,
+            "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+            "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
             "optimized_throughput": optimized_throughput,
             "validated_e2e_gain": validated_gain,
+            "workload_shape": _workload_shape(state),
             "value": value,
             "what_worked": worked,
             "what_failed": _experience(state, "last_action_failures"),
@@ -704,6 +1183,13 @@ def build_remote_knowledge(
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "optimization_stack_length": len(stack),
                 "staged_sections": staged_sections,
+                "dropped_staged_sections": list(
+                    dict.fromkeys(
+                        str(row.get("id") or "")
+                        for row in dropped_sections
+                        if str(row.get("id") or "")
+                    )
+                ),
             },
         }
     )
@@ -713,333 +1199,90 @@ def build_remote_knowledge(
     return bundle
 
 
-_KERNEL_SECTION = "kernel"
-# Producer prefix keeping this record out of KernelForge's kernel: slugs.
-_KERNEL_ID_PREFIX = "hyperloom-"
-# Champion metric for the kernel-agent record: a percentage, not a throughput.
-KERNEL_AGENT_METRIC = "kernel_gain_pct"
-# Storage session the accumulating kernel-agent record lives under.
-#
-# Readers resolve an identity through its champion session, but this record
-# accumulates instead of competing: a run that adds a second kernel without
-# raising the best gain scores no higher than the incumbent, so a per-run
-# session would leave the merged document on a session the champion never moves
-# to, invisible to every later read. Writing every merge back to one session
-# keeps the champion pointing at the accumulated document whatever the server
-# does with an equal-valued promotion. The contributing run stays recorded in
-# the document's provenance.
-KERNEL_AGENT_SESSION_ID = "hyperloom-kernel-agent"
-
-
-def kernel_agent_canonical_id(recipe_canonical_id: str) -> str:
-    """Map an ``inference:`` recipe id to the sibling ``kernel:`` identity.
-
-    Hyperloom's kernel-agent KB is an INDEPENDENT KB Store record under the
-    ``kernel:`` scheme. It is deliberately not part of the recipe document, so
-    it is never gated by the recipe's end-to-end throughput champion nor wiped
-    when a higher-throughput run with empty kernel columns wins the recipe.
-
-    The slug is prefixed with the producer. KernelForge publishes its own
-    ``kernel:`` records, and this record is graded on a different metric and
-    written with ``mode="replace"`` — sharing a slug would let either side
-    overwrite the other's document, or make the champion unreadable because the
-    two metrics are not comparable.
-    """
-    cid = str(recipe_canonical_id or "").strip()
-    if not cid:
-        # An unknown workload has no kernel identity either; returning "kernel:"
-        # would publish this session under a junk shared id.
-        return ""
-    slug = cid[len("inference:") :] if cid.startswith("inference:") else cid
-    if slug.startswith("kernel:"):
-        slug = slug[len("kernel:") :]
-    if slug.startswith(_KERNEL_ID_PREFIX):
-        return "kernel:" + slug
-    return f"kernel:{_KERNEL_ID_PREFIX}{slug}"
-
-
-def _kernel_agent_score(value: Mapping[str, Any]) -> float:
-    """Best kernel end-to-end gain across accepted gemm/fusion/rewrite records.
-
-    Used as the kernel-agent KB's own keep-if-better metric so a kernel
-    optimization is stored whenever it beats what the kernel-agent KB already
-    holds — independent of recipe serving throughput. Only end-to-end gain
-    percentages are compared: a micro-benchmark speedup is a different unit and
-    would always outrank a real E2E gain.
-    """
-    best = 0.0
-    gemm = value.get("gemm") if isinstance(value, Mapping) else {}
-    optimizations = (gemm or {}).get("optimizations", []) if isinstance(gemm, Mapping) else []
-    for opt in optimizations:
-        if isinstance(opt, Mapping):
-            best = max(
-                best,
-                _number(opt.get("e2e_gain_pct")),
-                _number(opt.get("gain_pct")),
-            )
-    for col in ("fusion", "rewrite"):
-        node = value.get(col) if isinstance(value, Mapping) else {}
-        items = (node or {}).get("items", []) if isinstance(node, Mapping) else []
-        for it in items:
-            if isinstance(it, Mapping):
-                e2e = it.get("e2e") if isinstance(it.get("e2e"), Mapping) else {}
-                best = max(
-                    best,
-                    _number(it.get("e2e_gain_pct")),
-                    _number(e2e.get("gain_pct")),
-                )
-    return best
-
-
-_KERNEL_COLUMN_LISTS = (("gemm", "optimizations"), ("fusion", "items"), ("rewrite", "items"))
-
-
-def _kernel_record_key(column: str, record: Mapping[str, Any]) -> str:
-    """Identify the optimization a record describes, within its column.
-
-    Two sessions optimizing the same kernel compete for one slot; two sessions
-    optimizing different kernels must both survive the merge.
-    """
-    if column == "gemm":
-        candidates = (
-            record.get("variant_name"),
-            record.get("task_id"),
-            Path(str(record.get("tuned_file") or "")).name,
-        )
-    else:
-        candidates = (
-            record.get("kernel_name"),
-            record.get("best_pattern"),
-            record.get("id"),
-        )
-    for candidate in candidates:
-        text = str(candidate or "").strip()
-        if text:
-            return f"{column}:{text}"
-    return f"{column}:{hashlib.sha256(repr(sorted(record.items())).encode()).hexdigest()[:10]}"
-
-
-def _kernel_record_score(record: Mapping[str, Any]) -> float:
-    """How good one recorded optimization was, in end-to-end gain percent."""
-    e2e = record.get("e2e") if isinstance(record.get("e2e"), Mapping) else {}
-    return max(
-        _number(record.get("e2e_gain_pct")),
-        _number(record.get("gain_pct")),
-        _number(e2e.get("gain_pct")),
-    )
-
-
-def merge_kernel_columns(
-    published: Mapping[str, Any] | None,
-    incoming: Mapping[str, Any],
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Keep the better recording of each optimization, not the better document.
-
-    The kernel-agent record accumulates across sessions: a run that only tuned
-    GEMM must not erase a rewrite an earlier run learned. Records are matched
-    per column by the optimization they describe and the higher end-to-end gain
-    wins, so a session contributes exactly what it improved.
-
-    Returns the merged columns and the records inherited from the published
-    document. The caller has to re-upload those records' artifacts for their
-    refs to keep resolving, and the returned dicts are the ones inside
-    ``merged``, so rewriting a ref on one updates the document.
-    """
-    merged: dict[str, Any] = {}
-    inherited: list[dict[str, Any]] = []
-    published = published if isinstance(published, Mapping) else {}
-    for column, list_key in _KERNEL_COLUMN_LISTS:
-        prior_node = published.get(column)
-        prior = list((prior_node or {}).get(list_key) or []) if isinstance(prior_node, Mapping) else []
-        fresh_node = incoming.get(column)
-        fresh = list((fresh_node or {}).get(list_key) or []) if isinstance(fresh_node, Mapping) else []
-        by_key: dict[str, tuple[Mapping[str, Any], bool]] = {}
-        order: list[str] = []
-        for record in prior:
-            if not isinstance(record, Mapping):
-                continue
-            key = _kernel_record_key(column, record)
-            if key not in by_key:
-                order.append(key)
-            by_key[key] = (record, True)
-        for record in fresh:
-            if not isinstance(record, Mapping):
-                continue
-            key = _kernel_record_key(column, record)
-            held = by_key.get(key)
-            if held is None:
-                order.append(key)
-                by_key[key] = (record, False)
-            elif _kernel_record_score(record) > _kernel_record_score(held[0]):
-                by_key[key] = (record, False)
-        rows = []
-        for key in order:
-            record, from_published = by_key[key]
-            row = dict(record)
-            rows.append(row)
-            if from_published:
-                inherited.append(row)
-        merged[column] = {list_key: rows}
-    return merged, inherited
-
-
-def kernel_record_refs(record: Mapping[str, Any]) -> set[str]:
-    """Artifact refs one record depends on.
-
-    Delegates to the same extractor the bundle validates with, so a record
-    cannot depend on a ref the caller forgot to carry: hand-listing key names
-    missed nested sections and the report/artifact paths a real record carries.
-    """
-    return extract_knowledge_artifact_refs(record)
-
-
-def build_kernel_agent_knowledge(
-    state: Any,
-    files_dir: str | Path,
-    *,
-    sections: Any = None,
-) -> tuple[KnowledgeBundle, float]:
-    """Build the standalone kernel-agent KB document and its keep-if-better score.
-
-    The document holds only the kernel sub-columns (gemm/fusion/rewrite),
-    published under the ``kernel:`` identity. Columns the kernel backends staged
-    during the run win over the CLOSE-time scrape, so a run that recorded its
-    work as it happened publishes that record rather than one reconstructed at
-    the end. The score is the best kernel end-to-end gain across the columns.
-    """
-    root = Path(files_dir)
-    root.mkdir(parents=True, exist_ok=True)
-    files = _Files(root)
-    # Merge against the section's own shape ({"kernel": {...}}) so the staged
-    # overlay is the one build_remote_knowledge uses, then publish it flat: this
-    # record's whole subject is the kernel agent.
-    nested = {
-        _KERNEL_SECTION: {
-            "gemm": build_kernel_gemm_value(state, files),
-            "fusion": build_kernel_fusion_value(state, files),
-            "rewrite": build_kernel_rewrite_value(state, files),
-        }
-    }
-    staged_sections = (
-        merge_staged_sections(nested, sections, files, only={_KERNEL_SECTION})
-        if sections is not None
-        else []
-    )
-    value = nested[_KERNEL_SECTION]
-    score = _kernel_agent_score(value)
-    knowledge = sanitize_shared_knowledge(
-        {
-            "knowledge_schema_version": 2,
-            # This record is graded on kernel gain, not serving throughput; the
-            # field is named for what it holds so a consumer cannot misread it.
-            KERNEL_AGENT_METRIC: score,
-            "value": value,
-            "provenance": {
-                "producer": "hyperloom-kernel-agent",
-                "phase": "CLOSE",
-                "session_id": str(
-                    getattr(state, "recipe_kb_session_id", "")
-                    or getattr(state, "session_id", "")
-                ),
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-                "staged_sections": staged_sections,
-            },
-        }
-    )
-    bundle = KnowledgeBundle(knowledge=knowledge, artifacts=files.artifacts)
-    bundle.validate()
-    return bundle, score
-
-
-def convert_v1_recipe_to_knowledge(recipe: Mapping[str, Any]) -> dict[str, Any]:
-    """Wrap one legacy RecipeKB row for migration/backfill tooling.
-
-    Runtime reads use :func:`envelope_to_v1_recipe`; the production CLOSE
-    writer always emits knowledge schema v2.
-    """
-    legacy = dict(recipe)
-    best_config = _mapping(legacy.get("best_config"))
-    if best_config:
-        legacy["best_config"] = {
-            "extra_server_args": str(
-                best_config.get("extra_server_args")
-                or best_config.get("args")
-                or ""
-            ),
-            "extra_envs": _mapping(
-                best_config.get("extra_envs") or best_config.get("envs")
-            ),
-        }
-    return sanitize_shared_knowledge(
-        {
-            "knowledge_schema_version": 1,
-            "optimized_throughput": _number(recipe.get("best_throughput")),
-            "validated_e2e_gain": _number(
-                recipe.get("validated_gain_pct") or recipe.get("gain_pct")
-            ),
-            "value": {
-                "legacy_recipe": legacy,
-            },
-            "provenance": {
-                "producer": "hyperloom-v1-converter",
-                "source_schema": 1,
-            },
-        }
-    )
-
-
-def envelope_to_v1_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
-    """Project a service envelope or flattened record into the warm Recipe shape."""
+def has_replay_material(document: Mapping[str, Any]) -> bool:
+    """Report nonempty config, patch, or kernel material from a View."""
     knowledge = _mapping(document.get("knowledge")) or dict(document)
     value = _mapping(knowledge.get("value"))
-    raw_version = knowledge.get("knowledge_schema_version")
-    if raw_version is None:
-        raw_version = 1 if "best_config" in knowledge or "legacy_recipe" in value else 2
-    try:
-        knowledge_version = int(raw_version)
-    except (TypeError, ValueError):
-        knowledge_version = 0
-    if knowledge_version == 1:
-        legacy = _mapping(value.get("legacy_recipe")) or knowledge
-        row = dict(legacy)
-        best_config = _mapping(row.get("best_config"))
-        row["best_config"] = {
-            "extra_server_args": str(
-                best_config.get("extra_server_args")
-                or best_config.get("args")
-                or ""
-            ),
-            "extra_envs": _mapping(
-                best_config.get("extra_envs") or best_config.get("envs")
-            ),
-        }
-        row["canonical_id"] = str(
-            document.get("canonical_id") or row.get("canonical_id") or ""
-        )
-        # Remote warm replay is intentionally config/env-only in phase 1.
-        row["prs_tested"] = []
-        row["remote_session_id"] = str(document.get("session_id") or "")
-        row["remote_schema_version"] = int(document.get("schema_version") or 2)
-        row["knowledge_schema_version"] = 1
-        return row
-    if knowledge_version != 2:
+    if not value:
+        return False
+    config = _mapping(value.get("config"))
+    if (
+        str(config.get("extra_server_args") or "").strip()
+        or _mapping(config.get("extra_envs"))
+    ):
+        return True
+    # Legacy records stored config under owner sections.
+    for section_name in ("explore", "framework"):
+        section = _mapping(value.get(section_name))
+        if not section:
+            continue
+        if str(section.get("extra_server_args") or "").strip():
+            return True
+        envs = section.get("extra_envs")
+        if isinstance(envs, Mapping) and envs:
+            return True
+        patches = section.get("patches")
+        if isinstance(patches, list) and patches:
+            return True
+    timeline = value.get("patch_timeline")
+    if isinstance(timeline, list) and timeline:
+        return True
+
+    def _nonempty(raw: Any) -> bool:
+        if isinstance(raw, Mapping):
+            return any(_nonempty(item) for item in raw.values())
+        if isinstance(raw, (list, tuple, set)):
+            return any(_nonempty(item) for item in raw)
+        return bool(raw)
+
+    return _nonempty(value.get("kernel"))
+
+
+def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and project the current Hyperloom Recipe contract for PRELUDE."""
+    knowledge = _mapping(document.get("knowledge")) or dict(document)
+    version = knowledge.get("knowledge_schema_version")
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version != CURRENT_KNOWLEDGE_SCHEMA_VERSION
+    ):
         raise RemoteRecipeValidationError(
-            f"unsupported knowledge_schema_version: {raw_version!r}"
+            "record knowledge_schema_version does not match the current "
+            f"Hyperloom contract ({CURRENT_KNOWLEDGE_SCHEMA_VERSION})"
         )
-    explore = _mapping(value.get("explore"))
-    explore_args = str(explore.get("extra_server_args") or "").strip()
-    explore_envs = {
-        str(key): str(value)
-        for key, value in _mapping(explore.get("extra_envs")).items()
-    }
+    if knowledge.get("record_kind") != RECORD_KIND_HYPERLOOM_RECIPE:
+        raise RemoteRecipeValidationError(
+            f"record_kind must be {RECORD_KIND_HYPERLOOM_RECIPE!r}"
+        )
+    raw_value = knowledge.get("value")
+    if not isinstance(raw_value, Mapping):
+        raise RemoteRecipeValidationError("current Recipe is missing value")
+    value = dict(raw_value)
+    for section in ("explore", "framework", "kernel"):
+        if not isinstance(value.get(section), Mapping):
+            raise RemoteRecipeValidationError(
+                f"current Recipe is missing value.{section}"
+            )
+    raw_timeline = value.get("patch_timeline")
+    if not isinstance(raw_timeline, list) or not all(
+        isinstance(ref, str) for ref in raw_timeline
+    ):
+        raise RemoteRecipeValidationError(
+            "current Recipe value.patch_timeline must be a flat string list"
+        )
+    for ref in raw_timeline:
+        validate_relative_path(ref)
     session_id = str(document.get("session_id") or "")
     validated_gain = _number(knowledge.get("validated_e2e_gain"))
-    return {
+    view = _mapping(document.get("view"))
+    replayable = (
+        bool(view.get("replayable"))
+        if isinstance(view.get("replayable"), bool)
+        else True
+    )
+    row = {
         "canonical_id": str(document.get("canonical_id") or ""),
-        "best_config": {
-            "extra_server_args": explore_args,
-            "extra_envs": explore_envs,
-        },
         "best_throughput": _number(knowledge.get("optimized_throughput")),
         "validated_gain_pct": validated_gain,
         "what_worked": list(knowledge.get("what_worked") or []),
@@ -1047,9 +1290,6 @@ def envelope_to_v1_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         "remaining_gaps": list(knowledge.get("remaining_gaps") or []),
         "lessons": list(knowledge.get("lessons") or []),
         "pitfalls": list(knowledge.get("pitfalls") or []),
-        # Phase 1 intentionally replays config/env only. Omitting historical PR
-        # payloads keeps the unchanged replay executor out of its patch path.
-        "prs_tested": [],
         "sessions": (
             [{"session_id": session_id, "gain_pct": validated_gain}]
             if session_id
@@ -1058,24 +1298,38 @@ def envelope_to_v1_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         "provenance": _mapping(knowledge.get("provenance")),
         "remote_session_id": session_id,
         "remote_schema_version": int(document.get("schema_version") or 2),
-        "knowledge_schema_version": 2,
+        "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+        "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
+        "view": view,
+        "view_source": str(view.get("source") or "current"),
+        "replayable": replayable,
+        "replay_material_available": (
+            replayable and has_replay_material(document)
+        ),
+        "replay_disabled_reason": str(
+            view.get("replay_disabled_reason") or ""
+        ),
     }
+    for key, value in _mapping(knowledge.get("workload_shape")).items():
+        if key in {"conc", "isl", "osl"}:
+            resolved = _positive_int(value)
+            if resolved is not None:
+                row[key] = resolved
+    return row
 
 
 __all__ = [
+    "CURRENT_KNOWLEDGE_SCHEMA_VERSION",
+    "RECORD_KIND_HYPERLOOM_RECIPE",
     "build_explore_value",
     "build_framework_value",
     "build_kernel_fusion_value",
     "build_kernel_gemm_value",
-    "build_kernel_agent_knowledge",
     "build_kernel_rewrite_value",
     "build_remote_knowledge",
-    "convert_v1_recipe_to_knowledge",
-    "envelope_to_v1_recipe",
+    "has_replay_material",
+    "knowledge_to_warm_recipe",
     "has_new_keep",
-    "kernel_agent_canonical_id",
-    "kernel_record_refs",
-    "merge_kernel_columns",
     "match_rewrite_attempt",
     "merge_staged_sections",
 ]
