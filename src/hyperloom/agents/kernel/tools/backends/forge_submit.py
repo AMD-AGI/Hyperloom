@@ -1135,18 +1135,7 @@ def _prepare_inplace(
 
 def _untracked_paths(repo: str) -> set[str]:
     """Return untracked repository paths without shell quoting."""
-    proc = _run(
-        [
-            "git",
-            "-C",
-            repo,
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ],
-        timeout=30,
-    )
+    proc = _run_git(["-C", repo, "ls-files", "--others", "--exclude-standard", "-z"], timeout=30)
     if proc.returncode != 0:
         raise RuntimeError(f"could not inspect untracked files in {repo}")
     return {
@@ -1190,15 +1179,7 @@ def _apply_tracked_baseline(repo: str, patch: bytes) -> None:
     if not patch:
         return
     proc = subprocess.run(
-        [
-            "git",
-            "-C",
-            repo,
-            "apply",
-            "--binary",
-            "--whitespace=nowarn",
-            "-",
-        ],
+        _git_argv(["-C", repo, "apply", "--binary", "--whitespace=nowarn", "-"]),
         input=patch,
         capture_output=True,
         timeout=60,
