@@ -75,6 +75,32 @@ def test_workspace_root_independent_of_session_pin(tmp_path, monkeypatch):
     assert paths.workspace_root() == tmp_path
 
 
+def test_relative_user_data_path_resolves_identically_from_every_cwd(tmp_path, monkeypatch):
+    """A relative $USER_DATA_PATH must not follow each subprocess's cwd.
+
+    Subprocesses are spawned with explicit, differing cwds, so absolutising on
+    read is not enough — each process would re-expand the relative value against
+    its own cwd. The CLI boundary rewrites the env var itself, before the parser
+    defaults or any session path derive from it, so children inherit a value that
+    cannot drift.
+    """
+    from hyperloom.inference_optimizer import cli
+
+    (tmp_path / "nested").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, "relws")
+    with pytest.raises(SystemExit):
+        cli.main([])  # no subcommand; the boundary normalises regardless
+    ws = paths.workspace_root()
+    assert ws == Path.cwd() / "relws"
+    sd = paths.make_session_dir(model_name="DeepSeek-R1-0528")
+
+    monkeypatch.chdir(tmp_path / "nested")
+    assert paths.workspace_root() == ws
+    assert paths.session_dir() == sd
+    assert paths.session_dir().is_dir()
+
+
 def test_make_session_dir_per_model_ts_layout(tmp_path, monkeypatch):
     """Default: per-model/per-launch subdir + pin propagation."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))

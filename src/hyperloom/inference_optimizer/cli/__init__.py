@@ -98,6 +98,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 )
 from ..session.lock import SessionAlreadyRunning, SessionLock
 from ..session.paths import (
+    ENV_USER_DATA_PATH,
     asset_system_prompts_dir,
     make_session_dir,
 )
@@ -2496,6 +2497,14 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.reconfigure(line_buffering=True)
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(line_buffering=True)
+
+    # Absolutise the workspace root once, here, before the parser's defaults or
+    # any session path derive from it. Every subprocess is spawned with an
+    # explicit cwd of its own, so a relative $USER_DATA_PATH would resolve to a
+    # different directory in each of them; children inherit the value fixed here.
+    _user_data = os.environ.get(ENV_USER_DATA_PATH, "").strip()
+    if _user_data and not Path(_user_data).is_absolute():
+        os.environ[ENV_USER_DATA_PATH] = str(Path(_user_data).expanduser().absolute())
 
     parser = _build_parser()
     # Strict on purpose. The platform's prompt FLAGS block is authored by hand,
