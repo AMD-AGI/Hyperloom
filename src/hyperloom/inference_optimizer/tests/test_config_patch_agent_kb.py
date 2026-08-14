@@ -21,6 +21,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     CURRENT_KNOWLEDGE_SCHEMA_VERSION,
     RECORD_KIND_HYPERLOOM_RECIPE,
     RemoteRecipeValidationError,
+    _Files,
     build_remote_knowledge,
     knowledge_to_warm_recipe,
 )
@@ -616,10 +617,8 @@ def test_close_fails_when_replayed_prior_overlay_adoption_fails(
         "status": "reproduced",
         "replayed_patch_refs": [old_ref],
     }
-    import hyperloom.orchestrator.knowledge.remote_recipe.values as values_module
-
     monkeypatch.setattr(
-        values_module._Files,
+        _Files,
         "adopt",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("copy failed")),
     )

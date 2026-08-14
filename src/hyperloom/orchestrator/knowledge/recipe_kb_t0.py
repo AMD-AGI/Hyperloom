@@ -1198,7 +1198,7 @@ def _cascade_warm_start_search(
 
     try:
         (
-            _target_model,
+            _,
             target_hardware,
             target_framework,
             target_model_type,
@@ -1207,7 +1207,6 @@ def _cascade_warm_start_search(
             target_precision,
         ) = cid_to_path_components(cid)
     except ValueError:
-        _target_model = ""
         target_hardware = str(hw or "")
         target_framework = str(framework or "")
         target_model_type = str(model_type_val or "")
