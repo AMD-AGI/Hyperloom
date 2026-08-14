@@ -24,9 +24,14 @@ kb_failure_reason=""
 
 : "${PR_MONITOR_URL:=}"
 _user_data_was_set="${USER_DATA_PATH:+1}"
-: "${USER_DATA_PATH:=/workspace/hyperloom}"
+# Container images ship a writable /workspace; a bare-metal host off root has
+# neither it nor permission to create it, so the mkdir below would abort.
+_default_workspace_root() {
+  if [ -w /workspace ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
+}
+: "${USER_DATA_PATH:=$(_default_workspace_root)}"
 if [ -z "${_user_data_was_set}" ]; then
-  echo "[install WARN] USER_DATA_PATH not set; defaulting to /workspace/hyperloom. Set USER_DATA_PATH to persist artifacts under your data root." >&2
+  echo "[install WARN] USER_DATA_PATH not set; defaulting to ${USER_DATA_PATH}. Set USER_DATA_PATH to persist artifacts under your data root." >&2
 fi
 : "${SKIP_PR_PROBE:=}"
 
