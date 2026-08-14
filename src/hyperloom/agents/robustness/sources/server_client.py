@@ -4,12 +4,11 @@
 """robustness-server client + Source adapter.
 
 The client wraps a small subset of the robustness-server REST API (the
-``/api/v1/sessions/{id}/{pods,events,summary}`` and ``/api/v1/cluster/*``
-endpoints). Networking errors (timeout / connect refused / 5xx)
-are translated to :class:`SourceUnavailable` so :class:`DegradeRouter`
-counts failures and degrades to the local fallback. 404 and other 4xx
-responses yield ``None`` without decoding the body, since they usually
-mean "no data for this session" rather than an upstream outage.
+``/api/v1/cluster/*`` endpoints). Networking errors (timeout / connect
+refused / 5xx) are translated to :class:`SourceUnavailable` so
+:class:`DegradeRouter` counts failures and degrades to the local
+fallback. 404 and other 4xx responses yield ``None`` without decoding
+the body, since a pod or workload may legitimately vanish between ticks.
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ from .cluster_decoder import decode_gpu_snapshot, merge_gpu_snapshots
 
 @dataclass
 class _MetricsWindow:
-    """Explicit ``start`` / ``end`` Unix-second window for ``/metrics`` and ``/summary``."""
+    """Explicit ``start`` / ``end`` Unix-second window for ``/metrics``."""
 
     start_unix: int
     end_unix: int
@@ -120,100 +119,6 @@ class RobustnessServerClient:
             return resp.json()
         except ValueError as exc:
             raise SourceUnavailable(f"GET {path}: invalid json") from exc
-
-    # -- public methods --------------------------------------------------
-
-    async def list_session_pods(
-        self,
-        session_id: str,
-        *,
-        start_unix: int | None = None,
-        end_unix: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """List a session's pods via ``GET .../{id}/pods``.
-
-        Args:
-            session_id (str): Identifier of the session.
-            start_unix (int | None): Optional window start in Unix
-                seconds; converted to ISO-8601 for the ``start`` query.
-            end_unix (int | None): Optional window end in Unix seconds;
-                converted to ISO-8601 for the ``end`` query.
-
-        Returns:
-            list[dict[str, Any]]: The pod rows, or ``[]`` when the
-            response is not a list.
-        """
-        params: dict[str, Any] = {}
-        if start_unix is not None:
-            params["start"] = _to_iso(start_unix)
-        if end_unix is not None:
-            params["end"] = _to_iso(end_unix)
-        body = await self._get_json(
-            f"/api/v1/sessions/{session_id}/pods",
-            params=params or None,
-        )
-        if isinstance(body, list):
-            return body
-        return []
-
-    async def list_session_events(
-        self,
-        session_id: str,
-        *,
-        start_unix: int | None = None,
-        end_unix: int | None = None,
-        limit: int = 200,
-    ) -> list[dict[str, Any]]:
-        """List a session's events via ``GET .../{id}/events``.
-
-        Args:
-            session_id (str): Identifier of the session.
-            start_unix (int | None): Optional window start in Unix
-                seconds; converted to ISO-8601 for the ``start`` query.
-            end_unix (int | None): Optional window end in Unix seconds;
-                converted to ISO-8601 for the ``end`` query.
-            limit (int): Maximum number of events to request.
-
-        Returns:
-            list[dict[str, Any]]: The ``events`` array from the
-            response, or ``[]`` when absent.
-        """
-        params: dict[str, Any] = {"limit": limit}
-        if start_unix is not None:
-            params["start"] = _to_iso(start_unix)
-        if end_unix is not None:
-            params["end"] = _to_iso(end_unix)
-        body = await self._get_json(
-            f"/api/v1/sessions/{session_id}/events",
-            params=params,
-        )
-        if isinstance(body, dict):
-            events = body.get("events")
-            if isinstance(events, list):
-                return events
-        return []
-
-    async def get_session_summary(
-        self,
-        session_id: str,
-        window: _MetricsWindow,
-    ) -> dict[str, Any]:
-        """Fetch a session summary via ``GET .../{id}/summary``.
-
-        Args:
-            session_id (str): Identifier of the session.
-            window (_MetricsWindow): Explicit ``start`` / ``end`` Unix
-                second bounds for the summary.
-
-        Returns:
-            dict[str, Any]: The summary object, or ``{}`` when the
-            response is not a dict.
-        """
-        body = await self._get_json(
-            f"/api/v1/sessions/{session_id}/summary",
-            params={"start": str(window.start_unix), "end": str(window.end_unix)},
-        )
-        return body if isinstance(body, dict) else {}
 
     # -- cluster-physical proxies ---------------------------------------
 
@@ -327,20 +232,6 @@ class RobustnessServerClient:
         return []
 
 
-def _to_iso(unix_seconds: int) -> str:
-    """Format Unix seconds as ISO-8601 UTC for ``start`` / ``end`` query args.
-
-    Args:
-        unix_seconds (int): The timestamp in Unix seconds.
-
-    Returns:
-        str: The ISO-8601 UTC string for the given instant.
-    """
-    from datetime import datetime, timezone
-
-    return datetime.fromtimestamp(int(unix_seconds), tz=timezone.utc).isoformat()
-
-
 # ---------------------------------------------------------------------------
 # Source adapter
 # ---------------------------------------------------------------------------
@@ -349,11 +240,11 @@ def _to_iso(unix_seconds: int) -> str:
 class RobustnessServerSource:
     """Adapter wrapping :class:`RobustnessServerClient` as a :class:`Source`.
 
-    Per tick fetches session-scoped data (``pods`` + ``events`` +
-    ``summary``) for ``ctx.shared_state.session_id`` plus cluster
-    ``cluster_faults``. Cluster fetches tolerate 404 / 4xx (treated as no
-    data); a 5xx or transport failure raises :class:`SourceUnavailable` and
-    fails the tick so the DegradeRouter degrades to the local probe.
+    Per tick fetches cluster-scoped data: workload-hierarchy pods,
+    ``cluster_faults``, and optional per-pod GPU metrics. Fetches tolerate
+    404 / 4xx (a pod or workload may vanish between ticks); a 5xx or
+    transport failure raises :class:`SourceUnavailable` and fails the tick
+    so the DegradeRouter degrades to the local probe.
     """
 
     name = "robustness-server"
@@ -363,7 +254,6 @@ class RobustnessServerSource:
         client: RobustnessServerClient,
         *,
         metrics_window_s: int = 300,
-        events_limit: int = 200,
         faults_lookback_s: int = 300,
         faults_page_size: int = 50,
         enable_cluster_faults: bool = True,
@@ -377,10 +267,8 @@ class RobustnessServerSource:
         Args:
             client (RobustnessServerClient): The HTTP client used for
                 all fetches.
-            metrics_window_s (int): Look-back window for session
-                metrics / summary; clamped to at least 60 seconds.
-            events_limit (int): Max events fetched per tick; clamped to
-                at least 1.
+            metrics_window_s (int): Look-back window for pod metrics;
+                clamped to at least 60 seconds.
             faults_lookback_s (int): Look-back for cluster faults;
                 clamped to at least 0.
             faults_page_size (int): Faults page size; clamped to the
@@ -396,7 +284,6 @@ class RobustnessServerSource:
         """
         self._client = client
         self._metrics_window_s = max(60, int(metrics_window_s))
-        self._events_limit = max(1, int(events_limit))
         self._faults_lookback_s = max(0, int(faults_lookback_s))
         self._faults_page_size = max(1, min(500, int(faults_page_size)))
         self._enable_cluster_faults = bool(enable_cluster_faults)
@@ -404,56 +291,32 @@ class RobustnessServerSource:
         self._enable_cluster_pod_metrics = bool(enable_cluster_pod_metrics)
         self._pod_metrics_categories = tuple(pod_metrics_categories)
         self._max_pods_per_tick = max(1, int(max_pods_per_tick))
-        # ``workload_uid`` opts into hierarchy-based pod discovery; empty keeps
-        # the ``list_session_pods`` path.
+        # ``workload_uid`` is the only route to pod discovery; empty yields no pods.
         self._workload_uid = (workload_uid or "").strip()
 
     async def fetch(self, ctx: Any) -> SourceData:
-        """Collect one tick of session- and cluster-scoped data.
+        """Collect one tick of cluster-scoped data.
 
-        Fetches pods, events and (when the window is set) a summary for
-        the context's session, plus best-effort cluster faults and
-        optional per-pod GPU metrics. Transport failures on the cluster
-        endpoints re-raise so the DegradeRouter can degrade.
+        Fetches workload-hierarchy pods, best-effort cluster faults and
+        optional per-pod GPU metrics. Transport failures re-raise so the
+        DegradeRouter can degrade.
 
         Args:
-            ctx (Any): The reactor context; must expose a session id via
-                ``ctx.shared_state.session_id`` and may carry
-                ``ctx.now_unix``.
+            ctx (Any): The reactor context; may carry ``ctx.now_unix``.
 
         Returns:
             SourceData: The assembled snapshot for the tick.
 
         Raises:
-            SourceUnavailable: When no session id is present, or a
-                cluster fetch hits a transport / 5xx failure.
+            SourceUnavailable: When a fetch hits a transport / 5xx
+                failure.
         """
-        session_id = _extract_session_id(ctx)
-        if not session_id:
-            raise SourceUnavailable("no session_id in reactor context")
-
         now_unix = int(getattr(ctx, "now_unix", 0)) or 0
         window = _MetricsWindow(
             start_unix=now_unix - self._metrics_window_s if now_unix else 0,
             end_unix=now_unix or 0,
         )
 
-        session_pods = await self._client.list_session_pods(
-            session_id,
-            start_unix=window.start_unix or None,
-            end_unix=window.end_unix or None,
-        )
-        events = await self._client.list_session_events(
-            session_id,
-            start_unix=window.start_unix or None,
-            end_unix=window.end_unix or None,
-            limit=self._events_limit,
-        )
-        summary: dict[str, Any] = {}
-        if window.start_unix and window.end_unix:
-            summary = await self._client.get_session_summary(session_id, window)
-
-        # When workload_uid is set, merge cluster-hierarchy pods with the session view.
         hierarchy_pods: list[dict[str, Any]] = []
         if self._workload_uid:
             try:
@@ -463,7 +326,7 @@ class RobustnessServerSource:
             except SourceUnavailable:
                 raise
             hierarchy_pods = _extract_hierarchy_pods(hierarchy)
-        merged_pods = _merge_pods(session_pods, hierarchy_pods)
+        pods = _wrap_hierarchy_pods(hierarchy_pods)
 
         cluster_faults: list[dict[str, Any]] = []
         if self._enable_cluster_faults:
@@ -478,13 +341,11 @@ class RobustnessServerSource:
                 raise
 
         local_gpu: dict[str, Any] = {}
-        if self._enable_cluster_pod_metrics and merged_pods and window.start_unix and window.end_unix:
-            local_gpu = await self._fetch_cluster_pod_metrics(merged_pods, window)
+        if self._enable_cluster_pod_metrics and pods and window.start_unix and window.end_unix:
+            local_gpu = await self._fetch_cluster_pod_metrics(pods, window)
 
         return SourceData(
-            session_pods=merged_pods,
-            session_events=events,
-            session_summary=summary,
+            session_pods=pods,
             cluster_faults=cluster_faults,
             local_gpu=local_gpu,
             sources_used=[self.name],
@@ -533,20 +394,6 @@ class RobustnessServerSource:
             if decoded:
                 snapshots.append(decoded)
         return merge_gpu_snapshots(snapshots)
-
-
-def _extract_session_id(ctx: Any) -> str:
-    """Pull the session id out of a reactor context.
-
-    Args:
-        ctx (Any): The reactor context, expected to expose
-            ``shared_state.session_id``.
-
-    Returns:
-        str: The session id, or ``""`` when it is missing / falsy.
-    """
-    shared = getattr(ctx, "shared_state", None)
-    return getattr(shared, "session_id", "") or ""
 
 
 def _unique_pod_refs(pods: list[dict[str, Any]]) -> list[tuple[str, str]]:
@@ -609,35 +456,23 @@ def _extract_hierarchy_pods(
     return []
 
 
-def _merge_pods(
-    session_pods: list[dict[str, Any]],
+def _wrap_hierarchy_pods(
     extra_pods: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Combine session_pods with hierarchy-derived pods, deduping by ref.
+    """Wrap hierarchy-derived pods in the pod envelope, deduping by ref.
 
-    Hierarchy rows are wrapped in the session-pod envelope
-    (``{"pod": {...}}``) so downstream consumers see a uniform shape.
-    Session entries win on conflicts (richer phase / role metadata).
+    Rows are wrapped as ``{"pod": {...}}`` so downstream consumers see a
+    uniform shape.
 
     Args:
-        session_pods: Pods reported by the session source.
         extra_pods: Pods derived from the workload hierarchy.
 
     Returns:
-        The merged, de-duplicated pod list.
+        The de-duplicated pod list.
     """
 
-    out: list[dict[str, Any]] = list(session_pods or [])
+    out: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
-    for entry in out:
-        if not isinstance(entry, dict):
-            continue
-        pod = entry.get("pod") if isinstance(entry.get("pod"), dict) else entry
-        ns = str(pod.get("namespace") or "")
-        name = str(pod.get("name") or "")
-        if ns and name:
-            seen.add((ns, name))
-
     for raw in extra_pods or []:
         pod = raw.get("pod") if isinstance(raw.get("pod"), dict) else raw
         if not isinstance(pod, dict):

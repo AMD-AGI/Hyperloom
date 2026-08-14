@@ -491,7 +491,7 @@ def _discover_workload_uid() -> str:
     """Resolve the multi-node workload uid (first non-empty env key above).
 
     Lets a RayJob sandbox opt into hierarchy-based pod discovery; single-node
-    runs leave every key unset and fall back to ``list_session_pods``.
+    runs leave every key unset and discover no pods from the server.
 
     Returns:
         The first non-empty workload-uid env value, or ``""`` if none set.

@@ -22,12 +22,11 @@ from hyperloom.agents.robustness.sources.server_client import (
 
 def _ctx(
     *,
-    session_id: str = "sess-1",
     now_unix: float = 1_700_000_000.0,
 ) -> ReactorContext:
     return ReactorContext(
         tick_index=1,
-        shared_state=SharedStateSnapshot(session_id=session_id),
+        shared_state=SharedStateSnapshot(session_id="sess-1"),
         inbox=[],
         now_unix=now_unix,
     )
@@ -40,19 +39,6 @@ def _client(handler) -> RobustnessServerClient:
 
 
 @pytest.mark.asyncio
-async def test_list_session_events_unwraps_envelope():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"events": [{"id": 1}, {"id": 2}]})
-
-    client = _client(handler)
-    try:
-        events = await client.list_session_events("sess-1")
-    finally:
-        await client.aclose()
-    assert events == [{"id": 1}, {"id": 2}]
-
-
-@pytest.mark.asyncio
 async def test_5xx_raises_source_unavailable():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, json={"detail": "down"})
@@ -60,7 +46,7 @@ async def test_5xx_raises_source_unavailable():
     client = _client(handler)
     try:
         with pytest.raises(SourceUnavailable):
-            await client.list_session_pods("sess-1")
+            await client.list_cluster_faults()
     finally:
         await client.aclose()
 
@@ -73,50 +59,7 @@ async def test_connect_error_raises_source_unavailable():
     client = _client(handler)
     try:
         with pytest.raises(SourceUnavailable):
-            await client.list_session_pods("sess-1")
-    finally:
-        await client.aclose()
-
-
-@pytest.mark.asyncio
-async def test_source_returns_pods_events_summary():
-    requests_seen: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests_seen.append(str(request.url))
-        if "/pods" in request.url.path:
-            return httpx.Response(200, json=[{"pod": {"name": "brain-0"}}])
-        if "/events" in request.url.path:
-            return httpx.Response(200, json={"events": [{"kind": "ping"}]})
-        if "/summary" in request.url.path:
-            return httpx.Response(200, json={"pods": [], "session": {}})
-        return httpx.Response(404)
-
-    client = _client(handler)
-    try:
-        source = RobustnessServerSource(client)
-        data = await source.fetch(_ctx())
-    finally:
-        await client.aclose()
-    assert data.session_pods == [{"pod": {"name": "brain-0"}}]
-    assert data.session_events == [{"kind": "ping"}]
-    assert data.session_summary == {"pods": [], "session": {}}
-    assert data.sources_used == ["robustness-server"]
-    assert any("/pods" in u for u in requests_seen)
-    assert any("/events" in u for u in requests_seen)
-    assert any("/summary" in u for u in requests_seen)
-
-
-@pytest.mark.asyncio
-async def test_source_raises_when_session_id_missing():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=[])
-
-    client = _client(handler)
-    try:
-        source = RobustnessServerSource(client)
-        with pytest.raises(SourceUnavailable):
-            await source.fetch(_ctx(session_id=""))
+            await client.list_cluster_faults()
     finally:
         await client.aclose()
 
@@ -133,28 +76,6 @@ async def test_source_propagates_5xx_as_source_unavailable():
             await source.fetch(_ctx())
     finally:
         await client.aclose()
-
-
-@pytest.mark.asyncio
-async def test_source_skips_summary_when_now_unix_is_zero():
-    requested_paths: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requested_paths.append(request.url.path)
-        if "/pods" in request.url.path:
-            return httpx.Response(200, json=[])
-        if "/events" in request.url.path:
-            return httpx.Response(200, json={"events": []})
-        return httpx.Response(404)
-
-    client = _client(handler)
-    try:
-        source = RobustnessServerSource(client)
-        data = await source.fetch(_ctx(now_unix=0.0))
-    finally:
-        await client.aclose()
-    assert "/api/v1/sessions/sess-1/summary" not in requested_paths
-    assert data.session_summary == {}
 
 
 @pytest.mark.asyncio
@@ -259,12 +180,6 @@ async def test_source_fetch_populates_cluster_faults():
 
     def handler(request: httpx.Request) -> httpx.Response:
         paths_hit.append(request.url.path)
-        if "/sessions/sess-1/pods" in request.url.path:
-            return httpx.Response(200, json=[])
-        if "/sessions/sess-1/events" in request.url.path:
-            return httpx.Response(200, json={"events": []})
-        if "/sessions/sess-1/summary" in request.url.path:
-            return httpx.Response(200, json={})
         if request.url.path == "/api/v1/cluster/faults":
             return httpx.Response(
                 200,
@@ -303,12 +218,6 @@ async def test_source_propagates_cluster_faults_5xx_as_source_unavailable():
     """A 5xx on /cluster/faults must trigger DegradeRouter, not be swallowed."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if "/sessions/sess-1/pods" in request.url.path:
-            return httpx.Response(200, json=[])
-        if "/sessions/sess-1/events" in request.url.path:
-            return httpx.Response(200, json={"events": []})
-        if "/sessions/sess-1/summary" in request.url.path:
-            return httpx.Response(200, json={})
         if request.url.path == "/api/v1/cluster/faults":
             return httpx.Response(503, json={"detail": "robust-api down"})
         return httpx.Response(404)
@@ -328,17 +237,16 @@ async def test_source_can_disable_cluster_faults():
 
     def handler(request: httpx.Request) -> httpx.Response:
         paths_hit.append(request.url.path)
-        if "/sessions/sess-1/pods" in request.url.path:
-            return httpx.Response(200, json=[])
-        if "/sessions/sess-1/events" in request.url.path:
-            return httpx.Response(200, json={"events": []})
-        if "/sessions/sess-1/summary" in request.url.path:
-            return httpx.Response(200, json={})
+        if request.url.path == "/api/v1/cluster/workloads/wl-1/hierarchy":
+            return httpx.Response(
+                200,
+                json={"pods": [{"namespace": "ns1", "name": "podA"}]},
+            )
         return httpx.Response(404)
 
     client = _client(handler)
     try:
-        source = RobustnessServerSource(client, enable_cluster_faults=False)
+        source = RobustnessServerSource(client, workload_uid="wl-1", enable_cluster_faults=False)
         data = await source.fetch(_ctx())
     finally:
         await client.aclose()
@@ -383,22 +291,18 @@ async def test_source_disables_cluster_pod_metrics_by_default():
 
     def handler(request: httpx.Request) -> httpx.Response:
         paths_hit.append(request.url.path)
-        if "/sessions/sess-1/pods" in request.url.path:
+        if request.url.path == "/api/v1/cluster/workloads/wl-1/hierarchy":
             return httpx.Response(
                 200,
-                json=[{"pod": {"namespace": "ns1", "name": "podA"}}],
+                json={"pods": [{"namespace": "ns1", "name": "podA"}]},
             )
-        if "/sessions/sess-1/events" in request.url.path:
-            return httpx.Response(200, json={"events": []})
-        if "/sessions/sess-1/summary" in request.url.path:
-            return httpx.Response(200, json={})
         if request.url.path == "/api/v1/cluster/faults":
             return httpx.Response(200, json={"faults": []})
         return httpx.Response(404)
 
     client = _client(handler)
     try:
-        source = RobustnessServerSource(client)
+        source = RobustnessServerSource(client, workload_uid="wl-1")
         data = await source.fetch(_ctx())
     finally:
         await client.aclose()
@@ -415,15 +319,11 @@ async def test_source_fans_out_pod_metrics_when_enabled():
 
     def handler(request: httpx.Request) -> httpx.Response:
         paths_hit.append(request.url.path)
-        if "/sessions/sess-1/pods" in request.url.path:
+        if request.url.path == "/api/v1/cluster/workloads/wl-1/hierarchy":
             return httpx.Response(
                 200,
-                json=[{"pod": {"namespace": "ns1", "name": "podA"}}],
+                json={"pods": [{"namespace": "ns1", "name": "podA"}]},
             )
-        if "/sessions/sess-1/events" in request.url.path:
-            return httpx.Response(200, json={"events": []})
-        if "/sessions/sess-1/summary" in request.url.path:
-            return httpx.Response(200, json={})
         if request.url.path == "/api/v1/cluster/faults":
             return httpx.Response(200, json={"faults": []})
         if request.url.path == "/api/v1/cluster/pods/ns1/podA/metrics":
@@ -432,7 +332,7 @@ async def test_source_fans_out_pod_metrics_when_enabled():
 
     client = _client(handler)
     try:
-        source = RobustnessServerSource(client, enable_cluster_pod_metrics=True)
+        source = RobustnessServerSource(client, workload_uid="wl-1", enable_cluster_pod_metrics=True)
         data = await source.fetch(_ctx())
     finally:
         await client.aclose()
@@ -449,15 +349,11 @@ async def test_source_pod_metrics_5xx_propagates_for_degrade():
     """Transport / 5xx on cluster metrics still triggers DegradeRouter."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if "/sessions/sess-1/pods" in request.url.path:
+        if request.url.path == "/api/v1/cluster/workloads/wl-1/hierarchy":
             return httpx.Response(
                 200,
-                json=[{"pod": {"namespace": "ns1", "name": "podA"}}],
+                json={"pods": [{"namespace": "ns1", "name": "podA"}]},
             )
-        if "/sessions/sess-1/events" in request.url.path:
-            return httpx.Response(200, json={"events": []})
-        if "/sessions/sess-1/summary" in request.url.path:
-            return httpx.Response(200, json={})
         if request.url.path == "/api/v1/cluster/faults":
             return httpx.Response(200, json={"faults": []})
         if request.url.path == "/api/v1/cluster/pods/ns1/podA/metrics":
@@ -466,7 +362,7 @@ async def test_source_pod_metrics_5xx_propagates_for_degrade():
 
     client = _client(handler)
     try:
-        source = RobustnessServerSource(client, enable_cluster_pod_metrics=True)
+        source = RobustnessServerSource(client, workload_uid="wl-1", enable_cluster_pod_metrics=True)
         with pytest.raises(SourceUnavailable):
             await source.fetch(_ctx())
     finally:
@@ -475,24 +371,22 @@ async def test_source_pod_metrics_5xx_propagates_for_degrade():
 
 @pytest.mark.asyncio
 async def test_source_pod_metrics_dedups_repeated_pod_refs():
-    """Same pod appearing twice in session_pods should fan out once."""
+    """Same pod appearing twice in the hierarchy should fan out once."""
 
     seen_metrics_paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if "/sessions/sess-1/pods" in request.url.path:
+        if request.url.path == "/api/v1/cluster/workloads/wl-1/hierarchy":
             return httpx.Response(
                 200,
-                json=[
-                    {"pod": {"namespace": "ns1", "name": "podA"}},
-                    {"pod": {"namespace": "ns1", "name": "podA"}},
-                    {"pod": {"namespace": "ns1", "name": "podB"}},
-                ],
+                json={
+                    "pods": [
+                        {"namespace": "ns1", "name": "podA"},
+                        {"namespace": "ns1", "name": "podA"},
+                        {"namespace": "ns1", "name": "podB"},
+                    ]
+                },
             )
-        if "/sessions/sess-1/events" in request.url.path:
-            return httpx.Response(200, json={"events": []})
-        if "/sessions/sess-1/summary" in request.url.path:
-            return httpx.Response(200, json={})
         if request.url.path == "/api/v1/cluster/faults":
             return httpx.Response(200, json={"faults": []})
         if "/api/v1/cluster/pods/" in request.url.path:
@@ -502,7 +396,7 @@ async def test_source_pod_metrics_dedups_repeated_pod_refs():
 
     client = _client(handler)
     try:
-        source = RobustnessServerSource(client, enable_cluster_pod_metrics=True)
+        source = RobustnessServerSource(client, workload_uid="wl-1", enable_cluster_pod_metrics=True)
         await source.fetch(_ctx())
     finally:
         await client.aclose()
@@ -515,21 +409,17 @@ async def test_source_pod_metrics_dedups_repeated_pod_refs():
 
 @pytest.mark.asyncio
 async def test_source_pod_metrics_caps_fan_out_per_tick():
-    """Sessions with too many pods must not blow the per-tick budget."""
+    """Workloads with too many pods must not blow the per-tick budget."""
 
     metrics_calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal metrics_calls
-        if "/sessions/sess-1/pods" in request.url.path:
+        if request.url.path == "/api/v1/cluster/workloads/wl-1/hierarchy":
             return httpx.Response(
                 200,
-                json=[{"pod": {"namespace": "ns1", "name": f"pod-{i:02d}"}} for i in range(10)],
+                json={"pods": [{"namespace": "ns1", "name": f"pod-{i:02d}"} for i in range(10)]},
             )
-        if "/sessions/sess-1/events" in request.url.path:
-            return httpx.Response(200, json={"events": []})
-        if "/sessions/sess-1/summary" in request.url.path:
-            return httpx.Response(200, json={})
         if request.url.path == "/api/v1/cluster/faults":
             return httpx.Response(200, json={"faults": []})
         if "/api/v1/cluster/pods/" in request.url.path:
@@ -541,6 +431,7 @@ async def test_source_pod_metrics_caps_fan_out_per_tick():
     try:
         source = RobustnessServerSource(
             client,
+            workload_uid="wl-1",
             enable_cluster_pod_metrics=True,
             max_pods_per_tick=3,
         )
@@ -556,15 +447,11 @@ async def test_server_pod_metrics_drive_local_health_gpu_signal():
     """End-to-end: server-decoded GPU >= warn threshold fires gpu_thermal_high."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if "/sessions/sess-1/pods" in request.url.path:
+        if request.url.path == "/api/v1/cluster/workloads/wl-1/hierarchy":
             return httpx.Response(
                 200,
-                json=[{"pod": {"namespace": "ns1", "name": "podA"}}],
+                json={"pods": [{"namespace": "ns1", "name": "podA"}]},
             )
-        if "/sessions/sess-1/events" in request.url.path:
-            return httpx.Response(200, json={"events": []})
-        if "/sessions/sess-1/summary" in request.url.path:
-            return httpx.Response(200, json={})
         if request.url.path == "/api/v1/cluster/faults":
             return httpx.Response(200, json={"faults": []})
         if request.url.path == "/api/v1/cluster/pods/ns1/podA/metrics":
@@ -574,7 +461,7 @@ async def test_server_pod_metrics_drive_local_health_gpu_signal():
 
     client = _client(handler)
     try:
-        source = RobustnessServerSource(client, enable_cluster_pod_metrics=True)
+        source = RobustnessServerSource(client, workload_uid="wl-1", enable_cluster_pod_metrics=True)
         data = await source.fetch(_ctx())
     finally:
         await client.aclose()
@@ -593,22 +480,13 @@ async def test_server_pod_metrics_drive_local_health_gpu_signal():
 
 
 @pytest.mark.asyncio
-async def test_source_workload_uid_merges_hierarchy_pods_into_session_pods():
-    """Hierarchy-derived workers are added even when session_pods skipped them."""
+async def test_source_workload_uid_populates_pods_from_hierarchy():
+    """Hierarchy is the only pod-discovery route."""
 
     paths_hit: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         paths_hit.append(request.url.path)
-        if "/sessions/sess-1/pods" in request.url.path:
-            return httpx.Response(
-                200,
-                json=[{"pod": {"namespace": "ns1", "name": "head-pod"}}],
-            )
-        if "/sessions/sess-1/events" in request.url.path:
-            return httpx.Response(200, json={"events": []})
-        if "/sessions/sess-1/summary" in request.url.path:
-            return httpx.Response(200, json={})
         if request.url.path == "/api/v1/cluster/workloads/wl-1/hierarchy":
             return httpx.Response(
                 200,
@@ -643,21 +521,11 @@ async def test_source_workload_uid_merges_hierarchy_pods_into_session_pods():
 
 @pytest.mark.asyncio
 async def test_source_workload_uid_drives_multi_node_pod_metric_fan_out():
-    """Cluster pod-metrics fans out across hierarchy-only pods, not just session_pods."""
+    """Cluster pod-metrics fans out across every hierarchy pod."""
 
     metric_paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if "/sessions/sess-1/pods" in request.url.path:
-            # Session only knows the head pod; workers exist only in the cluster hierarchy view.
-            return httpx.Response(
-                200,
-                json=[{"pod": {"namespace": "ns1", "name": "head"}}],
-            )
-        if "/sessions/sess-1/events" in request.url.path:
-            return httpx.Response(200, json={"events": []})
-        if "/sessions/sess-1/summary" in request.url.path:
-            return httpx.Response(200, json={})
         if request.url.path == "/api/v1/cluster/workloads/wl-1/hierarchy":
             return httpx.Response(
                 200,
@@ -698,12 +566,6 @@ async def test_source_workload_uid_hierarchy_5xx_triggers_degrade():
     """A 5xx on the hierarchy endpoint must propagate as SourceUnavailable."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if "/sessions/sess-1/pods" in request.url.path:
-            return httpx.Response(200, json=[])
-        if "/sessions/sess-1/events" in request.url.path:
-            return httpx.Response(200, json={"events": []})
-        if "/sessions/sess-1/summary" in request.url.path:
-            return httpx.Response(200, json={})
         if request.url.path == "/api/v1/cluster/workloads/wl-1/hierarchy":
             return httpx.Response(503, text="busy")
         return httpx.Response(404)
@@ -719,23 +581,14 @@ async def test_source_workload_uid_hierarchy_5xx_triggers_degrade():
 
 @pytest.mark.asyncio
 async def test_source_no_workload_uid_skips_hierarchy_call():
-    """Single-node path keeps the existing list_session_pods behaviour."""
+    """Without a workload uid there is no pod-discovery route at all."""
 
     paths_hit: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         paths_hit.append(request.url.path)
-        if "/sessions/sess-1/pods" in request.url.path:
-            return httpx.Response(
-                200,
-                json=[{"pod": {"namespace": "ns1", "name": "head"}}],
-            )
-        if "/sessions/sess-1/events" in request.url.path:
-            return httpx.Response(200, json={"events": []})
-        if "/sessions/sess-1/summary" in request.url.path:
-            return httpx.Response(200, json={})
         if request.url.path == "/api/v1/cluster/faults":
-            return httpx.Response(200, json={"faults": []})
+            return httpx.Response(200, json={"faults": [{"name": "g1-ecc"}]})
         return httpx.Response(404)
 
     client = _client(handler)
@@ -746,5 +599,4 @@ async def test_source_no_workload_uid_skips_hierarchy_call():
         await client.aclose()
 
     assert not any("workloads" in p for p in paths_hit)
-    assert len(data.session_pods) == 1
-    assert data.session_pods[0]["pod"]["name"] == "head"
+    assert data.session_pods == []

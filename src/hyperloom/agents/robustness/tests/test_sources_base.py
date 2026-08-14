@@ -53,7 +53,7 @@ class _ScriptedSource:
 
 
 def _data(label: str) -> SourceData:
-    return SourceData(session_summary={"from": label})
+    return SourceData(cluster_faults=[{"from": label}])
 
 
 @pytest.mark.asyncio
@@ -65,7 +65,7 @@ async def test_router_happy_path_uses_primary_only():
     for _ in range(3):
         snap = await router.collect(ctx=None)
         assert snap.sources_used == ["server"]
-        assert snap.session_summary == {"from": "server"}
+        assert snap.cluster_faults == [{"from": "server"}]
         assert snap.degraded_reason is None
     assert primary.calls == 3
     assert fallback.calls == 0
