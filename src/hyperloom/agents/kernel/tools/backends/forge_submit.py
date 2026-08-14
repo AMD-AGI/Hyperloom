@@ -37,6 +37,7 @@ from _task_group_contract import (  # noqa: E402
     logical_operator_name,
     task_group_shape_cases,
 )
+from _vendor_operator_playbooks import match_vendor_operator_playbook  # noqa: E402
 
 if _TOOLS_DIR_INSERTED:
     sys.path.remove(_TOOLS_DIR)
@@ -3709,6 +3710,510 @@ def _finalize_forge_workspace(
     )
 
 
+# --- Vendor-operator-playbook route -----------------------------------------
+#
+# A vendor-playbook candidate (mori's EP dispatch/combine is the first case,
+# see _vendor_operator_playbooks.py and KernelForge PR #88) has no rewritable
+# device source: it's a pip-installed compiled library. Instead of the
+# git-worktree / source-rewrite pipeline `submit()` otherwise runs, this copies
+# a validated KernelForge `examples/<task>/` bundle into a scratch workspace
+# and runs forge-loop against that bundle's own driver/config/program.md.
+#
+# mori's dispatch and combine are two separate hot-kernel candidates that
+# share one playbook id and are deliberately invoked as **one** Forge
+# task/session (not two) -- the lock/result files below de-duplicate so a
+# session that dispatches both candidates only launches forge-loop once.
+
+_VENDOR_PLAYBOOK_CLAIM_POLL_S = 5.0
+
+
+def _vendor_playbook_lock_dir(output_dir: Path, group_id: str) -> Path:
+    """Return the session-scoped directory used to de-duplicate a playbook group.
+
+    ``output_dir`` is per-attempt (``.../forge/<session_id>/<prompt_stem>``);
+    the lock lives one level up so every kernel_id in the same analysis
+    session and playbook group shares it.
+    """
+    safe_group = re.sub(r"[^A-Za-z0-9_-]+", "-", group_id).strip("-") or "vendor-playbook"
+    return output_dir.parent / "vendor_playbook_locks" / safe_group
+
+
+def _read_vendor_playbook_cached_result(lock_dir: Path) -> dict | None:
+    result_path = lock_dir / "result.json"
+    try:
+        return json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _write_vendor_playbook_result(lock_dir: Path, result: dict) -> None:
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = lock_dir / f".result.json.{uuid.uuid4().hex[:8]}.tmp"
+    tmp_path.write_text(json.dumps(result, sort_keys=True, default=str), encoding="utf-8")
+    tmp_path.replace(lock_dir / "result.json")
+
+
+def _claim_vendor_playbook_run(lock_dir: Path) -> bool:
+    """Atomically claim the right to run this group's one forge-loop session.
+
+    Returns ``True`` for whichever caller wins the race (dispatch or
+    combine, whichever the orchestrator happened to submit first); the loser
+    waits for the winner's result instead of launching a second session.
+    """
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    claim_path = lock_dir / "claimed.lock"
+    try:
+        fd = os.open(str(claim_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    os.close(fd)
+    return True
+
+
+def _wait_for_vendor_playbook_result(lock_dir: Path, deadline_unix: float) -> dict | None:
+    """Poll for the winner's result until it appears or ``deadline_unix`` passes."""
+    while True:
+        cached = _read_vendor_playbook_cached_result(lock_dir)
+        if cached is not None:
+            return cached
+        if time.time() >= deadline_unix:
+            return None
+        time.sleep(min(_VENDOR_PLAYBOOK_CLAIM_POLL_S, max(0.0, deadline_unix - time.time())))
+
+
+def _copy_vendor_task_bundle(task_bundle_root: Path, workspace: Path) -> None:
+    """Copy a KernelForge ``examples/<task>/`` bundle into ``workspace`` and
+    git-init it there.
+
+    forge-loop's IterationLoop runs ``git status``/``git checkout`` against
+    the workspace to snapshot and restore each attempt (see the bundle's own
+    ``run_example.sh``, which does the identical ``git init`` + commit before
+    invoking forge-loop directly); a bare directory of copied files with no
+    ``.git`` fails the very first git call with "not a git repository".
+    """
+    workspace.mkdir(parents=True, exist_ok=True)
+    for item in sorted(task_bundle_root.iterdir()):
+        if item.name in (".git", "__pycache__"):
+            continue
+        dest = workspace / item.name
+        if item.is_dir():
+            shutil.copytree(item, dest, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, dest)
+    gitignore = workspace / ".gitignore"
+    if not gitignore.is_file():
+        gitignore.write_text(
+            "__pycache__/\n*.pyc\n*.log\nbuild/\nforge_experiments/\n", encoding="utf-8"
+        )
+    _git = shutil.which("git") or "git"
+    subprocess.run([_git, "init", "-q"], cwd=str(workspace), check=True)
+    subprocess.run(
+        [_git, "config", "user.email", "forge-vendor-playbook@local"],
+        cwd=str(workspace),
+        check=True,
+    )
+    subprocess.run(
+        [_git, "config", "user.name", "forge-vendor-playbook"],
+        cwd=str(workspace),
+        check=True,
+    )
+    subprocess.run([_git, "add", "-A"], cwd=str(workspace), check=True)
+    subprocess.run(
+        [_git, "commit", "-q", "-m", "vendor playbook: initial task bundle", "--allow-empty"],
+        cwd=str(workspace),
+        check=True,
+    )
+
+
+def _run_vendor_playbook_loop_via_cli(
+    *,
+    kernel_anchor: str,
+    driver: str,
+    workspace: str,
+    snr_threshold: float,
+    max_iters: int,
+    max_hours: float,
+    branch: str,
+    gpu_target: str,
+    gpu_type: str,
+    fellow: str,
+    program_md_file: str,
+    target_functions: list[str],
+    experiments_dir: Path,
+    forge_log: Path,
+    timeout_s: int,
+    deadline_unix: float,
+    experience_id: str,
+    extra_env: dict[str, str] | None = None,
+) -> ForgeLoopOutcome:
+    """Run forge-loop against a copied vendor-playbook task bundle.
+
+    Mirrors ``_run_loop_via_cli``'s subprocess/result-parsing conventions, but
+    always passes ``--no-profiling --no-prepare-task`` (the bundle already
+    ships a hand-written, validated ``driver.py`` -- forge-loop's own
+    task-preparer/profiler must not try to author or reprofile it) and forwards
+    the playbook's own env requirements (e.g. ``KERNELFORGE_INCLUDE_MORI_KB``).
+    """
+    result_json = experiments_dir.parent / "forge_cli_result.json"
+    checkpoint_json = experiments_dir / f"{_FORGE_EXPERIMENT_ID}.json"
+    for stale_path in (result_json, checkpoint_json):
+        try:
+            stale_path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"could not clear stale Forge recovery artifact {stale_path}: {exc}"
+            ) from exc
+
+    forge_root = _ensure_forge_on_path()
+    env = dict(os.environ)
+    if forge_root:
+        env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
+    env["GPU_TARGET"] = gpu_target
+    _apply_gpu_type_env(env, gpu_type)
+    _apply_fellow_env(env)
+    for key, value in (extra_env or {}).items():
+        env[str(key)] = str(value)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kernel_agents.cli",
+        "forge-loop",
+        "--kernel",
+        kernel_anchor,
+        "--driver",
+        driver,
+        "--workspace",
+        workspace,
+        "--snr-threshold",
+        str(snr_threshold),
+        "--max-iters",
+        str(max_iters),
+        "--max-hours",
+        str(max_hours),
+        "--git-branch",
+        branch,
+        "--gpu-target",
+        gpu_target,
+        "--fellow",
+        fellow,
+        "--experiments-dir",
+        str(experiments_dir),
+        "--experiment-id",
+        _FORGE_EXPERIMENT_ID,
+        "--experience-id",
+        experience_id or experiments_dir.parent.name,
+        "--deadline-unix",
+        str(deadline_unix),
+        "--result-json",
+        str(result_json),
+        "--no-profiling",
+        "--no-prepare-task",
+    ]
+    cmd += ["--gpu-type", _known_gpu_model(gpu_type)]
+    if _openai_only_provider():
+        cmd += ["--agent-backend", "codex", "--agent-fallback-provider", "none"]
+        codex_model = (os.environ.get("CODEX_MODEL") or "").strip()
+        if codex_model:
+            cmd += ["--model", codex_model]
+    if program_md_file and Path(program_md_file).exists():
+        cmd += ["--program-md-file", str(program_md_file)]
+    if target_functions:
+        cmd += ["--target-functions", ",".join(target_functions)]
+
+    loop_exc = None
+    out = ""
+    timed_out = False
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            cwd=workspace,
+            start_new_session=True,
+        )
+        try:
+            remaining = max(1.0, deadline_unix - time.time())
+            stdout, stderr = proc.communicate(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            stdout, stderr = _terminate_forge_process(proc)
+        out = (stdout or "") + "\n" + (stderr or "")
+        if timed_out:
+            loop_exc = RuntimeError(f"forge-loop exceeded absolute deadline after {timeout_s}s")
+        if proc.returncode != 0:
+            if loop_exc is None:
+                loop_exc = RuntimeError(f"forge-loop exited rc={proc.returncode}: {_forge_failure_tail(out)}")
+    except Exception as exc:  # noqa: BLE001
+        loop_exc = exc
+
+    try:
+        with open(forge_log, "a") as f:
+            f.write("\n=== forge-loop vendor-playbook (cli) stdout ===\n")
+            f.write(out)
+            if loop_exc:
+                f.write(f"\n=== forge-loop exception ===\n{loop_exc}\n")
+    except OSError:  # noqa: S110
+        pass
+
+    baseline_ms = best_ms = None
+    pristine_baseline_ms = search_start_ms = None
+    mean_case_speedup = search_start_mean_case_speedup = None
+    improved = improved_during_search = total_improved = incremental_improved = False
+    parsed = None
+    try:
+        if result_json.exists():
+            parsed = json.loads(result_json.read_text())
+    except Exception:
+        parsed = None
+    if parsed is None and "__FORGE_RESULT__" in out:
+        try:
+            parsed = json.loads(out.split("__FORGE_RESULT__")[1])
+        except Exception:
+            parsed = None
+    if parsed:
+        baseline_ms = parsed.get("baseline_ms")
+        best_ms = parsed.get("best_ms")
+        pristine_baseline_ms = parsed.get("pristine_baseline_ms", baseline_ms)
+        search_start_ms = parsed.get("search_start_ms", baseline_ms)
+        (
+            mean_case_speedup,
+            search_start_mean_case_speedup,
+            total_improved,
+            incremental_improved,
+        ) = _observed_mean_case_result_fields(parsed)
+        improved = total_improved
+        improved_during_search = incremental_improved
+        if parsed.get("deadline_expired"):
+            timed_out = True
+            if loop_exc is None:
+                loop_exc = RuntimeError("forge-loop reached its graceful absolute deadline")
+    checkpoint = _read_forge_checkpoint(experiments_dir)
+    return ForgeLoopOutcome(
+        baseline_ms=baseline_ms,
+        best_ms=best_ms,
+        improved=improved,
+        output=out,
+        error=loop_exc,
+        timed_out=timed_out,
+        checkpoint=checkpoint,
+        pristine_baseline_ms=pristine_baseline_ms,
+        search_start_ms=search_start_ms,
+        improved_during_search=improved_during_search,
+        structured_result=parsed if isinstance(parsed, dict) else None,
+        mean_case_speedup=mean_case_speedup,
+        search_start_mean_case_speedup=search_start_mean_case_speedup,
+        total_improved=total_improved,
+        incremental_improved=incremental_improved,
+    )
+
+
+def _submit_vendor_playbook(
+    *,
+    candidate: dict[str, Any],
+    prompt_file: Path,
+    output_dir: Path,
+    timeout_s: int,
+) -> dict:
+    """Run (or reuse) the one forge-loop session for a vendor-playbook group."""
+    started = time.time()
+    playbook = candidate.get("vendor_operator_playbook")
+    if not isinstance(playbook, dict) or not playbook.get("id"):
+        # Defensive re-resolve: a candidate dict round-tripped through JSON by
+        # a caller that dropped nested fields still carries enough identity
+        # (name/library/source_file) to re-match the registry.
+        playbook = match_vendor_operator_playbook(candidate)
+    if not isinstance(playbook, dict) or not playbook.get("id"):
+        return _normalized(
+            2,
+            "",
+            "forge: patch_strategy=vendor_playbook but candidate carries no "
+            "vendor_operator_playbook entry (re-run classify_patchability?)",
+            time.time() - started,
+            skipped=True,
+        )
+
+    group_id = str(playbook.get("id"))
+    role = str(candidate.get("vendor_playbook_role") or playbook.get("role") or "")
+    lock_dir = _vendor_playbook_lock_dir(output_dir, group_id)
+
+    cached = _read_vendor_playbook_cached_result(lock_dir)
+    if cached is not None:
+        result = dict(cached)
+        result["vendor_playbook_reused"] = True
+        result["vendor_playbook_role"] = role
+        return result
+
+    if not _claim_vendor_playbook_run(lock_dir):
+        # A sibling role (e.g. this is "combine" and "dispatch" already
+        # claimed the group) is running the one shared session; wait for it
+        # rather than launching a second forge-loop for the same task.
+        deadline = time.time() + max(60.0, float(timeout_s) + 300.0)
+        cached = _wait_for_vendor_playbook_result(lock_dir, deadline)
+        if cached is not None:
+            result = dict(cached)
+            result["vendor_playbook_reused"] = True
+            result["vendor_playbook_role"] = role
+            return result
+        return _normalized(
+            2,
+            "",
+            f"forge: vendor playbook group {group_id!r} was claimed by a "
+            "concurrent submission but never produced a result before the wait "
+            "deadline",
+            time.time() - started,
+            skipped=True,
+        )
+
+    forge_root = (os.environ.get("FORGE_PATH") or "").strip()
+    if not forge_root:
+        result = _normalized(
+            2,
+            "",
+            "forge: FORGE_PATH is not set; cannot locate the KernelForge "
+            f"examples/ task bundle for vendor playbook {group_id!r}",
+            time.time() - started,
+            skipped=True,
+        )
+        _write_vendor_playbook_result(lock_dir, result)
+        return result
+
+    task_bundle_root = Path(forge_root) / str(playbook.get("task_bundle") or "")
+    if not task_bundle_root.is_dir():
+        result = _normalized(
+            2,
+            "",
+            f"forge: vendor playbook task bundle not found: {task_bundle_root}",
+            time.time() - started,
+            skipped=True,
+        )
+        _write_vendor_playbook_result(lock_dir, result)
+        return result
+
+    workspace = output_dir / "worktree"
+    if workspace.exists() or workspace.is_symlink():
+        result = _normalized(
+            2,
+            "",
+            f"forge: retained vendor playbook workspace already exists: {workspace}",
+            time.time() - started,
+            skipped=True,
+        )
+        _write_vendor_playbook_result(lock_dir, result)
+        return result
+
+    try:
+        _copy_vendor_task_bundle(task_bundle_root, workspace)
+    except OSError as exc:
+        result = _normalized(
+            2,
+            "",
+            f"forge: failed to copy vendor playbook task bundle {task_bundle_root} "
+            f"-> {workspace}: {exc}",
+            time.time() - started,
+            skipped=True,
+        )
+        _write_vendor_playbook_result(lock_dir, result)
+        return result
+
+    kernel_anchor = workspace / str(playbook.get("kernel_anchor") or "")
+    driver = workspace / str(playbook.get("driver") or "driver.py")
+    program_md = workspace / str(playbook.get("program_md") or "program.md")
+    if not program_md.is_file():
+        program_md = Path(prompt_file)
+
+    experiments_dir = output_dir / "forge_experiments"
+    experiments_dir.mkdir(parents=True, exist_ok=True)
+    forge_log = output_dir / "forge_loop.log"
+    branch = _new_forge_branch(output_dir, str(kernel_anchor))
+    gpu_target = _resolve_gpu_target(candidate)
+    gpu_type = _resolve_gpu_type(candidate)
+    max_iters = int(os.environ.get("FORGE_MAX_ITERS", "8"))
+    snr_threshold = float(playbook.get("snr_threshold", 30.0))
+    if timeout_s < _FORGE_MIN_BUDGET_SEC:
+        log.warning(
+            "forge budget %.0f min is below the %d-min minimum forge-loop "
+            "accepts for vendor playbook %r; running with the floored "
+            "--max-hours and hard-killing at the requested budget",
+            timeout_s / 60.0,
+            _FORGE_MIN_BUDGET_SEC // 60,
+            group_id,
+        )
+    deadline_unix = max(time.time() + 1.0, started + timeout_s)
+
+    loop_outcome = _run_vendor_playbook_loop_via_cli(
+        kernel_anchor=str(kernel_anchor),
+        driver=str(driver),
+        workspace=str(workspace),
+        snr_threshold=snr_threshold,
+        max_iters=max_iters,
+        max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),
+        branch=branch,
+        gpu_target=gpu_target,
+        gpu_type=gpu_type,
+        fellow=str(playbook.get("fellow") or "aiter-fellow"),
+        program_md_file=str(program_md),
+        target_functions=[str(f) for f in (playbook.get("target_functions") or [])],
+        experiments_dir=experiments_dir,
+        forge_log=forge_log,
+        timeout_s=timeout_s,
+        deadline_unix=deadline_unix,
+        experience_id=output_dir.name,
+        extra_env={str(k): str(v) for k, v in (playbook.get("env") or {}).items()},
+    )
+    result = _normalized(
+        0 if loop_outcome.error is None else 1,
+        loop_outcome.output or "",
+        "" if loop_outcome.error is None else str(loop_outcome.error),
+        time.time() - started,
+    )
+    # kernel_optimization.py's build_verification() only recognizes a forge
+    # attempt's measured speedup when total_improved/mean_case_speedup are
+    # BOTH present on the result dict it reads (see run_attempt's field
+    # copy); leaving any of these out silently downgrades a real KEEP-worthy
+    # improvement to PARTIAL ("no measurable speedup found"), even though
+    # forge-loop itself committed and validated a faster config.
+    result.update(
+        {
+            "cli_workspace": str(workspace),
+            "forge_workspace": str(workspace),
+            "output_dir": str(output_dir),
+            "improved": bool(loop_outcome.total_improved),
+            "total_improved": bool(loop_outcome.total_improved),
+            "incremental_improved": bool(loop_outcome.incremental_improved),
+            "improved_during_search": bool(loop_outcome.improved_during_search),
+            "mean_case_speedup": loop_outcome.mean_case_speedup,
+            "search_start_mean_case_speedup": loop_outcome.search_start_mean_case_speedup,
+            "best_ms": loop_outcome.best_ms,
+            "baseline_ms": loop_outcome.baseline_ms,
+            "pristine_baseline_ms": loop_outcome.pristine_baseline_ms,
+            "search_start_ms": loop_outcome.search_start_ms,
+            "vendor_playbook_id": group_id,
+            "vendor_playbook_role": role,
+            "vendor_playbook_task_bundle": str(task_bundle_root),
+            "vendor_playbook_reused": False,
+        }
+    )
+    if loop_outcome.total_improved and kernel_anchor.is_file():
+        # There is no separate "deploy" artifact for a vendor launch-config:
+        # the tuned values live in the anchor file forge-loop already
+        # committed in-place in workspace. Materialize a copy under the
+        # attempt's own optimized_versions/ so _select_source_artifact()
+        # (which only looks in that conventional directory) can find it,
+        # exactly like the ordinary per-file-rewrite forge path does.
+        try:
+            opt_dir = output_dir / "optimized_versions"
+            opt_dir.mkdir(parents=True, exist_ok=True)
+            dest = opt_dir / f"{group_id}_{role or 'optimized'}{kernel_anchor.suffix}"
+            shutil.copy2(kernel_anchor, dest)
+        except OSError as exc:
+            log.warning("forge: could not stage vendor playbook artifact copy: %s", exc)
+    _write_vendor_playbook_result(lock_dir, result)
+    return result
+
+
 def submit(
     source_file: str,
     prompt_file: Path,
@@ -3730,14 +4235,28 @@ def submit(
     optimization_report.md under output_dir.
     """
     started = time.time()
+    candidate = candidate or {}
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Vendor-operator-playbook route: a closed-source vendor op (e.g. mori's EP
+    # dispatch/combine) has no rewritable device source to worktree/rewrite --
+    # skip the entire git-worktree / fellow-resolution / rewrite-route pipeline
+    # below and copy the validated KernelForge task bundle instead. See
+    # _vendor_operator_playbooks.py and KernelForge PR #88.
+    if candidate.get("patch_strategy") == "vendor_playbook":
+        return _submit_vendor_playbook(
+            candidate=candidate,
+            prompt_file=Path(prompt_file),
+            output_dir=output_dir,
+            timeout_s=timeout_s,
+        )
+
     from hyperloom.orchestrator.knowledge.kernel_experience_bridge import (
         KernelExperienceBridge,
     )
 
     knowledge_bridge = KernelExperienceBridge(_knowledge_config_for_forge())
-    candidate = candidate or {}
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Re-derive source_type from the file extension when it's unknown: an aiter
     # .cu/.cuh kernel can arrive as "unknown" and be wrongly skipped. A real

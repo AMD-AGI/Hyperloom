@@ -91,6 +91,14 @@ from _roofline_source import (
 # section structure + table schemas as the bypass route.
 from _analysis_md import render_report
 
+# Vendor-operator-playbook registry: routes a closed-source vendor op (no
+# rewritable device source) to a validated KernelForge task bundle instead of
+# a source rewrite -- see KernelForge PR #88's mori dispatch/combine gap.
+from _vendor_operator_playbooks import (
+    match_vendor_operator_playbook,
+    resolve_kernel_anchor_path,
+)
+
 # Shared with the kernel-opt side; these tools also run as standalone scripts
 # outside an importable hyperloom, where the artifact is simply not written.
 try:
@@ -1515,6 +1523,17 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
                 or "non-rewritable"
             )
             return False, f"source: {reason}"
+    # Vendor-operator-playbook check: some closed-source vendor operators (a
+    # pip-installed compiled library with no rewritable device source) still
+    # have a small, named set of launch-config knobs that a KernelForge
+    # forge-loop task bundle has already been validated to tune (mori's EP
+    # dispatch/combine is the first case -- see KernelForge PR #88). This is
+    # checked before the vendor_binary/no-source-file rejections below and
+    # before the ``source_file`` requirement, since a vendor-playbook
+    # candidate's "source" is a pip-installed file, not something forge would
+    # ever rewrite.
+    if match_vendor_operator_playbook(candidate) is not None:
+        return True, ""
     if not source_file:
         # A bare launch API has no kernel body to rewrite, which is a different
         # situation from a kernel whose source we merely failed to locate. Say
@@ -4056,6 +4075,18 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
     reusable, skip_reason = classify_patchability(item)
     item["reusable_native_kernel"] = reusable
     item["skip_reason"] = skip_reason
+    playbook = match_vendor_operator_playbook(item)
+    if playbook is not None:
+        item["patch_strategy"] = "vendor_playbook"
+        item["vendor_operator_playbook"] = playbook
+        item["vendor_playbook_role"] = playbook.get("role", "")
+        # kernel_optimization.py's CLI gates on a non-empty, path-shaped
+        # source_file before it will dispatch to any backend; a vendor
+        # playbook candidate has no rewritable device source, so point that
+        # field at the task bundle's anchor file instead of leaving it
+        # empty (which would otherwise fall through as "missing_native_source").
+        if not str(item.get("source_file") or "").strip():
+            item["source_file"] = resolve_kernel_anchor_path(playbook)
     item["benchmark_files"] = find_benchmark_files(
         item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
     )
@@ -4617,6 +4648,7 @@ def _finalize_candidates(
             item["vendor_dispatch_wrapper"] = True
         item["runtime_generated_kernel"] = is_runtime_generated_kernel(item["name"], item.get("source_file", ""))
         _stamp_candidate_metadata(item, op_cat_map)
+    _apply_vendor_operator_playbook_grouping(top)
     if source_resolution_out and _KSC is not None:
         write_source_resolution_artifact(
             top,
@@ -4628,6 +4660,36 @@ def _finalize_candidates(
             allow_review=allow_model_tiers,
         )
     return top
+
+
+def _apply_vendor_operator_playbook_grouping(top: list[dict[str, Any]]) -> None:
+    """Sum GPU share across a vendor playbook's sibling roles; mutates ``top``.
+
+    mori's dispatch and combine are two separate kernel launches under the
+    hood, but this deliberately invokes them as **one** Forge task/session
+    (see KernelForge PR #88): each is gated on the *sum* of dispatch's +
+    combine's ``gpu_pct``, since together they are one logical round trip.
+    Each member keeps its own candidate entry (so either one can be picked as
+    the ``--kernel-id`` the orchestrator dispatches); ``forge_submit``'s
+    vendor-playbook path de-duplicates so only one forge-loop session actually
+    runs per group per analysis session.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in top:
+        if not isinstance(item, dict) or item.get("patch_strategy") != "vendor_playbook":
+            continue
+        playbook = item.get("vendor_operator_playbook")
+        group_id = str(playbook.get("id") or "") if isinstance(playbook, dict) else ""
+        if not group_id:
+            continue
+        groups.setdefault(group_id, []).append(item)
+    for group_id, members in groups.items():
+        aggregate = round(sum(float(m.get("gpu_pct") or 0.0) for m in members), 3)
+        member_ids = [str(m.get("kernel_id") or "") for m in members]
+        for member in members:
+            member["vendor_playbook_group_id"] = group_id
+            member["aggregate_gpu_pct"] = aggregate
+            member["vendor_playbook_group_kernel_ids"] = list(member_ids)
 
 
 def _candidate_resolution_method(item: dict[str, Any]) -> str:
