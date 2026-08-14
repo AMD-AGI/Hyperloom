@@ -684,52 +684,97 @@ def verdict_rests_on_one_ground(entry: dict[str, Any]) -> bool:
     return len([risk for risk in (entry.get("risks") or []) if risk]) <= 1
 
 
-# The grounds a verdict states outside its prose: the evidence it still wants,
-# the further findings it lists, and the rule it declares it rests on. A
-# ``verdict_map`` entry is ``{verdict, rationale?, failure_reason_code?}`` --
-# the shape PolicyGate documents -- so the first two have nowhere to live but
-# the payload, where they are stated once for the whole batch.
-_VERDICT_STATED_GROUNDS_KEYS: tuple[str, ...] = (
-    "required_evidence",
-    "risks",
-    "failure_reason_code",
-)
+# The findings a verdict lists outside its prose: the evidence it still wants
+# and the further risks it names. A ``verdict_map`` entry is
+# ``{verdict, rationale?, failure_reason_code?}`` -- the shape PolicyGate
+# documents -- so these have nowhere to live but the payload, where a batch
+# review states them once for every variant it looked at.
+_VERDICT_INHERITED_FINDING_KEYS: tuple[str, ...] = ("required_evidence", "risks")
 
 
-def verdict_map_entry_grounds(entry: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+def _finding_binds_variant(finding: Any, variant: str, siblings: Iterable[str]) -> bool:
+    """Return whether a batch-level finding is a ground ``variant`` rests on.
+
+    Args:
+        finding: One ``risks`` or ``required_evidence`` item from the payload.
+        variant: The ``verdict_map`` key being read.
+        siblings: The batch's other ``verdict_map`` keys.
+
+    Returns:
+        True unless the finding names a sibling and not ``variant`` itself.
+    """
+    text = finding if isinstance(finding, str) else json.dumps(finding, default=str)
+
+    def names(name: str) -> bool:
+        return bool(name) and re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text) is not None
+
+    return names(variant) or not any(names(sibling) for sibling in siblings)
+
+
+def _inheritable_reason_code(payload: dict[str, Any]) -> str:
+    """Return the payload's declared code, when it cannot soften a variant's reject.
+
+    Args:
+        payload: The ``review_verdict`` payload.
+
+    Returns:
+        The declared ``failure_reason_code``, or ``""`` when it names an
+        advisory-only rule.
+    """
+    code = str(payload.get("failure_reason_code") or "").strip()
+    return "" if code in advisory_only_reason_codes() else code
+
+
+def verdict_map_entry_grounds(entry: dict[str, Any], payload: dict[str, Any], *, variant: str) -> dict[str, Any]:
     """Return the grounds one ``verdict_map`` entry rests on.
 
     Reading the entry alone left the hold's safeguards looking for keys the
     per-variant shape has no slot for, so both answered "nothing further
     stated" whatever the Critic wrote: a reject listing blockers and asking for
     evidence was held to a rule its rationale merely mentioned. The payload is
-    where those grounds are stated, and it states them for every variant --
-    which is also how the same verdict is serialised downstream
-    (:func:`serialize_verdict_advisory`).
+    where those findings are stated, in the field set the same verdict is
+    serialised from downstream (:func:`serialize_verdict_advisory`).
 
-    Prose is deliberately not inherited. Grounds stated once bind every
-    variant, but a citation is a claim about the verdict making it: reading the
-    batch's prose as one variant's grounds would downgrade a reject whose own
-    rationale refuses on something else. The two mistakes cost different
-    amounts (see :data:`_CITATION_OPENER`), so only the narrower reading is
-    taken.
+    What the batch states can only add to the grounds a variant is held on; it
+    never supplies the grounds a variant is softened on. That is one rule with
+    two faces. A finding binds unless it names a sibling instead
+    (:func:`_finding_binds_variant`) -- a batch lists its findings about every
+    variant in one place, and counting a sibling's blocker would decide this
+    variant's hold by how many *others* drew a complaint. A citation is not
+    inherited at all when it could downgrade: prose because the batch's
+    grounds are not this variant's, and ``failure_reason_code`` for the same
+    reason and more forcefully, since a declared code outranks the entry's own
+    rationale rather than competing with it. A code naming a rule that asked
+    for a reject is still inherited: it withholds the downgrade rather than
+    causing one, and the two mistakes cost different amounts (see
+    :data:`_CITATION_OPENER`).
 
     Args:
         entry: One ``verdict_map`` entry.
         payload: The ``review_verdict`` payload that entry arrived in.
+        variant: The ``verdict_map`` key ``entry`` is filed under.
 
     Returns:
         The entry's own keys, plus each ground the entry states none of and the
-        payload does; ``{}`` when ``entry`` is not a dict.
+        payload states for it; ``{}`` when ``entry`` is not a dict.
     """
     if not isinstance(entry, dict):
         return {}
     grounds = dict(entry)
     if not isinstance(payload, dict):
         return grounds
-    for key in _VERDICT_STATED_GROUNDS_KEYS:
-        if not grounds.get(key) and payload.get(key):
-            grounds[key] = payload[key]
+    siblings = [str(name) for name in (payload.get("verdict_map") or {}) if str(name) != variant]
+    stated = serialize_verdict_advisory(payload)
+    for key in _VERDICT_INHERITED_FINDING_KEYS:
+        if grounds.get(key):
+            continue
+        bound = [item for item in stated.get(key, []) if _finding_binds_variant(item, variant, siblings)]
+        if bound:
+            grounds[key] = bound
+    if not grounds.get("failure_reason_code"):
+        code = _inheritable_reason_code(payload)
+        if code:
+            grounds["failure_reason_code"] = code
     return grounds
 
 

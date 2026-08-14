@@ -1243,6 +1243,64 @@ async def test_the_verdicts_own_prose_does_not_supply_a_variants_citation(coord)
     assert coord._materialise_calls == []
 
 
+@pytest.mark.asyncio
+async def test_the_batchs_declared_advisory_code_does_not_supply_a_variants_citation(coord):
+    """The batch's citation is not the variant's either. A declared code
+    outranks prose, so inheriting one would not merely compete with the
+    variant's own rationale — it would stop it being read at all, and downgrade
+    a reject that refuses on grounds no advisory rule ever asked advice for."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-field", variants=["v_a"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-field",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+            "verdict_map": {
+                "v_a": {
+                    "verdict": "reject",
+                    "rationale": "this variant has no rollback plan and its patch does not apply.",
+                },
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_risk_the_batch_states_about_a_sibling_does_not_hold_this_variant(coord):
+    """A batch review lists its findings about every variant in one ``risks``
+    list. Counting a sibling's findings as this variant's grounds decides the
+    hold by how many *other* variants drew a complaint, which switched the
+    feature off for the whole batch path."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-siblings", variants=["v_a", "v_b", "v_c"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-siblings",
+            "risks": [
+                {"severity": "blocker", "summary": "v_b: the patch does not apply to the base checkout."},
+                {"severity": "blocker", "summary": "v_c has no rollback plan."},
+            ],
+            "verdict_map": {
+                "v_a": {
+                    "verdict": "reject",
+                    "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+                    "rationale": "carries a self-reported gain field; nothing else.",
+                },
+                "v_b": {"verdict": "needs_review", "rationale": "re-run once the patch applies"},
+                "v_c": {"verdict": "needs_review", "rationale": "no prior on this flag"},
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "advise"
+    assert len(coord._materialise_calls) == 1
+
+
 @pytest.mark.parametrize(
     ("entry", "payload", "expected"),
     [
@@ -1250,7 +1308,7 @@ async def test_the_verdicts_own_prose_does_not_supply_a_variants_citation(coord)
             {"verdict": "reject"},
             {"risks": [{"severity": "blocker"}], "required_evidence": ["a bench"]},
             {"verdict": "reject", "risks": [{"severity": "blocker"}], "required_evidence": ["a bench"]},
-            id="grounds_with_no_per_variant_slot_are_inherited",
+            id="findings_with_no_per_variant_slot_are_inherited",
         ),
         pytest.param(
             {"verdict": "reject", "failure_reason_code": "variant_code"},
@@ -1264,11 +1322,51 @@ async def test_the_verdicts_own_prose_does_not_supply_a_variants_citation(coord)
             {"verdict": "reject", "rationale": "the variant's own grounds"},
             id="prose_is_not_inherited",
         ),
+        pytest.param(
+            {"verdict": "reject", "rationale": "the variant's own grounds"},
+            {"failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE},
+            {"verdict": "reject", "rationale": "the variant's own grounds"},
+            id="a_code_that_could_soften_the_reject_is_not_inherited_either",
+        ),
+        pytest.param(
+            {"verdict": "reject", "rationale": "the variant's own grounds"},
+            {"failure_reason_code": "specialist_patch_not_grounded"},
+            {
+                "verdict": "reject",
+                "rationale": "the variant's own grounds",
+                "failure_reason_code": "specialist_patch_not_grounded",
+            },
+            id="a_code_that_can_only_hold_the_reject_is_inherited",
+        ),
+        pytest.param(
+            {"verdict": "reject"},
+            {"risks": [{"summary": "no rollback plan"}, {"summary": "the patch does not apply"}]},
+            {"verdict": "reject", "risks": [{"summary": "no rollback plan"}, {"summary": "the patch does not apply"}]},
+            id="every_finding_that_binds_is_inherited_not_just_the_first",
+        ),
+        pytest.param(
+            {"verdict": "reject"},
+            {
+                "risks": [{"summary": "v_b has no rollback plan"}, {"summary": "v_c: the patch does not apply"}],
+                "verdict_map": {"v_a": {}, "v_b": {}, "v_c": {}},
+            },
+            {"verdict": "reject"},
+            id="findings_about_siblings_only_are_not_this_variants_grounds",
+        ),
+        pytest.param(
+            {"verdict": "reject"},
+            {
+                "risks": [{"summary": "v_a and v_b both carry a gain field"}, {"summary": "v_c: no rollback plan"}],
+                "verdict_map": {"v_a": {}, "v_b": {}, "v_c": {}},
+            },
+            {"verdict": "reject", "risks": [{"summary": "v_a and v_b both carry a gain field"}]},
+            id="a_finding_naming_this_variant_binds_it_however_many_others_it_names",
+        ),
         pytest.param("reject", {"risks": [{"severity": "blocker"}]}, {}, id="a_non_dict_entry_states_nothing"),
     ],
 )
-def test_the_grounds_an_entry_rests_on_join_its_own_to_the_ones_stated_for_the_batch(entry, payload, expected):
-    assert verdict_map_entry_grounds(entry, payload) == expected
+def test_the_grounds_an_entry_rests_on_join_its_own_to_the_ones_stated_for_it(entry, payload, expected):
+    assert verdict_map_entry_grounds(entry, payload, variant="v_a") == expected
 
 
 def test_a_map_of_verdicts_none_of_which_decides_asks_for_review():
