@@ -356,9 +356,14 @@ def _appends_until_stopped(path: Path, line: str, stop: threading.Event) -> thre
     ("appended_line", "reports_liveness"),
     [
         ('INFO:     127.0.0.1:0 - "GET /health HTTP/1.1" 200 OK\n', False),
+        ("Avg generation throughput: 0.0 tokens/s, Running: 0 reqs\n", False),
         ("Avg generation throughput: 123.4 tokens/s, Running: 8 reqs\n", True),
     ],
-    ids=["an_access_log_line", "a_generation_throughput_line"],
+    ids=[
+        "an_access_log_line",
+        "an_idle_engines_throughput_line",
+        "a_generation_throughput_line",
+    ],
 )
 def test_run_with_session_kill_reports_a_silent_child_alive_only_on_real_progress(
     tmp_path,
@@ -367,14 +372,18 @@ def test_run_with_session_kill_reports_a_silent_child_alive_only_on_real_progres
 ):
     """A log that grew is not the child talking; a log that shows tokens flowing is.
 
-    Both lines are written by the same third party, so growth alone cannot tell
-    them apart — and one of them is the access line vLLM and sglang emit per
-    request, including the health probe the robustness agent issues on its own
-    tick. Counting those as the child's output closes a loop where the monitor's
-    probe manufactures the evidence that suppresses its own stall accusation,
-    and turns the heartbeat into the bare timer it documents itself as never
-    being. A throughput line is different in kind: whoever logged it, tokens
-    were being produced during the interval, and the round is genuinely alive.
+    All three lines are written by the same third party, so growth alone cannot
+    tell them apart — and one of them is the access line vLLM and sglang emit
+    per request, including the health probe the robustness agent issues on its
+    own tick. Counting those as the child's output closes a loop where the
+    monitor's probe manufactures the evidence that suppresses its own stall
+    accusation, and turns the heartbeat into the bare timer it documents itself
+    as never being. A throughput line is different in kind — whoever logged it,
+    tokens were being produced during the interval — but only if it carries a
+    rate: some vLLM builds keep printing the stats line at ``0.0 tokens/s`` on
+    an idle engine, and an engine goes idle precisely when the client that was
+    driving it wedges, so the zero-rate line is the shape this failure actually
+    takes in production.
     """
     log_path = tmp_path / "server.log"
     log_path.write_text("Application startup complete\n")
@@ -655,6 +664,12 @@ def test_scan_server_log_increment_detects_ready_and_progress(tmp_path):
         f.write("HYPERLOOM_EVAL_START\n")
     off4, ready4, prog4, ev4 = _scan_server_log_increment(str(log_path), off3)
     assert ev4 is True and ready4 is False and prog4 is False and off4 == log_path.stat().st_size
+    # An idle engine keeps printing the same line with no rate on it: the value
+    # is the progress signal, not the marker.
+    with log_path.open("a") as f:
+        f.write("Avg generation throughput: 0.0 tokens/s, Running: 0 reqs\n")
+    off5, _ready5, prog5, _ev5 = _scan_server_log_increment(str(log_path), off4)
+    assert prog5 is False and off5 == log_path.stat().st_size
 
 
 def test_scan_logs_increment_reads_nested_stderr_for_eval_start(tmp_path):

@@ -26,6 +26,8 @@ import time
 from pathlib import Path
 from typing import Callable, NamedTuple
 
+from .bypass_analysis import parse_server_log_throughput
+
 log = logging.getLogger(__name__)
 
 
@@ -259,16 +261,6 @@ _SERVER_READY_MARKERS: tuple[str, ...] = (
     "Application startup complete",
     "Uvicorn running on",
     "The server is fired up and ready to roll",
-)
-
-# Generation-progress markers: the periodic decode-throughput lines. Whoever
-# logged them, tokens were being produced during the interval, which is why they
-# are the log evidence the liveness callback reports a long step alive on. The
-# stall gate is deliberately broader and keys on raw log activity (any new
-# bytes); see :func:`_communicate_with_soft_deadline`.
-_SERVER_PROGRESS_MARKERS: tuple[str, ...] = (
-    "gen throughput (token/s):",  # sglang
-    "Avg generation throughput:",  # vLLM
 )
 
 # Accuracy-eval start markers: their appearance means the benchmark phase of the
@@ -577,8 +569,9 @@ class _LogScan(NamedTuple):
 
     Attributes:
         saw_ready: A server-ready marker appeared.
-        saw_progress: A generation-progress marker appeared, so tokens were
-            being produced during the interval whoever logged them.
+        saw_progress: A periodic decode-throughput line reported a non-zero
+            rate, so tokens were being produced during the interval whoever
+            logged them.
         saw_eval_start: The accuracy eval announced itself.
         grew: Some resolved log got longer, from any writer at all.
         child_spoke: The benchmark body's own redirected stderr got longer,
@@ -637,8 +630,8 @@ def _scan_server_log_increment(path: str, from_offset: int) -> tuple[int, bool, 
 
     Returns:
         ``(new_offset, saw_ready, saw_progress, saw_eval_start)`` — the advanced
-        offset plus whether a ready / progress / eval-start marker appeared in
-        the newly read bytes.
+        offset plus whether the newly read bytes carried a ready marker, a
+        non-zero generation-throughput rate, or the eval-start marker.
     """
     try:
         size = os.path.getsize(path)
@@ -656,7 +649,19 @@ def _scan_server_log_increment(path: str, from_offset: int) -> tuple[int, bool, 
     except (OSError, ValueError):
         return from_offset, False, False, False
     saw_ready = any(marker in chunk for marker in _SERVER_READY_MARKERS)
-    saw_progress = any(marker in chunk for marker in _SERVER_PROGRESS_MARKERS)
+    # Progress is the rate on the periodic decode-throughput line, not the
+    # line's presence: some vLLM builds log ``Avg generation throughput: 0.0
+    # tokens/s`` on an idle engine, and an engine goes idle precisely when the
+    # client driving it wedges, so the marker alone lets the server vouch for
+    # the client that stopped asking it for tokens. Reusing the post-mortem
+    # estimator's parse keeps the frameworks the two recognise from drifting
+    # apart. A line whose rate it cannot read counts as no progress: this
+    # evidence only ever suppresses a stall accusation, and one suppressed by
+    # mistake is invisible, where a missing one is visible and answerable from
+    # the child's own redirected stderr. The stall gate is deliberately broader
+    # and keys on raw log activity (any new bytes); see
+    # :func:`_communicate_with_soft_deadline`.
+    saw_progress = bool(parse_server_log_throughput(chunk))
     saw_eval_start = any(marker in chunk for marker in _EVAL_START_MARKERS)
     return size, saw_ready, saw_progress, saw_eval_start
 
