@@ -29,7 +29,6 @@ def _prompt(shared: str, inbox: str, *, time_budget: str | None = None) -> str:
 def test_empty_prompt_returns_empty_context():
     ctx = from_coordinator_prompt("")
     assert isinstance(ctx, ReactorContext)
-    assert ctx.shared_state.session_id == ""
     assert ctx.inbox == []
     assert ctx.parse_warnings == ["empty prompt"]
 
@@ -56,7 +55,6 @@ def test_no_new_messages_yields_empty_inbox():
     ctx = from_coordinator_prompt(prompt, tick_index=3, now_unix=100.0)
     assert ctx.tick_index == 3
     assert ctx.now_unix == 100.0
-    assert ctx.shared_state.session_id == "sess-1"
     assert ctx.shared_state.model_name == "qwen3-8b"
     assert ctx.shared_state.model_class == "qwen3"
     assert ctx.shared_state.baseline_tput == 10.5
@@ -88,7 +86,6 @@ def test_inbox_parses_multiple_messages_with_python_repr_payload():
         ),
     )
     ctx = from_coordinator_prompt(prompt)
-    assert ctx.shared_state.session_id == "sess-2"
     assert ctx.shared_state.model_name == ""
     assert ctx.shared_state.crash_count == 2
     assert ctx.shared_state.current_action == "baseline"
@@ -141,15 +138,14 @@ def test_payload_with_non_dict_repr_is_preserved_as_raw():
 def test_kb_section_is_ignored_for_robustness_role():
     prompt = (
         "=== Shared session state ===\n"
-        "session_id=sess-kb\n"
-        "crash_count=0\n"
+        "crash_count=4\n"
         "=== Knowledge base hints ===\n"
         "kb-hint-do-not-parse\n"
         "=== Inbox for robustness ===\n"
         "(no new messages)\n"
     )
     ctx = from_coordinator_prompt(prompt)
-    assert ctx.shared_state.session_id == "sess-kb"
+    assert ctx.shared_state.crash_count == 4
     assert ctx.inbox == []
 
 

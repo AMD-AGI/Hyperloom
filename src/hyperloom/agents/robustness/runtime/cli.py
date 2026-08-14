@@ -62,11 +62,7 @@ from ..config import Config
 from ..factory import build_reactor_components
 from ..role.envelope import build_envelope_dict
 from ..role.postmortem import finalize_session
-from ..role.prompt_inputs import (
-    ReactorContext,
-    SharedStateSnapshot,
-    from_coordinator_prompt,
-)
+from ..role.prompt_inputs import from_coordinator_prompt
 
 
 log = logging.getLogger("robustness_agent.runtime.cli")
@@ -199,25 +195,6 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
         tick_index=tick_index,
         now_unix=now_unix,
     )
-    if not reactor_ctx.shared_state.session_id:
-        reactor_ctx = ReactorContext(
-            tick_index=reactor_ctx.tick_index,
-            shared_state=SharedStateSnapshot(
-                session_id=session_id,
-                model_name=reactor_ctx.shared_state.model_name,
-                model_class=reactor_ctx.shared_state.model_class,
-                baseline_tput=reactor_ctx.shared_state.baseline_tput,
-                cumulative_gain=reactor_ctx.shared_state.cumulative_gain,
-                crash_count=reactor_ctx.shared_state.crash_count,
-                current_action=reactor_ctx.shared_state.current_action,
-            ),
-            inbox=list(reactor_ctx.inbox),
-            now_unix=reactor_ctx.now_unix,
-            parse_warnings=list(reactor_ctx.parse_warnings),
-            phase=reactor_ctx.phase,
-            phase_budget=list(reactor_ctx.phase_budget),
-            conversation_progress=reactor_ctx.conversation_progress,
-        )
 
     bundle = build_reactor_components(config, session_id=session_id)
     try:

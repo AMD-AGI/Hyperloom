@@ -105,14 +105,12 @@ def _build_reactor_with_finalizer(
 def _ctx(
     crash_count: int = 0,
     *,
-    session_id: str = "sess-1",
     now_unix: float = 1.0,
     stop_reason: str = "",
 ) -> ReactorContext:
     return ReactorContext(
         tick_index=0,
         shared_state=SharedStateSnapshot(
-            session_id=session_id,
             crash_count=crash_count,
             stop_reason=stop_reason,
         ),

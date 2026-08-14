@@ -26,7 +26,7 @@ def _ctx(
 ) -> ReactorContext:
     return ReactorContext(
         tick_index=1,
-        shared_state=SharedStateSnapshot(session_id="sess-1"),
+        shared_state=SharedStateSnapshot(),
         inbox=[],
         now_unix=now_unix,
     )

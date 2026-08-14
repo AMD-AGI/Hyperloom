@@ -38,7 +38,6 @@ def _ctx(
     return ReactorContext(
         tick_index=1,
         shared_state=SharedStateSnapshot(
-            session_id="sess-1",
             crash_count=crash_count,
             current_action=current_action,
         ),

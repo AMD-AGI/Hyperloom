@@ -88,20 +88,48 @@ async def test_run_tick_emits_alert_on_high_crash_count(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_run_tick_propagates_session_id_when_prompt_lacks_it(tmp_path: Path):
+async def test_run_tick_hands_the_parsed_snapshot_to_the_reactor(tmp_path: Path, monkeypatch):
+    """Every parsed shared-state field must survive the trip into the reactor."""
+    captured: dict[str, object] = {}
+
+    async def _capture_tick(_self, ctx):
+        captured["ctx"] = ctx
+        return []
+
+    from hyperloom.agents.robustness.role.reactor import Reactor
+
+    monkeypatch.setattr(Reactor, "tick", _capture_tick, raising=True)
+
     from hyperloom.agents.robustness.runtime.cli import _coerce_request, _run_tick
 
-    prompt = "=== Shared session state ===\ncrash_count=0\n=== Inbox for robustness ===\n(no new messages)\n"
+    prompt = (
+        "=== Time budget ===\n"
+        "elapsed=116.0min  remaining=4.0min  budget=120min  closing_phase=False\n"
+        "=== Shared session state ===\n"
+        "tick=42\n"
+        "stop_reason=time_exhausted\n"
+        "crash_count=3\n"
+        "=== Inbox for robustness ===\n"
+        "(no new messages)\n"
+    )
     request = _coerce_request(
         {
             "kind": "coordinator_inbox",
-            "session_id": "sess-fallback",
+            "session_id": "sess-snapshot",
             "raw_prompt": prompt,
             "options": {"session_dir": str(tmp_path)},
         }
     )
     emit = await _run_tick(request)
-    assert emit["session_id"] == "sess-fallback"
+
+    assert emit["session_id"] == "sess-snapshot"
+    snap = captured["ctx"].shared_state  # type: ignore[union-attr]
+    assert snap.tick == 42
+    assert snap.stop_reason == "time_exhausted"
+    assert snap.crash_count == 3
+    assert snap.budget_minutes == 120.0
+    assert snap.remaining_minutes == 4.0
+    assert snap.elapsed_minutes == 116.0
 
 
 def test_coerce_request_rejects_bad_kind():

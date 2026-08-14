@@ -11,7 +11,7 @@ headers. For the robustness role the expected blocks are:
     ...
 
     === Shared session state ===
-    session_id=...
+    tick=...
     ...
 
     === Time budget ===
@@ -78,7 +78,6 @@ _CONVERSATION_PROGRESS_LINE_RE = re.compile(
 
 # SharedState lines we care about.
 _SCALAR_KEYS = {
-    "session_id",
     "baseline_tput",
     "cumulative_gain",
     "cumulative_gain_validated",
@@ -180,7 +179,6 @@ class SharedStateSnapshot:
     parse miss degrades to "no signal" rather than raising.
 
     Attributes:
-        session_id (str): Current session id, or ``""`` when unset.
         model_name (str): Target model name, or ``""`` when unset.
         model_class (str): Target model class, or ``""`` when unset.
         baseline_tput (float): Baseline throughput reported by the
@@ -210,7 +208,6 @@ class SharedStateSnapshot:
             queue still has work pending.
     """
 
-    session_id: str = ""
     model_name: str = ""
     model_class: str = ""
     baseline_tput: float = 0.0
@@ -470,7 +467,6 @@ def _coerce_cumulative_gain_validated(head: str) -> float:
 #: attr name differs from its rendered key. Explore-family keys are handled
 #: separately because they set a shared flag idempotently rather than a 1:1 attr.
 _SCALAR_FIELD_TABLE: dict[str, tuple[str, Callable[[str], Any]]] = {
-    "session_id": ("session_id", lambda head: "" if head == "(unset)" else head),
     "baseline_tput": ("baseline_tput", lambda head: to_float(head, default=0.0)),
     "cumulative_gain": ("cumulative_gain", lambda head: to_float(head.rstrip("%"), default=0.0)),
     "cumulative_gain_validated": ("cumulative_gain_validated", _coerce_cumulative_gain_validated),

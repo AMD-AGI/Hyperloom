@@ -80,7 +80,7 @@ async def _run_reactor_mode(config: Config) -> None:
         while not stop.is_set():
             ctx = ReactorContext(
                 tick_index=0,
-                shared_state=SharedStateSnapshot(session_id=config.session_dir.name),
+                shared_state=SharedStateSnapshot(),
                 inbox=[],
                 now_unix=time.time(),
             )

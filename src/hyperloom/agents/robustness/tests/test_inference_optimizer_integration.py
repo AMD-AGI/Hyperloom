@@ -190,7 +190,7 @@ async def test_gpu_memory_leaked_round_trips_through_upstream_policy_gate(tmp_pa
         )
         ctx_t0 = ReactorContext(
             tick_index=0,
-            shared_state=SharedStateSnapshot(session_id="sess-1"),
+            shared_state=SharedStateSnapshot(),
             inbox=[],
             now_unix=1.0,
         )
@@ -200,7 +200,7 @@ async def test_gpu_memory_leaked_round_trips_through_upstream_policy_gate(tmp_pa
 
         ctx_t1 = ReactorContext(
             tick_index=1,
-            shared_state=SharedStateSnapshot(session_id="sess-1"),
+            shared_state=SharedStateSnapshot(),
             inbox=[],
             now_unix=2.0,
         )
@@ -266,7 +266,7 @@ async def test_gpu_memory_leaked_silent_when_live_owner_present(tmp_path):
         for tick in range(4):
             ctx = ReactorContext(
                 tick_index=tick,
-                shared_state=SharedStateSnapshot(session_id="sess-1"),
+                shared_state=SharedStateSnapshot(),
                 inbox=[],
                 now_unix=float(tick + 1),
             )

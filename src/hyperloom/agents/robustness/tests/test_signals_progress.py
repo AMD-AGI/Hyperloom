@@ -28,7 +28,6 @@ def _ctx(
     explore_started: bool = False,
 ) -> ReactorContext:
     snap = SharedStateSnapshot(
-        session_id="sess-1",
         tick=tick,
         macro_cycle=macro_cycle,
         cumulative_gain_validated=cumulative_gain_validated,

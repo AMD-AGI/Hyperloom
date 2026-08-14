@@ -21,7 +21,7 @@ from hyperloom.agents.robustness.sources.base import SourceData
 def _ctx(*, inbox=None) -> ReactorContext:
     return ReactorContext(
         tick_index=1,
-        shared_state=SharedStateSnapshot(session_id="sess-1"),
+        shared_state=SharedStateSnapshot(),
         inbox=list(inbox or []),
         now_unix=1.0,
     )

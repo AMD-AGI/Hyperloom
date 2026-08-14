@@ -27,7 +27,7 @@ async def test_build_reactor_components_local_only_mode_runs_a_tick(tmp_path: Pa
     try:
         ctx = ReactorContext(
             tick_index=0,
-            shared_state=SharedStateSnapshot(session_id="sess-1", crash_count=2),
+            shared_state=SharedStateSnapshot(crash_count=2),
             inbox=[],
             now_unix=1000.0,
         )

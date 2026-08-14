@@ -77,7 +77,6 @@ def _ctx_with_tick(
     return ReactorContext(
         tick_index=tick,
         shared_state=SharedStateSnapshot(
-            session_id="sess-int",
             tick=tick,
             cumulative_gain_validated=cumulative_gain_validated,
             optimization_stack_size=optimization_stack_size,
