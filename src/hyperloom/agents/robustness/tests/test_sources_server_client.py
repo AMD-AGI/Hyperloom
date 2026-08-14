@@ -600,3 +600,46 @@ async def test_source_no_workload_uid_skips_hierarchy_call():
 
     assert not any("workloads" in p for p in paths_hit)
     assert data.session_pods == []
+
+
+@pytest.mark.asyncio
+async def test_source_fails_the_tick_when_it_harvests_nothing():
+    """An all-empty tick must degrade, not pass for a clean bill of health."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/cluster/faults":
+            return httpx.Response(200, json={"faults": []})
+        return httpx.Response(404)
+
+    client = _client(handler)
+    try:
+        source = RobustnessServerSource(client)
+        with pytest.raises(SourceUnavailable):
+            await source.fetch(_ctx())
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_router_falls_back_to_local_probe_on_an_empty_harvest():
+    """The empty-harvest failure has to reach the DegradeRouter."""
+    from hyperloom.agents.robustness.sources.base import DegradeRouter, SourceData
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    class _Fallback:
+        name = "local-probe"
+
+        async def fetch(self, ctx):
+            return SourceData(local_gpu={"tool": "rocm-smi"})
+
+    client = _client(handler)
+    try:
+        router = DegradeRouter(RobustnessServerSource(client), _Fallback(), fail_threshold=1)
+        data = await router.collect(_ctx())
+    finally:
+        await client.aclose()
+
+    assert data.sources_used == ["local-probe"]
+    assert data.local_gpu == {"tool": "rocm-smi"}

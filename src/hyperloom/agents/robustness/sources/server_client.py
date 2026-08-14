@@ -242,9 +242,10 @@ class RobustnessServerSource:
 
     Per tick fetches cluster-scoped data: workload-hierarchy pods,
     ``cluster_faults``, and optional per-pod GPU metrics. Fetches tolerate
-    404 / 4xx (a pod or workload may vanish between ticks); a 5xx or
-    transport failure raises :class:`SourceUnavailable` and fails the tick
-    so the DegradeRouter degrades to the local probe.
+    404 / 4xx (a pod or workload may vanish between ticks); a 5xx, a
+    transport failure, or a tick that harvests nothing raises
+    :class:`SourceUnavailable` so the DegradeRouter degrades to the local
+    probe.
     """
 
     name = "robustness-server"
@@ -309,7 +310,7 @@ class RobustnessServerSource:
 
         Raises:
             SourceUnavailable: When a fetch hits a transport / 5xx
-                failure.
+                failure, or when the tick harvests no data at all.
         """
         now_unix = int(getattr(ctx, "now_unix", 0)) or 0
         window = _MetricsWindow(
@@ -343,6 +344,12 @@ class RobustnessServerSource:
         local_gpu: dict[str, Any] = {}
         if self._enable_cluster_pod_metrics and pods and window.start_unix and window.end_unix:
             local_gpu = await self._fetch_cluster_pod_metrics(pods, window)
+
+        # An empty harvest means this source served nothing at all. Failing the
+        # tick lets the DegradeRouter fall back to the local probe rather than
+        # passing "no data" off as a clean bill of health.
+        if not pods and not cluster_faults and not local_gpu:
+            raise SourceUnavailable("robustness-server returned no data this tick")
 
         return SourceData(
             session_pods=pods,
