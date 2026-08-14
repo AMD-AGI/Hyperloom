@@ -1574,6 +1574,139 @@ async def test_a_reaped_revalidation_leaves_the_window_open_for_a_resume(session
         await c.stop()
 
 
+async def _cancelled_revalidation_row(c: Coordinator, *, gen: int) -> Task:
+    """A revalidation row for ``gen`` that the queue scan cancelled before dispatch."""
+    task, _existing = await c.tasks.create_or_return_existing(
+        kind="baseline",
+        params={"reason": "enablement_eval_revalidation"},
+        idempotency_key=f"enablement_revalidation:gen{gen}",
+    )
+    await c.tasks.transition(task.task_id, "cancelled", evidence={"reason": "time_budget"})
+    return task
+
+
+@pytest.mark.asyncio
+async def test_a_revalidation_the_budget_cannot_fit_is_not_enqueued(session_dir, monkeypatch):
+    """Opening a row the dispatcher would cancel on sight is what wedges the window.
+
+    A revalidation is a full baseline, and the queue scan drops a queued one the
+    wall-clock budget can no longer fit. That leaves a cancelled row owning this
+    window's idempotency key -- and a row cancelled at dispatch never produces a
+    result to route, so nothing advances the generation past it and every later
+    tick resolves the window to a row that measured nothing.
+    """
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        st = c.shared_state
+        st.enablement.validation_pending = True
+        st.enablement.revalidation_generation = 3
+        st.max_minutes = 60
+        st.elapsed_minutes = lambda **_kw: 60.0  # type: ignore[method-assign]
+
+        assert await c._maybe_enqueue_enablement_baseline_revalidation() == ""
+
+        # The window survives the stop: same generation, still pending, and no
+        # row for the key a resume with budget left will need.
+        assert st.enablement.validation_pending is True
+        assert st.enablement.revalidation_generation == 3
+        assert st.enablement.revalidation_task_id == ""
+        assert await c.tasks.by_state("cancelled") == []
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_revalidation_key_spent_on_a_cancelled_row_opens_the_next_one(session_dir, monkeypatch):
+    """A terminal row is a spent generation, not an enqueue.
+
+    ``create_or_return_existing`` hands back the cancelled row for as long as the
+    key names it, so without recognising that the window stays open resolving to
+    it for the rest of the session.
+    """
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        st = c.shared_state
+        st.enablement.validation_pending = True
+        st.enablement.revalidation_generation = 3
+        spent = await _cancelled_revalidation_row(c, gen=3)
+
+        tid = await c._maybe_enqueue_enablement_baseline_revalidation()
+
+        assert tid and tid != spent.task_id, "the window resolved to the cancelled row"
+        assert st.enablement.revalidation_generation == 4
+        assert (await c.tasks.get(tid)).state == "queued"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_charge_a_revalidation_the_run_cancelled(
+    session_dir,
+    monkeypatch,
+):
+    """The exemption the reap grants must not be charged back by the resume.
+
+    The reap path leaves the window open without charging the stall streak,
+    because a round the run stopped measured nothing. The resume-time recovery saw
+    only "tracked row is terminal" and closed the window with the increment the
+    reap went out of its way to avoid -- reaching the ``enablement_stalled`` cap on
+    the evidence of a clock, one resume later.
+    """
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        st = c.shared_state
+        cancelled = await _cancelled_revalidation_row(c, gen=3)
+        st.enablement.validation_pending = True
+        st.enablement.revalidation_task_id = cancelled.task_id
+        st.enablement.revalidation_generation = 3
+        st.enablement.stall_streak = 4
+
+        report: dict[str, Any] = {"fixes": []}
+        await c.writeback._resume_recover_pending_revalidation(report)
+
+        assert st.enablement.stall_streak == 4
+        assert st.stop_reason in ("", None)
+        # And the window is left usable rather than merely uncharged.
+        assert st.enablement.validation_pending is True
+        assert st.enablement.revalidation_task_id == ""
+        assert st.enablement.revalidation_generation == 4
+        assert [f["kind"] for f in report["fixes"]] == ["reopened_revalidation_the_run_cancelled"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_resume_still_closes_a_revalidation_window_that_had_its_chance(session_dir, monkeypatch):
+    """A row that is terminal for any other reason is evidence, and still charged."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        st = c.shared_state
+        task, _existing = await c.tasks.create_or_return_existing(
+            kind="baseline",
+            params={"reason": "enablement_eval_revalidation"},
+            idempotency_key="enablement_revalidation:gen0",
+        )
+        await c.tasks.transition(task.task_id, "running")
+        await c.tasks.transition(task.task_id, "succeeded")
+        st.enablement.validation_pending = True
+        st.enablement.revalidation_task_id = task.task_id
+        st.enablement.stall_streak = 1
+
+        report: dict[str, Any] = {"fixes": []}
+        await c.writeback._resume_recover_pending_revalidation(report)
+
+        assert st.enablement.validation_pending is False
+        assert st.enablement.revalidation_task_id == ""
+        assert st.enablement.stall_streak == 2
+        assert [f["kind"] for f in report["fixes"]] == ["cleared_orphaned_revalidation_pending"]
+    finally:
+        await c.stop()
+
+
 @pytest.mark.asyncio
 async def test_handle_unpromotable_records_for_non_baseline_kinds(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
