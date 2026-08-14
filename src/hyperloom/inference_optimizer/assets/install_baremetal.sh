@@ -93,9 +93,6 @@ Options:
                          entry imports.
   --install-framework FW Install a missing bare-metal framework layer.
                          Supported: none, sglang, vllm. Default: none.
-                         atom is not installable here — it ships in
-                         rocm/atom:latest, so run setup inside that image with
-                         --install-framework none.
   --framework-env MODE   Install target for framework packages: shared or
                          isolated. Default: shared, except vLLM which defaults
                          to isolated so it never replaces the shared ROCm
@@ -167,8 +164,7 @@ warn() { echo "[install-baremetal WARN] $*" >&2; }
 die() { echo "[install-baremetal ERROR] $*" >&2; exit 1; }
 
 IMAGE_HINT="Provision the ROCm framework base first (run inside an AMD ROCm \
-image that already ships the engine — rocm/hyperloom:sglang-*-rocm7.2.0-mi300x|mi350x, \
-rocm/hyperloom:vllm-*-rocm7.2.0, or rocm/atom:latest for --framework atom — or \
+SGLang/vLLM image such as rocm/hyperloom:sglang-*-rocm7.2.0-mi300x|mi350x, or \
 install an equivalent ROCm torch + framework stack), then re-run."
 
 is_interactive() { [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; }

@@ -1106,8 +1106,8 @@ def test_baremetal_runtime_deps_skip_sgl_kernel_without_sglang(tmp_path: Path):
 def test_baremetal_preflight_probes_atom_by_default():
     """Phase 1 must accept an atom-only host without extra flags.
 
-    The default probe list gated on sglang/vllm alone, so setup inside
-    rocm/atom:latest died with 'no serving framework importable' even though
+    The default probe list gated on sglang/vllm alone, so setup inside an
+    atom-only image died with 'no serving framework importable' even though
     atom was installed and is a registered framework.
     """
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
@@ -1117,11 +1117,7 @@ def test_baremetal_preflight_probes_atom_by_default():
     assert m, "install_baremetal.sh must define an overridable FRAMEWORKS default"
     assert "atom" in m.group(1).split(","), (
         "atom must be in the default Phase 1 probe list; otherwise setup inside "
-        "rocm/atom:latest fails preflight"
-    )
-
-    assert "rocm/atom:latest" in text, (
-        "the missing-framework hint must point atom users at their image"
+        "an atom-only image fails preflight"
     )
 
 

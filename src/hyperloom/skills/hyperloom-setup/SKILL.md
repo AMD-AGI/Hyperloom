@@ -162,9 +162,7 @@ value.
    framework (used as the `--install-framework` value in Step 4). Present exactly
    these three option labels in this order and do not reorder them by
    recommendation:
-   1. `none`: use an already-installed vLLM/SGLang/ATOM framework stack on the
-      host. This is the only valid choice for ATOM, which setup cannot install —
-      it comes from `rocm/atom:latest`.
+   1. `none`: use an already-installed vLLM/SGLang framework stack on the host.
    2. `sglang`: install SGLang ROCm framework components (shared with the host torch).
    3. `vllm (isolated)`: install vLLM into a dedicated venv. vLLM's ROCm wheel
       pins its own torch, so it runs in an isolated env and never touches the
