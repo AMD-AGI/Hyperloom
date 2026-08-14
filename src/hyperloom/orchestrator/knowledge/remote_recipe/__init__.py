@@ -117,7 +117,7 @@ class HyperloomRemoteKB:
         identity: str,
         destination: str | Path,
     ) -> dict[str, Any] | None:
-        """Download the direct best record for an inference canonical id."""
+        """Download the selected Recipe View for an inference identity."""
         return read_remote_recipe(identity, destination, client=self._client)
 
     def get_view(self, identity: str) -> dict[str, Any] | None:
