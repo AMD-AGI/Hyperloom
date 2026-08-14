@@ -1622,16 +1622,26 @@ class PreludePhase(PhaseHandler):
         from ..actions.executors.baseline import _revert_patches
 
         restores: list[dict[str, Any]] = []
-        target = str(result.get("warm_patch_target") or "")
-        pre_sha = str(result.get("warm_patch_pre_sha") or "")
         pending = getattr(self.shared_state, "warm_replay_pending", {}) or {}
+        target = str(
+            result.get("warm_patch_target")
+            or pending.get("recipe_patch_target")
+            or ""
+        )
+        pre_sha = str(
+            result.get("warm_patch_pre_sha")
+            or pending.get("recipe_patch_pre_sha")
+            or ""
+        )
         recipe_manifest = (
             result.get("warm_patch_snapshot_manifest")
             or pending.get("recipe_patch_snapshot_manifest")
         )
-        if target and recipe_manifest:
+        if target:
             restores.append(
                 _revert_patches(target, pre_sha, recipe_manifest)
+                if recipe_manifest
+                else {"ok": False, "errors": ["recipe:missing_snapshot_manifest"]}
             )
         params = (task.params if task is not None else {}) or {}
         kernel_applied = (

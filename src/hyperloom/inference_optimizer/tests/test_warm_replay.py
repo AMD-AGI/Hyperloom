@@ -1573,6 +1573,13 @@ def test_combined_replay_revert_rolls_back_recipe_and_kernel(
             or {"ok": True, "errors": []}
         )
     )
+    coord.shared_state.warm_replay_pending = {
+        "recipe_patch_target": "/repo",
+        "recipe_patch_pre_sha": "abc",
+        "recipe_patch_snapshot_manifest": {
+            "manifest_path": "/repo.json"
+        },
+    }
     task = _StubTask(
         task_id="combined",
         params={
@@ -1588,11 +1595,6 @@ def test_combined_replay_revert_rolls_back_recipe_and_kernel(
         {
             "status": "succeeded",
             "output_throughput": 500.0,
-            "warm_patch_target": "/repo",
-            "warm_patch_pre_sha": "abc",
-            "warm_patch_snapshot_manifest": {
-                "manifest_path": "/repo.json"
-            },
         },
         task=task,
     )
