@@ -46,8 +46,7 @@ def test_runs_dir_rejects_unknown_action():
     ],
 )
 def test_runs_dir_rejects_bad_task_id(bad_task_id):
-    # Legitimate task ids are single non-blank path components; blank collapses
-    # to the action dir, and path-like values could relocate the sandbox.
+    # Blank or path-like ids would relocate the sandbox onto a shared path.
     with pytest.raises(ValueError):
         sp.runs_dir(SD, "baseline", bad_task_id)
 

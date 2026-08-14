@@ -99,9 +99,8 @@ def _validate_action(action: str) -> str:
 def _validate_id_component(value: str, *, field: str) -> str:
     """Reject blank ids and path-traversal in an LLM-controlled single-segment id.
 
-    Legitimate ids (uuid hex, ``k001``) never contain a separator or ``..``;
-    anything that does could relocate a per-task sandbox. Blank is refused for
-    the same reason: it collapses to the parent action directory.
+    Legitimate ids (uuid hex, ``k001``) are never blank and never contain a
+    separator or ``..``; either would relocate a per-task sandbox.
     """
     v = str(value or "").strip()
     if not v or v == "." or "/" in v or "\\" in v or ".." in Path(v).parts or Path(v).is_absolute():

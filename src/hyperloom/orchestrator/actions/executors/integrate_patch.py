@@ -1742,7 +1742,7 @@ class IntegratePatchExecutor:
                     "patches_reverted": [],
                     "config_changes_applied": {},
                 }
-            task_id = str(getattr(ctx.task, "task_id", ""))
+            task_id = ctx.task.task_id
             scratch = runs_dir(self.session_dir, "integrate_patch", task_id)
             scratch.mkdir(parents=True, exist_ok=True)
             ctx._ip_specialist_task_id = task_id  # type: ignore[attr-defined]
@@ -1999,7 +1999,7 @@ class IntegratePatchExecutor:
                 f"localization touches path(s) outside the allowlist: {outside[:8]}",
             )
 
-        loc_dir = runs_dir(self.session_dir, "integrate_patch", str(getattr(ctx.task, "task_id", "")))
+        loc_dir = runs_dir(self.session_dir, "integrate_patch", ctx.task.task_id)
         loc_dir = loc_dir / "localization"
         loc_dir.mkdir(parents=True, exist_ok=True)
         gap_slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", action.gap_id or "localization")
@@ -2038,7 +2038,7 @@ class IntegratePatchExecutor:
                 setup_result = _run_setup_commands(
                     setup_cmds,
                     cwd=self.session_dir,
-                    log_dir=runs_dir(self.session_dir, "integrate_patch", str(getattr(ctx.task, "task_id", ""))),
+                    log_dir=runs_dir(self.session_dir, "integrate_patch", ctx.task.task_id),
                 )
 
         specialist_workspace: Path = ctx._ip_specialist_workspace  # type: ignore[attr-defined]
