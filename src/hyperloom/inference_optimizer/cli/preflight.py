@@ -930,16 +930,41 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
     interpreters = _framework_probe_interpreters(framework, benchmark_python)
     found, probe = _resolve_framework_build(framework, interpreters)
     evidence = _rocm_evidence(framework)
+    if found and probe.verdict is True:
+        print(f"Preflight: {framework} importable ({found}); {evidence} confirms a ROCm build")
+        return
+    if found and probe.verdict is None:
+        print(
+            f"Preflight: WARNING — {framework} is importable ({found}) but could not verify a ROCm build "
+            f"via {evidence}{_probe_detail_block(probe.detail)}"
+        )
+        return
+    if not found and probe.timed_out:
+        # A timeout proves nothing, so blocking here would fail a merely slow host.
+        print(
+            f"Preflight: WARNING — the {framework} probe timed out; proceeding without verifying it"
+            f"{_probe_detail_block(probe.detail)}"
+        )
+        return
+
+    # Every path below stops the run, so it needs a remedy that works. Both of
+    # them name --install-framework, which setup rejects outside its own set.
+    probed = "\n".join(f"  - {python_exe}" for python_exe in interpreters)
+    if framework not in _SETUP_INSTALLABLE_FRAMEWORKS:
+        state = (
+            f"is importable ({found}) but {evidence} says it is not a ROCm build"
+            if found
+            else f"is not importable by:\n{probed}"
+        )
+        print(
+            f"Preflight: WARNING — {framework} {state}{_probe_detail_block(probe.detail)}\n"
+            f"setup cannot install {framework}, so it has to come from the image or an\n"
+            "existing checkout on this host. Continuing; the benchmark will fail if it\n"
+            f"genuinely needs {framework} here."
+        )
+        return
+
     if found:
-        if probe.verdict is True:
-            print(f"Preflight: {framework} importable ({found}); {evidence} confirms a ROCm build")
-            return
-        if probe.verdict is None:
-            print(
-                f"Preflight: WARNING — {framework} is importable ({found}) but could not verify a ROCm build "
-                f"via {evidence}{_probe_detail_block(probe.detail)}"
-            )
-            return
         print(
             f"\nERROR: {framework} is importable ({found}) but {evidence} says it is NOT a ROCm build.\n\n"
             "The wheels on PyPI are the CUDA build: they import fine and then fail\n"
@@ -951,26 +976,6 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
         )
         sys.exit(2)
 
-    if probe.timed_out:
-        # A timeout proves nothing, so blocking here would fail a merely slow host.
-        print(
-            f"Preflight: WARNING — the {framework} probe timed out; proceeding without verifying it"
-            f"{_probe_detail_block(probe.detail)}"
-        )
-        return
-
-    probed = "\n".join(f"  - {python_exe}" for python_exe in interpreters)
-    if framework not in _SETUP_INSTALLABLE_FRAMEWORKS:
-        # Blocking needs a remedy that works. setup cannot install this one, so
-        # say so and let the run reach whatever the framework itself reports.
-        print(
-            f"Preflight: WARNING — {framework} is not importable by:\n"
-            f"{probed}{_probe_detail_block(probe.detail)}\n"
-            f"setup cannot install {framework}, so it has to come from the image or an\n"
-            "existing checkout on this host. Continuing; the benchmark will fail if it\n"
-            f"genuinely needs {framework} here."
-        )
-        return
     if _in_container():
         remedy = (
             "This process already runs in a container, so its image does not ship\n"

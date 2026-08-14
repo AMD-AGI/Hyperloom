@@ -579,3 +579,18 @@ def test_the_installable_set_matches_the_installer():
     assert declared == set(preflight._SETUP_INSTALLABLE_FRAMEWORKS), (
         f"installer accepts {declared}, preflight believes {set(preflight._SETUP_INSTALLABLE_FRAMEWORKS)}"
     )
+
+
+def test_an_uninstallable_framework_is_not_blocked_for_a_cuda_build(monkeypatch, capsys):
+    """The refuted branch is the other way into the same dead end.
+
+    A CUDA torch with an atom checkout on PYTHONPATH is uncommon, but it lands on
+    exactly the remedy that cannot work, which is what the exemption exists for.
+    """
+    _probe_result(monkeypatch, importable=True, rocm=False)
+    monkeypatch.setattr(preflight, "_in_container", lambda: False)
+
+    preflight._check_serving_framework(_args("atom"), "/usr/bin/python3")
+
+    combined = capsys.readouterr()
+    assert "--install-framework atom" not in combined.out + combined.err
