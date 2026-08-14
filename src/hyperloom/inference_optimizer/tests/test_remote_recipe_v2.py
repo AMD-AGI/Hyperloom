@@ -920,6 +920,10 @@ class _FakeStore:
         if self.conflict:
             self.conflict = False
             raise KBStoreError("POST champion -> HTTP 409: write_conflict")
+        # The store promotes whatever it is told: measured against the real
+        # service, it accepts an equal or even a lower value.
+        self.champion = value
+        self.champion_session = session_id
 
     def list_session_files(self, canonical_id, session_id, *, kind=""):
         self.calls.append(("list_session_files", canonical_id, session_id, kind))
@@ -2315,3 +2319,56 @@ def test_kernel_agent_write_displaces_one_ref_without_touching_its_namesake(tmp_
     assert inherited["source_files"] == ["kernel/rewrite/source/x.py"]
     assert uploaded[inherited["patch"]] == b"OLD-PATCH"
     assert uploaded["kernel/rewrite/source/x.py"] == b"OLD-SOURCE"
+
+
+def test_kernel_agent_write_takes_over_an_equally_scored_foreign_champion(tmp_path):
+    """Records written before this scheme sit on per-run sessions. Adding a
+    kernel that does not raise the best gain leaves the score equal, so without
+    an equal-score takeover the accumulated document stays off-champion and no
+    reader ever sees it. The store promotes whatever it is told, so a conflict
+    is worth retrying at an unchanged score."""
+    store = _FakeStore(champion=12.5, conflict=True, metric="kernel_gain_pct")
+    store.champion_session = "old-run-session"
+
+    result = write_kernel_agent_kb(
+        _kernel_state(tmp_path), "kernel:hyperloom-m:h", client=_kernel_client(store)
+    )
+
+    assert result.status == "written"
+    promotions = [c for c in store.calls if c[0] == "set_champion"]
+    assert len(promotions) == 2  # the refused one, then the takeover
+    assert promotions[-1][2] == KERNEL_AGENT_SESSION_ID
+    assert store.champion_session == KERNEL_AGENT_SESSION_ID
+
+
+def test_recipe_write_leaves_an_equally_scored_champion_alone(tmp_path):
+    """The recipe record competes rather than accumulates: an equal throughput
+    is not a reason to displace a concurrent winner and churn the identity."""
+    store = _FakeStore(champion=100.0, conflict=True)
+    store.champion_session = "other-session"
+    client = RemoteRecipeClient(store)  # type: ignore[arg-type]
+    # Gating sees the old champion; the conflict re-read sees a concurrent
+    # winner that landed exactly this run's score.
+    values = [100.0, 130.0]
+
+    def _rollup(canonical_id):
+        store.calls.append(("get_rollup", canonical_id))
+        value = values.pop(0) if len(values) > 1 else values[0]
+        return {
+            "champion": {
+                "session_id": "other-session",
+                "value": value,
+                "metric": "optimized_throughput",
+            }
+        }
+
+    store.get_rollup = _rollup  # type: ignore[method-assign]
+
+    result = write_final_remote_recipe(
+        _state(tmp_path), "inference:m:h:f:mt:a:v:p", "session-1", client=client
+    )
+
+    assert result.status == "written"
+    # One refused promotion, and no retry over the equal-scored incumbent.
+    assert len([c for c in store.calls if c[0] == "set_champion"]) == 1
+    assert store.champion_session == "other-session"
