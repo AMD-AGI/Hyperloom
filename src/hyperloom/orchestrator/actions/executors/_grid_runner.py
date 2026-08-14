@@ -1781,6 +1781,7 @@ async def run_grid(
                     note=variant.note,
                 )
             )
+            await _pulse_after_variant(i)
             if not keep_going_on_failure:
                 break
             continue
