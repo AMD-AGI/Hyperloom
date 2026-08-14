@@ -97,15 +97,14 @@ def _validate_action(action: str) -> str:
 
 
 def _validate_id_component(value: str, *, field: str) -> str:
-    """Reject path-traversal in an LLM-controlled single-segment id.
+    """Reject blank ids and path-traversal in an LLM-controlled single-segment id.
 
     Legitimate ids (uuid hex, ``k001``) never contain a separator or ``..``;
-    anything that does could relocate a per-task sandbox and is refused here.
+    anything that does could relocate a per-task sandbox. Blank is refused for
+    the same reason: it collapses to the parent action directory.
     """
-    v = str(value or "").strip() or "unknown"
-    if v == "unknown":
-        return v
-    if v == "." or "/" in v or "\\" in v or ".." in Path(v).parts or Path(v).is_absolute():
+    v = str(value or "").strip()
+    if not v or v == "." or "/" in v or "\\" in v or ".." in Path(v).parts or Path(v).is_absolute():
         raise ValueError(f"{field}: unsafe path component {value!r}")
     return v
 
@@ -134,14 +133,14 @@ def runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
         session_dir (Path): The session root directory.
         action (str): The owning action name; validated against the
             runs-workspace action set.
-        task_id (str): The task identifier; blank/empty falls back to
-            ``"unknown"``.
+        task_id (str): The task identifier; must be non-blank.
 
     Returns:
         Path: The absolute path to ``<session_dir>/runs/<action>/<task_id>``.
 
     Raises:
-        ValueError: If ``action`` is not a recognised runs-workspace action.
+        ValueError: If ``action`` is not a recognised runs-workspace action, or
+            ``task_id`` is blank or path-like.
     """
     a = _validate_action(action)
     tid = _validate_id_component(task_id, field="runs_dir.task_id")
@@ -161,14 +160,14 @@ def unique_runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
         session_dir (Path): The session root directory.
         action (str): The owning action name; validated against the
             runs-workspace action set.
-        task_id (str): The task identifier; blank/empty falls back to
-            ``"unknown"``.
+        task_id (str): The task identifier; must be non-blank.
 
     Returns:
         Path: The newly created workspace directory.
 
     Raises:
-        ValueError: If ``action`` is not a recognised runs-workspace action.
+        ValueError: If ``action`` is not a recognised runs-workspace action, or
+            ``task_id`` is blank or path-like.
         RuntimeError: If every suffix up to ``_MAX_RUNS_DIR_ATTEMPTS`` is taken.
     """
     base = runs_dir(session_dir, action, task_id)
@@ -202,8 +201,7 @@ def kernel_agent_runs_dir(session_dir: Path, session_id: str) -> Path:
 
     Args:
         session_dir: The session root directory.
-        session_id: Tool-invocation session id; blank falls back to
-            ``"unknown"``.
+        session_id: Tool-invocation session id; must be non-blank.
 
     Returns:
         ``<session_dir>/kernel-agent/runs/<session_id>``.
@@ -218,8 +216,7 @@ def patches_dir(session_dir: Path, kernel_id: str) -> Path:
 
     Args:
         session_dir: The session root directory.
-        kernel_id: Kernel id keying the patch dir; blank falls back to
-            ``"unknown"``.
+        kernel_id: Kernel id keying the patch dir; must be non-blank.
 
     Returns:
         ``<session_dir>/patches/<kernel_id>``.
