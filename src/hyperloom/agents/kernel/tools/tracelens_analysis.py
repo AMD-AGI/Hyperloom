@@ -987,33 +987,60 @@ def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> in
 _SPLIT_DIR_NAME = "trace_split"
 
 #: How many discovered files the CPU-only preflight will open before giving up.
-#: Each probe decompresses a trace, so this is a cost ceiling rather than a
-#: correctness one -- the raw capture sorts near the front, and a directory that
-#: needs more than a handful of probes has a real capture problem.
+#: A cost ceiling, not the thing that makes the preflight land on the capture --
+#: size ordering does that, and it holds whatever the fragments are called or
+#: where they sit. Reaching this limit means every large candidate was empty,
+#: which is a real capture problem rather than a selection one.
 _KERNEL_PROBE_LIMIT = 8
+
+#: Per-phase fragment names the splitter emits. Matched as well as the directory
+#: because a flat layout would otherwise leave them in the default bucket, and a
+#: capture with eight ranks would then spend the whole probe budget on fragments
+#: before reaching a rank file.
+_PHASE_FRAGMENT_RE = re.compile(
+    r"^(?:decode_only|mixed|prefill_only|prefilldecode)\w*_steady_state\w*"
+    r"_rank_\d+\.trace\.json(?:\.gz)?$"
+)
 
 
 def _is_derived_trace(path: Path) -> bool:
     """Whether a trace path is splitter output rather than a raw capture.
 
-    Two shapes, both derived: anything under the splitter's own output directory,
-    and the per-iteration annotation sidecars it writes beside a capture. They
-    are a few hundred bytes each and cover one phase of one iteration, so an
-    analysis pointed at them describes a sliver of the run.
+    Three shapes, all derived: anything under the splitter's own output
+    directory, the per-iteration annotation sidecars it writes beside a capture,
+    and the per-phase fragment names themselves. They are a few hundred bytes
+    each and cover one phase of one iteration, so an analysis pointed at them
+    describes a sliver of the run.
+
+    The name test is not redundant with the directory test. Production nests
+    these under ``trace_split/`` today -- 276 of 276 capture directories with
+    fragments -- but the demotion should not depend on a layout that the
+    splitter is free to change.
     """
     if _SPLIT_DIR_NAME in path.parts:
+        return True
+    if _PHASE_FRAGMENT_RE.match(path.name):
         return True
     return bool(re.search(r"trace_annotation_iteration_\d+", path.name))
 
 
-def _trace_input_sort_key(path: Path) -> tuple[int, str]:
+def _trace_file_size(path: Path) -> int:
+    """Size in bytes, or 0 when it cannot be read."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _trace_input_sort_key(path: Path) -> tuple[int, int, str]:
     """Compute the discovery sort key for a trace input path.
 
     Prefers the merged annotated trace over rank/phase shards (the TraceLens
     splitter needs the large trace).
 
-    Splitter output sorts last. It used to land in the same default bucket as
-    the raw capture, which left alphabetical order to decide between them -- and
+    Splitter output sorts last, and within a bucket the largest file leads.
+    Both parts exist because of the same bug: the fragments used to share the
+    default bucket with the raw capture, so alphabetical order decided, and
     ``decode_only_steady_state_...`` beats ``rank_0.trace.json.gz`` on the first
     letter. Every xDiT roofline attempt therefore analysed a 938-byte phase
     fragment instead of the 910 KB capture beside it: runs whose fragment held
@@ -1021,22 +1048,28 @@ def _trace_input_sort_key(path: Path) -> tuple[int, str]:
     whose fragment happened to hold 512 produced a roofline computed from 2.6%
     of its own trace, with no ceiling.
 
+    Size is the part that does not depend on recognising a name. A real capture
+    is orders of magnitude larger than a per-phase fragment or a sidecar like
+    ``execution_details.json``, so ordering by descending size puts the right
+    file first even for a fragment shape nobody has seen yet.
+
     Args:
         path: The trace file path to rank.
 
     Returns:
-        A ``(priority, name)`` sort key (lower priority sorts first).
+        A ``(priority, -size, name)`` sort key (lower sorts first).
     """
     name = path.name
+    size = _trace_file_size(path)
     if _is_derived_trace(path):
-        return (4, name)
+        return (4, -size, name)
     if name.startswith("merged-"):
-        return (0, name)
+        return (0, -size, name)
     if re.search(r"TP-\d+-DECODE\.trace\.json(?:\.gz)?$", name):
-        return (2, name)
+        return (2, -size, name)
     if name.startswith("bs_") or name.startswith("graph_capture"):
-        return (3, name)
-    return (1, name)
+        return (3, -size, name)
+    return (1, -size, name)
 
 
 def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
@@ -7092,6 +7125,11 @@ def main() -> int:
         # the leading file happens to be a fragment with no kernels, and the
         # error it raises then blames the profiler for a capture that is sitting
         # in the same directory with thirty thousand kernel events in it.
+        #
+        # With size ordering the first candidate is normally the capture, so this
+        # loop exits on one probe and the promotion below stays quiet. It earns
+        # its keep on the layouts where it does not: a multi-rank capture whose
+        # leading rank recorded nothing.
         if not args.dry_run and trace_files:
             kernel_event_count = 0
             probed: list[str] = []

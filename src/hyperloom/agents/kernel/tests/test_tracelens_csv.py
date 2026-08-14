@@ -1945,6 +1945,85 @@ def test_annotation_sidecars_sort_after_a_capture_even_outside_trace_split(tmp_p
     assert traces[-1] == sidecar
 
 
+def test_fragments_flat_beside_the_capture_are_still_demoted(tmp_path):
+    """The demotion must not depend on the splitter nesting its output.
+
+    Production nests fragments under trace_split/ today, but keying only on the
+    directory would leave a flat layout exactly as broken as before: the phase
+    names sort ahead of rank files on the first letter.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    raw = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=40)
+    flat_fragment = _rank_trace(
+        trace_dir / "decode_only_steady_state_prefill_0_decode_1_bs1_conc1"
+                    "_rank_0.trace.json.gz", kernels=0)
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    assert traces[0] == raw
+    assert traces[-1] == flat_fragment
+
+
+def test_an_eight_rank_flat_capture_does_not_exhaust_the_probe_budget(tmp_path):
+    """xDiT runs at TP=8, so a flat layout could present eight fragments first.
+
+    With the fragments still in the default bucket they would consume the whole
+    probe budget before any rank file was opened, and the run would fail with the
+    error this change exists to remove.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    for rank in range(8):
+        _rank_trace(
+            trace_dir / f"decode_only_steady_state_x_rank_{rank}.trace.json.gz",
+            kernels=0)
+        _rank_trace(
+            trace_dir / f"mixed_steady_state_x_rank_{rank}.trace.json.gz",
+            kernels=0)
+    captures = [_rank_trace(trace_dir / f"rank_{r}.trace.json.gz", kernels=25)
+                for r in range(8)]
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    leading = traces[:tla._KERNEL_PROBE_LIMIT]
+    assert any(p in captures for p in leading), (
+        "a real capture must be reachable inside the probe budget")
+    assert tla.count_gpu_kernel_events(traces[0]) > 0
+
+
+def test_a_non_trace_sidecar_does_not_lead_discovery(tmp_path):
+    """execution_details.json is swept in by the *.json glob but is not a trace.
+
+    It sorts ahead of rank_0.trace.json.gz alphabetically, so before size
+    ordering it was trace_files[0] in every healthy nested capture: one wasted
+    probe, and a promotion logged on every run, which made the log line
+    meaningless exactly when it should have meant something.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    raw = _xdit_roofline_capture(trace_dir)
+    sidecar = trace_dir / "trace_split" / "execution_details.json"
+    assert sidecar.exists()
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    assert traces[0] == raw
+    assert traces.index(sidecar) > 0
+
+
+def test_the_larger_trace_leads_within_a_bucket(tmp_path):
+    """Size is the part of the ordering that needs no name recognition."""
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    small = _rank_trace(trace_dir / "aaa_unknown_shape.trace.json.gz", kernels=1)
+    large = _rank_trace(trace_dir / "zzz_unknown_shape.trace.json.gz", kernels=400)
+    assert large.stat().st_size > small.stat().st_size
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    assert traces[0] == large
+
+
 def test_merged_trace_still_wins_over_a_raw_rank_capture(tmp_path):
     """The pre-existing preference is unchanged: merged first when present."""
     trace_dir = tmp_path / "torch_trace"
@@ -2203,12 +2282,18 @@ def _drive_main_over_capture_dir(tmp_path, trace_dir):
     return captured
 
 
-def _rank_trace(path: Path, kernels: int) -> Path:
+def _rank_trace(path: Path, kernels: int, cpu_events: int = 0) -> Path:
+    """Write a rank trace with the given number of GPU kernels.
+
+    ``cpu_events`` pads with host-side events, which is what a CPU-only capture
+    actually looks like: a large file with no kernels in it.
+    """
+    events = [{"cat": "kernel", "name": "void real_kernel<...>", "dur": 5.0}
+              for _ in range(kernels)]
+    events += [{"cat": "cpu_op", "name": f"aten::some_host_op_{i}", "dur": 1.0}
+               for i in range(cpu_events)]
     with gzip.open(path, "wt") as fh:
-        json.dump({"traceEvents": [
-            {"cat": "kernel", "name": "void real_kernel<...>", "dur": 5.0}
-            for _ in range(kernels)
-        ]}, fh)
+        json.dump({"traceEvents": events}, fh)
     return path
 
 
@@ -2222,11 +2307,13 @@ def test_analysis_input_follows_the_candidate_that_passed_the_preflight(tmp_path
     """
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
-    empty = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0)
+    # A CPU-only rank is a big file with no kernels in it, so size ordering puts
+    # it first on merit. Ordering cannot help here; only the promotion can.
+    empty = _rank_trace(trace_dir / "rank_0.trace.json.gz",
+                        kernels=0, cpu_events=400)
     populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
+    assert empty.stat().st_size > populated.stat().st_size
 
-    # Discovery still leads with rank_0: the promotion, not the ordering, is what
-    # this test is about.
     _kind, traces = tla.discover_trace_inputs(trace_dir)
     assert traces[0] == empty
 
