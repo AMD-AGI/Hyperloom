@@ -40,6 +40,7 @@ __all__ = [
     "CancelScope",
     "cancel_scope_listener",
     "current_cancel_scope",
+    "stop_was_asked_for",
     "use_cancel_scope",
 ]
 
@@ -123,6 +124,20 @@ def current_cancel_scope() -> CancelScope | None:
             dispatcher did not start.
     """
     return _CURRENT_SCOPE.get()
+
+
+def stop_was_asked_for() -> bool:
+    """Whether the action running in this context has already been asked to stop.
+
+    For code deciding whether a step is still worth taking, rather than for code
+    stopping something in flight: no scope, or an uncancelled one, both read as
+    "carry on", so a caller outside an action behaves exactly as it always did.
+
+    Returns:
+        bool: ``True`` when a scope is published and cancelled.
+    """
+    scope = _CURRENT_SCOPE.get()
+    return scope is not None and scope.cancelled
 
 
 @contextmanager

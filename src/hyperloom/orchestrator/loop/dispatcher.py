@@ -85,6 +85,16 @@ log = _logging.getLogger(__name__)
 # that pays the most: the teardown a Ray round owes is not an alternative to
 # closing its lease, it is what it does first.
 #
+# The enumeration above has to stay exhaustive, so a serial step the unwind takes
+# and this sum does not name has to be removed from the unwind instead. One is:
+# ``run_grid`` fires a robustness tick at each variant boundary, and a cooperative
+# stop reaches that boundary the ordinary way, so the tick would sit between
+# recording the round's row and releasing what the round held -- eight more
+# seconds, spent observing the reap this cancel just ordered. It is skipped
+# whenever the scope is already cancelled rather than budgeted for, because the
+# rows the grid has already built are what a window short by those eight seconds
+# throws away, and they are worth more than one tick.
+#
 # Past this window the coroutine is cancelled anyway, and the window is only ever
 # spent when work is still unwinding: the wait ends the moment the last victim is
 # done, so covering the teardown term costs a round that stops promptly nothing.

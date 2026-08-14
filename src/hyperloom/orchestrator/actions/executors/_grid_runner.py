@@ -34,6 +34,7 @@ from hyperloom.common.env_safety import (
 
 from ...roles.robustness_pulse import pulse as _robustness_pulse
 from ...trace.task_progress import heartbeat_while_output_flows, report_progress
+from ..cancel_channel import stop_was_asked_for
 from ..stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
@@ -1567,14 +1568,35 @@ async def run_grid(
         """Report the finished variant and run a best-effort robustness pulse.
 
         Called once the variant's result has been appended, so the progress
-        note carries what actually landed. Exceptions from the pulse are
-        swallowed (logged at debug) so a pulse failure never aborts the grid.
+        note carries what actually landed. The robustness tick is skipped once
+        the action has been asked to stop: a cooperative stop returns its
+        sentinel rather than raising, so this is reached on the ordinary path
+        with the cancel already outstanding, and the tick is a subprocess
+        spawned and waited out for its whole timeout -- serially, between
+        recording the row and releasing what the round held, inside the one
+        window the canceller allows the entire unwind. What it would observe
+        is the reap the orchestrator just ordered, and what waiting for it costs
+        is every row this grid has already built.
+
+        The gate is the cancel scope rather than the round's returncode because a
+        variant can be failing for its own reasons when the cancel lands: that
+        row is a genuine failure and its tick is just as unaffordable.
+
+        Exceptions from the pulse are swallowed (logged at debug) so a pulse
+        failure never aborts the grid.
 
         Args:
             idx (int): Zero-based index of the just-finished variant, passed
                 through as the pulse ``tick_index``.
         """
         await report_progress(**_variant_progress_note(grid, results, idx))
+        if stop_was_asked_for():
+            log.info(
+                "grid_runner: variant %d/%d robustness pulse skipped; the orchestrator cancelled this action",
+                idx + 1,
+                len(grid),
+            )
+            return
         try:
             await _robustness_pulse(tick_index=idx)
         except Exception as exc:  # noqa: BLE001
