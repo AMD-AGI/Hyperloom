@@ -40,7 +40,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     run_grid,
 )
 
-from .conftest import launches_by_round_slot
+from .conftest import enable_multi_node, launches_by_round_slot
 
 
 # Section 1: _write_variant_abort_marker
@@ -1457,18 +1457,9 @@ async def _launch_every_pass_of_one_variant(
         list[dict]: One record per launched round, as ``_capture_launches`` makes
             them.
     """
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
-    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnsl
-
     base = tmp_path / "base.yaml"
     _write_baseline_yaml_overrides(base)
-    monkeypatch.setattr(mne, "is_multi_node", lambda: True)
-    monkeypatch.setattr(mne, "mn_bench_warmup_enabled", lambda: True)
-
-    async def fake_restart_server_for_round(**_kwargs):
-        return None
-
-    monkeypatch.setattr(mnsl, "restart_server_for_round", fake_restart_server_for_round)
+    enable_multi_node(monkeypatch)
     recorded: list[dict] = []
     with (
         patch(

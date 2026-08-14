@@ -48,7 +48,7 @@ from hyperloom.orchestrator.trace.task_progress import progress_scope
 
 from .conftest import chatty_child, enable_multi_node, suppression_window_s
 
-from .conftest import launches_by_round_slot
+from .conftest import enable_multi_node, launches_by_round_slot
 
 
 @pytest.fixture(autouse=True)
@@ -1872,23 +1872,6 @@ def _capturing_fake_run(returncode: int = 0, *, produces_workspace: bool = True)
     return fake_run, calls
 
 
-def _enable_multi_node(monkeypatch) -> None:
-    """Put the executor on the multi-node path with the per-round restart stubbed.
-
-    Multi-node is what adds the discarded client-warmup pass in front of the
-    measured round, so it is the only mode in which a baseline round launches
-    more than one benchmark process.
-    """
-    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-
-    async def fake_restart_server_for_round(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(mnl, "restart_server_for_round", fake_restart_server_for_round)
-
-
 def _run_baseline_under_budget(
     tmp_path,
     *,
@@ -1942,14 +1925,14 @@ class TestTheSessionBudgetReachesTheBaselineRound:
         one runs until its own hard cap and comes back looking like a variant
         that timed out.
         """
-        _enable_multi_node(monkeypatch)
+        enable_multi_node(monkeypatch)
         _result, calls = _run_baseline_under_budget(tmp_path, remaining_sec=3600.0)
 
         assert launches_by_round_slot(calls)[round_slot]["session_deadline_sec"] is not None
 
     def test_no_pass_of_a_round_is_launched_without_the_deadline(self, tmp_path, monkeypatch):
         """The net for a pass added later, which no per-slot test would know about."""
-        _enable_multi_node(monkeypatch)
+        enable_multi_node(monkeypatch)
         _result, calls = _run_baseline_under_budget(tmp_path, remaining_sec=3600.0)
 
         assert set(launches_by_round_slot(calls)) >= set(_BASELINE_ROUND_SLOTS)
@@ -2008,7 +1991,7 @@ class TestTheSessionBudgetReachesTheBaselineRound:
         """
         base = tmp_path / "base.yaml"
         _write_yaml(base, framework="vllm")
-        _enable_multi_node(monkeypatch)
+        enable_multi_node(monkeypatch)
         launched: list[str] = []
 
         def fake_run(cmd, *args, **kwargs):
@@ -2053,7 +2036,7 @@ class TestTheSessionBudgetReachesTheBaselineRound:
         result is a baseline reported as ``session_time_exhausted`` whose warmup
         succeeded, after a round of GPU time that could never have finished.
         """
-        _enable_multi_node(monkeypatch)
+        enable_multi_node(monkeypatch)
         _result, calls = _run_baseline_under_budget(tmp_path, remaining_sec=1000.0, timeout_sec=600)
         launches = launches_by_round_slot(calls)
 
