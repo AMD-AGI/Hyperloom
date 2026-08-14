@@ -103,7 +103,9 @@ def test_home_dir_matches_python_path_home(home_env: dict[str, str]) -> None:
     )
 
 
-def _run_credential_write(tmp_path: Path, *, home: str) -> subprocess.CompletedProcess[str]:
+def _run_credential_write(
+    tmp_path: Path, *, home: str, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run ensure_forge_claude_cli() with stubbed log/warn/run and a fake npm."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -123,7 +125,9 @@ _ANTHROPIC_BASE_URL_VAL="https://gateway.example.com/v1/"
 {_extract_func("ensure_forge_claude_cli")}
 ensure_forge_claude_cli
 """
-    return _run_bash(harness, {"PATH": f"{fake_bin}:{_BASE_PATH}", "HOME": home})
+    env = {"PATH": f"{fake_bin}:{_BASE_PATH}", "HOME": home}
+    env.update(extra_env or {})
+    return _run_bash(harness, env)
 
 
 def test_credentials_land_under_home(tmp_path: Path) -> None:
@@ -142,6 +146,29 @@ def test_credentials_land_under_home(tmp_path: Path) -> None:
     assert "/root" not in combined, combined
 
 
+def test_npm_prefix_avoids_usr_local_when_it_is_unwritable(tmp_path: Path) -> None:
+    """A global npm install needs a writable prefix.
+
+    ``run`` executes bare under ``set -euo pipefail``, so a failed
+    ``npm install -g /usr/local`` aborts the installer exactly as an unwritable
+    /root did -- in the same function, for the same reason.
+    """
+    home = tmp_path / "home" / "hluser"
+    home.mkdir(parents=True)
+    # Pinning the version takes the branch that installs unconditionally, so the
+    # test does not depend on whether the host already has a claude binary.
+    proc = _run_credential_write(tmp_path, home=str(home), extra_env={"HYPERLOOM_CLAUDE_CODE_VERSION": "1.2.3"})
+    combined = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, combined
+    prefix_lines = [ln for ln in combined.splitlines() if "npm config set prefix" in ln]
+    assert prefix_lines, combined
+    if os.access("/usr/local/lib", os.W_OK):
+        assert all("/usr/local" in ln for ln in prefix_lines), prefix_lines
+    else:
+        assert all(str(home / ".local") in ln for ln in prefix_lines), prefix_lines
+
+
 def test_installer_has_no_hardcoded_root_home() -> None:
     """No home-relative path may bypass the resolver via /root or a bare $HOME."""
     text = INSTALL_SH.read_text(encoding="utf-8")
@@ -149,7 +176,9 @@ def test_installer_has_no_hardcoded_root_home() -> None:
     # _home_dir owns the only HOME reference and guards presence with ${HOME+x};
     # anywhere else a bare ${HOME} is fatal under set -u.
     outside_resolver = text.replace(_extract_func("_home_dir", required=False), "")
-    assert "${HOME}" not in outside_resolver, "use _home_dir instead of a bare ${HOME}"
+    # Both spellings: $HOME reads the same to the shell and slips a ${...}-only check.
+    bare = re.findall(r"\$\{?HOME\b", outside_resolver)
+    assert not bare, f"use _home_dir instead of a bare HOME reference: {bare}"
 
 
 def test_write_env_file_survives_unset_home(tmp_path: Path) -> None:
