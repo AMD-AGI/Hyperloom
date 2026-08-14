@@ -117,10 +117,10 @@ def test_sigkill_cannot_write_final_json(tmp_path):
 def test_crash_safe_platform_does_not_drag_in_the_orchestrator():
     """The safety net must not import the subsystems that may have just failed.
 
-    Building this record used to reach into the orchestrator's report renderer,
-    which imports the message bus and a SQLite connection layer at module level.
-    That is a poor dependency to acquire after a run has already died -- and if
-    the crash came from that subsystem, the record explaining it is what breaks.
+    The orchestrator's report renderer imports the message bus and a SQLite
+    connection layer at module level, so reaching it for this record would
+    acquire that dependency after a run has already died -- and if the crash
+    came from that subsystem, the record explaining it is what breaks.
     Run in a subprocess because the import is global and one test cannot unsee it.
     """
     probe = (

@@ -71,8 +71,9 @@ def test_absent_sysfs_is_not_a_failure(tmp_path):
 def test_missing_numa_tree_does_not_produce_nps0(tmp_path):
     """A container seeing CPUs but no node tree must not report a fake NPS0.
 
-    NPS0 is not a value any BIOS can hold, and it previously read downstream as
-    a real misconfiguration rather than as an unanswerable question.
+    NPS0 is not a value any BIOS can hold, so a reader comparing the record
+    against a target cannot tell it apart from a real misconfiguration. None
+    says the question was unanswerable on this host, which is the truth.
     """
     root = _host(tmp_path, nodes=0)
     assert numa_node_count(root=root) is None
