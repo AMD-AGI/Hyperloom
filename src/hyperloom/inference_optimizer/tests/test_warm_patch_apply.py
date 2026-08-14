@@ -444,14 +444,11 @@ def test_legacy_patch_skips_when_rollback_snapshot_fails(
     output_dir,
     monkeypatch,
 ):
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
-
     def _fail_snapshot(*_args, **_kwargs):
         raise OSError("snapshot unavailable")
 
     monkeypatch.setattr(
-        baseline_module,
-        "_create_patch_snapshot",
+        "hyperloom.orchestrator.actions.executors.baseline._create_patch_snapshot",
         _fail_snapshot,
     )
 

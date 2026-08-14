@@ -592,9 +592,7 @@ class PreludePhase(PhaseHandler):
                         f"{patch_path}"
                     ),
                 }
-            repo_root = target_path
-            for _part in relative_path.parts:
-                repo_root = repo_root.parent
+            repo_root = target_path.parents[len(relative_path.parts) - 1]
             try:
                 resolved_from_patch = (repo_root / relative_path).resolve()
             except (OSError, RuntimeError):

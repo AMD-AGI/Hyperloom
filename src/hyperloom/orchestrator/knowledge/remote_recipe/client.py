@@ -452,7 +452,6 @@ class RemoteRecipeClient:
                 )
                 _deactivate_destination(root)
                 generation.replace(root)
-                generation = None
             return document
         except Exception:
             _deactivate_destination(root)
