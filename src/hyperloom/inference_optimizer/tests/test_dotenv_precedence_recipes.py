@@ -157,6 +157,35 @@ def test_recipe_lets_dotenv_fill_a_blank_export(doc: Path, tmp_path: Path) -> No
     assert result["USER_DATA_PATH"] == "/from/dotenv"
 
 
+@pytest.mark.parametrize("doc", RECIPE_DOCS, ids=lambda p: p.parent.name + "/" + p.name)
+def test_a_failed_restore_names_the_variable(doc: Path, tmp_path: Path) -> None:
+    """Suppressing eval's stderr hid the only precise diagnosis available.
+
+    ``eval`` keeps going after a failed assignment and reports the *last*
+    statement's status, so a ``|| warning`` fires only when the failure happens
+    to come last. The shell's own message names the variable and the reason.
+    """
+    if not doc.exists():
+        pytest.skip(f"{doc} not present in this layout")
+
+    fragment = _extract_dotenv_load(doc)
+    (tmp_path / ".env").write_text("USER_DATA_PATH=/from/dotenv\n", encoding="utf-8")
+    script = tmp_path / "recipe.sh"
+    script.write_text("readonly LOCKED=locked\nexport LOCKED\n" + fragment + "\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(script)],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "REPO_ROOT": str(tmp_path)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert "LOCKED" in proc.stderr, proc.stderr
+    assert "readonly" in proc.stderr, proc.stderr
+
+
 def test_credential_only_recipe_keeps_the_callers_key(tmp_path: Path) -> None:
     """install.sh snapshots the same credential vars for this exact reason.
 
