@@ -374,6 +374,35 @@ def test_probe_stderr_tail_is_bounded(monkeypatch):
     assert "line-0 " not in tail
 
 
+@pytest.mark.parametrize(
+    ("framework", "evidence"),
+    [("vllm", "vllm platform"), ("sglang", "torch.version.hip")],
+)
+def test_the_rocm_verdict_names_its_evidence(monkeypatch, capsys, framework, evidence):
+    """Only vLLM reports its own platform; elsewhere torch's tag is all there is.
+
+    Claiming the framework itself is a ROCm build would wave a CUDA sglang
+    sitting beside a ROCm torch straight through.
+    """
+    _probe_result(monkeypatch, importable=True, rocm=True)
+
+    preflight._check_serving_framework(_args(framework), "/usr/bin/python3")
+
+    assert evidence in capsys.readouterr().out
+
+
+def test_a_refuted_non_vllm_build_blames_torch(monkeypatch, capsys):
+    """For sglang the refuted thing is torch, so the error must not overclaim."""
+    _probe_result(monkeypatch, importable=True, rocm=False)
+
+    with pytest.raises(SystemExit):
+        preflight._check_serving_framework(_args("sglang"), "/usr/bin/python3")
+
+    err = capsys.readouterr().err
+    assert "NOT a ROCm build" in err
+    assert "torch.version.hip" in err
+
+
 def _timing_out_probe(monkeypatch, *, importable: bool) -> list[float]:
     """Record every probe timeout; time out on the probe under test."""
     budget: list[float] = []

@@ -769,8 +769,17 @@ class _Probe(NamedTuple):
     timed_out: bool = False
 
 
+def _rocm_evidence(framework: str) -> str:
+    """Name the signal the ROCm verdict for ``framework`` rests on."""
+    return "the vllm platform" if framework == "vllm" else "torch.version.hip"
+
+
 def _probe_rocm_build(framework: str, python_exe: str) -> _Probe:
-    """Tri-state: is ``framework`` in ``python_exe`` a ROCm build?
+    """Tri-state: is the ROCm stack behind ``framework`` in ``python_exe`` ROCm?
+
+    Verifies ``torch.version.hip``, plus vLLM's own platform for vllm. No other
+    framework exposes its build identity -- sglang's ``is_hip()`` only re-reads
+    ``torch.version.hip`` -- so a CUDA sglang beside a ROCm torch still passes.
 
     ``True`` verified, ``False`` refuted, ``None`` inconclusive. Deliberately
     not ``adapters.verify_torch_is_rocm``: it collapses inconclusive into
@@ -909,20 +918,21 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
 
     interpreters = _framework_probe_interpreters(framework, benchmark_python)
     found, probe = _resolve_framework_build(framework, interpreters)
+    evidence = _rocm_evidence(framework)
     if found:
         if probe.verdict is True:
-            print(f"Preflight: {framework} importable and a ROCm build ({found})")
+            print(f"Preflight: {framework} importable ({found}); {evidence} confirms a ROCm build")
             return
         if probe.verdict is None:
             print(
-                f"Preflight: WARNING — {framework} is importable ({found}) but could not verify it is a ROCm build"
-                f"{_probe_detail_block(probe.detail)}"
+                f"Preflight: WARNING — {framework} is importable ({found}) but could not verify a ROCm build "
+                f"via {evidence}{_probe_detail_block(probe.detail)}"
             )
             return
         print(
-            f"\nERROR: {framework} is importable ({found}) but is NOT a ROCm build.\n\n"
-            "The wheel on PyPI is the CUDA build: it imports fine and then fails at\n"
-            "GPU init. Replace it with the ROCm build:\n"
+            f"\nERROR: {framework} is importable ({found}) but {evidence} says it is NOT a ROCm build.\n\n"
+            "The wheels on PyPI are the CUDA build: they import fine and then fail\n"
+            "at GPU init. Reinstall the ROCm stack:\n"
             "    python3 -m hyperloom.inference_optimizer.setup -- "
             f"--install-framework {framework}\n\n"
             f"To proceed anyway, set {SKIP_FRAMEWORK_CHECK_ENV}=1.",
