@@ -42,7 +42,7 @@ _WARNED_NO_USER_DATA = False
 
 # Per-session directory skeleton mkdir-ed by make_session_dir(). Splits into
 # workspace-shared roots (runtime/, logs/ — one per $USER_DATA_PATH) and
-# per-session roots (one per model+timestamp).
+# per-session roots (one per launch).
 _SESSION_SKELETON: tuple[str, ...] = (
     "storage",
     "personas",
@@ -156,10 +156,8 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
     ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR``; otherwise it is
     workspace_root. Idempotent.
 
-    The random suffix is what makes the directory unique: the timestamp is
-    second-granular, so two launches of one model within the same second would
-    otherwise share a session dir (and, via ``session_dir.name``, a session id).
-    The fixed-width timestamp prefix keeps lexical order chronological.
+    The random suffix keeps two same-second launches of one model apart; the
+    fixed-width timestamp stays first so lexical order remains chronological.
 
     Args:
         model_name: Model name selecting the per-model subtree, or ``None``

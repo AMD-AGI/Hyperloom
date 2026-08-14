@@ -56,7 +56,7 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
 │       # Open-source deps are installed by install.sh.
 ├── logs/                                 # workspace-shared launcher stdout
 └── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
-    └── <UTC_YYYYMMDDTHHMMSSZ>/           # session_dir — manifest.json, state.json, runs/, …
+    └── <UTC_YYYYMMDDTHHMMSSZ>-<rand8>/   # session_dir — manifest.json, state.json, runs/, …
         ├── manifest.json
         ├── state.json
         ├── storage/coordinator.db
@@ -73,11 +73,11 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
 run-scoped path *before* the optimizer starts, e.g.
 ``/hyperloom/users/<uid>/deepseek-ai-DeepSeek-V3-20260522_034024/``.
 That outer directory is **platform isolation** (one Claw job). The
-optimizer then creates ``<model_basename>/<UTC_ts>/`` inside it. Full
+optimizer then creates ``<model_basename>/<UTC_ts>-<rand8>/`` inside it. Full
 session path example::
 
     /hyperloom/users/<uid>/deepseek-ai-DeepSeek-V3-20260522_034024/   ← USER_DATA_PATH (Claw)
-        deepseek-ai-DeepSeek-V3/20260522T035359Z/                      ← session_dir (optimizer)
+        deepseek-ai-DeepSeek-V3/20260522T035359Z-9f3c1a04/            ← session_dir (optimizer)
 
 ### Path resolution (do not guess)
 

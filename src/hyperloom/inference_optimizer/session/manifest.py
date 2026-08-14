@@ -425,8 +425,7 @@ def build_manifest(
         "created_at_utc": now_iso(timespec="seconds"),
         "session_dir": str(session_dir),
         # USER_DATA_PATH root snapshotted so a trace-based consumer can locate
-        # the on-disk artifacts. Read through workspace_root() so the snapshot is
-        # absolute even when the launcher exported a relative $USER_DATA_PATH.
+        # the on-disk artifacts.
         "user_data_path": str(_paths.workspace_root()),
         "model_path": model_path,
         "model_name": model_name,

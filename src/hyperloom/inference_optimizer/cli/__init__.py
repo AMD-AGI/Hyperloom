@@ -1964,7 +1964,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
         )
 
-        # session_dir defaults to <workspace_root>/<model>/<UTC ts>/.
+        # session_dir defaults to <workspace_root>/<model>/<UTC ts>-<rand8>/.
         # Use the resolved identity so a quantized run is named after the source
         # model (e.g. "<model>-quantized") instead of the generic export-dir
         # basename "quantized".
@@ -2498,13 +2498,11 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(line_buffering=True)
 
-    # Absolutise the workspace root once, here, before the parser's defaults or
-    # any session path derive from it. Every subprocess is spawned with an
-    # explicit cwd of its own, so a relative $USER_DATA_PATH would resolve to a
-    # different directory in each of them; children inherit the value fixed here.
-    _user_data = os.environ.get(ENV_USER_DATA_PATH, "").strip()
-    if _user_data and not Path(_user_data).is_absolute():
-        os.environ[ENV_USER_DATA_PATH] = str(Path(_user_data).expanduser().absolute())
+    # Absolutise before the parser defaults or any session path derive from it:
+    # subprocesses run with their own cwd, so a relative value would diverge.
+    user_data = os.environ.get(ENV_USER_DATA_PATH, "")
+    if user_data and not Path(user_data).is_absolute():
+        os.environ[ENV_USER_DATA_PATH] = str(Path(user_data).expanduser().absolute())
 
     parser = _build_parser()
     # Strict on purpose. The platform's prompt FLAGS block is authored by hand,
