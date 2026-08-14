@@ -15,6 +15,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from hyperloom.common.git_safety import safe_directory_args
+
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
@@ -501,14 +503,15 @@ class FrameworkPhase(PhaseHandler):
                 continue
             try:
                 cp = subprocess.run(
-                    ["git", "-C", str(p), "rev-parse", "--is-inside-work-tree"],
+                    ["git", *safe_directory_args(["-C", str(p), "rev-parse", "--is-inside-work-tree"])],
                     capture_output=True,
                     text=True,
                     timeout=10,
                     check=False,
                 )
             except (FileNotFoundError, subprocess.TimeoutExpired):
-                return False
+                # One unusable root says nothing about the others.
+                continue
             if cp.returncode == 0 and cp.stdout.strip() == "true":
                 return True
         return False

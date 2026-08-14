@@ -313,7 +313,11 @@ Both are idempotent; do not replicate them inside chat.
 The common single-gateway setup uses `OPENAI_API_KEY` and `OPENAI_BASE_URL`.
 Split-gateway deployments may provide provider-specific `ANTHROPIC_*` /
 `OPENAI_*` credentials instead. Shell-exported values win; `$REPO_ROOT/.env`
-is loaded only to fill missing values by `install.sh` and the CLI preflight.
+is loaded only to fill missing values. `install.sh` and the CLI preflight
+enforce this internally; the launch recipes below enforce it by re-exporting a
+snapshot of the caller's environment after sourcing `.env`, so a path variable
+such as `USER_DATA_PATH` left in `.env` can never redirect a run to another
+workspace. Never plain `set -a; . .env` — that inverts the precedence.
 After Step 1, source the generated `kernel-agent.env.sh` in the same shell.
 
 
@@ -957,7 +961,12 @@ After `setsid nohup ... &`, locate the optimizer via
 
 ```bash
 cd "$REPO_ROOT"
+# .env fills gaps only: re-exporting the non-empty pre-source snapshot keeps every
+# value the caller exported. Wider than install.sh, which guards a fixed list.
+_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
 if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
+eval "$_dotenv_prev"
+unset _dotenv_prev
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
 export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"

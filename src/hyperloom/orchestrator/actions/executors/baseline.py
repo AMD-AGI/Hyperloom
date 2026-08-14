@@ -31,6 +31,7 @@ import yaml
 
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
+from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
@@ -618,7 +619,7 @@ def _git_head_sha(repo_path: str) -> str:
         return ""
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", *safe_directory_args(["rev-parse", "HEAD"], cwd=repo_path)],
             cwd=repo_path,
             capture_output=True,
             timeout=5,
@@ -639,14 +640,14 @@ def _revert_patches(repo_path: str, pre_sha: str) -> None:
         return
     try:
         subprocess.run(
-            ["git", "reset", "--hard", pre_sha],
+            ["git", *safe_directory_args(["reset", "--hard", pre_sha], cwd=repo_path)],
             cwd=repo_path,
             capture_output=True,
             timeout=15,
             check=True,
         )
         subprocess.run(
-            ["git", "clean", "-fd"],
+            ["git", *safe_directory_args(["clean", "-fd"], cwd=repo_path)],
             cwd=repo_path,
             capture_output=True,
             timeout=15,

@@ -60,7 +60,7 @@ CONSTRAINTS (do not deviate):
 
 SEARCH SAFETY: do NOT run `find /`, `grep -R /`, or any unbounded root-filesystem
 search. If you need to inspect skills or tuner files, use only these bounded
-paths: /root/.claude/skills, ~/.claude/skills,
+paths: ~/.claude/skills,
 /sgl-workspace/aiter/csrc/ck_gemm_a8w8_blockscale,
 /sgl-workspace/sglang/python/sglang/srt/layers/quantization,
 and this workspace. Root-wide scans can hang the Hyperloom session.

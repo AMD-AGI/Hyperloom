@@ -206,6 +206,25 @@ def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120) -> subproce
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
 
 
+def _git_argv(args: list[str], cwd: str | None = None) -> list[str]:
+    """Build a ``git`` argv carrying a ``safe.directory`` exception for the target repo.
+
+    ``args`` excludes the executable. The kernel repo is routinely bind-mounted
+    and owned by another uid, which git refuses to read or write without this.
+    """
+    try:
+        from hyperloom.common.git_safety import safe_directory_args  # noqa: PLC0415 - standalone import-light
+    except ImportError:
+        # tools/ scripts also run on remote nodes with no hyperloom installed.
+        return ["git", *args]
+    return ["git", *safe_directory_args(args, cwd=cwd)]
+
+
+def _run_git(args: list[str], cwd: str | None = None, timeout: int = 120) -> subprocess.CompletedProcess:
+    """Run ``git <args>`` (``args`` excludes the executable) on a possibly foreign-owned repo."""
+    return _run(_git_argv(args, cwd=cwd), cwd=cwd, timeout=timeout)
+
+
 def _resolve_gpu_target(candidate: dict) -> str:
     """Resolve the gfx target: env GPU_TARGET -> candidate platform -> probe.
 
@@ -486,7 +505,7 @@ def _resolve_fellow(source_type: str, kernel_kind: str) -> str | None:
 def _git_toplevel(path: str) -> str:
     """Return the git repo root containing `path`, or '' if not a git repo."""
     try:
-        proc = _run(["git", "-C", str(Path(path).parent), "rev-parse", "--show-toplevel"], timeout=30)
+        proc = _run_git(["-C", str(Path(path).parent), "rev-parse", "--show-toplevel"], timeout=30)
         if proc.returncode == 0:
             return proc.stdout.strip()
     except Exception:
@@ -509,12 +528,12 @@ def _default_branch(repo: str) -> str:
     Prefers the remote's advertised default, then falls back to common local
     branch names.
     """
-    p = _run(["git", "-C", repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], timeout=30)
+    p = _run_git(["-C", repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], timeout=30)
     ref = (p.stdout or "").strip()
     if ref.startswith("origin/"):
         return ref[len("origin/") :]
     for name in ("main", "master"):
-        if _run(["git", "-C", repo, "rev-parse", "--verify", name], timeout=30).returncode == 0:
+        if _run_git(["-C", repo, "rev-parse", "--verify", name], timeout=30).returncode == 0:
             return name
     return ""
 
@@ -553,21 +572,21 @@ def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path, bran
     # reuse it, and never let the caller reinterpret it as a no-git scratch.
     if wt.exists() or wt.is_symlink():
         raise _RetainedWorkspaceCollision(f"retained Forge workspace already exists: {wt}")
-    _run(["git", "-C", repo, "worktree", "prune"], timeout=60)
+    _run_git(["-C", repo, "worktree", "prune"], timeout=60)
 
-    base = _run(["git", "-C", repo, "rev-parse", "--verify", "HEAD"], timeout=30)
+    base = _run_git(["-C", repo, "rev-parse", "--verify", "HEAD"], timeout=30)
     if base.returncode != 0 or not base.stdout.strip():
         raise _WorktreePreparationError("could not resolve the source repository HEAD")
     base_commit = base.stdout.strip()
-    add = _run(["git", "-C", repo, "worktree", "add", "-b", branch, str(wt), "HEAD"], timeout=120)
+    add = _run_git(["-C", repo, "worktree", "add", "-b", branch, str(wt), "HEAD"], timeout=120)
     if add.returncode != 0:
         raise _WorktreePreparationError(
             "git worktree creation failed: " + (add.stderr.strip() or add.stdout.strip())
         )
 
     # Local git identity so IterationLoop commit/revert works.
-    _run(["git", "-C", str(wt), "config", "user.name", "forge-bot"], timeout=30)
-    _run(["git", "-C", str(wt), "config", "user.email", "forge-bot@local"], timeout=30)
+    _run_git(["-C", str(wt), "config", "user.name", "forge-bot"], timeout=30)
+    _run_git(["-C", str(wt), "config", "user.email", "forge-bot@local"], timeout=30)
 
     return str(wt), str(wt / rel), base_commit
 
@@ -808,7 +827,7 @@ def _prepare_worktree_nogit(
 
     def _scaffold(cmds: list[list[str]]) -> bool:
         for cmd in cmds:
-            proc = _run(cmd, timeout=120)
+            proc = _run_git(cmd, timeout=120)
             if proc.returncode != 0:
                 log.warning(
                     "forge: non-git scaffold git init step failed: %s -> %s",
@@ -822,9 +841,9 @@ def _prepare_worktree_nogit(
     # Bootstrap a real git repo so IterationLoop's commit/revert works.
     if not _scaffold(
         [
-            ["git", "-C", str(scratch_dir), "init", "-b", branch],
-            ["git", "-C", str(scratch_dir), "config", "user.name", "forge-bot"],
-            ["git", "-C", str(scratch_dir), "config", "user.email", "forge-bot@local"],
+            ["-C", str(scratch_dir), "init", "-b", branch],
+            ["-C", str(scratch_dir), "config", "user.name", "forge-bot"],
+            ["-C", str(scratch_dir), "config", "user.email", "forge-bot@local"],
         ]
     ):
         return None
@@ -835,13 +854,13 @@ def _prepare_worktree_nogit(
 
     if not _scaffold(
         [
-            ["git", "-C", str(scratch_dir), "add", "-A"],
-            ["git", "-C", str(scratch_dir), "commit", "-q", "-m", "forge: scratch baseline"],
+            ["-C", str(scratch_dir), "add", "-A"],
+            ["-C", str(scratch_dir), "commit", "-q", "-m", "forge: scratch baseline"],
         ]
     ):
         return None
 
-    base_commit_proc = _run(["git", "-C", str(scratch_dir), "rev-parse", "HEAD"], timeout=30)
+    base_commit_proc = _run_git(["-C", str(scratch_dir), "rev-parse", "HEAD"], timeout=30)
     if base_commit_proc.returncode != 0:
         shutil.rmtree(scratch_dir, ignore_errors=True)
         return None
@@ -1052,8 +1071,8 @@ def _prepare_inplace(
         return None
 
     try:
-        orig_branch = _run(["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"], timeout=30).stdout.strip()
-        orig_head = _run(["git", "-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip()
+        orig_branch = _run_git(["-C", repo, "rev-parse", "--abbrev-ref", "HEAD"], timeout=30).stdout.strip()
+        orig_head = _run_git(["-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip()
         if not orig_head:
             return _skip()
         # Auto-recover from a leftover forge temp branch: force the repo back
@@ -1063,37 +1082,37 @@ def _prepare_inplace(
             if not default_branch:
                 return _skip()
             stale = orig_branch
-            co = _run(["git", "-C", repo, "checkout", "-f", default_branch], timeout=120)
+            co = _run_git(["-C", repo, "checkout", "-f", default_branch], timeout=120)
             if co.returncode != 0:
                 return _skip()
-            _run(["git", "-C", repo, "branch", "-D", stale], timeout=30)
+            _run_git(["-C", repo, "branch", "-D", stale], timeout=30)
             orig_branch = default_branch
-            orig_head = _run(["git", "-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip()
+            orig_head = _run_git(["-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip()
             if not orig_head:
                 return _skip()
         # Drop any stale temp branch from a prior crashed run.
-        _run(["git", "-C", repo, "branch", "-D", branch], timeout=30)
+        _run_git(["-C", repo, "branch", "-D", branch], timeout=30)
         # Snapshot the source_file bytes on disk (restored exactly on exit).
         try:
             backup = Path(source_file).read_bytes()
         except OSError:
             return _skip()
-        _run(["git", "-C", repo, "config", "user.name", "forge-bot"], timeout=30)
-        _run(["git", "-C", repo, "config", "user.email", "forge-bot@local"], timeout=30)
+        _run_git(["-C", repo, "config", "user.name", "forge-bot"], timeout=30)
+        _run_git(["-C", repo, "config", "user.email", "forge-bot@local"], timeout=30)
         # Create a temp branch for the forge loop to commit/revert on (deleted
         # in _restore_inplace).
-        cb = _run(["git", "-C", repo, "checkout", "-b", branch], timeout=60)
+        cb = _run_git(["-C", repo, "checkout", "-b", branch], timeout=60)
         if cb.returncode != 0:
             return _skip()
         # Snapshot any pre-existing dirty tracked files as a baseline commit so
         # a later revert can't destroy them. base_commit is the pre-forge tree
         # that agent edits stack on top of; when the tree is clean it equals
         # orig_head.
-        _run(["git", "-C", repo, "add", "-u"], timeout=60)
-        dirty = _run(["git", "-C", repo, "diff", "--cached", "--quiet"], timeout=30)
+        _run_git(["-C", repo, "add", "-u"], timeout=60)
+        dirty = _run_git(["-C", repo, "diff", "--cached", "--quiet"], timeout=30)
         if dirty.returncode != 0:
-            _run(["git", "-C", repo, "commit", "-m", "forge: pre-existing dirty baseline"], timeout=60)
-            base_commit = _run(["git", "-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip() or orig_head
+            _run_git(["-C", repo, "commit", "-m", "forge: pre-existing dirty baseline"], timeout=60)
+            base_commit = _run_git(["-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip() or orig_head
         else:
             base_commit = orig_head
     except Exception:
@@ -1116,18 +1135,7 @@ def _prepare_inplace(
 
 def _untracked_paths(repo: str) -> set[str]:
     """Return untracked repository paths without shell quoting."""
-    proc = _run(
-        [
-            "git",
-            "-C",
-            repo,
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ],
-        timeout=30,
-    )
+    proc = _run_git(["-C", repo, "ls-files", "--others", "--exclude-standard", "-z"], timeout=30)
     if proc.returncode != 0:
         raise RuntimeError(f"could not inspect untracked files in {repo}")
     return {
@@ -1171,15 +1179,7 @@ def _apply_tracked_baseline(repo: str, patch: bytes) -> None:
     if not patch:
         return
     proc = subprocess.run(
-        [
-            "git",
-            "-C",
-            repo,
-            "apply",
-            "--binary",
-            "--whitespace=nowarn",
-            "-",
-        ],
+        _git_argv(["-C", repo, "apply", "--binary", "--whitespace=nowarn", "-"]),
         input=patch,
         capture_output=True,
         timeout=60,
@@ -1216,7 +1216,7 @@ def _restore_inplace(restore: dict) -> None:
         return
     repo = restore["repo"]
     # Abort any in-progress revert the loop may have left.
-    _run(["git", "-C", repo, "revert", "--abort"], timeout=30)
+    _run_git(["-C", repo, "revert", "--abort"], timeout=30)
     orig_branch = restore.get("orig_branch") or ""
     orig_head = restore.get("orig_head") or ""
     base_commit = restore.get("base_commit") or orig_head
@@ -1224,22 +1224,22 @@ def _restore_inplace(restore: dict) -> None:
     # base_commit content (working tree + index), undoing all tracked edits.
     # Done while still on the temp branch so base_commit is reachable.
     if base_commit:
-        diff = _run(["git", "-C", repo, "diff", "--name-only", base_commit], timeout=60)
+        diff = _run_git(["-C", repo, "diff", "--name-only", base_commit], timeout=60)
         for rel in (diff.stdout or "").splitlines():
             rel = rel.strip()
             if rel:
-                _run(["git", "-C", repo, "checkout", base_commit, "--", rel], timeout=30)
+                _run_git(["-C", repo, "checkout", base_commit, "--", rel], timeout=30)
     # Move HEAD back to the original ref WITHOUT touching the working tree.
     if orig_branch and orig_branch != "HEAD":
         # Was on a named branch: point HEAD back at it via symbolic-ref.
-        _run(["git", "-C", repo, "symbolic-ref", "HEAD", f"refs/heads/{orig_branch}"], timeout=30)
+        _run_git(["-C", repo, "symbolic-ref", "HEAD", f"refs/heads/{orig_branch}"], timeout=30)
     elif orig_head:
         # Was on detached HEAD: re-detach via update-ref --no-deref so the
         # working tree is not touched.
-        _run(["git", "-C", repo, "update-ref", "--no-deref", "HEAD", orig_head], timeout=30)
+        _run_git(["-C", repo, "update-ref", "--no-deref", "HEAD", orig_head], timeout=30)
     # Reset the index to match orig_head (without touching working tree).
     if orig_head:
-        _run(["git", "-C", repo, "reset", orig_head, "--", "."], timeout=30)
+        _run_git(["-C", repo, "reset", orig_head, "--", "."], timeout=30)
     # Any baseline failure below must still drop the temp branch and release the
     # per-repo lock, otherwise the next in-place session cannot run.
     try:
@@ -1279,7 +1279,7 @@ def _restore_inplace(restore: dict) -> None:
     finally:
         # Delete the temp branch (safe now that HEAD points elsewhere).
         if restore.get("branch"):
-            _run(["git", "-C", repo, "branch", "-D", restore["branch"]], timeout=30)
+            _run_git(["-C", repo, "branch", "-D", restore["branch"]], timeout=30)
         # Release the per-repo in-place lock last, after full restore.
         _release_repo_lock(restore.get("lock_fd"))
         restore["lock_fd"] = None
@@ -1290,10 +1290,10 @@ def _remove_worktree(kernel_repo: str, source_file: str, wt: str, branch: str) -
     repo = kernel_repo or _git_toplevel(source_file)
     if not repo:
         return
-    _run(["git", "-C", repo, "worktree", "remove", "--force", wt], timeout=60)
+    _run_git(["-C", repo, "worktree", "remove", "--force", wt], timeout=60)
     shutil.rmtree(wt, ignore_errors=True)
-    _run(["git", "-C", repo, "branch", "-D", branch], timeout=30)
-    _run(["git", "-C", repo, "worktree", "prune"], timeout=60)
+    _run_git(["-C", repo, "branch", "-D", branch], timeout=30)
+    _run_git(["-C", repo, "worktree", "prune"], timeout=60)
 
 
 # forge-loop requires --driver to exist before preflight_task repairs it in
@@ -1341,8 +1341,8 @@ def _exclude_generated_drivers(workspace: Path) -> None:
 
 def _git_exclude_file(workspace: Path) -> Path | None:
     """Resolve the exclude file git actually reads for ``workspace``."""
-    probe = _run(
-        ["git", "-C", str(workspace), "rev-parse", "--git-common-dir"],
+    probe = _run_git(
+        ["-C", str(workspace), "rev-parse", "--git-common-dir"],
         timeout=30,
     )
     if probe.returncode != 0:
@@ -1569,7 +1569,7 @@ def _export_best_artifacts(
 
     def _blob_at_commit(commit: str, relative_path: str) -> bytes | None:
         proc = subprocess.run(
-            ["git", "-C", workspace, "show", f"{commit}:{relative_path}"],
+            _git_argv(["-C", workspace, "show", f"{commit}:{relative_path}"]),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -1612,10 +1612,10 @@ def _export_best_artifacts(
     # A recovered run exports only the validated commit. A normally completed
     # run without checkpoint evidence retains the legacy working-tree export.
     changed: list[str] = []
-    diff_cmd = ["git", "-C", workspace, "diff", "--name-only", base_commit]
+    diff_cmd = ["-C", workspace, "diff", "--name-only", base_commit]
     if best_commit:
         diff_cmd.append(best_commit)
-    diff = _run(diff_cmd, timeout=60)
+    diff = _run_git(diff_cmd, timeout=60)
     if best_commit and diff.returncode != 0:
         raise RuntimeError(
             f"could not list files changed by validated best {best_commit}"
@@ -1647,10 +1647,10 @@ def _export_best_artifacts(
 
     # Full multi-file patch (excludes pre-existing dirty). --binary keeps the
     # patch appliable when a change touches a non-text artifact.
-    patch_cmd = ["git", "-C", workspace, "diff", "--binary", base_commit]
+    patch_cmd = ["-C", workspace, "diff", "--binary", base_commit]
     if best_commit:
         patch_cmd.append(best_commit)
-    patch = _run(patch_cmd, timeout=60)
+    patch = _run_git(patch_cmd, timeout=60)
     if best_commit and patch.returncode != 0:
         raise RuntimeError(
             f"could not export validated best patch {best_commit}"
@@ -2249,15 +2249,14 @@ def _validated_commit_lineage_and_timing(
     best_commit = str(payload.get("commit_hash") or "").strip()
     if not best_commit or best_commit == base_commit:
         return None
-    exists = _run(
-        ["git", "-C", workspace, "cat-file", "-e", f"{best_commit}^{{commit}}"],
+    exists = _run_git(
+        ["-C", workspace, "cat-file", "-e", f"{best_commit}^{{commit}}"],
         timeout=30,
     )
     if exists.returncode != 0:
         return None
-    ancestor = _run(
+    ancestor = _run_git(
         [
-            "git",
             "-C",
             workspace,
             "merge-base",
@@ -2622,8 +2621,8 @@ def _validated_rewrite_applyback_result(
     commit_ref = str(manifest.get("commit_ref") or "").strip()
     if not commit_ref:
         return _reject("the manifest names no commit_ref to pin the artifact to")
-    pinned = _run(
-        ["git", "-C", workspace, "rev-parse", "--verify", f"{commit_ref}^{{commit}}"],
+    pinned = _run_git(
+        ["-C", workspace, "rev-parse", "--verify", f"{commit_ref}^{{commit}}"],
         timeout=30,
     )
     if pinned.returncode != 0 or pinned.stdout.strip() != best_commit:
@@ -2683,15 +2682,14 @@ def _validated_forge_checkpoint(
         return None
     if not best_commit or best_commit == base_commit:
         return None
-    exists = _run(
-        ["git", "-C", workspace, "cat-file", "-e", f"{best_commit}^{{commit}}"],
+    exists = _run_git(
+        ["-C", workspace, "cat-file", "-e", f"{best_commit}^{{commit}}"],
         timeout=30,
     )
     if exists.returncode != 0:
         return None
-    ancestor = _run(
+    ancestor = _run_git(
         [
-            "git",
             "-C",
             workspace,
             "merge-base",
@@ -2789,15 +2787,14 @@ def _validated_warm_start_result(
     ).strip()
     if not best_commit or best_commit == base_commit:
         return None
-    exists = _run(
-        ["git", "-C", workspace, "cat-file", "-e", f"{best_commit}^{{commit}}"],
+    exists = _run_git(
+        ["-C", workspace, "cat-file", "-e", f"{best_commit}^{{commit}}"],
         timeout=30,
     )
     if exists.returncode != 0:
         return None
-    ancestor = _run(
+    ancestor = _run_git(
         [
-            "git",
             "-C",
             workspace,
             "merge-base",
