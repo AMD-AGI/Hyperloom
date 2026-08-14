@@ -982,11 +982,44 @@ def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> in
     return count
 
 
+#: Directory name the splitter writes its per-phase output into. Everything
+#: below it is derived from a raw capture, never a capture itself.
+_SPLIT_DIR_NAME = "trace_split"
+
+#: How many discovered files the CPU-only preflight will open before giving up.
+#: Each probe decompresses a trace, so this is a cost ceiling rather than a
+#: correctness one -- the raw capture sorts near the front, and a directory that
+#: needs more than a handful of probes has a real capture problem.
+_KERNEL_PROBE_LIMIT = 8
+
+
+def _is_derived_trace(path: Path) -> bool:
+    """Whether a trace path is splitter output rather than a raw capture.
+
+    Two shapes, both derived: anything under the splitter's own output directory,
+    and the per-iteration annotation sidecars it writes beside a capture. They
+    are a few hundred bytes each and cover one phase of one iteration, so an
+    analysis pointed at them describes a sliver of the run.
+    """
+    if _SPLIT_DIR_NAME in path.parts:
+        return True
+    return bool(re.search(r"trace_annotation_iteration_\d+", path.name))
+
+
 def _trace_input_sort_key(path: Path) -> tuple[int, str]:
     """Compute the discovery sort key for a trace input path.
 
     Prefers the merged annotated trace over rank/phase shards (the TraceLens
     splitter needs the large trace).
+
+    Splitter output sorts last. It used to land in the same default bucket as
+    the raw capture, which left alphabetical order to decide between them -- and
+    ``decode_only_steady_state_...`` beats ``rank_0.trace.json.gz`` on the first
+    letter. Every xDiT roofline attempt therefore analysed a 938-byte phase
+    fragment instead of the 910 KB capture beside it: runs whose fragment held
+    no GPU kernels failed the CPU-only preflight outright, and the one model
+    whose fragment happened to hold 512 produced a roofline computed from 2.6%
+    of its own trace, with no ceiling.
 
     Args:
         path: The trace file path to rank.
@@ -995,6 +1028,8 @@ def _trace_input_sort_key(path: Path) -> tuple[int, str]:
         A ``(priority, name)`` sort key (lower priority sorts first).
     """
     name = path.name
+    if _is_derived_trace(path):
+        return (4, name)
     if name.startswith("merged-"):
         return (0, name)
     if re.search(r"TP-\d+-DECODE\.trace\.json(?:\.gz)?$", name):
@@ -7046,16 +7081,30 @@ def main() -> int:
         append_log(log_path, f"trace_files={len(trace_files)}")
 
         # Fail-fast on CPU-only traces.
+        #
+        # Probes candidates in discovery order rather than only the first. A
+        # single-file probe reports the capture directory as CPU-only whenever
+        # the leading file happens to be a fragment with no kernels, and the
+        # error it raises then blames the profiler for a capture that is sitting
+        # in the same directory with thirty thousand kernel events in it.
         if not args.dry_run and trace_files:
-            kernel_event_count = count_gpu_kernel_events(trace_files[0])
+            kernel_event_count = 0
+            probed: list[str] = []
+            for candidate in trace_files[:_KERNEL_PROBE_LIMIT]:
+                kernel_event_count = count_gpu_kernel_events(candidate)
+                probed.append(f"{candidate.name}={kernel_event_count}")
+                if kernel_event_count:
+                    break
             append_log(
                 log_path,
-                f"trace_gpu_kernel_events={kernel_event_count} (probe={trace_files[0].name})",
+                f"trace_gpu_kernel_events={kernel_event_count} "
+                f"(probed={', '.join(probed)})",
             )
             if kernel_event_count == 0:
                 raise RuntimeError(
-                    "Trace contains zero GPU kernel events "
-                    f"({trace_files[0]}); the upstream profile run "
+                    "Trace contains zero GPU kernel events in any of "
+                    f"{len(probed)} probed file(s) under {trace_input}: "
+                    f"{', '.join(probed)}. The upstream profile run "
                     "captured CPU-only activity. Re-run profile with the "
                     "torch.profiler GPU activities enabled (no LD_PRELOAD "
                     "competing for ROCprofiler-SDK) before invoking "

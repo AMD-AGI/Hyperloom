@@ -1860,6 +1860,104 @@ def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
     assert traces[-1] == tp0_decode
 
 
+def _xdit_roofline_capture(trace_dir: Path) -> Path:
+    """Recreate an xDiT roofline capture directory as production writes it.
+
+    Names and sizes are taken from a real failing run: a 910 KB rank capture
+    with 30k kernel events, beside a trace_split/ directory of ~900-byte
+    per-phase fragments and annotation sidecars.
+    """
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    raw = trace_dir / "rank_0.trace.json.gz"
+    with gzip.open(raw, "wt") as fh:
+        json.dump({"traceEvents": [
+            {"cat": "kernel", "name": "void flash_fwd<...>", "dur": 40}
+            for _ in range(64)
+        ]}, fh)
+
+    split = trace_dir / "trace_split"
+    split.mkdir()
+    for name in (
+        "decode_only_steady_state_prefill_0_prefilldecode_0_decode_1_bs1_conc1"
+        "_rank_0.trace.json.gz",
+        "mixed_steady_state_prefill_0_prefilldecode_0_decode_1_bs1_conc1"
+        "_rank_0.trace.json.gz",
+    ):
+        with gzip.open(split / name, "wt") as fh:
+            json.dump({"traceEvents": []}, fh)
+    for i in range(3):
+        with gzip.open(split / f"rank_0.trace_annotation_iteration_{i}.json.gz", "wt") as fh:
+            json.dump({"traceEvents": []}, fh)
+    (split / "execution_details.json").write_text('{"steps": 1}', encoding="utf-8")
+    return raw
+
+
+def test_discover_trace_inputs_prefers_raw_capture_over_split_fragments(tmp_path):
+    """The raw capture must lead, whatever the fragments are named.
+
+    Every file in this layout used to land in the same default bucket, so
+    alphabetical order decided -- and `decode_only_...` sorts ahead of
+    `rank_0.trace.json.gz`. The preflight then read a 900-byte fragment, found
+    no GPU kernels, and reported the whole capture as CPU-only.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    raw = _xdit_roofline_capture(trace_dir)
+
+    kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    assert kind == "capture_dir"
+    assert traces[0] == raw, "the raw capture must be the first candidate"
+    # Nothing derived may outrank it.
+    assert all("trace_split" in p.parts for p in traces[1:])
+
+
+def test_the_leading_candidate_is_the_one_with_the_kernels(tmp_path):
+    """Ordering is only useful if it puts a probe-able trace first.
+
+    Ties the two halves of the fix together: whichever file discovery leads
+    with is the file the CPU-only preflight opens, so that file has to be the
+    one carrying GPU kernel events.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    _xdit_roofline_capture(trace_dir)
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    assert tla.count_gpu_kernel_events(traces[0]) == 64
+    # The fragment that used to be probed first really does look CPU-only, so
+    # the old ordering failed for a real reason and not a test artefact.
+    fragment = next(p for p in traces if p.name.startswith("decode_only_"))
+    assert tla.count_gpu_kernel_events(fragment) == 0
+
+
+def test_annotation_sidecars_sort_after_a_capture_even_outside_trace_split(tmp_path):
+    """Annotation sidecars are per-iteration slivers wherever they sit."""
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    raw = trace_dir / "rank_0.trace.json.gz"
+    raw.write_text("{}", encoding="utf-8")
+    sidecar = trace_dir / "aaa.trace_annotation_iteration_0.json.gz"
+    sidecar.write_text("{}", encoding="utf-8")
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    assert traces[0] == raw
+    assert traces[-1] == sidecar
+
+
+def test_merged_trace_still_wins_over_a_raw_rank_capture(tmp_path):
+    """The pre-existing preference is unchanged: merged first when present."""
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    (trace_dir / "rank_0.trace.json.gz").write_text("{}", encoding="utf-8")
+    merged = trace_dir / "merged-42.trace.json.gz"
+    merged.write_text("{}", encoding="utf-8")
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    assert traces[0] == merged
+
+
 def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     tmp_path,
     capsys,
