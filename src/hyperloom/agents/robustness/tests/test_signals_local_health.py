@@ -132,6 +132,13 @@ _CLIENT_RESULT_DIR_EQ = "python benchmark_serving.py --result-dir={dir}/runs/v1 
         pytest.param("ours", _OUTSIDE_ANY_SESSION, _CLIENT, False, id="no_anchor_at_all"),
         pytest.param("theirs", "{dir}/runs/v1", _CLIENT_RESULT_DIR, False, id="unrelated_co_tenant"),
         pytest.param("sibling", "{dir}/runs/v1", _CLIENT_RESULT_DIR, False, id="co_tenant_one_string_prefix_away"),
+        pytest.param(
+            "sibling",
+            _OUTSIDE_ANY_SESSION,
+            _CLIENT_RESULT_DIR_EQ,
+            False,
+            id="co_tenant_one_string_prefix_away_joined_by_=",
+        ),
     ],
 )
 def test_only_this_sessions_benchmark_client_vouches_for_a_dead_server(
@@ -148,7 +155,8 @@ def test_only_this_sessions_benchmark_client_vouches_for_a_dead_server(
     under the session on its command line, which is the second anchor. Anything
     else is somebody else's traffic — including the sibling directory whose name
     merely starts with ours (``<session>-retry``), which a substring test reads
-    as inside the session.
+    as inside the session. The command line is held to that boundary in both
+    spellings of the flag, since the two are read by different code.
 
     A client with neither anchor is indistinguishable from a co-tenant's and
     must not vouch either; every launch path in this repo carries one, which is
