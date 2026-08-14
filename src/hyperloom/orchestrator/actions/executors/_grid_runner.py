@@ -1279,6 +1279,9 @@ async def run_grid(
         warmup_before_measure = _run_grid_warmup_enabled()
     auto_warmup_requested = bool(warmup_before_measure and server_lifecycle is None)
     results: list[VariantResult] = []
+    # This function names the working directory, so it creates it: callers and
+    # the per-variant config writer both happen to create it first today, and
+    # neither is a contract. The old system-temp default never needed one.
     output_root.mkdir(parents=True, exist_ok=True)
     cwd = str(output_root)
 
