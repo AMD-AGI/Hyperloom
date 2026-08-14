@@ -2229,12 +2229,15 @@ def _find_splitter_cmd(captured):
     )
 
 
-def _drive_main_over_capture_dir(tmp_path, trace_dir):
+def _drive_main_over_capture_dir(tmp_path, trace_dir, extra_argv=None):
     """Drive tla.main() with a capture *directory* and capture subprocess argvs.
 
     A sibling of :func:`_drive_main_capturing_subprocess`, which always passes a
     single file. Multi-rank selection only shows up when discovery has more than
     one candidate to choose from.
+
+    ``extra_argv`` appends CLI flags, which is how the ``--skip-split`` route
+    that scriptable workloads actually take gets exercised.
     """
     import os as _os
     from unittest.mock import patch
@@ -2267,6 +2270,7 @@ def _drive_main_over_capture_dir(tmp_path, trace_dir):
         "--budget-minutes", "1",
         "--no-llm-orchestrator",
     ]
+    argv += list(extra_argv or [])
 
     env_backup = dict(_os.environ)
     try:
@@ -2338,6 +2342,149 @@ def test_analysis_input_is_left_alone_when_the_first_candidate_has_kernels(tmp_p
     splitter = _find_splitter_cmd(captured)
     assert splitter is not None
     assert str(first) in [str(p) for p in splitter]
+
+
+def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
+    """The promotion must hold on the route xDiT actually takes.
+
+    Scriptable (xDiT/diffusion) workloads are dispatched with ``--skip-split``
+    plus ``--analysis-route deterministic`` (see ``request_handlers``), which
+    bypasses the splitter entirely and feeds the analysis path straight to the
+    deterministic pipeline. The other promotion tests assert on splitter argv, so
+    they cover the branch these sessions never enter -- which is to say the
+    regression this change exists to prevent was untested on the one path that
+    produced it.
+    """
+    from unittest.mock import patch
+
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    empty = _rank_trace(trace_dir / "rank_0.trace.json.gz",
+                        kernels=0, cpu_events=400)
+    populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
+
+    # This route runs the deterministic pipeline in-process, so the trace path
+    # never reaches a subprocess argv the way the splitter's does. Intercepting
+    # the call is the only place the decision is observable.
+    seen: list[Path] = []
+
+    def fake_steps(trace_path, *_a, **_kw):
+        seen.append(trace_path)
+        return 0
+
+    with patch.object(tla, "_run_deterministic_tracelens_steps",
+                      side_effect=fake_steps):
+        captured = _drive_main_over_capture_dir(
+            tmp_path,
+            trace_dir,
+            extra_argv=["--skip-split", "--analysis-route", "deterministic"],
+        )
+
+    assert _find_splitter_cmd(captured) is None, "--skip-split must skip the splitter"
+    assert seen, "the deterministic pipeline was never reached"
+    assert seen[0] == populated, f"analysed {seen[0].name}, expected {populated.name}"
+    assert empty not in seen
+
+
+def test_capture_under_an_ancestor_named_trace_split_still_orders_correctly(tmp_path):
+    """An ancestor directory name must not flatten the whole ranking.
+
+    ``--trace-input`` is resolved to an absolute path, so a ``trace_split``
+    component is checked against every ancestor unless the test is anchored at
+    the capture root. Pointing at a capture that happens to sit below such a
+    directory would otherwise demote every candidate into the same bucket, at
+    which point ordering falls back to filename and the original bug is exactly
+    reproduced -- from nothing but a coincidence of naming.
+    """
+    trace_dir = tmp_path / "trace_split" / "run" / "torch_trace"
+    trace_dir.mkdir(parents=True)
+    fragment = _rank_trace(trace_dir / "aaa_trace_annotation_iteration_1.json.gz",
+                           kernels=0)
+    capture = _rank_trace(trace_dir / "zzz_rank_0.trace.json.gz", kernels=30)
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    assert traces[0] == capture, (
+        "the real capture must lead despite the ancestor directory name "
+        f"and despite sorting last alphabetically; got {[p.name for p in traces]}"
+    )
+    assert traces.index(fragment) > traces.index(capture)
+
+
+def test_unreadable_leading_candidate_is_not_reported_as_cpu_only(tmp_path):
+    """A corrupt trace and a CPU-only trace must not read as the same finding.
+
+    Both counted as zero kernels before, so a truncated rank_0 was described as
+    having "no GPU kernel events" -- sending the next reader to the profiler for
+    a file problem. That is the same misdirection this change was written to
+    remove, so it should not be reintroduced by the promotion that fixes it.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    corrupt = trace_dir / "rank_0.trace.json.gz"
+    corrupt.write_bytes(b"\x1f\x8b" + b"\x00" * 4000)  # gzip magic, truncated body
+    _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=7)
+
+    readable, count = tla._count_kernels_if_readable(corrupt)
+
+    assert readable is False, "a truncated gzip must report as unreadable"
+    assert count == 0
+    populated_readable, populated_count = tla._count_kernels_if_readable(
+        trace_dir / "rank_1.trace.json.gz"
+    )
+    assert populated_readable is True
+    assert populated_count == 7
+
+
+def test_promotion_is_recorded_as_a_trace_health_warning(tmp_path, capsys):
+    """A run that switched its own input has to be explicable afterwards.
+
+    A CLI log line is not a contract: session breakdown and roofline snapshot
+    read ``trace_health_warnings`` and the artifact map, and neither recorded
+    which of the discovered traces was actually analysed. Without this, a
+    silently promoted run is indistinguishable downstream from one that used the
+    file discovery reported.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0, cpu_events=400)
+    populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
+
+    _drive_main_over_capture_dir(tmp_path, trace_dir)
+
+    result = json.loads(capsys.readouterr().out)
+    promoted = [
+        w
+        for w in (result.get("trace_health_warnings") or [])
+        if w.get("code") == "trace_analysis_input_promoted"
+    ]
+    assert promoted, (
+        "promotion was not surfaced in trace_health_warnings; "
+        f"warnings seen: {result.get('trace_health_warnings')}"
+    )
+    assert promoted[0]["analysed"] == populated.name
+    assert promoted[0]["leading_candidate"] == "rank_0.trace.json.gz"
+    # The probe record is what distinguishes "rank_0 had no kernels" from
+    # "rank_0 could not be read", which are different problems.
+    assert "rank_0.trace.json.gz=0" in promoted[0]["probed"]
+
+
+def test_no_promotion_warning_when_the_leading_candidate_is_used(tmp_path, capsys):
+    """The warning must stay absent on the ordinary path.
+
+    An informational warning that fires on every healthy run is noise, and noise
+    in ``trace_health_warnings`` costs the Coordinator the signal.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=9)
+    _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=9)
+
+    _drive_main_over_capture_dir(tmp_path, trace_dir)
+
+    result = json.loads(capsys.readouterr().out)
+    codes = [w.get("code") for w in (result.get("trace_health_warnings") or [])]
+    assert "trace_analysis_input_promoted" not in codes
 
 
 def test_194_3_splitter_receives_R_from_cli_arg(tmp_path):
