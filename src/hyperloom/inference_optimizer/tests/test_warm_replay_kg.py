@@ -47,7 +47,7 @@ def _ctx() -> dict[str, Any]:
         confidence=0.9,
         canonical_id="inference:qwen3:mi300x:sglang:qwen3:qwen3moeforcausallm:0.5.11:fp8",
         source="local",
-        recipe={"prs_tested": []},
+        recipe={"best_config": {}},
         model_architectures=["Qwen3MoeForCausalLM"],
         hardware="mi300x",
         framework="sglang",
@@ -77,6 +77,25 @@ def test_kg_recommended_knobs_positive() -> None:
     assert any(r["knob"] == "aiter_backend" and r["expected_gain"] > 0 for r in recs)
 
 
+def test_current_remote_context_discards_kg_patch_blocks() -> None:
+    ctx = _build_warm_start_context(
+        status="hit",
+        tier="exact",
+        confidence=1.0,
+        canonical_id="inference:qwen3",
+        source="kb-store",
+        recipe={"record_kind": "hyperloom_recipe"},
+        model_architectures=["Qwen3MoeForCausalLM"],
+        hardware="mi300x",
+        framework="sglang",
+        kg_client=_kg(),
+    )
+
+    assert ctx["blocked_patches"] == []
+    assert ctx["advisory_blocked_patches"] == []
+    assert ctx.get("recommended_knobs")
+
+
 _KNOB_FACTS_PAGE = """# KG
 
 ## Facts
@@ -96,7 +115,7 @@ def _ctx_knob() -> dict[str, Any]:
         confidence=0.9,
         canonical_id="inference:qwen3:mi300x:sglang:qwen3:qwen3moeforcausallm:0.5.11:fp8",
         source="local",
-        recipe={"prs_tested": []},
+        recipe={"best_config": {}},
         model_architectures=["Qwen3MoeForCausalLM"],
         hardware="mi300x",
         framework="sglang",
@@ -326,7 +345,7 @@ def test_kg_disabled_when_no_client() -> None:
         confidence=0.9,
         canonical_id="inference:x:mi300x:sglang:llama:llamaforcausallm:0.5.11:fp8",
         source="local",
-        recipe={"prs_tested": []},
+        recipe={"best_config": {}},
         model_architectures=["LlamaForCausalLM"],
         hardware="mi300x",
         framework="sglang",

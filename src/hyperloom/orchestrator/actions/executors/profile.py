@@ -410,20 +410,60 @@ def _is_capture_trace(path: Path) -> bool:
     return any(part == "capture_traces" for part in path.parts)
 
 
+def _trace_size_bytes(path: Path) -> int:
+    """Size in bytes, or 0 when it cannot be read."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _is_split_chunk(path: Path, root: Path) -> bool:
+    """True when ``path`` is steady-state splitter output below ``root``.
+
+    Same reasoning as :func:`_is_capture_trace`, one directory along: the
+    splitter's per-phase chunks also end in ``.trace.json.gz`` and would
+    otherwise be mistaken for a real annotated trace. They are a few hundred
+    bytes covering one phase of one iteration, and they sort ahead of
+    ``rank_0.trace.json.gz`` alphabetically, so a caller falling back to
+    ``trace_files[0]`` would analyse a sliver of the run.
+
+    Relative to ``root`` rather than over the whole absolute path, so a capture
+    that happens to live under some ancestor named ``trace_split`` does not have
+    every one of its traces excluded.
+    """
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        relative = path
+    return any(part == "trace_split" for part in relative.parts)
+
+
 def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
     """Return annotated ``*.trace.json.gz`` files under ``trace_dir``.
 
     Excludes capture sidecars under ``capture_traces/`` (see
     :func:`_is_capture_trace`) so a vLLM ``graph_capture_*.pt.trace.json.gz`` is
-    never promoted as the primary annotated trace.
+    never promoted as the primary annotated trace, and steady-state chunks under
+    ``trace_split/`` for the same reason.
+
+    Ordered largest first. Consumers fall back to ``trace_files[0]`` when
+    ``main_trace_path`` is absent, and at that point a 938-byte chunk and a
+    910 KB capture are indistinguishable by name -- alphabetical order picked the
+    chunk. Size needs no naming rule to get this right.
 
     Args:
         trace_dir: The directory to scan recursively.
 
     Returns:
-        Sorted annotated ``*.trace.json.gz`` paths, capture sidecars removed.
+        ``*.trace.json.gz`` paths largest first, capture sidecars and split
+        chunks removed.
     """
-    return sorted(p for p in trace_dir.rglob("*.trace.json.gz") if not _is_capture_trace(p))
+    candidates = [
+        p for p in trace_dir.rglob("*.trace.json.gz")
+        if not _is_capture_trace(p) and not _is_split_chunk(p, trace_dir)
+    ]
+    return sorted(candidates, key=lambda p: (-_trace_size_bytes(p), str(p)))
 
 
 def _capture_sidecar_traces_for_dir(trace_dir: Path) -> list[Path]:

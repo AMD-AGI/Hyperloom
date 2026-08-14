@@ -31,14 +31,16 @@ import yaml
 
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
+from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
 from ._file_lock import best_effort_file_lock
 from ._aiter_jit import (
     AITER_JIT_PROBE_PATHS,
+    BASELINE_COLD_START_TIMEOUT_SEC,
     COLD_START_KERNEL_THRESHOLD,
-    _resolve_aiter_jit_dir_dynamic,
+    probe_aiter_jit_cache as _probe_aiter_jit_cache,
     sweep_stale_aiter_locks_if_dead,
 )
 from ._grid_runner import (
@@ -52,8 +54,11 @@ from ._subprocess_kill import (
     run_with_session_kill,
     server_log_death_excerpt,
 )
-from ._workload_envs import (
+from ._accuracy_gate import (
     _RUN_EVAL_FALSE_VALUES,
+    materialized_run_eval_disabled,
+)
+from ._workload_envs import (
     _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -65,11 +70,14 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_start_patched,
     ensure_eval_probe_patched,
     eval_probe_targets_exist,
+    failed_patch_anchors,
 )
 from ._magpie_patcher import ensure_eval_concurrency_compat
 from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
+    select_run_workspace,
+    snapshot_workspaces,
 )
 from .benchmark_backend import build_benchmark_command
 
@@ -314,38 +322,14 @@ def _classify_subprocess_error(
 
 
 BASELINE_DEFAULT_TIMEOUT_SEC = 7800  # WARM-start cap, 130 min
-BASELINE_COLD_START_TIMEOUT_SEC = 9000  # COLD-start cap, 150 min (includes ~20 min cuda graph capture)
-# COLD_START_KERNEL_THRESHOLD and AITER_JIT_PROBE_PATHS live in ``_aiter_jit``;
-# re-exported below for callers/tests that import them from this module.
+# Cold-start settings and probes live in ``_aiter_jit`` and are re-exported
+# above for callers/tests that import them from this module.
 
 
 # Underscore-prefixed aliases re-exported for callers/tests; canonical
 # names live in `_workload_envs`.
 _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
-
-
-def _materialized_run_eval_disabled(config_path: Path) -> bool:
-    """Report whether lm-eval is disabled in the materialized benchmark config.
-
-    ``materialize_config_with_envs`` writes the effective ``RUN_EVAL`` (folded
-    from the base YAML ``benchmark.envs``, ``reference_envs``, ``extra_envs`` and
-    process ``$RUN_EVAL``, defaulting to "true") into ``benchmark.envs.RUN_EVAL``
-    -- the value the benchmark subprocess actually consumes. Reading it back is
-    the single source of truth for "did eval run this round", reusing the shared
-    ``_RUN_EVAL_FALSE_VALUES`` present-and-falsey semantics.
-
-    Args:
-        config_path (Path): The materialized benchmark YAML config path.
-
-    Returns:
-        bool: ``True`` when the config's ``RUN_EVAL`` is present and falsey.
-            A missing key reads as enabled (matches the materialize default).
-    """
-    cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
-    envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
-    val = envs.get("RUN_EVAL")
-    return val is not None and str(val).strip().lower() in _RUN_EVAL_FALSE_VALUES
 
 
 def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
@@ -629,78 +613,13 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
     return str(dest)
 
 
-def _probe_aiter_jit_cache() -> dict[str, Any]:
-    """Inspect aiter's ``jit/`` dir to decide cold vs warm start.
-
-    Read-only filesystem probe (no subprocess / GPU). Resolution order:
-    env override → dynamic find_spec → legacy AITER_JIT_PROBE_PATHS. First
-    existing dir wins; counts ``.so`` recursively. Any IO error degrades
-    to ``probe_status="error"`` (callers fall back to the WARM timeout).
-
-    Returns:
-        dict[str, Any]: Probe info with keys:
-            path           Path that was probed, or None if nothing found.
-            kernel_count   Number of `.so` files under `path` (recursive).
-            size_mb        Total size of those `.so` files, in MiB (int).
-            is_cold        True iff kernel_count < COLD_START_KERNEL_THRESHOLD;
-                           None when the probe found nothing or failed.
-            probe_status   "found" | "not_found" | "error".
-    """
-    info: dict[str, Any] = {
-        "path": None,
-        "kernel_count": 0,
-        "size_mb": 0,
-        "is_cold": None,
-        "probe_status": "not_found",
-    }
-    candidates: list[str] = []
-    override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
-    if override:
-        candidates.append(override)
-    candidates.extend(_resolve_aiter_jit_dir_dynamic())
-    candidates.extend(AITER_JIT_PROBE_PATHS)
-
-    try:
-        chosen: Path | None = None
-        for raw in candidates:
-            p = Path(raw)
-            if p.exists() and p.is_dir():
-                chosen = p
-                break
-        if chosen is None:
-            return info
-        info["path"] = str(chosen)
-
-        total_bytes = 0
-        kernel_count = 0
-        for so_path in chosen.rglob("*.so"):
-            try:
-                total_bytes += so_path.stat().st_size
-                kernel_count += 1
-            except OSError:
-                continue
-        info["kernel_count"] = kernel_count
-        info["size_mb"] = total_bytes // (1024 * 1024)
-        info["is_cold"] = kernel_count < COLD_START_KERNEL_THRESHOLD
-        info["probe_status"] = "found"
-        return info
-    except Exception as exc:  # noqa: BLE001
-        log.warning(
-            "baseline_executor: aiter jit cache probe failed: %s",
-            exc,
-        )
-        info["probe_status"] = "error"
-        info["is_cold"] = None
-        return info
-
-
 def _git_head_sha(repo_path: str) -> str:
     """Return the current HEAD sha of a git repo, or empty string on failure."""
     if not repo_path:
         return ""
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", *safe_directory_args(["rev-parse", "HEAD"], cwd=repo_path)],
             cwd=repo_path,
             capture_output=True,
             timeout=5,
@@ -711,67 +630,568 @@ def _git_head_sha(repo_path: str) -> str:
         return ""
 
 
-def _revert_patches(repo_path: str, pre_sha: str) -> None:
-    """Revert the repo to pre_sha after warm-replay patches were applied.
-
-    Prevents patch residue from leaking into subsequent tasks that reuse
-    the same InferenceX checkout mirror.
-    """
-    if not repo_path or not pre_sha:
-        return
+def _patch_present_in_committed_head(
+    repo_path: str,
+    patch_path: Path,
+) -> bool:
+    """Check reverse applicability against a temporary index loaded from HEAD."""
+    fd, raw_index = tempfile.mkstemp(prefix="warm-head-index-")
+    os.close(fd)
+    index_path = Path(raw_index)
+    index_path.unlink(missing_ok=True)
+    env = dict(os.environ)
+    env["GIT_INDEX_FILE"] = str(index_path)
     try:
         subprocess.run(
-            ["git", "reset", "--hard", pre_sha],
+            ["git", "read-tree", "HEAD"],
+            cwd=repo_path,
+            env=env,
+            capture_output=True,
+            timeout=15,
+            check=True,
+        )
+        reverse = subprocess.run(
+            [
+                "git",
+                "apply",
+                "-R",
+                "--check",
+                "--cached",
+                str(patch_path),
+            ],
+            cwd=repo_path,
+            env=env,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        return reverse.returncode == 0
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return False
+    finally:
+        index_path.unlink(missing_ok=True)
+        Path(f"{index_path}.lock").unlink(missing_ok=True)
+
+
+def _patch_touched_paths(patch_content: str) -> list[str]:
+    """Return safe repo-relative paths named by a text diff."""
+    paths: list[str] = []
+    for line in patch_content.splitlines():
+        if not line.startswith(("--- ", "+++ ")):
+            continue
+        raw = line[4:].split("\t", 1)[0].strip()
+        if raw == "/dev/null":
+            continue
+        if raw.startswith(("a/", "b/")):
+            raw = raw[2:]
+        path = Path(raw)
+        if raw and not path.is_absolute() and ".." not in path.parts:
+            paths.append(path.as_posix())
+    return list(dict.fromkeys(paths))
+
+
+def _create_patch_snapshot(
+    repo_path: str,
+    patch_contents: list[str],
+    output_dir: Path,
+) -> dict[str, Any]:
+    """Snapshot only patch-touched worktree and index paths."""
+    touched = list(
+        dict.fromkeys(
+            path
+            for content in patch_contents
+            for path in _patch_touched_paths(content)
+        )
+    )
+    if not touched:
+        raise ValueError("patch has no touched text paths")
+    snapshot_dir = output_dir / "warm_patch_snapshot"
+    if snapshot_dir.exists():
+        shutil.rmtree(snapshot_dir)
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    root = Path(repo_path).resolve()
+    rows: list[dict[str, Any]] = []
+    for index, rel in enumerate(touched):
+        target = (root / rel).resolve()
+        target.relative_to(root)
+        if (root / rel).is_symlink():
+            raise ValueError(f"patch target must not be a symlink: {rel}")
+        backup = snapshot_dir / f"{index:04d}.bin"
+        existed = target.is_file() and not target.is_symlink()
+        mode = target.stat().st_mode & 0o7777 if existed else None
+        if existed:
+            backup.write_bytes(target.read_bytes())
+        index_result = subprocess.run(
+            [
+                "git",
+                *safe_directory_args(
+                    ["ls-files", "-s", "--", rel],
+                    cwd=repo_path,
+                ),
+            ],
             cwd=repo_path,
             capture_output=True,
             timeout=15,
             check=True,
         )
-        subprocess.run(
-            ["git", "clean", "-fd"],
+        index_entry = index_result.stdout.decode(errors="replace").strip()
+        rows.append(
+            {
+                "path": rel,
+                "existed": existed,
+                "mode": mode,
+                "backup": str(backup) if existed else "",
+                "index_entry": index_entry,
+            }
+        )
+    manifest_path = snapshot_dir / "manifest.json"
+    manifest = {
+        "repo_path": str(root),
+        "paths": rows,
+        "manifest_path": str(manifest_path),
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return manifest
+
+
+def _restore_patch_snapshot(manifest: Any) -> dict[str, Any]:
+    """Restore exact touched paths/index entries; never reset unrelated work."""
+    if isinstance(manifest, (str, Path)):
+        try:
+            manifest = json.loads(Path(manifest).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            return {"ok": False, "errors": [f"manifest_read:{exc}"]}
+    if not isinstance(manifest, dict):
+        return {"ok": False, "errors": ["missing_manifest"]}
+    repo = str(manifest.get("repo_path") or "")
+    errors: list[str] = []
+    for row in manifest.get("paths") or []:
+        if not isinstance(row, dict):
+            continue
+        rel = str(row.get("path") or "")
+        target = Path(repo) / rel
+        try:
+            if row.get("existed"):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(Path(str(row.get("backup") or "")).read_bytes())
+                if row.get("mode") is not None:
+                    target.chmod(int(row["mode"]))
+            elif target.exists() or target.is_symlink():
+                target.unlink()
+            entry = str(row.get("index_entry") or "").strip()
+            if entry:
+                metadata, entry_path = entry.split("\t", 1)
+                mode, blob, stage = metadata.split()
+                if stage != "0" or entry_path != rel:
+                    raise ValueError("unsupported pre-existing unmerged index entry")
+                subprocess.run(
+                    ["git", "update-index", "--cacheinfo", mode, blob, rel],
+                    cwd=repo,
+                    capture_output=True,
+                    timeout=15,
+                    check=True,
+                )
+            else:
+                subprocess.run(
+                    ["git", "update-index", "--force-remove", "--", rel],
+                    cwd=repo,
+                    capture_output=True,
+                    timeout=15,
+                    check=True,
+                )
+            if row.get("existed"):
+                expected = Path(str(row.get("backup") or "")).read_bytes()
+                if not target.is_file() or target.read_bytes() != expected:
+                    raise OSError("worktree restore verification failed")
+            elif target.exists() or target.is_symlink():
+                raise OSError("removed path still exists after restore")
+            actual_index = subprocess.run(
+                [
+                    "git",
+                    *safe_directory_args(
+                        ["ls-files", "-s", "--", rel],
+                        cwd=repo,
+                    ),
+                ],
+                cwd=repo,
+                capture_output=True,
+                timeout=15,
+                check=True,
+            ).stdout.decode(errors="replace").strip()
+            if actual_index != entry:
+                raise OSError("index restore verification failed")
+        except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            errors.append(f"{rel}:{type(exc).__name__}:{exc}")
+    return {"ok": not errors, "errors": errors}
+
+
+def _revert_patches(
+    repo_path: str,
+    pre_sha: str = "",
+    snapshot_manifest: Any = None,
+) -> dict[str, Any]:
+    """Restore exact patch-touched state without broad reset/clean."""
+    manifest = snapshot_manifest
+    if isinstance(manifest, (str, Path)):
+        try:
+            manifest = json.loads(
+                Path(manifest).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError, TypeError) as exc:
+            result = {"ok": False, "errors": [f"manifest_read:{exc}"]}
+            log.warning(
+                "baseline_executor: exact patch restore failed: %s",
+                result["errors"],
+            )
+            return result
+    if not isinstance(manifest, dict):
+        result = {"ok": False, "errors": ["missing_manifest"]}
+        log.warning(
+            "baseline_executor: exact patch restore failed: %s",
+            result["errors"],
+        )
+        return result
+    manifest_repo_value = str(manifest.get("repo_path") or "").strip()
+    if not manifest_repo_value:
+        result = {"ok": False, "errors": ["missing_manifest_repo"]}
+        log.warning(
+            "baseline_executor: exact patch restore failed: %s",
+            result["errors"],
+        )
+        return result
+    try:
+        caller_repo = Path(repo_path).resolve(strict=True)
+        manifest_repo = Path(manifest_repo_value).resolve(strict=True)
+    except (OSError, ValueError) as exc:
+        result = {
+            "ok": False,
+            "errors": [f"repo_validation:{type(exc).__name__}:{exc}"],
+        }
+        log.warning(
+            "baseline_executor: exact patch restore failed: %s",
+            result["errors"],
+        )
+        return result
+    if caller_repo != manifest_repo:
+        result = {
+            "ok": False,
+            "errors": [
+                f"repo_mismatch:caller={caller_repo}:manifest={manifest_repo}"
+            ],
+        }
+        log.warning(
+            "baseline_executor: exact patch restore failed: %s",
+            result["errors"],
+        )
+        return result
+    if pre_sha:
+        try:
+            head = subprocess.run(
+                [
+                    "git",
+                    *safe_directory_args(
+                        ["rev-parse", "HEAD"],
+                        cwd=caller_repo,
+                    ),
+                ],
+                cwd=caller_repo,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=True,
+            ).stdout.strip()
+        except (
+            OSError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ) as exc:
+            result = {
+                "ok": False,
+                "errors": [f"head_validation:{type(exc).__name__}:{exc}"],
+            }
+            log.warning(
+                "baseline_executor: exact patch restore failed: %s",
+                result["errors"],
+            )
+            return result
+        if head != pre_sha:
+            result = {
+                "ok": False,
+                "errors": [f"head_mismatch:expected={pre_sha}:actual={head}"],
+            }
+            log.warning(
+                "baseline_executor: exact patch restore failed: %s",
+                result["errors"],
+            )
+            return result
+    result = _restore_patch_snapshot(manifest)
+    if not result["ok"]:
+        log.warning("baseline_executor: exact patch restore failed: %s", result["errors"])
+    return result
+
+
+def _three_way_residue_snapshot(
+    repo_path: str,
+    touched: list[str],
+) -> dict[str, Any]:
+    """Capture pre-existing residue only for this patch's paths."""
+    root = Path(repo_path).resolve()
+    unmerged = subprocess.run(
+        [
+            "git",
+            *safe_directory_args(
+                ["ls-files", "-u", "--", *touched],
+                cwd=repo_path,
+            ),
+        ],
+        cwd=repo_path,
+        capture_output=True,
+        timeout=15,
+        check=True,
+    ).stdout.decode(errors="replace").splitlines()
+    markers = (b"<<<<<<< ", b"=======", b">>>>>>> ")
+    rows: dict[str, Any] = {}
+    for rel in touched:
+        target = root / rel
+        marker_lines: list[str] = []
+        if target.is_file() and not target.is_symlink():
+            marker_lines = [
+                line.decode(errors="replace")
+                for line in target.read_bytes().splitlines()
+                if line.startswith(markers)
+            ]
+        rows[rel] = {
+            "reject": (root / f"{rel}.rej").exists(),
+            "markers": marker_lines,
+        }
+    return {"unmerged": unmerged, "paths": rows}
+
+
+def _verify_three_way_clean(
+    repo_path: str,
+    touched: list[str],
+    before: dict[str, Any],
+) -> tuple[bool, str]:
+    """Reject only residue newly introduced on this patch's paths."""
+    try:
+        unmerged = subprocess.run(
+            [
+                "git",
+                *safe_directory_args(
+                    ["ls-files", "-u", "--", *touched],
+                    cwd=repo_path,
+                ),
+            ],
             cwd=repo_path,
             capture_output=True,
             timeout=15,
-            check=False,
+            check=True,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-        log.warning("baseline_executor: patch revert failed: %s", exc)
+        return False, f"post_3way_check_failed:{type(exc).__name__}"
+    after_unmerged = unmerged.stdout.decode(errors="replace").splitlines()
+    if set(after_unmerged) - set(before.get("unmerged") or []):
+        return False, "new_unmerged_index_entries"
+    root = Path(repo_path).resolve()
+    markers = (b"<<<<<<< ", b"=======", b">>>>>>> ")
+    for rel in touched:
+        prior = (before.get("paths") or {}).get(rel) or {}
+        if (root / f"{rel}.rej").exists() and not prior.get("reject"):
+            return False, f"new_reject_file:{rel}.rej"
+        target = root / rel
+        marker_lines: list[str] = []
+        if target.is_file() and not target.is_symlink():
+            marker_lines = [
+                line.decode(errors="replace")
+                for line in target.read_bytes().splitlines()
+                if line.startswith(markers)
+            ]
+        if set(marker_lines) - set(prior.get("markers") or []):
+            return False, f"new_conflict_marker:{rel}"
+    return True, ""
 
 
 def _apply_warm_patches(
     params: dict[str, Any],
     target_repo: str,
     output_dir: Path,
-) -> list[dict[str, str]]:
+    *,
+    before_mutation: Any = None,
+) -> list[dict[str, str]] | dict[str, Any]:
     """Apply warm-replay code patches to the InferenceX checkout.
 
     Reads ``params["patches"]`` (list of dicts with patch_file/patch_content/
     patch_ref) and ``params["blocked_patches"]`` (blocklist). Applies each patch
-    via ``git apply`` in the target repo. Skips patches that appear in the
-    blocklist. Returns list of successfully applied patch metadata dicts.
+    via ``git apply`` in the target repo, skipping blocklisted patches.
 
-    If target_repo is empty or no patches are present, returns [].
+    Legacy patch lists return the list of successfully applied patch metadata
+    dicts (best-effort skip semantics). Current-contract timelines set
+    ``required_patch_timeline`` and fail closed: the patches are sequential, the
+    first failure stops the sequence and restores the starting tree, and the
+    return is a structured result dict describing the failure.
     """
     patches = params.get("patches") or []
-    if not patches or not target_repo:
+    required_timeline = bool(params.get("required_patch_timeline"))
+    if not patches:
+        return []
+    if not target_repo:
+        if required_timeline:
+            return {
+                "required": True,
+                "status": "failed",
+                "patches": [],
+                "applied": [],
+                "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
+                "failure": "missing_target_repo",
+                "rolled_back": True,
+            }
         return []
 
     blocked = {p.get("patch_file", "") for p in (params.get("blocked_patches") or [])}
 
     applied: list[dict[str, str]] = []
+    statuses: list[dict[str, Any]] = []
     patch_log_dir = output_dir / "warm_patches"
     patch_log_dir.mkdir(parents=True, exist_ok=True)
+    pre_sha = _git_head_sha(target_repo)
+    if required_timeline and not pre_sha:
+        return {
+            "required": True,
+            "status": "failed",
+            "patches": [],
+            "applied": [],
+            "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
+            "failure": "missing_git_head",
+            "pre_sha": "",
+            "target_repo": target_repo,
+            "rolled_back": False,
+        }
+    from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
+
+    resolved_contents: dict[int, str] = {}
+    snapshot_contents: list[str] = []
+    for idx, patch in enumerate(patches):
+        patch_file = str(patch.get("patch_file") or "")
+        if patch_file in blocked:
+            if required_timeline:
+                return {
+                    "required": True,
+                    "status": "failed",
+                    "patches": [
+                        {"patch_ref": patch_file, "status": "failed", "reason": "blocked"}
+                    ],
+                    "applied": [],
+                    "failed_ref": patch_file,
+                    "failure": "blocked",
+                    "pre_sha": pre_sha,
+                    "target_repo": target_repo,
+                    "rolled_back": False,
+                }
+            continue
+        content = str(patch.get("patch_content") or "")
+        patch_ref = str(patch.get("patch_ref") or "")
+        if not content and patch_ref:
+            try:
+                content = Path(patch_ref).read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except OSError:
+                content = ""
+        reason = ""
+        if not content:
+            reason = "missing_artifact"
+        elif not is_unified_diff(content) or "GIT binary patch" in content:
+            reason = "unsafe_or_non_text_diff"
+        elif patch_escapes_tree(content) is not None:
+            reason = "path_escapes_tree"
+        elif not _patch_touched_paths(content):
+            reason = "missing_touched_paths"
+        if reason:
+            if required_timeline:
+                return {
+                    "required": True,
+                    "status": "failed",
+                    "patches": [
+                        {"patch_ref": patch_file, "status": "failed", "reason": reason}
+                    ],
+                    "applied": [],
+                    "failed_ref": patch_file,
+                    "failure": reason,
+                    "pre_sha": pre_sha,
+                    "target_repo": target_repo,
+                    "rolled_back": False,
+                }
+            continue
+        resolved_contents[idx] = content
+        snapshot_contents.append(content)
+    snapshot_manifest: dict[str, Any] | None = None
+    if snapshot_contents:
+        try:
+            snapshot_manifest = _create_patch_snapshot(
+                target_repo,
+                snapshot_contents,
+                output_dir,
+            )
+        except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            if required_timeline:
+                return {
+                    "required": True,
+                    "status": "failed",
+                    "patches": [],
+                    "applied": [],
+                    "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
+                    "failure": f"snapshot_failed:{type(exc).__name__}",
+                    "pre_sha": pre_sha,
+                    "target_repo": target_repo,
+                    "rolled_back": False,
+                }
+            log.warning(
+                "baseline_executor: skipping legacy warm patches because the "
+                "rollback snapshot could not be created: %s",
+                exc,
+            )
+            return []
+        if snapshot_manifest is not None:
+            params["_warm_patch_snapshot_manifest"] = snapshot_manifest
+            if before_mutation is not None and not bool(
+                before_mutation(snapshot_manifest)
+            ):
+                return {
+                    "required": required_timeline,
+                    "status": "failed",
+                    "patches": [],
+                    "applied": [],
+                    "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
+                    "failure": "pending_state_persist_failed",
+                    "pre_sha": pre_sha,
+                    "target_repo": target_repo,
+                    "snapshot_manifest": snapshot_manifest,
+                    "rollback": {"ok": True, "errors": []},
+                    "rolled_back": True,
+                }
+    failed_ref = ""
+    failure = ""
 
     for idx, patch in enumerate(patches):
         patch_file = patch.get("patch_file") or ""
-        patch_content = patch.get("patch_content") or ""
+        patch_content = resolved_contents.get(idx) or patch.get("patch_content") or ""
         patch_ref = patch.get("patch_ref") or ""
+        status: dict[str, Any] = {
+            "patch_ref": patch_file,
+            "timeline_index": patch.get("timeline_index", idx),
+        }
 
         if patch_file in blocked:
             log.info(
                 "baseline_executor: skipping blocked patch %s",
                 patch_file,
             )
+            status.update(status="failed", reason="blocked")
+            statuses.append(status)
+            if required_timeline:
+                failed_ref, failure = patch_file, "blocked"
+                break
             continue
 
         if not patch_content and not patch_ref:
@@ -779,6 +1199,11 @@ def _apply_warm_patches(
                 "baseline_executor: patch entry has no content/ref, skipping: %s",
                 patch_file,
             )
+            status.update(status="failed", reason="missing_artifact")
+            statuses.append(status)
+            if required_timeline:
+                failed_ref, failure = patch_file, "missing_artifact"
+                break
             continue
 
         # Resolve patch content: prefer inline content, fallback to patch_ref file.
@@ -793,12 +1218,22 @@ def _apply_warm_patches(
                         patch_ref,
                         exc,
                     )
+                    status.update(status="failed", reason="artifact_read_failed")
+                    statuses.append(status)
+                    if required_timeline:
+                        failed_ref, failure = patch_file, "artifact_read_failed"
+                        break
                     continue
             else:
                 log.warning(
                     "baseline_executor: patch_ref not found: %s",
                     patch_ref,
                 )
+                status.update(status="failed", reason="missing_artifact")
+                statuses.append(status)
+                if required_timeline:
+                    failed_ref, failure = patch_file, "missing_artifact"
+                    break
                 continue
 
         # Structural safety gate on untrusted KB-sourced patch_content before
@@ -806,13 +1241,16 @@ def _apply_warm_patches(
         # patch whose header path escapes the tree (absolute / ``..``). Stale /
         # missing-target patches are left to git apply's own check so a
         # legitimate warm patch is never dropped here.
-        from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
-
-        if not is_unified_diff(patch_content):
+        if not is_unified_diff(patch_content) or "GIT binary patch" in patch_content:
             log.warning(
                 "baseline_executor: skipping warm patch %s — not a unified diff",
                 patch_file,
             )
+            status.update(status="failed", reason="unsafe_or_non_text_diff")
+            statuses.append(status)
+            if required_timeline:
+                failed_ref, failure = patch_file, "unsafe_or_non_text_diff"
+                break
             continue
         _escape = patch_escapes_tree(patch_content)
         if _escape is not None:
@@ -821,45 +1259,199 @@ def _apply_warm_patches(
                 patch_file,
                 _escape,
             )
+            status.update(status="failed", reason="path_escapes_tree")
+            statuses.append(status)
+            if required_timeline:
+                failed_ref, failure = patch_file, "path_escapes_tree"
+                break
             continue
 
         # Write patch to temp file then apply.
         patch_path = patch_log_dir / f"{idx:03d}_{Path(patch_file).stem or 'patch'}.diff"
         patch_path.write_text(patch_content, encoding="utf-8")
 
+        method = ""
         try:
-            subprocess.run(
-                ["git", "apply", "--stat", "--check", str(patch_path)],
+            checked = subprocess.run(
+                ["git", "apply", "--check", str(patch_path)],
                 cwd=target_repo,
                 capture_output=True,
                 timeout=30,
-                check=True,
+                check=False,
             )
-            subprocess.run(
-                ["git", "apply", str(patch_path)],
-                cwd=target_repo,
-                capture_output=True,
-                timeout=30,
-                check=True,
-            )
-        except subprocess.CalledProcessError as exc:
+            if checked.returncode == 0:
+                subprocess.run(
+                    ["git", "apply", str(patch_path)],
+                    cwd=target_repo,
+                    capture_output=True,
+                    timeout=30,
+                    check=True,
+                )
+                method = "applied"
+            elif required_timeline:
+                reverse = subprocess.run(
+                    ["git", "apply", "-R", "--check", str(patch_path)],
+                    cwd=target_repo,
+                    capture_output=True,
+                    timeout=30,
+                    check=False,
+                )
+                if reverse.returncode == 0:
+                    method = (
+                        "already_present"
+                        if _patch_present_in_committed_head(
+                            target_repo,
+                            patch_path,
+                        )
+                        else "present_in_dirty_worktree"
+                    )
+                else:
+                    touched = _patch_touched_paths(patch_content)
+                    before_residue = _three_way_residue_snapshot(
+                        target_repo,
+                        touched,
+                    )
+                    three_way = subprocess.run(
+                        ["git", "apply", "--3way", str(patch_path)],
+                        cwd=target_repo,
+                        capture_output=True,
+                        timeout=30,
+                        check=False,
+                    )
+                    if three_way.returncode == 0:
+                        clean, residue = _verify_three_way_clean(
+                            target_repo,
+                            touched,
+                            before_residue,
+                        )
+                        if not clean:
+                            raise RuntimeError(residue)
+                        method = "applied_3way"
+                    else:
+                        detail = (
+                            three_way.stderr.decode(errors="replace")[:500]
+                            if three_way.stderr
+                            else "git apply --3way failed"
+                        )
+                        raise RuntimeError(detail)
+            else:
+                detail = (
+                    checked.stderr.decode(errors="replace")[:500]
+                    if checked.stderr
+                    else "git apply --check failed"
+                )
+                raise RuntimeError(detail)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, RuntimeError) as exc:
             log.warning(
                 "baseline_executor: git apply failed for patch %s: %s",
                 patch_file,
-                exc.stderr.decode(errors="replace")[:500] if exc.stderr else str(exc),
-            )
-            continue
-        except (subprocess.TimeoutExpired, OSError) as exc:  # pragma: no cover
-            log.warning(
-                "baseline_executor: patch apply error for %s: %s",
-                patch_file,
                 exc,
             )
+            status.update(status="failed", reason="git_apply_failed", detail=str(exc)[:500])
+            statuses.append(status)
+            if required_timeline:
+                failed_ref, failure = patch_file, "git_apply_failed"
+                break
             continue
 
-        applied.append({"patch_file": patch_file, "idx": str(idx)})
+        item = {
+            "patch_file": patch_file,
+            "idx": str(idx),
+            "status": method,
+        }
+        applied.append(item)
+        status["status"] = method
+        statuses.append(status)
 
+    if required_timeline:
+        if failed_ref:
+            restore = _revert_patches(
+                target_repo,
+                pre_sha,
+                snapshot_manifest,
+            )
+            return {
+                "required": True,
+                "status": "failed",
+                "patches": statuses,
+                "applied": applied,
+                "failed_ref": failed_ref,
+                "failure": failure,
+                "pre_sha": pre_sha,
+                "target_repo": target_repo,
+                "snapshot_manifest": snapshot_manifest,
+                "rolled_back": bool(restore.get("ok")),
+                "rollback": restore,
+            }
+        return {
+            "required": True,
+            "status": "prepared",
+            "patches": statuses,
+            "applied": applied,
+            "failed_ref": "",
+            "pre_sha": pre_sha,
+            "target_repo": target_repo,
+            "snapshot_manifest": snapshot_manifest,
+            "rolled_back": False,
+        }
     return applied
+
+
+def _rollback_warm_kernel_apply_results(
+    results: Any,
+    snapshots: Any = None,
+) -> dict[str, Any]:
+    """Rollback kernel mutations and report whether every restore succeeded."""
+    if isinstance(snapshots, list) and snapshots:
+        errors: list[str] = []
+        for snapshot in reversed(snapshots):
+            target = Path(str(snapshot.get("target") or ""))
+            try:
+                if snapshot.get("existed"):
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(
+                        Path(str(snapshot.get("backup") or "")).read_bytes()
+                    )
+                    if snapshot.get("mode") is not None:
+                        target.chmod(int(snapshot["mode"]))
+                elif target.exists() or target.is_symlink():
+                    target.unlink()
+                if snapshot.get("existed"):
+                    expected = Path(
+                        str(snapshot.get("backup") or "")
+                    ).read_bytes()
+                    if not target.is_file() or target.read_bytes() != expected:
+                        raise OSError("kernel restore verification failed")
+                elif target.exists() or target.is_symlink():
+                    raise OSError("kernel target still exists after restore")
+            except OSError as exc:
+                errors.append(f"{target}:{type(exc).__name__}:{exc}")
+        return {"ok": not errors, "errors": errors}
+    if not isinstance(results, list):
+        return {"ok": False, "errors": ["invalid_apply_results"]}
+    from ...kernel.request_handlers import _maybe_revert_kernel_patch
+
+    errors: list[str] = []
+    for result in reversed(results):
+        if not isinstance(result, dict):
+            continue
+        try:
+            reverted = _maybe_revert_kernel_patch(result)
+            if reverted.get("status") != "ok":
+                raise RuntimeError(
+                    str(
+                        reverted.get("error")
+                        or reverted.get("reason")
+                        or f"kernel revert status={reverted.get('status')}"
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "baseline_executor: combined warm-kernel rollback failed",
+                exc_info=True,
+            )
+            errors.append(f"{type(exc).__name__}:{exc}")
+    return {"ok": not errors, "errors": errors}
 
 
 class BaselineExecutor:
@@ -1147,7 +1739,7 @@ class BaselineExecutor:
         if ix_root:
             ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
             ensure_benchmark_lib_eval_start_patched(Path(ix_root))
-        if not _materialized_run_eval_disabled(config_path):
+        if not materialized_run_eval_disabled(config_path):
             # Target present but unpatchable is a hard stop; target absent is an
             # unrecognized layout, which warns rather than failing every eval run.
             probe_root = Path(ix_root) if ix_root else None
@@ -1205,7 +1797,65 @@ class BaselineExecutor:
                     "error_class": "eval_concurrency_flag_unpatchable",
                     "error": msg,
                 }
+            anchor_result = self._eval_patch_anchors_result(ix_root)
+            if anchor_result is not None:
+                return anchor_result
         return None
+
+    # Scoped to the line-replacement patches this hook applies. The probe is
+    # judged above by its own target-exists test, and ``num_prompts`` /
+    # ``profile_extra_body`` belong to the profiling path and are
+    # ProfileExecutor's to judge.
+    _EVAL_HOOK_ANCHORS = ("eval_dest", "eval_start")
+    # Of those, the one whose silent absence corrupts the accuracy gate rather
+    # than degrading it: without ``eval_dest`` the results file lands in the cwd
+    # and no score is ever parsed. ``eval_start`` is a log breadcrumb -- worth
+    # reporting, never worth aborting for.
+    _EVAL_CRITICAL_ANCHORS = ("eval_dest",)
+
+    def _eval_patch_anchors_result(self, ix_root: str | None) -> dict[str, Any] | None:
+        """Fail the launch when an eval-critical patch can no longer be applied.
+
+        The ``ensure_*`` calls above report a miss as ``False`` and no caller
+        reads it, so an upstream edit that moves an anchor takes the patch
+        offline silently -- the run still looks healthy and only the symptom (no
+        score) shows up much later. This is the same failure mode that took the
+        probe offline before it was re-homed to a real file. Checked only when
+        this run executes lm-eval; anchors that merely degrade something are
+        logged, not fatal.
+
+        Args:
+            ix_root: The resolved InferenceX root for this run, if any.
+
+        Returns:
+            An early-return failure dict, or ``None`` to proceed.
+        """
+        broken = [s for s in failed_patch_anchors(ix_root or None) if s.name in self._EVAL_HOOK_ANCHORS]
+        if not broken:
+            return None
+        for status in broken:
+            log.error("baseline_executor: InferenceX patch anchor broken — %s", status.describe())
+        fatal = [s for s in broken if s.name in self._EVAL_CRITICAL_ANCHORS]
+        if not fatal:
+            return None
+        msg = (
+            "accuracy eval cannot run: Hyperloom redirects lm-eval's results file "
+            "by matching exact upstream text, and that text is no longer there "
+            f"(inferencex={ix_root or '<unset>'}). Broken: "
+            + "; ".join(s.describe() for s in fatal)
+            + ". Re-anchor the patch in _inferencex_patcher.py against the "
+            "checkout in use, or pin INFERENCEX_REF back to a revision it "
+            "matches. Continuing would leave every results*.json in the "
+            "benchmark's cwd, where the accuracy parser never looks, so the gate "
+            "would see no score at all — do NOT work around this with "
+            "RUN_EVAL=false."
+        )
+        log.error("baseline_executor: %s", msg)
+        return {
+            "status": "failed",
+            "error_class": "inferencex_patch_anchor_broken",
+            "error": msg,
+        }
 
     @staticmethod
     def _failure_carries_markers(
@@ -1403,6 +2053,10 @@ class BaselineExecutor:
         """
         result = await self._run_once(ctx)
         params = ctx.task.params or {}
+        # A failed required patch timeline means the donor is incompatible with
+        # the current tree. The run restored Recipe + Kernel changes and the
+        # result is returned as a failed warm replay; PRELUDE marks it failed
+        # and the session optimizes from the clean baseline.
         # "Already off" only when the operator explicitly disabled eval — via
         # ``--no-eval``, the param, or an extra_envs RUN_EVAL that is PRESENT and
         # falsey. An absent RUN_EVAL must NOT count.
@@ -1921,19 +2575,12 @@ class BaselineExecutor:
         ix_env = os.environ.get("INFERENCEX_PATH", "").strip()
         effective_inferencex_path = _ensure_local_inferencex(ix_env, mirror_key=str(output_dir)) if ix_env else ""
 
-        # Apply warm-replay code patches before server launch.
-        # Record pre-apply HEAD so patches are reverted after the benchmark
-        # completes (or fails), preventing residue in the shared checkout.
+        # Warm patches are prepared after config/runtime preflight, immediately
+        # before the single final benchmark.
         patch_target = effective_inferencex_path or ix_env
-        _pre_patch_sha = _git_head_sha(patch_target)
-        applied_patches = _apply_warm_patches(params, patch_target, output_dir)
-        if applied_patches:
-            log.info(
-                "baseline_executor: applied %d warm-replay code patches (pre_sha=%s): %s",
-                len(applied_patches),
-                _pre_patch_sha[:8],
-                [p["patch_file"] for p in applied_patches],
-            )
+        patch_application: list[dict[str, str]] | dict[str, Any] = []
+        applied_patches: list[dict[str, str]] = []
+        _pre_patch_sha = ""
 
         timeout_sec = self._resolve_timeout(params)
         # Model path: task.params['model_path'] > $MODEL_PATH > SharedState;
@@ -2078,9 +2725,149 @@ class BaselineExecutor:
                 materialized_config_path,
                 enabled=False,
             )
-        run_eval_disabled = _materialized_run_eval_disabled(
+        run_eval_disabled = materialized_run_eval_disabled(
             materialized_config_path
         )
+
+        before_apply_sha = _git_head_sha(patch_target)
+        def _persist_recipe_snapshot(manifest: dict[str, Any]) -> bool:
+            if live_shared_state is None:
+                return True
+            pending = dict(
+                getattr(live_shared_state, "warm_replay_pending", {}) or {}
+            )
+            pending.update(
+                {
+                    "status": "preparing_required_recipe",
+                    "recipe_patch_target": patch_target,
+                    "recipe_patch_pre_sha": before_apply_sha,
+                    "recipe_patch_snapshot_manifest": manifest,
+                }
+            )
+            live_shared_state.warm_replay_pending = pending
+            try:
+                live_shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001
+                log.warning(
+                    "combined warm replay recipe snapshot persist failed",
+                    exc_info=True,
+                )
+                return False
+            return True
+
+        patch_application = _apply_warm_patches(
+            params,
+            patch_target,
+            output_dir,
+            before_mutation=_persist_recipe_snapshot,
+        )
+        if isinstance(patch_application, dict):
+            applied_patches = list(patch_application.get("applied") or [])
+            _pre_patch_sha = str(patch_application.get("pre_sha") or "")
+            if patch_application.get("status") == "failed":
+                kernel_rollback = _rollback_warm_kernel_apply_results(
+                    params.get("warm_kernel_apply_results"),
+                    params.get("warm_kernel_snapshots"),
+                )
+                recipe_rollback = patch_application.get("rollback") or {
+                    "ok": not patch_application.get("snapshot_manifest"),
+                    "errors": [],
+                }
+                rollback_errors = [
+                    *list(recipe_rollback.get("errors") or []),
+                    *list(kernel_rollback.get("errors") or []),
+                ]
+                rollback_result = {
+                    "ok": bool(
+                        recipe_rollback.get("ok")
+                        and kernel_rollback.get("ok")
+                    ),
+                    "recipe": recipe_rollback,
+                    "kernel": kernel_rollback,
+                    "errors": rollback_errors,
+                }
+                if live_shared_state is not None:
+                    if rollback_result["ok"]:
+                        live_shared_state.warm_replay_pending = {}
+                    else:
+                        live_shared_state.warm_replay_pending = {
+                            **dict(
+                                getattr(
+                                    live_shared_state,
+                                    "warm_replay_pending",
+                                    {},
+                                )
+                                or {}
+                            ),
+                            "status": "rollback_failed",
+                            "rollback_errors": rollback_errors,
+                        }
+                        if hasattr(live_shared_state, "set_stop_reason"):
+                            live_shared_state.set_stop_reason(
+                                "warm_replay_rollback_failed"
+                            )
+                    try:
+                        live_shared_state.save(self.session_dir)
+                    except Exception:  # noqa: BLE001
+                        log.warning(
+                            "combined warm replay cleanup persist failed",
+                            exc_info=True,
+                        )
+                return {
+                    "status": (
+                        "required_patch_failed"
+                        if rollback_result["ok"]
+                        else "required_patch_rollback_failed"
+                    ),
+                    "error_class": (
+                        "required_patch_failed"
+                        if rollback_result["ok"]
+                        else "warm_replay_rollback_failed"
+                    ),
+                    "error": str(
+                        patch_application.get("failure")
+                        or "required recipe timeline patch failed"
+                    ),
+                    "required_patch_failure": patch_application,
+                    "failed_patch_ref": patch_application.get("failed_ref"),
+                    "warm_kernel_rolled_back": bool(kernel_rollback.get("ok")),
+                    "warm_replay_rollback": rollback_result,
+                    "workspace": str(output_dir),
+                }
+            if live_shared_state is not None:
+                pending = dict(
+                    getattr(live_shared_state, "warm_replay_pending", {}) or {}
+                )
+                pending.update(
+                    {
+                        "status": "benchmarking",
+                        "recipe_patch_target": patch_target,
+                        "recipe_patch_pre_sha": _pre_patch_sha,
+                        "recipe_patch_snapshot_manifest": patch_application.get(
+                            "snapshot_manifest"
+                        ),
+                        "recipe_patch_statuses": list(
+                            patch_application.get("patches") or []
+                        ),
+                    }
+                )
+                live_shared_state.warm_replay_pending = pending
+                try:
+                    live_shared_state.save(self.session_dir)
+                except Exception:  # noqa: BLE001
+                    log.debug(
+                        "combined warm replay pending persist failed",
+                        exc_info=True,
+                    )
+        else:
+            applied_patches = patch_application
+            _pre_patch_sha = before_apply_sha
+        if applied_patches:
+            log.info(
+                "baseline_executor: prepared %d warm-replay code patches: %s",
+                len(applied_patches),
+                [p["patch_file"] for p in applied_patches],
+            )
 
         # Ray-managed GPU execution (§12 T1): one held Ray lease (``num_gpus=TP``)
         # spans this baseline's benchmark rounds — a double-run's warmup +
@@ -2112,12 +2899,34 @@ class BaselineExecutor:
                     lifecycle["reason"],
                 )
             try:
-                return await self._run_single_benchmark(
+                result = await self._run_single_benchmark(
                     config_path=config_path,
                     output_dir=output_dir,
                     **common,
                 )
+                if applied_patches:
+                    result["warm_patches_applied"] = list(applied_patches)
+                if isinstance(patch_application, dict):
+                    result["warm_patch_result"] = patch_application
+                    result["warm_patch_pre_sha"] = _pre_patch_sha
+                    result["warm_patch_target"] = patch_target
+                    result["warm_patch_snapshot_manifest"] = patch_application.get(
+                        "snapshot_manifest"
+                    )
+                    result["warm_patch_canonical_target"] = ix_env
+                    result["warm_kernel_apply_results"] = list(
+                        params.get("warm_kernel_apply_results") or []
+                    )
+                return result
             finally:
+                if applied_patches and _pre_patch_sha and not isinstance(
+                    patch_application, dict
+                ):
+                    _revert_patches(
+                        patch_target,
+                        _pre_patch_sha,
+                        params.get("_warm_patch_snapshot_manifest"),
+                    )
                 if bench_lease is not None:
                     bench_lease.close()
 
@@ -2164,16 +2973,32 @@ class BaselineExecutor:
                     "baseline_executor: warmup round failed (error_class=%s); skipping measured round",
                     warmup_result.get("error_class"),
                 )
+                if applied_patches:
+                    warmup_result["warm_patches_applied"] = list(applied_patches)
+                if isinstance(patch_application, dict):
+                    warmup_result["warm_patch_result"] = patch_application
+                    warmup_result["warm_patch_pre_sha"] = _pre_patch_sha
+                    warmup_result["warm_patch_target"] = patch_target
+                    warmup_result["warm_patch_snapshot_manifest"] = patch_application.get(
+                        "snapshot_manifest"
+                    )
+                    warmup_result["warm_patch_canonical_target"] = ix_env
+                    warmup_result["warm_kernel_apply_results"] = list(
+                        params.get("warm_kernel_apply_results") or []
+                    )
                 return warmup_result
             warmup_tput = warmup_result.get("output_throughput")
             warmup_runtime = warmup_result.get("subprocess_runtime_sec")
 
             # Round 2 (measured): re-attach to the hot server (client only).
+            # Warm re-attach is intentional — all comparison points (baseline,
+            # explore decision, stack_rebench, and their grading anchor) are
+            # measured with a warm prefix cache, keeping them mutually
+            # comparable. Carryover is config-dependent (tracks KV-block
+            # capacity) and is not a uniform offset.
             #
-            # No accuracy eval here: ordinary baselines already measured it in
-            # round 1, while staged kernel integration intentionally defers it
-            # until after this hot-throughput gate. In both cases round 2 only
-            # needs the steady-state throughput number.
+            # No accuracy eval: ordinary baselines measured it in round 1;
+            # staged kernel integration defers it until after this gate.
             measure_dir = output_dir / "measure_round"
             measure_cfg = self._write_lifecycle_config(
                 materialized_config_path,
@@ -2195,6 +3020,19 @@ class BaselineExecutor:
                 output_dir=measure_dir,
                 **common,
             )
+            if applied_patches:
+                result["warm_patches_applied"] = list(applied_patches)
+            if isinstance(patch_application, dict):
+                result["warm_patch_result"] = patch_application
+                result["warm_patch_pre_sha"] = _pre_patch_sha
+                result["warm_patch_target"] = patch_target
+                result["warm_patch_snapshot_manifest"] = patch_application.get(
+                    "snapshot_manifest"
+                )
+                result["warm_patch_canonical_target"] = ix_env
+                result["warm_kernel_apply_results"] = list(
+                    params.get("warm_kernel_apply_results") or []
+                )
             if result.get("status") == "succeeded":
                 result.setdefault("nonfatal_warnings", [])
                 result["nonfatal_warnings"].append(
@@ -2303,8 +3141,16 @@ class BaselineExecutor:
             )
             # Revert warm-replay patches to prevent state leakage into
             # subsequent tasks that reuse the same InferenceX checkout.
-            if applied_patches and _pre_patch_sha:
-                _revert_patches(patch_target, _pre_patch_sha)
+            if (
+                applied_patches
+                and _pre_patch_sha
+                and not isinstance(patch_application, dict)
+            ):
+                _revert_patches(
+                    patch_target,
+                    _pre_patch_sha,
+                    params.get("_warm_patch_snapshot_manifest"),
+                )
             if bench_lease is not None:
                 bench_lease.close()
 
@@ -2715,6 +3561,7 @@ class BaselineExecutor:
             except Exception as exc:  # noqa: BLE001 - warmup is best-effort
                 log.warning("baseline_executor: MN warmup pass failed (ignored): %r", exc)
 
+        workspaces_before = snapshot_workspaces(output_dir)
         subprocess_started_unix = time.time()
         # Anchor the Magpie parent process cwd to the per-task output_dir. NOTE:
         # this does NOT keep the server's cuda-graph dump safe on its own —
@@ -2776,8 +3623,7 @@ class BaselineExecutor:
                 proc_stdout = proc.stdout
                 proc_stderr = proc.stderr
         except subprocess.TimeoutExpired as exc:
-            timeout_candidates = sorted(output_dir.glob("benchmark_*"))
-            timeout_destination = timeout_candidates[-1] if timeout_candidates else output_dir
+            timeout_destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
             timeout_harvested = harvest_leaked_artifacts(
                 timeout_destination,
                 subprocess_started_unix=subprocess_started_unix,
@@ -2797,8 +3643,7 @@ class BaselineExecutor:
         # A stall reap leaves no benchmark_* workspace; a distinct error_class
         # lets the coordinator fast-fail instead of burning the full timeout.
         if proc_returncode == DETOKENIZER_STALL_RETURNCODE:
-            stall_candidates = sorted(output_dir.glob("benchmark_*"))
-            stall_destination = stall_candidates[-1] if stall_candidates else output_dir
+            stall_destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
             stall_harvested = harvest_leaked_artifacts(
                 stall_destination,
                 subprocess_started_unix=subprocess_started_unix,
@@ -2853,12 +3698,11 @@ class BaselineExecutor:
             proc_stdout or "",
         )
 
-        # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
-        candidates = sorted(output_dir.glob("benchmark_*"))
+        workspace = select_run_workspace(output_dir, known_before=workspaces_before)
         # Always-on artifact harvest: copy wrapper-side leaks into the task
         # workspace so failure-path diagnostics survive; mtime gating rejects
         # stale prior-run leaks.
-        harvest_destination = candidates[-1] if candidates else output_dir
+        harvest_destination = workspace if workspace is not None else output_dir
         harvested = harvest_leaked_artifacts(
             harvest_destination,
             subprocess_started_unix=subprocess_started_unix,
@@ -2869,7 +3713,7 @@ class BaselineExecutor:
                 len(harvested),
                 ", ".join(str(src.name) for src, _ in harvested),
             )
-        if not candidates:
+        if workspace is None:
             failure_extras = {
                 "output_dir": str(output_dir),
                 "harvested_artifacts": [str(dst) for _, dst in harvested],
@@ -2932,7 +3776,6 @@ class BaselineExecutor:
                 "error": "Magpie completed but produced no benchmark_* workspace",
                 **failure_extras,
             }
-        workspace = candidates[-1]
         report_path = workspace / "benchmark_report.json"
         report: dict[str, Any] | None = None
         if report_path.exists():

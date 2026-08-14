@@ -51,6 +51,8 @@ import logging
 import re
 import shutil
 import subprocess
+
+from hyperloom.common.git_safety import safe_directory_args
 from pathlib import Path
 from typing import Any
 
@@ -100,7 +102,7 @@ def _is_git_tree(path: Path) -> bool:
     """True when ``path`` is inside an initialised git work tree."""
     try:
         cp = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+            ["git", *safe_directory_args(["-C", str(path), "rev-parse", "--is-inside-work-tree"])],
             capture_output=True,
             text=True,
             timeout=10,

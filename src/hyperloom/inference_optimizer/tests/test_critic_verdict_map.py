@@ -888,7 +888,7 @@ class TestN38ActionVerdictClass:
     """Per-action ``verdict_class`` metadata so new actions don't reintroduce prior deadlocks."""
 
     def test_action_metadata_has_verdict_class_field(self):
-        from hyperloom.orchestrator.actions.registry import (
+        from hyperloom.inference_optimizer.protocol.action_surfaces import (
             ActionMetadata,
         )
 
@@ -899,26 +899,17 @@ class TestN38ActionVerdictClass:
         )
 
     def test_default_classifier_covers_all_registered_actions(self):
-        from hyperloom.orchestrator.actions.registry import (
-            ActionRegistry,
-        )
+        from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 
-        reg = ActionRegistry().load()
-        all_actions = reg.all()
-        assert all_actions, "expected ActionRegistry to load >= 1 action"
+        all_actions = list(ACTION_CATALOGUE.values())
+        assert all_actions, "expected the catalogue to hold >= 1 action"
         missing = [a.name for a in all_actions if not a.verdict_class]
-        assert not missing, (
-            f"actions missing verdict_class default: {missing} -- update the "
-            f"default classifier in action_registry.py or add the field to "
-            f"the yaml"
-        )
+        assert not missing, f"actions missing verdict_class: {missing} -- set it in ACTION_CATALOGUE"
 
     def test_default_classifier_matches_expected_buckets(self):
-        from hyperloom.orchestrator.actions.registry import (
-            ActionRegistry,
-        )
+        from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 
-        reg = ActionRegistry().load()
+        reg = ACTION_CATALOGUE
 
         def klass(name: str) -> str:
             a = reg.get(name)
@@ -935,9 +926,6 @@ class TestN38ActionVerdictClass:
             "explore",
             "sweep",
             "kernel_opt",
-            "operator_tuning",
-            "vendor_kernel_config",
-            "deep_kernel_analysis",
             "recover",
         )
         for n in registered_exploration:

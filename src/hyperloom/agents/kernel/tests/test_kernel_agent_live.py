@@ -168,7 +168,7 @@ class KernelAgentLiveTests(unittest.TestCase):
                     backends,
                     "--source-file",
                     str(source),
-                    "--test-harness-path",
+                    "--benchmark-file",
                     str(harness),
                     "--budget-minutes",
                     os.environ.get("KERNEL_AGENT_LIVE_BUDGET_MIN", "0.25"),

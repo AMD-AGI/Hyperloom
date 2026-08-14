@@ -123,6 +123,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "warm_start_lessons",
         "warm_start_ts",
         "warm_start_context",
+        "kb_stage_outbox",
+        "kb_stage_dead_letter",
         "stack_fingerprint_meta",
         "baseline_workload_extra",
         "last_profile_workload",
@@ -197,10 +199,14 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "kernel_opt_attempts",
         "kernel_opt_task_attempts",
         "pending_kernel_integrations",
+        "last_collective",
+        "collective_attempts",
+        "collective_only_mode",
         # kept in lock-step with upstream
         # policy.CORE_STATE_FIELDS (see tests/test_role_contract.py).
         "closing_phase",
         "baseline_config_path",
+        "failures",
     }
 )
 

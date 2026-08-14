@@ -161,48 +161,6 @@ def test_item4_local_mode_ignores_central_credentials(
     assert out["best_throughput"] == 11111.0
 
 
-def test_item5_local_dispatcher_ignores_ambient_remote_credentials(
-    env_clean: None,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    cid = recipe_canonical_id(
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-    )
-
-    monkeypatch.setenv("KB_STORE_URL", "https://unreachable.invalid")
-    monkeypatch.setenv("KB_STORE_TOKEN", "ambient")
-    kb = _build_recipe_kb_dispatcher(_ns(local_kb_root=str(tmp_path)))
-
-    # Seed and update the local store; ambient remote settings are irrelevant.
-    kb.local.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        best_throughput=22222.0,
-    )
-
-    kb.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        best_throughput=33333.0,
-    )
-    out = kb.get_recipe(canonical_id=cid)
-    assert out is not None
-    assert out["best_throughput"] == 33333.0
-
-
 def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
     """Two recipes differing in any single dimension land in distinct on-disk locations."""
     store = LocalRecipeStore(root=tmp_path)

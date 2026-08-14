@@ -11,7 +11,7 @@ import os
 import signal
 import time
 import traceback
-import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -53,9 +53,10 @@ _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
 # of its recorded tput is flagged as drift.
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
 from ..phases import machine_state as _phase_state
+from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.optimization_journal import Journal
 from hyperloom.inference_optimizer.session.paths import db_path_for
-from ..actions.registry import ActionRegistry
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from ..roles.agent_role import AgentRole, default_role_registry
 from ..roles.base import Backend, BackendError, BackendTurnResult, LLMCallFailed
 from ..bus.cursor_store import CursorStore
@@ -81,9 +82,9 @@ from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
+from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
+from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 from ..trace.orchestration_trace import (
-    OrchestrationTurnRecord,
-    append_orchestration_turn,
     write_mcp_setup_once,
 )
 from .coordinator_helpers import (
@@ -332,23 +333,6 @@ def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
     return None
 
 
-def _defang_prompt_structure(text: str) -> str:
-    """Neutralise prompt-structure sequences in an untrusted string leaf.
-
-    Robustness ``alert`` payloads can carry attacker-influenceable server.log
-    excerpts (``evidence.samples``) that reach the orchestration-LLM prompt.
-    This defangs — without dropping content — the sequences such an excerpt
-    could use to escape its quoted context and read as instructions: markdown
-    code fences, ``data:`` URLs, and angle-bracket role/tag markers. The text
-    stays human-readable; it just can no longer act as prompt structure.
-    """
-    out = str(text or "")
-    out = out.replace("```", "`\u200b``").replace("~~~", "~\u200b~~")
-    out = out.replace("data:", "data\u200b:").replace("DATA:", "DATA\u200b:")
-    out = out.replace("<", "\u2039").replace(">", "\u203a")
-    return out
-
-
 def _defang_alert_payload(value: Any) -> Any:
     """Recursively defang string leaves of an alert payload (keys untouched).
 
@@ -364,16 +348,20 @@ def _defang_alert_payload(value: Any) -> Any:
     return value
 
 
-def _format_inbox_event(m: "Message") -> str:
+
+def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
     """Render one inbox ``Message`` as a compact, high-signal line.
 
     Args:
         m: The inbox message to render; its topic selects a per-topic
             formatting branch (delegated_result, policy_denial, review_verdict,
             observation) with a generic fallback.
+        max_variant_rows: Cap on the indented per-variant failure lines
+            appended to a ``delegated_result``; 0 suppresses them.
 
     Returns:
-        A single-line string summarising the message header and payload.
+        The header line, plus one indented continuation line per rendered
+        variant failure.
     """
     topic = (m.topic or "").strip()
     payload = m.payload if isinstance(m.payload, dict) else {}
@@ -415,7 +403,26 @@ def _format_inbox_event(m: "Message") -> str:
         if notes:
             shown = "; ".join(str(n) for n in notes)
             parts.append(f"notes={shown[:300]!r}")
-        return " ".join(parts)
+        header_line = " ".join(parts)
+        if max_variant_rows <= 0 or not isinstance(result, dict):
+            return header_line
+        pvos = result.get("per_variant_outcomes")
+        if not isinstance(pvos, list):
+            return header_line
+        failures = [
+            v for v in pvos if isinstance(v, dict) and str(v.get("outcome") or "").upper() in UNMEASURED_OUTCOMES
+        ]
+        if not failures:
+            return header_line
+        lines = [header_line]
+        for vo in failures[:max_variant_rows]:
+            row = dict(vo)
+            row["error_excerpt"] = _flatten_for_inbox(vo.get("error_excerpt") or vo.get("reason") or "")
+            lines.append("  failure: " + render_failure_line(row, excerpt_chars=120))
+        elided = len(failures) - max_variant_rows
+        if elided > 0:
+            lines.append(f"  (+{elided} more failures; pull get_variant_failures)")
+        return "\n".join(lines)
 
     if topic in ("policy_denial", "denial") or (topic == "observation" and payload.get("kind") == "policy_denial"):
         return (
@@ -490,7 +497,6 @@ _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
     "report_path",
     "json_path",
     "md_path",
-    "tracelens_agent_transcript",
     "tracelens_agent_report",
     # TraceLens analysis outputs surfaced by trace_analyze_handler.
     "trace_report_path",
@@ -840,12 +846,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         _CANONICAL_ORDER = ("orchestration", "critic", "robustness")
         self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
-        # Action registry — yaml catalogue mapping action_name -> metadata.
-        try:
-            self.action_registry: ActionRegistry | None = ActionRegistry().load()
-        except Exception:  # noqa: BLE001 — defensive; missing yaml shouldn't kill the run.
-            log.exception("Coordinator: failed to load ActionRegistry.")
-            self.action_registry = None
         # Inline fast-action execution: run cheap lane-light action in-turn. Default ON.
         _inline_raw = (
             os.environ.get(
@@ -932,7 +932,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_inject_warm_recipe_history_into_ledger": "phase_prelude",
         "_filter_warm_patches_with_kg": "phase_prelude",
         "_maybe_enqueue_warm_replay": "phase_prelude",
-        "_maybe_apply_warm_kernel_kb": "phase_prelude",
         "_promote_warm_replay": "phase_prelude",
         "_maybe_enqueue_prelude_initial_analysis_after_baseline": "phase_prelude",
         "_enqueue_internal_analysis_task": "phase_prelude",
@@ -972,6 +971,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_auto_enqueue_pending_integrations": "phase_kernel_stack",
         "_maybe_reprofile_for_kernel": "phase_kernel",
         "_geak_enabled": "phase_kernel",
+        "_collective_required_before_kernel_opt": "phase_kernel",
         "_on_enter_kernel": "phase_kernel",
         "_run_bf16_dense_gemm_fallback": "phase_kernel",
         "_should_run_bf16_dense_gemm_fallback": "phase_kernel",
@@ -1069,7 +1069,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_build_framework_working_memory": "phase_framework",
         "_render_framework_memory_for_prompt": "phase_framework",
         "_framework_agent_discover_repo_urls": "phase_framework",
-        "_write_prs_tested_from_framework_agent": "phase_framework",
+        "_emit_framework_agent_kg_decision": "phase_framework",
         "_emit_kg_decision": "phase_framework",
         "_record_framework_agent_phase_done": "phase_framework",
         "_discover_next_framework_batch": "phase_framework",
@@ -1381,6 +1381,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
     _DISK_RUNS_KEEP_PER_ACTION: int = 50
     _STATE_JSON_WARN_BYTES: int = 50 * 1024 * 1024
 
+    # Action catalogue mapping action_name -> metadata. Class-level so a
+    # partially-built Coordinator still resolves it.
+    action_registry: Mapping[str, ActionMetadata] = ACTION_CATALOGUE
+
     # Inline fast-action execution; deny report/session_breakdown (CLOSE artifacts).
     _INLINE_ACTION_DENY: frozenset[str] = frozenset(
         {
@@ -1468,7 +1472,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     # optimization_stack actions warranting a post-opt roofline; pure
     # param-search (explore/sweep) is excluded.
-    _POST_OPT_ROOFLINE_ACTIONS = frozenset({"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
+    _POST_OPT_ROOFLINE_ACTIONS = frozenset(
+        {"collective", "integrate", "integrate_patch", "gemm_tuning", "geak_e2e"}
+    )
 
     async def tick(self, n: int = 1) -> None:
         """Run exactly ``n`` reactor passes for every agent; dispatcher pumps at pass end, lazy resume replay on tick 1.
@@ -1826,15 +1832,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 max_turns=0,
             )
         except BackendError as exc:
-            self._trace_orchestration_turn(
-                agent_name=agent_name,
-                backend=backend,
-                prompt=prompt,
-                system_prompt=sys_prompt,
-                tools=tools,
-                outcome="backend_error",
-                error=exc,
-            )
             if isinstance(exc, LLMCallFailed) and not backend_self_traces:
                 self._trace_reactor_llm_failure(
                     agent_name,
@@ -1849,15 +1846,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
             await self._track_backend_error_streak(agent_name, exc)
             return
         except NoIntentEmitted as exc:
-            self._trace_orchestration_turn(
-                agent_name=agent_name,
-                backend=backend,
-                prompt=prompt,
-                system_prompt=sys_prompt,
-                tools=tools,
-                outcome="no_intent",
-                error=exc,
-            )
             # No parseable intents; surface as observation so the next tick self-corrects.
             await self._record_observation(
                 "coordinator",
@@ -1866,15 +1854,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
             return
         except Exception as exc:  # noqa: BLE001
-            self._trace_orchestration_turn(
-                agent_name=agent_name,
-                backend=backend,
-                prompt=prompt,
-                system_prompt=sys_prompt,
-                tools=tools,
-                outcome="exception",
-                error=exc,
-            )
             # Catch-all so one agent's bad turn never stops the loop.
             log.exception("reactor pass for %s raised", agent_name)
             await self._record_observation(
@@ -1888,21 +1867,14 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 exc=exc,
             )
             return
+        finally:
+            self._trace_mcp_setup(agent_name=agent_name, backend=backend)
         # Reset the streak — a successful turn proves the backend is alive again.
         if self._backend_error_streak.get(agent_name):
             self._backend_error_streak[agent_name] = 0
             self._backend_error_alarm_armed[agent_name] = True
         # Record this reactor turn's token spend on the unified ledger.
         latency_ms = int((time.perf_counter() - _t0) * 1000)
-        self._trace_orchestration_turn(
-            agent_name=agent_name,
-            backend=backend,
-            prompt=prompt,
-            system_prompt=sys_prompt,
-            tools=tools,
-            outcome="succeeded",
-            result=result,
-        )
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
         self._record_reactor_conversation(agent_name, result)
@@ -1934,78 +1906,18 @@ class Coordinator(metaclass=_CoordinatorMeta):
         for intent in result.intents:
             await self._handle_intent(agent_name, intent)
 
-    def _trace_orchestration_turn(
-        self,
-        *,
-        agent_name: str,
-        backend: Backend,
-        prompt: str,
-        system_prompt: str,
-        tools: list[str],
-        outcome: str,
-        result: BackendTurnResult | None = None,
-        error: BaseException | None = None,
-    ) -> None:
-        """Append one orchestration diagnostic row."""
+    def _trace_mcp_setup(self, *, agent_name: str, backend: Backend) -> None:
+        """Persist orchestration MCP setup once per session."""
         if agent_name != "orchestration":
             return
         try:
-            getter = getattr(backend, "get_turn_diagnostic", None)
-            diagnostic = getter() if callable(getter) else {}
-            if not isinstance(diagnostic, dict):
-                diagnostic = {}
-            metadata = result.metadata if result is not None else {}
-            err_trace = (
-                "".join(traceback.format_exception(type(error), error, error.__traceback__))[-4000:]
-                if error is not None
-                else None
-            )
-            record = OrchestrationTurnRecord(
-                session_id=self.session_dir.name,
-                turn_id=uuid.uuid4().hex,
-                tick=int(self.shared_state.tick or 0),
-                phase=(self.shared_state.phase or "") or None,
-                outcome=outcome,
-                backend=str(diagnostic.get("backend") or type(backend).__name__),
-                model=diagnostic.get("model") or metadata.get("model") or getattr(backend, "model", None),
-                sdk_name=diagnostic.get("sdk_name"),
-                sdk_version=diagnostic.get("sdk_version"),
-                cli_version=diagnostic.get("cli_version"),
-                gateway_endpoint=diagnostic.get("gateway_endpoint"),
-                request_id=diagnostic.get("request_id"),
-                resume_requested=bool(diagnostic.get("resume_requested", False)),
-                previous_session_id_hash=diagnostic.get("previous_session_id_hash"),
-                session_id_hash=diagnostic.get("session_id_hash"),
-                new_session=diagnostic.get("new_session"),
-                max_turns=diagnostic.get("max_turns"),
-                timeout_sec=diagnostic.get("timeout_sec"),
-                reasoning_effort=diagnostic.get("reasoning_effort"),
-                thinking=diagnostic.get("thinking"),
-                prompt=str(diagnostic.get("prompt") or prompt),
-                system_prompt=str(diagnostic.get("system_prompt") or system_prompt),
-                allowed_tools=list(diagnostic.get("allowed_tools") or tools),
-                mcp_servers=list(diagnostic.get("mcp_servers") or []),
-                emit_intent_registered=bool(diagnostic.get("emit_intent_registered", False)),
-                messages=list(diagnostic.get("messages") or []),
-                result=str(diagnostic.get("result") or metadata.get("response") or ""),
-                raw_text=str(diagnostic.get("raw_text") or getattr(result, "raw_text", "") or ""),
-                tool_blocks=list(diagnostic.get("tool_blocks") or []),
-                parse_errors=list(diagnostic.get("parse_errors") or []),
-                usage=dict(diagnostic.get("usage") or {}),
-                stderr_tail=list(diagnostic.get("stderr_tail") or []),
-                sdk_boundary_error=diagnostic.get("sdk_boundary_error"),
-                error_type=type(error).__name__ if error is not None else None,
-                error_message=str(error) if error is not None else None,
-                traceback=err_trace,
-            )
-            append_orchestration_turn(session_dir=self.session_dir, record=record)
             setup_getter = getattr(backend, "get_mcp_setup_diagnostic", None)
             if callable(setup_getter):
                 setup = setup_getter()
                 if isinstance(setup, dict):
                     write_mcp_setup_once(session_dir=self.session_dir, setup=setup)
         except Exception:  # noqa: BLE001
-            log.debug("orchestration turn trace failed", exc_info=True)
+            log.debug("orchestration mcp setup trace failed", exc_info=True)
 
     def _trace_reactor_llm_call(
         self,

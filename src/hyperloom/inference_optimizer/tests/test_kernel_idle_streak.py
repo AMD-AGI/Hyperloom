@@ -256,3 +256,29 @@ def test_fingerprint_tracks_inflight_task_ids():
     assert ps.compute_kernel_progress_fingerprint(
         state, inflight_task_ids=("t2", "t1")
     ) == ps.compute_kernel_progress_fingerprint(state, inflight_task_ids=("t1", "t2"))
+
+
+@pytest.mark.asyncio
+async def test_running_specialist_counts_as_kernel_lane_work(kernel_coordinator):
+    """A specialist admitted to KERNEL must reach ``_inflight_kernel_task_ids``.
+
+    The kind filter is the phase allowlist, so admitting ``specialist`` there is
+    what stops the idle guard from reading a live investigation as dead air.
+    """
+    c = kernel_coordinator
+    task = await c.tasks.create(kind="specialist", params={}, idempotency_key="spec-idle")
+    await c.tasks.transition(task.task_id, "running")
+    assert task.task_id in await c.phase_machine._inflight_kernel_task_ids()
+
+
+@pytest.mark.asyncio
+async def test_queued_specialist_survives_the_transition_into_kernel(kernel_coordinator):
+    """``cancel_queued_not_allowed`` reads the same allowlist, so the task lives."""
+    c = kernel_coordinator
+    task = await c.tasks.create(kind="specialist", params={}, idempotency_key="spec-keep")
+    cancelled = await c.tasks.cancel_queued_not_allowed(
+        allowed_kinds=ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_KERNEL_AGENT],
+        reason="phase_transition:EXPLORE->KERNEL_AGENT",
+    )
+    assert task.task_id not in cancelled
+    assert (await c.tasks.get(task.task_id)).state == "queued"

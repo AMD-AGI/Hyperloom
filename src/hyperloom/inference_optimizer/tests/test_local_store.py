@@ -68,17 +68,6 @@ def test_normalise_gaps_pitfalls_lessons():
     assert out[0]["measured_impact"] == {"x": 1}
 
 
-def test_normalise_prs_number_coercion():
-    out = ls._normalise_prs(
-        [
-            {"repo": "r", "number": "12", "outcome": "merged"},
-            {"repo": "r2", "number": "bad"},
-        ]
-    )
-    assert out[0]["number"] == 12
-    assert out[1]["number"] == 0
-
-
 def test_normalise_sessions_coercion():
     out = ls._normalise_sessions(
         [
@@ -109,7 +98,6 @@ def test_put_get_history_roundtrip(tmp_path):
         model="m",
         best_throughput=100.0,
         what_worked=[{"description": "w", "measured_impact": "i"}],
-        prs_tested=[_ToDictItem({"repo": "r", "number": 1})],
         sessions=[{"date": "d", "throughput_before": 1.0}],
         extras={"task": "pretrain"},
         provenance={"who": "test"},
@@ -233,7 +221,6 @@ def test_coerce_dict_dataclass():
 def test_normalisers_skip_uncoercible():
     assert ls._normalise_str_dicts(["x", None], ("description", "reason")) == []
     assert ls._normalise_str_dicts(["x"], ("description", "metrics")) == []
-    assert ls._normalise_prs([None]) == []
     assert ls._normalise_str_dicts(["x"], ("description", "severity")) == []
     assert ls._normalise_lessons([None]) == []
     assert ls._normalise_sessions(["x"]) == []

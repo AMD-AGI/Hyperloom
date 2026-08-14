@@ -270,6 +270,30 @@ def test_windows_separators_are_not_mistaken_for_placeholders():
     assert tl.reject_non_path_source(item) is False
 
 
+def test_aiter_cross_device_reduce_maps_to_all_reduce():
+    """aiter's custom all-reduce must not degrade to a rank-0-only reference.
+
+    The kernels are named cross_device_reduce_{1stage,2stage,half_butterfly}
+    and implement all-reduce semantics. Without an explicit tag they fall
+    through to the bare "reduce" entry, whose reference is
+    torch.distributed.reduce -- correct on rank 0 only, which makes the parity
+    gate meaningless everywhere else.
+    """
+    item = {"name": "_ZN5aiter26cross_device_reduce_2stageIDF16bLi8ELb0EEEv", "is_multigpu": True}
+    tl._enrich_kernel_contract(item, {"TP_SIZE": 8})
+    contract = item["kernel_contract"]
+    assert contract["collective_op"] == "all_reduce"
+    assert contract["reference"] == "torch.distributed.all_reduce"
+    assert contract["world_size"] == 8
+
+
+def test_plain_reduce_kernel_still_maps_to_reduce():
+    """The new tag must not swallow genuine dist.reduce kernels."""
+    item = {"name": "some_reduce_kernel", "is_multigpu": True}
+    tl._enrich_kernel_contract(item, {"TP_SIZE": 8})
+    assert item["kernel_contract"]["collective_op"] == "reduce"
+
+
 def test_real_path_is_not_flagged_as_rejected():
     """A genuine path must pass the guard untouched."""
     item = {"name": "k", "source_file": "/repo/pkg/kernels/moe.py"}

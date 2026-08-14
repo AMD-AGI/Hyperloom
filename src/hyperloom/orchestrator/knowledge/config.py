@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Generic, Mapping, MutableMapping, TypeVar
+from typing import Any, Mapping, MutableMapping
 
 
 class KnowledgeStoreMode(str, Enum):
@@ -111,9 +111,7 @@ class KnowledgeConfig:
         env.pop("GBRAIN_BASE_URL", None)
         env.pop("GBRAIN_TOKEN", None)
         env["KERNELFORGE_GBRAIN_ENABLED"] = "false"
-        # The section draft belongs to this run's inference document. A
-        # KernelForge child publishes its own ``kernel:`` record, so letting it
-        # inherit these would stage its sections into the wrong document.
+        # Section drafts are owned by the parent inference Recipe publisher.
         env.pop("KB_DRAFT_DIR", None)
         env.pop("KB_WARM_START_DIR", None)
 
@@ -128,36 +126,7 @@ class KnowledgeConfig:
         }
 
 
-T = TypeVar("T")
-
-
-@dataclass(frozen=True)
-class KnowledgeReadResult(Generic[T]):
-    """Typed read result with backend and provenance."""
-
-    value: T | None
-    mode: KnowledgeStoreMode
-    backend: str
-    hit: bool
-    provenance: Mapping[str, Any]
-    error: str = ""
-
-
-@dataclass(frozen=True)
-class KnowledgeWriteResult(Generic[T]):
-    """Typed write result with an observable success/failure outcome."""
-
-    value: T | None
-    mode: KnowledgeStoreMode
-    backend: str
-    success: bool
-    provenance: Mapping[str, Any]
-    error: str = ""
-
-
 __all__ = [
     "KnowledgeConfig",
-    "KnowledgeReadResult",
     "KnowledgeStoreMode",
-    "KnowledgeWriteResult",
 ]

@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir
-from hyperloom.orchestrator.actions.registry import ActionRegistry
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.phases import machine_state as _ps
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -29,8 +29,8 @@ def refs_dir():
 
 
 @pytest.fixture(scope="module")
-def registry() -> ActionRegistry:
-    return ActionRegistry().load()
+def registry() -> dict:
+    return ACTION_CATALOGUE
 
 
 @pytest.fixture

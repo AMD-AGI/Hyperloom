@@ -29,6 +29,7 @@ from hyperloom.orchestrator.actions.executors.profile import (
     ProfileExecutor,
     _default_profile_config,
     _sanitize_profile_server_args,
+    _trace_files_for_dir,
 )
 from hyperloom.orchestrator.roles import (
     MockBackend,
@@ -1644,32 +1645,30 @@ async def test_baseline_executor_keeps_valid_measurement_with_wrapper_failure(tm
     sub = SubAgentRunner(locks, tr)
 
     output_dir = tmp_path / "out"
-    workspace = output_dir / "benchmark_sglang_20260501_001122"
-    workspace.mkdir(parents=True)
-    (workspace / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "success": False,
-                "framework": "sglang",
-                "model": "/path/models/Qwen-Qwen3-8B",
-                "throughput": {
-                    "request_throughput": 1.8,
-                    "output_throughput": 1872.0,
-                    "total_token_throughput": 3744.0,
-                    "completed_requests": 320,
-                    "duration_seconds": 177.0,
-                },
-                "latency": {"ttft": {"mean_ms": 140}, "e2el": {"mean_ms": 2500}},
-            }
-        )
+    output_dir.mkdir(parents=True)
+
+    # The workspace must be created inside the fake to count as this run's output.
+    report_body = json.dumps(
+        {
+            "success": False,
+            "framework": "sglang",
+            "model": "/path/models/Qwen-Qwen3-8B",
+            "throughput": {
+                "request_throughput": 1.8,
+                "output_throughput": 1872.0,
+                "total_token_throughput": 3744.0,
+                "completed_requests": 320,
+                "duration_seconds": 177.0,
+            },
+            "latency": {"ttft": {"mean_ms": 140}, "e2el": {"mean_ms": 2500}},
+        }
     )
 
-    fake_completed = subprocess.CompletedProcess(
-        args=[],
-        returncode=1,
-        stdout="",
-        stderr="cleanup failed",
-    )
+    def fake_run(cmd, *args, **kwargs):
+        ws = output_dir / "benchmark_sglang_20260501_001122"
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "benchmark_report.json").write_text(report_body)
+        return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="cleanup failed")
 
     task = await tr.create(
         kind="baseline",
@@ -1677,7 +1676,7 @@ async def test_baseline_executor_keeps_valid_measurement_with_wrapper_failure(tm
         idempotency_key="baseline-valid-warning",
     )
     sub.register_executor("baseline", BaselineExecutor(session_dir=tmp_path))
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", return_value=fake_completed):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=fake_run):
         res = await sub.run_task(task)
 
     assert res.state == "succeeded"
@@ -1717,43 +1716,45 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
 
-    # Build a fake workspace dir matching what Magpie would create.
     output_dir = tmp_path / "out"
-    workspace = output_dir / "benchmark_sglang_20260501_001122"
-    workspace.mkdir(parents=True)
-    (workspace / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "success": True,
-                "framework": "sglang",
-                "model": "/path/models/Qwen-Qwen3-8B",
-                "throughput": {
-                    "request_throughput": 3.2,
-                    "output_throughput": 800.0,
-                    "total_token_throughput": 1600.0,
-                    "completed_requests": 80,
-                    "duration_seconds": 25.0,
-                },
-                "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158}, "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
-            }
+    output_dir.mkdir(parents=True)
+
+    # The workspace must be created inside the fake to count as this run's output.
+    ws_name = "benchmark_sglang_20260501_001122"
+
+    async def _fake_baseline(_self, _ctx):
+        workspace = output_dir / ws_name
+        workspace.mkdir(parents=True, exist_ok=True)
+        report_path = workspace / "benchmark_report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "success": True,
+                    "framework": "sglang",
+                    "model": "/path/models/Qwen-Qwen3-8B",
+                    "throughput": {
+                        "request_throughput": 3.2,
+                        "output_throughput": 800.0,
+                        "total_token_throughput": 1600.0,
+                        "completed_requests": 80,
+                        "duration_seconds": 25.0,
+                    },
+                    "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158}, "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
+                }
+            )
         )
-    )
-    trace_dir = workspace / "torch_trace"
-    trace_dir.mkdir()
-    (trace_dir / "177-TP-0-DECODE.trace.json.gz").write_bytes(b"fake-trace")
-    merged_trace = trace_dir / "merged-177.trace.json.gz"
-    merged_trace.write_bytes(b"fake-trace")
-
-    # Stub subprocess.run so we don't actually launch sglang.
-    fake_completed = subprocess.CompletedProcess(
-        args=[],
-        returncode=0,
-        stdout="ok",
-        stderr="",
-    )
-
-    def _fake_run(*args, **kwargs):
-        return fake_completed
+        trace_dir = workspace / "torch_trace"
+        trace_dir.mkdir()
+        (trace_dir / "177-TP-0-DECODE.trace.json.gz").write_bytes(b"fake-trace")
+        (trace_dir / "merged-177.trace.json.gz").write_bytes(b"fake-trace")
+        return {
+            "status": "succeeded",
+            "framework": "sglang",
+            "model": "/path/models/Qwen-Qwen3-8B",
+            "output_throughput": 800.0,
+            "workspace": str(workspace),
+            "report_path": str(report_path),
+        }
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
     task = await tr.create(
@@ -1762,8 +1763,12 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
         idempotency_key="prof-1",
     )
     sub.register_executor("profile", pe)
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
         res = await sub.run_task(task)
+
+    workspace = output_dir / ws_name
+    trace_dir = workspace / "torch_trace"
+    merged_trace = trace_dir / "merged-177.trace.json.gz"
     assert res.state == "succeeded"
     assert res.result["framework"] == "sglang"
     assert res.result["trace_dir"] == str(trace_dir)
@@ -1798,32 +1803,30 @@ async def test_profile_executor_patches_configured_inferencex_path(
     sub = SubAgentRunner(locks, tr)
 
     output_dir = tmp_path / "out"
-    workspace = output_dir / "benchmark_sglang_20260501_001122"
-    workspace.mkdir(parents=True)
-    (workspace / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "success": True,
-                "framework": "sglang",
-                "model": "/path/models/Qwen-Qwen3-8B",
-                "throughput": {
-                    "request_throughput": 3.2,
-                    "output_throughput": 800.0,
-                    "total_token_throughput": 1600.0,
-                    "completed_requests": 80,
-                    "duration_seconds": 25.0,
-                },
-                "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158}, "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
-            }
-        )
+    output_dir.mkdir(parents=True)
+
+    report_body = json.dumps(
+        {
+            "success": True,
+            "framework": "sglang",
+            "model": "/path/models/Qwen-Qwen3-8B",
+            "throughput": {
+                "request_throughput": 3.2,
+                "output_throughput": 800.0,
+                "total_token_throughput": 1600.0,
+                "completed_requests": 80,
+                "duration_seconds": 25.0,
+            },
+            "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158}, "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
+        }
     )
 
-    fake_completed = subprocess.CompletedProcess(
-        args=[],
-        returncode=0,
-        stdout="ok",
-        stderr="",
-    )
+    def _fake_run_ix(cmd, *args, **kwargs):
+        ws = output_dir / "benchmark_sglang_20260501_001122"
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "benchmark_report.json").write_text(report_body)
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
+
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
     task = await tr.create(
         kind="profile",
@@ -1831,7 +1834,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
         idempotency_key="prof-inferencex-path",
     )
     sub.register_executor("profile", pe)
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", return_value=fake_completed):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run_ix):
         res = await sub.run_task(task)
 
     assert res.state == "succeeded"
@@ -1853,39 +1856,33 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
     sub = SubAgentRunner(locks, tr)
 
     output_dir = tmp_path / "out"
-    workspace = output_dir / "benchmark_vllm_20260501_001122"
-    workspace.mkdir(parents=True)
-    (workspace / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "success": True,
-                "framework": "vllm",
-                "model": "/path/models/Qwen-Qwen3-8B",
-                "throughput": {
-                    "request_throughput": 3.2,
-                    "output_throughput": 800.0,
-                    "total_token_throughput": 1600.0,
-                    "completed_requests": 80,
-                    "duration_seconds": 25.0,
-                },
-                "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158}, "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
-            }
+    output_dir.mkdir(parents=True)
+
+    def _fake_run(cmd, *args, **kwargs):
+        workspace = output_dir / "benchmark_vllm_20260501_001122"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "benchmark_report.json").write_text(
+            json.dumps(
+                {
+                    "success": True,
+                    "framework": "vllm",
+                    "model": "/path/models/Qwen-Qwen3-8B",
+                    "throughput": {
+                        "request_throughput": 3.2,
+                        "output_throughput": 800.0,
+                        "total_token_throughput": 1600.0,
+                        "completed_requests": 80,
+                        "duration_seconds": 25.0,
+                    },
+                    "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158}, "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
+                }
+            )
         )
-    )
-    capture_dir = output_dir / "capture_traces"
-    capture_dir.mkdir()
-    (capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz").write_bytes(b"fake-trace")
-    (capture_dir / "graph_capture_rank_0.2.pt.trace.json.gz").write_bytes(b"fake-trace")
-
-    fake_completed = subprocess.CompletedProcess(
-        args=[],
-        returncode=0,
-        stdout="ok",
-        stderr="",
-    )
-
-    def _fake_run(*args, **kwargs):
-        return fake_completed
+        capture_dir = output_dir / "capture_traces"
+        capture_dir.mkdir(exist_ok=True)
+        (capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz").write_bytes(b"fake-trace")
+        (capture_dir / "graph_capture_rank_0.2.pt.trace.json.gz").write_bytes(b"fake-trace")
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
     task = await tr.create(
@@ -1896,6 +1893,8 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
     sub.register_executor("profile", pe)
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await sub.run_task(task)
+
+    capture_dir = output_dir / "capture_traces"
     assert res.state == "succeeded"
     assert res.result["framework"] == "vllm"
     assert res.result["trace_dir"] == str(capture_dir)
@@ -1982,6 +1981,125 @@ async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_di
     assert not any("bypass_trace_analysis.py" in c for c in cmd)
     assert "--analysis-route" in cmd and "agent" in cmd
     assert "--tracelens-root" in cmd
+    assert "--skip-split" in cmd
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_xdit_state_overrides_stale_payload_framework(
+    session_dir,
+    monkeypatch,
+):
+    """A stale text-generation payload must not make xDiT split its raw trace."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.framework = "xdit"
+    state.save(session_dir)
+
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "sglang",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "xdit"
+    assert "--skip-split" in cmd
+    assert "--analysis-mode" not in cmd
+    warnings = res["trace_health_warnings"]
+    assert warnings[0]["code"] == "stale_framework_overridden"
+    assert warnings[0]["payload_framework"] == "sglang"
+    assert warnings[0]["session_framework"] == "xdit"
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_custom_state_overrides_stale_payload_framework(
+    session_dir,
+    monkeypatch,
+):
+    """All scriptable session frameworks preserve their raw trace."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.framework = "custom"
+    state.save(session_dir)
+
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "sglang",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "custom"
+    assert "--skip-split" in cmd
+    assert res["trace_health_warnings"][0]["code"] == "stale_framework_overridden"
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_payload_framework_overrides_serving_state(
+    session_dir,
+    monkeypatch,
+):
+    """Explicit serving-framework payloads keep their existing precedence."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.framework = "vllm"
+    state.save(session_dir)
+
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "sglang",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "sglang"
+    assert "--analysis-mode" in cmd and cmd[cmd.index("--analysis-mode") + 1] == "inference"
+    assert "--skip-split" not in cmd
 
 
 @pytest.mark.asyncio
@@ -4328,3 +4446,70 @@ def test_resolve_integrate_payload_falls_back_to_kernel_opt_attempts_ledger(
     assert resolved.get("source_file") == "/p/moe_op.py", (
         "source_file must fall back to kernel_opt_attempts[k001].last_source_file"
     )
+
+
+def _gz_trace(path: Path, payload_bytes: int) -> Path:
+    """Write a ``*.trace.json.gz`` of roughly the requested size."""
+    import gzip
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wt") as fh:
+        json.dump({"traceEvents": [{"n": "x" * payload_bytes}]}, fh)
+    return path
+
+
+def test_trace_files_for_dir_excludes_split_chunks_and_leads_with_the_capture(tmp_path):
+    """Splitter chunks must never lead the discovered trace list.
+
+    Two consumers fall back to ``trace_files[0]`` when ``main_trace_path`` is
+    absent (the roofline trace extractor and the writeback path). Under
+    alphabetical order a 900-byte ``trace_split/`` chunk sorted ahead of
+    ``rank_0.trace.json.gz``, and a single chunk handed to ``--trace-input``
+    takes the single-file branch of discovery, where the multi-candidate probing
+    downstream cannot rescue it. This function already excludes ``capture_traces``
+    sidecars for the same reason.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    chunk = _gz_trace(trace_dir / "trace_split" / "aaa_mixed_0.trace.json.gz", 32)
+    capture = _gz_trace(trace_dir / "zzz_rank_0.trace.json.gz", 40_000)
+    sidecar = _gz_trace(
+        trace_dir / "capture_traces" / "aaa_graph_capture_0.pt.trace.json.gz", 32
+    )
+
+    found = _trace_files_for_dir(trace_dir)
+
+    assert chunk not in found, "trace_split chunks must be excluded"
+    assert sidecar not in found, "capture_traces sidecars must stay excluded"
+    assert found[0] == capture
+
+
+def test_trace_files_for_dir_orders_by_size_not_name(tmp_path):
+    """Size ordering, so the fallback does not depend on a naming rule.
+
+    The real discriminator between a fragment and a capture is that one is
+    hundreds of bytes and the other is hundreds of kilobytes. Ranking on size
+    gets this right without knowing any of the splitter's filename conventions,
+    which it is free to change.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    small = _gz_trace(trace_dir / "aaa_first_by_name.trace.json.gz", 16)
+    large = _gz_trace(trace_dir / "zzz_last_by_name.trace.json.gz", 60_000)
+
+    found = _trace_files_for_dir(trace_dir)
+
+    assert found == [large, small]
+
+
+def test_trace_files_for_dir_survives_an_ancestor_named_trace_split(tmp_path):
+    """An ancestor named ``trace_split`` must not empty the list.
+
+    The exclusion is relative to the scanned directory. Tested absolutely, a
+    capture that happened to live below such a directory would have every one of
+    its traces excluded, and the caller reads an empty list as "no traces here".
+    """
+    trace_dir = tmp_path / "trace_split" / "run" / "torch_trace"
+    capture = _gz_trace(trace_dir / "rank_0.trace.json.gz", 40_000)
+
+    found = _trace_files_for_dir(trace_dir)
+
+    assert found == [capture]

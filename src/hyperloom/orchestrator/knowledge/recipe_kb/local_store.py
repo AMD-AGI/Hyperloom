@@ -75,7 +75,6 @@ _COUNTED_COLLECTIONS: tuple[str, ...] = (
     "what_worked",
     "what_failed",
     "remaining_gaps",
-    "prs_tested",
     "sessions",
 )
 
@@ -370,7 +369,6 @@ class LocalRecipeStore:
         what_worked: list[Any] | None = None,
         what_failed: list[Any] | None = None,
         remaining_gaps: list[Any] | None = None,
-        prs_tested: list[Any] | None = None,
         pitfalls: list[Any] | None = None,
         lessons: list[Any] | None = None,
         last_profiled: str = "",
@@ -445,7 +443,6 @@ class LocalRecipeStore:
                 "what_worked": _normalise_str_dicts(what_worked, ("description", "measured_impact")),
                 "what_failed": _normalise_str_dicts(what_failed, ("description", "reason")),
                 "remaining_gaps": _normalise_str_dicts(remaining_gaps, ("description", "metrics")),
-                "prs_tested": _normalise_prs(prs_tested),
                 "pitfalls": _normalise_str_dicts(pitfalls, ("description", "severity")),
                 "lessons": _normalise_lessons(lessons),
                 "last_profiled": last_profiled
@@ -988,40 +985,6 @@ def _normalise_str_dicts(items: list[Any] | None, keys: tuple[str, ...]) -> list
         if d is None:
             continue
         out.append({k: str(d.get(k) or "") for k in keys})
-    return out
-
-
-def _normalise_prs(items: list[Any] | None) -> list[dict[str, Any]]:
-    """Coerce PRs into arbor ``{repo, number, outcome, notes}`` dicts.
-
-    ``number`` is coerced to ``int`` (defaulting to ``0`` on a
-    malformed value).
-
-    Args:
-        items (list[Any] | None): PR records as dicts or dataclasses;
-            uncoercible entries are skipped.
-
-    Returns:
-        list[dict[str, Any]]: One ``{repo, number, outcome, notes}``
-            dict per coercible PR.
-    """
-    out: list[dict[str, Any]] = []
-    for it in items or []:
-        d = _coerce_dict(it)
-        if d is None:
-            continue
-        try:
-            number = int(d.get("number") or 0)
-        except (TypeError, ValueError):
-            number = 0
-        out.append(
-            {
-                "repo": str(d.get("repo") or ""),
-                "number": number,
-                "outcome": str(d.get("outcome") or ""),
-                "notes": str(d.get("notes") or ""),
-            }
-        )
     return out
 
 
