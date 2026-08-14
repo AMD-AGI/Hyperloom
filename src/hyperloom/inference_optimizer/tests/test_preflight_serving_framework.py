@@ -639,15 +639,9 @@ def test_preflight_still_invokes_the_gate():
 
     source = _Path(preflight.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
-    target = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "_preflight"
-    )
+    target = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_preflight")
     called = {
-        node.func.id
-        for node in ast.walk(target)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        node.func.id for node in ast.walk(target) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
 
     assert "_check_serving_framework" in called
