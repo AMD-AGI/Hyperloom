@@ -12,6 +12,7 @@ privileged account behind on a service processor.
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -28,11 +29,13 @@ def _load():
 
 
 @pytest.fixture
-def bmc(monkeypatch):
-    """The module with a fake ipmitool, and a clean credential-failure list."""
-    mod = _load()
-    mod.CREDENTIAL_FAILURES.clear()
-    return mod
+def bmc():
+    """A freshly loaded copy of the module.
+
+    Credential failures live on the account instance, so each test reads them
+    from the account it created; nothing global needs resetting between tests.
+    """
+    return _load()
 
 
 class FakeIpmi:
@@ -77,10 +80,10 @@ class FakeIpmi:
 def test_revocation_runs_even_when_the_password_step_fails(bmc, monkeypatch):
     """The slot must be claimed before any mutation.
 
-    Previously the slot was recorded only after the password was set, so a
-    password failure returned with slot=None, __exit__ returned immediately, and
-    nothing was recorded -- while the account name had already been written and,
-    on the crash-recovery path, an enabled ADMINISTRATOR account was left live.
+    __exit__ returns immediately when no slot was claimed, so recording the slot
+    any later than the first mutation means a failure in between leaves the
+    account name written -- and, on the crash-recovery path, an enabled
+    ADMINISTRATOR account live -- with nothing recorded about it.
     """
     fake = FakeIpmi(initially_enabled=True, fail={"user set password"})
     monkeypatch.setattr(bmc, "sudo_run", fake)
@@ -96,9 +99,9 @@ def test_revocation_runs_even_when_the_password_step_fails(bmc, monkeypatch):
 def test_the_password_never_reaches_the_diagnostics(bmc, monkeypatch, capsys):
     """ipmitool echoes its stdin on some failures; that must not be republished.
 
-    The revoke path prints every failure to the console and stores it in
-    CREDENTIAL_FAILURES, so returning the command's stderr from the one function
-    that handles the secret put a live BMC password on that path.
+    The revoke path prints every failure to the console and stores it among the
+    account's credential failures, so returning the command's stderr from the
+    one function that handles the secret would put a live BMC password there.
     """
 
     class EchoingIpmi(FakeIpmi):
@@ -117,11 +120,11 @@ def test_the_password_never_reaches_the_diagnostics(bmc, monkeypatch, capsys):
     fake = EchoingIpmi()
     monkeypatch.setattr(bmc, "sudo_run", fake)
 
-    with bmc.TempBmcAccount():
+    with bmc.TempBmcAccount() as acct:
         pass
 
     assert fake.secrets, "the fake never saw a password, so it proved nothing"
-    published = "\n".join(bmc.CREDENTIAL_FAILURES) + capsys.readouterr().err
+    published = "\n".join(acct.credential_failures) + capsys.readouterr().err
     assert published, "the failure was meant to be reported"
     for secret in fake.secrets:
         assert secret, "a blank password would make this test vacuous"
@@ -136,31 +139,31 @@ def test_the_password_never_reaches_the_diagnostics(bmc, monkeypatch, capsys):
 def test_stale_enabled_sentinel_is_recorded_not_just_printed(bmc, monkeypatch):
     """A sentinel found enabled is evidence of a previous leak, so it must exit 3."""
     monkeypatch.setattr(bmc, "sudo_run", FakeIpmi(initially_enabled=True))
-    with bmc.TempBmcAccount():
+    with bmc.TempBmcAccount() as acct:
         pass
-    assert any("already enabled" in f for f in bmc.CREDENTIAL_FAILURES)
-    assert bmc.exit_code([]) == bmc.EXIT_CREDENTIAL
+    assert any("already enabled" in f for f in acct.credential_failures)
+    assert bmc.exit_code([], acct.credential_failures) == bmc.EXIT_CREDENTIAL
 
 
 def test_unreadable_final_state_is_not_treated_as_revoked(bmc, monkeypatch):
     """"Could not read" must never be recorded as "confirmed disabled".
 
-    account_status used a failure-swallowing runner, so any BMC that errored or
-    timed out answered "not enabled" -- a false confirmation at the exact point
-    the design calls its trust anchor.
+    Collapsing an unreadable state into "not enabled" would hand back a false
+    confirmation for any BMC that errors or times out -- at the exact point the
+    design calls its trust anchor.
     """
     monkeypatch.setattr(bmc, "sudo_run", FakeIpmi(unreadable_status=True))
-    with bmc.TempBmcAccount():
+    with bmc.TempBmcAccount() as acct:
         pass
-    assert any("could not confirm" in f.lower() for f in bmc.CREDENTIAL_FAILURES)
-    assert bmc.exit_code([]) == bmc.EXIT_CREDENTIAL
+    assert any("could not confirm" in f.lower() for f in acct.credential_failures)
+    assert bmc.exit_code([], acct.credential_failures) == bmc.EXIT_CREDENTIAL
 
 
 def test_account_still_enabled_after_revoke_is_reported(bmc, monkeypatch):
     monkeypatch.setattr(bmc, "sudo_run", FakeIpmi(enabled_after_revoke=True))
-    with bmc.TempBmcAccount():
+    with bmc.TempBmcAccount() as acct:
         pass
-    assert any("still reports" in f for f in bmc.CREDENTIAL_FAILURES)
+    assert any("still reports" in f for f in acct.credential_failures)
 
 
 def test_clean_lifecycle_leaves_no_credential_failures(bmc, monkeypatch):
@@ -168,8 +171,8 @@ def test_clean_lifecycle_leaves_no_credential_failures(bmc, monkeypatch):
     monkeypatch.setattr(bmc, "sudo_run", fake)
     with bmc.TempBmcAccount() as acct:
         assert acct.password
-    assert bmc.CREDENTIAL_FAILURES == []
-    assert bmc.exit_code([]) == bmc.EXIT_OK
+    assert acct.credential_failures == []
+    assert bmc.exit_code([], acct.credential_failures) == bmc.EXIT_OK
     # Channel access is dropped while the account is still enabled, because BMCs
     # reject setaccess on a disabled account.
     order = [" ".join(c) for c in fake.calls]
@@ -179,10 +182,30 @@ def test_clean_lifecycle_leaves_no_credential_failures(bmc, monkeypatch):
 
 
 def test_failed_grant_steps_are_surfaced(bmc, monkeypatch):
-    """A silent failure here produced a 401 that misdirected the operator."""
+    """A silent failure here surfaces as a 401 that misdirects the operator."""
     monkeypatch.setattr(bmc, "sudo_run", FakeIpmi(fail={"user enable"}))
     with bmc.TempBmcAccount() as acct:
         assert any("enable account" in e for e in acct.mint_errors)
+
+
+def test_a_failed_name_step_aborts_before_anything_grants_access(bmc, monkeypatch):
+    """Owning the slot's name is a precondition for granting it privilege.
+
+    Continuing past a failed rename enables an ADMINISTRATOR account on a slot
+    the audit does not control, and Redfish then 401s under the sentinel name --
+    which reads as an authentication problem rather than as the rename failing.
+    """
+    fake = FakeIpmi(fail={"user set name"})
+    monkeypatch.setattr(bmc, "sudo_run", fake)
+
+    with bmc.TempBmcAccount() as acct:
+        assert any("set account name" in e for e in acct.mint_errors)
+        assert not acct.password, "no credential may be handed out after this"
+
+    for granting in ("user priv 3", "user enable 3", "callin=on"):
+        assert not fake.ran(granting), f"{granting} ran after the name step failed"
+    # The slot was still claimed, so the revoke path runs regardless.
+    assert fake.ran("user disable 3")
 
 
 def test_signal_handlers_allow_the_context_manager_to_unwind(bmc, monkeypatch):
@@ -196,6 +219,108 @@ def test_signal_handlers_allow_the_context_manager_to_unwind(bmc, monkeypatch):
         with bmc.TempBmcAccount():
             signal.raise_signal(signal.SIGTERM)
     assert fake.ran("user disable 3"), "revocation must run when SIGTERM arrives"
+
+
+# ------------------------------------------------------- main(): exit contract
+
+@pytest.fixture
+def audit_main(bmc, monkeypatch):
+    """Run ``main()`` with everything off-box stubbed out.
+
+    Only the ipmitool layer is left to each test, because the exit code on the
+    credential paths is what these cases are about.
+    """
+    monkeypatch.setattr(bmc, "install_signal_handlers", lambda: None)
+    monkeypatch.setattr(bmc, "ipmitool_present", lambda: True)
+    monkeypatch.setattr(bmc, "bmc_ip", lambda: "10.0.0.1")
+    monkeypatch.setattr(bmc, "tls_context", lambda ca_cert, insecure: None)
+    monkeypatch.setattr(bmc, "probe_reachable", lambda host, ctx: "")
+    monkeypatch.setattr(bmc, "redfish_bios", lambda *a, **k: ({}, "", ""))
+
+    def _run(*argv):
+        monkeypatch.setattr(sys, "argv", ["platform_audit_bmc.py", *argv])
+        return bmc.main()
+
+    return _run
+
+
+def test_a_failed_revocation_reaches_the_exit_code(audit_main, bmc, monkeypatch, capsys):
+    """The verdict must be computed after ``__exit__``, not inside the ``with``.
+
+    This is the path that prints the "may remain enabled with ADMINISTRATOR
+    privilege" banner, so it is the last one that may report a clean audit.
+    """
+    monkeypatch.setattr(bmc, "sudo_run", FakeIpmi(fail={"user set password"}))
+
+    code = audit_main("--allow-account-creation")
+
+    err = capsys.readouterr().err
+    assert "SECURITY" in err, "this case is only interesting with the banner"
+    assert code == bmc.EXIT_CREDENTIAL, "exit 0 here contradicts the banner above it"
+
+
+def test_no_bmc_access_is_unresolved_not_success(audit_main, bmc, monkeypatch, capsys):
+    """Never reaching a knob cannot mean "every checked knob is on target"."""
+    monkeypatch.setattr(bmc, "sudo_run", FakeIpmi(fail={"user list"}))
+
+    code = audit_main("--allow-account-creation")
+
+    assert "Could not obtain BMC access" in capsys.readouterr().err
+    assert code == bmc.EXIT_UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "revoke_fails,expected",
+    [(False, "EXIT_UNKNOWN"), (True, "EXIT_CREDENTIAL")],
+)
+def test_a_signal_mid_audit_produces_an_exit_code_not_a_traceback(
+    audit_main, bmc, monkeypatch, revoke_fails, expected
+):
+    """SIGTERM is the case the signal handler exists for, so it must be reported.
+
+    The handler raises KeyboardInterrupt to unwind the ``with``; letting that
+    escape ends the run in a traceback and exit 130, discarding the revocation
+    verdict it just produced.
+    """
+    fake = FakeIpmi(fail={"user disable"} if revoke_fails else ())
+    monkeypatch.setattr(bmc, "sudo_run", fake)
+
+    def _interrupted(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(bmc, "redfish_bios", _interrupted)
+
+    code = audit_main("--allow-account-creation")
+
+    assert fake.ran("channel setaccess 1 3 callin=off"), "the with block must unwind"
+    assert code == getattr(bmc, expected)
+
+
+def test_minting_an_account_requires_an_explicit_opt_in(audit_main, bmc, monkeypatch, capsys):
+    """The README calls this a deliberate choice; the default must not make it."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bmc, "sudo_run", lambda cmd, **kw: (calls.append(cmd), (True, "", ""))[1])
+
+    code = audit_main()
+
+    assert code == bmc.EXIT_UNKNOWN
+    assert not calls, "the BMC must not be touched before the operator opts in"
+    assert "--allow-account-creation" in capsys.readouterr().err
+
+
+def test_ipmitool_is_required_to_mint_even_with_an_explicit_host(
+    audit_main, bmc, monkeypatch, capsys
+):
+    """--bmc-host removes the need to discover the address, not to mint."""
+    monkeypatch.setattr(bmc, "ipmitool_present", lambda: False)
+
+    assert audit_main("--bmc-host", "10.0.0.1", "--allow-account-creation") == bmc.EXIT_UNKNOWN
+    assert "ipmitool" in capsys.readouterr().err
+
+    # ... and it is not required when no account will be minted.
+    monkeypatch.setenv("BMC_PASSWORD", "not-a-real-password")
+    assert audit_main("--bmc-host", "10.0.0.1", "--bmc-user", "ro") == bmc.EXIT_UNKNOWN
+    assert "ipmitool" not in capsys.readouterr().err
 
 
 # ------------------------------------------------------- verdicts / matching
@@ -244,5 +369,4 @@ def test_every_bios_target_cites_its_basis(bmc):
 def test_exit_code_ranks_credentials_above_everything(bmc):
     rows = [{"verdict": "FAIL"}]
     assert bmc.exit_code(rows) == bmc.EXIT_FAIL
-    bmc.CREDENTIAL_FAILURES.append("left enabled")
-    assert bmc.exit_code(rows) == bmc.EXIT_CREDENTIAL
+    assert bmc.exit_code(rows, ["left enabled"]) == bmc.EXIT_CREDENTIAL
