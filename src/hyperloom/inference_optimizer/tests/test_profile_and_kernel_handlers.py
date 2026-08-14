@@ -511,7 +511,7 @@ def test_materialize_profile_bounds_survive_a_replacing_candidate(
     assert "--profiler-config.max_iterations 128" in extra, extra
     # The frontend profiler tracks no iterations, so it has to come back too.
     assert "--profiler-config.ignore_frontend True" in extra, extra
-    assert "--profiler-config.capture_torch_profiler_dir " in extra, extra
+    assert "--profiler-config.capture_torch_profiler True" in extra, extra
     # The candidate's own flags must still take effect, JSON value unmangled.
     assert "--no-enable-prefix-caching" in extra, extra
     assert '--compilation-config {"cudagraph_capture_sizes":[17,34,1088]}' in extra, extra
@@ -612,12 +612,12 @@ def test_materialize_profile_cap_wins_over_a_max_iterations_pinned_in_the_yaml(
     assert extra.rindex("max_iterations 128") > extra.rindex("max_iterations 100000"), extra
 
 
-def test_materialize_profile_capture_dir_wins_over_a_stale_yaml_path(
+def test_materialize_profile_capture_flag_wins_over_a_stale_yaml_value(
     tmp_path,
     monkeypatch,
 ):
-    """A stale capture dir left in the YAML would send this run's traces to the
-    previous session's directory, so this run's dir has to be injected after it."""
+    """A YAML that disables the capture would leave the run with no sidecar traces,
+    so the injected value has to land after it and win the last-wins resolution."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -629,13 +629,15 @@ def test_materialize_profile_capture_dir_wins_over_a_stale_yaml_path(
             "CONC": 32,
             "ISL": 256,
             "OSL": 1024,
-            "EXTRA_VLLM_ARGS": "--profiler-config.capture_torch_profiler_dir /stale/run",
+            "EXTRA_VLLM_ARGS": "--profiler-config.capture_torch_profiler False",
         },
     )
     out = _materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
-    assert "capture_traces" in extra, extra
-    assert extra.rindex("capture_traces") > extra.rindex("/stale/run"), extra
+    assert "--profiler-config.capture_torch_profiler True" in extra, extra
+    assert extra.rindex("capture_torch_profiler True") > extra.rindex(
+        "capture_torch_profiler False"
+    ), extra
 
 
 def test_materialize_profile_restore_rejects_a_zero_max_iterations(
@@ -729,7 +731,7 @@ def test_materialize_profile_restore_accepts_a_bound_that_already_holds(
                 "--profiler-config.delay_iterations 6080 "
                 "--profiler-config.max_iterations 64 "
                 "--profiler-config.ignore_frontend True "
-                "--profiler-config.capture_torch_profiler_dir /x "
+                "--profiler-config.capture_torch_profiler True "
                 "--profiler-config.detailed_trace_annotation True"
             ),
         },
@@ -794,7 +796,7 @@ def test_materialize_profile_restores_max_iterations_even_when_delay_survives(
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.max_iterations 128" in extra, extra
     assert "--profiler-config.ignore_frontend True" in extra, extra
-    assert "--profiler-config.capture_torch_profiler_dir " in extra, extra
+    assert "--profiler-config.capture_torch_profiler True" in extra, extra
     # The candidate's own delay value is left alone; only the missing flags return.
     assert extra.count("--profiler-config.delay_iterations") == 1, extra
 
@@ -981,7 +983,7 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
     tmp_path,
     monkeypatch,
 ):
-    """Patcher True for vLLM ⇒ EXTRA_VLLM_ARGS gains capture_torch_profiler_dir + detailed_trace_annotation on top of the default iteration count."""
+    """Patcher True for vLLM ⇒ EXTRA_VLLM_ARGS gains capture_torch_profiler + detailed_trace_annotation on top of the default iteration count."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -991,7 +993,7 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
-    assert "--profiler-config.capture_torch_profiler_dir " in extra, extra
+    assert "--profiler-config.capture_torch_profiler True" in extra, extra
     assert "--profiler-config.detailed_trace_annotation True" in extra, extra
     # Per-framework dispatch: the SGLang patcher must NOT run for a vLLM YAML.
     assert counts == {"vllm": 1, "sglang": 0}, counts
@@ -1013,7 +1015,7 @@ def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     extra = envs["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
-    assert "capture_torch_profiler_dir" not in extra, extra
+    assert "capture_torch_profiler" not in extra, extra
     assert "detailed_trace_annotation" not in extra, extra
     assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
     assert envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
@@ -1077,7 +1079,7 @@ def test_materialize_profile_kill_switch_skips_patcher_entirely(
     # Safe profiler flags still present.
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     # TraceLens-only flags absent.
-    assert "capture_torch_profiler_dir" not in extra, extra
+    assert "capture_torch_profiler" not in extra, extra
     assert "detailed_trace_annotation" not in extra, extra
     # Patchers never invoked.
     assert counts == {"vllm": 0, "sglang": 0}, counts

@@ -39,13 +39,13 @@ from typing import Any
 _SENTINEL_RELPATH = "python/sglang/srt/managers/scheduler_profiler_mixin.py"
 _SENTINEL_MARKERS: tuple[str, ...] = (
     "shape_discovery",
-    "roofline_annotations",
+    "detailed_annotations",
 )
 # io_struct must also be patched, else the request body fails to deserialise.
 _EXTRA_SENTINEL_RELPATH = "python/sglang/srt/managers/io_struct.py"
 _EXTRA_SENTINEL_MARKERS: tuple[str, ...] = (
     "shape_discovery",
-    "roofline_annotations",
+    "detailed_annotations",
 )
 
 # Path within the TraceLens checkout that hosts the patch sets.
