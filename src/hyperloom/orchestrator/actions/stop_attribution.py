@@ -35,6 +35,7 @@ from typing import NamedTuple
 
 __all__ = [
     "ORCHESTRATOR_CANCELLED_CLASS",
+    "SESSION_BUDGET_BELOW_ONE_ROUND_CLASS",
     "SESSION_TIME_EXHAUSTED_CLASS",
     "STOPPED_BY_THE_RUN",
     "StoppedByTheRun",
@@ -51,6 +52,15 @@ SESSION_TIME_EXHAUSTED_CLASS = "session_time_exhausted"
 # reason their returncodes are: a resume faces the spent budget again and does
 # not face the shutdown.
 ORCHESTRATOR_CANCELLED_CLASS = "orchestrator_cancelled"
+
+# Labels work refused, or cut short, because what is left of the budget cannot
+# pay for a whole round of it. A benchmark round is two passes -- a discarded
+# warmup and the measured pass it makes comparable -- so a budget that fits one
+# fits none: the pass it could pay for is the one whose number nothing may use.
+# Distinct from the class above because the deadline has not passed. Nothing was
+# measured either way, but this one is also known to be permanent: the clock
+# only shrinks, so the round that does not fit now never will.
+SESSION_BUDGET_BELOW_ONE_ROUND_CLASS = "session_budget_below_one_round"
 
 
 class StoppedByTheRun(NamedTuple):
@@ -85,6 +95,15 @@ STOPPED_BY_THE_RUN: dict[str, StoppedByTheRun] = {
         error_class=ORCHESTRATOR_CANCELLED_CLASS,
         interrupted="the orchestrator cancelled this action while this round was running",
         never_started="the orchestrator cancelled this action before this round ran",
+        ends_the_batch=True,
+    ),
+    SESSION_BUDGET_BELOW_ONE_ROUND_CLASS: StoppedByTheRun(
+        error_class=SESSION_BUDGET_BELOW_ONE_ROUND_CLASS,
+        interrupted=(
+            "the warmup pass was stopped at its share of the remaining budget, "
+            "which is therefore too small to fit both passes of this round"
+        ),
+        never_started="the remaining budget cannot fit both passes of this round",
         ends_the_batch=True,
     ),
 }
