@@ -3316,6 +3316,12 @@ async def _run_forge_gemm_tuning(
 
     Supports bf16/fp8/fp4 + sglang/vllm. Only micro-benchmarks;
     returns recommended_env for Hyperloom E2E validation.
+
+    ``model_path`` accepts either a local directory or a Hugging Face repo ID.
+    Forge receives a validated local directory, while result provenance and
+    durable artifact names retain the original logical model identifier.
+    Missing inputs return ``model_path_missing``; inputs that cannot resolve to
+    a local directory return ``model_path_unavailable``.
     """
     from ..state.shared_state import SharedState
 
@@ -3364,7 +3370,7 @@ async def _run_forge_gemm_tuning(
             ),
             "backend": "forge",
         }
-    model_path = str(resolved_model_dir)
+    resolved_model_path = str(resolved_model_dir)
 
     tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
     conc = int(payload.get("conc") or state.conc or os.environ.get("CONC") or 64)
@@ -3403,7 +3409,7 @@ async def _run_forge_gemm_tuning(
                 session_dir,
                 precision,
                 quant_type,
-                model_path,
+                resolved_model_path,
             )
 
     tunableop_input = str(payload.get("tunableop_input") or "").strip()
@@ -3412,7 +3418,11 @@ async def _run_forge_gemm_tuning(
         precision=precision,
         quant_type=quant_type,
         tunableop_input=tunableop_input,
-        **_resolve_vllm_aiter_routing(model_path=model_path, server_log=kernel_sig_log, tp=tp),
+        **_resolve_vllm_aiter_routing(
+            model_path=resolved_model_path,
+            server_log=kernel_sig_log,
+            tp=tp,
+        ),
     )
     shape_capture: HandlerResult | None = None
     block_fp8_profile_capture = _vllm_block_fp8_profile_capture_required(
@@ -3460,7 +3470,7 @@ async def _run_forge_gemm_tuning(
         # full extra server boot.
         _vllm_dense_shape_capture_required(
             framework=forge_framework,
-            model_path=model_path,
+            model_path=resolved_model_path,
             shapes_json=shapes_json,
             tunableop_input=tunableop_input,
             dry_run=bool(payload.get("dry_run")),
@@ -3507,7 +3517,7 @@ async def _run_forge_gemm_tuning(
         )
 
     input_payload = {
-        "model_path": model_path,
+        "model_path": resolved_model_path,
         "framework": forge_framework,
         "precision": precision,
         "quant_type": quant_type,
@@ -3599,6 +3609,8 @@ async def _run_forge_gemm_tuning(
         # source-layer snapshot): copy it into the serving aiter config dir,
         # repoint the env there, and snapshot it so the KEEP survives with the
         # recipe instead of referencing the ephemeral tuner-workspace path.
+        # Keep the logical ID here: a resolved HF snapshot basename is a commit
+        # hash, which would make durable artifact names unstable across revisions.
         _durable_envs, _snap_dir = _persist_forge_gemm_csv_durably(
             dict(result["recommended_env"]),
             model_path=raw_model_path,

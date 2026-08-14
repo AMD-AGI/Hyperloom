@@ -1146,25 +1146,17 @@ class TestForgeGemmHelperCoverage:
         assert durable["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "model_path",
-        [
-            "amd/Unavailable-Model",
-            "/missing/models/unavailable",
-        ],
-    )
-    async def test_run_forge_gemm_tuning_rejects_unavailable_model_path(
+    async def test_run_forge_gemm_tuning_rejects_uncached_hf_repo(
         self,
         tmp_path,
         monkeypatch,
-        model_path,
     ):
         from hyperloom.inference_optimizer import model_config_utils
 
         SharedState(
             precision="mxfp4",
             framework="vllm",
-            model_path=model_path,
+            model_path="amd/Unavailable-Model",
             gpu_type="mi355x",
         ).save(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
@@ -1184,6 +1176,36 @@ class TestForgeGemmHelperCoverage:
 
         result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
 
+        assert result["status"] == "failed"
+        assert result["error_class"] == "model_path_unavailable"
+        assert subprocess_called is False
+
+    @pytest.mark.asyncio
+    async def test_run_forge_gemm_tuning_rejects_missing_absolute_model_path(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        missing_model_dir = tmp_path / "missing-model"
+        SharedState(
+            precision="mxfp4",
+            framework="vllm",
+            model_path=str(missing_model_dir),
+            gpu_type="mi355x",
+        ).save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        subprocess_called = False
+
+        async def _unexpected_subprocess(_cmd, *, timeout_sec):
+            nonlocal subprocess_called
+            subprocess_called = True
+            return 1, "", ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _unexpected_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert missing_model_dir.is_absolute()
         assert result["status"] == "failed"
         assert result["error_class"] == "model_path_unavailable"
         assert subprocess_called is False
