@@ -68,10 +68,28 @@ class SubAgentResult:
         state (str): Terminal state — ``"succeeded"`` / ``"failed"``.
         result (dict): Executor result payload (empty on failure).
         error (str | None): Error string when the task failed, else None.
-        error_class (str): Machine-readable failure category (e.g.
-            ``"policy_source_file_outside_trusted_scope"``) for a
-            ``PolicyDenied`` dispatch rejection; empty for other failures
-            (executors set their own ``error_class`` inside ``result``).
+        error_class (str): Machine-readable failure category. Not a closed
+            enum — each producer mints its own values, so a new prefix
+            family here is discoverable only via its consumers, not via a
+            central registry:
+
+            * ``"policy_{rule}"`` (e.g.
+              ``"policy_source_file_outside_trusted_scope"``): a
+              ``PolicyDenied`` dispatch rejection, keyed on
+              :attr:`PolicyDenied.rule <..policy.gate.PolicyDenied.rule>`.
+              Falls through any exact-match bucket below by design — a
+              policy denial isn't a runtime crash/oom/hang, so
+              :meth:`writeback._pitfall_severity_for` correctly excludes it
+              from ``SEVERITY_CRASH``. Still lands in the gap ledger as its
+              own ``(action, error_class)`` key
+              (:meth:`explore._extract_gaps_from_attempts`), which is enough
+              to group repeat denials without a dedicated bucket.
+            * ``"crash"`` / ``"oom"`` / ``"hang"`` / ``"detokenizer_stall"``:
+              exact-matched by :meth:`writeback._pitfall_severity_for` to
+              classify a failure as crash-severity for the KB.
+            * Anything else (including empty): executors set their own
+              ``error_class`` inside ``result``, or leave it unset, in which
+              case the gap ledger buckets it as ``"unknown_error"``.
     """
 
     task_id: str
@@ -237,14 +255,14 @@ class SubAgentRunner:
                     "cancelled",
                     evidence={
                         "reason": "policy_denied",
-                        "rule": getattr(denied, "rule", None),
+                        "rule": denied.rule,
                         "error": str(denied),
                     },
                     context="dispatch_policy_denied",
                 )
                 if prebound_lease is not None:
                     await self.locks.release(prebound_lease)
-                rule = getattr(denied, "rule", "") or "denied"
+                rule = denied.rule or "denied"
                 return SubAgentResult(
                     task_id=task.task_id,
                     state="failed",
