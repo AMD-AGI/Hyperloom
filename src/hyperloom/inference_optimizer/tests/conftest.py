@@ -46,6 +46,26 @@ def _bootstrap_kernel_agent_env() -> None:
 _bootstrap_kernel_agent_env()
 
 
+def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
+    """Put the executors in multi-node mode with a no-op per-round server restart.
+
+    Multi-node is what puts a discarded client-warmup pass in front of a measured
+    round, so it is the mode in which one round launches more than one benchmark
+    process -- and the restart between them is the part that needs a cluster.
+
+    Args:
+        monkeypatch: The requesting test's monkeypatch fixture.
+        nodes: How many nodes to claim, which is what the executors read.
+    """
+    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl
+
+    async def _no_restart(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", str(nodes))
+    monkeypatch.setattr(mnl, "restart_server_for_round", _no_restart)
+
+
 def launches_by_round_slot(recorded: list[dict]) -> dict[str, dict]:
     """Index recorded benchmark launches by the output slot each round ran in.
 
