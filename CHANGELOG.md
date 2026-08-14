@@ -56,6 +56,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   read it; `KERNEL_OPT_BACKEND_ORDER` is the sole backend switch, and only an
   exact `forge` opts out of the default GEAK phase.
 
+- `agents/kernel/tools/parallel_e2e_runner.py` is gone. It was the
+  self-validation harness written alongside the original kernel-agent, back when
+  no KERNEL phase existed to prove the toolkit end to end; its own first step
+  (running the SGLang baseline) was removed in May, leaving a driver with no
+  caller whose `--backends` default was empty, so it raised on any plain
+  invocation. Its `load_env_file` duplicated the credential-alias derivation that
+  `tools/backends/ray_runtime.py` still performs under wider test coverage.
+
 ### Changed
 
 - `_geak_enabled` no longer falls back to the persisted
