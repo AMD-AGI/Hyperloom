@@ -1573,70 +1573,45 @@ class PreludePhase(PhaseHandler):
             log.debug("combined warm replay pending save failed", exc_info=True)
         return task
 
-    def _persist_required_recipe_keep(
+    def _resolve_promoted_recipe_checkout(
         self,
         result: dict[str, Any],
         task: "Task | None",
     ) -> tuple[bool, dict[str, Any]]:
-        """Atomically persist the validated required timeline to canonical IX."""
+        """Validate the already-patched checkout selected by warm replay."""
         params = (task.params if task is not None else {}) or {}
         if not params.get("required_patch_timeline") or not params.get("patches"):
             return True, {"status": "not_required"}
-        from ..actions.executors.baseline import _apply_warm_patches, _git_head_sha
 
-        canonical = str(result.get("warm_patch_canonical_target") or "").strip()
-        canonical_sha = _git_head_sha(canonical)
-        if not canonical or not canonical_sha:
+        target = str(result.get("warm_patch_target") or "").strip()
+        pre_sha = str(result.get("warm_patch_pre_sha") or "").strip()
+        manifest = result.get("warm_patch_snapshot_manifest")
+        if not target or not pre_sha or not isinstance(manifest, dict):
             return False, {
                 "status": "failed",
-                "failure": "canonical_git_head_unavailable",
-                "target_repo": canonical,
+                "failure": "validated_recipe_checkout_incomplete",
+                "target_repo": target,
             }
         try:
-            def _persist_canonical_snapshot(manifest: dict[str, Any]) -> bool:
-                prior = dict(
-                    getattr(self.shared_state, "warm_replay_pending", {}) or {}
-                )
-                current = {
-                    **prior,
-                    "status": "persisting_required_recipe",
-                    "canonical_patch_target": canonical,
-                    "canonical_patch_pre_sha": canonical_sha,
-                    "canonical_patch_snapshot_manifest": manifest,
-                }
-                self.shared_state.warm_replay_pending = current
-                try:
-                    self.shared_state.save(self.session_dir)
-                except Exception:  # noqa: BLE001
-                    self.shared_state.warm_replay_pending = prior
-                    return False
-                return True
-
-            persisted = _apply_warm_patches(
-                dict(params),
-                canonical,
-                Path(self.session_dir) / "runtime" / "warm_keep_persist",
-                before_mutation=_persist_canonical_snapshot,
-            )
-        except Exception as exc:  # noqa: BLE001
+            target_path = Path(target).resolve(strict=True)
+            manifest_target = Path(
+                str(manifest.get("repo_path") or "")
+            ).resolve(strict=True)
+        except (OSError, ValueError) as exc:
             return False, {
                 "status": "failed",
-                "failure": f"canonical_apply_exception:{type(exc).__name__}",
+                "failure": f"validated_recipe_checkout_invalid:{type(exc).__name__}",
             }
-        if not isinstance(persisted, dict) or persisted.get("status") != "prepared":
-            failure = (
-                persisted
-                if isinstance(persisted, dict)
-                else {"status": "failed", "failure": "non_required_apply_result"}
-            )
-            return False, failure
-        result["canonical_patch_result"] = persisted
-        result["canonical_patch_target"] = canonical
-        result["canonical_patch_pre_sha"] = canonical_sha
-        result["canonical_patch_snapshot_manifest"] = persisted.get(
-            "snapshot_manifest"
-        )
-        return True, persisted
+        if target_path != manifest_target:
+            return False, {
+                "status": "failed",
+                "failure": "validated_recipe_checkout_manifest_mismatch",
+                "target_repo": str(target_path),
+            }
+        return True, {
+            "status": "promoted",
+            "target_repo": str(target_path),
+        }
 
     def _rollback_combined_warm(
         self,
@@ -1657,28 +1632,6 @@ class PreludePhase(PhaseHandler):
         if target and recipe_manifest:
             restores.append(
                 _revert_patches(target, pre_sha, recipe_manifest)
-            )
-        canonical = str(
-            result.get("canonical_patch_target")
-            or pending.get("canonical_patch_target")
-            or ""
-        )
-        canonical_sha = str(
-            result.get("canonical_patch_pre_sha")
-            or pending.get("canonical_patch_pre_sha")
-            or ""
-        )
-        canonical_manifest = (
-            result.get("canonical_patch_snapshot_manifest")
-            or pending.get("canonical_patch_snapshot_manifest")
-        )
-        if canonical and canonical_manifest:
-            restores.append(
-                _revert_patches(
-                    canonical,
-                    canonical_sha,
-                    canonical_manifest,
-                )
             )
         params = (task.params if task is not None else {}) or {}
         kernel_applied = (
@@ -1897,34 +1850,43 @@ class PreludePhase(PhaseHandler):
                     historical_bar,
                     3,
                 )
+        promoted_checkout = ""
         if reproduced:
             params = (task.params if task is not None else {}) or {}
-            persisted, persistence = self._persist_required_recipe_keep(
+            promoted, promotion = self._resolve_promoted_recipe_checkout(
                 result,
                 task,
             )
-            if not persisted:
+            if not promoted:
                 if not self._require_combined_warm_rollback(
                     result,
                     task,
                     outcome,
                 ):
                     return
-                outcome["status"] = "persistence_failed"
+                outcome["status"] = "promotion_failed"
                 outcome["reason"] = str(
-                    persistence.get("failure")
-                    or "canonical required patch persistence failed"
+                    promotion.get("failure")
+                    or "validated Recipe checkout promotion failed"
                 )
-                outcome["canonical_patch_result"] = persistence
+                outcome["recipe_checkout_promotion"] = promotion
                 kernel_outcome = {
                     "status": "reverted",
-                    "reason": "recipe_persistence_failed",
+                    "reason": "recipe_checkout_promotion_failed",
                     "validation": "combined_recipe_kernel",
                 }
                 outcome["kernel"] = kernel_outcome
                 state.warm_replay_outcome = outcome
                 state.save(self.session_dir)
                 return
+            promoted_checkout = (
+                str(promotion.get("target_repo") or "").strip()
+                if promotion.get("status") == "promoted"
+                else ""
+            )
+            if promoted_checkout:
+                state.active_inferencex_path = promoted_checkout
+                outcome["active_inferencex_path"] = promoted_checkout
             warm_args = str(params.get("extra_server_args") or "").strip()
             warm_envs = dict(params.get("extra_envs") or {})
             replayed_patch_refs = [
@@ -1987,6 +1949,8 @@ class PreludePhase(PhaseHandler):
                 "source_tier": outcome.get("warm_recipe_tier", ""),
                 "source_confidence": outcome.get("warm_recipe_conf", 0.0),
             }
+            if promoted_checkout:
+                stack_entry["inferencex_path"] = promoted_checkout
             kernel_outcome = self._book_combined_kernel_keep(result, task)
             outcome["kernel"] = dict(kernel_outcome)
             if kernel_outcome.get("kept"):
@@ -2022,6 +1986,8 @@ class PreludePhase(PhaseHandler):
                 state.warm_replay_pending = {}
                 state.warm_replay_outcome = outcome
                 state.save(self.session_dir)
+                if promoted_checkout:
+                    os.environ["INFERENCEX_PATH"] = promoted_checkout
                 return
             state.optimization_stack.append(stack_entry)
             # gain_per_stack_entry runs in lock-step with optimization_stack.
@@ -2043,6 +2009,8 @@ class PreludePhase(PhaseHandler):
                 "extra_server_args": warm_args,
                 "extra_envs": warm_envs,
             }
+            if promoted_checkout:
+                state.current_best["inferencex_path"] = promoted_checkout
             if stack_entry.get("kernel_replay"):
                 state.current_best["kernel_replay"] = dict(
                     stack_entry["kernel_replay"]
@@ -2103,6 +2071,8 @@ class PreludePhase(PhaseHandler):
         state.warm_replay_pending = {}
         state.warm_replay_outcome = outcome
         state.save(self.session_dir)
+        if promoted_checkout:
+            os.environ["INFERENCEX_PATH"] = promoted_checkout
 
     async def _maybe_enqueue_prelude_initial_analysis_after_baseline(
         self,

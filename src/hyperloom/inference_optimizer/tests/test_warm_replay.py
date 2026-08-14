@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -1734,8 +1735,19 @@ def _git_repo_for_required_patch(tmp_path: Path) -> tuple[Path, str]:
     return repo, patch
 
 
-def test_combined_keep_persists_required_patch_to_canonical(tmp_path):
-    canonical, patch_content = _git_repo_for_required_patch(tmp_path)
+def test_combined_keep_promotes_validated_checkout_without_reapply(
+    tmp_path,
+    monkeypatch,
+):
+    checkout, patch_content = _git_repo_for_required_patch(tmp_path)
+    subprocess.run(
+        ["git", "apply", "-"],
+        cwd=checkout,
+        input=patch_content.encode(),
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setenv("INFERENCEX_PATH", "/original/inferencex")
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
@@ -1762,7 +1774,12 @@ def test_combined_keep_persists_required_patch_to_canonical(tmp_path):
         {
             "status": "succeeded",
             "output_throughput": 612.0,
-            "warm_patch_canonical_target": str(canonical),
+            "warm_patch_target": str(checkout),
+            "warm_patch_pre_sha": "base-sha",
+            "warm_patch_snapshot_manifest": {
+                "repo_path": str(checkout),
+                "manifest_path": str(tmp_path / "manifest.json"),
+            },
             "warm_patches_applied": [
                 {
                     "patch_file": "explore/overlays/000000/00-p.patch",
@@ -1773,12 +1790,14 @@ def test_combined_keep_persists_required_patch_to_canonical(tmp_path):
         task=task,
     )
 
-    assert "persisted = True" in (canonical / "vllm" / "fp8.py").read_text()
+    assert "persisted = True" in (checkout / "vllm" / "fp8.py").read_text()
+    assert coord.shared_state.active_inferencex_path == str(checkout.resolve())
+    assert os.environ["INFERENCEX_PATH"] == str(checkout.resolve())
     assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
     assert coord.shared_state.warm_replay_pending == {}
 
 
-def test_canonical_persistence_failure_rejects_keep_and_rolls_kernel(
+def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(
     tmp_path, monkeypatch
 ):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
@@ -1811,29 +1830,36 @@ def test_canonical_persistence_failure_rejects_keep_and_rolls_kernel(
             "warm_kernel_apply_results": [{"manifest_path": "/tmp/m"}],
         }
     )
+    mirror = tmp_path / "mirror"
+    other = tmp_path / "other"
+    mirror.mkdir()
+    other.mkdir()
 
     coord._promote_warm_replay(
         {
             "status": "succeeded",
             "output_throughput": 612.0,
-            "warm_patch_target": "/mirror",
+            "warm_patch_target": str(mirror),
             "warm_patch_pre_sha": "abc",
-            "warm_patch_canonical_target": str(tmp_path / "not-a-repo"),
+            "warm_patch_snapshot_manifest": {
+                "repo_path": str(other),
+                "manifest_path": str(tmp_path / "manifest.json"),
+            },
         },
         task=task,
     )
 
-    assert coord.shared_state.warm_replay_outcome["status"] == "persistence_failed"
+    assert coord.shared_state.warm_replay_outcome["status"] == "promotion_failed"
     assert coord.shared_state.optimization_stack == []
     assert kernel_rollbacks == [[{"manifest_path": "/tmp/m"}]]
 
 
-def test_persistence_failure_retains_pending_when_rollback_fails(tmp_path):
+def test_checkout_promotion_failure_retains_pending_when_rollback_fails(tmp_path):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
     coord.shared_state.warm_replay_pending = {"task_id": "warm"}
-    coord.phase_prelude._persist_required_recipe_keep = (  # type: ignore[method-assign]
+    coord.phase_prelude._resolve_promoted_recipe_checkout = (  # type: ignore[method-assign]
         lambda *_args: (False, {"failure": "persist failed"})
     )
     coord.phase_prelude._rollback_combined_warm = (  # type: ignore[method-assign]
@@ -1856,48 +1882,6 @@ def test_persistence_failure_retains_pending_when_rollback_fails(tmp_path):
     )
 
     assert coord.shared_state.warm_replay_outcome["status"] == "rollback_failed"
-    assert coord.shared_state.warm_replay_pending == {"task_id": "warm"}
-
-
-def test_canonical_rollback_is_not_armed_when_manifest_save_fails(
-    tmp_path,
-    monkeypatch,
-):
-    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    coord.shared_state.warm_replay_pending = {"task_id": "warm"}
-
-    def _save(*_args, **_kwargs):
-        if coord.shared_state.warm_replay_pending.get(
-            "canonical_patch_target"
-        ):
-            raise OSError("durability failed")
-
-    coord.shared_state.save = _save
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
-
-    monkeypatch.setattr(baseline_module, "_git_head_sha", lambda _path: "sha")
-
-    def _apply(_params, _target, _output, *, before_mutation=None):
-        manifest = {"manifest_path": "/tmp/canonical-manifest.json"}
-        assert before_mutation is not None
-        assert before_mutation(manifest) is False
-        return {"status": "failed", "failure": "pending_state_persist_failed"}
-
-    monkeypatch.setattr(baseline_module, "_apply_warm_patches", _apply)
-    task = _StubTask(
-        params={
-            "required_patch_timeline": True,
-            "patches": [{"patch_file": "p.patch"}],
-        }
-    )
-
-    persisted, failure = coord.phase_prelude._persist_required_recipe_keep(
-        {"warm_patch_canonical_target": str(tmp_path)},
-        task,
-    )
-
-    assert persisted is False
-    assert failure["failure"] == "pending_state_persist_failed"
     assert coord.shared_state.warm_replay_pending == {"task_id": "warm"}
 
 
