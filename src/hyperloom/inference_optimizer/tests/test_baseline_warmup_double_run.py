@@ -1872,6 +1872,28 @@ def _capturing_fake_run(returncode: int = 0, *, produces_workspace: bool = True)
     return fake_run, calls
 
 
+class _CapturingLease:
+    """A serving-lease stand-in that records how a round reached the Ray actor.
+
+    The Ray path is the same round through a different door, and the door matters
+    here: the lease is handed what is left of the budget as a duration, because
+    the absolute deadline is a ``time.monotonic()`` instant that means nothing in
+    the actor's process. So it is a launch site of its own, with its own way of
+    losing the reaper.
+    """
+
+    def __init__(self) -> None:
+        self._run, self.calls = _capturing_fake_run()
+
+    def run_session_kill(self, cmd, **kwargs) -> tuple[int | None, str, str]:
+        """Record the launch and answer as the actor does, with a bare triple."""
+        proc = self._run(cmd, **kwargs)
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def close(self) -> None:
+        """The executor closes the lease it was given; nothing is held here."""
+
+
 def _run_baseline_under_budget(
     tmp_path,
     *,
@@ -1937,6 +1959,25 @@ class TestTheSessionBudgetReachesTheBaselineRound:
 
         assert set(launches_by_round_slot(calls)) >= set(_BASELINE_ROUND_SLOTS)
         assert [c["round_slot"] for c in calls if c.get("session_deadline_sec") is None] == []
+
+    def test_the_ray_path_is_handed_the_budget_as_a_duration(self, tmp_path, monkeypatch):
+        """The fourth launch site, and the one a parameterization cannot reach.
+
+        Production runs a single-node round through a Ray lease, which is handed a
+        remaining duration rather than the deadline, by a different call. The
+        reaper in the actor's process has nothing else to go on.
+        """
+        from hyperloom.orchestrator.actions.executors import _ray_serving
+
+        lease = _CapturingLease()
+        monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: lease)
+        result, _calls = _run_baseline_under_budget(tmp_path, remaining_sec=3600.0)
+
+        assert result["status"] == "succeeded"
+        launch = launches_by_round_slot(lease.calls)[_MEASURED_ROUND_SLOT]
+        remaining = launch.get("session_remaining_sec")
+        assert remaining is not None, f"the budget did not cross the process boundary: {sorted(launch)}"
+        assert 0 < remaining <= 3600.0
 
     def test_the_hang_backstop_is_clamped_to_what_is_left(self, tmp_path):
         """A cap larger than the budget outlives the session it belongs to."""
