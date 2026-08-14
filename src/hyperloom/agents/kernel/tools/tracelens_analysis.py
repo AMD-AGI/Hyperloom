@@ -7079,6 +7079,11 @@ def main() -> int:
         trace_input_type, trace_files = discover_trace_inputs(trace_input)
         append_log(log_path, f"trace_input_type={trace_input_type}")
         append_log(log_path, f"trace_files={len(trace_files)}")
+        # The file the analysis will actually read. Discovery order picks the
+        # default; the preflight below promotes whichever candidate it proves
+        # carries GPU kernels, because passing the check on one file and then
+        # analysing another is how an empty trace reaches TraceLens silently.
+        analysis_trace_path = trace_files[0] if trace_files else None
 
         # Fail-fast on CPU-only traces.
         #
@@ -7094,12 +7099,20 @@ def main() -> int:
                 kernel_event_count = count_gpu_kernel_events(candidate)
                 probed.append(f"{candidate.name}={kernel_event_count}")
                 if kernel_event_count:
+                    analysis_trace_path = candidate
                     break
             append_log(
                 log_path,
                 f"trace_gpu_kernel_events={kernel_event_count} "
                 f"(probed={', '.join(probed)})",
             )
+            if analysis_trace_path is not None and analysis_trace_path != trace_files[0]:
+                append_log(
+                    log_path,
+                    "trace_analysis_input promoted from "
+                    f"{trace_files[0].name} to {analysis_trace_path.name} "
+                    "(the leading candidate carried no GPU kernel events)",
+                )
             if kernel_event_count == 0:
                 raise RuntimeError(
                     "Trace contains zero GPU kernel events in any of "
@@ -7209,12 +7222,16 @@ def main() -> int:
             # Split the full-window filtered trace into steady-state chunks via
             # TraceLens's own splitter, since the perf report expects a single
             # steady-state chunk.
-            cli_trace_path = trace_files[0]
+            # Whichever candidate the preflight proved has GPU kernels, which is
+            # trace_files[0] unless it was promoted. Analysing a different file
+            # from the one that passed the check would let an empty rank through
+            # on a sibling's evidence.
+            cli_trace_path = analysis_trace_path
             # The un-split source trace: analysis runs on the steady-state chunk
             # (cli_trace_path is reassigned below), but graph-capture health is a
             # whole-run property and must be read from the original trace -- the
             # chunk may drop the graph-launch runtime events the detector needs.
-            raw_trace_path = trace_files[0]
+            raw_trace_path = analysis_trace_path
             trace_split_blocked = False
             if not args.skip_split:
                 update_status(
@@ -7233,7 +7250,7 @@ def main() -> int:
                     sys.executable,
                     "-m",
                     "TraceLens.TraceUtils.split_inference_trace_annotation",
-                    str(trace_files[0]),
+                    str(analysis_trace_path),
                     "-o",
                     str(split_dir),
                     "--find-steady-state",
@@ -7293,7 +7310,7 @@ def main() -> int:
                 # Splitter produced nothing -> trace_split_no_steady_state failure.
                 if split_rc != 0 or not (mixed_chunks or decode_chunks or prefill_chunks):
                     warning = _build_trace_split_warning(
-                        trace_input=trace_files[0],
+                        trace_input=analysis_trace_path,
                         split_dir=split_dir,
                         split_rc=split_rc,
                         mixed_count=len(mixed_chunks),
@@ -7336,7 +7353,7 @@ def main() -> int:
                             "of the available_modes (or pass --steady-state-mode "
                             "directly when invoking tracelens_analysis.py)."
                         ),
-                        "trace_input": str(trace_files[0]),
+                        "trace_input": str(analysis_trace_path),
                         "split_dir": str(split_dir),
                     }
                     trace_health_warnings.append(warning)

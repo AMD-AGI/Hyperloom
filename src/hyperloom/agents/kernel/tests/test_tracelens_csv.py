@@ -2150,6 +2150,109 @@ def _find_splitter_cmd(captured):
     )
 
 
+def _drive_main_over_capture_dir(tmp_path, trace_dir):
+    """Drive tla.main() with a capture *directory* and capture subprocess argvs.
+
+    A sibling of :func:`_drive_main_capturing_subprocess`, which always passes a
+    single file. Multi-rank selection only shows up when discovery has more than
+    one candidate to choose from.
+    """
+    import os as _os
+    from unittest.mock import patch
+
+    tl_root = tmp_path / "TraceLens-internal"
+    skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / "skills" / "analysis-orchestrator"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("stub")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    captured: list[list[str]] = []
+
+    class _Result:
+        def __init__(self, returncode=0, stdout=""):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    def fake_run(cmd, *_a, **_kw):
+        captured.append(list(cmd))
+        return _Result(returncode=0, stdout="ok")
+
+    argv = [
+        "tracelens_analysis.py",
+        "--trace-input", str(trace_dir),
+        "--workspace-path", str(workspace),
+        "--tracelens-root", str(tl_root),
+        "--target-platform", "MI300X",
+        "--top-k", "5",
+        "--budget-minutes", "1",
+        "--no-llm-orchestrator",
+    ]
+
+    env_backup = dict(_os.environ)
+    try:
+        with patch.object(tla.subprocess, "run", side_effect=fake_run), \
+                patch.object(tla.sys, "argv", argv):
+            try:
+                tla.main()
+            except SystemExit:
+                pass
+    finally:
+        _os.environ.clear()
+        _os.environ.update(env_backup)
+    return captured
+
+
+def _rank_trace(path: Path, kernels: int) -> Path:
+    with gzip.open(path, "wt") as fh:
+        json.dump({"traceEvents": [
+            {"cat": "kernel", "name": "void real_kernel<...>", "dur": 5.0}
+            for _ in range(kernels)
+        ]}, fh)
+    return path
+
+
+def test_analysis_input_follows_the_candidate_that_passed_the_preflight(tmp_path):
+    """A CPU-only leading rank must not be what gets analysed.
+
+    The preflight probes several candidates, so it can pass on rank_1 while
+    rank_0 leads discovery. If the analysis kept using the first candidate, the
+    check would clear a capture on one rank's evidence and then hand TraceLens
+    the empty one -- quieter than the failure it replaced, and worse.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    empty = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0)
+    populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
+
+    # Discovery still leads with rank_0: the promotion, not the ordering, is what
+    # this test is about.
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    assert traces[0] == empty
+
+    captured = _drive_main_over_capture_dir(tmp_path, trace_dir)
+
+    splitter = _find_splitter_cmd(captured)
+    assert splitter is not None, "the splitter should have been invoked"
+    args = [str(p) for p in splitter]
+    assert str(populated) in args
+    assert str(empty) not in args
+
+
+def test_analysis_input_is_left_alone_when_the_first_candidate_has_kernels(tmp_path):
+    """No promotion when the leading candidate is already the right one."""
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    first = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=9)
+    _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=9)
+
+    captured = _drive_main_over_capture_dir(tmp_path, trace_dir)
+
+    splitter = _find_splitter_cmd(captured)
+    assert splitter is not None
+    assert str(first) in [str(p) for p in splitter]
+
+
 def test_194_3_splitter_receives_R_from_cli_arg(tmp_path):
     """`--split-r 0.5` must produce `--R 0.5` on the splitter argv (fractional ratios survive verbatim)."""
     captured, _ = _drive_main_capturing_subprocess(
