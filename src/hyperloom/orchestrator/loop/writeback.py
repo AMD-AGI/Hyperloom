@@ -312,9 +312,8 @@ class WritebackCollaborator:
     ) -> bool:
         """Stage one KEEP into its owner section.
 
-        Returns ``False`` (row retained) when the facade is inactive, referenced
-        patch members are missing, or staging fails. A config-only KEEP with no
-        patches writes config and drains normally.
+        Returns ``False`` when patch staging must be retried. Final config is
+        published once from durable ``current_best`` at CLOSE.
         """
         normalized = str(owner or "").strip().upper()
         facade = (
@@ -339,11 +338,7 @@ class WritebackCollaborator:
             refs = facade.stage_patches(sources, stack_index=stack_index)
             if len(refs) != len(sources) or any(not ref for ref in refs):
                 return False
-        return facade.write_config(
-            self.shared_state.current_best
-            if isinstance(self.shared_state.current_best, Mapping)
-            else {}
-        )
+        return True
 
     def _enqueue_agent_keep_outbox(
         self,
@@ -1165,7 +1160,6 @@ class WritebackCollaborator:
         if is_keep and gain_pct is not None and gain_pct > 0:
             statement = self._coord._build_statement(
                 change=change,
-                gain_pct=gain_pct,
                 kind="lesson",
             )
             impact = self._coord._build_measured_impact(
@@ -1289,7 +1283,6 @@ class WritebackCollaborator:
         *,
         change: str,
         kind: str,
-        gain_pct: float | None = None,  # kept for backward call-signature compat
         severity: str | None = None,
     ) -> str:
         """Build the lesson statement / pitfall description hashed into the KB canonical_id; MUST exclude volatile fields (e.g. gain_pct) so N sessions merge instead of producing N rows. Identity = framework + change + model/hw.
@@ -1297,8 +1290,6 @@ class WritebackCollaborator:
         Args:
             change: The summarized change description.
             kind: ``"lesson"`` or ``"pitfall"`` — selects the rendered form.
-            gain_pct: Kept for backward call-signature compat; intentionally not
-                included in the statement.
             severity: The pitfall severity, rendered only when ``kind`` is
                 ``"pitfall"``.
 
@@ -1310,7 +1301,6 @@ class WritebackCollaborator:
         model = self.shared_state.model_name or "?"
         hw = self.shared_state.gpu_type or "?"
         if kind == "lesson":
-            # gain_pct intentionally NOT included — see docstring.
             return f"{fw_tag}{change} on {model}/{hw}"
         # kind == "pitfall"
         return f"{fw_tag}{change} → {severity or '?'} on {model}/{hw}"
@@ -3257,7 +3247,6 @@ class WritebackCollaborator:
     ) -> None:
         """Promote an explore result: ledger increment, winners, current_best lift, resume revalidation."""
         changed = False
-        stack_len_before = len(self.shared_state.optimization_stack or [])
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
         # The executor already did per-variant KEEP/REVERT + rebench, so winners
@@ -3617,14 +3606,6 @@ class WritebackCollaborator:
             "keep_unstable_count": len(result.get("keep_unstable_in_stack") or []),
             "explore_grid_exhausted": bool(result.get("explore_grid_exhausted")),
         }
-        if promoted and len(self.shared_state.optimization_stack or []) > stack_len_before:
-            self._enqueue_agent_keep_outbox(
-                owner="EXPLORE",
-                stack_index=len(self.shared_state.optimization_stack) - 1,
-                result=result,
-                task=task,
-                include_patches=False,
-            )
         outcome.changed = changed
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras

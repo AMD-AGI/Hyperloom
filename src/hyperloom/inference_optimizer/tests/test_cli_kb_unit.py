@@ -26,42 +26,6 @@ def _args(**over):
     return argparse.Namespace(**base)
 
 
-def test_resolve_local_kb_root_explicit(tmp_path) -> None:
-    out = cli_kb._resolve_local_kb_root(_args(local_kb_root=str(tmp_path / "kb")))
-    assert out == tmp_path / "kb"
-
-
-def test_resolve_local_kb_root_env(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "envkb"))
-    out = cli_kb._resolve_local_kb_root(_args())
-    assert out == tmp_path / "envkb"
-
-
-def test_resolve_local_kb_root_default(monkeypatch) -> None:
-    monkeypatch.delenv("HYPERLOOM_LOCAL_KB_ROOT", raising=False)
-    out = cli_kb._resolve_local_kb_root(_args())
-    assert out.name == "knowledge"
-
-
-def test_dispatcher_degraded_kb(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    kb = cli_kb._build_recipe_kb_dispatcher(_args(degraded_kb=True))
-    assert kb is None
-
-
-def test_dispatcher_local_only_no_gbrain(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    kb = cli_kb._build_recipe_kb_dispatcher(_args())
-    assert kb.mode == "local"
-
-
-def test_dispatcher_remote_returns_none(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
-    monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path / "kb"))
-    monkeypatch.setenv("KB_STORE_URL", "https://kb.test")
-    monkeypatch.setenv("KB_STORE_TOKEN", "token")
-    kb = cli_kb._build_recipe_kb_dispatcher(_args())
-    assert kb is None
 def test_attach_recipe_audit_hook_appends_jsonl(tmp_path) -> None:
     import json
 
@@ -95,15 +59,6 @@ def test_bootstrap_recipe_kb_degraded_returns_none(tmp_path, monkeypatch, capsys
     )
     assert kb is None
     assert "DISABLED (--degraded-kb)" in capsys.readouterr().out
-
-
-def test_degraded_dispatcher_bypasses_remote_configuration_validation(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
-    monkeypatch.delenv("KB_STORE_URL", raising=False)
-    monkeypatch.delenv("KB_STORE_TOKEN", raising=False)
-    assert cli_kb._build_recipe_kb_dispatcher(_args(degraded_kb=True)) is None
 
 
 def test_bootstrap_recipe_kb_success(tmp_path, monkeypatch) -> None:

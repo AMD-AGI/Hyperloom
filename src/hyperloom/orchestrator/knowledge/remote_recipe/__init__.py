@@ -449,8 +449,17 @@ class RemoteWarmRecipeAdapter:
             candidate_dir / ".selection-sdk",
             warm_start_dir=candidate_dir,
         )
+        replay = RecipeReplayKB(sections)
+        config = replay.read_config()
+        config_envs = config.get("extra_envs")
+        if (
+            str(config.get("extra_server_args") or "").strip()
+            or (isinstance(config_envs, Mapping) and bool(config_envs))
+        ):
+            return True
         for reader_type in (ExploreAgentKB, FrameworkAgentKB):
             reader = reader_type(sections)
+            # Legacy schema-v1 config fallback.
             config = reader.read_config()
             if str(config.get("extra_server_args") or "").strip():
                 return True
@@ -459,7 +468,7 @@ class RemoteWarmRecipeAdapter:
                 return True
             if reader.read_patches():
                 return True
-        if RecipeReplayKB(sections).read_patch_timeline():
+        if replay.read_patch_timeline():
             return True
         kernel = KernelAgentKB(sections)
         for column in (
@@ -615,11 +624,6 @@ class RemoteWarmRecipeAdapter:
         self._cache[canonical_id] = selected
         self._materialized_identity = canonical_id
         return True
-
-    def put_recipe(self, **kwargs: Any) -> dict[str, Any]:
-        """No-op the legacy T0 anchor write; CLOSE owns remote publication."""
-        log.debug("Remote Recipe KB T0 put_recipe is a no-op; CLOSE owns publication")
-        return dict(kwargs)
 
     def close(self) -> None:
         """The wrapped blocking client has no explicit lifecycle."""

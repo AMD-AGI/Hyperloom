@@ -119,9 +119,6 @@ class KnowledgePlane:
             ),
         }
 
-    def reset_round_caches(self) -> None:
-        """No-op at EXPLORE round boundaries."""
-
     @property
     def pr_monitor_enabled(self) -> bool:
         """Whether the PR Monitor client is wired and enabled.

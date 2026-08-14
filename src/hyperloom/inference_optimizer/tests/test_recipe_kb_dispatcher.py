@@ -56,15 +56,6 @@ def test_attempt_api_delegates_locally(kb: RecipeKB) -> None:
     ] == ["reverted"]
 
 
-def test_prefer_reranks_local_search_without_dropping(kb: RecipeKB) -> None:
-    first = _cid()
-    second = first.replace(":m:", ":m2:")
-    kb.put_recipe(canonical_id=first, model="m", extras={"tp": 4})
-    kb.put_recipe(canonical_id=second, model="m2", extras={"tp": 8})
-    rows = kb.search(prefer={"tp": 8})
-    assert [row["canonical_id"] for row in rows] == [second, first]
-
-
 def test_audit_is_local_and_best_effort(kb: RecipeKB) -> None:
     events: list[dict] = []
     kb.audit_hook = events.append

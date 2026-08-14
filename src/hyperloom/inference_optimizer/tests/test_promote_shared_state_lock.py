@@ -295,38 +295,6 @@ async def test_promote_explore_promoted_writes_state_and_audit(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_promote_explore_stages_final_config_after_keep(
-    session_dir, tmp_path, monkeypatch
-):
-    draft = tmp_path / "kb-draft"
-    monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
-    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
-    coord = _coord(session_dir)
-    coord.shared_state.baseline_tput = 100.0
-    winner = {
-        "name": "v1",
-        "fingerprint": "abc",
-        "extra_server_args": "--page-size 32",
-        "extra_envs": {"VLLM_TEST_KEEP": "1"},
-        "tput": 130.0,
-    }
-
-    await coord._promote_to_shared_state(
-        "explore",
-        {
-            "winners": [winner],
-            "best_variant": winner,
-            "output_throughput": 130.0,
-        },
-        task=_task("explore"),
-    )
-
-    staged = KnowledgeSections(draft).staged("explore")
-    assert staged.knowledge["extra_server_args"] == "--page-size 32"
-    assert staged.knowledge["extra_envs"] == {"VLLM_TEST_KEEP": "1"}
-
-
-@pytest.mark.asyncio
 async def test_promote_roofline_succeeded_writes_audit(session_dir):
     coord = _coord(session_dir)
     s = coord.shared_state
@@ -753,11 +721,9 @@ async def test_explicit_empty_patches_applied_never_scans_stale_workspace(
         task=_task("framework_agent"),
     )
 
-    # A config-only KEEP drains: config is written with no patches, and the
-    # explicit empty patches_applied never scans the stale workspace .diff.
-    staged = KnowledgeSections(draft).staged("framework")
-    assert staged is not None
-    assert staged.knowledge.get("patches", []) == []
+    # Final config comes from current_best at CLOSE; an explicit empty patch
+    # list neither scans stale workspace files nor creates an owner section.
+    assert KnowledgeSections(draft).staged("framework") is None
     assert coord.shared_state.kb_stage_outbox == []
     # A config-only KEEP must not mark a required patch owner; otherwise CLOSE
     # would reject the record for missing required section staging.

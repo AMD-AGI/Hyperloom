@@ -12,6 +12,7 @@ import pytest
 from hyperloom.orchestrator.knowledge.agent_kb import (
     ExploreAgentKB,
     FrameworkAgentKB,
+    RecipeReplayKB,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
     KnowledgeSections,
@@ -48,11 +49,39 @@ def test_no_draft_is_a_noop(monkeypatch) -> None:
     assert kb.active is False
     assert kb.read() == {}
     assert kb.read_config() == {"extra_server_args": "", "extra_envs": {}}
-    assert kb.write_config("--foo", {"VLLM_TEST": "1"}) is False
     assert kb.stage_patches([], stack_index=0) == []
 
 
-def test_read_write_and_section_isolation(tmp_path: Path) -> None:
+def test_recipe_replay_reads_single_final_config(tmp_path: Path) -> None:
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    (warm / "recipe.json").write_text(
+        json.dumps(
+            {
+                "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+                "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
+                "value": {
+                    "config": {
+                        "extra_server_args": "--page-size 32",
+                        "extra_envs": {"VLLM_TEST": "1"},
+                    },
+                    "patch_timeline": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    replay = RecipeReplayKB(
+        KnowledgeSections(tmp_path / "draft", warm_start_dir=warm)
+    )
+
+    assert replay.read_config() == {
+        "extra_server_args": "--page-size 32",
+        "extra_envs": {"VLLM_TEST": "1"},
+    }
+
+
+def test_read_and_section_isolation(tmp_path: Path) -> None:
     warm = tmp_path / "warm"
     warm.mkdir()
     (warm / "recipe.json").write_text(
@@ -82,19 +111,6 @@ def test_read_write_and_section_isolation(tmp_path: Path) -> None:
     ]
     assert framework.read() == {}
     assert framework.read_patches() == []
-    assert explore.write_config("--page-size 32", {"VLLM_EXPLORE": "1"})
-    assert framework.write_config(
-        {"extra_server_args": "--framework", "extra_envs": {"VLLM_FW": "1"}}
-    )
-
-    assert sections.staged("explore").knowledge == {
-        "extra_server_args": "--page-size 32",
-        "extra_envs": {"VLLM_EXPLORE": "1"},
-    }
-    assert sections.staged("framework").knowledge == {
-        "extra_server_args": "--framework",
-        "extra_envs": {"VLLM_FW": "1"},
-    }
 
 
 def test_ordered_patch_refs_are_deterministic_and_idempotent(tmp_path: Path) -> None:
@@ -220,7 +236,7 @@ def test_close_timeline_orders_patches_across_owners(tmp_path: Path) -> None:
     bundle.validate()
 
 
-def test_current_contract_persists_only_owner_configs(
+def test_current_contract_persists_one_final_config(
     tmp_path: Path,
 ) -> None:
     state = _state(
@@ -244,14 +260,19 @@ def test_current_contract_persists_only_owner_configs(
         "extra_server_args": "--framework-final",
         "extra_envs": {"VLLM_OWNER": "framework"},
     }
-    bundle = build_remote_knowledge(state, tmp_path / "files")
+    bundle = build_remote_knowledge(
+        state,
+        tmp_path / "files",
+        sections=KnowledgeSections(tmp_path / "draft"),
+    )
 
     assert "replay_config" not in bundle.knowledge["value"]
-    assert bundle.knowledge["value"]["explore"]["extra_server_args"] == "--explore-old"
-    assert (
-        bundle.knowledge["value"]["framework"]["extra_server_args"]
-        == "--framework-final"
-    )
+    assert bundle.knowledge["value"]["config"] == {
+        "extra_server_args": "--framework-final",
+        "extra_envs": {"VLLM_OWNER": "framework"},
+    }
+    assert set(bundle.knowledge["value"]["explore"]) == {"patches", "artifacts"}
+    assert set(bundle.knowledge["value"]["framework"]) == {"patches", "artifacts"}
     row = knowledge_to_warm_recipe(
         {
             "canonical_id": "inference:test",
@@ -414,32 +435,6 @@ def test_close_fails_for_empty_required_staged_section(
         )
 
 
-def test_close_fails_for_invalid_staged_kernel_section(tmp_path: Path) -> None:
-    sections = KnowledgeSections(tmp_path / "draft")
-    section_file = sections.root / "sections" / "kernel.json"
-    section_file.parent.mkdir(parents=True)
-    ref = "kernel/rewrite/missing.patch"
-    section_file.write_text(
-        json.dumps(
-            {
-                "knowledge": {"rewrite": {"patch_path": ref}},
-                "files": [ref],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(
-        RemoteRecipeValidationError,
-        match="staged section 'kernel' file mismatch",
-    ):
-        build_remote_knowledge(
-            _state([]),
-            tmp_path / "files",
-            sections=sections,
-        )
-
-
 @pytest.mark.parametrize(
     ("owner", "expected"),
     [
@@ -509,6 +504,12 @@ def test_close_adopts_only_successfully_replayed_prior_overlays(
         "status": "reproduced",
         "replayed_patch_refs": [old_ref],
     }
+    state.current_best.update(
+        {
+            "extra_server_args": "--prior-config",
+            "extra_envs": {"VLLM_PRIOR": "1"},
+        }
+    )
 
     bundle = build_remote_knowledge(
         state,
@@ -517,7 +518,10 @@ def test_close_adopts_only_successfully_replayed_prior_overlays(
     )
 
     adopted = "framework/overlays/000000/00-upstream.patch"
-    assert bundle.knowledge["value"]["explore"]["extra_server_args"] == "--prior-config"
+    assert bundle.knowledge["value"]["config"] == {
+        "extra_server_args": "--prior-config",
+        "extra_envs": {"VLLM_PRIOR": "1"},
+    }
     assert bundle.knowledge["value"]["framework"]["patches"] == [adopted]
     assert bundle.knowledge["value"]["patch_timeline"][0] == adopted
     assert (tmp_path / "files" / adopted).read_bytes() == old_patch.read_bytes()

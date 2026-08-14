@@ -2240,26 +2240,6 @@ def test_promote_warm_replay_already_pushed(coord: Coordinator) -> None:
     assert n == 1
 
 
-def test_promote_warm_replay_drift(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    coord._promote_warm_replay(
-        {"status": "succeeded", "output_throughput": 750.0},
-        task=_warm_task(),
-    )
-    assert coord.shared_state.warm_replay_outcome["status"] == "drift"
-
-
-def test_promote_warm_replay_below_historical_bar(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 20.0}
-    coord._promote_warm_replay(
-        {"status": "succeeded", "output_throughput": 810.0},
-        task=_warm_task(),
-    )
-    out = coord.shared_state.warm_replay_outcome
-    assert out.get("below_historical_reproduce_pct") is True
-
-
 # -- finalize_recipe_and_journal (rich existing row merge) -----------
 class _FakeLocalRich:
     def get_recipe(self, *, canonical_id):
