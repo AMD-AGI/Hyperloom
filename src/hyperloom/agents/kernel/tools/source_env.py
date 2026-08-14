@@ -49,7 +49,7 @@ __all__ = [
 _KNOWN = ("vllm", "sglang", "aiter")
 
 # Subdirectories (relative to a package dir) that hold GPU kernel source.
-_CSRC_DIRS = ("csrc", "sgl-kernel/csrc", "kernels", "3rdparty/composable_kernel/include")
+_CSRC_DIRS = ("csrc", "sgl-kernel/csrc", "kernels")
 _NATIVE_EXTS = (".cu", ".cuh", ".hip", ".h", ".hpp")
 
 _VERSION_RE = re.compile(r"(?:__version__|version)\s*=\s*['\"]([^'\"]+)['\"]")
