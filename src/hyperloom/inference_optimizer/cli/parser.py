@@ -993,7 +993,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0.7,
         help="Minimum ``warm_start_recipe.confidence`` required to "
         "trigger the auto-replay. Default 0.7 means an ``exact`` "
-        "5-tuple hit (conf 1.0) and a server-returned ``relative`` "
+        "seven-tuple hit (conf 1.0) and a server-returned ``relative`` "
         "match (conf 0.7) both fire, while a ``miss`` (conf 0.0) "
         "does not. Raise it above 0.7 to require an exact hit "
         "before spending a verify on the warm config.",

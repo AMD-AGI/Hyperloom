@@ -674,12 +674,12 @@ class PreludePhase(PhaseHandler):
         snapshots: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Rollback kernels exactly, reporting every failure."""
-        if snapshots:
-            return PreludePhase._restore_warm_kernel_snapshots(snapshots)
         from ..kernel.request_handlers import _maybe_revert_kernel_patch
 
         errors: list[str] = []
         for apply_result in reversed(applied):
+            if not apply_result.get("manifest_path"):
+                continue
             try:
                 reverted = _maybe_revert_kernel_patch(apply_result)
                 if reverted.get("status") != "ok":
@@ -693,6 +693,9 @@ class PreludePhase(PhaseHandler):
             except Exception as exc:  # noqa: BLE001
                 log.warning("warm-kernel KB: revert failed", exc_info=True)
                 errors.append(f"{type(exc).__name__}:{exc}")
+        if snapshots:
+            restored = PreludePhase._restore_warm_kernel_snapshots(snapshots)
+            errors.extend(restored.get("errors") or [])
         return {"ok": not errors, "errors": errors}
 
     def _snapshot_warm_kernel_target(
@@ -1338,8 +1341,10 @@ class PreludePhase(PhaseHandler):
         elif rep_args or rep_envs:
             bc_args = rep_args
             bc_envs = dict(rep_envs)
-            # Donor transfer confidence (self-donor == identity confidence).
-            replay_conf = float(replay.get("config_confidence") or conf or 0.0)
+            raw_replay_conf = replay.get("config_confidence")
+            replay_conf = float(
+                conf if raw_replay_conf is None else raw_replay_conf
+            )
             config_source = str(replay.get("config_source") or "")
             config_tier = str(replay.get("config_tier") or "self")
             donor_expected_gain = float(replay.get("expected_gain_pct") or 0.0)

@@ -66,6 +66,35 @@ def test_trustworthy_donor_accepted() -> None:
     assert _donor_is_trustworthy(_donor(), **_TARGET) is True
 
 
+def test_donor_identity_falls_back_to_canonical_id() -> None:
+    donor = _donor(
+        canonical_id=(
+            "inference:checkpoint:mi300x:sglang:qwen2:"
+            "qwen2forcausallm:1.2.5:bf16"
+        )
+    )
+    donor.pop("architectures")
+    donor.pop("model_type")
+
+    assert _donor_is_trustworthy(donor, **_TARGET) is True
+
+
+def test_explicit_zero_donor_confidence_is_preserved() -> None:
+    context = _build_warm_start_context(
+        status="hit",
+        tier="exact",
+        confidence=1.0,
+        canonical_id="self-cid",
+        source="recipe-kb",
+        recipe={},
+        config_donor=_donor(),
+        config_donor_tier="kg_cross_model",
+        config_donor_confidence=0.0,
+    )
+
+    assert context["recommended_replay"]["config_confidence"] == 0.0
+
+
 class _StubKB:
     """A search-only KB stub returning a fixed donor row list."""
 
@@ -120,6 +149,24 @@ def test_find_config_donor_skips_untrustworthy() -> None:
     assert donor["validated_gain_pct"] == 20.0
     assert tier == "same_arch_class"
     assert conf == 0.95
+
+
+def test_find_config_donor_queries_canonical_framework_name() -> None:
+    calls: list[dict[str, Any]] = []
+
+    class _CaptureKB:
+        def search(self, **kwargs: Any) -> list[dict[str, Any]]:
+            calls.append(dict(kwargs))
+            return [_donor(gain=20.0)]
+
+    donor, _tier, _confidence = _find_config_donor(
+        _CaptureKB(),
+        **_find_kwargs(),
+    )
+
+    assert donor is not None
+    assert calls[0]["label_match"]["framework_name"] == "sglang"
+    assert "framework" not in calls[0]["label_match"]
 
 
 def test_find_config_donor_returns_none_when_all_untrustworthy() -> None:

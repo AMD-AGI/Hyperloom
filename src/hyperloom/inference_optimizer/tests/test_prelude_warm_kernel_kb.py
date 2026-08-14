@@ -258,6 +258,73 @@ def test_warm_kernel_apply_keeps_source_only_fallback(
     assert captured["patch_path"] == str(source_snapshot)
 
 
+def test_multi_file_manifest_and_target_snapshot_both_roll_back(
+    tmp_path: Path,
+) -> None:
+    from hyperloom.orchestrator.kernel.request_handlers import (
+        _maybe_apply_kernel_patch,
+    )
+
+    live = tmp_path / "framework"
+    materialized = tmp_path / "materialized"
+    for root, prefix in ((live, "old"), (materialized, "new")):
+        (root / "pkg").mkdir(parents=True)
+        (root / "pkg/a.py").write_text(f"{prefix}-a\n", encoding="utf-8")
+        (root / "pkg/b.py").write_text(f"{prefix}-b\n", encoding="utf-8")
+    patch = tmp_path / "multi.patch"
+    patch.write_text(
+        "\n".join(
+            [
+                "diff --git a/pkg/a.py b/pkg/a.py",
+                "--- a/pkg/a.py",
+                "+++ b/pkg/a.py",
+                "@@ -1 +1 @@",
+                "-old-a",
+                "+new-a",
+                "diff --git a/pkg/b.py b/pkg/b.py",
+                "--- a/pkg/b.py",
+                "+++ b/pkg/b.py",
+                "@@ -1 +1 @@",
+                "-old-b",
+                "+new-b",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    session_dir = tmp_path / "session"
+    target = live / "pkg/a.py"
+    snapshot = PreludePhase._snapshot_warm_kernel_target(
+        SimpleNamespace(session_dir=session_dir),
+        str(target),
+        0,
+    )
+    applied = _maybe_apply_kernel_patch(
+        {
+            "patch_path": str(patch),
+            "target_file": str(target),
+            "snapshot_dir": str(materialized),
+            "kernel_repo": str(live),
+            "allow_unknown_target": True,
+        },
+        session_dir=session_dir,
+        kernel_id="multi",
+    )
+
+    assert applied["status"] == "ok"
+    assert (live / "pkg/a.py").read_text(encoding="utf-8") == "new-a\n"
+    assert (live / "pkg/b.py").read_text(encoding="utf-8") == "new-b\n"
+
+    rollback = PreludePhase._revert_warm_kernel_patches(
+        [applied],
+        [snapshot],
+    )
+
+    assert rollback == {"ok": True, "errors": []}
+    assert (live / "pkg/a.py").read_text(encoding="utf-8") == "old-a\n"
+    assert (live / "pkg/b.py").read_text(encoding="utf-8") == "old-b\n"
+
+
 @pytest.mark.asyncio
 async def test_inactive_without_record(tmp_path: Path) -> None:
     # No inference Recipe section is available (cold start / KB not configured).
@@ -435,7 +502,7 @@ async def test_symlink_kernel_target_is_rejected_and_prior_mutation_rolls_back(
     def _apply(_entry: dict, target: str) -> dict:
         Path(target).write_text("mutated")
         stub.applied.append(target)
-        return {"status": "ok", "manifest_path": f"{target}.manifest"}
+        return {"status": "ok", "target_file": target}
 
     stub._apply_warm_kernel_patch = _apply  # type: ignore[method-assign]
 

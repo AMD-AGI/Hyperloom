@@ -50,11 +50,10 @@ class ProposalsCollaborator:
         return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _workload_canonical_id(self) -> str:
-        """Canonical 5-tuple recipe id for the current workload. Must match recipe_kb_t0.run_t0_anchor's derivation so warm-start and KEEP/REVERT/CLOSE writes target the same row.
+        """Return the workload's canonical seven-dimension Recipe identity.
 
         Returns:
-            The canonical recipe id derived from model, hardware, framework,
-            framework version and precision.
+            The canonical Recipe id used by warm-start and writeback.
         """
         ss = self.shared_state
         workload = ss.model_name or "unknown_model"

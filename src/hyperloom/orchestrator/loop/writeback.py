@@ -264,8 +264,9 @@ class WritebackCollaborator:
         # Raw framework-agent diffs are normally returned in
         # ``patches_applied``. The shallow workspace scan is a recovery path for
         # older result envelopes that only persisted ``workspace``.
-        workspace = Path(str(result.get("workspace") or ""))
-        if not explicit_present and workspace.is_dir():
+        workspace_value = str(result.get("workspace") or "").strip()
+        workspace = Path(workspace_value) if workspace_value else None
+        if not explicit_present and workspace is not None and workspace.is_dir():
             for base in (workspace, workspace / "patches", workspace / "worktree" / "patches"):
                 if not base.is_dir():
                     continue
@@ -1461,7 +1462,7 @@ class WritebackCollaborator:
         model_class = str(getattr(ss, "model_class", "") or "").strip()
         if model_class:
             out["model_class"] = model_class
-        # model_family (v1 fallback) no longer stamped: v2 uses the exact 5-tuple canonical_id.
+        # model_family is not part of the seven-dimension Recipe identity.
         model_name = str(getattr(ss, "model_name", "") or "").strip()
         if model_name:
             out["model_name"] = model_name
@@ -4585,6 +4586,48 @@ class WritebackCollaborator:
                 state.set_stop_reason("warm_replay_rollback_failed")
             state.save(self.session_dir)
             return
+        task_id = str(pending.get("task_id") or "").strip()
+        task_state = ""
+        if task_id:
+            try:
+                from ..state.task_registry import TaskNotFound
+
+                try:
+                    task = await self.tasks.get(task_id)
+                except TaskNotFound:
+                    task = None
+                if task is not None:
+                    task_state = str(task.state or "")
+                    if task_state == "queued":
+                        await self.tasks.transition(
+                            task_id,
+                            "cancelled",
+                            evidence={"reason": "resume_interrupted_warm_replay"},
+                        )
+                        task_state = "cancelled"
+                    elif task_state == "running":
+                        await self.tasks.transition(
+                            task_id,
+                            "failed",
+                            evidence={"failure_class": "resume_interrupted"},
+                        )
+                        task_state = "failed"
+            except Exception as exc:  # noqa: BLE001
+                state.warm_replay_pending = {
+                    **dict(pending),
+                    "status": "task_invalidation_failed",
+                }
+                report["warnings"].append(
+                    {
+                        "kind": "resume_warm_task_invalidation_failed",
+                        "task_id": task_id,
+                        "error": f"{type(exc).__name__}:{exc}",
+                    }
+                )
+                if hasattr(state, "set_stop_reason"):
+                    state.set_stop_reason("warm_replay_rollback_failed")
+                state.save(self.session_dir)
+                return
         state.warm_replay_outcome = {
             **dict(getattr(state, "warm_replay_outcome", {}) or {}),
             "status": "failed",
@@ -4598,6 +4641,7 @@ class WritebackCollaborator:
             {
                 "kind": "recovered_pending_warm_replay",
                 "task_id": pending.get("task_id"),
+                "task_state": task_state,
             }
         )
         state.save(self.session_dir)
