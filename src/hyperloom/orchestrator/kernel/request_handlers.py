@@ -14,21 +14,24 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hashlib
+import importlib
 import importlib.util
 import json
-import sys
 import logging
+import math
 import os
 import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
 from hyperloom.common import codex_session, llm_config
-from hyperloom.common.env import env_bool, is_truthy
+from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.kernel_shape_contract import (
     ALLOWED_SHAPE_PROVENANCE as _ALLOWED_SHAPE_PROVENANCE,
@@ -44,11 +47,9 @@ from ..trace.parse_usage import (
     parse_forge_usage,
 )
 
-# Cohesive clusters live in sibling modules; re-exported here so the module
-# namespace + monkeypatch surface is intact.
+# Re-exported: callers patch these at ``request_handlers.<name>``.
 from ._kernel_decisions import (
     _honest_flag as _honest_flag,
-    _format_last_kernel_opt as _format_last_kernel_opt,
     _resolve_kernel_patch_identity as _resolve_kernel_patch_identity,
     kernel_patch_key as kernel_patch_key,
     find_rejected_kernel_patch as find_rejected_kernel_patch,
@@ -65,6 +66,8 @@ from ._kernel_decisions import (
     has_keep_pending_integrate as has_keep_pending_integrate,
     kernel_opt_attempts_count as kernel_opt_attempts_count,
     untried_hot_reusable_kernels as untried_hot_reusable_kernels,
+    is_collective_candidate as is_collective_candidate,
+    SUPPORTED_COLLECTIVE_OPS as SUPPORTED_COLLECTIVE_OPS,
 )
 
 
@@ -1089,6 +1092,23 @@ def _maybe_apply_kernel_patch(
     )
 
 
+def _checkpoint_collective_apply(
+    checkpoint_path: str,
+    apply_result: HandlerResult,
+) -> None:
+    """Persist an applied-patch checkpoint before Collective E2E measurement."""
+    if not checkpoint_path or apply_result.get("status") != "ok":
+        return
+    path = Path(checkpoint_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(apply_result, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+
+
 def materialize_unified_patch_snapshot(
     *,
     patch_path: str | Path,
@@ -1180,30 +1200,55 @@ def materialize_unified_patch_snapshot(
 
 
 def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
-    """Revert a previously applied kernel patch using its apply manifest.
+    """Revert a kernel patch using its apply manifest.
+
+    A manifest is enough; the apply's ``status`` is not required, so a partial
+    apply reverts the files it managed to touch. Gating on ``status == "ok"``
+    used to leave exactly those applied.
 
     Args:
-        apply_result (HandlerResult): The result returned by
-            :func:`_maybe_apply_kernel_patch`; must be ``status="ok"`` with a
-            ``manifest_path`` to be revertible.
+        apply_result: Apply metadata carrying ``manifest_path``.
 
     Returns:
-        HandlerResult: A ``status="skipped"`` result when there is no applied
-            manifest, otherwise the tool's revert result dict.
+        The revert result, or an explicit failure result.
     """
-    if apply_result.get("status") != "ok" or not apply_result.get("manifest_path"):
+    if not apply_result.get("manifest_path"):
         return {"status": "skipped", "reason": "no applied patch manifest"}
-    tool = _load_apply_tool()
-    return tool.revert_kernel_patch(apply_result["manifest_path"])
+    try:
+        return _load_apply_tool().revert_kernel_patch(
+            apply_result["manifest_path"]
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "failed",
+            "error_class": "patch_revert_exception",
+            "error": repr(exc),
+            "manifest_path": str(apply_result["manifest_path"]),
+        }
 
 
 def _maybe_finalize_kernel_patch(
     apply_result: HandlerResult,
 ) -> HandlerResult:
-    """Delete backups once a KEEP becomes the accepted baseline."""
-    if apply_result.get("status") != "ok" or not apply_result.get("manifest_path"):
+    """Delete patch backups after a KEEP becomes durable."""
+    if apply_result.get("status") != "ok":
+        return {
+            "status": "skipped",
+            "reason": "patch apply did not complete",
+        }
+    if not apply_result.get("manifest_path"):
         return {"status": "skipped", "reason": "no applied patch manifest"}
-    return _load_apply_tool().finalize_kernel_patch(apply_result["manifest_path"])
+    try:
+        return _load_apply_tool().finalize_kernel_patch(
+            apply_result["manifest_path"]
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "failed",
+            "error_class": "patch_finalize_exception",
+            "error": repr(exc),
+            "manifest_path": str(apply_result["manifest_path"]),
+        }
 
 
 def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
@@ -1524,8 +1569,12 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     return resolved, None
 
 
-async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str, str]:
-    """asyncio-friendly wrapper around blocking subprocess.run (keeps the reactor responsive).
+async def _run_subprocess(
+    cmd: list[str],
+    *,
+    timeout_sec: int,
+) -> tuple[int, str, str]:
+    """Run a bounded subprocess without blocking the reactor.
 
     Args:
         cmd: The command and arguments to run.
@@ -1534,7 +1583,13 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
     Returns:
         A tuple of ``(returncode, stdout, stderr)``.
     """
-
+    if (
+        isinstance(timeout_sec, bool)
+        or not isinstance(timeout_sec, (int, float))
+        or not math.isfinite(float(timeout_sec))
+        or timeout_sec <= 0
+    ):
+        raise ValueError("timeout_sec must be finite and positive")
     def _run() -> tuple[int, str, str]:
         """Run the command synchronously in a worker thread.
 
@@ -1569,8 +1624,12 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
             if addr:
                 env.setdefault("RAY_ADDRESS", addr)
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-        # run_with_session_kill reaps the whole descendant tree on every exit path.
-        cp = run_with_session_kill(cmd, env=env, timeout=timeout_sec, text=True)
+        cp = run_with_session_kill(
+            cmd,
+            env=env,
+            timeout=timeout_sec,
+            text=True,
+        )
         return cp.returncode, cp.stdout or "", cp.stderr or ""
 
     return await asyncio.to_thread(_run)
@@ -1716,19 +1775,9 @@ exec {shlex.quote(runner)}
     return path
 
 
-def _forge_explicitly_enabled() -> bool:
-    """Return true only for the single supported forge opt-in switch.
-
-    KernelForge is private infrastructure, so forge must never be selected by
-    request payloads, legacy aliases, or GEMM_TUNING_BACKEND.  The only runtime
-    contract that enables forge is an exact KERNEL_OPT_BACKEND_ORDER=forge.
-    """
-    return str(os.environ.get("KERNEL_OPT_BACKEND_ORDER") or "").strip().lower() == "forge"
-
-
 def _resolve_gemm_tuning_backend(payload: dict) -> str:
     """Resolve GEMM tuning backend under the forge-explicit-only invariant."""
-    return "forge" if _forge_explicitly_enabled() else "geak"
+    return "forge" if forge_explicitly_enabled() else "geak"
 
 
 def _parse_forge_gemm_sentinel(stdout: str) -> dict[str, Any] | None:
@@ -2553,6 +2602,81 @@ def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
         return ""
 
 
+# Forge tuner families whose deliverable is an aiter tuned-GEMM CSV, i.e. the
+# ones whose rows are resolved through aiter's padded (M, N, K) lookup.
+_AITER_CSV_TUNER_FRAMEWORKS = ("sglang", "vllm-aiter")
+
+
+#: Wall-clock the aiter CK tuner needs per shape, measured on gfx950 at
+#: ``--mp 1`` (12 shapes / 1462s in production, ~135s each). Used to size the
+#: shape budget so a wider ladder cannot push the tuner past its timeout and
+#: return nothing at all.
+_AITER_TUNE_SEC_PER_SHAPE = 150
+
+
+def _align_forge_shapes_for_aiter(
+    shapes_json: str,
+    *,
+    forge_framework: str,
+    workspace: Path,
+    budget_sec: int = 0,
+    mp: int = 1,
+) -> tuple[str, dict[str, Any] | None]:
+    """Re-key profiled GEMM shapes onto the M values aiter actually looks up.
+
+    Captured shapes carry the raw runtime M, which for prefill is the
+    data-dependent scheduled-token count and so never recurs between runs. aiter
+    resolves a tuned row by trying the raw M and then two padded M variants, so a
+    CSV keyed on raw M is unreachable and the tuner's micro win never reaches the
+    server. Padding the shapes first makes each tuned row serve the whole bucket
+    that pads onto it.
+
+    Returns the shapes-JSON path to hand forge plus an alignment report, or the
+    input path and ``None`` when alignment does not apply.
+    """
+    if forge_framework not in _AITER_CSV_TUNER_FRAMEWORKS:
+        return shapes_json, None
+    if not env_bool("HYPERLOOM_GEMM_ALIGN_SHAPES", True):
+        return shapes_json, None
+
+    from .gemm_shape_coverage import align_shapes_to_aiter_keys, load_shapes_json, write_shapes_json
+
+    observed = load_shapes_json(shapes_json)
+    if not observed:
+        return shapes_json, None
+    try:
+        max_shapes = int(os.environ.get("HYPERLOOM_GEMM_ALIGN_MAX_SHAPES") or 64)
+    except (TypeError, ValueError):
+        max_shapes = 64
+    max_shapes = max(1, max_shapes)
+    if budget_sec > 0:
+        try:
+            per_shape = int(
+                os.environ.get("HYPERLOOM_GEMM_TUNE_SEC_PER_SHAPE") or _AITER_TUNE_SEC_PER_SHAPE
+            )
+        except (TypeError, ValueError):
+            per_shape = _AITER_TUNE_SEC_PER_SHAPE
+        # Reserve a third of the window for JIT builds and the report step.
+        affordable = int(budget_sec * 0.66 * max(1, mp) // max(1, per_shape))
+        max_shapes = min(max_shapes, max(len(observed), affordable))
+    aligned, report = align_shapes_to_aiter_keys(observed, max_shapes=max_shapes)
+    if not aligned or report.get("unchanged"):
+        return shapes_json, {**report, "applied": False, "source_shapes_json": shapes_json}
+    try:
+        out = write_shapes_json(aligned, workspace / "forge_shapes.aiter_aligned.json")
+    except OSError:
+        return shapes_json, {**report, "applied": False, "source_shapes_json": shapes_json}
+    log.info(
+        "Forge GEMM shapes: re-keyed %d observed shape(s) onto %d aiter lookup key(s) "
+        "(observed M=%s -> aligned M=%s)",
+        report.get("observed"),
+        report.get("aligned"),
+        report.get("observed_m"),
+        report.get("aligned_m"),
+    )
+    return out, {**report, "applied": True, "source_shapes_json": shapes_json}
+
+
 _VLLM_BLOCK_FP8_TRACE_OPS = (
     "w8a8_triton_block_scaled_mm",
     "rocm_aiter_gemm_a8w8_blockscale",
@@ -2570,17 +2694,136 @@ def _is_vllm_block_fp8(precision: str, quant_type: str) -> bool:
     }
 
 
+#: Markers that identify which kernels aiter is serving, read off a server log.
+#: ``bf16_tuned_gemm.csv`` means dense linears resolve through
+#: ``aiter/tuned_gemm.py`` (Forge's ``sglang_dense_bf16`` writes that table via
+#: ``AITER_CONFIG_GEMM_BF16``); the fused-MoE markers mean the MoE layers run on
+#: aiter's CK kernels (Forge's ``fmoe_ck``, via ``AITER_CONFIG_FMOE``) rather
+#: than vLLM's Triton ``fused_moe``.
+_AITER_SERVING_MARKERS = {
+    "bf16_dense": ("bf16_tuned_gemm.csv",),
+    "fused_moe": ("[aiter] [fused_moe]", "Mxfp4 MoE backend"),
+}
+
+#: aiter logs the fused-MoE problem it dispatched as
+#: ``[fused_moe] using ... (cu, token, dim, inter, experts, topk, act, dtype,
+#: q_dtype_a, q_dtype_w, q_type, ...)``.
+_AITER_FUSED_MOE_TUPLE_RE = re.compile(
+    r"\[fused_moe\] using \S+ \S+ for \(\d+, \d+, \d+, \d+, \d+, \d+, "
+    r"'[^']*', '[^']*', '([^']*)', '([^']*)'"
+)
+
+
+def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
+    """Return whether aiter's CK MoE tuner can tune what the server dispatched.
+
+    The tuner builds its kernel candidates from the activation/weight dtype pair
+    and rejects some combinations the serving path happily runs. Measured on
+    gpt-oss-120b at TP=1, a BF16-activation / FP4-weight MoE (the
+    ``AITER_MXFP4_BF16`` backend) benchmarks fine but fails candidate generation
+    with ``Unsupported data type combination: b16, fp4x2``, so routing it to
+    ``fmoe_ck`` would only trade silent no-op for a hard tuner error.
+    """
+    if not server_log:
+        return False
+    try:
+        text = Path(server_log).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    combos = {
+        (q_a.replace("torch.", ""), q_w.replace("torch.", ""))
+        for q_a, q_w in _AITER_FUSED_MOE_TUPLE_RE.findall(text)
+    }
+    if not combos:
+        # MoE evidence without a parseable problem tuple: let Forge decide.
+        return True
+    return not any(
+        act.startswith("bfloat") and weight.startswith("float4") for act, weight in combos
+    )
+
+
+def _aiter_serving_evidence(server_log: str) -> set[str]:
+    """Return which aiter kernel families a server log shows in use.
+
+    Routing is driven by the log rather than by precision alone because only the
+    log says which backend the model actually got: the same checkpoint runs on
+    aiter or on the native path depending on the recipe's env.
+    """
+    found: set[str] = set()
+    if not server_log:
+        return found
+    try:
+        with open(server_log, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                for family, markers in _AITER_SERVING_MARKERS.items():
+                    if family not in found and any(marker in line for marker in markers):
+                        found.add(family)
+                if len(found) == len(_AITER_SERVING_MARKERS):
+                    break
+    except OSError:
+        return set()
+    return found
+
+
 def _forge_framework_for_vllm(
     *,
     framework: str,
     precision: str,
     quant_type: str,
     tunableop_input: str,
+    aiter_bf16_dense: bool = False,
+    aiter_fused_moe: bool = False,
 ) -> str:
-    """Route block-FP8 vLLM to Forge's AITER dense tuner family."""
-    if framework == "vllm" and not tunableop_input and _is_vllm_block_fp8(precision, quant_type):
+    """Route vLLM runs served by aiter to Forge's AITER tuner family.
+
+    Forge's vLLM branch only offers ``vllm_moe_triton`` and
+    ``vllm_dense_tunableop``, which target kernels an aiter-served model never
+    executes. Its sglang branch carries the tuners that do write the tables aiter
+    reads, and the router already accepts ``vllm-aiter`` as an alias for it.
+    """
+    if framework != "vllm" or tunableop_input:
+        return framework
+    if _is_vllm_block_fp8(precision, quant_type):
+        return "vllm-aiter"
+    if aiter_bf16_dense and precision in ("bf16", "fp16"):
+        return "vllm-aiter"
+    if aiter_fused_moe:
         return "vllm-aiter"
     return framework
+
+
+def _resolve_vllm_aiter_routing(
+    *,
+    model_path: str,
+    server_log: str,
+    tp: int,
+) -> dict[str, bool]:
+    """Resolve the aiter-routing flags for a vLLM run from runtime evidence."""
+    flags = {"aiter_bf16_dense": False, "aiter_fused_moe": False}
+    evidence = _aiter_serving_evidence(server_log)
+    if not evidence:
+        return flags
+
+    from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
+
+    summary = summarize_model_config(model_path) or {}
+    if not summary:
+        return flags
+    is_moe = bool(summary.get("is_moe"))
+
+    # Dense BF16 routing is for dense checkpoints; a MoE model's dense side
+    # rides along with its MoE routing instead.
+    flags["aiter_bf16_dense"] = "bf16_dense" in evidence and not is_moe
+
+    if "fused_moe" in evidence and is_moe and _aiter_ck_moe_tuner_supports(server_log):
+        # Only route MoE when aiter's CK fused-MoE can actually serve this
+        # checkpoint at this TP -- otherwise the tuner has no reachable target.
+        from hyperloom.inference_optimizer.cli.model_gate import (
+            model_supports_aiter_ck_fused_moe,
+        )
+
+        flags["aiter_fused_moe"] = model_supports_aiter_ck_fused_moe(model_path, tp)
+    return flags
 
 
 def _vllm_block_fp8_profile_capture_required(
@@ -3224,6 +3467,7 @@ async def _run_forge_gemm_tuning(
         precision=precision,
         quant_type=quant_type,
         tunableop_input=tunableop_input,
+        **_resolve_vllm_aiter_routing(model_path=model_path, server_log=kernel_sig_log, tp=tp),
     )
     shape_capture: HandlerResult | None = None
     block_fp8_profile_capture = _vllm_block_fp8_profile_capture_required(
@@ -3266,8 +3510,11 @@ async def _run_forge_gemm_tuning(
             untuned_csv = ""
             block_fp8_profile_capture = False
     tunableop_capture = (
+        # Keyed on the routed framework: a run handed to the AITER tuner family
+        # has no use for a TunableOp recording pass, and paying for one costs a
+        # full extra server boot.
         _vllm_dense_shape_capture_required(
-            framework=framework,
+            framework=forge_framework,
             model_path=model_path,
             shapes_json=shapes_json,
             tunableop_input=tunableop_input,
@@ -3304,6 +3551,16 @@ async def _run_forge_gemm_tuning(
 
     timeout = _gemm_tuning_timeout_sec(payload)
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)
+    shape_alignment: dict[str, Any] | None = None
+    if shapes_json:
+        shapes_json, shape_alignment = _align_forge_shapes_for_aiter(
+            shapes_json,
+            forge_framework=forge_framework,
+            workspace=workspace,
+            budget_sec=timeout,
+            mp=mp,
+        )
+
     input_payload = {
         "model_path": model_path,
         "framework": forge_framework,
@@ -3361,6 +3618,8 @@ async def _run_forge_gemm_tuning(
     result.setdefault("framework", framework)
     result.setdefault("tuning_framework", forge_framework)
     result.setdefault("model_path", model_path)
+    if shape_alignment is not None:
+        result.setdefault("shape_alignment", shape_alignment)
     if shape_capture is not None:
         result.setdefault(
             "shape_capture",
@@ -4003,6 +4262,507 @@ async def run_fusion_handler(payload: dict, *, session_dir: Path) -> HandlerResu
     return await _run_forge_fusion(payload, session_dir=session_dir)
 
 
+def _parse_forge_collective_sentinel(stdout: str) -> dict[str, Any]:
+    """Parse and validate the collective wrapper result sentinel."""
+    match = re.search(
+        r"FORGE_COLLECTIVE_RESULT_BEGIN\s*\n(.*?)\nFORGE_COLLECTIVE_RESULT_END",
+        stdout,
+        re.DOTALL,
+    )
+    if not match:
+        raise ValueError("collective wrapper emitted no result sentinel")
+    try:
+        parsed = json.loads(match.group(1))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("collective wrapper emitted malformed result JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("collective wrapper result must be a JSON object")
+    if parsed.get("engine") != "forge_collective":
+        raise ValueError("collective wrapper result has invalid engine")
+    if not isinstance(parsed.get("status"), str) or not parsed["status"]:
+        raise ValueError("collective wrapper result has invalid status")
+    decision = parsed.get("decision")
+    if decision not in {"KEEP", "REVERT"}:
+        raise ValueError("collective wrapper result has invalid decision")
+    if not isinstance(parsed.get("kept"), bool):
+        raise ValueError("collective wrapper result has invalid kept")
+    if not isinstance(parsed.get("requires_e2e_validation"), bool):
+        raise ValueError(
+            "collective wrapper result has invalid requires_e2e_validation"
+        )
+    if parsed["kept"] != (decision == "KEEP"):
+        raise ValueError("collective wrapper result has inconsistent decision")
+    if parsed["requires_e2e_validation"] != parsed["kept"]:
+        raise ValueError("collective wrapper result has inconsistent E2E gate")
+    return parsed
+
+
+def _enriched_kernel_candidates(state: Any) -> list[dict[str, Any]]:
+    """Load full candidate rows from the latest trace artifact."""
+    analysis = getattr(state, "last_trace_analyze", None)
+    if analysis is None:
+        return []
+    if not isinstance(analysis, dict):
+        raise ValueError("last_trace_analyze must be a mapping")
+    if not analysis:
+        return []
+    path = str(analysis.get("candidates_path") or "").strip()
+    if not path:
+        raise ValueError("latest trace analysis has no candidates_path")
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"invalid collective candidate artifact: {path}") from exc
+    rows = payload.get("hot_kernels") if isinstance(payload, dict) else None
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError(f"candidate artifact has no valid hot_kernels list: {path}")
+    return rows
+
+
+def collective_analysis_key(state: Any) -> str:
+    """Return a stable identity for the latest trace analysis."""
+    analysis = getattr(state, "last_trace_analyze", None)
+    if analysis is None:
+        return ""
+    if not isinstance(analysis, dict):
+        raise ValueError("last_trace_analyze must be a mapping")
+    if not analysis:
+        return ""
+    path = str(analysis.get("candidates_path") or "").strip()
+    if path:
+        return path
+    encoded = json.dumps(analysis, sort_keys=True).encode("utf-8")
+    return f"inline:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _validate_collective_candidate(
+    candidate: dict[str, Any],
+    *,
+    index: int | None = None,
+) -> None:
+    """Validate fields required by the collective driver."""
+    label = (
+        f"collective candidate[{index}]"
+        if index is not None
+        else "collective candidate"
+    )
+    required_strings = ("kernel_id", "source_file", "source_function")
+    missing = [
+        field
+        for field in required_strings
+        if not isinstance(candidate.get(field), str)
+        or not candidate[field].strip()
+    ]
+    for field in ("input_shapes", "input_dtypes"):
+        value = candidate.get(field)
+        if not isinstance(value, list) or not value:
+            missing.append(field)
+    if missing:
+        raise ValueError(f"{label} is missing {', '.join(missing)}")
+    gpu_pct = candidate.get("gpu_pct")
+    if (
+        isinstance(gpu_pct, bool)
+        or not isinstance(gpu_pct, (int, float))
+        or not math.isfinite(float(gpu_pct))
+        or gpu_pct < 0
+    ):
+        raise ValueError(f"{label}.gpu_pct must be finite and non-negative")
+
+
+def select_collective_candidate(state: Any) -> dict[str, Any] | None:
+    """Pick the hottest source-resolved traced collective."""
+    eligible: list[dict[str, Any]] = []
+    for index, entry in enumerate(_enriched_kernel_candidates(state)):
+        if entry.get("reusable_native_kernel") is not True:
+            continue
+        contract = entry.get("kernel_contract")
+        if not isinstance(contract, dict) or str(contract.get("kind") or "") != "collective":
+            continue
+        if str(contract.get("collective_op") or "") not in SUPPORTED_COLLECTIVE_OPS:
+            continue
+        try:
+            _validate_collective_candidate(entry, index=index)
+        except ValueError as exc:
+            log.warning("Skipping unusable collective candidate: %s", exc)
+            continue
+        eligible.append(entry)
+    if not eligible:
+        return None
+    resolved = [
+        entry
+        for entry in eligible
+        if str(entry.get("candidate_source") or "").strip() == "nccl_summary"
+    ]
+    pool = resolved or eligible
+
+    def _gpu_pct(entry: dict[str, Any]) -> float:
+        """Return a sortable GPU-time share for one collective candidate."""
+        return float(entry["gpu_pct"])
+
+    return max(pool, key=_gpu_pct)
+
+
+def _forge_loop_constant(module: str, name: str, fallback: float) -> float:
+    """Read a forge-loop budget bound, falling back when KernelForge is off the path.
+
+    A local copy of the number drifts the moment upstream changes it, and the
+    lane then plans against a budget the campaign will not honour.
+    """
+    try:
+        return float(getattr(importlib.import_module(module), name))
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return fallback
+
+
+# Session time held back for the E2E integrate round plus reporting.
+_COLLECTIVE_BUDGET_RESERVE_MIN = 45.0
+_COLLECTIVE_PREP_GRACE_SEC = int(
+    _forge_loop_constant("kernel_agents.loop.task_preparer", "PREPARE_MAX_WALL_SEC", 3000)
+)
+# Wrapper grace to export the patch and restore the repository.
+_COLLECTIVE_FINALIZE_GRACE_SEC = 300
+# forge-loop rejects a campaign shorter than its own minimum.
+_COLLECTIVE_MIN_CAMPAIGN_SEC = int(
+    _forge_loop_constant("kernel_agents.cli", "MIN_MAX_HOURS", 1.0) * 3600
+)
+# Mirrors forge_collective.DEFAULT_TIMEOUT_SEC for a session with no deadline.
+_COLLECTIVE_UNBOUNDED_WRAPPER_SEC = 14400
+
+
+def _collective_revert_result(
+    error_class: str,
+    error: str,
+    *,
+    status: str = "failed",
+    **fields: Any,
+) -> HandlerResult:
+    """Build a non-KEEP collective handler result."""
+    result: HandlerResult = {
+        "status": status,
+        "backend": "forge",
+        "engine": "forge_collective",
+        "error_class": error_class,
+        "error": error,
+        "decision": "REVERT",
+        "kept": False,
+        "requires_e2e_validation": False,
+    }
+    result.update(fields)
+    return result
+
+
+def _collective_budget(state: Any, requested_hours: Any, timeout_sec: int) -> tuple[float | None, int]:
+    """Derive campaign and wrapper budgets from remaining session time."""
+    remaining_fn = getattr(state, "remaining_minutes", None)
+    remaining = remaining_fn() if callable(remaining_fn) else None
+    wall_limits: list[int] = []
+    if remaining is not None:
+        if isinstance(remaining, bool):
+            raise ValueError("remaining session minutes must be numeric")
+        remaining = float(remaining)
+        if not math.isfinite(remaining) or remaining < 0:
+            raise ValueError(
+                f"remaining session minutes must be finite and non-negative: {remaining}"
+            )
+        wall_limits.append(
+            max(
+                0,
+                int(
+                    (remaining - _COLLECTIVE_BUDGET_RESERVE_MIN)
+                    * 60
+                ),
+            )
+        )
+    if (
+        isinstance(timeout_sec, bool)
+        or not isinstance(timeout_sec, int)
+        or timeout_sec < 0
+    ):
+        raise ValueError(
+            f"collective timeout must be a non-negative integer: {timeout_sec!r}"
+        )
+    if timeout_sec > 0:
+        wall_limits.append(timeout_sec)
+    if requested_hours is None and not wall_limits:
+        # Unbounded session: no budget to divide, so the reserve and
+        # minimum-campaign contracts below cannot apply.
+        log.info(
+            "collective budget: unbounded session, defaulting the wrapper to %ds",
+            _COLLECTIVE_UNBOUNDED_WRAPPER_SEC,
+        )
+        return None, _COLLECTIVE_UNBOUNDED_WRAPPER_SEC
+
+    wall_limit = min(wall_limits) if wall_limits else 0
+    campaign_capacity = (
+        wall_limit
+        - _COLLECTIVE_PREP_GRACE_SEC
+        - _COLLECTIVE_FINALIZE_GRACE_SEC
+    )
+    if requested_hours is None:
+        campaign_sec = campaign_capacity
+    else:
+        if isinstance(requested_hours, bool):
+            raise ValueError("collective max_hours must be numeric")
+        requested = float(requested_hours)
+        if not math.isfinite(requested) or requested <= 0:
+            raise ValueError(
+                f"collective max_hours must be finite and positive: {requested_hours!r}"
+            )
+        requested_sec = int(requested * 3600)
+        if requested_sec < _COLLECTIVE_MIN_CAMPAIGN_SEC:
+            return None, 0
+        campaign_sec = (
+            min(requested_sec, campaign_capacity)
+            if wall_limits
+            else requested_sec
+        )
+    if campaign_sec < _COLLECTIVE_MIN_CAMPAIGN_SEC:
+        return None, 0
+    # Truncate to two decimals so the hours we hand forge-loop never round up
+    # past the budget they were derived from.
+    hours = math.floor(campaign_sec / 3600 * 100) / 100.0
+    required = (
+        _COLLECTIVE_PREP_GRACE_SEC
+        + int(hours * 3600)
+        + _COLLECTIVE_FINALIZE_GRACE_SEC
+    )
+    return hours, required
+
+
+async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerResult:
+    """Run the strict collective Forge lane and parse its result contract."""
+    from ..state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+
+    candidate_value = payload.get("candidate")
+    if candidate_value is not None and (
+        not isinstance(candidate_value, dict) or not candidate_value
+    ):
+        return _collective_revert_result(
+            "invalid_collective_candidate",
+            "candidate must be a non-empty object",
+        )
+    try:
+        candidate = (
+            dict(candidate_value)
+            if isinstance(candidate_value, dict)
+            else select_collective_candidate(state)
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        return _collective_revert_result(
+            "invalid_collective_candidate_artifact",
+            str(exc),
+            status="skipped",
+            analysis_key=collective_analysis_key(state),
+        )
+    if not candidate:
+        return _collective_revert_result(
+            "no_collective_candidate",
+            (
+                "no rewritable collective in the latest trace analysis "
+                "(nccl/rccl are vendor binaries and never qualify)"
+            ),
+            status="skipped",
+            analysis_key=collective_analysis_key(state),
+        )
+
+    contract = candidate.get("kernel_contract")
+    if (
+        not isinstance(contract, dict)
+        or contract.get("kind") != "collective"
+        or contract.get("collective_op") not in SUPPORTED_COLLECTIVE_OPS
+    ):
+        return _collective_revert_result(
+            "unsupported_collective_contract",
+            "collective Forge supports "
+            + ", ".join(sorted(SUPPORTED_COLLECTIVE_OPS)),
+        )
+    try:
+        _validate_collective_candidate(candidate)
+    except ValueError as exc:
+        return _collective_revert_result(
+            "invalid_collective_candidate",
+            str(exc),
+        )
+
+    source_file = candidate["source_file"].strip()
+    source_function = candidate["source_function"].strip()
+    # The anchor alone hides the op's sibling sources, so a fused variant of the
+    # same collective stays uneditable. Keep the anchor first, then whatever the
+    # candidate declares as the op's source set.
+    raw_kernel_sources = candidate.get("kernel_sources") or []
+    if isinstance(raw_kernel_sources, str):
+        raw_kernel_sources = [raw_kernel_sources]
+    collective_sources = list(
+        dict.fromkeys(
+            str(path).strip()
+            for path in (source_file, *raw_kernel_sources)
+            if str(path or "").strip()
+        )
+    )
+    kernel_repo_raw = candidate.get("kernel_repo")
+    if kernel_repo_raw is not None and not isinstance(kernel_repo_raw, str):
+        return _collective_revert_result(
+            "invalid_collective_candidate",
+            "collective candidate kernel_repo must be a string",
+        )
+    kernel_repo = (kernel_repo_raw or "").strip() or _find_repo_root_for_source(
+        source_file
+    )
+    if not kernel_repo:
+        return _collective_revert_result(
+            "kernel_repo_missing",
+            f"cannot resolve a repo root for {source_file!r}",
+        )
+
+    tp_raw = payload.get("tp")
+    if tp_raw in (None, ""):
+        tp_raw = getattr(state, "tp", 0) or os.environ.get("TP")
+    try:
+        if isinstance(tp_raw, bool) or isinstance(tp_raw, float):
+            raise ValueError
+        tp = int(tp_raw)
+    except (TypeError, ValueError):
+        tp = 0
+    if tp <= 1:
+        return _collective_revert_result(
+            "invalid_collective_world_size",
+            f"collective TP must be greater than one, got {tp_raw!r}",
+        )
+
+    timeout_raw = payload.get("timeout")
+    if timeout_raw in (None, ""):
+        timeout_raw = os.environ.get("FORGE_COLLECTIVE_TIMEOUT")
+    try:
+        if isinstance(timeout_raw, bool) or isinstance(timeout_raw, float):
+            raise ValueError
+        timeout = int(timeout_raw) if timeout_raw not in (None, "") else 0
+        max_hours, timeout = _collective_budget(state, payload.get("max_hours"), timeout)
+    except (OverflowError, TypeError, ValueError) as exc:
+        return _collective_revert_result(
+            "invalid_collective_budget",
+            str(exc),
+        )
+    if timeout <= 0:
+        return _collective_revert_result(
+            "insufficient_collective_budget",
+            (
+                "remaining session budget cannot fit collective preparation, "
+                "KernelForge's one-hour minimum campaign, and finalization"
+            ),
+            status="skipped",
+            analysis_key=collective_analysis_key(state),
+        )
+    workspace = (
+        session_dir
+        / "runs"
+        / "collective"
+        / str(payload.get("task_id") or "kernel_entry_collective")
+        / f"attempt-{time.time_ns()}"
+    )
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    input_payload = {
+        "candidate": candidate,
+        "source_file": source_file,
+        "kernel_repo": kernel_repo,
+        "output_dir": str(workspace),
+        "tp": tp,
+        "timeout": timeout,
+        "finalize_grace_sec": _COLLECTIVE_FINALIZE_GRACE_SEC,
+        "agent_timeout_sec": payload.get("agent_timeout_sec")
+        or os.environ.get("FORGE_COLLECTIVE_AGENT_TIMEOUT"),
+        "gpu_target": str(payload.get("gpu_target") or getattr(state, "gpu_type", "") or ""),
+        "max_hours": max_hours,
+        "llm_model": payload.get("llm_model") or os.environ.get("CLAUDE_MODEL"),
+        "target_functions": [source_function],
+        "source_files": collective_sources,
+        "operator_name": source_function,
+        "framework": str(getattr(state, "framework", "") or ""),
+        "experience_id": workspace.name,
+    }
+    input_json = workspace / "forge_collective_input.json"
+    input_json.write_text(
+        json.dumps(input_payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    cmd = ["python3", str(_kernel_agent_tool_path("forge_collective.py")), "--input-json", str(input_json)]
+
+    wrapper_timeout = timeout + _COLLECTIVE_FINALIZE_GRACE_SEC
+    try:
+        rc, stdout, stderr = await _run_subprocess(
+            cmd,
+            timeout_sec=wrapper_timeout,
+        )
+        try:
+            result = _parse_forge_collective_sentinel(stdout)
+        except ValueError as exc:
+            result = _collective_revert_result(
+                "invalid_collective_result",
+                str(exc),
+                returncode=rc,
+                stdout_tail=stdout[-2000:],
+                stderr_tail=stderr[-2000:],
+            )
+    except subprocess.TimeoutExpired as exc:
+        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
+        result = _collective_revert_result(
+            "subprocess_timeout",
+            f"TimeoutExpired after {wrapper_timeout}s: {cmd_repr[:1500]}",
+        )
+
+    result.setdefault("backend", "forge")
+    result.setdefault("engine", "forge_collective")
+    result.setdefault("workspace", str(workspace))
+    result.setdefault("kernel_id", candidate.get("kernel_id"))
+    result.setdefault("kernel_name", candidate.get("name"))
+    result.setdefault("source_file", source_file)
+    result.setdefault("kernel_repo", kernel_repo)
+    result.setdefault("gpu_pct", candidate.get("gpu_pct"))
+    result.setdefault("collective_op", contract["collective_op"])
+    result.setdefault("world_size", tp)
+    result.setdefault("requires_e2e_validation", False)
+    result.setdefault("source", "forge_collective")
+    if (
+        str(result.get("status") or "") == "skipped"
+        and str(result.get("error_class") or "")
+        in {"no_collective_candidate", "insufficient_collective_budget"}
+    ):
+        result.setdefault("analysis_key", collective_analysis_key(state))
+    return result
+
+
+def _find_repo_root_for_source(source_file: str) -> str:
+    """Nearest ancestor of ``source_file`` containing a ``.git`` directory."""
+    if not source_file:
+        return ""
+    try:
+        current = Path(source_file).resolve()
+    except OSError:
+        return ""
+    for parent in current.parents:
+        if (parent / ".git").exists():
+            return str(parent)
+    return ""
+
+
+async def run_collective_handler(payload: dict, *, session_dir: Path) -> HandlerResult:
+    """Run the coordinator-owned collective optimization lane.
+
+    The attempt identity is deliberately left unset: the KERNEL phase derives it
+    from the result's content so a replayed or salvaged campaign deduplicates
+    against its earlier record. Stamping a wall-clock id here would make every
+    replay look like a new campaign.
+    """
+    result = await _run_forge_collective(payload, session_dir=session_dir)
+    if not isinstance(result, dict):
+        raise TypeError("Collective handler result must be a mapping")
+    result.setdefault("requires_e2e_validation", False)
+    return result
+
+
 def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
     """Append one ``gemm_tuning.jsonl`` audit row for a GEMM-tuning run.
 
@@ -4587,12 +5347,26 @@ async def run_optimization_handler(
 def _optimization_budget_minutes(payload: dict) -> float:
     """Wall-clock budget mirrored by the kernel_optimization.py wrapper.
 
+    Priority: env ``KERNEL_OPT_BACKEND_BUDGET_MIN`` > payload ``budget_minutes``
+    > :data:`_DEFAULT_BACKEND_BUDGET_MINUTES`. The env wins because the payload
+    value is LLM-authored from a prompt template, so an operator raising the
+    budget must not be silently overridden by it. forge-loop reserves half this
+    window for finalize, so 60 leaves only ~30 min of actual iteration.
+
     Args:
         payload (dict): Request payload carrying an optional ``budget_minutes``.
 
     Returns:
         float: The wall-clock budget in minutes for this optimization.
     """
+    raw = os.environ.get("KERNEL_OPT_BACKEND_BUDGET_MIN", "").strip()
+    if raw:
+        try:
+            forced = float(raw)
+        except ValueError:
+            forced = 0.0
+        if forced > 0:
+            return forced
     return float(payload.get("budget_minutes", _DEFAULT_BACKEND_BUDGET_MINUTES))
 
 
@@ -4619,7 +5393,7 @@ def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
     missing value, legacy alias, or payload override stays on the GEAK
     whole-phase backend.
     """
-    if _forge_explicitly_enabled():
+    if forge_explicitly_enabled():
         return ["forge"]
     return list(_DEFAULT_KERNEL_PHASE_BACKEND_ORDER)
 
@@ -4987,7 +5761,17 @@ def _batch_kernel_candidates(
     # front so both the grouped and legacy passes agree: they resolve a source
     # yet fail the kernel-opt gate on untrusted shape provenance. Absent field
     # (TraceLens path) stays dispatchable to avoid regressing it.
-    kernels = [k for k in kernels if not (isinstance(k, dict) and k.get("shape_dispatchable") is False)]
+    kernels = [
+        k
+        for k in kernels
+        if not (
+            isinstance(k, dict)
+            and (
+                k.get("shape_dispatchable") is False
+                or is_collective_candidate(k)
+            )
+        )
+    ]
     reusable_ids = data.get("reusable_native_kernel_ids") or []
     reusable_id_set = {str(item) for item in reusable_ids if item}
 
@@ -5733,8 +6517,6 @@ async def _run_optimization_single(
         cmd += ["--candidates-path", str(payload["candidates_path"])]
     if payload.get("benchmark_file"):
         cmd += ["--benchmark-file", str(payload["benchmark_file"])]
-    if payload.get("test_harness_path"):
-        cmd += ["--test-harness-path", str(payload["test_harness_path"])]
     if payload.get("micro_speedup") is not None:
         cmd += ["--micro-speedup", str(payload["micro_speedup"])]
     if payload.get("e2e_gain_pct") is not None:
@@ -5749,12 +6531,13 @@ async def _run_optimization_single(
             "--accuracy-passed",
             "true" if bool(payload["accuracy_passed"]) else "false",
         ]
-    if payload.get("test_command"):
-        cmd += ["--test-command", str(payload["test_command"])]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
-    if payload.get("budget_minutes") is not None:
-        cmd += ["--budget-minutes", str(payload["budget_minutes"])]
+    # Always pass the resolved budget so the operator env override reaches the
+    # tool: reading payload directly here would bypass
+    # _optimization_budget_minutes and silently leave forge on its own 60-min
+    # default (of which forge-loop reserves half for finalize).
+    cmd += ["--budget-minutes", str(_optimization_budget_minutes(payload))]
     # Let the tool handle its own backend timeout and salvage partial artifacts.
     timeout_sec = _optimization_wrapper_timeout_sec(payload)
     if timeout_override_sec is not None:
@@ -6284,6 +7067,39 @@ def _grade_integrate_accuracy(
     }
 
 
+def _cold_start_rebaseline_timeout(resolved_sec: int) -> int:
+    """Raise a re-baseline timeout to the cold-start cap when the JIT cache is empty.
+
+    An apply moves the cache aside, so the re-baseline recompiles from scratch;
+    the explicit ``timeout_sec`` integrate passes also suppresses the baseline
+    executor's own cold-start branch, leaving the warm budget as the only one.
+    """
+    from ..actions.executors._aiter_jit import (
+        BASELINE_COLD_START_TIMEOUT_SEC,
+        probe_aiter_jit_cache,
+    )
+
+    cache = probe_aiter_jit_cache()
+    if cache.get("probe_status") != "found" or not cache.get("is_cold"):
+        return resolved_sec
+    cold_cap = int(
+        os.environ.get(
+            "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC",
+            BASELINE_COLD_START_TIMEOUT_SEC,
+        )
+    )
+    if cold_cap <= resolved_sec:
+        return resolved_sec
+    log.warning(
+        "integrate_handler: aiter JIT cache is cold (%s kernels); raising "
+        "re-baseline timeout %ds -> %ds for the recompile the patch forces",
+        cache.get("kernel_count"),
+        resolved_sec,
+        cold_cap,
+    )
+    return cold_cap
+
+
 def _integrate_rebaseline_timeout_sec(
     payload: dict,
     *,
@@ -6402,10 +7218,35 @@ async def integrate_handler(
 
     patch_path = payload.get("patch_path")
     kernel_id = payload.get("kernel_id")
-    apply_result = _maybe_apply_kernel_patch(
-        payload,
-        session_dir=session_dir,
-        kernel_id=kernel_id,
+    preapplied = payload.get("preapplied_apply_result")
+    if isinstance(preapplied, dict) and preapplied.get("status") == "ok":
+        manifest_path = Path(str(preapplied.get("manifest_path") or ""))
+        patches_root = (Path(session_dir) / "patches").resolve()
+        try:
+            trusted_preapplied = (
+                manifest_path.is_file()
+                and manifest_path.resolve().is_relative_to(patches_root)
+            )
+        except OSError:
+            trusted_preapplied = False
+        apply_result = (
+            dict(preapplied)
+            if trusted_preapplied
+            else {
+                "status": "failed",
+                "error_class": "untrusted_preapplied_manifest",
+                "error": f"invalid pre-applied manifest: {manifest_path}",
+            }
+        )
+    else:
+        apply_result = _maybe_apply_kernel_patch(
+            payload,
+            session_dir=session_dir,
+            kernel_id=kernel_id,
+        )
+    _checkpoint_collective_apply(
+        str(payload.get("apply_checkpoint_path") or ""),
+        apply_result,
     )
     if apply_result.get("status") == "skipped" and env_only_validation:
         apply_result = {
@@ -6447,15 +7288,16 @@ async def integrate_handler(
     extra_args = _vram_guarded_server_args(extra_args)
 
     # Wrap BaselineExecutor in a Task/RunnerContext.
-    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+    from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
 
     fake_task_id = f"integrate-{kernel_id or 'anon'}"
-    workspace = runs_dir(session_dir, "integrate", fake_task_id)
-    workspace.mkdir(parents=True, exist_ok=True)
+    workspace = unique_runs_dir(session_dir, "integrate", fake_task_id)
     baseline_executor = BaselineExecutor(session_dir=session_dir)
-    rebaseline_timeout_sec = _integrate_rebaseline_timeout_sec(
-        payload,
-        default_timeout_sec=baseline_executor.default_timeout_sec,
+    rebaseline_timeout_sec = _cold_start_rebaseline_timeout(
+        _integrate_rebaseline_timeout_sec(
+            payload,
+            default_timeout_sec=baseline_executor.default_timeout_sec,
+        )
     )
     fake_task = Task(
         task_id=fake_task_id,
@@ -6716,8 +7558,7 @@ async def integrate_handler(
         paired_ab = {"status": "attempted"}
         try:
             paired_pristine_revert = _maybe_revert_kernel_patch(apply_result)
-            paired_ws = runs_dir(session_dir, "integrate", f"{fake_task_id}-pairedbase")
-            paired_ws.mkdir(parents=True, exist_ok=True)
+            paired_ws = unique_runs_dir(session_dir, "integrate", f"{fake_task_id}-pairedbase")
             paired_task = Task(
                 task_id=f"{fake_task_id}-pairedbase",
                 kind="baseline",
@@ -6797,14 +7638,27 @@ async def integrate_handler(
             paired_pristine_revert if paired_pristine_revert is not None else _maybe_revert_kernel_patch(apply_result)
         )
     )
+    defer_patch_finalize = bool(payload.get("defer_patch_finalize", False))
     finalize_result = (
-        _maybe_finalize_kernel_patch(apply_result)
-        if decision == "KEEP"
-        else {"status": "skipped", "reason": "non-KEEP decision"}
+        {"status": "skipped", "reason": "deferred to caller durability checkpoint"}
+        if decision == "KEEP" and defer_patch_finalize
+        else (
+            _maybe_finalize_kernel_patch(apply_result)
+            if decision == "KEEP"
+            else {"status": "skipped", "reason": "non-KEEP decision"}
+        )
+    )
+    revert_required = decision != "KEEP" and bool(apply_result.get("manifest_path"))
+    revert_complete = (
+        not revert_required
+        or revert_result.get("status") in {"ok", "partial"}
     )
 
     result: dict[str, Any] = {
-        "status": "ok",
+        # Clean finish including any owed revert; the verdict is ``decision``,
+        # which every in-tree consumer reads, so a REVERT that reverted cleanly
+        # still reports ``ok``.
+        "status": "ok" if revert_complete else "failed",
         "decision": decision,
         "kernel_id": kernel_id,
         "patch_path": patch_path,
@@ -6824,6 +7678,12 @@ async def integrate_handler(
         "identity_route": str(payload.get("identity_route") or ""),
         "integration_id": str(payload.get("integration_id") or ""),
     }
+    if not revert_complete:
+        result["error_class"] = "patch_revert_incomplete"
+        result["error"] = str(
+            revert_result.get("error")
+            or "Kernel patch revert did not complete"
+        )
     if stack_positive_keep and gain_pct <= keep_threshold_pct:
         result["decision_reason"] = "stack_positive_increment"
         result["stack_incremental_gain_pct"] = stack_incremental_gain_pct
@@ -6883,7 +7743,8 @@ async def integrate_handler(
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
     "trace_analyze": trace_analyze_handler,
     "run_gemm_tuning": run_gemm_tuning_handler,
-    "run_fusion": run_fusion_handler,
+    # No run_fusion entry: KernelPhase awaits run_fusion_handler directly.
+    "run_collective": run_collective_handler,
     "run_optimization": run_optimization_handler,
     "integrate": integrate_handler,
     "apply_patch": integrate_handler,  # alias — same flow
@@ -6923,24 +7784,4 @@ __all__ = [
     "run_gemm_tuning_handler",
     "run_optimization_handler",
     "trace_analyze_handler",
-    # Re-exported from sibling modules for backward compat and the test
-    # monkeypatch surface (referenced via ``request_handlers.<name>``).
-    # Declared so the re-exports are intentional, not flagged imports.
-    "_format_last_kernel_opt",
-    "_resolve_kernel_patch_identity",
-    "kernel_patch_key",
-    "find_rejected_kernel_patch",
-    "record_kernel_integrate_result",
-    "record_kernel_opt",
-    "record_gemm_tuning",
-    "_kernel_ids_in_optimization_stack",
-    "_source_files_in_optimization_stack",
-    "_kernel_ids_with_integrate_attempts",
-    "integrate_attempt_count_for_kernel",
-    "_kernel_trace_impact_pct",
-    "next_pending_keep_kernel_id",
-    "pending_keep_kernel_ids",
-    "has_keep_pending_integrate",
-    "kernel_opt_attempts_count",
-    "untried_hot_reusable_kernels",
 ]

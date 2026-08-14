@@ -271,9 +271,16 @@ def _derive_runtime_paths() -> None:
 
 _KERNEL_AGENT_PATH_VARS: tuple[str, ...] = ("TRACELENS_ROOT",)
 
+_SHELL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 def _parse_env_assignments(text: str) -> dict[str, str]:
-    """Parse ``[export] KEY=VALUE`` shell assignments into a dict (first wins)."""
+    """Parse ``[export] KEY=VALUE`` shell assignments into a dict (first wins).
+
+    Lines that merely contain ``=`` are skipped rather than parsed: the file is
+    real shell, so a conditional such as ``[ "$X" = 'v' ] || ...`` would
+    otherwise yield a bogus key and a spurious "unsupported env key" warning.
+    """
     out: dict[str, str] = {}
     for raw in text.splitlines():
         line = raw.strip()
@@ -285,7 +292,7 @@ def _parse_env_assignments(text: str) -> dict[str, str]:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
-        if not key:
+        if not _SHELL_NAME_RE.match(key):
             continue
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):

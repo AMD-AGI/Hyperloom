@@ -12,6 +12,8 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     KERNEL_AGENT_METRIC,
     build_kernel_agent_knowledge,
     kernel_agent_canonical_id,
+    kernel_record_refs,
+    merge_kernel_columns,
 )
 from hyperloom.orchestrator.knowledge.kernel_kb_columns import stage_kernel_columns
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
@@ -288,3 +290,76 @@ def test_restaging_a_displaced_artifact_keeps_its_own_ref(tmp_path):
     assert restaged_ref != "kernel/gemm/tuned.csv"
     files_dir = kb._sections.files_dir
     assert (files_dir / restaged_ref).read_text(encoding="utf-8") == "displaced\n"
+
+
+def _cols(gemm=(), fusion=(), rewrite=()):
+    return {
+        "gemm": {"optimizations": list(gemm)},
+        "fusion": {"items": list(fusion)},
+        "rewrite": {"items": list(rewrite)},
+    }
+
+
+def test_merge_keeps_a_column_the_incoming_session_never_touched():
+    published = _cols(rewrite=[{"kernel_name": "k1", "e2e_gain_pct": 20.0}])
+    incoming = _cols(gemm=[{"variant_name": "v1", "e2e_gain_pct": 30.0}])
+
+    merged, inherited = merge_kernel_columns(published, incoming)
+
+    assert [i["kernel_name"] for i in merged["rewrite"]["items"]] == ["k1"]
+    assert [o["variant_name"] for o in merged["gemm"]["optimizations"]] == ["v1"]
+    assert kernel_record_refs(inherited[0]) == set()  # this one names no files
+
+
+def test_merge_prefers_the_better_recording_of_the_same_optimization():
+    published = _cols(rewrite=[{"kernel_name": "k1", "e2e_gain_pct": 20.0, "id": "old"}])
+    incoming = _cols(rewrite=[{"kernel_name": "k1", "e2e_gain_pct": 25.0, "id": "new"}])
+
+    merged, _ = merge_kernel_columns(published, incoming)
+
+    assert [i["id"] for i in merged["rewrite"]["items"]] == ["new"]
+
+
+def test_merge_declines_a_worse_recording_of_the_same_optimization():
+    published = _cols(rewrite=[{"kernel_name": "k1", "e2e_gain_pct": 20.0, "id": "old"}])
+    incoming = _cols(rewrite=[{"kernel_name": "k1", "e2e_gain_pct": 5.0, "id": "new"}])
+
+    merged, _ = merge_kernel_columns(published, incoming)
+
+    assert [i["id"] for i in merged["rewrite"]["items"]] == ["old"]
+    # Nothing improved, so the caller can tell the write is pointless.
+    assert merged == published
+
+
+def test_merge_hands_back_the_inherited_records_so_their_files_follow():
+    published = _cols(
+        rewrite=[
+            {
+                "kernel_name": "k1",
+                "e2e_gain_pct": 20.0,
+                "patch": "kernel/rewrite/k1.diff",
+                "source_files": ["kernel/rewrite/k1.py"],
+            }
+        ]
+    )
+    incoming = _cols(gemm=[{"variant_name": "v1", "e2e_gain_pct": 30.0}])
+
+    merged, inherited = merge_kernel_columns(published, incoming)
+
+    # The caller re-uploads and may re-ref these, so they must be the very
+    # objects inside the merged document, not copies of them.
+    assert inherited == [published["rewrite"]["items"][0]]
+    assert inherited[0] is merged["rewrite"]["items"][0]
+    assert kernel_record_refs(inherited[0]) == {
+        "kernel/rewrite/k1.diff",
+        "kernel/rewrite/k1.py",
+    }
+
+
+def test_merge_treats_different_kernels_as_different_slots():
+    published = _cols(rewrite=[{"kernel_name": "k1", "e2e_gain_pct": 20.0}])
+    incoming = _cols(rewrite=[{"kernel_name": "k2", "e2e_gain_pct": 5.0}])
+
+    merged, _ = merge_kernel_columns(published, incoming)
+
+    assert sorted(i["kernel_name"] for i in merged["rewrite"]["items"]) == ["k1", "k2"]

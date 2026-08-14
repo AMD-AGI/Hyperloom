@@ -26,7 +26,7 @@ objective progress.
 The CLI starts a Python Coordinator that coordinates:
 
 - Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`, Kernel requests, `report`).
-- Kernel (programmatic, not LLM): the Coordinator dispatches `trace_analyze`, `run_optimization`, `integrate`, and related request kinds directly to Python handlers without an LLM turn.
+- Kernel (programmatic, not LLM): the Coordinator dispatches `trace_analyze`, `run_gemm_tuning`, `run_optimization`, `integrate`, and related request kinds directly to Python handlers without an LLM turn. The `run_fusion` and `run_collective` lanes share that handler table but are Coordinator-owned: they run at KERNEL entry behind their own gate and PolicyGate rejects an agent request for either.
 - Critic: proposal review (default `--critic-agent`; see
   [Critic Backend Selection](#critic-backend-selection) for modes).
 - Robustness: default `--robustness-agent` — drives the
@@ -157,10 +157,10 @@ run silently degrades the next `baseline` by 5–30 % (shares VRAM +
 schedules on the same XCD); `current_best` cannot detect this
 pollution after the fact.
 > Inside a running session, the equivalent guard is enforced in
-> `orchestrator/kernel/request_handlers.py`: `restart_server_for_round` and
-> `apply_and_bench.py` run `kill_server` + `check_gpu_memory` before every
-> server restart. IR-1 above is the *outer* gate that fires before the
-> optimizer process exists.
+> `orchestrator/kernel/request_handlers.py` via
+> `_multi_node_server_lifecycle.py::restart_server_for_round`, which kills
+> stale servers before every restart. IR-1 above is the *outer* gate that
+> fires before the optimizer process exists.
 
 ### IR-2 — install.sh MUST succeed before every launch
 
@@ -277,9 +277,12 @@ under **Framework Selection** below.
 
 ## Retired modules and rules (do not re-introduce)
 
-The live runtime uses `actions/_meta/*.yaml`, `_grid_runner.py`, and the
-unified specialist-informed `explore` flow. Do not recreate the retired
-`backends` / `params` / `validate_stack` / scoring modules.
+The live runtime uses `protocol/action_surfaces.ACTION_CATALOGUE`,
+`_grid_runner.py`, and the unified specialist-informed `explore` flow. Do not
+recreate the retired `backends` / `params` / `validate_stack` / scoring
+modules, nor the `actions/_meta/*.yaml` catalogue and its ActionRegistry
+loader, nor the `vendor_kernel_config` / `operator_tuning` /
+`deep_kernel_analysis` actions (they never had an implementation).
 
 Rules that look reasonable but break the current flow:
 
@@ -702,15 +705,15 @@ shell wrappers hardcode artifacts under `/workspace/`
 (`inferencex_result.json`, `server.log`, `gpu_metrics.csv`,
 `profile_*.trace.json.gz`). When a task's in-workspace search finds no
 usable measurement, the executors run an mtime-gated salvage pass over
-`$INFERENCE_OPTIMIZER_RESCUE_PATHS` (default `/workspace/`) and copy
+`$INFERENCE_OPTIMIZER_RESCUE_PATHS` (unset = no salvage) and copy
 fresh matches into the task workspace, tagged in `nonfatal_warnings`
 (`rescued_from_leaked_path:` / `harvested_leaked_artifact:`). Extend the
 scan roots via `$INFERENCE_OPTIMIZER_LEAK_ROOTS` if a script leaks
 elsewhere; the default `{framework}_{runner_type}.sh` already respects
 `$RESULT_DIR` so salvage normally never fires.
 
-Operators only interact through two `task.params` knobs (full schema in
-each `actions/_meta/<action>.yaml`): `params.benchmark_script` (bare
+Operators only interact through two `task.params` knobs:
+`params.benchmark_script` (bare
 sanitized `*.sh` name; overrides the gpu_type auto-pick) and
 `params.result_dir` (forwarded as `$RESULT_DIR`). A baseline retry after a
 failure MUST change at least one of `params.benchmark_script` /
@@ -1149,27 +1152,6 @@ JIT was killed mid-`hipcc` — bump
 `INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC` above its 9000s default (e.g.
 `=12000`; it replaces the cold cap, so a smaller value shortens it).
 Override the probe dir via `INFERENCE_OPTIMIZER_AITER_JIT_DIR`.
-
-## Pre-GEAK Unittest Harness (unittest skill)
-
-Before `backend=geak` attempts, the main agent generates a GEAK-compatible
-test harness by following `src/hyperloom/agents/kernel/skills/unittest/SKILL.md`. The skill
-searches for existing tests, collects shapes/dtypes from TraceLens and
-profiling data, and generates a 4-mode harness (`--correctness` / `--profile`
-/ `--benchmark` / `--full-benchmark`) that matches GEAK's evaluation contract.
-
-The resulting `test_command` is passed via `--test-command` to
-`kernel_optimization.py`, which forwards it to GEAK. If the skill fails to
-produce a valid harness (after up to 3 retries), `--test-command` is omitted
-and GEAK falls back to its own test discovery cascade.
-
-Validation uses `src/hyperloom/agents/kernel/skills/unittest/validate_harness.py` for both
-static checks (argparse + 4 flags + GEAK output markers) and runtime
-verification (run correctness + benchmark with reduced iterations).
-
-The Coordinator does NOT need to drive this step — the main agent executes
-the unittest skill before calling `kernel_optimization.py`. Observability
-shows up as `test_command` in `optimization_attempts.jsonl[].backend_paths`.
 
 ## Kernel Apply Safety
 

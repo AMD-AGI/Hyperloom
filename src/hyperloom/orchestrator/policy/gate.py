@@ -20,6 +20,7 @@ from ..bus.gpu_pool import (
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
+    COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
     INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_AGENT_OWNED_ACTIONS,
     KERNEL_REQUEST_KIND_ALIASES,
@@ -635,6 +636,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "kernel_opt_attempts",
         "kernel_opt_task_attempts",
         "pending_kernel_integrations",
+        "last_collective",
+        "collective_attempts",
+        "collective_only_mode",
         # closing_phase and baseline_config_path are Coordinator-only fact
         # fields, locked here so non-coordinator roles cannot mutate them via
         # UPDATE_STATE.
@@ -860,7 +864,7 @@ class PolicyGate:
         capability, presence of ``action_name``, the
         kernel_agent-owned-action guard, the per-action specialised paths
         (``specialist`` / ``integrate_patch`` / ``sweep``), the GEMM-tuning
-        ownership gate, the ActionRegistry unknown-action lookup, per-action
+        ownership gate, the action-catalogue unknown-action lookup, per-action
         source and required-payload guards, the phase-compatibility check,
         and the external-tool collision guard (R5).
 
@@ -913,7 +917,7 @@ class PolicyGate:
                 f"of delegate(action_name={action_name!r})",
                 rule="kernel_owned_by_kernel_agent",
             )
-        # ``specialist`` bypasses ActionRegistry; ``_validate_specialist_dispatch`` owns its contract.
+        # ``specialist`` bypasses the catalogue; ``_validate_specialist_dispatch`` owns its contract.
         if action_name == SPECIALIST_ACTION_NAME:
             self._validate_specialist_dispatch(role, payload)
             if check_phase:
@@ -931,12 +935,12 @@ class PolicyGate:
         if action_name == BASELINE_ACTION_NAME and not skip_baseline_singleton:
             self._validate_baseline_singleton(payload)
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
-        # Refuse delegate for unknown action names when an ActionRegistry is wired (no registry → fall through).
+        # Unwired in production: coordinator.py builds the gate without
+        # action_registry, so this is None there.
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
             raise PolicyDenied(
-                f"unknown action_name={action_name!r} (not in ActionRegistry)",
+                f"unknown action_name={action_name!r} (not in the action catalogue)",
                 rule="unknown_action",
-                hint="register a yaml under src/hyperloom/inference_optimizer/actions/_meta/<name>.yaml",
             )
         # Per-action source allowlist (e.g. ``recover`` is robustness-only).
         allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
@@ -979,7 +983,7 @@ class PolicyGate:
         """Validate a ``PROPOSE_ACTION`` intent (the advisory channel).
 
         Requires ``action_name``, then hard-rejects kernel_agent-owned
-        actions (REQUEST-only) before the ActionRegistry lookup, which is
+        actions (REQUEST-only) before the action-catalogue lookup, which is
         soft — unknown names are rejected only when a registry is wired.
         Mirrors the delegate channel's sweep-singleton, per-action source,
         GEMM-tuning ownership, phase, and external-tool collision gates so
@@ -1010,10 +1014,10 @@ class PolicyGate:
                 f"of propose_action(action_name={action_name!r})",
                 rule="kernel_owned_by_kernel_agent",
             )
-        # Soft check — reject only if registry is wired AND name is unknown.
+        # Soft check — same unwired catalogue as the delegate twin above.
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
             raise PolicyDenied(
-                f"propose_action: unknown action_name={action_name!r} (not in ActionRegistry)",
+                f"propose_action: unknown action_name={action_name!r} (not in the action catalogue)",
                 rule="unknown_action",
             )
         # sweep_phase_singleton (defense in depth on the propose_action channel).
@@ -1145,6 +1149,21 @@ class PolicyGate:
         # resolve a request-kind alias (e.g. apply_patch -> integrate) to its
         # canonical owned action so the phase-action gate applies identically.
         gated_kind = KERNEL_REQUEST_KIND_ALIASES.get(kind, kind)
+        if gated_kind in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS:
+            raise PolicyDenied(
+                f"request kind {gated_kind!r} is a Coordinator-owned kernel lane "
+                f"and not LLM-requestable ({role.name})",
+                rule="phase_incompatible",
+                hint=(
+                    "run_fusion / run_collective are dispatched by the "
+                    "Coordinator at KERNEL entry once their deterministic gate "
+                    "passes; their outcomes arrive as run_fusion_done / "
+                    "run_collective_done responses. Requesting one directly "
+                    "skips that gate, the lane's SharedState accounting, and "
+                    "its integrate step. Propose ``kernel_opt`` for a "
+                    "source-level kernel instead."
+                ),
+            )
         # R1 phase_incompatible: treat REQUEST kind as the action name for kernel_agent-owned + coordinator-internal kinds.
         if (
             target == "kernel_agent" and gated_kind in KERNEL_AGENT_OWNED_ACTIONS

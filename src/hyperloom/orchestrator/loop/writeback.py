@@ -1638,12 +1638,7 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 - audit cannot break finalization
             log.debug("Remote Recipe KB audit append failed", exc_info=True)
 
-    def _finalize_kernel_agent_kb(
-        self,
-        remote_cid: str,
-        remote_sid: str,
-        source: str,
-    ) -> None:
+    def _finalize_kernel_agent_kb(self, remote_cid: str, source: str) -> None:
         """Publish the independent kernel-agent KB record for this session.
 
         A separate ``kernel:`` record with its own keep-if-better on kernel
@@ -1673,9 +1668,7 @@ class WritebackCollaborator:
                 # The recipe write failed before resolving the workload identity.
                 log.info("Kernel-agent KB finalize skipped: no workload identity")
                 return
-            kernel_result = write_kernel_agent_kb(
-                self.shared_state, kernel_cid, remote_sid
-            )
+            kernel_result = write_kernel_agent_kb(self.shared_state, kernel_cid)
             log.info(
                 "Kernel-agent KB finalize: status=%s reason=%s cid=%s sid=%s",
                 kernel_result.status,
@@ -1772,7 +1765,7 @@ class WritebackCollaborator:
                     optimized_throughput=remote_result.optimized_throughput,
                     reason=remote_result.reason,
                 )
-                self._finalize_kernel_agent_kb(remote_cid, remote_sid, source)
+                self._finalize_kernel_agent_kb(remote_cid, source)
                 return {
                     "status": remote_result.status,
                     "reason": remote_result.reason,
@@ -1793,7 +1786,7 @@ class WritebackCollaborator:
                     error_type=type(exc).__name__,
                 )
                 log.exception("Remote Recipe KB finalize failed (non-fatal)")
-                self._finalize_kernel_agent_kb(remote_cid, remote_sid, source)
+                self._finalize_kernel_agent_kb(remote_cid, source)
                 return {
                     "status": "error",
                     "reason": type(exc).__name__,
@@ -4776,7 +4769,7 @@ class WritebackCollaborator:
             osl = int(reg.get("osl") or 1024)
         except (TypeError, ValueError):
             conc, isl, osl = 64, 1024, 1024
-        from hyperloom.inference_optimizer.session.session_paths import runs_dir
+        from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
         from ..actions.executors._geak_sweep import sweep_via_geak
 
         try:
@@ -4787,7 +4780,7 @@ class WritebackCollaborator:
             result=ps,
             conc_values=[conc],
             isl_osl_configs=[f"{isl}:{osl}"],
-            output_root=runs_dir(self.session_dir, "sweep", "revalidate_geak"),
+            output_root=unique_runs_dir(self.session_dir, "sweep", "revalidate_geak"),
             variant_timeout_sec=timeout,
             repeats=3,
             # Single-point validated replay pins the headline protocol (num_prompts
@@ -4858,11 +4851,12 @@ class WritebackCollaborator:
         """Idempotently re-fire the KERNEL_AGENT entry hook on resume.
 
         Phase-entry side effects (the GEAK delegation + its ``result.json``
-        crash-recovery) are bound to a phase *transition* via
-        ``_on_phase_entered``; a resume only restores ``phase`` from state.json
-        and never re-enters the current phase. Without this, a session that
-        crashed mid ``KERNEL_AGENT`` sits idle until the phase budget cap fires,
-        then hands SWEEP an empty result — the whole delegation is silently lost.
+        crash-recovery, and the collective lane's pending integration) are bound
+        to a phase *transition* via ``_on_phase_entered``; a resume only restores
+        ``phase`` from state.json and never re-enters the current phase. Without
+        this, a session that crashed mid ``KERNEL_AGENT`` sits idle until the
+        phase budget cap fires, then hands SWEEP an empty result — the whole
+        delegation is silently lost.
 
         General across every crash timing (not case-by-case): the decision is
         driven purely by whether THIS KERNEL phase's history row already carries
@@ -4876,12 +4870,13 @@ class WritebackCollaborator:
             re-runs the e2e only when there is genuinely nothing to recover
             (run_e2e itself then continues from the pinned eval_dir on disk).
 
-        No-op unless resumed while parked in ``KERNEL_AGENT`` with the GEAK
-        backend selected.
+        No-op unless resumed while parked in ``KERNEL_AGENT`` with a pending
+        collective integration or the GEAK backend selected.
         """
         from ..phases.machine_state import (
             ESCALATE_HINT_SKIP_TO_SWEEP,
             PHASE_KERNEL_AGENT,
+            collective_integration_pending,
         )
 
         if not self._resumed_from.get("is_resume"):
@@ -4889,7 +4884,40 @@ class WritebackCollaborator:
         state = self.shared_state
         if (state.phase or "").strip().upper() != PHASE_KERNEL_AGENT:
             return
-        if not (self._kernel_enabled() and self._geak_enabled()):
+        kernel_enabled = self._kernel_enabled()
+        collective_only = bool(getattr(state, "collective_only_mode", False))
+        # Mirror _on_enter_kernel's precedence: GEAK owns the phase unless
+        # collective-only mode turned it off, and the collective lane is only
+        # reachable when GEAK does not own it. Checking collective state ahead
+        # of an owning GEAK would re-run its whole e2e instead of re-arming the
+        # wind-down hint.
+        geak_enabled = kernel_enabled and not collective_only and self._geak_enabled()
+        if kernel_enabled and not geak_enabled:
+            try:
+                collective_required = bool(
+                    collective_integration_pending(state)
+                    or self._collective_required_before_kernel_opt()
+                )
+            except Exception:  # noqa: BLE001
+                # A malformed collective record must not strand the GEAK
+                # crash-recovery below: without it the session idles to its
+                # phase budget and hands SWEEP an empty result.
+                log.exception(
+                    "resume: Collective state check failed; continuing without it",
+                )
+                collective_required = False
+            if collective_required:
+                log.info("resume: re-entering unfinished Collective work")
+                try:
+                    await self._on_enter_kernel(from_phase="resume")
+                except Exception:  # noqa: BLE001
+                    log.exception("resume: Collective re-entry failed")
+                return
+            if collective_only:
+                state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
+                state.save(self.session_dir)
+                return
+        if not geak_enabled:
             return
         history = state.phase_history or []
         row = history[-1] if history else {}

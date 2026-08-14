@@ -37,8 +37,9 @@ from . import _server_lifecycle as _lifecycle
 from ._file_lock import best_effort_file_lock
 from ._aiter_jit import (
     AITER_JIT_PROBE_PATHS,
+    BASELINE_COLD_START_TIMEOUT_SEC,
     COLD_START_KERNEL_THRESHOLD,
-    _resolve_aiter_jit_dir_dynamic,
+    probe_aiter_jit_cache as _probe_aiter_jit_cache,
     sweep_stale_aiter_locks_if_dead,
 )
 from ._grid_runner import (
@@ -74,6 +75,8 @@ from ._magpie_patcher import ensure_eval_concurrency_compat
 from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
+    select_run_workspace,
+    snapshot_workspaces,
 )
 from .benchmark_backend import build_benchmark_command
 
@@ -318,9 +321,8 @@ def _classify_subprocess_error(
 
 
 BASELINE_DEFAULT_TIMEOUT_SEC = 7800  # WARM-start cap, 130 min
-BASELINE_COLD_START_TIMEOUT_SEC = 9000  # COLD-start cap, 150 min (includes ~20 min cuda graph capture)
-# COLD_START_KERNEL_THRESHOLD and AITER_JIT_PROBE_PATHS live in ``_aiter_jit``;
-# re-exported below for callers/tests that import them from this module.
+# Cold-start settings and probes live in ``_aiter_jit`` and are re-exported
+# above for callers/tests that import them from this module.
 
 
 # Underscore-prefixed aliases re-exported for callers/tests; canonical
@@ -608,71 +610,6 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
         dest,
     )
     return str(dest)
-
-
-def _probe_aiter_jit_cache() -> dict[str, Any]:
-    """Inspect aiter's ``jit/`` dir to decide cold vs warm start.
-
-    Read-only filesystem probe (no subprocess / GPU). Resolution order:
-    env override → dynamic find_spec → legacy AITER_JIT_PROBE_PATHS. First
-    existing dir wins; counts ``.so`` recursively. Any IO error degrades
-    to ``probe_status="error"`` (callers fall back to the WARM timeout).
-
-    Returns:
-        dict[str, Any]: Probe info with keys:
-            path           Path that was probed, or None if nothing found.
-            kernel_count   Number of `.so` files under `path` (recursive).
-            size_mb        Total size of those `.so` files, in MiB (int).
-            is_cold        True iff kernel_count < COLD_START_KERNEL_THRESHOLD;
-                           None when the probe found nothing or failed.
-            probe_status   "found" | "not_found" | "error".
-    """
-    info: dict[str, Any] = {
-        "path": None,
-        "kernel_count": 0,
-        "size_mb": 0,
-        "is_cold": None,
-        "probe_status": "not_found",
-    }
-    candidates: list[str] = []
-    override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
-    if override:
-        candidates.append(override)
-    candidates.extend(_resolve_aiter_jit_dir_dynamic())
-    candidates.extend(AITER_JIT_PROBE_PATHS)
-
-    try:
-        chosen: Path | None = None
-        for raw in candidates:
-            p = Path(raw)
-            if p.exists() and p.is_dir():
-                chosen = p
-                break
-        if chosen is None:
-            return info
-        info["path"] = str(chosen)
-
-        total_bytes = 0
-        kernel_count = 0
-        for so_path in chosen.rglob("*.so"):
-            try:
-                total_bytes += so_path.stat().st_size
-                kernel_count += 1
-            except OSError:
-                continue
-        info["kernel_count"] = kernel_count
-        info["size_mb"] = total_bytes // (1024 * 1024)
-        info["is_cold"] = kernel_count < COLD_START_KERNEL_THRESHOLD
-        info["probe_status"] = "found"
-        return info
-    except Exception as exc:  # noqa: BLE001
-        log.warning(
-            "baseline_executor: aiter jit cache probe failed: %s",
-            exc,
-        )
-        info["probe_status"] = "error"
-        info["is_cold"] = None
-        return info
 
 
 def _git_head_sha(repo_path: str) -> str:
@@ -2757,6 +2694,7 @@ class BaselineExecutor:
             except Exception as exc:  # noqa: BLE001 - warmup is best-effort
                 log.warning("baseline_executor: MN warmup pass failed (ignored): %r", exc)
 
+        workspaces_before = snapshot_workspaces(output_dir)
         subprocess_started_unix = time.time()
         # Anchor the Magpie parent process cwd to the per-task output_dir. NOTE:
         # this does NOT keep the server's cuda-graph dump safe on its own —
@@ -2818,8 +2756,7 @@ class BaselineExecutor:
                 proc_stdout = proc.stdout
                 proc_stderr = proc.stderr
         except subprocess.TimeoutExpired as exc:
-            timeout_candidates = sorted(output_dir.glob("benchmark_*"))
-            timeout_destination = timeout_candidates[-1] if timeout_candidates else output_dir
+            timeout_destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
             timeout_harvested = harvest_leaked_artifacts(
                 timeout_destination,
                 subprocess_started_unix=subprocess_started_unix,
@@ -2839,8 +2776,7 @@ class BaselineExecutor:
         # A stall reap leaves no benchmark_* workspace; a distinct error_class
         # lets the coordinator fast-fail instead of burning the full timeout.
         if proc_returncode == DETOKENIZER_STALL_RETURNCODE:
-            stall_candidates = sorted(output_dir.glob("benchmark_*"))
-            stall_destination = stall_candidates[-1] if stall_candidates else output_dir
+            stall_destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
             stall_harvested = harvest_leaked_artifacts(
                 stall_destination,
                 subprocess_started_unix=subprocess_started_unix,
@@ -2895,12 +2831,11 @@ class BaselineExecutor:
             proc_stdout or "",
         )
 
-        # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
-        candidates = sorted(output_dir.glob("benchmark_*"))
+        workspace = select_run_workspace(output_dir, known_before=workspaces_before)
         # Always-on artifact harvest: copy wrapper-side leaks into the task
         # workspace so failure-path diagnostics survive; mtime gating rejects
         # stale prior-run leaks.
-        harvest_destination = candidates[-1] if candidates else output_dir
+        harvest_destination = workspace if workspace is not None else output_dir
         harvested = harvest_leaked_artifacts(
             harvest_destination,
             subprocess_started_unix=subprocess_started_unix,
@@ -2911,7 +2846,7 @@ class BaselineExecutor:
                 len(harvested),
                 ", ".join(str(src.name) for src, _ in harvested),
             )
-        if not candidates:
+        if workspace is None:
             failure_extras = {
                 "output_dir": str(output_dir),
                 "harvested_artifacts": [str(dst) for _, dst in harvested],
@@ -2974,7 +2909,6 @@ class BaselineExecutor:
                 "error": "Magpie completed but produced no benchmark_* workspace",
                 **failure_extras,
             }
-        workspace = candidates[-1]
         report_path = workspace / "benchmark_report.json"
         report: dict[str, Any] | None = None
         if report_path.exists():
