@@ -369,13 +369,27 @@ def test_probe_rocm_build_reports_tri_state(monkeypatch):
         assert preflight._probe_rocm_build("vllm", "/usr/bin/python3").verdict is None
 
 
-def test_probe_is_inconclusive_when_torch_is_absent(monkeypatch):
-    """A host with no torch must not be told its wheel is the CUDA build."""
+def test_the_real_probe_agrees_with_this_host(monkeypatch):
+    """Runs the probe for real, and derives the expectation from the host.
+
+    The stubbed tri-state test covers the return codes; this one covers the
+    subprocess path itself -- a real interpreter running the real script, which
+    is where "absent torch" was once mistaken for a CUDA wheel. Asserting a
+    fixed verdict instead would only hold where torch happens to be missing,
+    passing on a CI runner and failing on every ROCm host the product targets.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("torch") is None:
+        expected = None  # nothing to read a platform off
+    else:
+        import torch
+
+        expected = True if getattr(torch.version, "hip", None) else False
+
     probe = preflight._probe_rocm_build("sglang", sys.executable)
 
-    # No torch here, so the only correct answer is "cannot say". Accepting True
-    # as well would let a wrong verdict through, which is the whole risk.
-    assert probe.verdict is None
+    assert probe.verdict is expected
 
 
 # ---------------------------------------------------------------------------
