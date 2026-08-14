@@ -538,13 +538,22 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     warm_history_injected: bool = False
     # Structured warm-replay outcome for reports/prompts (status reproduced|drift|failed|skipped, etc.).
     warm_replay_outcome: dict = field(default_factory=dict)
+    # Crash-safe rollback/bookkeeping state for the combined Recipe + Kernel
+    # PRELUDE validation. Cleared only after KEEP/REVERT settles.
+    warm_replay_pending: dict = field(default_factory=dict)
+    # Session-authoritative InferenceX checkout. A successful isolated warm
+    # replay promotes its already-patched checkout here without re-applying.
+    active_inferencex_path: str = ""
+    # Durable post-save handoffs for section KB staging. Rows are removed only
+    # after the idempotent draft write succeeds.
+    kb_stage_outbox: list = field(default_factory=list)
+    # Owner sections dropped because their persisted artifacts disappeared.
+    kb_stage_dead_letter: list = field(default_factory=list)
     # One-shot guard for PRELUDE warm-kernel KB read/apply (resume can't re-fire).
     warm_kernel_kb_attempted: bool = False
-    # Resolved prior-champion kernel columns (gemm/fusion/rewrite) loaded from the
-    # KB Store warm-start record at PRELUDE, with local file paths resolved.
+    # Resolved prior-champion kernel columns (gemm/fusion/rewrite) loaded at
+    # PRELUDE from the Recipe ``value.kernel`` section, with file paths resolved.
     warm_kernel_kb_plan: list = field(default_factory=list)
-    # Structured warm-kernel KB outcome for reports/prompts.
-    warm_kernel_kb_outcome: dict = field(default_factory=dict)
     # Baseline COLD (warmup-round) full boot+bench wall-clock; the hard-cap
     # anchor from which ExploreExecutor derives the overtime-kill deadline.
     baseline_runtime_sec: float = 0.0
@@ -940,10 +949,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # ISO UTC timestamp of the T0 snapshot; empty under --degraded-kb or T0 failure.
     warm_start_ts: str = ""
-    # Model-facing WarmStartContext built by ``recipe_kb_t0`` from the KB recipe
-    # row (parallel to the raw ``warm_start_recipe`` envelope). Carries an
-    # explicit ``status``, a ready-to-replay ``recommended_replay`` champion, and
-    # the experiential lists. Empty dict when T0 was bypassed or failed.
+    # Model-facing advisory context built by ``recipe_kb_t0``. Current remote
+    # records carry match/history/KG data only; local legacy records may also
+    # carry their compatibility replay projection.
     warm_start_context: dict[str, Any] = field(default_factory=dict)
 
     # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only _refresh_gaps; CORE_STATE_FIELDS); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
@@ -2395,17 +2403,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
 
-        outcome = _m.record_kernel_integrate_result(
+        return _m.record_kernel_integrate_result(
             self,
             result,
             max_attempts=max_attempts,
             keep_threshold_pct=keep_threshold_pct,
             max_fault_attempts=max_fault_attempts,
         )
-        # An integrate result is a rewrite/fusion round completion; re-stage the
-        # kernel KB columns so the run owns them with their per-patch verdicts.
-        self._stage_kernel_kb_columns()
-        return outcome
 
     def record_kernel_opt(self, result: dict[str, Any]) -> None:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
@@ -2418,24 +2422,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         from ..kernel import _kernel_decisions as _m
 
         _m.record_gemm_tuning(self, result)
-        # Staging deliberately does NOT happen here: the ``gemm_tuning`` row the
-        # column is built from is appended later by promote/validate, so a stage
-        # at record time would see nothing. The GEMM handler stages once that row
-        # exists.
-
-    def _stage_kernel_kb_columns(self) -> None:
-        """Best-effort per-round stage of the kernel KB sub-columns.
-
-        No-op when no KB draft directory is configured (local mode / tests):
-        :meth:`KernelAgentKB.open` returns an inactive facade. Never raises into
-        the caller — knowledge is advisory.
-        """
-        try:
-            from ..knowledge.kernel_kb_columns import stage_kernel_columns
-
-            stage_kernel_columns(self)
-        except Exception:  # noqa: BLE001 — knowledge write must not fail a round
-            log.debug("kernel kb: per-round staging failed", exc_info=True)
 
     # Multi-KEEP integrate queue helpers.
     def _kernel_ids_with_integrate_attempts(self) -> set[str]:

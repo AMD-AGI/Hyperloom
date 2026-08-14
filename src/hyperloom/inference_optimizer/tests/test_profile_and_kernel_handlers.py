@@ -1720,10 +1720,11 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     # The workspace must be created inside the fake to count as this run's output.
     ws_name = "benchmark_sglang_20260501_001122"
 
-    def _fake_run(cmd, *args, **kwargs):
+    async def _fake_baseline(_self, _ctx):
         workspace = output_dir / ws_name
         workspace.mkdir(parents=True, exist_ok=True)
-        (workspace / "benchmark_report.json").write_text(
+        report_path = workspace / "benchmark_report.json"
+        report_path.write_text(
             json.dumps(
                 {
                     "success": True,
@@ -1744,7 +1745,14 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
         trace_dir.mkdir()
         (trace_dir / "177-TP-0-DECODE.trace.json.gz").write_bytes(b"fake-trace")
         (trace_dir / "merged-177.trace.json.gz").write_bytes(b"fake-trace")
-        return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
+        return {
+            "status": "succeeded",
+            "framework": "sglang",
+            "model": "/path/models/Qwen-Qwen3-8B",
+            "output_throughput": 800.0,
+            "workspace": str(workspace),
+            "report_path": str(report_path),
+        }
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
     task = await tr.create(
@@ -1753,7 +1761,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
         idempotency_key="prof-1",
     )
     sub.register_executor("profile", pe)
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
         res = await sub.run_task(task)
 
     workspace = output_dir / ws_name

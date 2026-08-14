@@ -993,17 +993,33 @@ class DispatcherCollaborator:
                         "apply_fail retry drain failed for task=%s",
                         task.task_id,
                     )
-            # Auto-promote succeeded results into CORE_STATE_FIELDS (Coordinator-only writer).
-            kept = result.state == "succeeded" and self._is_promotable_result(task.kind, result.result or {})
+            # Auto-promote succeeded results into CORE_STATE_FIELDS
+            # (Coordinator-only writer).  Warm replay is deliberately routed
+            # through its promote handler even when dispatch itself failed:
+            # that handler owns rollback of pre-applied framework patches and
+            # clears the PRELUDE ``in_flight`` gate.
+            result_payload = dict(result.result or {})
+            replay_needs_cleanup = (
+                task.kind == "replay_warm_recipe"
+                and result.state != "succeeded"
+            )
+            if replay_needs_cleanup:
+                result_payload.setdefault("status", "failed")
+                result_payload.setdefault("error_class", "dispatch_failed")
+                if result.error:
+                    result_payload.setdefault("error", str(result.error))
+            kept = (
+                result.state == "succeeded" or replay_needs_cleanup
+            ) and self._is_promotable_result(task.kind, result_payload)
             try:
                 if kept:
                     await self._promote_to_shared_state(
                         task.kind,
-                        result.result,
+                        result_payload,
                         task=task,
                     )
                 elif task.task_id not in self._dead_holder_accounted:
-                    await self._handle_unpromotable_result(task, result.result)
+                    await self._handle_unpromotable_result(task, result_payload)
             except Exception as exc:  # noqa: BLE001
                 log.exception(
                     "dispatcher: promotion/unpromotable handling failed for task=%s",
@@ -1028,16 +1044,17 @@ class DispatcherCollaborator:
                         stage="dispatcher_fact_write",
                         exc=exc,
                     )
-            # Framework prs_tested write-back: record KEEP/REVERT patches.
+            # Real-time KG edge for a framework KEEP/REVERT (best-effort).
             if task.kind == "framework_agent":
                 try:
-                    self._write_prs_tested_from_framework_agent(task=task, result=result, kept=kept)
-                except Exception:  # noqa: BLE001 — defensive
+                    self._emit_framework_agent_kg_decision(
+                        task=task, result=result, kept=kept
+                    )
+                except Exception:  # noqa: BLE001 — real-time KG edge is best-effort
                     log.exception(
-                        "dispatcher: prs_tested write-back failed for task=%s",
+                        "dispatcher: framework KG decision emit failed for task=%s",
                         task.task_id,
                     )
-                    continue
             # explore-round gap update: append per-variant KEEP/REVERT, then re-run the global refresh.
             if task.kind == "explore":
                 result_dict = result.result if isinstance(result.result, dict) else {}
