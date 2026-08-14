@@ -444,6 +444,7 @@ class Recipe:
             # recipe row, never persisted into extras.
             "_field_sources",
             "_sources",
+            "prs_tested",
         }
         extras = {k: v for k, v in d.items() if k not in well_known}
         return cls(

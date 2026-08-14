@@ -336,6 +336,79 @@ async def test_inactive_without_record(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_one_shot_save_failure_stops_before_kernel_apply(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "serving/kernel.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("old", encoding="utf-8")
+    record = _kernel_record(
+        tmp_path,
+        {"rewrite": {"items": [_rewrite_item(target)]}},
+        {"kernel/rewrite/k1.py": "new"},
+    )
+    stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
+
+    def _fail_save(*_args, **_kwargs):
+        raise OSError("state unavailable")
+
+    stub.shared_state.save = _fail_save
+
+    outcome = await stub._prepare_warm_kernel_kb()
+
+    assert outcome["status"] == "error"
+    assert outcome["reason"] == (
+        "kernel_attempt_state_persist_failed:OSError"
+    )
+    assert stub.applied == []
+    assert target.read_text(encoding="utf-8") == "old"
+
+
+@pytest.mark.asyncio
+async def test_prepared_state_save_failure_rolls_back_kernel_set(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "serving/kernel.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("old", encoding="utf-8")
+    record = _kernel_record(
+        tmp_path,
+        {"rewrite": {"items": [_rewrite_item(target)]}},
+        {"kernel/rewrite/k1.py": "new"},
+    )
+    stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
+    save_calls = 0
+    rollbacks: list[tuple[list[dict], list[dict]]] = []
+
+    def _save(*_args, **_kwargs):
+        nonlocal save_calls
+        save_calls += 1
+        if save_calls >= 4:
+            raise OSError("state unavailable")
+
+    stub.shared_state.save = _save
+    stub._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+        lambda applied, snapshots=None: (
+            rollbacks.append((list(applied), list(snapshots or [])))
+            or {"ok": True, "errors": []}
+        )
+    )
+
+    outcome = await stub._prepare_warm_kernel_kb()
+
+    assert outcome["status"] == "error"
+    assert outcome["reason"] == (
+        "kernel_prepared_state_persist_failed:OSError"
+    )
+    assert len(rollbacks) == 1
+    assert len(rollbacks[0][0]) == 1
+    assert len(rollbacks[0][1]) == 1
+    assert outcome["pending"] == []
+    assert outcome["applied"] == []
+    assert stub.shared_state.warm_replay_pending == {}
+
+
+@pytest.mark.asyncio
 async def test_unresolvable_target_defers(tmp_path: Path) -> None:
     record = _kernel_record(
         tmp_path,

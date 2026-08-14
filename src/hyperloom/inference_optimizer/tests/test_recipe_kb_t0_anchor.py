@@ -394,6 +394,7 @@ _ACTIONABLE = {
     "validated_gain_pct": 10.0,
     "architectures": ["Qwen3ForCausalLM"],
     "model_type": "qwen",
+    "precision": "fp8",
     "best_config": {"extra_server_args": "--trusted"},
 }
 

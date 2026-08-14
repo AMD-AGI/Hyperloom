@@ -11,6 +11,7 @@ import pytest
 
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
+    Recipe,
     RecipeKB,
     recipe_canonical_id,
 )
@@ -24,6 +25,18 @@ def _cid() -> str:
         framework_version="0.4.5",
         precision="fp8",
     )
+
+
+def test_removed_prs_tested_field_does_not_round_trip() -> None:
+    recipe = Recipe.from_dict(
+        {
+            "canonical_id": _cid(),
+            "prs_tested": [{"url": "https://example.test/pr/1"}],
+        }
+    )
+
+    assert "prs_tested" not in recipe.extras
+    assert "prs_tested" not in recipe.to_dict()
 
 
 @pytest.fixture
