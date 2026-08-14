@@ -328,6 +328,82 @@ def test_normalize_manifest_kept_writes_keep_result(tmp_path):
     assert result["artifact_files"] == ["foo.py"]
 
 
+def _compile_pass_manifest(output_dir, *, kept: bool) -> dict:
+    """A claimed framework compile pass: no authoring loop, no validation block."""
+    return {
+        "schema_version": 2,
+        "verdict": "candidate",
+        "fusion_loop": None,
+        "validation": None,
+        "compile_pass": {
+            "flag": "VLLM_FUSE_RMSNORM",
+            "config_file": "vllm/config.py",
+            "baseline_tok_s": 1000.0,
+            "enabled_tok_s": 1090.0 if kept else 1005.0,
+            "speedup": 1.09 if kept else 1.005,
+            "pass_activated": True,
+            "validated": kept,
+            "kept": kept,
+        },
+        "artifacts": {
+            "patch": "diff --git a/vllm/config.py",
+            "changes": [{"path": "vllm/config.py"}],
+            "repo_root": "/venv/site-packages",
+        }
+        if kept
+        else None,
+        "fusion": {"source_file": str(output_dir / "config.py")},
+    }
+
+
+def test_normalize_manifest_keeps_a_claimed_compile_pass(tmp_path):
+    """A compile-pass claim reports no fusion_loop, and used to be read as a miss.
+
+    The claim is the cheapest win available -- the framework already shipped the
+    kernel, just switched off -- and its patch was being discarded.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_manifest.json").write_text(
+        json.dumps(_compile_pass_manifest(output_dir, kept=True)), encoding="utf-8"
+    )
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["kept"] is True
+    assert result["decision"] == "KEEP"
+    assert result["status"] == "ok"
+    assert result["micro_decision"] == "candidate"
+    assert result["patch"] == "diff --git a/vllm/config.py"
+    assert result["kernel_repo"] == "/venv/site-packages"
+    assert result["requires_e2e_validation"] is True
+    # The edit lives in the framework source, so there is no runtime flag to set.
+    assert result["env_flags"] == {}
+    assert result["baseline_env_flags"] == {}
+    # The number is a serving ratio; say so rather than let it pass for a
+    # microbenchmark one.
+    assert result["kernel_speedup"] == 1.09
+    assert result["serving_speedup"] == 1.09
+    assert result["compile_pass_flag"] == "VLLM_FUSE_RMSNORM"
+
+
+def test_normalize_manifest_reverts_a_compile_pass_that_did_not_pay(tmp_path):
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_manifest.json").write_text(
+        json.dumps(_compile_pass_manifest(output_dir, kept=False)), encoding="utf-8"
+    )
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["kept"] is False
+    assert result["decision"] == "REVERT"
+    assert result["status"] == "complete"
+    assert result["micro_decision"] == "no_improvement"
+    assert result["patch"] is None
+    assert result["requires_e2e_validation"] is False
+
+
 def test_normalize_manifest_reports_an_llm_outage_as_infrastructure(tmp_path):
     """`llm_unavailable` means the model was never reached, so it is not a verdict.
 

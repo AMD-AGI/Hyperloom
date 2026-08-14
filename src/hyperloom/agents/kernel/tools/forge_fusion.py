@@ -248,8 +248,11 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         return result
 
     loop = m.get("fusion_loop") or {}
-    val = m.get("validation") or {}
-    kept = bool(loop.get("kept") or val.get("kept"))
+    compile_pass = m.get("compile_pass") or {}
+    # KernelForge runs the compile-pass shortcut INSTEAD of the authoring loop, so
+    # exactly one of these is populated. ``validation`` is not consulted: it is the
+    # same object as ``fusion_loop.best``.
+    kept = bool(loop.get("kept") or compile_pass.get("kept"))
 
     if str(m.get("verdict") or "").strip().lower() == LLM_UNAVAILABLE_VERDICT and not kept:
         # forge-fusion never reached the model, so this run holds no opinion about the
@@ -283,12 +286,35 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         )
         return result
 
-    best = loop.get("best") or {}
-    speedup = best.get("kernel_speedup") or val.get("kernel_speedup")
-    best_flags = str(loop.get("best_env_flag") or "").split()
     artifacts = m.get("artifacts") or {}
     changed = [c.get("path") for c in (artifacts.get("changes") or []) if c.get("path")]
     src_file = str((m.get("fusion") or {}).get("source_file") or "")
+
+    if compile_pass:
+        # Claiming a framework compile pass that shipped switched off: the win is a
+        # flipped default in the framework's own source, so the patch carries it and
+        # there is no runtime flag to toggle. Its speedup is a serving tok/s ratio
+        # rather than a microbenchmark one, hence the extra fields naming where the
+        # number came from. Re-entry idempotency comes from last_fusion.status, not
+        # from env flags, so leaving them empty does not cause a re-run.
+        speedup = compile_pass.get("speedup")
+        result.update(
+            {
+                "compile_pass_flag": compile_pass.get("flag"),
+                "serving_speedup": speedup,
+            }
+        )
+    else:
+        speedup = (loop.get("best") or {}).get("kernel_speedup")
+        best_flags = str(loop.get("best_env_flag") or "").split()
+        result.update(
+            {
+                # Fused arm = all confirmed flags ON; baseline arm = same flags OFF.
+                "env_flags": {f: "1" for f in best_flags},
+                "baseline_env_flags": {f: "0" for f in best_flags},
+                "best_pattern": loop.get("best_pattern"),
+            }
+        )
 
     result.update(
         {
@@ -297,9 +323,6 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
             "decision": "KEEP" if kept else "REVERT",
             "kept": kept,
             "kernel_speedup": speedup,
-            # Fused arm = all confirmed flags ON; baseline arm = same flags OFF.
-            "env_flags": {f: "1" for f in best_flags},
-            "baseline_env_flags": {f: "0" for f in best_flags},
             "artifact_files": changed,
             "patch": artifacts.get("patch"),
             # For integrate's patch-apply path.
@@ -308,10 +331,10 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
             # site-packages dir. KernelForge sets it exactly when it sets a
             # patch, so it is present whenever integrate needs it.
             "kernel_repo": str(artifacts.get("repo_root") or ""),
-            "best_pattern": loop.get("best_pattern"),
             "verdict": m.get("verdict"),
-            # A KEPT fusion passed kernel parity + serving smoke; the orchestrator
-            # still confirms the real e2e gain via integrate.
+            # KernelForge validated this on its own -- kernel parity plus a serving
+            # smoke for an authored fusion, a serving A/B for a claimed compile pass
+            # -- but integrate is what confirms the real e2e gain here.
             "requires_e2e_validation": kept,
         }
     )
