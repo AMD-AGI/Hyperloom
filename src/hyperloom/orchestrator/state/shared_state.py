@@ -554,22 +554,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     reference_envs: dict[str, str] = field(default_factory=dict)
     reference_model: str = ""
     reference_source: str = ""
-    # Operator launch shape that used to live only in argv / process env. Persisted
-    # here so a resume that does not re-pass the flag still serves the same
-    # contract: state.json is the single source of truth for the launch shape and
-    # the CLI re-exports the derived env from it on both the fresh and resume path.
-    # ``--server-args`` (merged with per-task extra_server_args, above the
-    # reference base).
+    # Operator launch shape, persisted so a bare --resume serves the same contract.
+    # ``--server-args``: merged with per-task extra_server_args, above the reference base.
     operator_server_args: str = ""
     # ``--extra-env NAME=VALUE`` pins.
     operator_extra_env: dict[str, str] = field(default_factory=dict)
-    # ``--nodes``; the multi-node executors prefer multi_node_state.json, but the
-    # CLI-level policy derived from it (robustness defaults, env export) needs it.
+    # ``--nodes``; the executors read multi_node_state.json, but the CLI-level
+    # policy derived from the count (robustness defaults, env export) needs it.
     nodes: int = 1
-    # Resolved robustness-agent ``request.options`` overrides. Stored as the
-    # already-resolved mapping rather than the individual flags because the
-    # resolution folds in the multi-node and scriptable-framework policy, and
-    # replaying that policy on resume needs the same inputs the launch had.
+    # Resolved robustness-agent ``request.options``. Stored resolved rather than as
+    # the individual flags: the resolution folds in multi-node / scriptable policy.
     robustness_options: dict[str, Any] = field(default_factory=dict)
     # Warm-recipe replay gates (``--no-warm-replay`` / ``--warm-replay-min-*``).
     warm_replay_enabled: bool = True

@@ -389,33 +389,6 @@ def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] 
     return not (params or {}).get("quality_ref_exempt")
 
 
-def _resolve_reference_base(session_dir: Path) -> tuple[str, dict[str, str]]:
-    """Read the reference base server args/envs from SharedState.
-
-    Baseline is the single choke point every run funnels through, so reading the
-    reference here seeds every baseline (including resume restarts).
-
-    Returns ``("", {})`` when no reference is set.
-    """
-    from ...state.shared_state import SharedState
-
-    # The baseline executor is a module-level singleton instantiated before
-    # $INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR is pinned, so its cached
-    # session_dir can point at the workspace root. Prefer the live pin when
-    # present; otherwise honor the caller-supplied path.
-    from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
-
-    _pinned = os.environ.get(ENV_CURRENT_SESSION_DIR)
-    if _pinned:
-        session_dir = Path(_pinned)
-    state = SharedState.load_or_init(session_dir)
-    ref_args = str(getattr(state, "reference_server_args", "") or "").strip()
-    ref_envs = dict(getattr(state, "reference_envs", {}) or {})
-    if not ref_args and not ref_envs:
-        return ("", {})
-    return (ref_args, ref_envs)
-
-
 # Filesystem types that can be revoked / unmounted mid-run (e.g. a wekafs/NFS
 # mount flap), where a process whose cwd lives on such a mount sees relative-path
 # writes ENOENT. Such FS types trigger local mirroring of the InferenceX
@@ -2002,12 +1975,6 @@ class BaselineExecutor:
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
-        # Reference recipe base (lowest priority): prefer the explicit param,
-        # else read the SharedState value.
-        ref_args = str(params.get("reference_server_args") or "").strip()
-        ref_envs = dict(params.get("reference_envs") or {})
-        if not ref_args and not ref_envs:
-            ref_args, ref_envs = _resolve_reference_base(self.session_dir)
         # Accuracy eval (GSM8K) opt-out: ``--no-eval``, the ``disable_run_eval``
         # param and the eval-failure fallback force ``RUN_EVAL=false``. Candidates
         # template from this materialized YAML, so they inherit it.
@@ -2032,8 +1999,6 @@ class BaselineExecutor:
                 gpu_type=resolved_gpu,
                 inferencex_path=effective_inferencex_path,
                 benchmark_script=override_script,
-                reference_server_args=ref_args,
-                reference_envs=ref_envs,
                 establish_quality_ref=is_genuine_baseline,
                 drop_moe_runner_backend=force_drop_moe_runner_backend,
                 flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
@@ -2675,14 +2640,11 @@ class BaselineExecutor:
             try:
                 # Merge the reference base UNDER the per-task args (last-wins) so
                 # a multi-node per-round restart carries the same reference flags
-                # the single-node materialized YAML does. Prefer explicit params,
-                # else the SharedState value.
+                # the single-node materialized YAML does.
                 from ._grid_runner import merge_server_args
+                from ._workload_envs import resolve_reference_base
 
-                _mn_ref_args = str(params.get("reference_server_args") or "").strip()
-                _mn_ref_envs = dict(params.get("reference_envs") or {})
-                if not _mn_ref_args and not _mn_ref_envs:
-                    _mn_ref_args, _mn_ref_envs = _resolve_reference_base(self.session_dir)
+                _mn_ref_args, _mn_ref_envs = resolve_reference_base()
                 # Base on effective_extra_server_args (carries the one-shot
                 # cuda-graph eager-fallback flag when armed) so the MN per-round
                 # restart keeps that fallback too.

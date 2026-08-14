@@ -1340,34 +1340,6 @@ def _export_workload_envs_for_optimize(
     os.environ["EP"] = str(max(1, int(ep_resolved or 1)))
 
 
-def _export_reference_recipe(state: Any) -> None:
-    """Project the persisted ``--reference-script`` recipe into env.
-
-    ``materialize_config_with_envs`` takes the recipe as explicit parameters, but
-    only the ``baseline`` executor passes them; ``explore`` / ``sweep`` /
-    ``conc_sweep`` / ``integrate_patch`` / ``framework_agent`` / ``rebench``
-    inherited it by luck, via a ``params.config_path`` pointing at baseline's
-    already-rendered YAML. Nothing guaranteed that pointer, and when a
-    second-cycle explore round fell through to the shipped YAML it benchmarked
-    without the operator's recipe — reading a ~45% regression as a real
-    measurement. This env is the session-scoped fallback those callers resolve,
-    so the reference base no longer depends on which caller renders the YAML.
-
-    Args:
-        state: The SharedState carrying the resolved reference recipe.
-    """
-    args_str = str(getattr(state, "reference_server_args", "") or "").strip()
-    envs = dict(getattr(state, "reference_envs", None) or {})
-    if args_str:
-        os.environ["INFERENCE_OPTIMIZER_REFERENCE_SERVER_ARGS"] = args_str
-    else:
-        os.environ.pop("INFERENCE_OPTIMIZER_REFERENCE_SERVER_ARGS", None)
-    if envs:
-        os.environ["INFERENCE_OPTIMIZER_REFERENCE_ENVS"] = json.dumps(envs)
-    else:
-        os.environ.pop("INFERENCE_OPTIMIZER_REFERENCE_ENVS", None)
-
-
 def _export_operator_launch_shape(
     *,
     server_args: str,
@@ -1375,14 +1347,10 @@ def _export_operator_launch_shape(
 ) -> None:
     """Project the operator's ``--server-args`` / ``--extra-env`` into env.
 
-    These are internal handoffs for the in-process executors (e.g. the explore
-    aiter-MoE filter honours a pinned ``SGLANG_USE_AITER=0`` against variants
-    that would flip it back on), not a public config API. The env is derived
-    state: a fresh launch feeds it from argv and a resume feeds it from the
-    persisted SharedState, so the two paths serve the same contract.
-
-    Empty inputs clear the variables rather than leaving a stale value behind,
-    which matters when one shell launches several sessions in sequence.
+    Internal handoff for the in-process executors, not a public config API. A
+    fresh launch feeds it from argv, a resume from the persisted SharedState.
+    Empty inputs clear the variables so a second session in the same shell
+    cannot inherit a stale value.
 
     Args:
         server_args: The resolved ``--server-args`` string, possibly empty.
@@ -1701,11 +1669,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if getattr(state, "framework_version", ""):
             os.environ["FRAMEWORK_VERSION"] = state.framework_version
             print(f"  re-exported FRAMEWORK_VERSION: {state.framework_version}")
-        # Operator launch shape. An explicit flag on this resume still wins;
-        # otherwise the persisted value is re-exported so a resume that only
-        # passes --resume (the robustness monitor's auto-restart, and the
-        # hand-typed form the SKILL documents) keeps serving the same flags and
-        # env pins the original launch did.
+        # Operator launch shape: an explicit flag on this resume wins, else the
+        # persisted value, so a bare --resume keeps the original contract.
         _resume_server_args = str(getattr(args, "server_args", "") or "").strip() or str(
             getattr(state, "operator_server_args", "") or ""
         ).strip()
@@ -1720,19 +1685,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  re-exported server_args   : {_resume_server_args}")
         if _resume_extra_env:
             print(f"  re-exported extra_env     : {','.join(sorted(_resume_extra_env))}")
-        # --nodes is not re-passed by the monitor's resume. The multi-node
-        # executors prefer multi_node_state.json, but the CLI-level policy
-        # derived from the count (robustness multi-node defaults, IR-8) reads
-        # args/env, so restore both from the persisted value.
+        # The multi-node executors read multi_node_state.json, but the CLI-level
+        # policy derived from the count (robustness defaults, IR-8) reads args/env.
         _resume_nodes = max(1, int(getattr(state, "nodes", 1) or 1))
         if _resume_nodes > 1 and int(getattr(args, "nodes", 1) or 1) <= 1:
             args.nodes = _resume_nodes
             os.environ["INFERENCE_OPTIMIZER_NODES"] = str(_resume_nodes)
             print(f"  re-exported nodes         : {_resume_nodes}")
-        # Warm-replay gates: an explicit flag on this resume overrides the
-        # persisted value, otherwise the persisted one stands. A non-default
-        # numeric is the only available "operator set this" signal — the parser
-        # gives these flags real defaults rather than None.
+        # Warm-replay gates: a non-default numeric is the only "operator set this"
+        # signal, since the parser gives these flags real defaults rather than None.
         if bool(getattr(args, "no_warm_replay", False)):
             state.warm_replay_enabled = False
         for _wr_attr, _wr_default in (
@@ -2180,13 +2141,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     robustness_agent_root: Path | None = None
     robustness_options = resolve_robustness_options(args, state)
     state.robustness_options = dict(robustness_options)
-    # Both paths converge here with a final SharedState, which is the only point
-    # where the reference recipe is known on a resume as well as a fresh launch.
-    _export_reference_recipe(state)
-    # Persist the launch shape resolved above (and, on resume, the flags the
-    # resume block folded back in) before the Coordinator reads SharedState off
-    # disk — otherwise these stay in-memory only and the *next* resume falls
-    # back to defaults all over again.
+    # Persist before the Coordinator reads SharedState off disk, or the launch
+    # shape stays in-memory only and the next resume falls back to defaults.
     state.save(session_dir)
     if robustness_choice == "agent":
         robustness_agent_root = _resolve_agent_root("robustness")

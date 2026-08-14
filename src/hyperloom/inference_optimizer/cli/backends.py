@@ -421,18 +421,11 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
 def resolve_robustness_options(args: argparse.Namespace, state: Any) -> dict[str, Any]:
     """Resolve robustness ``request.options``, preferring this launch's flags.
 
-    :func:`_build_robustness_options` reads argv only, so a ``--resume`` that
-    does not re-pass the robustness flags would resolve to an empty mapping and
-    let the runtime defaults take over — most visibly re-enabling the
-    127.0.0.1:8888 ``/health`` probe that ``--robustness-disable-server-probe``
-    exists to silence, whose false positives can escalate to a premature
-    ``skip_to_close``. Falling back to the mapping persisted at launch keeps a
-    resumed run on the operator's original intent.
-
-    The fallback is all-or-nothing: any robustness flag on this invocation
-    replaces the persisted mapping wholesale rather than merging, because the
-    resolution folds in multi-node and scriptable-framework policy that a
-    per-key merge would tear apart.
+    :func:`_build_robustness_options` reads argv only, so a resume that re-passes
+    no robustness flag takes the mapping persisted at launch instead of dropping
+    to the runtime defaults. Substitution is wholesale, not per-key: the
+    resolution folds in multi-node and scriptable-framework policy that a merge
+    would tear apart.
 
     Args:
         args: Parsed CLI args carrying the robustness flags.

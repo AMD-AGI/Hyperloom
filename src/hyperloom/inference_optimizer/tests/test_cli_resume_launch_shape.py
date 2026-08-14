@@ -3,11 +3,9 @@
 
 """Launch-shape persistence across ``--resume``.
 
-``--server-args``, ``--extra-env``, ``--nodes`` and the robustness flags used to
-be rebuilt from argv on every boot, so any resume that did not re-pass them
-silently dropped the operator's intent — including the auto-resume the
-robustness monitor fires after a crash. SharedState is now the single authority
-for all of it; these tests pin that contract.
+``--server-args``, ``--extra-env``, ``--nodes`` and the robustness flags are
+rebuilt from argv on every boot, so a resume that re-passes none of them takes
+them from SharedState instead of dropping to the defaults.
 """
 
 from __future__ import annotations
@@ -88,7 +86,7 @@ def test_robustness_options_empty_state_is_empty():
 
 
 def test_launch_shape_survives_a_state_roundtrip():
-    """The fields reach disk, which is what makes the resume fallback work at all."""
+    """The fields reach disk, which is what a resume reads them back from."""
     state = SharedState(
         session_id="s",
         operator_server_args="--max-num-seqs 512",
