@@ -256,7 +256,7 @@ def base_symbol(device_kernel_name: str) -> str:
         return ""
     if raw.startswith("_Z"):
         demangled = _demangle_itanium(raw)
-        if demangled and demangled != raw:
+        if demangled:
             return _demangle_kernel_name(demangled) or ""
         return _base_from_mangled(raw)
     return _demangle_kernel_name(raw) or ""
@@ -296,7 +296,7 @@ def _non_patchable_kind(device_kernel_name: str) -> str:
         return "miopen_precompiled"
     if raw.startswith("_Z"):
         demangled = _demangle_itanium(raw)
-        if demangled and demangled != raw:
+        if demangled:
             return "aiter_ck" if _CK_DEMANGLED_RE.search(demangled.lower()) else ""
         # Demangling failed: classify from the mangled namespace prefix instead.
         return "aiter_ck" if _CK_MANGLED_RE.search(raw) else ""
