@@ -244,7 +244,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Model path (required for new runs; ignored when "
-        "--resume is set — model is read from manifest.json/"
+        "--resume-from is set — model is read from manifest.json/"
         "state.json)",
     )
     opt.add_argument(
@@ -257,7 +257,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "optimization loop: it drives AMD Quark PTQ from this prompt, "
         "then rewrites --model to the exported quantized model so the "
         "rest of the run optimizes the quantized model. Ignored on "
-        "--resume.",
+        "--resume-from.",
     )
     from hyperloom.orchestrator.phases.quantization_schemes import QUANT_SCHEME_CHOICES
 
@@ -581,40 +581,30 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target-baseline-dir", type=str, default=None, help="Stop when current best matches the baseline in DIR"
     )
     opt.add_argument(
-        "--resume",
-        action="store_true",
-        default=False,
-        help="Resume an existing session. Without --resume-from, "
-        "auto-picks the latest per-session subdir under "
-        "$USER_DATA_PATH/<model>/<UTC ts>/ (N17 layout) or "
-        "falls back to $USER_DATA_PATH. "
-        "USER_DATA_PATH MUST stay at workspace level "
-        "(/shared/hyperloom-sessions, not the per-session subdir) "
-        "so runtime/ resolution works. Skips the SharedState "
-        "seed and lets the Coordinator replay the prior "
-        "event log + state.json.",
-    )
-    opt.add_argument(
         "--resume-from",
         type=str,
         default=None,
-        help="Explicit per-session subdir to resume from. Use "
-        "when multiple per-launch ts dirs exist under the "
-        "same model and the latest is not what you want. "
-        "Must be an absolute path under $USER_DATA_PATH "
-        "(workspace_root). Implies --resume.",
+        help="Per-session subdir to resume; the only way to resume a session. "
+        "Skips the SharedState seed and lets the Coordinator replay the "
+        "prior event log + state.json. Must be an absolute path under "
+        "$USER_DATA_PATH (workspace_root), which MUST stay at workspace "
+        "level (/shared/hyperloom-sessions, not the per-session subdir) so "
+        "runtime/ resolution works. Read the path from the launch-info JSON "
+        "(--launch-info-file), else the HYPERLOOM_LAUNCH session_dir=… line "
+        "the CLI printed at launch, else by inspecting "
+        "$USER_DATA_PATH/<model>/<UTC ts>/manifest.json.",
     )
     opt.add_argument(
         "--force-resume",
         action="store_true",
         default=False,
         help=(
-            "Allow ``--resume`` to push past a terminal "
+            "Allow ``--resume-from`` to push past a terminal "
             "``stop_reason='target_reached'``. "
             "Without this flag the resume aborts (Issue-G guard, per "
             "SKILL.md 'Run-time signals': that terminal requires an "
             "operator-side workload / strategy change before resuming). "
-            "No-op outside ``--resume``."
+            "No-op outside a resume."
         ),
     )
     opt.add_argument(

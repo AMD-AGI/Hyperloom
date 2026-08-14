@@ -49,8 +49,8 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
     kernel) optimizes the quantized model instead of the source.
 
     Contract:
-      * Skipped on ``--resume`` (a resumed session already has its model
-        pinned in the manifest; re-quantizing would diverge from it).
+      * Reached only on the fresh-launch path; a resumed session takes its
+        model from the manifest and never re-quantizes.
       * On a failed/blocked quantization the process exits with code 3 —
         we must not silently fall through and optimize the un-quantized
         source model when the user explicitly asked for quantization.
@@ -65,8 +65,8 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
 
     Args:
         args: Parsed CLI arguments; reads ``quantize`` / ``quantize_scheme`` /
-            ``gpu_type`` / ``resume`` and rewrites ``args.model`` in place to
-            the exported quantized model path on success.
+            ``gpu_type`` and rewrites ``args.model`` in place to the exported
+            quantized model path on success.
     """
     # Free-text --quantize wins; otherwise resolve the structured
     # --quantize-scheme enum (the UI/backend path) to a prompt.
@@ -99,10 +99,6 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         prompt = resolve_scheme_prompt(scheme)
     if not prompt:
         return
-    if getattr(args, "resume", False):
-        print("Quantization prelude: skipped (--resume); using model from manifest.")
-        return
-
     # Deterministic master switch: quantization runs ONLY when
     # $HYPERLOOM_QUANTIZE_ENABLED is truthy, regardless of the flags. Absent /
     # false => skip and continue on the un-quantized model (detectable via the

@@ -41,7 +41,6 @@ from .credentials import (
 from ..session.paths import (
     DEFAULT_SESSION_DIR,
     ENV_USER_DATA_PATH,
-    find_latest_per_session_dir,
     session_dir as _session_dir_resolve,
     workspace_root as _workspace_root_resolve,
 )
@@ -783,8 +782,8 @@ def _install_pinned_lm_eval(python_exe: str, pip_extra: list[str]) -> None:
 def _resolved_eval_disabled(args: argparse.Namespace) -> bool:
     """Effective ``--no-eval`` for this launch, flag or persisted.
 
-    Preflight runs before the ``--resume`` block reads ``state.json``, so a
-    resume that inherits the flag instead of re-passing it must be read here.
+    Preflight runs before the resume block reads ``state.json``, so a resume
+    that inherits the flag instead of re-passing it must be read here.
 
     Args:
         args (argparse.Namespace): The parsed ``optimize`` args.
@@ -794,12 +793,10 @@ def _resolved_eval_disabled(args: argparse.Namespace) -> bool:
     """
     if bool(getattr(args, "no_eval", False)):
         return True
-    if not bool(getattr(args, "resume", False)):
-        return False
     raw = str(getattr(args, "resume_from", "") or "").strip()
-    resumed = Path(raw).expanduser() if raw else find_latest_per_session_dir()
-    if resumed is None:
+    if not raw:
         return False
+    resumed = Path(raw).expanduser()
     try:
         state = json.loads((resumed / "state.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -1007,7 +1004,7 @@ def _check_tracelens_cli() -> None:
     """Hard-gate TraceLens CLI presence — abort before Coordinator starts (SKILL IR-2).
 
     Pod-local /opt/venv/bin/TraceLens_* console_scripts don't persist across pod restarts, so install.sh
-    must run before every launch (carve-out: --resume in the same shell). Fail-fast beats a delayed
+    must run before every launch (carve-out: --resume-from in the same shell). Fail-fast beats a delayed
     tracelens_cli_missing strike at tick ~6 after baseline burned setup time.
     """
     missing = [name for name in _TRACELENS_REQUIRED_CLIS if shutil.which(name) is None]
@@ -1020,7 +1017,7 @@ def _check_tracelens_cli() -> None:
         f"src/hyperloom/agents/kernel/scripts/install.sh (chained from "
         f"src/hyperloom/inference_optimizer/assets/install.sh) and do NOT persist "
         f"across pod restarts. SKILL IR-2 requires running install.sh "
-        f"before every launch (carve-out applies only to --resume in "
+        f"before every launch (carve-out applies only to --resume-from in "
         f"the same shell that earlier ran install.sh). Re-run:\n"
         f"  bash $REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh\n"
         f"  . {session_dir}/runtime/kernel-agent.env.sh\n"

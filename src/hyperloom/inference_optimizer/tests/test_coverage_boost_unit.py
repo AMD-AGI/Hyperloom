@@ -349,9 +349,9 @@ def test_paths_helpers(monkeypatch, tmp_path) -> None:
     # asset_root override that exists.
     monkeypatch.setenv(paths.ENV_OVERRIDE_ASSET_ROOT, str(tmp_path))
     assert paths.asset_root() == tmp_path
-    # find_latest returns None when workspace root is not a dir.
+    # workspace_root echoes USER_DATA_PATH even when the dir is absent.
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "does_not_exist"))
-    assert paths.find_latest_per_session_dir() is None
+    assert paths.workspace_root() == tmp_path / "does_not_exist"
 
 
 def test_paths_asset_root_missing_override(monkeypatch, tmp_path) -> None:

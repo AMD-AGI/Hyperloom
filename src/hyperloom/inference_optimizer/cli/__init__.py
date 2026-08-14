@@ -441,7 +441,7 @@ SESSION_BUSY_EXIT_CODE = 3
 def _acquire_session_lock_or_exit(session_dir: Path) -> SessionLock:
     """Take the single-optimizer session lock or exit ``SESSION_BUSY_EXIT_CODE``.
 
-    Guards both fresh ``optimize`` and ``--resume`` against a second optimizer
+    Guards both fresh ``optimize`` and ``--resume-from`` against a second optimizer
     attaching to the same ``session_dir``. When a live optimizer already owns
     the session this refuses to run before any ``state.json`` / lease mutation.
 
@@ -1510,7 +1510,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # (``None`` -> 1) because the persisted SharedState is loaded later; the
     # resume branch re-exports the real values after ``_resolve_workload_knobs``
     # so downstream (incl. preflight) never sees the placeholder default.
-    if not args.resume and not args.resume_from:
+    if not args.resume_from:
         _export_workload_envs_for_optimize(
             args,
             nodes_resolved=nodes_resolved,
@@ -1586,53 +1586,34 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         codex_follows_claude=codex_follows_claude,
     )
 
-    # `--resume-from <path>` implies `--resume` (operator convenience).
-    if args.resume_from and not args.resume:
-        args.resume = True
-
-    if args.resume:
-        # Resume mode: USER_DATA_PATH stays at workspace level; pick the
-        # per-session subdir via --resume-from or auto-pick the latest. Pin
+    if args.resume_from:
+        # Resume mode: USER_DATA_PATH stays at workspace level and the operator
+        # names the per-session subdir. Pin
         # INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR for consistent resolution.
         from ..session.paths import (
             ENV_CURRENT_SESSION_DIR,
-            find_latest_per_session_dir,
             workspace_root,
         )
 
         ws = workspace_root()
-        if args.resume_from:
-            session_dir = Path(args.resume_from).expanduser().resolve()
-            try:
-                session_dir.relative_to(ws.resolve())
-            except ValueError:
-                print(
-                    f"ERROR: --resume-from {session_dir!r} is not under "
-                    f"$USER_DATA_PATH={ws}. Move USER_DATA_PATH to the "
-                    f"workspace root (the parent of the per-session subdirs) "
-                    f"and pass the per-session subdir via --resume-from.",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            if not session_dir.is_dir():
-                print(
-                    f"ERROR: --resume-from {session_dir!r} does not exist.",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-        else:
-            picked = find_latest_per_session_dir()
-            if picked is not None:
-                session_dir = picked
-                print("  --resume: auto-picked latest per-session subdir")
-            else:
-                # No per-session subdir found — workspace_root itself is the
-                # session_dir (e.g. resuming a pre-existing single-dir session).
-                session_dir = ws
-                print(
-                    f"  --resume: no per-session subdir found under "
-                    f"{ws}/<model>/<ts>/; falling back to {ws}"
-                )
+        session_dir = Path(args.resume_from).expanduser().resolve()
+        try:
+            session_dir.relative_to(ws.resolve())
+        except ValueError:
+            print(
+                f"ERROR: --resume-from {session_dir!r} is not under "
+                f"$USER_DATA_PATH={ws}. Move USER_DATA_PATH to the "
+                f"workspace root (the parent of the per-session subdirs) "
+                f"and pass the per-session subdir via --resume-from.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if not session_dir.is_dir():
+            print(
+                f"ERROR: --resume-from {session_dir!r} does not exist.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         # Pin before Coordinator/SharedState load so paths/subprocesses inherit the resolved location.
         os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
         # Ensure per-session skeleton exists (idempotent mkdir -p).
@@ -1648,11 +1629,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         try:
             manifest = load_manifest(session_dir)
         except FileNotFoundError as exc:
-            print(f"ERROR: --resume failed: {exc}", file=sys.stderr)
+            print(f"ERROR: --resume-from failed: {exc}", file=sys.stderr)
             sys.exit(2)
         if not (session_dir / "state.json").exists():
             print(
-                f"ERROR: --resume failed: {session_dir}/state.json missing "
+                f"ERROR: --resume-from failed: {session_dir}/state.json missing "
                 f"(manifest exists but Coordinator never wrote SharedState)",
                 file=sys.stderr,
             )
@@ -1788,7 +1769,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         gated_terminal = {"target_reached"}
         if prior_stop in gated_terminal and not force_resume:
             print(
-                f"\nERROR: --resume blocked by terminal stop_reason="
+                f"\nERROR: --resume-from blocked by terminal stop_reason="
                 f"{prior_stop!r}.\n"
                 f"\n"
                 f"  SKILL.md (Run-time signals): {prior_stop!r} is a "
@@ -1866,8 +1847,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if not args.model:
             print(
                 "ERROR: model is required. Pass --model <path> or set "
-                "MODEL_PATH env (or use --resume to continue an existing "
-                "session at the canonical session_dir).",
+                "MODEL_PATH env (or use --resume-from <session_dir> to "
+                "continue an existing session).",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -2187,7 +2168,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         critic_protocol=args.critic_protocol,
     )
     # Expose active session_dir to in-process executors via the canonical pin
-    # env var; reinforced here for --resume paths. Do NOT overwrite
+    # env var; reinforced here for resume paths. Do NOT overwrite
     # USER_DATA_PATH — it must remain the workspace root for concurrent sessions
     # and install.sh on shared filesystems (WekaFS).
     os.environ["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] = str(session_dir)
@@ -2219,7 +2200,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Advisory multi-model specialist-proposal scorer, disabled by default
         # (enable via --proposal-scoring). When active it scores each
         # proposal_set and surfaces results to Orchestration without gating.
-        # Not persisted across --resume. ``session_dir`` lets it append per-model
+        # Not persisted across a resume. ``session_dir`` lets it append per-model
         # token usage to the full-trace ledger (component=proposal_scorer).
         proposal_scorer=_build_proposal_scorer(args, session_dir),
         # Warm-recipe replay controls. Default ON; fires when

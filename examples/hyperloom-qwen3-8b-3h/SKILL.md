@@ -205,5 +205,5 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 9. Include `--no-enable-roofline` in the optimize command so PRELUDE uses the lighter profile path instead of roofline analysis.
 10. Report the session ID, log path, PID, and initial health check result.
 11. Monitor the process every 300 seconds until work is done.
-12. To recover an unexpected crash, only run `optimize --resume` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
+12. To recover an unexpected crash, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
 13. If `stop_reason` in the current session `state.json` is final, stop and exit.

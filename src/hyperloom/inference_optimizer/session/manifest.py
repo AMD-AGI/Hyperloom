@@ -505,7 +505,7 @@ def write_manifest(
 
 def load_manifest(session_dir: Path) -> dict[str, Any]:
     """Read ``manifest.json`` for an existing session. Raises
-    ``FileNotFoundError`` if missing (the signal ``--resume`` uses to refuse a
+    ``FileNotFoundError`` if missing (the signal ``--resume-from`` uses to refuse a
     fresh sandbox).
 
     Args:
@@ -520,7 +520,7 @@ def load_manifest(session_dir: Path) -> dict[str, Any]:
     p = manifest_path(Path(session_dir))
     if not p.exists():
         raise FileNotFoundError(
-            f"manifest.json not found under {session_dir} — the session was never initialised; cannot --resume"
+            f"manifest.json not found under {session_dir} — the session was never initialised; cannot resume"
         )
     with p.open(encoding="utf-8") as f:
         return json.load(f)

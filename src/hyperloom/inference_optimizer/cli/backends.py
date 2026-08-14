@@ -270,7 +270,7 @@ def _build_proposal_scorer(
     deployments (the scorer is OpenAI-compatible only) or when the resolved
     model list is empty (defaults to :data:`DEFAULT_SCORER_MODELS`). The
     scorer is purely advisory and never gates anything. The flag is not
-    persisted across ``--resume``.
+    persisted across ``--resume-from``.
 
     ``session_dir`` is forwarded so the scorer can append its per-model
     token usage to the full-trace ledger; when omitted trace writes are skipped.
