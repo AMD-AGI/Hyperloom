@@ -50,7 +50,7 @@ def _probe_result(monkeypatch, importable: bool, *, rocm: bool | None = True) ->
         return _Proc()
 
     monkeypatch.setattr(preflight.subprocess, "run", _run)
-    monkeypatch.setattr(preflight, "_probe_rocm_build", lambda _fw, _py: rocm)
+    monkeypatch.setattr(preflight, "_probe_rocm_build", lambda _fw, _py: preflight._Probe(rocm))
     return calls
 
 
@@ -69,7 +69,7 @@ def _probe_per_interpreter(monkeypatch, table, default=(False, None)) -> list[li
         return _Proc(0 if table.get(cmd[0], default)[0] else 1)
 
     monkeypatch.setattr(preflight.subprocess, "run", _run)
-    monkeypatch.setattr(preflight, "_probe_rocm_build", lambda _fw, py: table.get(py, default)[1])
+    monkeypatch.setattr(preflight, "_probe_rocm_build", lambda _fw, py: preflight._Probe(table.get(py, default)[1]))
     return calls
 
 
@@ -309,29 +309,69 @@ def test_probe_rocm_build_reports_tri_state(monkeypatch):
             self.stderr = ""
 
     monkeypatch.setattr(preflight.subprocess, "run", lambda *_a, **_k: _Proc(0))
-    assert preflight._probe_rocm_build("vllm", "/usr/bin/python3") is True
+    assert preflight._probe_rocm_build("vllm", "/usr/bin/python3").verdict is True
 
     monkeypatch.setattr(preflight.subprocess, "run", lambda *_a, **_k: _Proc(1))
-    assert preflight._probe_rocm_build("vllm", "/usr/bin/python3") is False
+    assert preflight._probe_rocm_build("vllm", "/usr/bin/python3").verdict is False
 
     def _boom(*_a, **_k):
         raise OSError("probe crashed")
 
     monkeypatch.setattr(preflight.subprocess, "run", _boom)
-    assert preflight._probe_rocm_build("vllm", "/usr/bin/python3") is None
+    assert preflight._probe_rocm_build("vllm", "/usr/bin/python3").verdict is None
 
     # Absent torch and a signal death are "cannot answer", not "wrong build":
     # calling either a CUDA wheel would be a wrong diagnosis.
     for rc in (3, -11):
         monkeypatch.setattr(preflight.subprocess, "run", lambda *_a, _rc=rc, **_k: _Proc(_rc))
-        assert preflight._probe_rocm_build("vllm", "/usr/bin/python3") is None
+        assert preflight._probe_rocm_build("vllm", "/usr/bin/python3").verdict is None
 
 
 def test_probe_is_inconclusive_when_torch_is_absent(monkeypatch):
     """A host with no torch must not be told its wheel is the CUDA build."""
-    verdict = preflight._probe_rocm_build("sglang", sys.executable)
+    probe = preflight._probe_rocm_build("sglang", sys.executable)
 
-    assert verdict is None or verdict is True
+    assert probe.verdict is None or probe.verdict is True
+
+
+# ---------------------------------------------------------------------------
+# probe diagnostics
+# ---------------------------------------------------------------------------
+def _dying_rocm_probe(monkeypatch, stderr: str, *, returncode: int = -11) -> None:
+    """Importable framework whose ROCm probe dies, leaving only stderr behind."""
+
+    class _Proc:
+        def __init__(self, rc: int, err: str = "") -> None:
+            self.returncode = rc
+            self.stdout = ""
+            self.stderr = err
+
+    def _run(cmd, *_args, **_kwargs):
+        return _Proc(0) if "find_spec" in cmd[-1] else _Proc(returncode, stderr)
+
+    monkeypatch.setattr(preflight.subprocess, "run", _run)
+
+
+def test_inconclusive_warning_surfaces_the_probe_stderr_tail(monkeypatch, capsys):
+    """A broken ROCm stack is diagnosable only from the stderr the probe drops."""
+    noise = [f"noise-{i}" for i in range(40)]
+    _dying_rocm_probe(monkeypatch, "\n".join([*noise, "ImportError: libamdhip64.so: cannot open"]))
+
+    preflight._check_serving_framework(_args("sglang"), "/usr/bin/python3")
+
+    out = capsys.readouterr().out
+    assert "could not verify" in out
+    assert "libamdhip64.so" in out
+    assert "noise-0" not in out
+
+
+def test_probe_stderr_tail_is_bounded(monkeypatch):
+    """A ROCm import traceback can be enormous; the warning must stay readable."""
+    tail = preflight._probe_stderr_tail("\n".join(f"line-{i} " + "x" * 400 for i in range(500)))
+
+    assert 0 < len(tail) <= 1000
+    assert "line-499" in tail
+    assert "line-0 " not in tail
 
 
 # ---------------------------------------------------------------------------

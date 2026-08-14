@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from hyperloom.common import provenance
 from hyperloom.common.env_safety import (
@@ -724,7 +724,37 @@ def _framework_probe_interpreters(framework: str, benchmark_python: str) -> list
     return out
 
 
-def _probe_rocm_build(framework: str, python_exe: str) -> bool | None:
+# A ROCm import traceback can run to megabytes, so the tail is clipped twice:
+# to the last few lines, and to the informative head of each.
+_PROBE_TAIL_LINES = 4
+_PROBE_TAIL_LINE_CHARS = 200
+
+
+def _probe_stderr_tail(stderr: str | None) -> str:
+    """Clipped tail of a probe's stderr; ``""`` when it wrote nothing."""
+    lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
+    return "\n".join(
+        line if len(line) <= _PROBE_TAIL_LINE_CHARS else f"{line[:_PROBE_TAIL_LINE_CHARS]} ..."
+        for line in lines[-_PROBE_TAIL_LINES:]
+    )
+
+
+def _probe_detail_block(detail: str) -> str:
+    """Indent a probe's stderr tail under a preflight line, or return ``""``."""
+    if not detail:
+        return ""
+    body = "\n".join(f"    {line}" for line in detail.splitlines())
+    return f"\n  last lines of the probe's stderr:\n{body}"
+
+
+class _Probe(NamedTuple):
+    """Probe outcome plus the stderr tail needed to diagnose an unclear one."""
+
+    verdict: bool | None
+    detail: str = ""
+
+
+def _probe_rocm_build(framework: str, python_exe: str) -> _Probe:
     """Tri-state: is ``framework`` in ``python_exe`` a ROCm build?
 
     ``True`` verified, ``False`` refuted, ``None`` inconclusive. Deliberately
@@ -755,17 +785,20 @@ def _probe_rocm_build(framework: str, python_exe: str) -> bool | None:
     else:
         probe.append("sys.exit(0)")
     try:
-        proc = subprocess.run([python_exe, "-c", "\n".join(probe)], capture_output=True, timeout=180)
-    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
-        return None
+        proc = subprocess.run(
+            [python_exe, "-c", "\n".join(probe)], capture_output=True, text=True, errors="replace", timeout=180
+        )
+    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired) as exc:
+        return _Probe(None, _probe_stderr_tail(f"{type(exc).__name__}: {exc}"))
+    detail = _probe_stderr_tail(getattr(proc, "stderr", ""))
     if proc.returncode == 0:
-        return True
+        return _Probe(True, detail)
     # Absent torch (3) and a signal death (negative rc, which a broken ROCm stack
     # can trigger on ``import torch``) both mean no verdict was reached.
-    return False if proc.returncode == 1 else None
+    return _Probe(False, detail) if proc.returncode == 1 else _Probe(None, detail)
 
 
-def _framework_importable(framework: str, python_exe: str) -> bool:
+def _framework_importable(framework: str, python_exe: str) -> _Probe:
     """Whether ``python_exe`` can locate ``framework``.
 
     Uses ``find_spec`` so a heavy framework is located without importing it,
@@ -773,37 +806,38 @@ def _framework_importable(framework: str, python_exe: str) -> bool:
     """
     probe = f"import importlib.util as u, sys; sys.exit(0 if u.find_spec({framework!r}) else 1)"
     try:
-        proc = subprocess.run([python_exe, "-c", probe], capture_output=True, timeout=60)
-    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
-        return False
-    return proc.returncode == 0
+        proc = subprocess.run([python_exe, "-c", probe], capture_output=True, text=True, errors="replace", timeout=60)
+    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired) as exc:
+        return _Probe(False, _probe_stderr_tail(f"{type(exc).__name__}: {exc}"))
+    return _Probe(proc.returncode == 0, _probe_stderr_tail(getattr(proc, "stderr", "")))
 
 
-def _resolve_framework_build(framework: str, interpreters: list[str]) -> tuple[str | None, bool | None]:
-    """Best (interpreter, ROCm verdict) across every candidate.
+def _resolve_framework_build(framework: str, interpreters: list[str]) -> tuple[str | None, _Probe]:
+    """Best (interpreter, probe) across every candidate.
 
     Scanning all of them, rather than stopping at the first import, is what lets
     an isolated ROCm venv outrank a stray CUDA wheel earlier in the list. An
     inconclusive verdict outranks a refuted one so the gate blocks only when
     every importable candidate is provably the wrong build.
     """
-    refuted: str | None = None
-    inconclusive: str | None = None
+    refuted: tuple[str, _Probe] | None = None
+    inconclusive: tuple[str, _Probe] | None = None
+    missing = _Probe(False)
     for python_exe in interpreters:
-        if not _framework_importable(framework, python_exe):
+        found = _framework_importable(framework, python_exe)
+        if not found.verdict:
+            # Keep the first probe that said something: a framework that is
+            # installed yet unreachable shows up only here.
+            missing = missing if missing.detail else found
             continue
-        verdict = _probe_rocm_build(framework, python_exe)
-        if verdict is True:
-            return python_exe, True
-        if verdict is None:
-            inconclusive = inconclusive or python_exe
+        probe = _probe_rocm_build(framework, python_exe)
+        if probe.verdict is True:
+            return python_exe, probe
+        if probe.verdict is None:
+            inconclusive = inconclusive or (python_exe, probe)
         else:
-            refuted = refuted or python_exe
-    if inconclusive:
-        return inconclusive, None
-    if refuted:
-        return refuted, False
-    return None, None
+            refuted = refuted or (python_exe, probe)
+    return inconclusive or refuted or (None, missing)
 
 
 def _check_serving_framework(args, benchmark_python: str) -> None:
@@ -847,13 +881,16 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
         return
 
     interpreters = _framework_probe_interpreters(framework, benchmark_python)
-    found, rocm = _resolve_framework_build(framework, interpreters)
+    found, probe = _resolve_framework_build(framework, interpreters)
     if found:
-        if rocm is True:
+        if probe.verdict is True:
             print(f"Preflight: {framework} importable and a ROCm build ({found})")
             return
-        if rocm is None:
-            print(f"Preflight: WARNING — {framework} is importable ({found}) but could not verify it is a ROCm build")
+        if probe.verdict is None:
+            print(
+                f"Preflight: WARNING — {framework} is importable ({found}) but could not verify it is a ROCm build"
+                f"{_probe_detail_block(probe.detail)}"
+            )
             return
         print(
             f"\nERROR: {framework} is importable ({found}) but is NOT a ROCm build.\n\n"
@@ -890,7 +927,7 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
         )
     print(
         f"\nERROR: serving framework {framework!r} is not importable by any candidate interpreter:\n"
-        f"{probed}\n\n"
+        f"{probed}{_probe_detail_block(probe.detail)}\n\n"
         f"{remedy}\n\n"
         f"To proceed anyway (e.g. the server lives elsewhere), set {SKIP_FRAMEWORK_CHECK_ENV}=1.",
         file=sys.stderr,
