@@ -84,11 +84,11 @@ causes MODEL_PATH race conditions where sessions launch the wrong model.
 
 ```bash
 cd "$REPO_ROOT"
-# .env fills gaps only; re-exporting the non-empty pre-source snapshot keeps
-# caller values, matching install.sh's restore rule.
+# .env fills gaps only: re-exporting the non-empty pre-source snapshot keeps every
+# value the caller exported. Wider than install.sh, which guards a fixed list.
 _dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
 if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
-eval "$_dotenv_prev" 2>/dev/null || echo "warning: could not restore the caller's environment" >&2
+eval "$_dotenv_prev"
 unset _dotenv_prev
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
