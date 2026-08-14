@@ -2141,6 +2141,10 @@ async def test_advance_phase_hint_discarded_when_not_headed_to_explore(coord: Co
     """A pending hint is genuinely stale once the transition target isn't
     EXPLORE -- it can never reach exit_normal_explore's check again -- so this
     is the one case the unrelated-transition cleanup should still clear it.
+
+    A discard is not a consumption: it must land in last_discarded_escalate_hint,
+    not last_consumed_escalate_hint, which specifically means "this hint drove
+    a transition" and this one never did.
     """
     import hyperloom.orchestrator.phases.machine_state as ps
 
@@ -2155,7 +2159,36 @@ async def test_advance_phase_hint_discarded_when_not_headed_to_explore(coord: Co
     await coord._advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "SWEEP"
     assert coord.shared_state.pending_escalate_hint == ""
+    assert coord.shared_state.last_discarded_escalate_hint == "skip_to_kernel"
+    assert coord.shared_state.last_discarded_escalate_hint_ts
+    assert coord.shared_state.last_consumed_escalate_hint == ""
+
+
+@pytest.mark.asyncio
+async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: Coordinator, monkeypatch) -> None:
+    """The complementary case: a hint-driven transition must record consumption,
+    not a discard, so the two are distinguishable in the breakdown.
+    """
+    import hyperloom.orchestrator.phases.machine_state as ps
+
+    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
+    monkeypatch.setattr(
+        ps,
+        "compute_next_phase",
+        lambda *a, **k: ("KERNEL_AGENT", "skip_to_kernel", {"hint": "skip_to_kernel"}),
+    )
+
+    async def _entered(*, from_phase, to_phase):
+        return None
+
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    await coord._advance_phase_if_needed()
+    assert (coord.shared_state.phase or "").upper() == "KERNEL_AGENT"
+    assert coord.shared_state.pending_escalate_hint == ""
     assert coord.shared_state.last_consumed_escalate_hint == "skip_to_kernel"
+    assert coord.shared_state.last_consumed_escalate_hint_ts
+    assert coord.shared_state.last_discarded_escalate_hint == ""
 
 
 # -- _materialize_approved_proposal -----------------------------------------

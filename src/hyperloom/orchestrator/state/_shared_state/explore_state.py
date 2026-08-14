@@ -393,7 +393,14 @@ class _ExploreStateMixin:
         self.params_no_promote_streak = 0
 
     def reset_per_cycle_plateau_state(self) -> None:
-        """Reset transient plateau and dispatch state for a macro-cycle."""
+        """Reset transient plateau and dispatch state for a macro-cycle, plus any stale escalate hint.
+
+        ``pending_escalate_hint`` isn't plateau or dispatch state, but it is
+        reset here too: a hint set during the prior macro-cycle (e.g. by
+        kernel_agent completion) and never claimed by the transition it
+        caused must not survive into the next cycle's phases as if they'd
+        earned it.
+        """
         self.params_no_promote_streak = 0
         self.explore_specialist_dispatched_count = 0
         self.framework_agent_phase_done = False
@@ -407,10 +414,7 @@ class _ExploreStateMixin:
         self.rounds_since_last_keep = {}
         self.last_sweep = {}
         self.last_conc_sweep = {}
-        # A hint set during the prior macro-cycle (e.g. by kernel_agent
-        # completion) and never claimed by the transition it caused must not
-        # survive into the next cycle's phases as if they'd earned it.
-        self.pending_escalate_hint = ""
+        self.discard_pending_escalate_hint()
 
     def note_explore_outcome(self, *, promoted: bool) -> None:
         """Update the plateau proxy after one explore task (KEEP resets, no-promote increments).
