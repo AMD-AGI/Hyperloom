@@ -1216,3 +1216,82 @@ async def test_gpu_memory_leaked_idempotency_key_advances_with_tick():
     second_delegate = next(i for i in second.intents if i.type is IntentType.DELEGATE)
     assert first_delegate.payload["idempotency_key"] == "recover-gpu-leak-tick-0"
     assert second_delegate.payload["idempotency_key"] == "recover-gpu-leak-tick-5"
+
+
+# local_server_unreachable -> delegate(recover)
+
+
+def _server_unreachable_symptom(url: str, evidence: dict | None = None) -> Symptom:
+    return Symptom(
+        name="local_server_unreachable",
+        severity=SymptomSeverity.HIGH,
+        summary=f"local server probe {url} status=down",
+        evidence=evidence or {"url": url},
+        subject={"url": url},
+        source="local",
+        suggestion="delegate(recover, force_gpu_cleanup=True) to restart the inference server",
+    )
+
+
+async def test_local_server_unreachable_emits_alert_and_delegate_recover():
+    """``local_server_unreachable`` must route to the real ``recover`` action,
+    not the non-dispatchable ``server_lifecycle`` its own suggestion text names.
+    """
+    ladder = ActionLadder()
+    out = await ladder.decide(
+        [_server_unreachable_symptom("http://127.0.0.1:8000/health")],
+        tick_index=4,
+        now_unix=1.0,
+    )
+    types = [i.type for i in out.intents]
+    assert types == [IntentType.ALERT, IntentType.DELEGATE]
+
+    delegate = out.intents[1]
+    assert delegate.payload["action_name"] == "recover"
+    assert delegate.payload["params"]["force_gpu_cleanup"] is True
+    assert delegate.payload["params"]["reason"] == "local_server_unreachable"
+    assert delegate.payload["idempotency_key"].startswith("recover-server-unreachable-tick-4-")
+
+
+async def test_local_server_unreachable_idempotency_key_disambiguates_targets():
+    """Two unreachable targets in the same tick must not collide on idempotency_key,
+    or the second delegate comes back as a duplicate-idempotency PolicyDenied
+    that pollutes repeated_policy_denied tracking instead of just recovering.
+    """
+    ladder = ActionLadder()
+    out = await ladder.decide(
+        [
+            _server_unreachable_symptom("http://127.0.0.1:8000/health"),
+            _server_unreachable_symptom("http://127.0.0.1:8001/health"),
+        ],
+        tick_index=4,
+        now_unix=1.0,
+    )
+    delegate_keys = [i.payload["idempotency_key"] for i in out.intents if i.type is IntentType.DELEGATE]
+    assert len(delegate_keys) == 2
+    assert len(set(delegate_keys)) == 2
+    assert all(key.startswith("recover-server-unreachable-tick-4-") for key in delegate_keys)
+
+
+async def test_local_server_unreachable_idempotency_key_stable_for_same_target():
+    """The same target re-firing (e.g. a later tick after cooldown) must derive
+    the same per-target suffix, since that's what makes the disambiguator
+    deterministic rather than a source of new spurious duplicates.
+    """
+    ladder = ActionLadder()
+    first = await ladder.decide(
+        [_server_unreachable_symptom("http://127.0.0.1:8000/health")],
+        tick_index=4,
+        now_unix=1.0,
+    )
+    second = await ladder.decide(
+        [_server_unreachable_symptom("http://127.0.0.1:8000/health")],
+        tick_index=9,
+        now_unix=2.0,
+    )
+    first_key = next(i.payload["idempotency_key"] for i in first.intents if i.type is IntentType.DELEGATE)
+    second_key = next(i.payload["idempotency_key"] for i in second.intents if i.type is IntentType.DELEGATE)
+    first_suffix = first_key.rsplit("-", 1)[-1]
+    second_suffix = second_key.rsplit("-", 1)[-1]
+    assert first_suffix == second_suffix
+    assert first_key != second_key
