@@ -39,6 +39,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.actions.cancel_channel import (
     CancelScope,
     current_cancel_scope,
+    stop_was_asked_for,
     use_cancel_scope,
 )
 from hyperloom.orchestrator.actions.executors._ray_serving import CANCEL_ROUND_GRACE_SEC
@@ -61,6 +62,7 @@ from hyperloom.orchestrator.loop.coordinator_helpers import (
 )
 from hyperloom.orchestrator.policy.gate import PolicyDenied
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
+from hyperloom.orchestrator.roles.robustness_pulse import _PULSE_TIMEOUT_SEC
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -695,7 +697,9 @@ class TestTheCooperativeStopWindowsCompose:
     sentinel the round was about to return.
 
     The components are spelled out here rather than re-derived from the constants
-    under test, so a change to one of them has to be argued for.
+    under test, so a change to one of them has to be argued for -- and the sum is
+    spelled out too, so a serial step the unwind takes and no term covers has to
+    be argued for as well, rather than quietly making the window short again.
     """
 
     def test_the_reap_budget_is_what_stopping_a_round_costs(self):
@@ -722,6 +726,39 @@ class TestTheCooperativeStopWindowsCompose:
         shortfall these windows were derived to remove.
         """
         assert _COOPERATIVE_CANCEL_GRACE_SEC >= 8.5 + 0.25 + 5.0 + 10.0
+
+    def test_the_window_is_exactly_the_terms_it_names(self):
+        """An upper bound, so a term the unwind pays and the sum omits is a bug.
+
+        Spelled as a total and not only as a floor: a fifth serial step was found
+        in the unwind that no term covered, and a floor would have gone on passing
+        while the sum stayed short of what stopping costs.
+        """
+        assert _COOPERATIVE_CANCEL_GRACE_SEC == 8.5 + 0.25 + 5.0 + 10.0
+
+    def test_the_variant_boundary_tick_is_skipped_rather_than_budgeted_for(self):
+        """The one step in the unwind this window deliberately does not cover.
+
+        A cooperative stop returns its sentinel, so ``run_grid`` reaches its
+        variant boundary the ordinary way and would spend the robustness tick's
+        whole budget there -- between recording the stopped round's row and
+        releasing what the round held, which are the terms above. Counting it
+        would take the window past what an operator's own ``SIGTERM`` grace
+        allows, so the tick gives way instead: the scope it reads is cancelled for
+        the rest of the action's life, so once the cancel is out no boundary
+        spends it.
+        """
+        assert _PULSE_TIMEOUT_SEC == 8.0
+        assert 8.5 + 0.25 + 5.0 + 10.0 + _PULSE_TIMEOUT_SEC > _COOPERATIVE_CANCEL_GRACE_SEC
+        scope = CancelScope()
+        with use_cancel_scope(scope):
+            assert not stop_was_asked_for()
+            scope.cancel(reason="session_time_exhausted")
+            assert stop_was_asked_for()
+
+    def test_work_outside_an_action_is_never_told_to_skip(self):
+        """No scope means no cancel, so a bare call keeps every step it had."""
+        assert not stop_was_asked_for()
 
     def test_the_notice_window_is_the_poll_the_scope_is_checked_at(self):
         """Nothing is listening yet is a claim about the poll, not about the work."""
