@@ -4590,58 +4590,9 @@ class WritebackCollaborator:
         pending = getattr(state, "warm_replay_pending", {}) or {}
         if not isinstance(pending, dict) or not pending:
             return
-        from ..actions.executors.baseline import _revert_patches
-        from ..kernel.request_handlers import _maybe_revert_kernel_patch
-
-        errors: list[str] = []
-        target = str(pending.get("recipe_patch_target") or "")
-        pre_sha = str(pending.get("recipe_patch_pre_sha") or "")
-        manifest = pending.get("recipe_patch_snapshot_manifest")
-        if target:
-            if not manifest:
-                errors.append("recipe:missing_snapshot_manifest")
-            else:
-                restored = _revert_patches(target, pre_sha, manifest)
-                errors.extend(restored.get("errors") or [])
-
-        kernel_snapshots = pending.get("kernel_snapshots") or []
-        if isinstance(kernel_snapshots, list) and kernel_snapshots:
-            restored = self.phase_prelude._restore_warm_kernel_snapshots(
-                kernel_snapshots
-            )
-            errors.extend(restored.get("errors") or [])
-        else:
-            kernel_results = pending.get("kernel_apply_results") or []
-            if not isinstance(kernel_results, list):
-                kernel_results = []
-            for apply_result in reversed(kernel_results):
-                if not isinstance(apply_result, dict):
-                    continue
-                try:
-                    reverted = _maybe_revert_kernel_patch(apply_result)
-                    if reverted.get("status") != "ok":
-                        raise RuntimeError(
-                            str(
-                                reverted.get("error")
-                                or reverted.get("reason")
-                                or (
-                                    "kernel revert status="
-                                    f"{reverted.get('status')}"
-                                )
-                            )
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    errors.append(
-                        "kernel:"
-                        f"{apply_result.get('manifest_path')}:"
-                        f"{type(exc).__name__}:{exc}"
-                    )
+        rollback = self.phase_prelude._rollback_combined_warm({}, None)
+        errors = list(rollback.get("errors") or [])
         if errors:
-            state.warm_replay_pending = {
-                **dict(pending),
-                "status": "rollback_failed",
-                "rollback_errors": errors,
-            }
             report["warnings"].append(
                 {
                     "kind": "resume_warm_rollback_failed",
@@ -4653,7 +4604,6 @@ class WritebackCollaborator:
                 state.set_stop_reason("warm_replay_rollback_failed")
             state.save(self.session_dir)
             return
-        state.warm_replay_pending = {}
         state.warm_replay_outcome = {
             **dict(getattr(state, "warm_replay_outcome", {}) or {}),
             "status": "failed",
