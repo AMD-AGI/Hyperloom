@@ -116,46 +116,59 @@ def _client_snapshot(cmd: str, cwd: str) -> SourceData:
     )
 
 
-def test_a_co_tenants_benchmark_client_does_not_vouch_for_this_sessions_port(tmp_path):
-    """``ps`` is whole-host, so another session's load generator is in it too.
-
-    It has never sent a request to this port, so letting it vouch turns a
-    session's idle stretch into a HIGH alert on someone else's traffic.
-    """
-    ours, theirs = tmp_path / "session-a", tmp_path / "session-b"
-    data = _client_snapshot(
-        cmd=f"python benchmark_serving.py --result-dir {theirs}/runs/v1 --port 30000",
-        cwd=f"{theirs}/runs/v1",
-    )
-    out = evaluate_local_health_signals(_ctx(), data, config=LocalHealthConfig(session_dir=ours))
-    assert all(s.name != "local_server_unreachable" for s in out)
+_OUTSIDE_ANY_SESSION = "/tmp"  # nosec B108 - a path in a fixture, not a temp file.
+_CLIENT = "python benchmark_serving.py --port 30000"
+_CLIENT_RESULT_DIR = "python benchmark_serving.py --result-dir {dir}/runs/v1 --port 30000"
+_CLIENT_RESULT_DIR_EQ = "python benchmark_serving.py --result-dir={dir}/runs/v1 --port 30000"
 
 
-@pytest.mark.parametrize("anchor", ["cwd", "result_dir"])
-def test_this_sessions_benchmark_client_still_vouches_for_its_dead_server(tmp_path, anchor):
-    """The harness runs with its cwd inside the session; children inherit it.
+@pytest.mark.parametrize(
+    ("client_dir", "client_cwd", "client_cmd", "vouches"),
+    [
+        pytest.param("ours", "{dir}/runs/v1", _CLIENT, True, id="ours_by_cwd"),
+        pytest.param("ours", "{dir}", _CLIENT, True, id="ours_by_cwd_at_the_session_root"),
+        pytest.param("ours", _OUTSIDE_ANY_SESSION, _CLIENT_RESULT_DIR, True, id="ours_by_result_dir"),
+        pytest.param("ours", _OUTSIDE_ANY_SESSION, _CLIENT_RESULT_DIR_EQ, True, id="ours_by_result_dir_joined_by_="),
+        pytest.param("ours", _OUTSIDE_ANY_SESSION, _CLIENT, False, id="no_anchor_at_all"),
+        pytest.param("theirs", "{dir}/runs/v1", _CLIENT_RESULT_DIR, False, id="unrelated_co_tenant"),
+        pytest.param("sibling", "{dir}/runs/v1", _CLIENT_RESULT_DIR, False, id="co_tenant_one_string_prefix_away"),
+    ],
+)
+def test_only_this_sessions_benchmark_client_vouches_for_a_dead_server(
+    tmp_path,
+    client_dir,
+    client_cwd,
+    client_cmd,
+    vouches,
+):
+    """A client vouches for a refused port only when it belongs to this session.
 
-    A launch path that chdirs elsewhere still names the session on the command
-    line, which is the second way a client can be attributed.
+    The harness runs with its cwd inside the session and children inherit it, so
+    the cwd is the anchor; a launch path that chdirs elsewhere still names a path
+    under the session on its command line, which is the second anchor. Anything
+    else is somebody else's traffic — including the sibling directory whose name
+    merely starts with ours (``<session>-retry``), which a substring test reads
+    as inside the session.
+
+    A client with neither anchor is indistinguishable from a co-tenant's and
+    must not vouch either; every launch path in this repo carries one, which is
+    what the grid-runner cwd test holds it to.
     """
     ours = tmp_path / "session-a"
-    run_dir = f"{ours}/runs/v1"
+    dirs = {"ours": ours, "theirs": tmp_path / "session-b", "sibling": tmp_path / "session-a-retry"}
     data = _client_snapshot(
-        cmd=(
-            f"python benchmark_serving.py --result-dir {run_dir} --port 30000"
-            if anchor == "result_dir"
-            else "python benchmark_serving.py --port 30000"
-        ),
-        cwd=run_dir if anchor == "cwd" else "/tmp",  # nosec B108 - a path in a fixture, not a temp file.
+        cmd=client_cmd.format(dir=dirs[client_dir]),
+        cwd=client_cwd.format(dir=dirs[client_dir]),
     )
     matched = [
         s
         for s in evaluate_local_health_signals(_ctx(), data, config=LocalHealthConfig(session_dir=ours))
         if s.name == "local_server_unreachable"
     ]
-    assert len(matched) == 1
-    assert matched[0].severity is SymptomSeverity.HIGH
-    assert matched[0].evidence["benchmark_client_seen"] is True
+    assert bool(matched) is vouches
+    if vouches:
+        assert matched[0].severity is SymptomSeverity.HIGH
+        assert matched[0].evidence["benchmark_client_seen"] is True
 
 
 def test_a_refused_port_is_still_a_fault_when_nobody_could_look_for_the_server():

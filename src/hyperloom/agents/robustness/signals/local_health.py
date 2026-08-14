@@ -12,6 +12,7 @@ unreachable); silent otherwise since the SourceData fields are empty. Covers
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -245,7 +246,9 @@ def _in_session(proc: dict[str, Any], anchor: str) -> bool:
     The harness is launched with its working directory inside the session and
     children inherit it, so the cwd is the anchor; a client that names a path
     under the session on its command line (``--result-dir``) counts too, for the
-    launch paths that chdir elsewhere.
+    launch paths that chdir elsewhere. Both readings go through
+    :func:`_under_session` so neither can drift into accepting a path that only
+    starts with the session's.
 
     Args:
         proc (dict[str, Any]): One ``local_processes`` entry.
@@ -258,10 +261,48 @@ def _in_session(proc: dict[str, Any], anchor: str) -> bool:
     """
     if not anchor:
         return True
-    cwd = str(proc.get("cwd") or "")
-    if cwd == anchor or cwd.startswith(anchor.rstrip("/") + "/"):
+    if _under_session(str(proc.get("cwd") or ""), anchor):
         return True
-    return anchor in str(proc.get("cmd") or "")
+    return any(_under_session(path, anchor) for path in _command_line_paths(str(proc.get("cmd") or "")))
+
+
+def _under_session(path: str, anchor: str) -> bool:
+    """Report whether ``path`` is the session directory or something inside it.
+
+    Compared a path component at a time, never as a string prefix: a co-tenant's
+    ``<session>-retry`` — a retry, a backup, or any sibling an operator names
+    after ours — starts with the session path without being in the session, and
+    a prefix test would let it vouch for its own port.
+
+    Args:
+        path (str): Candidate path; ``""`` belongs to nobody.
+        anchor (str): Resolved session directory.
+
+    Returns:
+        bool: ``True`` when ``path`` lies at or under ``anchor``.
+    """
+    return bool(path) and Path(path).is_relative_to(anchor)
+
+
+def _command_line_paths(cmd: str) -> Iterator[str]:
+    """Yield the path-shaped pieces of a command line.
+
+    Each whitespace-separated token, plus what follows the first ``=`` in it, so
+    ``--result-dir /run/x`` and ``--result-dir=/run/x`` read the same. Tokens are
+    yielded whole rather than searched for a substring, which is what lets the
+    caller apply a directory boundary to them.
+
+    Args:
+        cmd (str): The process command line.
+
+    Yields:
+        str: One candidate path per token, and its ``key=value`` value.
+    """
+    for token in cmd.split():
+        yield token
+        _, sep, value = token.partition("=")
+        if sep:
+            yield value
 
 
 def _log_error_symptoms(data: SourceData) -> list[Symptom]:
