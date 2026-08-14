@@ -815,16 +815,17 @@ ensure_forge_gemm_tune() {
 
 # --- 1c. kernel_agents (KernelForge forge-loop CLI) ---
 # forge-loop shells out to `python -m kernel_agents.cli` (see forge_submit.py).
-# Unlike forge_gemm_tune / forge_fusion — which have standalone sub-pyprojects and
-# get pip-installed by the carrier from their sub-package dirs — `kernel_agents`
-# is only packaged by the KernelForge *root* pyproject and was never installed
-# here. So forge-loop relied entirely on $FORGE_PATH being present and prepended to
-# the child PYTHONPATH by _ensure_forge_on_path() at call time. When FORGE_PATH is
+# Unlike forge_gemm_tune — which has a standalone sub-pyproject and gets
+# pip-installed by the carrier from its sub-package dir — `kernel_agents` is only
+# packaged by the KernelForge *root* pyproject and was never installed here. So
+# forge-loop relied entirely on $FORGE_PATH being present and prepended to the
+# child PYTHONPATH by _ensure_forge_on_path() at call time. When FORGE_PATH is
 # unset (as in the 2026-07-28 CI runs) `python -m kernel_agents.cli` dies with
 # `ModuleNotFoundError: No module named 'kernel_agents'` and every forge kernel
 # attempt REVERTs. Installing kernel_agents from the KernelForge root makes the
-# import succeed regardless of FORGE_PATH (root install also covers the two
-# sub-packages, so the carrier's later import checks short-circuit).
+# import succeed regardless of FORGE_PATH, and it is now the ONLY way to get the
+# fusion pipeline: `kernel-agents forge-fuse` lives in the root package since
+# forge_fusion was absorbed into it.
 _kernel_forge_root() {
   # KernelForge repo root that actually contains kernel_agents. Keyed on
   # FORGE_PATH only (CI guarantees it is exported; it is also the repo-canonical
@@ -870,11 +871,11 @@ ensure_kernel_agents() {
   # KernelForge checkout used by concurrent sessions. A non-editable install
   # builds in a temp dir and never writes egg-info/build artifacts back into the
   # checkout, so parallel runs can't race on it — this mirrors the carrier's
-  # own forge_fusion/forge_gemm_tune install (see _incontainer.sh: "Non-editable
-  # installs build in a temp dir and never write to the read-only shared
-  # checkout"). Installing the root also provides forge_gemm_tune + forge_fusion,
-  # so the carrier's later `import forge_fusion` guard short-circuits (verified:
-  # it logs "forge kernel backend ready" with no reinstall).
+  # own forge_gemm_tune install (see _incontainer.sh: "Non-editable installs
+  # build in a temp dir and never write to the read-only shared checkout").
+  # Installing the root also provides forge_gemm_tune and the fusion pipeline.
+  # A carrier that still installs from <KernelForge>/src/forge_fusion will fail:
+  # that directory and its sub-pyproject were removed when fusion was absorbed.
   #
   # Both provider extras: the forge fellow runs on the claude CLI when an
   # Anthropic side is configured and on the codex SDK when the deployment is

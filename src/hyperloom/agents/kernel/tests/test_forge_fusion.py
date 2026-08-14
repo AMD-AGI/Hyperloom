@@ -70,7 +70,8 @@ def _sentinel_payload(text: str) -> dict:
 def test_build_cmd_maps_core_options(tmp_path):
     cmd = forge_fusion._build_cmd(_payload(tmp_path))
 
-    assert cmd[:4] == [forge_fusion.sys.executable, "-m", "forge_fusion.cli", "run"]
+    assert cmd[:3] == [forge_fusion.sys.executable, "-m", "kernel_agents.cli"]
+    assert cmd[3] == "forge-fuse"
     assert cmd[cmd.index("--trace") + 1] == "/tmp/decode.trace.json.gz"
     assert cmd[cmd.index("--model-path") + 1] == "/models/zaya"
     assert cmd[cmd.index("--framework") + 1] == "sglang"
@@ -460,7 +461,7 @@ def test_main_relays_the_outage_sentinel_despite_a_non_zero_exit(tmp_path, monke
     input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
 
     class Proc:
-        returncode = 3  # forge_fusion.cli.EXIT_LLM_UNAVAILABLE
+        returncode = 3  # kernel_agents.fusion.command.EXIT_LLM_UNAVAILABLE
         stdout = ""
         stderr = ""
 

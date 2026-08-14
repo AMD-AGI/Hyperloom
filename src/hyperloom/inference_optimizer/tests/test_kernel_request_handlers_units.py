@@ -478,13 +478,27 @@ class TestForgeGemmHelperCoverage:
         assert krh._resolve_fusion_decode_trace(state, {}) == str(state_trace)
         assert krh._resolve_fusion_decode_trace(state, {"trace_path": "/missing"}) == str(state_trace)
 
-    def test_forge_fusion_available_by_path_and_import(self, monkeypatch):
-        monkeypatch.setattr(krh.shutil, "which", lambda _name: "/usr/bin/forge-fusion")
+    def test_forge_fusion_available_probes_the_fusion_subpackage(self, monkeypatch):
+        probed: list[str] = []
+
+        def spec(name):
+            probed.append(name)
+            return object()
+
+        monkeypatch.setattr(krh.importlib.util, "find_spec", spec)
         assert krh._forge_fusion_available() is True
-        monkeypatch.setattr(krh.shutil, "which", lambda _name: None)
-        monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: object())
-        assert krh._forge_fusion_available() is True
+        # Probing kernel_agents alone would pass on a KernelForge predating the
+        # fusion absorption and only fail once the subprocess rejected forge-fuse.
+        assert probed == ["kernel_agents.fusion"]
+
         monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: None)
+        assert krh._forge_fusion_available() is False
+
+    def test_forge_fusion_available_survives_an_unimportable_parent(self, monkeypatch):
+        def boom(_name):
+            raise ModuleNotFoundError("kernel_agents")
+
+        monkeypatch.setattr(krh.importlib.util, "find_spec", boom)
         assert krh._forge_fusion_available() is False
 
     def test_materialize_unified_patch_snapshot(self, tmp_path):

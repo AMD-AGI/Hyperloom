@@ -2,17 +2,18 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run forge-fusion as a Hyperloom kernel-agent tool.
+"""Run KernelForge's kernel fusion as a Hyperloom kernel-agent tool.
 
 The orchestrator writes an input JSON with one validated agent backend, model,
-and sandbox policy and calls this script; the autonomous fusion loop itself
-lives in the standalone ``forge_fusion`` package.
+and sandbox policy and calls this script; the autonomous fusion pipeline itself
+lives in KernelForge and is invoked as ``kernel-agents forge-fuse``.
 
-forge-fusion emits a ``fusion_manifest.json``; this wrapper normalizes that into
-the Hyperloom kernel-result contract (a ``FORGE_FUSION_RESULT_BEGIN/END`` stdout
+It emits a ``fusion_manifest.json``; this wrapper normalizes that into the
+Hyperloom kernel-result contract (a ``FORGE_FUSION_RESULT_BEGIN/END`` stdout
 sentinel + an on-disk ``result.json``) that ``run_fusion_handler`` parses. A KEPT
-fusion already carries kernel-parity AND serving-smoke validation, so
-``requires_e2e_validation`` is set for the orchestrator's integrate/re-baseline
+result already carries validation on the KernelForge side -- kernel parity plus a
+serving smoke for an authored fusion, a serving A/B for a claimed compile pass --
+so ``requires_e2e_validation`` is set for the orchestrator's integrate/re-baseline
 gate to confirm the end-to-end gain and apply the patch + env flags.
 """
 
@@ -40,9 +41,9 @@ sys.path.pop(0)
 RESULT_BEGIN = "FORGE_FUSION_RESULT_BEGIN"
 RESULT_END = "FORGE_FUSION_RESULT_END"
 
-# forge-fusion's manifest verdict for "discovery never reached the model", added in
-# manifest schema v2 alongside the ``error`` block. It is NOT a statement about the
-# kernel, so it must not be normalized into an optimization outcome -- see
+# The manifest verdict for "discovery never reached the model", added in manifest
+# schema v2 alongside the ``error`` block. It is NOT a statement about the kernel,
+# so it must not be normalized into an optimization outcome -- see
 # _normalize_manifest.
 LLM_UNAVAILABLE_VERDICT = "llm_unavailable"
 DEFAULT_TIMEOUT_SEC = 7200
@@ -179,7 +180,7 @@ def _add_opt(cmd: list[str], args: dict[str, Any], key: str, flag: str, *, requi
 def _build_cmd(args: dict[str, Any]) -> list[str]:
     agent_backend = _validated_agent_backend(args.get("agent_backend"))
     agent_sandbox_mode = _validated_agent_sandbox_mode(args.get("agent_sandbox_mode"))
-    cmd = [sys.executable, "-m", "forge_fusion.cli", "run"]
+    cmd = [sys.executable, "-m", "kernel_agents.cli", "forge-fuse"]
     _add_opt(cmd, args, "trace_path", "--trace", required=True)
     _add_opt(cmd, args, "model_path", "--model-path", required=True)
     _add_opt(cmd, args, "framework", "--framework", required=True)
