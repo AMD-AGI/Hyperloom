@@ -37,9 +37,18 @@ from hyperloom.inference_optimizer.session.session_paths import (
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
 
-def test_session_dir_default_is_workspace_hyperloom(monkeypatch):
+def test_session_dir_default_follows_the_host(monkeypatch, tmp_path):
+    """/workspace is a container convention, absent on bare metal off root."""
+    import os as _os
+
     monkeypatch.delenv(paths.ENV_USER_DATA_PATH, raising=False)
+
+    monkeypatch.setattr(_os, "access", lambda _p, _m: True)
     assert paths.session_dir() == Path("/workspace/hyperloom")
+
+    monkeypatch.setattr(_os, "access", lambda _p, _m: False)
+    monkeypatch.chdir(tmp_path)
+    assert paths.session_dir() == tmp_path / "session"
 
 
 def test_session_dir_user_data_path_overrides_default(tmp_path, monkeypatch):

@@ -206,8 +206,12 @@ def _any_live_compiler(
     return False
 
 
-def _dedupe_existing_dirs(candidates: list[Path]) -> list[Path]:
-    """Return existing candidate directories once, preserving priority."""
+def _dedupe_existing_dirs(candidates: list[Path], unreadable: list[str] | None = None) -> list[Path]:
+    """Return existing candidate directories once, preserving priority.
+
+    Candidates that cannot be stat'ed are collected into ``unreadable`` so the
+    caller can report them; skipping them silently hides a whole build tree.
+    """
     resolved: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -216,19 +220,32 @@ def _dedupe_existing_dirs(candidates: list[Path]) -> list[Path]:
         except OSError:
             normalized = candidate.expanduser().absolute()
         key = str(normalized)
-        if key in seen or not normalized.is_dir():
+        if key in seen:
+            continue
+        try:
+            if not normalized.is_dir():
+                continue
+        except OSError as exc:
+            # is_dir() re-raises EACCES (not in pathlib's ignored errnos), so a
+            # fallback under an unreadable root is skipped rather than fatal.
+            log.warning("aiter lock sweep: cannot inspect %s (%s); skipping", key, exc)
+            if unreadable is not None:
+                unreadable.append(key)
             continue
         seen.add(key)
         resolved.append(normalized)
     return resolved
 
 
-def _resolve_lock_sweep_dirs(aiter_jit_dir: Path | None) -> list[Path]:
+def _resolve_lock_sweep_dirs(
+    aiter_jit_dir: Path | None, unreadable: list[str] | None = None
+) -> list[Path]:
     """Resolve every active aiter build tree that may contain baton locks.
 
     An explicit argument remains a single-directory test/diagnostic override.
     Automatic resolution covers both ``AITER_ROOT_DIR/build`` and
     ``AITER_JIT_DIR/build`` rather than stopping at the first JIT directory.
+    Trees that cannot be stat'ed are collected into ``unreadable``.
     """
     if aiter_jit_dir is not None:
         return [aiter_jit_dir]
@@ -250,13 +267,13 @@ def _resolve_lock_sweep_dirs(aiter_jit_dir: Path | None) -> list[Path]:
     if aiter_root and aiter_jit_override:
         # Forge sets both variables for a private attempt. Treat the pair as an
         # authoritative namespace and never wander into shared fallback trees.
-        return _dedupe_existing_dirs(candidates)
+        return _dedupe_existing_dirs(candidates, unreadable)
     override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
     if override:
         override_path = Path(override)
         # Preserve the legacy explicit-override contract: callers use this
         # variable to constrain a diagnostic/test sweep to one tree.
-        return _dedupe_existing_dirs([override_path / "build", override_path])
+        return _dedupe_existing_dirs([override_path / "build", override_path], unreadable)
     try:
         spec = importlib.util.find_spec("aiter")
     except (ImportError, ValueError):
@@ -274,7 +291,7 @@ def _resolve_lock_sweep_dirs(aiter_jit_dir: Path | None) -> list[Path]:
             "/opt/venv/lib/python3.12/site-packages/aiter/jit/build",
         )
     )
-    return _dedupe_existing_dirs(candidates)
+    return _dedupe_existing_dirs(candidates, unreadable)
 
 
 def _resolve_lock_sweep_dir(aiter_jit_dir: Path | None) -> Path | None:
@@ -317,7 +334,8 @@ def clean_stale_aiter_locks(
     Returns:
         dict[str, Any]: A stats dict (``dir`` — primary tree, ``dirs`` — every
             swept tree, ``scanned``, ``deleted``, ``skipped_fresh``,
-            ``errors``).
+            ``errors``, ``unreadable`` — trees that could not be stat'ed, each
+            also counted in ``errors``).
     """
     stats: dict[str, Any] = {
         "dir": None,
@@ -328,7 +346,10 @@ def clean_stale_aiter_locks(
         "errors": 0,
     }
 
-    resolved_dirs = _resolve_lock_sweep_dirs(aiter_jit_dir)
+    unreadable: list[str] = []
+    resolved_dirs = _resolve_lock_sweep_dirs(aiter_jit_dir, unreadable)
+    stats["errors"] += len(unreadable)
+    stats["unreadable"] = unreadable
     if not resolved_dirs:
         return stats
 

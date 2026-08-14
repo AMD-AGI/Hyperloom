@@ -27,6 +27,8 @@ import os
 import signal
 import subprocess
 import time
+
+from hyperloom.common.git_safety import safe_directory_args
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -486,7 +488,7 @@ def run_aiter_build(
     else:
         # Tag-descending autoselect
         tags_res = git_run(
-            ["git", "-C", str(worktree_dir), "tag", "-l", "v*"],
+            ["git", *safe_directory_args(["-C", str(worktree_dir), "tag", "-l", "v*"])],
             capture_output=True, text=True, timeout=60,
         )
         raw_tags = (getattr(tags_res, "stdout", "") or "").strip().splitlines()
@@ -496,7 +498,7 @@ def run_aiter_build(
 
         for tag in tags:
             checkout_res = git_run(
-                ["git", "-C", str(worktree_dir), "checkout", tag],
+                ["git", *safe_directory_args(["-C", str(worktree_dir), "checkout", tag])],
                 capture_output=True, text=True, timeout=120,
             )
             if getattr(checkout_res, "returncode", 1) != 0:
@@ -530,7 +532,7 @@ def run_aiter_build(
 
     # 7. Collect installed_versions + hashes, return BuildResult ---------------
     sha_res = git_run(
-        ["git", "-C", str(worktree_dir), "rev-parse", "--short", "HEAD"],
+        ["git", *safe_directory_args(["-C", str(worktree_dir), "rev-parse", "--short", "HEAD"])],
         capture_output=True, text=True, timeout=30,
     )
     commit_sha = (getattr(sha_res, "stdout", "") or "").strip()
@@ -732,7 +734,7 @@ def run_sgl_kernel_build(
             return _fail("symbol_missing", f"symbols not importable: {sym_result['missing']}")
 
     git_run = git if git is not None else _run
-    sha_res = git_run(["git", "-C", str(worktree_dir), "rev-parse", "--short", "HEAD"],
+    sha_res = git_run(["git", *safe_directory_args(["-C", str(worktree_dir), "rev-parse", "--short", "HEAD"])],
                       capture_output=True, text=True, timeout=30)
     commit_sha = (getattr(sha_res, "stdout", "") or "").strip()
 
@@ -1014,7 +1016,7 @@ def run_vllm_source_build(
             return _fail("symbol_missing", f"symbols not importable: {sym_result['missing']}")
 
     git_run = git if git is not None else _run
-    sha_res = git_run(["git", "-C", str(worktree_dir), "rev-parse", "--short", "HEAD"],
+    sha_res = git_run(["git", *safe_directory_args(["-C", str(worktree_dir), "rev-parse", "--short", "HEAD"])],
                       capture_output=True, text=True, timeout=30)
     commit_sha = (getattr(sha_res, "stdout", "") or "").strip()
 

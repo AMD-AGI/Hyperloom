@@ -32,6 +32,7 @@ from typing import Any, Awaitable, Callable, Mapping
 
 from hyperloom.common import codex_session, llm_config
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
+from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.kernel_shape_contract import (
     ALLOWED_SHAPE_PROVENANCE as _ALLOWED_SHAPE_PROVENANCE,
@@ -1155,7 +1156,7 @@ def materialize_unified_patch_snapshot(
             raise ValueError(f"unsafe patch path: {rel}")
         dst = snap / rel
         base = subprocess.run(
-            ["git", "-C", str(root), "show", f"HEAD:{rel.as_posix()}"],
+            ["git", *safe_directory_args(["-C", str(root), "show", f"HEAD:{rel.as_posix()}"])],
             capture_output=True,
             timeout=60,
         )
