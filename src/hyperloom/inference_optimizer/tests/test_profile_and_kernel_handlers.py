@@ -29,6 +29,7 @@ from hyperloom.orchestrator.actions.executors.profile import (
     ProfileExecutor,
     _default_profile_config,
     _sanitize_profile_server_args,
+    _trace_files_for_dir,
 )
 from hyperloom.orchestrator.roles import (
     MockBackend,
@@ -4435,3 +4436,70 @@ def test_resolve_integrate_payload_falls_back_to_kernel_opt_attempts_ledger(
     assert resolved.get("source_file") == "/p/moe_op.py", (
         "source_file must fall back to kernel_opt_attempts[k001].last_source_file"
     )
+
+
+def _gz_trace(path: Path, payload_bytes: int) -> Path:
+    """Write a ``*.trace.json.gz`` of roughly the requested size."""
+    import gzip
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wt") as fh:
+        json.dump({"traceEvents": [{"n": "x" * payload_bytes}]}, fh)
+    return path
+
+
+def test_trace_files_for_dir_excludes_split_chunks_and_leads_with_the_capture(tmp_path):
+    """Splitter chunks must never lead the discovered trace list.
+
+    Two consumers fall back to ``trace_files[0]`` when ``main_trace_path`` is
+    absent (the roofline trace extractor and the writeback path). Under
+    alphabetical order a 900-byte ``trace_split/`` chunk sorted ahead of
+    ``rank_0.trace.json.gz``, and a single chunk handed to ``--trace-input``
+    takes the single-file branch of discovery, where the multi-candidate probing
+    downstream cannot rescue it. This function already excludes ``capture_traces``
+    sidecars for the same reason.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    chunk = _gz_trace(trace_dir / "trace_split" / "aaa_mixed_0.trace.json.gz", 32)
+    capture = _gz_trace(trace_dir / "zzz_rank_0.trace.json.gz", 40_000)
+    sidecar = _gz_trace(
+        trace_dir / "capture_traces" / "aaa_graph_capture_0.pt.trace.json.gz", 32
+    )
+
+    found = _trace_files_for_dir(trace_dir)
+
+    assert chunk not in found, "trace_split chunks must be excluded"
+    assert sidecar not in found, "capture_traces sidecars must stay excluded"
+    assert found[0] == capture
+
+
+def test_trace_files_for_dir_orders_by_size_not_name(tmp_path):
+    """Size ordering, so the fallback does not depend on a naming rule.
+
+    The real discriminator between a fragment and a capture is that one is
+    hundreds of bytes and the other is hundreds of kilobytes. Ranking on size
+    gets this right without knowing any of the splitter's filename conventions,
+    which it is free to change.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    small = _gz_trace(trace_dir / "aaa_first_by_name.trace.json.gz", 16)
+    large = _gz_trace(trace_dir / "zzz_last_by_name.trace.json.gz", 60_000)
+
+    found = _trace_files_for_dir(trace_dir)
+
+    assert found == [large, small]
+
+
+def test_trace_files_for_dir_survives_an_ancestor_named_trace_split(tmp_path):
+    """An ancestor named ``trace_split`` must not empty the list.
+
+    The exclusion is relative to the scanned directory. Tested absolutely, a
+    capture that happened to live below such a directory would have every one of
+    its traces excluded, and the caller reads an empty list as "no traces here".
+    """
+    trace_dir = tmp_path / "trace_split" / "run" / "torch_trace"
+    capture = _gz_trace(trace_dir / "rank_0.trace.json.gz", 40_000)
+
+    found = _trace_files_for_dir(trace_dir)
+
+    assert found == [capture]
