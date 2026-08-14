@@ -8,6 +8,7 @@ import json
 from hyperloom.inference_optimizer.breakdown import exporter
 from hyperloom.inference_optimizer.breakdown.collectors import (
     collect_attribution,
+    collect_optimization_stack,
     collect_optimizations,
     collect_v4_optimizations,
 )
@@ -127,6 +128,91 @@ def test_fusion_after_warm_replay_is_attributed_to_kernel_agent():
         "kernel_agent",
     ]
     assert result["entries"][1]["optimization_kind"] == "kernel_fusion"
+
+
+def test_collective_keep_is_attributed_to_its_own_family():
+    state = {
+        "session_id": "collective-keep",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 30.0,
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": "collective",
+                "source_phase": "KERNEL_AGENT",
+                "variant_name": "forge_collective",
+                "backend": "forge",
+                "engine": "forge_collective",
+                "provenance": "forge_collective",
+                "kernel_id": "k007",
+                "tput": 130.0,
+                "gain_pct": 30.0,
+                "patch_path": "/ws/collective.patch",
+                "target_file": "/aiter/csrc/include/custom_all_reduce.cuh",
+                "kernel_speedup": 1.4,
+                "collective_op": "all_reduce",
+                "world_size": 8,
+                "ts": "1970-01-01T00:00:20+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [30.0],
+        "phase_history": [
+            {"to_phase": "PRELUDE", "ts_unix": 0.0},
+            {"to_phase": "KERNEL_AGENT", "ts_unix": 15.0},
+        ],
+    }
+    warnings: list[str] = []
+
+    attribution = collect_attribution(state, [], [], warnings)
+    result = collect_optimizations(state, attribution, [], [], warnings)
+
+    source_breakdown = attribution["source_breakdown"]
+    assert source_breakdown["collective_pct_of_total"] == 30.0
+    assert source_breakdown["unattributed_pct_of_total"] == 0.0
+    assert source_breakdown["kernel_unattributed_pct_of_total"] == 0.0
+    assert not any("actions: collective" in warning for warning in warnings)
+    kernel_phase = attribution["phase_breakdown"]["kernel_agent"]
+    assert kernel_phase["total_gain_pct"] == 30.0
+    assert kernel_phase["by_kernel_id"] == {"k007": 30.0}
+    entry = result["entries"][0]
+    assert entry["source"] == "kernel_agent"
+    assert entry["optimization_kind"] == "kernel_collective"
+    assert entry["backend"] == "forge"
+    assert entry["execution_mode"] == "per_kernel"
+    assert entry["kernel_id"] == "k007"
+    assert result["summary_by_kind"]["kernel_collective"]["by_backend"]["forge"] == {
+        "keeps": 1,
+        "total_gain_pct": 30.0,
+    }
+    assert result["validation"]["attributed_total_gain_pct"] == 30.0
+
+
+def test_collective_stack_entry_keeps_campaign_evidence():
+    state = {
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": "collective",
+                "variant_name": "forge_collective",
+                "engine": "forge_collective",
+                "kernel_id": "k007",
+                "tput": 130.0,
+                "ts": "1970-01-01T00:00:20+00:00",
+                "collective_op": "all_reduce",
+                "world_size": 8,
+                "collective_attempt_id": "attempt-1",
+                "integration_id": "integration-1",
+            },
+        ],
+    }
+
+    entry = collect_optimization_stack(state)[0]
+
+    assert entry["collective_op"] == "all_reduce"
+    assert entry["world_size"] == 8
+    assert entry["collective_attempt_id"] == "attempt-1"
+    assert entry["integration_id"] == "integration-1"
+    assert entry["validated"] is True
 
 
 def test_prebaseline_enablement_is_not_framework_gain_before_warm_replay():
