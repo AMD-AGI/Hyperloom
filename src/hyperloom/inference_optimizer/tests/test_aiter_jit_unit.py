@@ -95,7 +95,7 @@ def test_clean_no_dir_returns_zero_stats():
 
 def test_clean_unresolvable_dir_returns_empty_stats(monkeypatch):
     # Force resolution to yield no trees so the empty-list early return is hit.
-    monkeypatch.setattr(aj, "_resolve_lock_sweep_dirs", lambda d: [])
+    monkeypatch.setattr(aj, "_resolve_lock_sweep_dirs", lambda d, unreadable=None: [])
     stats = aj.clean_stale_aiter_locks(None)
     assert stats["dir"] is None
     assert stats["scanned"] == 0
@@ -238,6 +238,10 @@ def test_unreadable_fallback_tree_does_not_raise(tmp_path, monkeypatch):
         unreadable.chmod(0o700)
 
     assert stats["deleted"] == 0
+    # "errors counted" is the documented contract; an all-zero stats dict would
+    # read as a clean sweep of a tree that was never looked at.
+    assert stats["errors"] >= 1
+    assert any(str(unreadable) in entry for entry in stats["unreadable"])
 
 
 def test_find_aiter_baton_wait_returns_bounded_evidence(tmp_path):
