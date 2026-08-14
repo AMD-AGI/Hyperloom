@@ -24,6 +24,7 @@ def _clear_env(monkeypatch):
         "FRAMEWORK",
         "BENCHMARK_BASE_URL",
         "VLLM_VENV_ROOT",
+        "FRAMEWORK_ENV",
         "HYPERLOOM_MN_EXT_SERVICE_URL",
         "INFERENCE_OPTIMIZER_NODES",
         "KUBERNETES_SERVICE_HOST",
@@ -167,17 +168,36 @@ def test_escape_hatch_is_exempt(monkeypatch, capsys):
     assert _SKIP_ENV in capsys.readouterr().out
 
 
-def test_isolated_vllm_venv_is_probed(monkeypatch):
+def test_isolated_vllm_venv_is_probed(isolated_vllm, monkeypatch):
     """vLLM installs into $VLLM_VENV_ROOT, invisible to the benchmark python."""
-    monkeypatch.setenv("VLLM_VENV_ROOT", "/opt/hyperloom/vllm-venv")
     calls = _probe_result(monkeypatch, importable=False)
     monkeypatch.setattr(preflight, "_in_container", lambda: False)
 
     with pytest.raises(SystemExit):
         preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
 
-    probed = [c[0] for c in calls]
-    assert "/opt/hyperloom/vllm-venv/bin/python" in probed
+    assert isolated_vllm in [c[0] for c in calls]
+
+
+def test_a_bare_venv_root_is_not_enough_to_probe_it(monkeypatch):
+    """$VLLM_VENV_ROOT alone is not the installer's condition.
+
+    It also requires FRAMEWORK_ENV=isolated and an executable python there, so
+    probing on the variable alone would claim a mirror the installer never made.
+    """
+    monkeypatch.setenv("VLLM_VENV_ROOT", "/opt/hyperloom/vllm-venv")
+    monkeypatch.delenv("FRAMEWORK_ENV", raising=False)
+
+    probed = preflight._framework_probe_interpreters("vllm", "/usr/bin/python3")
+
+    assert not any("vllm-venv" in candidate for candidate in probed)
+
+
+def test_no_other_framework_probes_the_vllm_venv(isolated_vllm, monkeypatch):
+    """That venv holds vLLM only, so sglang has no business being looked for there."""
+    probed = preflight._framework_probe_interpreters("sglang", "/usr/bin/python3")
+
+    assert isolated_vllm not in probed
 
 
 def test_container_message_omits_the_container_remedy(monkeypatch, capsys):
@@ -239,44 +259,56 @@ def test_rocm_build_proceeds_quietly(monkeypatch, capsys):
     assert "could not verify" not in out
 
 
-_ISOLATED_VENV = "/opt/hyperloom/vllm-venv"
-_ISOLATED_PY = f"{_ISOLATED_VENV}/bin/python"
+@pytest.fixture
+def isolated_vllm(monkeypatch, tmp_path):
+    """The shape install_baremetal.sh switches its own probe on, and returns its python.
+
+    $VLLM_VENV_ROOT alone is not it: the installer also requires
+    FRAMEWORK_ENV=isolated and an executable python in that venv. The executable
+    is real rather than a stubbed os.access, which would answer for every other
+    caller in this module too.
+    """
+    venv = tmp_path / "vllm-venv"
+    python = venv / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python.chmod(0o755)
+    monkeypatch.setenv("VLLM_VENV_ROOT", str(venv))
+    monkeypatch.setenv("FRAMEWORK_ENV", "isolated")
+    return str(python)
 
 
-def test_isolated_venv_rocm_build_beats_a_stray_cuda_wheel(monkeypatch, capsys):
+def test_isolated_venv_rocm_build_beats_a_stray_cuda_wheel(isolated_vllm, monkeypatch, capsys):
     """Stopping at the first importable candidate rejects a working host.
 
     install_baremetal.sh defaults vLLM to an isolated venv, so the ROCm build
     routinely lives there while the benchmark interpreter may still carry a
     stray PyPI CUDA wheel. Every candidate has to be considered.
     """
-    monkeypatch.setenv("VLLM_VENV_ROOT", _ISOLATED_VENV)
     _probe_per_interpreter(
         monkeypatch,
-        {"/usr/bin/python3": (True, False), _ISOLATED_PY: (True, True)},
+        {"/usr/bin/python3": (True, False), isolated_vllm: (True, True)},
     )
 
     preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
 
-    assert _ISOLATED_PY in capsys.readouterr().out
+    assert isolated_vllm in capsys.readouterr().out
 
 
-def test_isolated_venv_is_probed_before_the_benchmark_interpreter(monkeypatch, capsys):
+def test_isolated_venv_is_probed_before_the_benchmark_interpreter(isolated_vllm, monkeypatch, capsys):
     """Mirror install_baremetal.sh, which switches the probe to the venv."""
-    monkeypatch.setenv("VLLM_VENV_ROOT", _ISOLATED_VENV)
-    calls = _probe_per_interpreter(monkeypatch, {_ISOLATED_PY: (True, True)})
+    calls = _probe_per_interpreter(monkeypatch, {isolated_vllm: (True, True)})
 
     preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
 
-    assert calls[0][0] == _ISOLATED_PY
+    assert calls[0][0] == isolated_vllm
 
 
-def test_every_importable_candidate_cuda_still_fails(monkeypatch, capsys):
+def test_every_importable_candidate_cuda_still_fails(isolated_vllm, monkeypatch, capsys):
     """Scanning all candidates must not weaken the gate when all are wrong."""
-    monkeypatch.setenv("VLLM_VENV_ROOT", _ISOLATED_VENV)
     _probe_per_interpreter(
         monkeypatch,
-        {"/usr/bin/python3": (True, False), _ISOLATED_PY: (True, False)},
+        {"/usr/bin/python3": (True, False), isolated_vllm: (True, False)},
     )
 
     with pytest.raises(SystemExit) as excinfo:
@@ -286,12 +318,11 @@ def test_every_importable_candidate_cuda_still_fails(monkeypatch, capsys):
     assert "NOT a ROCm build" in capsys.readouterr().err
 
 
-def test_an_inconclusive_candidate_outweighs_a_refuted_one(monkeypatch, capsys):
+def test_an_inconclusive_candidate_outweighs_a_refuted_one(isolated_vllm, monkeypatch, capsys):
     """Block only when every importable candidate is provably the wrong build."""
-    monkeypatch.setenv("VLLM_VENV_ROOT", _ISOLATED_VENV)
     _probe_per_interpreter(
         monkeypatch,
-        {"/usr/bin/python3": (True, False), _ISOLATED_PY: (True, None)},
+        {"/usr/bin/python3": (True, False), isolated_vllm: (True, None)},
     )
 
     preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
@@ -331,7 +362,9 @@ def test_probe_is_inconclusive_when_torch_is_absent(monkeypatch):
     """A host with no torch must not be told its wheel is the CUDA build."""
     probe = preflight._probe_rocm_build("sglang", sys.executable)
 
-    assert probe.verdict is None or probe.verdict is True
+    # No torch here, so the only correct answer is "cannot say". Accepting True
+    # as well would let a wrong verdict through, which is the whole risk.
+    assert probe.verdict is None
 
 
 # ---------------------------------------------------------------------------
@@ -442,13 +475,12 @@ def _timing_out_probe(monkeypatch, *, importable: bool) -> list[float]:
 
 
 @pytest.mark.parametrize("importable", [False, True])
-def test_a_probe_timeout_stops_the_interpreter_scan(monkeypatch, capsys, importable):
+def test_a_probe_timeout_stops_the_interpreter_scan(isolated_vllm, monkeypatch, capsys, importable):
     """Paying a timeout per candidate turned preflight into a 12-minute wait.
 
     A host slow enough to blow one budget will blow the next two as well, and a
     timeout proves nothing, so the scan stops and the run proceeds unverified.
     """
-    monkeypatch.setenv("VLLM_VENV_ROOT", _ISOLATED_VENV)
 
     budget = _timing_out_probe(monkeypatch, importable=importable)
     preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
@@ -594,3 +626,28 @@ def test_an_uninstallable_framework_is_not_blocked_for_a_cuda_build(monkeypatch,
 
     combined = capsys.readouterr()
     assert "--install-framework atom" not in combined.out + combined.err
+
+
+# ---------------------------------------------------------------------------
+# Wiring: nothing above proves _preflight still calls the gate
+# ---------------------------------------------------------------------------
+def test_preflight_still_invokes_the_gate():
+    """Every other test calls the gate directly, so deleting the one line that
+    reaches it from _preflight would leave them all green."""
+    import ast
+    from pathlib import Path as _Path
+
+    source = _Path(preflight.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    target = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_preflight"
+    )
+    called = {
+        node.func.id
+        for node in ast.walk(target)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+
+    assert "_check_serving_framework" in called

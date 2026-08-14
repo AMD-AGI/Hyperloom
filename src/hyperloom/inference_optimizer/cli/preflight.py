@@ -717,17 +717,18 @@ def _in_container() -> bool:
 def _framework_probe_interpreters(framework: str, benchmark_python: str) -> list[str]:
     """Interpreters that may hold the serving package, deduped in probe order.
 
-    ``$VLLM_VENV_ROOT`` leads for vLLM, mirroring install_baremetal.sh: the
-    installer defaults vLLM to that isolated venv, so it is the authoritative
-    build even when the benchmark interpreter carries a stray wheel.
+    The isolated venv leads for vLLM under the same condition install_baremetal.sh
+    switches its own probe: ``$VLLM_VENV_ROOT`` present with an executable python
+    and ``FRAMEWORK_ENV=isolated``. It holds vLLM only, so no other framework
+    probes it.
     """
     candidates: list[str] = []
     venv_root = os.environ.get("VLLM_VENV_ROOT", "").strip()
-    if venv_root and framework == "vllm":
-        candidates.append(str(Path(venv_root) / "bin" / "python"))
+    isolated = os.environ.get("FRAMEWORK_ENV", "").strip().lower() == "isolated"
+    venv_python = str(Path(venv_root) / "bin" / "python") if venv_root else ""
+    if framework == "vllm" and isolated and venv_python and os.access(venv_python, os.X_OK):
+        candidates.append(venv_python)
     candidates += [benchmark_python, sys.executable]
-    if venv_root and framework != "vllm":
-        candidates.append(str(Path(venv_root) / "bin" / "python"))
     out: list[str] = []
     for candidate in candidates:
         if candidate and candidate not in out:
@@ -824,7 +825,7 @@ def _probe_rocm_build(framework: str, python_exe: str) -> _Probe:
         proc = subprocess.run(
             [python_exe, "-c", "\n".join(probe)], capture_output=True, text=True, errors="replace", timeout=timeout
         )
-    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         return _Probe(None, _probe_failure_detail(exc), isinstance(exc, subprocess.TimeoutExpired))
     detail = _probe_stderr_tail(getattr(proc, "stderr", ""))
     if proc.returncode == 0:
@@ -849,7 +850,7 @@ def _framework_importable(framework: str, python_exe: str) -> _Probe:
             errors="replace",
             timeout=_IMPORT_PROBE_TIMEOUT_SEC,
         )
-    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         return _Probe(False, _probe_failure_detail(exc), isinstance(exc, subprocess.TimeoutExpired))
     return _Probe(proc.returncode == 0, _probe_stderr_tail(getattr(proc, "stderr", "")))
 
