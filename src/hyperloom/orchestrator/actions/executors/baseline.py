@@ -3473,20 +3473,30 @@ class BaselineExecutor:
             if bench_lease is not None:
                 bench_lease.close()
 
-    def _round_cost_lower_bound_sec(
+    def _last_round_cost_sec(
         self,
         *,
         double_run: bool,
         ctx_extra: dict[str, Any] | None = None,
     ) -> float | None:
-        """What this round will cost at least, from what earlier rounds measured.
+        """What an earlier round of this session actually cost.
 
-        A lower bound rather than an estimate, so that refusing on it is sound:
-        if the part the session can prove does not fit, the whole round does not.
+        An over-prediction of what the next one will cost, and knowingly so. The
+        figure comes from a pass that paid the one-time JIT compile on a fresh
+        kernel cache, which a later pass on the same signature does not pay
+        again; the executor's own cache probe is built on that difference, and
+        picks a cap 20 minutes shorter when it finds the cache warm.
+
+        Over-predicting is the tolerable direction *for this caller only*, and
+        the reason is in :meth:`_round_affordable_before_ignition`: a refusal
+        here costs the session a fresh anchor it can do without, because the
+        anchor it already has still stands. No caller that would end a session on
+        this figure may use it.
+
         The two passes are priced apart because they buy different things -- the
-        first boots the server and pays the one-time compile and graph capture,
-        the second re-attaches a client to a server already up -- and each is
-        added only once it has been measured.
+        first boots the server and pays the compile and the graph capture, the
+        second re-attaches a client to a server already up -- and each is added
+        only once it has been measured.
 
         A session can hold the cold figure without the hot one, and that is not a
         corner case: a round whose measured pass was dropped for budget promotes
@@ -3500,8 +3510,8 @@ class BaselineExecutor:
             ctx_extra: The runner context extras carrying ``shared_state``.
 
         Returns:
-            float | None: Seconds the round will cost at least, or ``None`` when
-                the session has measured nothing to predict from.
+            float | None: What an earlier round cost, or ``None`` when the
+                session has measured nothing to predict from.
         """
         state = (ctx_extra or {}).get("shared_state") or self.shared_state
         cold_sec = _measured_runtime_sec(state, "baseline_runtime_sec")
@@ -3527,10 +3537,18 @@ class BaselineExecutor:
         against what the first actually cost.
 
         Every later round has at least the previous one's cold figure, and by then
-        an anchor already exists. So a session too poor to finish a round should
-        not spend a cold pass discovering it: refusing costs the session nothing
-        it had, while igniting costs it the boot, the compile, and the capture for
-        a number it will then have to mark as cold.
+        an anchor already exists. That is what makes this gate safe to build on an
+        over-predicting figure: the two outcomes are not symmetric. Igniting a
+        round that cannot finish costs a boot, a compile and a graph capture for a
+        number that must then be marked cold. Refusing one that would have fitted
+        costs a fresh anchor the session did not need, because the anchor it
+        measured earlier still stands and every later comparison is made against
+        that one.
+
+        The asymmetry is the whole justification, so it may not be borrowed. A
+        caller that would *end the session* on this figure would be trading the
+        rest of the run against a systematic over-prediction, and needs a bound
+        that errs the other way.
 
         Args:
             double_run: Whether this round will run both passes.
@@ -3540,7 +3558,7 @@ class BaselineExecutor:
             tuple[bool, dict[str, Any]]: ``(affordable, evidence)``.
         """
         state = (ctx_extra or {}).get("shared_state") or self.shared_state
-        cost = self._round_cost_lower_bound_sec(
+        cost = self._last_round_cost_sec(
             double_run=double_run,
             ctx_extra=ctx_extra,
         )
