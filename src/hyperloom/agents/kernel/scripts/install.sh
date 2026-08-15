@@ -596,8 +596,9 @@ ensure_python() {
 #     Still tolerates whitespace and single-line drift, the common
 #     point-release case the fuzzy fallback was designed for.
 #
-# Stripped runtime images (`lmsysorg/sglang:v0.5.9-rocm700-mi30x` and the
-# minimal vLLM serving images) sometimes ship without one or both binaries.
+# Stripped upstream runtime images (minimal SGLang/vLLM serving images, as
+# opposed to the `rocm/hyperloom` ones) sometimes ship without one or both
+# binaries.
 # `_server_patcher` fail-softs in that case → `--enable-shape-discovery-
 # for-cuda-graph-profile` is silently never injected → graph-replayed
 # kernels stay opaque, exactly what #194 §5 was trying to fix.
@@ -646,14 +647,15 @@ ensure_patch_tools() {
 # `cmd 2>&1 | ts '[%H:%M:%S]'` shim the optimizer fork-execs) doesn't blow
 # up with `ts: command not found`.
 #
-# Background: stripped runtime images (e.g. `lmsysorg/sglang:v0.5.9-rocm700-mi30x`
-# and the minimal vLLM serving images) ship without moreutils. When a wrapper
-# pipes its stdout/stderr through `ts` for per-line timestamps and `ts` is
-# missing, bash propagates exit code 127 up through the pipeline. The driving
-# inference_optimizer validate_stack executor sees `subprocess_nonzero`,
-# classifies the run as a baseline failure, and loops — burning minutes per
-# iteration on a one-line apt fix. moreutils itself is a tiny perl-only
-# package (<1 MB with deps), so this is a strict win over the retry cost.
+# Background: stripped upstream runtime images (minimal SGLang/vLLM serving
+# images, as opposed to the `rocm/hyperloom` ones) ship without moreutils.
+# When a wrapper pipes its stdout/stderr through `ts` for per-line timestamps
+# and `ts` is missing, bash propagates exit code 127 up through the pipeline.
+# The driving inference_optimizer validate_stack executor sees
+# `subprocess_nonzero`, classifies the run as a baseline failure, and loops —
+# burning minutes per iteration on a one-line apt fix. moreutils itself is a
+# tiny perl-only package (<1 MB with deps), so this is a strict win over the
+# retry cost.
 #
 # Same shape as ensure_patch_tools(): cheap apt-install with dry-run /
 # check-only / no-apt-get fail-soft semantics. fail-soft on install error
