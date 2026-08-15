@@ -27,7 +27,7 @@ In docker mode:
 
 Suggested Docker images:
 
-- `vllm`: `docker.io/rocm/hyperloom:vllm-v0.24.0-rocm7.2.0`
+- `vllm`: `docker.io/rocm/hyperloom:vllm-v0.27.1-rocm7.2.3`
 - `sglang` MI300X: `docker.io/rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x`
 - `sglang` MI355X: `docker.io/rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi350x`
 

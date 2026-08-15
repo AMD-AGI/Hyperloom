@@ -591,10 +591,10 @@ def test_bypass_eval_limit_absent_is_none(tmp_path, monkeypatch):
 
 
 def test_vllm_server_command_enables_torch_profiler():
-    """vllm 0.24 needs --profiler-config flags to enable the torch profiler.
+    """vLLM needs --profiler-config flags to enable the torch profiler.
 
-    Regression: setting only VLLM_TORCH_PROFILER_DIR env is ignored by vllm
-    0.24 (Unknown env var), so /start_profile returns 404 and no trace lands.
+    Regression: setting only VLLM_TORCH_PROFILER_DIR env is ignored by vLLM
+    (Unknown env var), so /start_profile returns 404 and no trace lands.
     """
     cmd = bypass_engine.build_server_command(
         framework="vllm",
