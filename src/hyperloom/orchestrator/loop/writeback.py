@@ -2938,38 +2938,9 @@ class WritebackCollaborator:
             audit_extras["framework_rewrite_evidence"] = evidence_path
             audit_extras["framework_rewrite_candidate_count"] = result.get("framework_rewrite_candidate_count")
             changed = True
-        # profile result may include a tput; promote into current_best on the +1% rule.
-        tput = result.get("output_throughput")
-        cb = self.shared_state.current_best or {}
-        cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-        cur_best = (
-            float(cb_tput)
-            if isinstance(cb_tput, (int, float)) and cb_tput > 0
-            else float(self.shared_state.baseline_tput or 0.0)
-        )
-        if (
-            isinstance(tput, (int, float))
-            and tput > 0
-            and cur_best > 0
-            and (tput - cur_best) / cur_best * 100.0 >= 1.0
-        ):
-            promoted = dict(cb) if isinstance(cb, dict) else {}
-            promoted.update(
-                {
-                    "action": "profile",
-                    "tput": float(tput),
-                    "ttft_mean_ms": result.get("ttft_mean_ms"),
-                    "e2el_mean_ms": result.get("e2el_mean_ms"),
-                    "tpot_mean_ms": result.get("tpot_mean_ms"),
-                    "workspace": result.get("workspace"),
-                }
-            )
-            self.shared_state.current_best = promoted
-            if self.shared_state.baseline_tput > 0:
-                self.shared_state.cumulative_gain = (
-                    (float(tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
-                )
-            changed = True
+        # A profile run measures with the torch profiler attached, so its
+        # throughput is not comparable with the un-profiled measurements that
+        # establish current_best; it is recorded in the audit row only.
         # On a successful profile, re-anchor last_roofline_tput and clear the pending field.
         if profile_status == "succeeded":
             anchor_tput = self._current_tput_from_validated_gain()

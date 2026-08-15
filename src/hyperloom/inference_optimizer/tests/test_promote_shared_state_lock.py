@@ -216,14 +216,10 @@ async def test_promote_profile_writes_state_and_audit(session_dir):
             "max_model_len": 4096,
         }
     )
-    # +1% rule met (150 vs 100): current_best re-lifted to profile.
-    assert s.current_best["action"] == "profile"
-    assert s.current_best["tput"] == 150.0
-    assert s.current_best["engine"] == "sglang"
-    assert s.current_best["extra_server_args"] == "--attention-backend aiter"
-    assert s.current_best["extra_envs"] == {
-        "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tmp/tuned.csv"
-    }
+    # A profiler-on measurement never moves current_best, however high it reads.
+    assert s.current_best["action"] == "explore"
+    assert s.current_best["tput"] == 100.0
+    assert s.cumulative_gain_validated == 0.0
     # Audit row.
     assert s.last_profile["decision"] == "promoted"
     assert s.last_profile["status"] == "succeeded"
