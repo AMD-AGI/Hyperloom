@@ -415,3 +415,30 @@ def test_orchestration_context_is_empty_without_a_census_or_db(tmp_path):
     assert section["compactions_per_tick"] == 0.0
     assert section["context_tokens_at_compaction"] == {}
     assert warnings == []
+
+
+def test_recorder_snapshot_leaves_the_workload_contract_intact(tmp_path):
+    """A recorder fragment replaces its whole section, so it must not own workload."""
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+    (tmp_path / "state.json").write_text(
+        json.dumps({"session_id": "s", "framework": "sglang", "model_name": "qwen3-8b"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"session_id": "s", "framework_version": "0.4.1", "workload": {"conc": 64}}),
+        encoding="utf-8",
+    )
+    instrument.snapshot_state_sections(
+        tmp_path,
+        SimpleNamespace(framework="sglang", model_name="qwen3-8b", model_path="", session_id="s"),
+    )
+
+    workload = ex.build(tmp_path)["workload"]
+    assert workload["framework_name"] == "sglang"
+    assert workload["framework_version"] == "0.4.1"
+    assert workload["conc"] == 64
+    # Unset knobs stay None; a recorder fragment used to coerce them to 0.
+    assert workload["tp"] is None

@@ -775,7 +775,6 @@ def snapshot_state_sections(
 
     for name, fn in (
         ("session", _snapshot_session),
-        ("workload", _snapshot_workload),
         ("final", _snapshot_final),
         ("explore_search", _snapshot_explore_search),
         ("sweep", _snapshot_sweep),
@@ -883,38 +882,6 @@ def _snapshot_session(rec, st: Any) -> None:
             "max_minutes": int(getattr(st, "max_minutes", 0) or 0),
             "tick_count": int(getattr(st, "tick", 0) or 0),
             "phase": str(getattr(st, "phase", "") or ""),
-        },
-    )
-
-
-def _snapshot_workload(rec, st: Any) -> None:
-    """Snapshot the ``workload`` singleton from ``st``.
-
-    A no-op when neither a framework nor a model is set.
-
-    Args:
-        rec: the recorder used to write the singleton.
-        st (Any): the live ``SharedState`` to snapshot.
-    """
-    framework = str(getattr(st, "framework", "") or "")
-    model = str(getattr(st, "model_name", "") or getattr(st, "model_path", "") or "")
-    if not framework and not model:
-        return
-    rec.record_singleton(
-        "workload",
-        {
-            "framework": framework,
-            "model_name": str(getattr(st, "model_name", "") or ""),
-            "model_path": str(getattr(st, "model_path", "") or ""),
-            "model_class": str(getattr(st, "model_class", "") or ""),
-            "gpu_type": str(getattr(st, "gpu_type", "") or ""),
-            "tp": int(getattr(st, "tp", 0) or 0),
-            "ep": int(getattr(st, "ep", 0) or 0),
-            "precision": str(getattr(st, "precision", "") or ""),
-            "conc": int(getattr(st, "conc", 0) or 0),
-            "isl": int(getattr(st, "isl", 0) or 0),
-            "osl": int(getattr(st, "osl", 0) or 0),
-            "max_model_len": int(getattr(st, "max_model_len", 0) or 0),
         },
     )
 
