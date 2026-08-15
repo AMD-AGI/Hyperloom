@@ -1185,7 +1185,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_should_run_prelude_bootstrap": "writeback",
         "_detect_resume_state": "writeback",
         "replay_for_resume": "writeback",
-        "_materialize_stack_config_for_resume": "writeback",
+        "_current_best_launch_config": "writeback",
         "build_env_spec": "writeback",
         "_resume_consistency_pass": "writeback",
         "_resume_reenter_kernel_if_needed": "writeback",

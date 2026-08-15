@@ -620,6 +620,14 @@ async def test_resume_consistency_enqueues_stack_rebench_for_unvalidated(coord: 
         }
     ]
     coord.shared_state.cumulative_gain_validated_stack_len = 0
+    # The lift writes both together, so a stack always has a config behind it.
+    coord.shared_state.current_best = {
+        "action": "explore",
+        "variant_name": "v1",
+        "tput": 110.0,
+        "extra_server_args": "--a 1",
+        "extra_envs": {"A": "1"},
+    }
 
     report = await coord._resume_consistency_pass()
 

@@ -951,6 +951,59 @@ def test_lift_keeps_entry_extra_off_current_best(session_dir):
     assert "backend" not in s.current_best
 
 
+def test_env_spec_reports_the_config_current_best_was_measured_on(session_dir):
+    """The GEAK handoff must describe current_best, ablations included."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+
+    coord._lift_to_current_best(
+        "explore",
+        1100.0,
+        {"name": "v1", "extra_server_args": "--flag-a 1", "extra_envs": {"OLD": "1"}},
+    )
+    coord._lift_to_current_best(
+        "explore",
+        1200.0,
+        {
+            "name": "v2",
+            "extra_server_args": "--flag-a 1",
+            "extra_envs": {"NEW": "1"},
+            "unset_envs": ["OLD"],
+            "final_overlay": "/overlay/build",
+        },
+    )
+
+    spec = coord.build_env_spec()
+
+    assert spec["config"]["extra_envs"] == {"NEW": "1"}
+    assert spec["config"]["extra_server_args"] == "--flag-a 1"
+    assert spec["overlay_pythonpath"] == "/overlay/build"
+
+
+def test_env_spec_routes_a_flag_stored_under_extra_envs_back_into_args(session_dir):
+    """A ``-``-prefixed env key is a server arg; exporting it would drop it."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    coord._lift_to_current_best(
+        "integrate_patch",
+        1200.0,
+        {
+            "name": "patch-1",
+            "extra_server_args": "--flag-a 1",
+            "extra_envs": {"REAL_ENV": "1", "--compilation-config": "3"},
+        },
+    )
+
+    spec = coord.build_env_spec()
+
+    assert spec["config"]["extra_envs"] == {"REAL_ENV": "1"}
+    args = spec["config"]["extra_server_args"].split()
+    assert args[args.index("--compilation-config") + 1] == "3"
+    assert "--flag-a" in args
+
+
 def test_lift_carries_the_active_overlay_forward(session_dir):
     """An authored-kernel overlay outlives the KEEP that built it."""
     coord = _coord(session_dir)

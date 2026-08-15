@@ -3849,7 +3849,7 @@ class WritebackCollaborator:
     # Three semantic boundaries live below: the live-promote / replay path
     # (``_replay_keep_from_result``), the resume-reconcile path
     # (``_resume_consistency_pass`` + its recover helpers), and the
-    # current_best lift path (``_materialize_stack_config_for_resume`` /
+    # current_best lift path (``_current_best_launch_config`` /
     # ``build_env_spec``). Methods keep bare ``self.<name>`` access; tests
     # monkeypatch them via ``coord.writeback.<name>`` (or bare-name
     # ``_DELEGATED`` on the coordinator).
@@ -3920,56 +3920,35 @@ class WritebackCollaborator:
             "verdicts_seen": len(verdicts),
         }
 
-    def _materialize_stack_config_for_resume(self) -> dict[str, Any]:
-        """Rebuild cumulative launch args/envs from ``optimization_stack``."""
-        stack = [e for e in (getattr(self.shared_state, "optimization_stack", []) or []) if isinstance(e, dict)]
-        args = ""
+    def _current_best_launch_config(self) -> dict[str, Any]:
+        """The launch config ``current_best`` was measured on.
+
+        ``current_best`` already carries the merged result of every KEEP, so
+        this only normalizes it for launch: a ``-``-prefixed key under
+        ``extra_envs`` (e.g. a ``--compilation-config`` that reached an
+        integrate KEEP through ``config_changes_applied``) is a SERVER ARG, and
+        the grid runner would otherwise export it verbatim as an env the backend
+        ignores, silently dropping it. Keyed on the prefix, never on a flag name.
+
+        Returns:
+            ``extra_server_args`` / ``extra_envs`` / ``final_overlay``.
+        """
+        cb = self.shared_state.current_best if isinstance(self.shared_state.current_best, Mapping) else {}
+        args = str(cb.get("extra_server_args") or "").strip()
         envs: dict[str, str] = {}
-        overlay = ""
-        tput: float | None = None
-        variant_name = ""
-        action = "resume_reconstructed"
-        workspace = None
-        for entry in stack:
-            candidate = str(entry.get("candidate_extra_server_args") or "").strip()
-            full = str(entry.get("extra_server_args") or "").strip()
-            args = _merge_cumulative_extra_server_args(args, candidate, full)
-            raw_envs = entry.get("extra_envs") or {}
-            if isinstance(raw_envs, Mapping):
-                for k, v in raw_envs.items():
-                    ks = str(k)
-                    # A flag mis-stored under extra_envs (e.g. a ``--compilation-config``
-                    # key from an integrate_patch entry) is a SERVER ARG, not an env
-                    # var — the grid runner would otherwise inject it verbatim as an
-                    # env the backend ignores, silently dropping it from the rebuilt
-                    # config. Route any ``-``-prefixed key back into extra_server_args
-                    # so the materialized stack reproduces the real launch. General:
-                    # keyed on the ``-`` prefix, never on a specific flag name.
-                    if ks.startswith("-"):
-                        tok = ks if v in ("", None) else f"{ks}={v}"
-                        args = _merge_cumulative_extra_server_args(args, "", tok)
-                    else:
-                        envs[ks] = str(v)
-            # Carry the authored-kernel overlay (PYTHONPATH prefix) so a native
-            # rebuild of an overlay winner actually loads the built kernels
-            # instead of measuring the un-optimized stack. Last non-empty wins.
-            entry_overlay = str(entry.get("final_overlay") or "").strip()
-            if entry_overlay:
-                overlay = entry_overlay
-            if isinstance(entry.get("tput"), (int, float)) and float(entry["tput"]) > 0:
-                tput = float(entry["tput"])
-            variant_name = str(entry.get("variant_name") or variant_name or "")
-            action = str(entry.get("action") or action)
-            workspace = entry.get("workspace") or workspace
+        raw_envs = cb.get("extra_envs") or {}
+        if isinstance(raw_envs, Mapping):
+            for key, value in raw_envs.items():
+                name = str(key)
+                if name.startswith("-"):
+                    token = name if value in ("", None) else f"{name}={value}"
+                    args = _merge_cumulative_extra_server_args(args, token, "")
+                else:
+                    envs[name] = str(value)
         return {
-            "action": action,
-            "variant_name": variant_name,
             "extra_server_args": args,
             "extra_envs": envs,
-            "final_overlay": overlay,
-            "tput": tput,
-            "workspace": workspace,
-            "optimization_stack": stack,
+            "final_overlay": str(cb.get("final_overlay") or "").strip(),
         }
 
     def build_env_spec(self) -> dict[str, Any]:
@@ -3990,7 +3969,7 @@ class WritebackCollaborator:
         baseline ref is materialized from the SAME layers as ``current_best``
         (not just its flags/env), closing the cross-harness baseline gap.
         """
-        materialized = self._materialize_stack_config_for_resume()
+        materialized = self._current_best_launch_config()
         stack = [e for e in (getattr(self.shared_state, "optimization_stack", []) or []) if isinstance(e, dict)]
         source_snapshots: list[dict[str, Any]] = []
         for entry in stack:
@@ -4626,16 +4605,16 @@ class WritebackCollaborator:
                     "mode": "geak_2b",
                 }
 
-        rebuilt = self._materialize_stack_config_for_resume()
-        args = str(rebuilt.get("extra_server_args") or "").strip()
-        envs = rebuilt.get("extra_envs") or {}
-        overlay = str(rebuilt.get("final_overlay") or "").strip()
+        launch = self._current_best_launch_config()
+        args = launch["extra_server_args"]
+        envs = launch["extra_envs"]
+        overlay = launch["final_overlay"]
         cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
         cb_remove = cb_now.get("remove_args")
         cb_unset = cb_now.get("unset_envs")
         cb_replace = str(cb_now.get("args_mode") or "").strip().lower() == "replace"
         if not (args or envs or cb_remove or cb_unset or cb_replace):
-            return {"skipped": True, "reason": "empty_stack"}
+            return {"skipped": True, "reason": "empty_config"}
         params: dict[str, Any] = {
             "source": "resume_stack_revalidate",
             "reason": reason,
