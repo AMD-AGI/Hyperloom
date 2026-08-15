@@ -12,6 +12,7 @@ from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from .coordinator_helpers import approved_proposal_idempotency_key
 from ..state.shared_state import inject_stack_base_params
+from ..state.task_registry import TERMINAL_STATES
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -23,8 +24,6 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
-# Task states past which the same idempotency key may be reused for a retry.
-_TERMINAL_TASK_STATES: frozenset[str] = frozenset({"succeeded", "failed", "cancelled"})
 _MAX_IDEMPOTENCY_ATTEMPTS: int = 6
 
 
@@ -483,7 +482,7 @@ class ProposalsCollaborator:
             )
             if not was_existing:
                 break
-            if task.state not in _TERMINAL_TASK_STATES:
+            if task.state not in TERMINAL_STATES:
                 await self._record_observation(
                     "coordinator",
                     "observation",

@@ -4412,8 +4412,6 @@ class FrameworkPhase(PhaseHandler):
         boot the model before KEEP is declared.
         """
         try:
-            from ..state.task_registry import TERMINAL_STATES
-
             all_tasks = []
             for st in ("succeeded", "failed"):
                 all_tasks.extend(

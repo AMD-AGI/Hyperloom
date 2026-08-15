@@ -44,7 +44,7 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
     "cancelled": frozenset(),
 }
 
-TERMINAL_STATES = frozenset({"succeeded", "cancelled"})
+TERMINAL_STATES = frozenset(state for state, outgoing in _TRANSITIONS.items() if not outgoing)
 
 
 # microseconds + ``+00:00`` (canonical helper; kept importable for callers).
