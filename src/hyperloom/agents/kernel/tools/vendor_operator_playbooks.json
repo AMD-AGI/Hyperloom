@@ -14,7 +14,16 @@
     "reusable_native_kernel=True with patch_strategy='vendor_playbook'.",
     "forge_submit.py then copies task_bundle (resolved under $FORGE_PATH,",
     "KernelForge's checkout) into the forge worktree instead of doing a",
-    "source-file rewrite, and includes kb_path in the fellow's context."
+    "source-file rewrite, and sets each entry's own 'env' vars (e.g.",
+    "KERNELFORGE_INCLUDE_MORI_KB=1) on the forge-loop subprocess. That var",
+    "is a boolean ablation switch KernelForge's own Config.include_mori_kb",
+    "reads to decide whether to inject a FIXED directory it resolves",
+    "internally -- KernelForge has no CLI/env hook to pass an arbitrary",
+    "external path in its place. 'kb_path' below is therefore not read by",
+    "any code path; it is recorded purely so this entry documents which",
+    "on-disk directory that boolean switch actually pulls in (see",
+    "KernelForge's local_knowledge/framework/mori/), for cross-reference",
+    "when auditing what knowledge a run had access to."
   ],
   "playbooks": [
     {

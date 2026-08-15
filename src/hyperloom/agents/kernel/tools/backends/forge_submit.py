@@ -3781,6 +3781,46 @@ def _wait_for_vendor_playbook_result(lock_dir: Path, deadline_unix: float) -> di
         time.sleep(min(_VENDOR_PLAYBOOK_CLAIM_POLL_S, max(0.0, deadline_unix - time.time())))
 
 
+def _stage_vendor_playbook_artifact_for_reuse(cached: dict, output_dir: Path) -> None:
+    """Duplicate a reused vendor-playbook result's artifact under ``output_dir``.
+
+    ``kernel_optimization.py``'s ``invoke_backend()`` unconditionally resets
+    ``result["output_dir"]`` to *this* attempt's own directory right after
+    ``submit()`` returns (``result["output_dir"] = str(out_dir)``), and
+    ``_candidate_artifact_paths()`` looks under both ``cli_workspace`` and
+    ``output_dir`` for an ``optimized_versions/`` directory. A cache-hit
+    result's ``cli_workspace``/``output_dir`` fields describe the *winner's*
+    directory (correct at the time they were written to ``result.json``,
+    before that later overwrite mutates the in-memory dict this call
+    returns), so the winner's directory alone would silently stop being
+    reachable for a reused sibling once the caller clobbers ``output_dir``.
+    Physically copying the file(s) here makes the reused result
+    self-contained regardless of that overwrite.
+    """
+    src_opt = None
+    for key in ("cli_workspace", "output_dir"):
+        candidate_dir = cached.get(key)
+        if not candidate_dir:
+            continue
+        probe = Path(candidate_dir) / "optimized_versions"
+        if probe.is_dir():
+            src_opt = probe
+            break
+    if src_opt is None:
+        return
+    dest_opt = output_dir / "optimized_versions"
+    try:
+        dest_opt.mkdir(parents=True, exist_ok=True)
+        for item in src_opt.iterdir():
+            if not item.is_file():
+                continue
+            dest = dest_opt / item.name
+            if not dest.exists():
+                shutil.copy2(item, dest)
+    except OSError as exc:
+        log.warning("forge: could not stage reused vendor playbook artifact copy: %s", exc)
+
+
 def _copy_vendor_task_bundle(task_bundle_root: Path, workspace: Path) -> None:
     """Copy a KernelForge ``examples/<task>/`` bundle into ``workspace`` and
     git-init it there.
@@ -4010,63 +4050,27 @@ def _run_vendor_playbook_loop_via_cli(
     )
 
 
-def _submit_vendor_playbook(
+def _run_claimed_vendor_playbook(
     *,
     candidate: dict[str, Any],
     prompt_file: Path,
     output_dir: Path,
     timeout_s: int,
+    playbook: dict[str, Any],
+    group_id: str,
+    role: str,
+    lock_dir: Path,
+    started: float,
 ) -> dict:
-    """Run (or reuse) the one forge-loop session for a vendor-playbook group."""
-    started = time.time()
-    playbook = candidate.get("vendor_operator_playbook")
-    if not isinstance(playbook, dict) or not playbook.get("id"):
-        # Defensive re-resolve: a candidate dict round-tripped through JSON by
-        # a caller that dropped nested fields still carries enough identity
-        # (name/library/source_file) to re-match the registry.
-        playbook = match_vendor_operator_playbook(candidate)
-    if not isinstance(playbook, dict) or not playbook.get("id"):
-        return _normalized(
-            2,
-            "",
-            "forge: patch_strategy=vendor_playbook but candidate carries no "
-            "vendor_operator_playbook entry (re-run classify_patchability?)",
-            time.time() - started,
-            skipped=True,
-        )
+    """Copy the task bundle and run forge-loop, having already won the claim.
 
-    group_id = str(playbook.get("id"))
-    role = str(candidate.get("vendor_playbook_role") or playbook.get("role") or "")
-    lock_dir = _vendor_playbook_lock_dir(output_dir, group_id)
-
-    cached = _read_vendor_playbook_cached_result(lock_dir)
-    if cached is not None:
-        result = dict(cached)
-        result["vendor_playbook_reused"] = True
-        result["vendor_playbook_role"] = role
-        return result
-
-    if not _claim_vendor_playbook_run(lock_dir):
-        # A sibling role (e.g. this is "combine" and "dispatch" already
-        # claimed the group) is running the one shared session; wait for it
-        # rather than launching a second forge-loop for the same task.
-        deadline = time.time() + max(60.0, float(timeout_s) + 300.0)
-        cached = _wait_for_vendor_playbook_result(lock_dir, deadline)
-        if cached is not None:
-            result = dict(cached)
-            result["vendor_playbook_reused"] = True
-            result["vendor_playbook_role"] = role
-            return result
-        return _normalized(
-            2,
-            "",
-            f"forge: vendor playbook group {group_id!r} was claimed by a "
-            "concurrent submission but never produced a result before the wait "
-            "deadline",
-            time.time() - started,
-            skipped=True,
-        )
-
+    May raise (e.g. ``subprocess.CalledProcessError`` from the git-init
+    calls in ``_copy_vendor_task_bundle``, or anything else unexpected from
+    forge-loop setup) -- the caller (``_submit_vendor_playbook``) must catch
+    broadly and always write a result to ``lock_dir``, or a raised exception
+    here leaves ``claimed.lock`` in place forever with no result for any
+    waiting sibling or later retry to find.
+    """
     forge_root = (os.environ.get("FORGE_PATH") or "").strip()
     if not forge_root:
         result = _normalized(
@@ -4106,7 +4110,9 @@ def _submit_vendor_playbook(
 
     try:
         _copy_vendor_task_bundle(task_bundle_root, workspace)
-    except OSError as exc:
+    except (OSError, subprocess.CalledProcessError) as exc:
+        # _copy_vendor_task_bundle's git init/config/add/commit calls run with
+        # check=True and raise CalledProcessError, not OSError, on failure.
         result = _normalized(
             2,
             "",
@@ -4177,7 +4183,15 @@ def _submit_vendor_playbook(
     # forge-loop itself committed and validated a faster config.
     result.update(
         {
-            "cli_workspace": str(workspace),
+            # NOTE: cli_workspace intentionally equals output_dir here (the
+            # convention the ordinary per-file forge path uses, see
+            # `res["cli_workspace"] = str(output_dir)` elsewhere in this
+            # module), NOT the git worktree -- optimized_versions/ below is
+            # written directly under output_dir, and _candidate_artifact_paths()
+            # checks cli_workspace/optimized_versions first. forge_workspace
+            # separately carries the real git worktree for anything that needs
+            # the live tree (e.g. a future patch-based snapshot).
+            "cli_workspace": str(output_dir),
             "forge_workspace": str(workspace),
             "output_dir": str(output_dir),
             "improved": bool(loop_outcome.total_improved),
@@ -4212,6 +4226,105 @@ def _submit_vendor_playbook(
             log.warning("forge: could not stage vendor playbook artifact copy: %s", exc)
     _write_vendor_playbook_result(lock_dir, result)
     return result
+
+
+def _submit_vendor_playbook(
+    *,
+    candidate: dict[str, Any],
+    prompt_file: Path,
+    output_dir: Path,
+    timeout_s: int,
+) -> dict:
+    """Run (or reuse) the one forge-loop session for a vendor-playbook group."""
+    started = time.time()
+    playbook = candidate.get("vendor_operator_playbook")
+    if not isinstance(playbook, dict) or not playbook.get("id"):
+        # Defensive re-resolve: a candidate dict round-tripped through JSON by
+        # a caller that dropped nested fields still carries enough identity
+        # (name/library/source_file) to re-match the registry.
+        playbook = match_vendor_operator_playbook(candidate)
+    if not isinstance(playbook, dict) or not playbook.get("id"):
+        return _normalized(
+            2,
+            "",
+            "forge: patch_strategy=vendor_playbook but candidate carries no "
+            "vendor_operator_playbook entry (re-run classify_patchability?)",
+            time.time() - started,
+            skipped=True,
+        )
+
+    group_id = str(playbook.get("id"))
+    role = str(candidate.get("vendor_playbook_role") or playbook.get("role") or "")
+    lock_dir = _vendor_playbook_lock_dir(output_dir, group_id)
+
+    cached = _read_vendor_playbook_cached_result(lock_dir)
+    if cached is not None:
+        result = dict(cached)
+        result["vendor_playbook_reused"] = True
+        result["vendor_playbook_role"] = role
+        _stage_vendor_playbook_artifact_for_reuse(cached, output_dir)
+        return result
+
+    if not _claim_vendor_playbook_run(lock_dir):
+        # A sibling role (e.g. this is "combine" and "dispatch" already
+        # claimed the group) is running the one shared session; wait for it
+        # rather than launching a second forge-loop for the same task.
+        deadline = time.time() + max(60.0, float(timeout_s) + 300.0)
+        cached = _wait_for_vendor_playbook_result(lock_dir, deadline)
+        if cached is not None:
+            result = dict(cached)
+            result["vendor_playbook_reused"] = True
+            result["vendor_playbook_role"] = role
+            _stage_vendor_playbook_artifact_for_reuse(cached, output_dir)
+            return result
+        return _normalized(
+            2,
+            "",
+            f"forge: vendor playbook group {group_id!r} was claimed by a "
+            "concurrent submission but never produced a result before the wait "
+            "deadline",
+            time.time() - started,
+            skipped=True,
+        )
+
+    # From here on we hold the claim: any unhandled exception MUST still
+    # produce a result.json, or claimed.lock is orphaned forever and no
+    # sibling/retry for this group can ever run again (see
+    # _run_claimed_vendor_playbook's docstring). _copy_vendor_task_bundle's
+    # git subprocess calls and the forge-loop launch are the known risks,
+    # but this is a deliberate catch-all, not just those two.
+    try:
+        return _run_claimed_vendor_playbook(
+            candidate=candidate,
+            prompt_file=prompt_file,
+            output_dir=output_dir,
+            timeout_s=timeout_s,
+            playbook=playbook,
+            group_id=group_id,
+            role=role,
+            lock_dir=lock_dir,
+            started=started,
+        )
+    except Exception as exc:  # noqa: BLE001
+        result = _normalized(
+            2,
+            "",
+            f"forge: vendor playbook group {group_id!r} raised after claiming "
+            f"the shared session, before producing a result "
+            f"({type(exc).__name__}: {exc})",
+            time.time() - started,
+            skipped=True,
+        )
+        try:
+            _write_vendor_playbook_result(lock_dir, result)
+        except OSError:
+            log.exception(
+                "forge: could not write a failure result for vendor playbook "
+                "group %r after claiming it; claimed.lock will remain until "
+                "manually cleared",
+                group_id,
+            )
+        return result
 
 
 def submit(

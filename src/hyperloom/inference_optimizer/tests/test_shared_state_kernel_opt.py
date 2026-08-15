@@ -540,6 +540,69 @@ def test_untried_hot_kernels_reproduces_log1_session_164910Z(state: SharedState)
     assert untried[0] == "k002"  # strongest-first
 
 
+def test_untried_hot_kernels_vendor_playbook_group_gated_on_aggregate(state: SharedState):
+    """mori's dispatch (7%) + combine (5%) must clear the gate together.
+
+    Neither member clears the 10% default threshold alone, but
+    _apply_vendor_operator_playbook_grouping() (tracelens_analysis.py) stamps
+    aggregate_gpu_pct=12.0 on both, since the pair is deliberately dispatched
+    as one forge-loop session (see KernelForge PR #88 / the mori vendor
+    playbook). Regression for a real gap: the gate used to compare each row's
+    own gpu_pct, so a split load like this was silently dropped as
+    below_min_gpu_pct on both members despite clearing the floor combined.
+    """
+    _set_trace(
+        state,
+        hot_kernels=[
+            {
+                "kernel_id": "k010",
+                "gpu_pct": 7.0,
+                "aggregate_gpu_pct": 12.0,
+                "reusable_native_kernel": True,
+                "source_file": "/opt/venv/.../mori_ep_config.py",
+                "name": "mori::EpDispatchCombineOp::dispatch",
+            },
+            {
+                "kernel_id": "k011",
+                "gpu_pct": 5.0,
+                "aggregate_gpu_pct": 12.0,
+                "reusable_native_kernel": True,
+                "source_file": "/opt/venv/.../mori_ep_config.py",
+                "name": "mori::EpDispatchCombineOp::combine",
+            },
+        ],
+    )
+    untried = state.untried_hot_reusable_kernels()
+    # Both members carry the group's full aggregate: whichever the fallback
+    # identity-dedup keeps (they share source_file+name, differing only in
+    # gpu_pct) must clear the gate.
+    assert untried, "vendor-playbook group must not be dropped as below_min_gpu_pct"
+
+
+def test_untried_hot_kernels_vendor_playbook_floor_still_applies(state: SharedState):
+    """A playbook's min_gpu_pct_floor is a floor on the *threshold*, not a
+    bypass: an aggregate that clears a loosened env override but not the
+    playbook's own floor must still be gated out."""
+    _set_trace(
+        state,
+        hot_kernels=[
+            {
+                "kernel_id": "k010",
+                "gpu_pct": 2.0,
+                "aggregate_gpu_pct": 3.0,
+                "vendor_playbook_min_gpu_pct_floor": 10.0,
+                "reusable_native_kernel": True,
+                "source_file": "/opt/venv/.../mori_ep_config.py",
+                "name": "mori::EpDispatchCombineOp::dispatch",
+            },
+        ],
+    )
+    # A caller loosening the env default to 1.0% must not let this in: the
+    # playbook's own floor (10.0) still applies.
+    untried = state.untried_hot_reusable_kernels(min_gpu_pct=1.0)
+    assert untried == []
+
+
 def test_untried_hot_kernels_collapses_by_task_group(state: SharedState):
     """task_group dedup: same AST function -> one slot."""
     _set_trace(
