@@ -875,11 +875,7 @@ def test_lift_applies_unset_envs_before_new_envs(session_dir):
 
 
 def test_lift_is_the_only_writer_so_an_ablated_env_stays_gone(session_dir):
-    """A later winner that drops an inherited env must not see it come back.
-
-    Every writer routes through the lift, so the ablation survives on
-    current_best without anything replaying the stack to reconstruct it.
-    """
+    """A later winner that drops an inherited env must not see it come back."""
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 1000.0
@@ -915,14 +911,13 @@ def test_lift_refuses_a_winner_that_does_not_beat_the_anchor(session_dir):
         {"name": "good", "extra_server_args": "--flag-a 1", "extra_envs": {"A": "1"}},
     )
 
-    assert (
-        coord._lift_to_current_best(
-            "gemm_tuning",
-            1100.0,
-            {"name": "worse", "extra_server_args": "--flag-b 2", "extra_envs": {"B": "2"}},
-        )
-        is False
+    lifted = coord._lift_to_current_best(
+        "gemm_tuning",
+        1100.0,
+        {"name": "worse", "extra_server_args": "--flag-b 2", "extra_envs": {"B": "2"}},
     )
+
+    assert lifted is False
     assert s.current_best["tput"] == 1500.0
     assert s.current_best["extra_envs"] == {"A": "1"}
     assert [e["variant_name"] for e in s.optimization_stack] == ["good"]
@@ -944,7 +939,6 @@ def test_lift_keeps_entry_extra_off_current_best(session_dir):
     entry = s.optimization_stack[-1]
     assert entry["tuned_file"] == "/tuned.csv"
     assert entry["backend"] == "geak"
-    # Empty values are not stamped, so a missing handle stays missing.
     assert "empty" not in entry
     assert "absent" not in entry
     assert "tuned_file" not in s.current_best

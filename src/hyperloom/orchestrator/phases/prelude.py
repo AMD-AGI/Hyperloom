@@ -1075,8 +1075,7 @@ class PreludePhase(PhaseHandler):
             outcome["status"] = "reproduced"
             # Resume safety: do not clobber existing stack entries.
             state.optimization_stack = list(state.optimization_stack or [])
-            # Idempotency guard: a prior promote that already pushed the entry
-            # owns the outcome; re-running the rest would re-journal it.
+            # A prior promote owns the outcome; re-running would re-journal it.
             already_pushed = any(
                 isinstance(e, dict) and e.get("action") == "replay_warm_recipe" for e in state.optimization_stack
             )

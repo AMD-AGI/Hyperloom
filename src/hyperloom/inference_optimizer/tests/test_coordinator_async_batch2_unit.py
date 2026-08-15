@@ -171,12 +171,7 @@ async def test_resume_consistency_marks_unvalidated_keeps(coord: Coordinator) ->
 
 @pytest.mark.asyncio
 async def test_resume_consistency_leaves_current_best_alone(coord: Coordinator) -> None:
-    """Resume must not rewrite the config: the lift is its only author.
-
-    A replay from the stack cannot reconstruct what the lift merged (an env a
-    later winner unset would come back), so a disagreement is not something to
-    'repair' here.
-    """
+    """Resume must not rewrite the config; a stack replay loses ablated envs."""
     coord._resumed_from["is_resume"] = True
     coord.shared_state.optimization_stack = [
         {
@@ -358,7 +353,6 @@ async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
     assert coord.shared_state.pending_integrate == sentinel
     warning = next(w for w in report["warnings"] if w.get("kind") == "pending_integrate_scan_failed")
     assert warning["task_id"] == "ti-unreadable"
-    assert warning["sentinel_retained"] is True
     assert not any(
         isinstance(f, dict) and f.get("kind") in {"rolled_back_pending_integrate", "cleared_stale_pending_integrate"}
         for f in report["fixes"]

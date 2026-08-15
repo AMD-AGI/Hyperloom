@@ -61,7 +61,7 @@ class KernelPhase(PhaseHandler):
         Reuses the exact ``serving_config`` shape built by
         ``SharedState.profile_workload_context`` so the reprofile gate and the
         recorded-trace workload are normalized identically (no second, drifting
-        copy of the engine/args/env rules).
+        copy of the args/env rules).
         """
         if not isinstance(serving_config, Mapping) or not serving_config:
             return ""
@@ -1901,13 +1901,11 @@ class KernelPhase(PhaseHandler):
         """Record and post-process a run_gemm_tuning result from any entrypoint.
 
         Both the KERNEL-entry auto hook and orchestration-issued
-        ``run_gemm_tuning`` requests converge here so forge results never bypass
-        per-tuner E2E validation.
+        ``run_gemm_tuning`` requests converge here so no backend bypasses
+        per-candidate E2E validation.
         """
         self._sync_profile_state_after_gemm_roofline(result)
         self.shared_state.record_gemm_tuning(result)
-        # Every backend goes through the same validator: a tuning result only
-        # becomes a gain once it is measured end-to-end against current_best.
         await self._validate_gemm_tuning_e2e(result)
         # Per-round write: promotion/validation is what appends the
         # ``gemm_tuning`` row to ``optimization_stack``, and the column is built
@@ -2001,12 +1999,9 @@ class KernelPhase(PhaseHandler):
     def _gemm_e2e_candidates(self, result: dict[str, Any]) -> list[dict[str, Any]]:
         """Reduce a GEMM tuning result to the env sets worth E2E-validating.
 
-        The two backends report differently — forge lists one entry per tuner
-        in ``tuners_run``, GEAK reports a single tuned dispatch CSV — but both
-        collapse to the same candidate shape, so one validation loop can
-        measure either against ``current_best``. Selection is by result shape:
-        ``tuners_run`` entries are self-describing, whereas a bare
-        ``tuned_file`` only names an env var under the GEAK a8w8 tuner.
+        Selection is by result shape: ``tuners_run`` entries name their own env
+        vars, whereas a bare ``tuned_file`` is only meaningful under the GEAK
+        a8w8 tuner's env var.
 
         Args:
             result (dict[str, Any]): The GEMM tuning handler result.
@@ -2089,10 +2084,8 @@ class KernelPhase(PhaseHandler):
         """Sequentially E2E-validate each tuning candidate's env independently.
 
         Like kernel_opt's per-kernel integrate: try each candidate's env one by
-        one. KEEPs accumulate (stacked envs); REVERTs are discarded. This
-        prevents one bad candidate from dragging down the whole set. Every
-        promoted number is measured here against ``current_best``; a micro
-        speedup never becomes a throughput on its own.
+        one, measured against ``current_best``. KEEPs accumulate (stacked envs);
+        REVERTs are discarded, so one bad candidate cannot drag down the set.
         """
         from ..kernel.request_handlers import integrate_handler
 
@@ -2311,8 +2304,7 @@ class KernelPhase(PhaseHandler):
                     reason = f"tuned_config_never_applied ({reason})"
                 reverted.append({**cand, "reason": reason})
 
-        # current_best already advanced per KEEP; only the validated watermark
-        # is a whole-run statement and has to wait for the last one.
+        # The watermark covers the whole run, so it waits for the last KEEP.
         if kept:
             total_gain = (running_tput - baseline_tput) / baseline_tput * 100.0 if baseline_tput > 0 else 0.0
             if baseline_tput > 0:
@@ -2619,8 +2611,7 @@ class KernelPhase(PhaseHandler):
             "fusion",
             new_tput,
             {
-                # The patch is the identity: two fusions differ by what they
-                # rewrote, not by the engine that produced them.
+                # The patch is the identity; the engine that produced it is not.
                 "name": f"forge_fusion:{Path(patch).name}" if patch else "forge_fusion",
                 "candidate_extra_server_args": extra_args,
                 "extra_envs": envs,
@@ -2632,21 +2623,14 @@ class KernelPhase(PhaseHandler):
                 "backend": "forge",
                 "engine": "forge_fusion",
                 "source": "kernel_entry_auto",
-                # integrate reports the increment against its own base_tput (the
-                # currently active stack). Keep that local meaning on the entry;
-                # the session headline uses the original baseline.
+                # integrate's increment is against the active stack, not the
+                # session baseline the headline uses.
                 "gain_pct": incremental_gain,
                 "patch_path": patch,
                 "target_file": fusion_result.get("source_file") or integrate_result.get("target_file"),
             },
         )
-        if not lifted:
-            return
-        try:
-            baseline_tput = float(self.shared_state.baseline_tput or 0.0)
-        except (TypeError, ValueError):
-            baseline_tput = 0.0
-        if baseline_tput > 0:
+        if lifted and float(self.shared_state.baseline_tput or 0.0) > 0:
             self._update_cumulative_gain_validated(new_tput)
 
     def _current_tput_from_validated_gain(self) -> float:

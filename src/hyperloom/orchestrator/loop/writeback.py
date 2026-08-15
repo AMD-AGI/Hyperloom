@@ -259,9 +259,8 @@ class WritebackCollaborator:
         """Promote a kernel integrate KEEP into the optimization stack.
 
         Stamps ``cumulative_gain_validated`` and fires a watermark roofline once
-        the lift is accepted. No-op when the result lacks a positive
-        ``new_tput``, when the same patch application is already stacked, or when
-        the measurement does not beat the current anchor.
+        the lift is accepted. No-op without a positive ``new_tput`` or when the
+        lift refuses the winner.
 
         Args:
             result (dict[str, Any]): The integrate-patch executor result.
@@ -269,43 +268,19 @@ class WritebackCollaborator:
         new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
-        # An integrate is identified by the whole patch application, not by one
-        # field: the same kernel can be integrated by different patches, so this
-        # stays a call-site precondition rather than folding into the lift's
-        # (action, variant_name) dedupe.
-        key = (
-            result.get("integration_id"),
-            result.get("kernel_id"),
-            result.get("patch_path"),
-            result.get("target_file"),
-        )
-        already_stacked = key in {
-            (
-                item.get("integration_id"),
-                item.get("kernel_id"),
-                item.get("patch_path"),
-                item.get("target_file"),
-            )
-            for item in self.shared_state.optimization_stack
-            if isinstance(item, dict) and item.get("action") == "integrate"
-        }
-        if already_stacked:
-            return
-        bv = {
-            "name": result.get("kernel_id"),
-            "candidate_extra_server_args": str(result.get("extra_server_args") or "").strip(),
-            "extra_envs": {str(k): str(v) for k, v in (result.get("extra_envs") or {}).items()},
-            "source_phase": str(getattr(self.shared_state, "phase", "") or "KERNEL_AGENT"),
-            "ttft_mean_ms": result.get("ttft_mean_ms"),
-            "e2el_mean_ms": result.get("e2el_mean_ms"),
-            "tpot_mean_ms": result.get("tpot_mean_ms"),
-            "workspace": result.get("workspace"),
-        }
-        stack_kernel_ids = [str(kid) for kid in (result.get("stack_kernel_ids") or []) if str(kid)]
-        if not self._lift_to_current_best(
+        lifted = self._lift_to_current_best(
             "integrate",
             float(new_tput),
-            bv,
+            {
+                "name": result.get("kernel_id"),
+                "candidate_extra_server_args": result.get("extra_server_args"),
+                "extra_envs": {str(k): str(v) for k, v in (result.get("extra_envs") or {}).items()},
+                "source_phase": str(getattr(self.shared_state, "phase", "") or "KERNEL_AGENT"),
+                "ttft_mean_ms": result.get("ttft_mean_ms"),
+                "e2el_mean_ms": result.get("e2el_mean_ms"),
+                "tpot_mean_ms": result.get("tpot_mean_ms"),
+                "workspace": result.get("workspace"),
+            },
             gap_canonical_id=str(result.get("gap_canonical_id") or "").strip(),
             entry_extra={
                 "integration_id": result.get("integration_id"),
@@ -315,11 +290,10 @@ class WritebackCollaborator:
                 "patch_path": result.get("patch_path"),
                 "target_file": result.get("target_file"),
                 "gain_pct": result.get("gain_pct"),
-                "stack_kernel_ids": stack_kernel_ids,
+                "stack_kernel_ids": [str(k) for k in (result.get("stack_kernel_ids") or []) if str(k)],
             },
-        ):
-            return
-        if self.shared_state.baseline_tput > 0:
+        )
+        if lifted and self.shared_state.baseline_tput > 0:
             # Integrate KEEP is already rebench-validated: promote into cumulative_gain_validated + watermark.
             self._update_cumulative_gain_validated(new_tput)
             await self._maybe_enqueue_watermark_roofline(
@@ -2237,8 +2211,8 @@ class WritebackCollaborator:
     ) -> bool:
         """Lift a winner only when it improves the current throughput anchor.
 
-        The single writer of ``current_best`` and ``optimization_stack``: it is
-        the only place that merges a winner onto the previous config rather than
+        The single writer of ``current_best`` and ``optimization_stack``, and the
+        only place a winner is merged onto the previous config instead of
         replacing it, so ``unset_envs`` and cumulative args stay correct across
         the whole stack. The stack append is skipped when the winner is already
         applied, keyed by ``(action, variant_name)`` or by ``fingerprint``, so a
@@ -2251,9 +2225,8 @@ class WritebackCollaborator:
             bv: The winning variant dict (args, envs, metrics, provenance).
             gap_canonical_id: When known, stamped onto the stack entry so
                 provenance resolves by gap id rather than name.
-            entry_extra: Per-action metadata for the stack entry only — the
-                artifact and provenance handles downstream collectors join on.
-                ``current_best`` stays a pure config record and never takes it.
+            entry_extra: Per-action metadata for the stack entry only;
+                ``current_best`` stays a pure config record.
 
         Returns:
             ``True`` when the winner was lifted, ``False`` when it was refused
@@ -2272,6 +2245,7 @@ class WritebackCollaborator:
         base_args = ""
         if isinstance(previous, dict):
             base_args = str(previous.get("extra_server_args") or "").strip()
+        # An authored-kernel overlay stays active until another KEEP replaces it.
         _overlay = str((bv.get("final_overlay") if isinstance(bv, dict) else "") or "").strip()
         if not _overlay and isinstance(previous, dict):
             _overlay = str(previous.get("final_overlay") or "").strip()
@@ -2445,8 +2419,6 @@ class WritebackCollaborator:
             "variant_name": variant_name,
             "extra_server_args": full_args,
             "extra_envs": _merged_envs,
-            # An authored-kernel overlay outlives the KEEP that built it, so a
-            # later winner that carries none inherits the active one.
             "final_overlay": _overlay,
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
@@ -3923,23 +3895,18 @@ class WritebackCollaborator:
     def _current_best_launch_config(self) -> dict[str, Any]:
         """The launch config ``current_best`` was measured on.
 
-        ``current_best`` already carries the merged result of every KEEP, so
-        this only normalizes it for launch: a ``-``-prefixed key under
-        ``extra_envs`` (e.g. a ``--compilation-config`` that reached an
-        integrate KEEP through ``config_changes_applied``) is a SERVER ARG, and
-        the grid runner would otherwise export it verbatim as an env the backend
-        ignores, silently dropping it. Keyed on the prefix, never on a flag name.
-
         Returns:
             ``extra_server_args`` / ``extra_envs`` / ``final_overlay``.
         """
         cb = self.shared_state.current_best if isinstance(self.shared_state.current_best, Mapping) else {}
         args = str(cb.get("extra_server_args") or "").strip()
         envs: dict[str, str] = {}
-        raw_envs = cb.get("extra_envs") or {}
+        raw_envs = cb.get("extra_envs")
         if isinstance(raw_envs, Mapping):
             for key, value in raw_envs.items():
                 name = str(key)
+                # A ``-``-prefixed key is a server arg; exported as an env the
+                # backend ignores it and the flag is silently lost.
                 if name.startswith("-"):
                     token = name if value in ("", None) else f"{name}={value}"
                     args = _merge_cumulative_extra_server_args(args, token, "")
@@ -4034,9 +4001,8 @@ class WritebackCollaborator:
     async def _resume_consistency_pass(self) -> dict[str, Any]:
         """One-shot resume audit + recovery for stack/current_best consistency.
 
-        Order matters: recover half-applied / orphaned KEEPs FIRST (they mutate
-        the stack through the same lift the live path uses, so ``current_best``
-        follows along), then compensate the validation watermark by enqueuing a
+        Recovers half-applied / orphaned KEEPs through the same lift the live
+        path uses, then compensates the validation watermark by enqueuing a
         single full-stack end-to-end rebench. Idempotent — only runs on a
         resumed session and every recovery step dedupes, so a second pass is a
         no-op.
@@ -4065,10 +4031,8 @@ class WritebackCollaborator:
         # that crashed before the append landed; surface ambiguous ones loudly.
         await self._resume_recover_orphaned_keeps(report)
 
-        # (3) current_best is written only by the lift, which merges onto the
-        # previous config as it appends, so a stack without a matching config is
-        # the one shape worth reporting.
-        if not (getattr(state, "optimization_stack", None) or []) and state.current_best:
+        # (3) A config with no stack behind it cannot be reproduced.
+        if state.current_best and not state.optimization_stack:
             report["warnings"].append({"kind": "current_best_without_stack"})
 
         # (4) Validation-watermark compensation: unvalidated
@@ -4249,11 +4213,8 @@ class WritebackCollaborator:
         Three-way decision keyed on whether a ``kept`` delegated-result exists
         for the sentinel's task: replay the missing append (crashed after KEEP),
         roll back the half-applied patch (crashed after apply, before KEEP), or
-        clear a stale sentinel. The sentinel is cleared only once one of those
-        three decisions is actually reached: a scan that could not read the
-        event log proves nothing, so it must neither roll back nor consume the
-        sentinel, or a transient DB error would reverse-apply a validated patch
-        and leave nothing for the next resume to retry.
+        clear a stale sentinel. A scan that could not read the event log reaches
+        none of the three, so it must neither roll back nor clear the sentinel.
 
         Args:
             report: The resume report dict to append fixes/warnings to.
@@ -4286,9 +4247,7 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001
             log.exception("Coordinator: pending_integrate kept-result scan failed")
         if not scanned:
-            report["warnings"].append(
-                {"kind": "pending_integrate_scan_failed", "task_id": task_id, "sentinel_retained": True}
-            )
+            report["warnings"].append({"kind": "pending_integrate_scan_failed", "task_id": task_id})
             return
         if kept_res is not None:
             appended = self._replay_keep_from_result("integrate_patch", kept_res)
@@ -4510,10 +4469,10 @@ class WritebackCollaborator:
             log.exception("Coordinator: orphaned KEEP resume recovery failed")
 
     async def _enqueue_internal_stack_rebench(self, *, reason: str) -> dict[str, Any]:
-        """Enqueue one full-stack end-to-end rebench of the cumulative config (Gap A).
+        """Enqueue one full-stack end-to-end rebench of the cumulative config.
 
-        Builds a single-variant ``explore`` task from the stack-materialized
-        launch args/envs, benched against ``baseline_tput`` so the measured
+        Builds a single-variant ``explore`` task from ``current_best``'s launch
+        args/envs, benched against ``baseline_tput`` so the measured
         delta becomes the validated cumulative gain. Tagged
         ``source=resume_stack_revalidate`` so ``_promote_to_shared_state``
         reconciles ``cumulative_gain_validated_stack_len`` + clears

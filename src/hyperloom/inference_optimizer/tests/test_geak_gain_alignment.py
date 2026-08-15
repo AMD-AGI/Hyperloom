@@ -403,7 +403,7 @@ async def test_2b_stamps_validated_from_orchestrator_rebench(tmp_path: Path) -> 
     """decision==validated → validated == (measured − baseline)/baseline, same harness."""
     base, measured = 2844.209, 3270.0  # ~+14.97%, engaged + identity matches
     coord = _coord(tmp_path, baseline=base, best_tput=3236.489)
-    coord.shared_state.optimization_stack = [{"action": "geak_e2e", "tput": 3236.489}]
+    coord.shared_state.optimization_stack = [{"action": "geak_e2e", "variant_name": "geak_e2e", "tput": 3236.489}]
     coord.shared_state.resume_pending_revalidation = True
 
     # Guard: the GEAK-harness fallback must NOT be taken on the validated path.
@@ -432,7 +432,7 @@ async def test_2b_identity_mismatch_defers_to_geak_harness(tmp_path: Path) -> No
     """decision==fallback (config drift) → NO validated stamp; 2a is invoked."""
     base, measured = 2844.209, 3270.0  # engaged, but fingerprint won't match
     coord = _coord(tmp_path, baseline=base, best_tput=3236.489)
-    coord.shared_state.optimization_stack = [{"action": "geak_e2e", "tput": 3236.489}]
+    coord.shared_state.optimization_stack = [{"action": "geak_e2e", "variant_name": "geak_e2e", "tput": 3236.489}]
     coord.shared_state.resume_pending_revalidation = True
     coord.shared_state.geak_pending = {
         "status": "awaiting_rebench",
@@ -878,7 +878,7 @@ async def test_2b_empty_result_with_prior_geak_e2e_still_promotes(tmp_path: Path
     (the material was proven in the original KERNEL cycle)."""
     base, current_best, measured = 8668.5946, 8900.0, 9600.0
     coord = _coord(tmp_path, baseline=base, best_tput=current_best)
-    coord.shared_state.optimization_stack = [{"action": "geak_e2e", "tput": current_best}]
+    coord.shared_state.optimization_stack = [{"action": "geak_e2e", "variant_name": "geak_e2e", "tput": current_best}]
     coord.shared_state.resume_pending_revalidation = True
     coord.shared_state.geak_result = {}  # lost on resume
 
@@ -917,7 +917,7 @@ async def test_2b_resume_reverify_of_promoted_geak_win_still_promotes(tmp_path: 
     coord.shared_state.current_best["extra_envs"] = {"VLLM_ROCM_USE_AITER": "1"}
     coord.shared_state.optimization_stack = [
         {"action": "explore", "variant_name": "kv-cache-fp8", "tput": 8900.0},
-        {"action": "geak_e2e", "tput": current_best},
+        {"action": "geak_e2e", "variant_name": "geak_e2e", "tput": current_best},
         {"action": "integrate_patch", "variant_name": "kernel-x", "tput": current_best},
     ]
     coord.shared_state.resume_pending_revalidation = True

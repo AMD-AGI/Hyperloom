@@ -231,8 +231,7 @@ class _Bus:
 
 
 class TestGemmE2eCandidates:
-    """The candidate builder is the only place a tuning result is turned into
-    something to measure, so its guard rails decide what can ever be promoted."""
+    """Guard rails deciding which tuning results reach the E2E validator."""
 
     def test_geak_result_yields_the_tuned_dispatch_csv(self, tmp_path):
         coord = _coord(tmp_path, baseline_tput=200.0)
@@ -301,8 +300,7 @@ class TestGemmE2eCandidates:
         assert cands[0]["envs"] == {"AITER_CONFIG_FMOE": "/cfg/fmoe.csv"}
 
     def test_forge_result_ignores_a_tuned_file(self, tmp_path):
-        # tuned_file is the GEAK shape; a forge result must come from tuners_run
-        # or it has nothing the validator can measure.
+        """tuned_file is the GEAK shape; forge must come from tuners_run."""
         coord = _coord(tmp_path, baseline_tput=100.0)
         assert (
             coord._gemm_e2e_candidates(
@@ -1203,8 +1201,7 @@ class TestCkBlockscaleSwitchEligible:
 
 
 class TestCkBlockscaleCandidateInjection:
-    """The fp8 block-scale CK backend switch enters as its own candidate so the
-    validator measures Triton vs CK, rather than being stamped un-measured."""
+    """The fp8 block-scale CK switch enters as its own candidate to be measured."""
 
     def _forge_result(self, **overrides):
         result = {
