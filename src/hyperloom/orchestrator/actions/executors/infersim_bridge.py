@@ -446,6 +446,8 @@ def anchor_curve_is_sane(path: str) -> bool:
             doc = json.load(fh) or {}
     except (OSError, ValueError):
         return False
+    if not isinstance(doc, dict):
+        return False
     points = []
     for entry in doc.get("sweep") or []:
         try:
