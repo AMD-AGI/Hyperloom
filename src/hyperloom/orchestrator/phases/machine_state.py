@@ -235,6 +235,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "recipe_kb_drain_failed",
         "recipe_kb_commit_failed",
         "prelude_baseline_failed",
+        "prelude_cold_anchor_low_budget",  # PRELUDE → CLOSE; only a cold anchor, nothing comparable to it affordable
         "prelude_policy_loop",
         "policy_loop",
         "crash_threshold_exceeded",
@@ -267,6 +268,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "robustness_escalated",
         "user_stop_requested",
         "prelude_baseline_failed",
+        "prelude_cold_anchor_low_budget",
         "prelude_policy_loop",
         "time_exhausted_during_prelude",
         "recipe_kb_t0_failed",
@@ -1974,6 +1976,14 @@ def enablement_engaged(state: Any) -> bool:
 def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     """``baseline_tput > 0`` and warm-replay settled → ``prelude_done`` (else ``None``).
 
+    A figure whose hot pass was dropped for budget does not finish preparation,
+    even though it is a figure. It is depressed by the boot, the compile and the
+    graph capture it could not discard, so declaring PRELUDE done on it would
+    hand the optimization phases a denominator that was never the baseline. The
+    phase stays open instead, and what happens next is decided by the budget:
+    :func:`exit_cold_anchor_prelude` closes a session that still cannot afford a
+    comparable baseline, and one resumed with a fresh clock measures another.
+
     Args:
         state (Any): Frozen SharedState view exposing ``baseline_tput`` and the
             warm-replay outcome.
@@ -1984,6 +1994,8 @@ def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     """
     if warm_replay_in_flight(state):
         return None
+    if bool(getattr(state, "baseline_measure_round_dropped", False)):
+        return None
     try:
         tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
     except (TypeError, ValueError):
@@ -1991,6 +2003,127 @@ def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     if tput > 0.0:
         return "prelude_done", {"baseline_tput": tput, **prelude_exit_viability(state)}
     return None
+
+
+def measured_seconds(state: Any, field: str) -> float | None:
+    """Read a duration an earlier round measured, or ``None`` when none did.
+
+    Every budget decision that prices work off a measurement has to tell "no
+    round has run" apart from "a round ran and took no time", because the first
+    means the decision cannot be made and the second would make everything look
+    free.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        field (str): The ``SharedState`` attribute holding the duration.
+
+    Returns:
+        float | None: The duration when one was measured, else ``None``.
+    """
+    try:
+        value = float(getattr(state, field, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0.0 else None
+
+
+def boot_cost_sec(state: Any) -> float | None:
+    """What bringing this workload's server up costs, or ``None`` when unmeasured.
+
+    The baseline's cold round is the one round that pays this in the open, so it
+    is where the figure comes from: its wall-clock less the part of it that ran
+    after the server reported ready.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        float | None: Seconds spent before the server was ready, or ``None`` when
+        no round has reported the split (no baseline yet, or a scriptable
+        workload, which runs no server and so has no boot to separate).
+    """
+    total_sec = measured_seconds(state, "baseline_runtime_sec")
+    post_ready_sec = measured_seconds(state, "baseline_post_ready_runtime_sec")
+    if total_sec is None or post_ready_sec is None:
+        return None
+    return max(0.0, total_sec - post_ready_sec)
+
+
+def benchmark_cost_sec(state: Any) -> float | None:
+    """What one benchmark pass costs on a server already up, or ``None``.
+
+    Two figures can answer this and they are not equally good, so the better one
+    wins when it exists:
+
+    * The measured hot pass (``baseline_warm_runtime_sec``) is the answer, being
+      exactly a benchmark against a server someone else booted.
+    * The cold round's post-ready segment is the fallback, and it over-predicts:
+      that segment also pays the first request's kernel compile, which a pass on
+      a now-populated JIT cache does not. It is what a session has before its hot
+      pass runs, and over-predicting a benchmark is a smaller error than pricing
+      one at a whole cold round.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        float | None: Seconds one benchmark pass costs, or ``None`` when neither
+        figure has been measured.
+    """
+    hot_sec = measured_seconds(state, "baseline_warm_runtime_sec")
+    if hot_sec is not None:
+        return hot_sec
+    return measured_seconds(state, "baseline_post_ready_runtime_sec")
+
+
+def baseline_round_cost_sec(state: Any, *, double_run: bool) -> float | None:
+    """What a baseline round costs, or ``None`` when unmeasured.
+
+    A round is one or two passes and they are priced apart, because they buy
+    different things. The first brings a server up and then benchmarks it, so it
+    costs what any measured variant costs. The second re-attaches to the server
+    the first left running, so it costs a benchmark and no second boot.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        double_run (bool): Whether the round runs a warmup pass and a measured
+            one, or a single pass.
+
+    Returns:
+        float | None: Seconds the round costs, or ``None`` when the session has
+        measured nothing to price it from.
+    """
+    first_pass_sec = one_more_measurement_sec(state)
+    if first_pass_sec is None or not double_run:
+        return first_pass_sec
+    second_pass_sec = benchmark_cost_sec(state)
+    return first_pass_sec if second_pass_sec is None else first_pass_sec + second_pass_sec
+
+
+def one_more_measurement_sec(state: Any) -> float | None:
+    """What the next measured variant will cost, or ``None`` when unmeasured.
+
+    A variant is not a benchmark; it is a boot and then a benchmark. Its config
+    differs from the baseline's in the very knobs that decide how a server comes
+    up -- parallelism, quantization, kernel backends -- so it cannot re-attach to
+    a server already running and has to bring up its own.
+
+    This is the unit every "is there time left to use a result" question is asked
+    in, because a result nothing gets measured against is a result the session
+    could not have used.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        float | None: Seconds one further measured variant costs, or ``None``
+        when either half of it is unmeasured.
+    """
+    boot_sec = boot_cost_sec(state)
+    benchmark_sec = benchmark_cost_sec(state)
+    if boot_sec is None or benchmark_sec is None:
+        return None
+    return boot_sec + benchmark_sec
 
 
 def prelude_exit_viability(state: Any) -> dict[str, Any]:
@@ -2005,6 +2138,14 @@ def prelude_exit_viability(state: Any) -> dict[str, Any]:
     the answer is actionable and the first moment it is knowable: the baseline
     is measured, so one benchmark round has a price rather than an estimate.
 
+    Priced as what an optimization round actually is -- one boot and one
+    benchmark (:func:`one_more_measurement_sec`) -- rather than as the baseline's
+    whole cold wall-clock, which also carries the first request's compile and so
+    over-reports a prepared session as a spent one. The cold figure remains the
+    fallback for a session whose baseline reported no split, with ``priced_by``
+    naming which ruler answered so two runs' evidence cannot be compared as
+    though they used the same one.
+
     Args:
         state (Any): Frozen SharedState view.
 
@@ -2012,16 +2153,18 @@ def prelude_exit_viability(state: Any) -> dict[str, Any]:
         dict[str, Any]: Evidence for the phase record; empty when the budget is
         unbounded or no round has been measured.
     """
-    usable = _session_usable_seconds(state)
-    try:
-        round_sec = float(getattr(state, "baseline_runtime_sec", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        round_sec = 0.0
-    if usable is None or round_sec <= 0.0:
+    usable = session_usable_seconds(state)
+    round_sec = one_more_measurement_sec(state)
+    priced_by = "boot_plus_benchmark"
+    if round_sec is None:
+        round_sec = measured_seconds(state, "baseline_runtime_sec")
+        priced_by = "cold_round"
+    if usable is None or round_sec is None:
         return {}
     return {
         "session_usable_sec": round(usable, 1),
         "measured_round_sec": round(round_sec, 1),
+        "priced_by": priced_by,
         "affordable_rounds": round(usable / round_sec, 2),
         "fits_one_optimization_round": usable >= round_sec,
     }
@@ -2061,7 +2204,7 @@ def append_phase_evidence_row(history: Any, *, key: str, row: dict[str, Any]) ->
     return True
 
 
-def _session_usable_seconds(state: Any) -> float | None:
+def session_usable_seconds(state: Any) -> float | None:
     """Seconds a unit of work may still claim, from the session's own accounting.
 
     Prefers ``SharedState.session_budget_usable_sec`` — the single number
@@ -2109,7 +2252,7 @@ def prelude_affordable_seconds(state: Any) -> tuple[float | None, dict[str, Any]
         unbounded budget, plus the evidence behind it.
     """
     max_sec = _max_minutes(state) * 60.0
-    usable = _session_usable_seconds(state)
+    usable = session_usable_seconds(state)
     if max_sec <= 0.0 or usable is None:
         return None, {"reason": "unbounded_budget"}
     reserve_sec = max_sec * OPTIMIZATION_RESERVE_PCT
@@ -2176,7 +2319,7 @@ def exit_time_exhausted_prelude(
         tuple[str, dict[str, Any]] | None: ``("time_exhausted_during_prelude",
         evidence)`` when the budget is gone, else ``None``.
     """
-    usable = _session_usable_seconds(state)
+    usable = session_usable_seconds(state)
     if usable is None or usable > 0.0:
         return None
     return "time_exhausted_during_prelude", {
@@ -2185,6 +2328,70 @@ def exit_time_exhausted_prelude(
             phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
             1,
         ),
+    }
+
+
+def exit_cold_anchor_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
+    """Route to CLOSE when PRELUDE could only produce a cold anchor.
+
+    A baseline's hot pass is dropped when the budget cannot cover it together with
+    one variant to read against it. What survives is the cold pass's figure, and
+    it is depressed: it carries the server boot, the first request's kernel
+    compile and the graph capture in its throughput denominator.
+
+    Continuing on it is worse than stopping. Every variant measured against a
+    depressed denominator reads as an improvement over a baseline that was never
+    the baseline, so the session would spend the rest of its clock producing
+    findings that a later run cannot reproduce. Stopping keeps the number and the
+    marker that says what it is.
+
+    Fires only on the dropped-pass marker, not on a cold figure as such: a session
+    configured for a single-round baseline reports a cold figure by design, and
+    its comparisons are consistent because everything downstream is measured the
+    same way.
+
+    And only while the budget still cannot buy a comparable baseline. A session
+    resumed with a fresh clock carries the earlier leg's marker but not its
+    shortfall, and it can now do the thing it was stopped for: measure a hot
+    baseline. Firing on the marker alone would send it straight back to CLOSE on
+    the strength of a constraint that no longer holds, and no later baseline could
+    ever clear the marker because none would run.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        tuple[str, dict[str, Any]] | None: ``("prelude_cold_anchor_low_budget",
+        evidence)`` when the hot pass was dropped and still cannot be afforded,
+        else ``None``.
+    """
+    if not bool(getattr(state, "baseline_measure_round_dropped", False)):
+        return None
+    usable = session_usable_seconds(state)
+    if usable is None:
+        return None
+    # Without the boot/benchmark split -- a scriptable workload runs no server, so
+    # it has no ready boundary to split on -- the cold round's whole wall-clock
+    # stands in for each half, the same upper bound the round's own gate falls
+    # back to. Undecidable rather than assumed only when nothing was measured at
+    # all, which cannot happen with the marker set but is not worth closing on.
+    cold_sec = measured_seconds(state, "baseline_runtime_sec")
+    round_sec = (
+        baseline_round_cost_sec(
+            state,
+            double_run=bool(getattr(state, "baseline_double_run", False)),
+        )
+        or cold_sec
+    )
+    use_sec = one_more_measurement_sec(state) or cold_sec
+    if round_sec is None or use_sec is None:
+        return None
+    if usable >= round_sec + use_sec:
+        return None
+    return "prelude_cold_anchor_low_budget", {
+        "baseline_anchor": "cold",
+        "retry_round_sec": round(round_sec, 1),
+        **prelude_exit_viability(state),
     }
 
 
@@ -2815,6 +3022,11 @@ def compute_next_phase(
         term = exit_terminal_prelude(state)
         if term is not None:
             return PHASE_CLOSE, term[0], {"terminal": True, **term[1]}
+        # Asked before the normal exit, which sees only that a figure exists: a
+        # cold anchor is a figure the later phases cannot honestly compare to.
+        cold = exit_cold_anchor_prelude(state)
+        if cold is not None:
+            return PHASE_CLOSE, cold[0], {"terminal": True, **cold[1]}
         norm = exit_normal_prelude(state)
         if norm is None:
             # No baseline and no clock left: name the failure instead of
@@ -3388,14 +3600,21 @@ __all__ = [
     "exit_normal_explore",
     "exit_normal_framework_agent",
     "exit_normal_kernel",
+    "exit_cold_anchor_prelude",
     "exit_normal_prelude",
     "exit_normal_sweep",
     "exit_terminal_prelude",
     "exit_time_exhausted_prelude",
     "append_phase_evidence_row",
+    "baseline_round_cost_sec",
+    "benchmark_cost_sec",
+    "boot_cost_sec",
+    "measured_seconds",
+    "one_more_measurement_sec",
     "prelude_affordable_seconds",
     "prelude_can_afford",
     "prelude_exit_viability",
+    "session_usable_seconds",
     "is_action_allowed_in_phase",
     "is_action_llm_proposable_in_phase",
     "llm_proposable_actions_for",

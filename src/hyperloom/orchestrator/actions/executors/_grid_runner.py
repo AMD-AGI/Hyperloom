@@ -32,6 +32,7 @@ from hyperloom.common.env_safety import (
     scrub_benchmark_process_env,
 )
 
+from ...phases import machine_state as _phase_state
 from ...roles.robustness_pulse import pulse as _robustness_pulse
 from ...trace.task_progress import heartbeat_while_output_flows, report_progress
 from ..cancel_channel import stop_was_asked_for
@@ -1329,11 +1330,18 @@ def session_grid_bounds(shared_state: Any) -> tuple[float | None, float | None]:
     next produces arms that abandon different amounts of the tail budget. Both
     are read here so there is one definition.
 
-    ``variant_expected_sec`` is the measured baseline runtime -- what a
-    normally-behaving variant needs -- and is deliberately not the declared
-    timeout, which is a catastrophic-hang backstop roughly twice as large.
-    Admitting on the backstop would refuse to start a 20-minute round with 30
-    minutes left.
+    ``variant_expected_sec`` is what a normally-behaving variant needs -- its own
+    server boot and then its benchmark
+    (:func:`~...phases.machine_state.one_more_measurement_sec`) -- and is
+    deliberately not the declared timeout, which is a catastrophic-hang backstop
+    roughly twice as large. Admitting on the backstop would refuse to start a
+    20-minute round with 30 minutes left.
+
+    Nor is it the baseline's cold wall-clock, which is the fallback only for a
+    session whose baseline reported no boot/benchmark split. That figure also
+    carries the first request's kernel compile on a cold JIT cache, which a
+    variant on the now-populated cache does not pay again, so admitting on it
+    abandons the tail of the budget to variants that would have finished.
 
     Args:
         shared_state: The session ``SharedState``, or ``None`` when the caller
@@ -1349,11 +1357,10 @@ def session_grid_bounds(shared_state: Any) -> tuple[float | None, float | None]:
         return (None, None)
     deadline_fn = getattr(shared_state, "grid_session_deadline_sec", None)
     deadline = deadline_fn() if callable(deadline_fn) else None
-    try:
-        baseline_sec = float(getattr(shared_state, "baseline_runtime_sec", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        baseline_sec = 0.0
-    return (deadline, baseline_sec if baseline_sec > 0 else None)
+    variant_sec = _phase_state.one_more_measurement_sec(shared_state)
+    if variant_sec is None:
+        variant_sec = _phase_state.measured_seconds(shared_state, "baseline_runtime_sec")
+    return (deadline, variant_sec)
 
 
 async def run_grid(
