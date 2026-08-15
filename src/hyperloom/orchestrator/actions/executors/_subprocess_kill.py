@@ -735,6 +735,40 @@ class _LogScan(NamedTuple):
     child_spoke: bool
 
 
+def _stale_scan_log_sizes(server_log_path: str) -> dict[str, int]:
+    """Current byte length of each nested log that already exists at spawn.
+
+    Seeded as starting offsets so such a log contributes only what it grows by,
+    never what a previous attempt left in it.
+
+    Only the nested ``benchmark_*/`` workspaces, not the path the caller named.
+    That one the caller owns: it clears it when it means this round to start
+    clean, and a caller that means to attach to a server already up says so with
+    ``server_already_ready``. The nested ones are found by globbing a directory
+    the caller reuses, so nothing in them was asserted by anyone -- and a stale
+    ready line there would otherwise latch on the first poll and report a boot
+    that took minutes as one that took none.
+
+    Args:
+        server_log_path: The ``<output_dir>/server.log`` path from the caller.
+
+    Returns:
+        dict[str, int]: Per-path byte lengths; a path whose size cannot be read
+        is left out, so it is scanned from the start as an absent one would be.
+    """
+    owned_dir = Path(server_log_path).parent
+    sizes: dict[str, int] = {}
+    for path in _resolve_scan_logs(server_log_path):
+        candidate = Path(path)
+        if candidate.parent == owned_dir:
+            continue
+        try:
+            sizes[path] = candidate.stat().st_size
+        except OSError:
+            continue
+    return sizes
+
+
 def _scan_logs_increment(server_log_path: str, offsets: dict[str, int]) -> _LogScan:
     """Scan every resolved log for markers, advancing ``offsets`` in place.
 
@@ -1183,12 +1217,14 @@ def _communicate_with_soft_deadline(
         not in {"0", "false", "no", "off"}
     )
     # The log increment scan feeds the stall watchdog, the from-ready
-    # soft-deadline anchor and the eval-start boundary; run it once per slice
-    # when any of them needs it. Broader than ``soft_from_ready``: a warm-reuse
-    # round (``server_already_ready``) still needs the eval-start boundary, so
-    # any soft deadline with a log present scans.
-    soft_watches_log = soft_active and bool(server_log_path)
-    scan_active = stall_active or soft_watches_log
+    # soft-deadline anchor, the eval-start boundary and the ready timestamp the
+    # caller prices later work off; run it once per slice whenever a log is
+    # present. Not narrowed to the watchdogs that consume it: tying it to
+    # ``stall_active`` let an unrelated knob
+    # (``INFERENCE_OPTIMIZER_DETOK_STALL_GRACE_SEC=0``) silently withdraw the
+    # boot/benchmark split for a whole session. It costs nothing where it did not
+    # already run, since without a gate this call never enters the loop at all.
+    scan_active = bool(server_log_path) and gated
     poll_interval = STOP_GATE_POLL_SECONDS
     start = time.monotonic()
     dead_marker_since: float | None = None
@@ -1197,6 +1233,12 @@ def _communicate_with_soft_deadline(
     # new output (seeded to the ready time). The gate only arms once
     # ``server_ready_since`` is set.
     scan_offsets: dict[str, int] = {}
+    if scan_active:
+        # A reused output_dir can still hold a prior attempt's nested workspace,
+        # whose markers are not this round's. The workspace this round creates
+        # does not exist yet, so it is discovered later at offset zero, which is
+        # correct: all of its bytes are this round's.
+        scan_offsets.update(_stale_scan_log_sizes(server_log_path))  # type: ignore[arg-type]
     server_ready_since: float | None = None
     last_activity_at: float | None = None
     # Latched once the accuracy eval starts: the soft deadline bounds the

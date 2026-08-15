@@ -2938,10 +2938,31 @@ class WritebackCollaborator:
         # revalidation is exempt: the enablement patch changed the stack, so the
         # prior anchor no longer describes anything reproducible.
         prior_anchor = float(self.shared_state.baseline_tput or 0.0)
+        # A hot pass measured against a recorded COLD anchor is a correction, not
+        # a regression, so it lands even when the number is lower. The two are not
+        # comparable -- that is what the cold marker says -- and a cold figure can
+        # read higher than the hot one that replaces it whenever the "cold" pass
+        # was not really cold: weights in page cache and a JIT cache a prior run
+        # populated leave it paying none of the startup its depressed reputation
+        # assumes. Without this the session cannot escape the marker. PRELUDE
+        # refuses to finish while it is set, the retry that would clear it is
+        # rejected for measuring lower, and the run re-measures whole baseline
+        # rounds until the clock kills it.
+        hot_pass_ran = result.get("measure_round_runtime_sec")
+        corrects_a_cold_anchor = (
+            bool(getattr(self.shared_state, "baseline_measure_round_dropped", False))
+            and isinstance(hot_pass_ran, (int, float))
+            and hot_pass_ran > 0
+        )
         anchor_accepted = bool(
             isinstance(tput, (int, float))
             and tput > 0
-            and (prior_anchor <= 0.0 or float(tput) > prior_anchor or is_revalidation)
+            and (
+                prior_anchor <= 0.0
+                or float(tput) > prior_anchor
+                or is_revalidation
+                or corrects_a_cold_anchor
+            )
         )
         if isinstance(tput, (int, float)) and tput > 0:
             if anchor_accepted:

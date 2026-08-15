@@ -51,9 +51,12 @@ from hyperloom.orchestrator.actions.stop_attribution import STOPPED_BY_THE_RUN
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.trace.task_progress import progress_scope
 
-from .conftest import chatty_child, enable_multi_node, suppression_window_s
-
-from .conftest import enable_multi_node, launches_by_round_slot
+from .conftest import (
+    chatty_child,
+    enable_multi_node,
+    launches_by_round_slot,
+    suppression_window_s,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -216,7 +219,6 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
     assert captured[0]["benchmark"]["benchmark_script"] == "vllm_mi300x.sh"
 
 
-<<<<<<< HEAD
 def _run_capturing_rounds(executor, ctx, notes):
     """Run ``executor`` and record which round notes existed at each launch."""
     at_launch: list[list[str]] = []
@@ -388,6 +390,28 @@ def _prelude_shared_state(*, usable_sec: float, phase: str = "PRELUDE") -> Simpl
     )
 
 
+def _a_session_the_passes_spend(
+    *,
+    usable_sec: float,
+    clock: _AClockOnlyThePassesMove,
+    **measured: float,
+) -> SimpleNamespace:
+    """A PRELUDE session whose remaining budget falls as the passes spend it.
+
+    The fixed-remainder double cannot show the two gates disagreeing, because the
+    second one is asked after the warmup has spent its share and a budget that
+    never moves hides exactly that. This reads the same clock the passes move.
+    """
+    started = clock()
+    return SimpleNamespace(
+        baseline_double_run=True,
+        phase="PRELUDE",
+        max_minutes=180,
+        session_budget_usable_sec=lambda: usable_sec - (clock() - started),
+        **measured,
+    )
+
+
 def _run_double_run_baseline(
     tmp_path,
     shared_state,
@@ -460,6 +484,74 @@ def test_a_budget_that_cannot_pay_for_the_measured_round_keeps_the_cold_warmup(t
     assert dropped["measure_round_sec"] < 1200.0, (
         "the pass alone did not fit, so this case does not show what it claims to"
     )
+
+
+def test_a_round_admitted_before_ignition_is_not_refused_after_its_cold_pass(tmp_path):
+    """The two gates price the same second pass, so they must reach the same answer.
+
+    A gate before ignition that admits what the gate after the cold pass will
+    certainly refuse spends a whole cold pass to learn something it already knew.
+    The disagreement is in the ruler: this session has measured a 400s hot pass,
+    and pricing the pass to come at the warmup's 550s post-ready segment instead
+    -- a segment that also paid the first request's compile -- demands 300s more
+    than ignition was allowed to require.
+
+    2100s is inside that band. Ignition needs the 1300s round and a 750s variant;
+    after the warmup spends 900s, the hot pass and its variant need 1150s of the
+    1200s left, while the post-ready ruler would have called for 1450s.
+    """
+    clock = _AClockOnlyThePassesMove()
+    state = _a_session_the_passes_spend(
+        usable_sec=2100.0,
+        clock=clock,
+        baseline_runtime_sec=900.0,
+        baseline_post_ready_runtime_sec=550.0,
+        baseline_warm_runtime_sec=400.0,
+    )
+
+    result = _run_double_run_baseline(
+        tmp_path,
+        state,
+        clock=clock,
+        boot_sec=350.0,
+        benchmark_sec=550.0,
+    )
+
+    assert result["_rounds_run"] == 2, (
+        "a cold pass was spent on a round the gate after it was always going to refuse"
+    )
+    assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
+
+
+def test_a_warmup_that_overran_its_prediction_still_drops_the_hot_pass(tmp_path):
+    """Agreeing with the earlier gate is not the same as admitting everything.
+
+    Once the two price the same work, the only rounds left for this gate to
+    refuse are the ones that cost more than they were admitted on -- which is
+    precisely what a gate asked after the pass, against the clock rather than
+    against a prediction, exists for. This round was admitted at 2050s and its
+    warmup then took 1250s instead of 900s, leaving 850s where 1150s is needed.
+    """
+    clock = _AClockOnlyThePassesMove()
+    state = _a_session_the_passes_spend(
+        usable_sec=2100.0,
+        clock=clock,
+        baseline_runtime_sec=900.0,
+        baseline_post_ready_runtime_sec=550.0,
+        baseline_warm_runtime_sec=400.0,
+    )
+
+    result = _run_double_run_baseline(
+        tmp_path,
+        state,
+        clock=clock,
+        boot_sec=700.0,
+        benchmark_sec=550.0,
+    )
+
+    assert result["_rounds_run"] == 1
+    assert result["output_throughput"] == pytest.approx(_COLD_TPUT)
+    assert result["measure_round_dropped"]["priced_by"] == "session_hot_pass"
 
 
 def test_a_rebaselines_hot_pass_needs_only_its_own_wall_clock(tmp_path):
@@ -697,12 +789,16 @@ _COLD_POST_READY_SEC = 550.0
 _HOT_ROUND_SEC = 400.0
 # 900 - 550: the part of the cold round that was not the benchmark.
 _BOOT_SEC = 350.0
-# One further measured variant: its own boot, then its own benchmark.
+# One further measured variant: its own boot, then its own benchmark. The
+# benchmark is priced hot because the variant runs on a JIT cache this session
+# has already populated.
 _ONE_MORE_SEC = _BOOT_SEC + _HOT_ROUND_SEC
-# A single-pass round is a boot and a benchmark; a double-run round adds a second
-# benchmark, which re-attaches and so buys no second boot.
-_SINGLE_ROUND_SEC = _ONE_MORE_SEC
-_DOUBLE_ROUND_SEC = _ONE_MORE_SEC + _HOT_ROUND_SEC
+# A round's first pass is the cold one, measured whole rather than rebuilt from
+# its halves -- rebuilding it as boot-plus-hot would drop the compile it paid and
+# under-price the round by 150s. A double run adds a second benchmark, which
+# re-attaches and so buys no second boot.
+_SINGLE_ROUND_SEC = _COLD_ROUND_SEC
+_DOUBLE_ROUND_SEC = _COLD_ROUND_SEC + _HOT_ROUND_SEC
 
 
 class TestARoundThatCannotFinishIsNotIgnited:
@@ -868,38 +964,41 @@ class TestARoundThatCannotFinishIsNotIgnited:
         assert shortfall["round_sec"] == pytest.approx(_DOUBLE_ROUND_SEC)
         assert shortfall["expected_cost_sec"] == pytest.approx(_DOUBLE_ROUND_SEC + _ONE_MORE_SEC)
 
-    def test_a_session_with_no_hot_figure_prices_the_benchmark_from_the_cold_pass(self, tmp_path):
+    def test_a_session_with_no_hot_figure_prices_the_variant_from_the_cold_pass(self, tmp_path):
         """The state a previous cold-anchor drop leaves, and the one to catch.
 
         A round whose measured pass was dropped for budget promotes its cold
         number and has no hot number to write. Going inert on such a session would
         exempt exactly the one that already ran out of budget once, so the cold
-        round's post-ready segment stands in for the benchmark. It over-predicts,
-        having also paid the first request's compile, which is why the hot figure
-        wins whenever one exists.
+        round's post-ready segment stands in for the variant's benchmark. It
+        over-predicts, having also paid the first request's compile, which is why
+        the hot figure wins whenever one exists.
         """
         one_more_sec = _BOOT_SEC + _COLD_POST_READY_SEC
 
         result, calls = _run_baseline_under_budget(
             tmp_path,
-            remaining_sec=one_more_sec * 2 - 1.0,
+            remaining_sec=_SINGLE_ROUND_SEC + one_more_sec - 1.0,
             cold_round_sec=_COLD_ROUND_SEC,
             cold_post_ready_sec=_COLD_POST_READY_SEC,
         )
 
         assert calls == []
-        assert result["budget_shortfall"]["round_sec"] == pytest.approx(one_more_sec)
-        assert result["budget_shortfall"]["round_sec"] > _SINGLE_ROUND_SEC, (
+        shortfall = result["budget_shortfall"]
+        assert shortfall["one_more_measurement_sec"] == pytest.approx(one_more_sec)
+        assert shortfall["one_more_measurement_sec"] > _ONE_MORE_SEC, (
             "the fallback did not over-predict, so it cannot be the post-ready segment"
         )
 
-    def test_a_round_whose_boot_was_never_measured_is_not_judged(self, tmp_path):
-        """A cold wall-clock alone cannot say what a variant costs.
+    def test_a_round_whose_boot_was_never_measured_is_still_judged(self, tmp_path):
+        """A round with no split is priced at whole cold rounds, not waved through.
 
-        Without the split, the boot is unknown, and a boot is most of what a
-        variant pays. Refusing on a figure that cannot be built would refuse
-        sessions arbitrarily, so the question is left to the post-warmup gate,
-        which prices the pass from what the warmup just spent.
+        Multi-node and scriptable workloads never report a boot boundary -- one
+        brings its server up outside the round, the other runs no server at all --
+        so a gate that goes inert without the split exempts them permanently. Both
+        terms fall back to what the session did measure: the cold round's own
+        wall-clock, which is a boot and a benchmark, and so is what a variant
+        costs too.
         """
         result, calls = _run_baseline_under_budget(
             tmp_path,
@@ -908,8 +1007,10 @@ class TestARoundThatCannotFinishIsNotIgnited:
             hot_round_sec=_HOT_ROUND_SEC,
         )
 
-        assert calls, "a round was refused on a price the session cannot compute"
-        assert result["status"] == "succeeded"
+        assert calls == [], "a workload with no boot boundary was exempted from the gate"
+        shortfall = result["budget_shortfall"]
+        assert shortfall["round_sec"] == pytest.approx(_COLD_ROUND_SEC)
+        assert shortfall["one_more_measurement_sec"] == pytest.approx(_COLD_ROUND_SEC)
 
     def test_a_refused_round_carries_nothing_that_could_replace_the_anchor(self, tmp_path):
         """The property the whole gate rests on, asserted rather than assumed.
@@ -2816,6 +2917,50 @@ class TestTheSessionBudgetReachesTheBaselineRound:
             f"pass can now be killed by its own timeout before the watchdog reaches "
             f"it: {warmup}s against {remaining_sec}s left"
         )
+
+    def test_a_multi_node_round_that_cannot_pay_for_both_passes_launches_neither(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A multi-node round is two client passes, and the figure covers one.
+
+        The server comes up outside the round, so both passes are the same shape
+        and the recorded wall-clock -- taken after the warmup -- is one of them.
+        Pricing the round at that one figure admits a pair that cannot fit: the
+        warmup spends its half and the measured pass meets the deadline, leaving
+        the round with no anchor and the GPU time gone.
+
+        1500s is the band only this gate catches: the generic gate before it
+        prices the round at one 600s pass and a variant at another, admits at
+        1200s, and has no way to know a second pass is coming. The pair plus a
+        variant needs 1800s.
+        """
+        enable_multi_node(monkeypatch)
+
+        result, calls = _run_baseline_under_budget(
+            tmp_path,
+            remaining_sec=1500.0,
+            cold_round_sec=600.0,
+        )
+
+        assert calls == [], "a multi-node pair ran on a budget that covers one pass"
+        assert result["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
+        assert result["returncode"] is None
+        assert result["budget_shortfall"]["round_sec"] == pytest.approx(1200.0)
+
+    def test_a_multi_node_round_the_budget_covers_runs_both_passes(self, tmp_path, monkeypatch):
+        """The gate must not refuse the pairs that fit, only the ones that cannot."""
+        enable_multi_node(monkeypatch)
+
+        result, calls = _run_baseline_under_budget(
+            tmp_path,
+            remaining_sec=3600.0,
+            cold_round_sec=600.0,
+        )
+
+        assert set(launches_by_round_slot(calls)) >= set(_BASELINE_ROUND_SLOTS)
+        assert result["status"] == "succeeded"
 
     def test_the_profile_arm_gets_all_of_it(self, tmp_path):
         """Profile is the same executor with a four-hour default -- longer than

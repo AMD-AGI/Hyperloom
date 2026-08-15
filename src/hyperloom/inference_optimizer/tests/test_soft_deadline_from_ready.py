@@ -168,6 +168,81 @@ class TestARoundIsPricedByItsTwoParts:
         boot_sec = runtime_sec - post_ready
         assert 2.5 <= boot_sec <= 4.5, f"boot share read as {boot_sec:.2f}s, expected ~3s"
 
+    def test_a_previous_attempts_log_does_not_time_this_rounds_boot(self, tmp_path):
+        """Only bytes this round writes may say when its server came up.
+
+        Magpie writes into a ``benchmark_*/`` workspace under the round's output
+        dir, and a reused dir can still hold one from an earlier attempt. Scanned
+        from byte zero, its ready line latches on the first poll -- seconds after
+        spawn -- and the round reports a boot that took minutes as one that took
+        none. Every variant is then admitted at a benchmark's price and reaped.
+        """
+        stale = tmp_path / "benchmark_vllm_20200101" / "server.log"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("Application startup complete\n", encoding="utf-8")
+
+        log_path = tmp_path / "server.log"
+        script = (
+            "import sys, time\n"
+            "f = open(sys.argv[1], 'w')\n"
+            "f.write('INFO loading weights\\n'); f.flush()\n"
+            "time.sleep(3)\n"
+            "f.write('Application startup complete\\n'); f.flush()\n"
+            "time.sleep(1)\n"
+            "raise SystemExit(0)\n"
+        )
+        started_unix = time.time()
+        cp = run_with_session_kill(
+            [sys.executable, "-c", script, str(log_path)],
+            timeout=30,
+            server_log_path=str(log_path),
+            detok_stall_grace_sec=_LONG_STALL_GRACE,
+        )
+        runtime_sec = time.time() - started_unix
+        assert cp.returncode == 0
+
+        post_ready = post_ready_runtime_sec(
+            str(log_path),
+            started_unix=started_unix,
+            runtime_sec=runtime_sec,
+        )
+        assert post_ready is not None
+        boot_sec = runtime_sec - post_ready
+        assert boot_sec >= 2.5, (
+            f"the stale log timed the boot: read {boot_sec:.2f}s of boot for a round "
+            f"that spent 3s on it"
+        )
+
+    def test_the_split_does_not_depend_on_an_unrelated_watchdog(self, tmp_path):
+        """The stall grace is a hang backstop, not a switch for the cost model.
+
+        Turning it off used to withdraw the ready timestamp with it, and a session
+        run that way prices every round at its whole cold wall-clock without
+        anything saying so.
+        """
+        log_path = tmp_path / "server.log"
+        script = (
+            "import sys, time\n"
+            "f = open(sys.argv[1], 'w')\n"
+            "f.write('INFO loading weights\\n'); f.flush()\n"
+            "time.sleep(2)\n"
+            "f.write('Application startup complete\\n'); f.flush()\n"
+            "time.sleep(1)\n"
+            "raise SystemExit(0)\n"
+        )
+        started_unix = time.time()
+        cp = run_with_session_kill(
+            [sys.executable, "-c", script, str(log_path)],
+            timeout=30,
+            server_log_path=str(log_path),
+            detok_stall_grace_sec=0.0,
+            session_deadline_sec=time.monotonic() + 30.0,
+        )
+        assert cp.returncode == 0
+        assert server_ready_unix(str(log_path)) is not None, (
+            "the boot/benchmark split was withdrawn along with the stall watchdog"
+        )
+
     def test_a_round_that_never_came_up_is_not_priced(self, tmp_path):
         """No ready marker means no split, reported as unknown rather than guessed."""
         log_path = tmp_path / "server.log"

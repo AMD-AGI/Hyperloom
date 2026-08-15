@@ -162,6 +162,82 @@ async def test_promote_baseline_carries_a_dropped_hot_pass_to_the_session(
     assert coord.shared_state.baseline_measure_round_dropped is False
 
 
+class TestAHotPassCorrectsAColdAnchor:
+    """The escape from the marker, without which PRELUDE cannot finish.
+
+    A cold anchor holds the phase open until a hot pass replaces it. The rule
+    that keeps a later, lower re-baseline from displacing the anchor would reject
+    that replacement whenever the cold figure reads higher -- which it does
+    whenever the "cold" pass was not really cold, its weights already in page
+    cache and its kernels already compiled by an earlier run. The session would
+    then re-measure whole baseline rounds until the clock killed it, each one
+    landing the very measurement that was supposed to release it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_lower_hot_figure_replaces_a_marked_cold_one(self, coord: Coordinator) -> None:
+        coord.shared_state.baseline_tput = 1000.0
+        coord.shared_state.baseline_measure_round_dropped = True
+
+        await coord._promote_to_shared_state(
+            "baseline",
+            {
+                "output_throughput": 980.0,
+                "subprocess_runtime_sec": 900.0,
+                "measure_round_runtime_sec": 400.0,
+                "workspace": "/tmp/ws",
+            },
+        )
+
+        assert coord.shared_state.baseline_tput == 980.0
+        assert coord.shared_state.baseline_measure_round_dropped is False
+        assert coord.shared_state.baseline_warm_runtime_sec == 400.0
+
+    @pytest.mark.asyncio
+    async def test_a_lower_cold_figure_does_not_replace_a_marked_cold_one(
+        self,
+        coord: Coordinator,
+    ) -> None:
+        """Only a hot pass corrects the anchor; another cold one is just noisier.
+
+        Two cold figures are comparable to each other, so the ordinary rule
+        applies and the better one stands. Nothing has been corrected, so the
+        marker stays and the phase stays open.
+        """
+        coord.shared_state.baseline_tput = 1000.0
+        coord.shared_state.baseline_measure_round_dropped = True
+
+        await coord._promote_to_shared_state(
+            "baseline",
+            {
+                "output_throughput": 980.0,
+                "subprocess_runtime_sec": 900.0,
+                "workspace": "/tmp/ws",
+            },
+        )
+
+        assert coord.shared_state.baseline_tput == 1000.0
+        assert coord.shared_state.baseline_measure_round_dropped is True
+
+    @pytest.mark.asyncio
+    async def test_a_lower_hot_figure_still_loses_to_a_hot_anchor(self, coord: Coordinator) -> None:
+        """With no marker there is nothing to correct, so drift is refused again."""
+        coord.shared_state.baseline_tput = 1000.0
+        coord.shared_state.baseline_measure_round_dropped = False
+
+        await coord._promote_to_shared_state(
+            "baseline",
+            {
+                "output_throughput": 980.0,
+                "subprocess_runtime_sec": 900.0,
+                "measure_round_runtime_sec": 400.0,
+                "workspace": "/tmp/ws",
+            },
+        )
+
+        assert coord.shared_state.baseline_tput == 1000.0
+
+
 @pytest.mark.asyncio
 async def test_promote_baseline_non_dict_is_noop(coord: Coordinator) -> None:
     await coord._promote_to_shared_state("baseline", "not-a-dict")  # type: ignore[arg-type]

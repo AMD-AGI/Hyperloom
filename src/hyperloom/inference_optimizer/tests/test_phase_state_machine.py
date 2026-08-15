@@ -325,9 +325,10 @@ def test_prelude_exit_states_whether_one_optimization_round_still_fits():
 
 # The workload the cold-anchor cases below are priced against: a 900s cold round
 # whose last 550s was the benchmark, so the boot took 350s, and a 400s hot pass.
-# One further measured variant therefore costs 750s and a double-run baseline
-# round 1150s, which is what a session must be able to afford before it is worth
-# measuring another baseline.
+# One further measured variant therefore costs 750s -- its own boot and a
+# benchmark on a populated JIT cache -- while a double-run round costs the whole
+# measured cold pass plus a second benchmark, 1300s. Together they are what a
+# session must afford before measuring another baseline is worth doing.
 _COLD_ANCHOR_WORKLOAD = {
     "baseline_tput": 1074.7,
     "baseline_runtime_sec": 900.0,
@@ -335,7 +336,7 @@ _COLD_ANCHOR_WORKLOAD = {
     "baseline_warm_runtime_sec": 400.0,
     "baseline_double_run": True,
 }
-_RETRY_COST_SEC = 1150.0 + 750.0
+_RETRY_COST_SEC = 1300.0 + 750.0
 
 
 class TestAColdAnchorIsNotAFinishedPrelude:
@@ -363,7 +364,7 @@ class TestAColdAnchorIsNotAFinishedPrelude:
         assert phase_state.exit_normal_prelude(state)[0] == "prelude_done"
 
     def test_a_session_that_cannot_afford_another_baseline_closes(self):
-        """1900s buys a round and a variant to read against it; 1200s buys neither."""
+        """2050s buys a round and a variant to read against it; 1200s buys neither."""
         state = _prelude_state(
             **_COLD_ANCHOR_WORKLOAD,
             baseline_measure_round_dropped=True,
@@ -377,7 +378,7 @@ class TestAColdAnchorIsNotAFinishedPrelude:
         assert (next_phase, reason) == ("CLOSE", "prelude_cold_anchor_low_budget")
         assert evidence["terminal"] is True
         assert evidence["baseline_anchor"] == "cold"
-        assert evidence["retry_round_sec"] == pytest.approx(1150.0)
+        assert evidence["retry_round_sec"] == pytest.approx(1300.0)
         assert phase_state.is_valid_stop_reason(reason)
         assert phase_state.is_valid_phase_exit_reason(reason)
 
