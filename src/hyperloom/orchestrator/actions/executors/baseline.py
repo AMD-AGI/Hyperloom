@@ -414,6 +414,35 @@ def _round_headroom_sec(state: Any, session_deadline_sec: float | None) -> tuple
     return remaining_sec, {**outside, "bound": "session_deadline", "affordable_sec": round(remaining_sec, 1)}
 
 
+def _cold_anchor_from_warmup(
+    warmup_result: dict[str, Any],
+    *,
+    dropped: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep the warmup's cold figure as the anchor, marked as the cold one.
+
+    Two things end a round once its warmup has already paid for the boot, the
+    compile and the capture: the budget cannot cover a second pass, and the
+    session's budget reaped the second pass mid-flight. Either way a number
+    exists and the GPU time behind it is spent, so it is kept rather than
+    discarded -- a marked cold anchor beats no anchor. The marker is what tells a
+    reader of the session's later gains that their denominator is depressed.
+
+    Args:
+        warmup_result: The succeeded warmup pass's result, mutated in place.
+        dropped: Why the measured round did not produce the figure, recorded so
+            the decision is legible in the result and the session record.
+
+    Returns:
+        dict[str, Any]: ``warmup_result``, marked.
+    """
+    warnings = warmup_result.setdefault("nonfatal_warnings", [])
+    if MEASURE_ROUND_DROPPED_WARNING not in warnings:
+        warnings.append(MEASURE_ROUND_DROPPED_WARNING)
+    warmup_result["measure_round_dropped"] = dropped
+    return warmup_result
+
+
 def _measured_runtime_sec(state: Any, field: str) -> float | None:
     """Read a runtime some earlier round measured, or ``None`` when none did.
 
@@ -3300,12 +3329,7 @@ class BaselineExecutor:
                         gate_evidence.get("affordable_sec", 0.0),
                         gate_evidence.get("bound", ""),
                     )
-                    warmup_result.setdefault("nonfatal_warnings", [])
-                    warmup_result["nonfatal_warnings"].append(
-                        MEASURE_ROUND_DROPPED_WARNING,
-                    )
-                    warmup_result["measure_round_dropped"] = gate_evidence
-                    return warmup_result
+                    return _cold_anchor_from_warmup(warmup_result, dropped=gate_evidence)
 
             # Round 2 (measured): re-attach to the hot server (client only).
             # Warm re-attach is intentional — all comparison points (baseline,
