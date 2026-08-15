@@ -18,7 +18,9 @@ from pathlib import Path
 
 import pytest
 
+import hyperloom.orchestrator.kernel.request_handlers as krh_mod
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases.kernel import KernelPhase
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -46,7 +48,17 @@ async def test_geak_gemm_keep_stages_gemm_column(tmp_path, monkeypatch):
     tuned = tmp_path / "tuned_gemm.csv"
     tuned.write_text("M,N,K,kernelId\n16,512,7168,3\n", encoding="utf-8")
 
-    coord = _coord(tmp_path, baseline_tput=100.0)
+    coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+
+    async def _integrate(_payload, *, session_dir):
+        return {"decision": "KEEP", "new_tput": 140.0, "gain_pct": 40.0}
+
+    monkeypatch.setattr(krh_mod, "integrate_handler", _integrate)
+    monkeypatch.setattr(
+        KernelPhase,
+        "_merge_gemm_candidate_with_runtime",
+        lambda _self, _env_var, env_value: env_value,
+    )
 
     await coord._handle_gemm_tuning_result(
         {

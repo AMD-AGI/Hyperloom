@@ -1664,7 +1664,7 @@ class KernelPhase(PhaseHandler):
                         break
             if not source_paths:
                 log.warning(
-                    "forge gemm E2E: no complete aiter config found for %s; "
+                    "gemm E2E: no complete aiter config found for %s; "
                     "candidate-only validation would be unsafe",
                     env_var,
                 )
@@ -1734,7 +1734,7 @@ class KernelPhase(PhaseHandler):
                     key_cols.append(column)
             if not key_cols:
                 log.warning(
-                    "forge gemm E2E: cannot derive dispatch keys for %s",
+                    "gemm E2E: cannot derive dispatch keys for %s",
                     env_var,
                 )
                 return None
@@ -1753,7 +1753,7 @@ class KernelPhase(PhaseHandler):
                     return rows
                 if "us" not in all_columns:
                     log.warning(
-                        "forge gemm E2E: %s has duplicate dispatch keys for %s "
+                        "gemm E2E: %s has duplicate dispatch keys for %s "
                         "but no 'us' column to select the fastest row",
                         label,
                         env_var,
@@ -1779,7 +1779,7 @@ class KernelPhase(PhaseHandler):
                         best[key] = row
                 deduplicated = [best[key] for key in order]
                 log.info(
-                    "forge gemm E2E: removed %d duplicate %s row(s) for %s",
+                    "gemm E2E: removed %d duplicate %s row(s) for %s",
                     len(rows) - len(deduplicated),
                     label,
                     env_var,
@@ -1804,7 +1804,7 @@ class KernelPhase(PhaseHandler):
                 writer.writeheader()
                 writer.writerows(merged_rows)
             log.info(
-                "forge gemm E2E: merged %d candidate rows into %d rows from %d "
+                "gemm E2E: merged %d candidate rows into %d rows from %d "
                 "aiter config file(s) -> %d total (%s)",
                 len(candidate_rows),
                 len(runtime_rows),
@@ -1814,7 +1814,7 @@ class KernelPhase(PhaseHandler):
             )
             return str(merged_path)
         except Exception as exc:  # noqa: BLE001
-            log.warning("forge gemm E2E: merge failed (%s); rejecting candidate", exc)
+            log.warning("gemm E2E: merge failed (%s); rejecting candidate", exc)
             return None
 
     def _ck_blockscale_switch_eligible(self, result: dict[str, Any]) -> bool:
@@ -1948,14 +1948,9 @@ class KernelPhase(PhaseHandler):
         """
         self._sync_profile_state_after_gemm_roofline(result)
         self.shared_state.record_gemm_tuning(result)
-        # Forge results route to the per-tuner E2E validator when table tuning
-        # asked for it OR when the CK block-scale backend switch is eligible.
-        if result.get("backend") == "forge" and (
-            result.get("requires_e2e_validation") or self._ck_blockscale_switch_eligible(result)
-        ):
-            await self._validate_forge_gemm_tuning_e2e(result)
-        else:
-            self._promote_gemm_tuning_keep(result)
+        # Every backend goes through the same validator: a tuning result only
+        # becomes a gain once it is measured end-to-end against current_best.
+        await self._validate_gemm_tuning_e2e(result)
         # Per-round write: promotion/validation is what appends the
         # ``gemm_tuning`` row to ``optimization_stack``, and the column is built
         # from that row, so this is the first point where there is anything to
@@ -2030,117 +2025,6 @@ class KernelPhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — journaling is best-effort
             log.exception("gemm_tuning journal append failed")
 
-    def _promote_gemm_tuning_keep(self, result: dict[str, Any]) -> None:
-        """Promote a successful GEMM tuning run into the main gain ledger.
-
-        Only acts on a successful, ``KEEP``-decision result with a speedup
-        greater than 1.0 and a known baseline. Appends an entry to the
-        optimization stack (deduped on tuned file), updates ``current_best``,
-        and stamps ``cumulative_gain`` / ``cumulative_gain_validated`` since
-        the GEMM benchmark is itself an end-to-end serving measurement.
-
-        Forge results that requested per-tuner E2E validation
-        (``requires_e2e_validation``), or that are eligible for the CK
-        block-scale switch (``_ck_blockscale_switch_eligible``), are routed to
-        ``_validate_forge_gemm_tuning_e2e`` by ``_handle_gemm_tuning_result``
-        and normally never reach this promoter. Anything that does reach it —
-        including a forge result whose validation already completed — has its
-        gain stamped as validated.
-
-        Args:
-            result (dict[str, Any]): The GEMM tuning handler result; ignored if
-                not a successful KEEP.
-        """
-        if not isinstance(result, dict):
-            return
-        status = str(result.get("status") or "").strip().lower()
-        decision = str(result.get("decision") or "").strip().upper()
-        if status not in {"ok", "complete", "completed", "succeeded", "success"}:
-            return
-        if decision != "KEEP":
-            return
-        try:
-            speedup = float(result.get("best_speedup") or 0.0)
-            baseline = float(self.shared_state.baseline_tput or 0.0)
-        except (TypeError, ValueError):
-            return
-        if speedup <= 1.0 or baseline <= 0:
-            return
-
-        backend = str(result.get("backend") or "geak").strip().lower()
-        ts = datetime.now(timezone.utc).isoformat()
-
-        # Resolve extra_envs: forge provides them; GEAK infers from tuned_file.
-        if backend == "forge":
-            extra_envs = dict(result.get("extra_envs") or result.get("recommended_env") or {})
-            tuned_file = ""
-            artifacts = result.get("artifacts") or {}
-            if isinstance(artifacts, dict) and artifacts:
-                tuned_file = str(next(iter(artifacts.values()), ""))
-            if not tuned_file:
-                tuned_file = str(next(iter(extra_envs.values()), "")) if extra_envs else ""
-            variant_name = "forge_gemm_tuned"
-        else:
-            tuned_file = str(result.get("tuned_file") or "")
-            extra_envs = {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": tuned_file} if tuned_file else {}
-            variant_name = "a8w8_blockscale_tuned_gemm"
-
-        # fp8 block-scale CK backend switch safety net (an operator-set value
-        # wins via setdefault); the primary forge path validates it standalone.
-        if self._ck_blockscale_switch_eligible(result):
-            extra_envs.setdefault("SGLANG_FP8_BLOCKSCALE_CK_MAX_M", "256")
-
-        final_report = str(result.get("final_report_path") or "")
-
-        # GEAK path: E2E already validated internally.
-        tuned_tput = baseline * speedup
-        existing = {
-            str(item.get("tuned_file") or "")
-            for item in (self.shared_state.optimization_stack or [])
-            if isinstance(item, dict) and item.get("action") == "gemm_tuning"
-        }
-
-        entry = {
-            "action": "gemm_tuning",
-            "source_phase": "KERNEL_AGENT",
-            "variant_name": variant_name,
-            "tuned_file": tuned_file,
-            "final_report_path": final_report,
-            "gain_pct": (speedup - 1.0) * 100.0,
-            "tput": tuned_tput,
-            "workspace": result.get("workspace"),
-            "extra_envs": extra_envs,
-            "backend": backend,
-            "source": "kernel_entry_auto",
-            "ts": ts,
-        }
-        if tuned_file not in existing:
-            self.shared_state.optimization_stack.append(entry)
-            self.shared_state.append_stack_gain_entry(
-                action="gemm_tuning",
-                variant_name=variant_name,
-                new_tput=tuned_tput,
-                ts=ts,
-            )
-            self._journal_gemm_tuning_keep(
-                entry,
-                task_id=str(result.get("task_id") or ""),
-            )
-        self.shared_state.current_best = {
-            "action": "gemm_tuning",
-            "engine": backend,
-            "tput": tuned_tput,
-            "variant_name": variant_name,
-            "tuned_file": tuned_file,
-            "final_report_path": final_report,
-            "workspace": result.get("workspace"),
-            "extra_envs": extra_envs,
-        }
-        self.shared_state.cumulative_gain = (speedup - 1.0) * 100.0
-        self.shared_state.cumulative_gain_validated = self.shared_state.cumulative_gain
-        self.shared_state.cumulative_gain_validated_ts = ts
-        self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack or [])
-
     def _replace_latest_gemm_tuning_attempt(self, result: dict[str, Any]) -> None:
         """Sync the latest GEMM history row after forge E2E rewrites ``result``."""
         if not isinstance(result, dict):
@@ -2156,19 +2040,26 @@ class KernelPhase(PhaseHandler):
         self.shared_state.gemm_tuning_attempts = attempts
         self.shared_state.last_gemm_tuning = entry
 
-    async def _validate_forge_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
-        """Sequentially E2E-validate each forge tuner's env independently.
+    def _gemm_e2e_candidates(self, result: dict[str, Any]) -> list[dict[str, Any]]:
+        """Reduce a GEMM tuning result to the env sets worth E2E-validating.
 
-        Like kernel_opt's per-kernel integrate: try each tuner's env one by
-        one. KEEPs accumulate (stacked envs); REVERTs are discarded. This
-        prevents one bad tuner from dragging down the whole set.
+        The two backends report differently — forge lists one entry per tuner
+        in ``tuners_run``, GEAK reports a single tuned dispatch CSV — but both
+        collapse to the same candidate shape, so one validation loop can
+        measure either against ``current_best``. Selection is by result shape:
+        ``tuners_run`` entries are self-describing, whereas a bare
+        ``tuned_file`` only names an env var under the GEAK a8w8 tuner.
+
+        Args:
+            result (dict[str, Any]): The GEMM tuning handler result.
+
+        Returns:
+            list[dict[str, Any]]: Candidates with ``tuner`` / ``env_var`` /
+                ``env_value`` / ``envs`` / ``micro_speedup``.
         """
-        from ..kernel.request_handlers import integrate_handler
-
-        tuners_run = result.get("tuners_run") or []
+        candidates: list[dict[str, Any]] = []
         # The list is already priority-sorted by forge CLI (fmoe_ck first).
-        candidates = []
-        for t in tuners_run:
+        for t in result.get("tuners_run") or []:
             if not isinstance(t, dict):
                 continue
             if t.get("status") != "ok":
@@ -2200,6 +2091,27 @@ class KernelPhase(PhaseHandler):
                     }
                 )
 
+        if not candidates and str(result.get("backend") or "").strip().lower() != "forge":
+            tuned_file = str(result.get("tuned_file") or "").strip()
+            try:
+                micro_speedup = float(result.get("best_speedup") or 0.0)
+            except (TypeError, ValueError):
+                micro_speedup = 0.0
+            keeps = str(result.get("decision") or "").strip().upper() == "KEEP" and str(
+                result.get("status") or ""
+            ).strip().lower() in {"ok", "complete", "completed", "succeeded", "success"}
+            if tuned_file and micro_speedup > 1.0 and keeps:
+                env_var = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"
+                candidates.append(
+                    {
+                        "tuner": "a8w8_blockscale_tuned_gemm",
+                        "env_var": env_var,
+                        "env_value": tuned_file,
+                        "envs": {env_var: tuned_file},
+                        "micro_speedup": micro_speedup,
+                    }
+                )
+
         # Standalone fp8 block-scale CK backend switch: inject as its own
         # candidate so the loop E2E-validates baseline Triton vs CK.
         if self._ck_blockscale_switch_eligible(result):
@@ -2213,9 +2125,23 @@ class KernelPhase(PhaseHandler):
                         "micro_speedup": 1.0,
                     }
                 )
+        return candidates
 
+    async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
+        """Sequentially E2E-validate each tuning candidate's env independently.
+
+        Like kernel_opt's per-kernel integrate: try each candidate's env one by
+        one. KEEPs accumulate (stacked envs); REVERTs are discarded. This
+        prevents one bad candidate from dragging down the whole set. Every
+        promoted number is measured here against ``current_best``; a micro
+        speedup never becomes a throughput on its own.
+        """
+        from ..kernel.request_handlers import integrate_handler
+
+        backend = str(result.get("backend") or "geak").strip().lower()
+        candidates = self._gemm_e2e_candidates(result)
         if not candidates:
-            log.info("forge gemm tuning: no candidates to E2E validate")
+            log.info("gemm tuning: no candidates to E2E validate")
             return
 
         baseline_tput = float(self.shared_state.baseline_tput or 0.0)
@@ -2252,7 +2178,7 @@ class KernelPhase(PhaseHandler):
             tuner_name = cand["tuner"]
             if tuner_name == "vllm_moe_triton" and triton_moe_inert:
                 log.warning(
-                    "forge gemm E2E: skipping %s — the server dispatches MoE through "
+                    "gemm E2E: skipping %s — the server dispatches MoE through "
                     "aiter, which never reads VLLM_TUNED_CONFIG_FOLDER, so the tuned "
                     "Triton config cannot take effect",
                     tuner_name,
@@ -2264,7 +2190,7 @@ class KernelPhase(PhaseHandler):
                 int(getattr(self.shared_state, "tp", 0) or 0),
             ):
                 log.info(
-                    "forge gemm E2E: skipping %s — aiter CK fused-MoE cannot serve "
+                    "gemm E2E: skipping %s — aiter CK fused-MoE cannot serve "
                     "this model at tp=%s (intermediate size is not 128-aligned)",
                     tuner_name,
                     getattr(self.shared_state, "tp", 0),
@@ -2297,7 +2223,7 @@ class KernelPhase(PhaseHandler):
                     break
             if merge_failure_reason:
                 log.error(
-                    "forge gemm E2E: refusing aiter candidate for %s (%s: %s)",
+                    "gemm E2E: refusing aiter candidate for %s (%s: %s)",
                     tuner_name,
                     merge_failure_env,
                     merge_failure_reason,
@@ -2321,7 +2247,7 @@ class KernelPhase(PhaseHandler):
             test_envs.update(env)
 
             log.info(
-                "forge gemm E2E: validating tuner=%s env=%s (base_tput=%.1f)",
+                "gemm E2E: validating tuner=%s env=%s (base_tput=%.1f)",
                 tuner_name,
                 cand["env_var"],
                 running_tput,
@@ -2343,7 +2269,7 @@ class KernelPhase(PhaseHandler):
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning(
-                    "forge gemm E2E: integrate failed for %s: %s",
+                    "gemm E2E: integrate failed for %s: %s",
                     tuner_name,
                     exc,
                 )
@@ -2355,7 +2281,7 @@ class KernelPhase(PhaseHandler):
             gain_pct = float(integrate_result.get("gain_pct") or 0.0)
 
             log.info(
-                "forge gemm E2E: tuner=%s decision=%s new_tput=%.1f gain=%.2f%%",
+                "gemm E2E: tuner=%s decision=%s new_tput=%.1f gain=%.2f%%",
                 tuner_name,
                 decision,
                 new_tput,
@@ -2367,7 +2293,7 @@ class KernelPhase(PhaseHandler):
                 cand = {**cand, "tuned_config_coverage": coverage}
                 if not coverage.get("artifact_applied"):
                     log.error(
-                        "forge gemm E2E: tuner=%s produced an artifact the runtime never "
+                        "gemm E2E: tuner=%s produced an artifact the runtime never "
                         "applied — 0 of %d requested shape(s) resolve to a tuned row; "
                         "the %.2f%% e2e delta measures nothing about the tuning",
                         tuner_name,
@@ -2376,7 +2302,7 @@ class KernelPhase(PhaseHandler):
                     )
                 else:
                     log.info(
-                        "forge gemm E2E: tuner=%s tuned-config coverage %.2f%% (%d/%d shapes)",
+                        "gemm E2E: tuner=%s tuned-config coverage %.2f%% (%d/%d shapes)",
                         tuner_name,
                         coverage.get("coverage_pct") or 0.0,
                         coverage.get("covered") or 0,
@@ -2398,7 +2324,7 @@ class KernelPhase(PhaseHandler):
                 entry = {
                     "action": "gemm_tuning",
                     "source_phase": "KERNEL_AGENT",
-                    "variant_name": f"forge_{tuner_name}",
+                    "variant_name": f"{backend}_{tuner_name}",
                     "tuned_file": (
                         env.get(cand["env_var"])
                         or next(iter(env.values()), "")
@@ -2408,14 +2334,14 @@ class KernelPhase(PhaseHandler):
                     "workspace": result.get("workspace"),
                     "extra_server_args": extra_server_args,
                     "extra_envs": dict(stacked_envs),
-                    "backend": "forge",
+                    "backend": backend,
                     "source": "kernel_entry_auto",
                     "ts": ts,
                 }
                 self.shared_state.optimization_stack.append(entry)
                 self.shared_state.append_stack_gain_entry(
                     action="gemm_tuning",
-                    variant_name=f"forge_{tuner_name}",
+                    variant_name=f"{backend}_{tuner_name}",
                     new_tput=new_tput,
                     ts=ts,
                 )
@@ -2435,9 +2361,9 @@ class KernelPhase(PhaseHandler):
         if kept:
             self.shared_state.current_best = {
                 "action": "gemm_tuning",
-                "engine": "forge",
+                "engine": backend,
                 "tput": running_tput,
-                "variant_name": "forge_gemm_tuned",
+                "variant_name": f"{backend}_gemm_tuned",
                 "extra_server_args": "--moe-runner-backend aiter" if "AITER_CONFIG_FMOE" in stacked_envs else "",
                 "extra_envs": stacked_envs,
                 "workspace": result.get("workspace"),
@@ -2448,7 +2374,7 @@ class KernelPhase(PhaseHandler):
             self.shared_state.cumulative_gain_validated_ts = ts
             self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack or [])
             log.info(
-                "forge gemm E2E: %d tuners KEEP (total gain=+%.2f%%), %d REVERT",
+                "gemm E2E: %d tuners KEEP (total gain=+%.2f%%), %d REVERT",
                 len(kept),
                 total_gain,
                 len(reverted),
@@ -2457,7 +2383,7 @@ class KernelPhase(PhaseHandler):
             stacked_envs = {}
             total_gain = 0.0
             log.info(
-                "forge gemm E2E: all %d tuners REVERT, no E2E gain",
+                "gemm E2E: all %d tuners REVERT, no E2E gain",
                 len(reverted),
             )
 
