@@ -268,6 +268,10 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     # The subscription token is snapshotted like the other three: without it a
     # stale token in .env silently replaces the one the caller exported.
     _snap_claude_oauth="${CLAUDE_CODE_OAUTH_TOKEN-}"
+    # Snapshotted like the credentials above rather than via
+    # _DOTENV_PROTECTED_VARS, whose mismatch warning prints the value -- this one
+    # usually carries the gateway secret.
+    _snap_anthropic_headers="${ANTHROPIC_CUSTOM_HEADERS-}"
     for _v in $_DOTENV_PROTECTED_VARS; do
       eval "_snap_prot_${_v}=\"\${${_v}-}\""
     done
@@ -279,6 +283,7 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     [ -n "$_snap_anthropic_key" ] && export ANTHROPIC_API_KEY="$_snap_anthropic_key"
     [ -n "$_snap_anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$_snap_anthropic_token"
     [ -n "$_snap_claude_oauth" ] && export CLAUDE_CODE_OAUTH_TOKEN="$_snap_claude_oauth"
+    [ -n "$_snap_anthropic_headers" ] && export ANTHROPIC_CUSTOM_HEADERS="$_snap_anthropic_headers"
     for _v in $_DOTENV_PROTECTED_VARS; do
       eval "_snap_val=\"\${_snap_prot_${_v}-}\""
       if [ -n "${_snap_val}" ]; then
@@ -291,7 +296,7 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
       unset "_snap_prot_${_v}"
     done
     unset _v _snap_val _cur_val
-    unset _snap_anthropic_url _snap_anthropic_key _snap_anthropic_token
+    unset _snap_anthropic_url _snap_anthropic_key _snap_anthropic_token _snap_claude_oauth _snap_anthropic_headers
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
@@ -343,6 +348,9 @@ _ANTHROPIC_BASE_URL_VAL="${ANTHROPIC_BASE_URL:-}"
 # variable: it feeds ~/.claude/config.json primaryApiKey, which would move a
 # subscription run onto API billing.
 _ANTHROPIC_KEY_VAL="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
+# Part of the Anthropic-side credential for a header-authenticated gateway, and
+# not derivable from the key, so it is persisted alongside the URL and key.
+_ANTHROPIC_CUSTOM_HEADERS_VAL="${ANTHROPIC_CUSTOM_HEADERS:-}"
 # GEAK_BASE_URL / GEAK_API_KEY are neither derived nor written here: GEAKv4 runs
 # on the Anthropic side via GEAK_CLAUDE_MODEL + Claude Code auth, and an operator
 # value reaches it from the environment. write_env_file removes both from the
@@ -1126,6 +1134,7 @@ write_env_file() {
   # GEAK aliases are never written back to provider slots.
   local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-}"
   local _anthropic_key="${_ANTHROPIC_KEY_VAL:-}"
+  local _anthropic_headers="${_ANTHROPIC_CUSTOM_HEADERS_VAL:-}"
   # Warn loudly if the Anthropic endpoint is unresolved — kernel-agent env would
   # silently lack a base URL and CLIs would resort to whatever was in the
   # operator's shell rc, defeating the point of this file.
@@ -1159,6 +1168,11 @@ write_env_file() {
     # exported here; gateway/OpenAI credentials are never persisted.
     [ -n "${_anthropic_url}" ] && _emit_credential_fallback ANTHROPIC_BASE_URL "${_anthropic_url}"
     [ -n "${_anthropic_key}" ] && _emit_credential_fallback ANTHROPIC_API_KEY "${_anthropic_key}"
+    # A header-authenticated gateway rejects the CLI without this, and it cannot
+    # be re-derived from the key, so it is a credential in its own right. The
+    # single quotes _emit_credential_fallback writes keep any ${VAR} reference
+    # intact for parse_custom_headers to expand.
+    [ -n "${_anthropic_headers}" ] && _emit_credential_fallback ANTHROPIC_CUSTOM_HEADERS "${_anthropic_headers}"
     # A subscription token is the Anthropic side on its own: an oauth-only host
     # resolves neither URL nor key, so without this line sourcing the file
     # leaves the kernel-agent with no Anthropic credential at all.
