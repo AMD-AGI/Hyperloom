@@ -123,29 +123,74 @@ host -> subprocess -> envelope -> upstream PolicyGate path.
 | `LLM_MODEL` | no | provider default | RCA model name. With neither override set the chain is openai: `OPENAI_MODEL` → `CODEX_MODEL` → `gpt-5.6-sol`, else anthropic: `ANTHROPIC_MODEL` → `CLAUDE_MODEL` → `claude-opus-5`. |
 | `ROBUSTNESS_LLM_RCA_DISABLED` | no | unset | Set to `1` to forcibly disable the LlmRcaEngine even when credentials are present. |
 
-## Symptom -> intent mapping (M1 / M1.5)
+## Symptom -> intent mapping
 
-| Symptom | Severity | Intents emitted | Source |
-|---------|----------|-----------------|--------|
-| `agent_stall` (≥ stall_timeout_s) | medium | `alert(medium)` | M1 |
-| `agent_stall` (≥ severity_high_after_s) | high | `alert(high)` | M1 |
-| `crash_count_rising` (≥ 2) | medium | `alert(medium)` | M1 |
-| `crash_count_high` (≥ 5) | high | `alert(high)` | M1 |
-| `crash_count_emergency` (≥ 10) | high | `alert(high)` | M1 |
-| `repeated_policy_denied` (≥ 3) | medium | `alert(medium)` | M1 |
-| `repeated_failure` (≥ 2 same family) | medium / high (≥ prune threshold) | `alert(medium)`; HIGH tier also emits `prune_branch(family)` | M1 |
-| `pod_not_running` (Failed) | high | `alert(high)` | M1 |
-| `pod_not_running` (other non-Running) | medium | `alert(medium)` | M1 |
-| `local_server_unreachable` (any target down) | medium / high (all down) | `alert(medium)` / `alert(high)` | M1.5 |
-| `log_error_pattern` (CUDA OOM / NCCL / segfault) | high | `alert(high)` | M1.5 |
-| `log_error_pattern` (RuntimeError / generic) | medium | `alert(medium)` | M1.5 |
-| `gpu_thermal_high` (≥ warn_c) | medium | `alert(medium)` | M1.5 |
-| `gpu_thermal_high` (≥ crit_c) | high | `alert(high)` | M1.5 |
-| `stale_lease` | high | `alert(high)` + `kill_task(task_id)` | M1 |
-| `gpu_memory_leaked` | high | `alert(high)` + `delegate(recover, force_gpu_cleanup=True)` | M1 |
-| `deadline_warning` / `deadline_imminent` / `deadline_hard_cutoff` / `recover_unsuccessful` | high | `alert(high)` + `delegate(report)` | M1 |
-| `same_payload_loop` / `kernel_opt_no_progress` / `geak_budget_starvation` / `amdahl_kernel_ceiling_low` | high | `alert(high)` + `prune_branch(family)` | M1 |
-| (no symptoms) | — | `send_message(heartbeat)` | M1 |
+Complete inventory. The `Rule` column is the `SignalSpec.name` from
+`_SIGNAL_REGISTRY` in `signals/classifier.py`, which is also the module the
+rule lives in (`signals/<rule>.py`; `ray_pending` and `kernel_pipeline` share
+`kernel_pipeline.py`, and the three preflight rules share `preflight.py`).
+
+Severity drives the ladder tier: low emits `send_message(observation)`, medium
+emits `alert(medium)`, high emits `alert(high)` plus any remediation intent
+listed below.
+
+| Symptom | Severity | Intents emitted | Rule |
+|---------|----------|-----------------|------|
+| `agent_stall` (≥ stall_timeout_s) | medium | `alert(medium)` | `stall` |
+| `agent_stall` (≥ severity_high_after_s) | high | `alert(high)` | `stall` |
+| `crash_count_rising` (≥ 2) | medium | `alert(medium)` | `crash` |
+| `crash_count_high` (≥ 5) | high | `alert(high)` | `crash` |
+| `crash_count_emergency` (≥ 10) | high | `alert(high)` | `crash` |
+| `repeated_policy_denied` (≥ 3) | medium | `alert(medium)` | `event` |
+| `repeated_failure` (≥ 2 same family) | medium / high (≥ prune threshold) | `alert(...)`; HIGH tier also emits `prune_branch(family)` | `event` |
+| `idempotency_replay` | medium | `alert(medium)` | `event` |
+| `recover_unsuccessful` | high | `alert(high)` + `delegate(report)` | `event` |
+| `local_server_unreachable` (any target down) | medium / high (all down) | `alert(medium)` / `alert(high)` | `local_health` |
+| `log_error_pattern` (CUDA OOM / NCCL / segfault) | high | `alert(high)` | `local_health` |
+| `log_error_pattern` (RuntimeError / generic) | medium | `alert(medium)` | `local_health` |
+| `gpu_thermal_high` (≥ warn_c / ≥ crit_c) | medium / high | `alert(medium)` / `alert(high)` | `local_health` |
+| `disk_pressure` (≥ warn_pct / ≥ crit_pct) | medium / high | `alert(medium)` / `alert(high)` | `local_health` |
+| `shm_pressure` (≥ warn_pct / ≥ crit_pct) | medium / high | `alert(medium)` / `alert(high)` | `local_health` |
+| `fd_pressure` (≥ warn_pct / ≥ crit_pct) | medium / high | `alert(medium)` / `alert(high)` | `local_health` |
+| `ray_head_dead` | high | `alert(high)` | `local_health` |
+| `gpu_memory_leaked` | high | `alert(high)` + `delegate(recover, force_gpu_cleanup=True)` | `gpu_leak` |
+| `deadline_warning` | medium / high | `alert(...)`; HIGH tier also emits `delegate(report)` | `budget` |
+| `deadline_imminent` | high | `alert(high)` + `delegate(report)` | `budget` |
+| `deadline_hard_cutoff` | high | `alert(high)` + `delegate(report)` | `budget` |
+| `budget_burn_no_gain` | medium | `alert(medium)` | `budget` |
+| `budget_strategy_drift` | medium | `alert(medium)` | `budget` |
+| `phase_budget_nearly_exhausted` | medium | `alert(medium)` | `phase_budget` |
+| `conversation_no_progress` | high | `alert(high)` | `conversation_progress` |
+| `aiter_jit_regressed` | high | `alert(high)` | `aiter_jit` |
+| `aiter_jit_build_stuck` | medium | `alert(medium)` | `aiter_jit` |
+| `gain_plateau` | medium | `alert(medium)` | `progress` |
+| `no_levers_found` | medium | `alert(medium)` | `progress` |
+| `same_payload_loop` | high | `alert(high)` + `prune_branch(family)` | `repeated_payload` |
+| `empty_patch_kept` | high | `alert(high)` | `decision_audit` |
+| `decision_threshold_violated` | medium | `alert(medium)` | `decision_audit` |
+| `kernel_dispatch_bypassed` | high | `alert(high)` | `decision_audit` |
+| `kernel_negative_delta_kept` | high | `alert(high)` | `decision_audit` |
+| `ci_metrics_baseline_zero` | high | `alert(high)` | `decision_audit` |
+| `ci_metrics_schema_drift` | medium | `alert(medium)` | `decision_audit` |
+| `model_gpu_infeasible` | high | `alert(high)` | `model_gpu_fit` |
+| `amdahl_kernel_ceiling_low` | high | `alert(high)` + `prune_branch(kernel_opt)` | `amdahl_ceiling` |
+| `cold_start_budget_exhausted` | high | `alert(high)` | `cold_start` |
+| `critic_kb_outage` | high | `alert(high)` | `critic_health` |
+| `critic_unavailable_streak` | high | `alert(high)` | `critic_health` |
+| `critic_prune_stuck` | medium | `alert(medium)` | `critic_health` |
+| `critic_runtime_stuck` | high | `alert(high)` | `critic_health` |
+| `ray_pending_starvation` | high | `alert(high)` | `ray_pending` |
+| `geak_budget_starvation` | high | `alert(high)` + `prune_branch(kernel_opt)` | `kernel_pipeline` |
+| `kernel_opt_no_progress` | high | `alert(high)` + `prune_branch(kernel_opt)` | `kernel_pipeline` |
+| `state_json_corrupt` | high | `alert(high)` | `state_integrity` |
+| `coordinator_wal_bloat` (≥ warn / ≥ critical bytes) | medium / high | `alert(medium)` / `alert(high)` | `state_integrity` |
+| `stale_lease` | high | `alert(high)` + `kill_task(task_id)` | `state_integrity` |
+| `inbox_bloat` (≥ warn / ≥ critical bytes) | low / medium | `send_message(observation)` / `alert(medium)` | `state_integrity` |
+| `coordinator_zombie` | high | `alert(high)` | `state_integrity` |
+| `gateway_auth_outage` | high | `alert(high)` | `external_deps` |
+| `wekafs_degraded` (unreachable, or ≥ warn / ≥ critical latency) | medium / high | `alert(medium)` / `alert(high)` | `external_deps` |
+| `tracelens_cli_missing` | high (once per session) | `alert(high)` | `external_deps` |
+| (no symptoms) | — | `send_message(heartbeat)` | — |
 
 Every other HIGH symptom is strategic: the recommendation rides the
 alert's `detail.suggestion` field and the ladder never auto-emits
@@ -157,30 +202,37 @@ allowlist (`accuracy_gate` / `recover` / `report` / `server_lifecycle`).
 Cooldown: identical `(symptom_name, subject)` keys are silenced for
 `config.cooldown_ticks` ticks (default 5) to avoid inbox flooding.
 
-## Data sources (M1 / M1.5)
+## Data sources
 
-* **Primary:** `robustness-server`
-  * `/api/v1/cluster/faults` (on by default)
-  * `/api/v1/cluster/workloads/{id}/hierarchy` — the only pod-discovery
-    route; needs `Config.workload_uid` (see the env keys below)
-  * `/api/v1/cluster/pods/{ns}/{name}/metrics` — gated by
-    `Config.enable_cluster_pod_metrics` (default `False`, env-settable)
-* **Fallback:** local probes
+Two of the rule families need no source at all: everything driven by the
+rendered Coordinator prompt (`budget`, `phase_budget`,
+`conversation_progress`, `progress`, `crash`) and everything driven by the
+inbox (`event`, `repeated_payload`, and part of `stall` / `critic_health`).
+Those keep working when the probe is off, which is what multi-node relies on.
+
+The rest read `SourceData`, collected by:
+
+* **LocalProbe** — the only collector
   * `coordinator.db` (read-only) for Coordinator events
   * `shutil.disk_usage`, `ps`, parsed `rocm-smi --csv` / `nvidia-smi`
   * `Config.health_probe_targets[]` — local HTTP `/health` probes for
-    inference servers running on the same host (M1.5)
+    inference servers running on the same host
   * tail of a configured log file + error-pattern extraction
     (`CUDA out of memory`, `NCCL error`, `Segmentation fault`, etc.)
+  * `state.json` / WAL / lease integrity, decision-audit and critic-workdir
+    scans, and the external-dependency probes (gateway `/models`, source
+    mounts, TraceLens CLI)
+* **Quiet stub** — substituted when `Config.disable_local_probe` is set
+  (the multi-node default). Returns an empty snapshot without raising, so
+  probe-derived rules stay silent instead of false-firing on a single pod.
 
-LocalProbe stays small-scope by design: it only collects what the
-agent itself can see. GPU time-series, workload inference health, and
-node-level fault detection stay with primus-robust + robustness-server
-ownership.
+LocalProbe stays small-scope by design: it only collects what the agent
+itself can see, so on multi-node it sees one pod and is therefore disabled.
 
-`DegradeRouter` switches to the fallback after
-`source_fail_threshold` (default 3) consecutive primary failures and
-re-probes the primary every `source_recheck_interval_s` (default 30s).
+`DegradeRouter` keeps the collector behind a silent fallback: after
+`source_fail_threshold` (default 3) consecutive failures it serves an empty
+snapshot instead, and re-probes every `source_recheck_interval_s` (default
+30s). A tick therefore degrades to "no data" rather than failing outright.
 State transitions emit one WARN log; no spam in steady state.
 
 ## LLM RCA
