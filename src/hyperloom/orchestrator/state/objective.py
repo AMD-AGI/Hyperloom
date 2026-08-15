@@ -15,21 +15,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .shared_state import resolve_grading_anchor_tput
+
 if TYPE_CHECKING:  # pragma: no cover
     from .shared_state import SharedState
 
 
 class ObjectiveError(ValueError):
     """Raised by `build_objective` on bad/conflicting inputs."""
-
-
-def _resolve_current_tput(state: "SharedState") -> float:
-    """Resolve current throughput, preferring ``current_best['tput']`` over baseline (0.0 if none)."""
-    cb = state.current_best or {}
-    v = cb.get("tput") if isinstance(cb, dict) else None
-    if isinstance(v, (int, float)) and v > 0:
-        return float(v)
-    return float(state.baseline_tput or 0.0)
 
 
 @dataclass
@@ -124,7 +117,7 @@ class _RatioObjective(Objective):
 
 @dataclass
 class TargetGainObjective(_RatioObjective):
-    """Reach ``target_gain_pct`` % over baseline_tput (progress = cumulative_gain / target, capped at 1.0)."""
+    """Reach ``target_gain_pct`` % over baseline_tput (progress = cumulative_gain_validated / target, capped at 1.0)."""
 
     target_gain_pct: float
 
@@ -146,8 +139,8 @@ class TargetGainObjective(_RatioObjective):
         return "gain_pct"
 
     def _current(self, state: "SharedState") -> float:
-        """Return the per-round-sum cumulative gain percentage (``cumulative_gain``, not ``cumulative_gain_validated``)."""
-        return state.cumulative_gain
+        """Return the cumulative validated gain percentage."""
+        return state.cumulative_gain_validated
 
     def _target(self) -> float:
         """Return the configured gain-percent target."""
@@ -197,7 +190,7 @@ class TargetTputObjective(_RatioObjective):
 
     def _current(self, state: "SharedState") -> float:
         """Resolve current throughput (best-so-far, else baseline)."""
-        return _resolve_current_tput(state)
+        return resolve_grading_anchor_tput(state)
 
     def _target(self) -> float:
         """Return the configured per-GPU throughput target."""
@@ -253,7 +246,7 @@ class TargetBaselineObjective(_RatioObjective):
 
     def _current(self, state: "SharedState") -> float:
         """Resolve current throughput (best-so-far, else baseline)."""
-        return _resolve_current_tput(state)
+        return resolve_grading_anchor_tput(state)
 
     def _target(self) -> float:
         """Return the reference throughput loaded from the baseline session."""

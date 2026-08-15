@@ -570,7 +570,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     grp = opt.add_mutually_exclusive_group()
-    grp.add_argument("--target-gain", type=float, default=None, help="Stop when cumulative_gain >= N%% over baseline")
+    grp.add_argument(
+        "--target-gain",
+        type=float,
+        default=None,
+        help="Stop when cumulative_gain_validated >= N%% over baseline",
+    )
     grp.add_argument(
         "--target-tput",
         type=float,
@@ -1344,16 +1349,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="KERNEL plateau: number of trailing integrate attempts the gain sum is computed over. Default 5.",
     )
-    # IR-6 — EXPLORE hard force-exit thresholds (either condition fires; locked at start).
-    opt.add_argument(
-        "--explore-force-exit-hours-remaining",
-        dest="explore_force_exit_hours_remaining",
-        type=float,
-        default=None,
-        help="EXPLORE force-exit: total wall-clock remaining (hours) "
-        "below which EXPLORE exits immediately to the next phase, "
-        "regardless of plateau / steward. Default 3.0 (IR-6).",
-    )
+    # IR-6 — EXPLORE hard force-exit threshold (locked at start).
     opt.add_argument(
         "--explore-force-exit-budget-pct",
         dest="explore_force_exit_budget_pct",
