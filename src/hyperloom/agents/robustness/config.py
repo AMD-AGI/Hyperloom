@@ -286,7 +286,7 @@ class Config:
     async def discover(cls) -> "Config":
         """Auto-detect all configuration from the runtime environment.
 
-        Discovers the session directory, probes the robustness-server
+        Discovers the session directory, the LLM
         endpoint, and reads LLM credentials from the sandbox environment.
 
         Returns:

@@ -19,8 +19,7 @@ on-disk findings.
 # from the repo root — the repo is a single distribution
 python3 -m venv .venv && .venv/bin/pip install -e ".[test]"
 
-# Reactor mode. Auto-discovers session_dir and probes
-# robustness-server before falling back to local probes.
+# Reactor mode. Auto-discovers session_dir and runs the local probes.
 .venv/bin/robustness-agent
 ```
 
@@ -116,7 +115,6 @@ host -> subprocess -> envelope -> upstream PolicyGate path.
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `SESSION_DIR` | no | scan known paths | Path containing `storage/coordinator.db`; the FindingSink writes under `{session_dir}/agents/robustness/findings/{session_id}.jsonl`. |
-| `ROBUSTNESS_SERVER_URL` | no | scan known DNS | M1 primary data source; empty disables the primary path and forces local-only mode. |
 | `OPENAI_BASE_URL` | no | — | LLM endpoint for RCA (used as `llm_base_url`). |
 | `OPENAI_API_KEY` | no | — | API key for the LLM proxy (used as `llm_api_key`). |
 | `ROBUSTNESS_LLM_MODEL` | no | — | RCA model name; takes precedence over `LLM_MODEL`. |
@@ -267,8 +265,7 @@ Each tick that emits a non-heartbeat intent writes one
 Fields: `tick_index`, `timestamp_unix`, `symptom_name`, `severity`,
 `summary`, `intents` (envelope dicts), `evidence`, `rca_text`.
 
-These records are the hand-off point for a future findings publisher
-that POSTs them to the robustness-server for dashboards / alerting;
+These records are the hand-off point for a future findings publisher;
 today they remain local-only.
 
 ## Session-end postmortem
@@ -313,6 +310,6 @@ Knobs (env): `CRITIC_ROBUSTNESS_PRIORS_LIMIT` (default 5),
   feeding the same reactor. Not shipped: the only transport today is the
   subprocess one above, and `ReactorContext` is only ever built from a
   rendered Coordinator prompt.
-* **Findings publisher** — POST the on-disk findings to
-  robustness-server for cross-session reporting and advisory pull-back.
-  Nothing ships today; findings stay local-only.
+* **Findings publisher** — POST the on-disk findings to a collector for
+  cross-session reporting and advisory pull-back. Nothing ships today;
+  findings stay local-only.

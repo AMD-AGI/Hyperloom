@@ -3,8 +3,8 @@
 
 """Symptoms derived from LocalProbe-only data.
 
-Fire only when DegradeRouter hands control to :class:`LocalProbeSource` (robustness-server
-unreachable); silent otherwise since the SourceData fields are empty. Covers
+Fire only when :class:`LocalProbeSource` is active; silent when the probe is
+disabled, since the SourceData fields are then empty. Covers
 ``local_server_unreachable`` (HIGH if all targets fail), ``log_error_pattern`` (OOM/NCCL → HIGH),
 ``gpu_thermal_high``, plus disk/shm/ray-head/fd pressure rules.
 """

@@ -255,17 +255,8 @@ def test_subprocess_tick_help_smoke():
 @pytest.mark.asyncio
 async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
     """``request.options`` overrides land on the per-tick :class:`Config`."""
-    # Drop workload-uid env so the only non-default Config value comes from options.
-    for key in (
-        "ROBUSTNESS_WORKLOAD_UID",
-        "CLAW_WORKLOAD_UID",
-        "WORKLOAD_UID",
-        "KUBE_WORKLOAD_UID",
-        "RAY_JOB_ID",
-        "ROBUSTNESS_DISABLE_LOCAL_PROBE",
-        "ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS",
-        "ROBUSTNESS_NODES",
-    ):
+    # Drop the env so the only non-default Config value comes from options.
+    for key in ("ROBUSTNESS_DISABLE_LOCAL_PROBE", "ROBUSTNESS_NODES"):
         monkeypatch.delenv(key, raising=False)
 
     captured: dict[str, object] = {}

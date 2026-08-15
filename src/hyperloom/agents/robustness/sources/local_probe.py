@@ -9,7 +9,7 @@ extraction, HTTP server probe). A failing sub-probe returns empty data
 without raising; :class:`LocalProbeSource` raises
 :class:`SourceUnavailable` only when *every* sub-probe yields nothing,
 so :class:`DegradeRouter` does not flap. Cluster-wide metrics and
-node-level fault detection stay with robustness-server.
+node-level fault detection are out of scope.
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@
 
 """Coverage for ``cli_backends``: per-role backend construction (mock/agent
 choices, kernel selection, validation errors), advisory proposal-scorer
-wiring, robustness-server detection, and robustness option overrides."""
+wiring and robustness option overrides."""
 
 from __future__ import annotations
 
