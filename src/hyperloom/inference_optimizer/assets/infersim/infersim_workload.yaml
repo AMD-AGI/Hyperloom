@@ -1,0 +1,42 @@
+# InferSim workload template used by Hyperloom's infersim benchmark backend.
+#
+# This is an env-driven Infera (infersim) workload spec. The infersim bridge
+# (hyperloom.orchestrator.actions.executors.infersim_bridge) points
+# `infersim inference --config` at this file and sets:
+#   INFERSIM_MODEL  - model preset name (e.g. gpt_oss_120B), from the resolved
+#                     Hyperloom model or HYPERLOOM_INFERSIM_MODEL
+#   INFERSIM_TP/PP/EP - parallelism (also forced via CLI overrides)
+#
+# The model preset (`<INFERSIM_MODEL>.yaml`) is resolved from Infera's own
+# configs/models/megatron search path, so this template works regardless of
+# where it lives. To use a fully custom Infera workload instead, set
+# HYPERLOOM_INFERSIM_WORKLOAD=/path/to/your_workload.yaml.
+work_group: ${INFERSIM_TEAM:hyperloom}
+user_name: ${INFERSIM_USER:hyperloom}
+exp_name: ${INFERSIM_EXP_NAME:hyperloom-infersim}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # Model preset to project; overridden per-run via INFERSIM_MODEL.
+    model: ${INFERSIM_MODEL:gpt_oss_120B}.yaml
+    overrides:
+      # Sequence sizing; the serving request length is set separately by the
+      # bridge via --input-len / --output-len.
+      seq_length: ${INFERSIM_SEQ_LENGTH:4096}
+      max_position_embeddings: ${INFERSIM_MAX_POSITION_EMBEDDINGS:4096}
+
+      # Parallelism (env defaults; the bridge also forces these via CLI
+      # overrides so an explicit workload YAML is honored too).
+      tensor_model_parallel_size: ${INFERSIM_TP:1}
+      pipeline_model_parallel_size: ${INFERSIM_PP:1}
+      expert_model_parallel_size: ${INFERSIM_EP:1}
+
+      # Keep the projection self-contained (no data / checkpoints).
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
