@@ -4,8 +4,8 @@
 """Coordinator resume tests.
 
 Covers resume detection, ``replay_for_resume`` rebuilding undecided
-pending_proposals, pruned_families preservation, and lazy replay on the first
-``tick()``.
+pending_proposals, pruned_families preservation, lazy replay on the first
+``tick()``, and reopening the phase machine for a session that stopped in CLOSE.
 """
 
 from __future__ import annotations
@@ -60,6 +60,76 @@ async def test_existing_state_json_triggers_resume(session_dir):
         assert c.resumed_from["state_json_present"] is True
     finally:
         await c.stop()
+
+
+class TestAClosedSessionIsReopenedOnResume:
+    """CLOSE has no way out, so a leg that loads it would tick in it to the end.
+
+    The machine's only terminal phase, and the run loop stops on ``stop_reason``
+    rather than on the phase. A resumed leg that keeps CLOSE therefore spends its
+    whole new clock in a phase admitting nothing but ``report``,
+    ``session_breakdown`` and ``recover``. Every design that stops early on the
+    promise of "resume with more budget" rests on this being reopened.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_session_stopped_in_close_starts_the_next_leg_at_the_entrance(
+        self,
+        session_dir,
+    ):
+        SharedState(session_id="closed", phase="CLOSE").save(session_dir)
+
+        coordinator = Coordinator(session_dir, backends=_backends_full())
+        try:
+            assert coordinator.shared_state.phase == "PRELUDE"
+        finally:
+            await coordinator.stop()
+
+    @pytest.mark.asyncio
+    async def test_the_reopening_is_recorded_as_the_transition_it_is(self, session_dir):
+        """A phase the run did not reach by working its way there needs saying so."""
+        SharedState(session_id="closed", phase="CLOSE").save(session_dir)
+
+        coordinator = Coordinator(session_dir, backends=_backends_full())
+        try:
+            latest = coordinator.shared_state.phase_history[-1]
+        finally:
+            await coordinator.stop()
+
+        assert latest["from_phase"] == "CLOSE"
+        assert latest["to_phase"] == "PRELUDE"
+        assert latest["evidence"]["trigger"] == "resumed_from_close"
+
+    @pytest.mark.asyncio
+    async def test_the_earlier_legs_close_sequence_does_not_count_for_this_one(
+        self,
+        session_dir,
+    ):
+        """The flag means "the sequencer already wrote the breakdown".
+
+        Carried into a leg that then never reaches CLOSE, it silences the
+        end-of-run safety net that would have written one, and the leg finishes
+        with no breakdown at all.
+        """
+        SharedState(session_id="closed", phase="CLOSE", close_sequence_done=True).save(session_dir)
+
+        coordinator = Coordinator(session_dir, backends=_backends_full())
+        try:
+            assert coordinator.shared_state.close_sequence_done is False
+        finally:
+            await coordinator.stop()
+
+    @pytest.mark.asyncio
+    async def test_a_session_stopped_anywhere_else_resumes_where_it_stopped(self, session_dir):
+        """Only the phase with no exit is reopened; the rest can still make progress."""
+        SharedState(session_id="mid", phase="EXPLORE").save(session_dir)
+
+        coordinator = Coordinator(session_dir, backends=_backends_full())
+        try:
+            assert coordinator.shared_state.phase == "EXPLORE"
+            assert coordinator.shared_state.phase_history == []
+        finally:
+            await coordinator.stop()
 
 
 @pytest.mark.asyncio
