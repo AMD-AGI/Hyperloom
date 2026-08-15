@@ -18,6 +18,7 @@ from ..state.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_NO_PROMOTE,
     OUTCOME_REVERT,
+    PROMOTION_REFUSED_KEY,
     classify_change_kind,
     derive_journal_outcome,
     operation_kind_for,
@@ -2184,7 +2185,8 @@ class WritebackCollaborator:
     ) -> bool:
         """Lift a winner only when it improves the current throughput anchor.
 
-        The single writer of ``current_best`` and ``optimization_stack``, and the
+        The writer of ``optimization_stack`` and every config-KEEP write to
+        ``current_best`` (the baseline anchor is the one other writer), and the
         only place a winner is merged onto the previous config instead of
         replacing it, so ``unset_envs`` and cumulative args stay correct across
         the whole stack. The stack append is skipped when the winner is already
@@ -3025,8 +3027,9 @@ class WritebackCollaborator:
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
         # The executor already did per-variant KEEP/REVERT + rebench, so winners
-        # are authoritative; Coordinator is single-writer for explore_search.accepted +
-        # current_best + optimization_stack and does not re-threshold.
+        # arrive graded; Coordinator is single-writer for explore_search.accepted +
+        # current_best + optimization_stack, and the lift still holds a winner that
+        # no longer beats the live anchor.
         # 1. Apply the executor's ledger increment.
         update = result.get("explore_search_update")
         if isinstance(update, dict):
@@ -3538,6 +3541,7 @@ class WritebackCollaborator:
             audit_decision = "promoted"
         elif kept_flag:
             audit_decision = "no_promote"
+            result[PROMOTION_REFUSED_KEY] = True
         elif status == "kept_inert":
             # Applied but every switch off: nothing was promoted, yet the patch
             # stays on disk as registered levers, so it is not a discard either.
@@ -3678,6 +3682,7 @@ class WritebackCollaborator:
             audit_decision = "promoted"
         elif kept_flag:
             audit_decision = "no_promote"
+            result[PROMOTION_REFUSED_KEY] = True
         else:
             audit_decision = "discarded"
         audit_extras = {

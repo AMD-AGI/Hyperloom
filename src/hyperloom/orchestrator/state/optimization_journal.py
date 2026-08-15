@@ -40,6 +40,10 @@ _STATUS_DRIVEN_JOURNAL_KINDS: frozenset[str] = frozenset({"integrate_patch", "fr
 # The only status meaning the change was adopted into current_best.
 _JOURNAL_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
 
+# Set by the promote path when the anchor gate refused a KEEP the executor had
+# already granted: the measurement stands, but nothing was adopted.
+PROMOTION_REFUSED_KEY: str = "promotion_refused"
+
 # Statuses meaning a real change was tested/applied then rolled back or rejected
 # on measured grounds → REVERT. Everything else is ``no_promote``.
 _JOURNAL_REVERT_STATUSES: frozenset[str] = frozenset({"reverted", "accuracy_unavailable_reject", "regression"})
@@ -357,7 +361,8 @@ def derive_journal_outcome(
     For source-patch kinds (``integrate_patch`` / ``framework_agent``) the
     outcome follows the executor's authoritative per-status verdict:
 
-    - ``status == "kept"`` → ``OUTCOME_KEEP``
+    - ``status == "kept"`` → ``OUTCOME_KEEP``, unless the promote path stamped
+      :data:`PROMOTION_REFUSED_KEY` because the anchor gate declined to lift it
     - ``status in {reverted, accuracy_unavailable_reject, regression}`` →
       ``OUTCOME_REVERT``
     - any other status → ``OUTCOME_NO_PROMOTE``
@@ -377,6 +382,8 @@ def derive_journal_outcome(
     if (task_kind or "").lower() in _STATUS_DRIVEN_JOURNAL_KINDS:
         status = str((result_dict or {}).get("status") or "").strip().lower()
         if status in _JOURNAL_KEEP_STATUSES:
+            if (result_dict or {}).get(PROMOTION_REFUSED_KEY):
+                return OUTCOME_NO_PROMOTE
             return OUTCOME_KEEP
         if status in _JOURNAL_REVERT_STATUSES:
             return OUTCOME_REVERT
@@ -524,6 +531,7 @@ __all__ = [
     "OUTCOME_KEEP",
     "OUTCOME_NO_PROMOTE",
     "OUTCOME_REVERT",
+    "PROMOTION_REFUSED_KEY",
     "classify_change_kind",
     "derive_journal_outcome",
     "summarize_change",

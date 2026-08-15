@@ -381,6 +381,18 @@ def test_derive_journal_outcome_integrate_patch_kept_is_keep():
     assert out == OUTCOME_KEEP
 
 
+def test_derive_journal_outcome_refused_promotion_is_no_promote():
+    """A KEEP the anchor gate declined to lift adopted nothing, so it is not a KEEP."""
+    from hyperloom.orchestrator.state.optimization_journal import PROMOTION_REFUSED_KEY
+
+    out = derive_journal_outcome(
+        "integrate_patch",
+        {"status": "kept", "delta_pct": 7.5, PROMOTION_REFUSED_KEY: True},
+        promotable=True,
+    )
+    assert out == OUTCOME_NO_PROMOTE
+
+
 def test_derive_journal_outcome_accuracy_unavailable_reject_is_revert():
     out = derive_journal_outcome(
         "integrate_patch",

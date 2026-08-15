@@ -450,6 +450,31 @@ async def test_promote_integrate_patch_kept_lifts_and_clears_pending(session_dir
 
 
 @pytest.mark.asyncio
+async def test_promote_integrate_patch_marks_a_refused_keep(session_dir):
+    """A KEEP measured below the live anchor is not adopted, and must not journal as one."""
+    from hyperloom.orchestrator.state.optimization_journal import (
+        OUTCOME_NO_PROMOTE,
+        derive_journal_outcome,
+    )
+
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.current_best = {"action": "explore", "tput": 200.0, "extra_server_args": "", "extra_envs": {}}
+
+    result = {
+        "status": "kept",
+        "output_throughput": 140.0,
+        "specialist_task_id": "spec-1",
+        "delta_pct": 40.0,
+    }
+    await coord._promote_to_shared_state("integrate_patch", result, task=_task("integrate_patch", task_id="t1"))
+
+    assert s.current_best["tput"] == 200.0
+    assert derive_journal_outcome("integrate_patch", result, promotable=True) == OUTCOME_NO_PROMOTE
+
+
+@pytest.mark.asyncio
 async def test_integrate_patch_preserves_proposal_owner_across_phase_change(
     session_dir,
 ):
