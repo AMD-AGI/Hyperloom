@@ -854,7 +854,10 @@ ensure_kernel_agents() {
   # The provider SDK is part of the readiness check, not just the CLI import: a
   # pod that already has kernel_agents but no openai_codex would skip the install
   # and leave the OpenAI-only side with a codex provider it cannot construct.
-  if "$PYTHON" -c "import kernel_agents.cli, openai_codex" >/dev/null 2>&1; then
+  # kernel_agents.fusion for the same reason: a checkout from before fusion was
+  # absorbed imports the CLI fine and then fails at forge-fuse.
+  if "$PYTHON" -c "import kernel_agents.cli, kernel_agents.fusion, openai_codex" \
+      >/dev/null 2>&1; then
     log "kernel_agents already importable; skipping install (codex SDK present)"
     return 0
   fi
@@ -883,7 +886,7 @@ ensure_kernel_agents() {
   # KernelForge's provider fallback then turns that into a silent claude run that
   # dies at its first turn on "Not logged in".
   "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "${root}[claude,codex]"
-  "$PYTHON" -c "import kernel_agents, kernel_agents.cli, openai_codex" \
+  "$PYTHON" -c "import kernel_agents, kernel_agents.cli, kernel_agents.fusion, openai_codex" \
     && log "kernel_agents installed OK from ${root} (claude + codex extras)" \
     || die "kernel_agents / codex SDK import failed after install from ${root}"
 }

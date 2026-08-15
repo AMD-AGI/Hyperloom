@@ -313,6 +313,19 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
             }
         )
 
+    patch = artifacts.get("patch")
+    if kept and not (patch and src_file):
+        # Integrate applies a fusion from its patch and target file and returns
+        # without either, while ``ok`` satisfies the KERNEL-entry idempotency
+        # gate -- so reported as a success this is both dropped and never
+        # retried. The failed/REVERT defaults above are the retryable shape.
+        result["error_class"] = "fusion_artifact_missing"
+        result["error"] = (
+            "forge-fuse kept a fusion but exported no "
+            f"{'patch' if not patch else 'source file'} to integrate"
+        )
+        return result
+
     result.update(
         {
             "status": "ok" if kept else "complete",
@@ -321,7 +334,7 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
             "kept": kept,
             "kernel_speedup": speedup,
             "artifact_files": changed,
-            "patch": artifacts.get("patch"),
+            "patch": patch,
             # For integrate's patch-apply path.
             "source_file": src_file,
             # The root the patch was exported against, which may be a
@@ -417,6 +430,9 @@ def main(argv: list[str] | None = None) -> int:
 
     _inject_author_gateway_env(str(payload.get("agent_backend") or ""))
     output_dir = str(payload.get("output_dir") or "")
+    # The output dir is keyed on the task, so a run that dies before writing a
+    # manifest would otherwise have the previous run's KEEP read back as its own.
+    (Path(output_dir or ".") / "fusion_manifest.json").unlink(missing_ok=True)
     timeout_sec = _timeout_sec(payload)
     try:
         proc = _run_with_tree_timeout(cmd, timeout_sec)

@@ -328,6 +328,35 @@ def test_normalize_manifest_kept_writes_keep_result(tmp_path):
     assert result["artifact_files"] == ["foo.py"]
 
 
+def test_normalize_manifest_refuses_a_keep_integrate_cannot_apply(tmp_path):
+    """Integrate needs a patch and a target file, and returns without them.
+
+    Reported as ok this is lost twice: nothing adopts it, and the status also
+    satisfies the KERNEL-entry idempotency gate, so it is never retried either.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest = {
+        "fusion_loop": {
+            "kept": True,
+            "best": {"kernel_speedup": 1.12},
+            "best_env_flag": "VLLM_FUSE=1",
+        },
+        "artifacts": {"patch": None, "changes": []},
+        "fusion": {"source_file": str(output_dir / "foo.py")},
+        "verdict": "keep",
+    }
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["status"] == "failed"
+    assert result["decision"] == "REVERT"
+    assert result["kept"] is False
+    assert result["error_class"] == "fusion_artifact_missing"
+    # Anything the gate accepts would stop the session from trying again.
+    assert result["status"] not in ("ok", "complete", "kept")
+
+
 def _compile_pass_manifest(output_dir, *, kept: bool) -> dict:
     """A claimed framework compile pass: no authoring loop, no validation block."""
     return {
@@ -523,16 +552,6 @@ def test_main_relays_the_outage_sentinel_despite_a_non_zero_exit(tmp_path, monke
     """
     output_dir = tmp_path / "out"
     output_dir.mkdir()
-    (output_dir / "fusion_manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "verdict": "llm_unavailable",
-                "error": {"kind": "api_error", "attempts": 5, "message": "gateway 400 x5"},
-            }
-        ),
-        encoding="utf-8",
-    )
     input_json = tmp_path / "input.json"
     input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
 
@@ -541,7 +560,20 @@ def test_main_relays_the_outage_sentinel_despite_a_non_zero_exit(tmp_path, monke
         stdout = ""
         stderr = ""
 
-    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", lambda _cmd, _timeout: Proc())
+    def fake_run(_cmd, _timeout):
+        (output_dir / "fusion_manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "verdict": "llm_unavailable",
+                    "error": {"kind": "api_error", "attempts": 5, "message": "gateway 400 x5"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return Proc()
+
+    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
 
     rc = forge_fusion.main(["--input-json", str(input_json)])
 
@@ -619,9 +651,9 @@ def test_main_kept_manifest_emits_keep_result(tmp_path, monkeypatch, capsys):
     manifest = {
         "fusion_loop": {"kept": True, "best": {"kernel_speedup": 1.05}},
         "validation": {},
-        "artifacts": {},
+        "artifacts": {"patch": "diff --git a/foo.py", "changes": [{"path": "foo.py"}]},
+        "fusion": {"source_file": str(output_dir / "foo.py")},
     }
-    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     input_json = tmp_path / "input.json"
     input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
 
@@ -630,7 +662,14 @@ def test_main_kept_manifest_emits_keep_result(tmp_path, monkeypatch, capsys):
         stdout = ""
         stderr = ""
 
-    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", lambda _cmd, _timeout: Proc())
+    def fake_run(_cmd, _timeout):
+        # The run writes its own manifest; main() clears any stale one first.
+        (output_dir / "fusion_manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        return Proc()
+
+    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
 
     rc = forge_fusion.main(["--input-json", str(input_json)])
 
@@ -640,6 +679,38 @@ def test_main_kept_manifest_emits_keep_result(tmp_path, monkeypatch, capsys):
     assert result["decision"] == "KEEP"
     assert result["kept"] is True
     assert result["requires_e2e_validation"] is True
+
+
+def test_main_does_not_report_a_previous_runs_manifest(tmp_path, monkeypatch, capsys):
+    """The output dir is keyed on the task, so the file outlives the run."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_manifest.json").write_text(
+        json.dumps(
+            {
+                "fusion_loop": {"kept": True, "best": {"kernel_speedup": 1.4}},
+                "artifacts": {"patch": "diff --git a/foo.py", "changes": []},
+                "fusion": {"source_file": "/fw/foo.py"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    input_json = tmp_path / "input.json"
+    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
+
+    class Proc:
+        returncode = 1
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", lambda _cmd, _timeout: Proc())
+
+    forge_fusion.main(["--input-json", str(input_json)])
+
+    result = _sentinel_payload(capsys.readouterr().out)
+    assert result["kept"] is False
+    assert result["decision"] == "REVERT"
+    assert "no fusion_manifest.json" in result["error"]
 
 
 def test_main_invalid_json_returns_2(tmp_path, capsys):
