@@ -30,6 +30,7 @@ Design notes
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -77,8 +78,14 @@ _MODEL_HEURISTICS: tuple[tuple[str, str], ...] = (
     ("llama3.1-70b", "llama3.1_70B"),
     ("llama3.1-8b", "llama3.1_8B"),
     ("llama3.3-70b", "llama3.3_70B"),
+    # Longest/most specific needles first: "deepseek-v2-lite" must not be
+    # swallowed by "deepseek-v2", and R1 is the V3 architecture at 671B so it
+    # resolves to the V3 config rather than a config of its own.
+    ("deepseek-v2-lite", "deepseek_v2_lite"),
+    ("deepseek-r1", "deepseek_v3_671b-fp8"),
     ("deepseek-v3", "deepseek_v3"),
     ("deepseek-v2", "deepseek_v2"),
+    ("minimax-m2", "minimax_m2.5"),
     ("mixtral-8x22b", "mixtral_8x22B_v0.1"),
     ("mixtral-8x7b", "mixtral_8x7B_v0.1"),
 )
@@ -187,6 +194,73 @@ def _parse_server_arg_str(server_args: str, *flags: str) -> str | None:
     return None
 
 
+def parse_speculative(server_args: str) -> tuple[str | None, int]:
+    """Speculative-decoding ``(method, k)`` from a framework's server args.
+
+    Each serving framework spells this differently, and Hyperloom's EXPLORE grid
+    emits all three, so all three are recognised:
+
+    * vLLM   ``--speculative-config '{"method": "deepseek_mtp",
+      "num_speculative_tokens": 3}'``
+    * SGLang ``--speculative-algorithm NEXTN --speculative-num-steps 3``
+    * atom   ``--method mtp --num-speculative-tokens 3``
+
+    Returns ``(None, 0)`` when the args request no speculation. ``k`` defaults to
+    1 when a method is named without a token count, matching every framework's
+    own default.
+    """
+    if not server_args:
+        return None, 0
+
+    method = _parse_server_arg_str(server_args, "--speculative-algorithm")
+    k = _parse_server_arg_int(
+        server_args,
+        "--speculative-num-steps",
+        "--num-speculative-tokens",
+        "--speculative-num-draft-tokens",
+        "--speculative-tokens",
+    )
+
+    raw = _parse_server_arg_str(server_args, "--speculative-config")
+    if raw:
+        # The JSON is usually quoted as a single shell token, but a bare
+        # unquoted blob would have been split on spaces by the tokenizer; fall
+        # back to a regex over the whole string in that case.
+        try:
+            cfg = json.loads(raw.strip("'\""))
+        except (ValueError, TypeError):
+            cfg = {}
+            m = re.search(r'"method"\s*:\s*"([^"]+)"', server_args)
+            if m:
+                cfg["method"] = m.group(1)
+            m = re.search(r'"num_speculative_tokens"\s*:\s*(\d+)', server_args)
+            if m:
+                cfg["num_speculative_tokens"] = int(m.group(1))
+        if isinstance(cfg, dict):
+            method = cfg.get("method") or method
+            k = int(cfg.get("num_speculative_tokens") or 0) or k
+
+    # atom spells the method as ``--method mtp``; only honour that spelling when
+    # it names a speculative method, since ``--method`` is a generic flag name.
+    if not method:
+        generic = _parse_server_arg_str(server_args, "--method")
+        if generic and generic.strip().lower() in ("mtp", "eagle", "eagle3", "nextn"):
+            method = generic
+
+    if not method:
+        return None, 0
+    return str(method), max(1, int(k or 0))
+
+
+def _parse_server_arg_int(server_args: str, *flags: str) -> int:
+    """Integer value for any of ``flags``, or 0 when absent/non-numeric."""
+    raw = _parse_server_arg_str(server_args, *flags)
+    try:
+        return int(str(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
 def spec_from_benchmark(bench: dict) -> ServingSpec:
     """Extract a :class:`ServingSpec` from a Magpie ``benchmark`` block."""
     bench = bench or {}
@@ -261,6 +335,7 @@ class AnchorChoice:
 def recipe_from_spec(spec: ServingSpec) -> dict[str, Any]:
     """Canonical InferSim recipe dict for a Hyperloom serving spec."""
     attn = _parse_server_arg_str(spec.extra_server_args, "--attention-backend")
+    method, k = parse_speculative(spec.extra_server_args)
     return {
         "model": spec.model_path or None,
         "weight_dtype": spec.weight_dtype,
@@ -269,6 +344,11 @@ def recipe_from_spec(spec: ServingSpec) -> dict[str, Any]:
         "attention_backend": attn,
         "cudagraph": None,
         "aiter": None,
+        # A speculating candidate emits >1 token per step, so an anchor measured
+        # without speculation cannot price it. Putting this on the recipe is what
+        # makes the regime signature reject such an anchor instead of silently
+        # reporting a plain-decode number for it.
+        "speculative": f"spec:{k}" if method else "off",
         "tp": spec.tp,
         "pp": spec.pp,
         "ep": spec.ep,
@@ -288,6 +368,10 @@ def select_anchor(spec: ServingSpec) -> AnchorChoice | None:
     """
     explicit = os.environ.get(ENV_ANCHOR)
     if explicit and Path(explicit).is_file():
+        # Pinned by an operator, but still gated: a corrupt curve would silently
+        # propagate into every projection made from it.
+        if not anchor_curve_is_sane(explicit):
+            return None
         return AnchorChoice(path=explicit, regime_distance=0, model=spec.model_path)
 
     store_root = os.environ.get(ENV_ANCHOR_STORE)
@@ -332,7 +416,10 @@ def select_anchor(spec: ServingSpec) -> AnchorChoice | None:
                 gap += abs(float(av) - float(rv))
         return (dist, 0 if real else 1, gap)
 
-    best = min(entries, key=rank)
+    usable = [e for e in entries if anchor_curve_is_sane(e["path"])]
+    if not usable:
+        return None
+    best = min(usable, key=rank)
     dist, fidelity_rank, _ = rank(best)
     return AnchorChoice(
         path=best["path"],
@@ -341,6 +428,44 @@ def select_anchor(spec: ServingSpec) -> AnchorChoice | None:
         needs_warmup=bool(dist),
         real_weights=(fidelity_rank == 0),
     )
+
+
+# A decode step at a larger batch does strictly more work, so measured decode
+# latency must not fall as batch rises. Small drops are ordinary run-to-run
+# noise; a large one means the measurement itself is broken (the harness times
+# decode by differencing two generate() calls, which degenerates when the longer
+# call is not actually longer). Such an artifact is not merely imprecise -- it
+# poisons every projection that anchors on it, so it is rejected outright.
+_ANCHOR_MONOTONIC_TOLERANCE = 0.15
+
+
+def anchor_curve_is_sane(path: str) -> bool:
+    """False when an artifact's measured decode curve is physically impossible."""
+    try:
+        with open(path) as fh:
+            doc = json.load(fh) or {}
+    except (OSError, ValueError):
+        return False
+    points = []
+    for entry in doc.get("sweep") or []:
+        try:
+            batch, decode_ms = int(entry["batch"]), float(entry["decode_ms"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if decode_ms <= 0.0:
+            return False
+        points.append((batch, decode_ms))
+    if not points:
+        return False
+    # A single-batch anchor is narrow, not invalid: there is no monotonicity to
+    # check, and it still calibrates the one operating point it measured.
+    points.sort()
+    peak = points[0][1]
+    for _, decode_ms in points[1:]:
+        if decode_ms < peak * (1.0 - _ANCHOR_MONOTONIC_TOLERANCE):
+            return False
+        peak = max(peak, decode_ms)
+    return True
 
 
 def _anchor_is_real_weights(path: str) -> bool:

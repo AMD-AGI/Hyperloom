@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
@@ -287,3 +288,95 @@ def test_select_anchor_none_without_store(monkeypatch):
     monkeypatch.delenv(ib.ENV_ANCHOR, raising=False)
     monkeypatch.delenv(ib.ENV_ANCHOR_STORE, raising=False)
     assert ib.select_anchor(ib.ServingSpec(framework="vllm", model_path="m")) is None
+
+
+def _write_curve(path: Path, points: list[tuple[int, float]]) -> None:
+    """Artifact carrying an explicit decode-vs-batch curve."""
+    path.write_text(
+        json.dumps(
+            {
+                "backend": "vllm",
+                "sweep": [
+                    {"batch": b, "prefill_ms": 10.0, "decode_ms": d} for b, d in points
+                ],
+                "meta": {"model": "m", "tp": 1, "input_len": 1024},
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "points, sane",
+    [
+        ([(1, 4.0), (8, 6.4), (32, 12.0)], True),      # ordinary rising curve
+        ([(16, 12.0)], True),                          # single point: narrow, valid
+        ([(8, 6.0), (16, 5.7)], True),                 # -5%: run-to-run noise
+        ([(16, 16.3), (64, 1.4)], False),              # differencing degenerated
+        ([(4, 11.6), (32, 9.5)], False),               # decode faster at 8x batch
+        ([(8, 0.0)], False),                           # non-positive timing
+        ([], False),                                   # nothing measured
+    ],
+)
+def test_anchor_curve_sanity_gate(tmp_path, points, sane):
+    p = tmp_path / "curve.json"
+    _write_curve(p, points)
+    assert ib.anchor_curve_is_sane(str(p)) is sane
+
+
+def test_anchor_curve_sanity_gate_missing_file(tmp_path):
+    assert ib.anchor_curve_is_sane(str(tmp_path / "nope.json")) is False
+
+
+@pytest.mark.parametrize(
+    "args, expected",
+    [
+        ("", (None, 0)),
+        ("--attention-backend triton", (None, 0)),
+        ('--speculative-config \'{"method": "deepseek_mtp", '
+         '"num_speculative_tokens": 3}\'', ("deepseek_mtp", 3)),
+        ("--speculative-algorithm NEXTN --speculative-num-steps 3", ("NEXTN", 3)),
+        ("--speculative-algorithm EAGLE3", ("EAGLE3", 1)),
+        ("--method mtp --num-speculative-tokens 3", ("mtp", 3)),
+        ("--method fp8", (None, 0)),
+    ],
+)
+def test_parse_speculative_across_frameworks(args, expected):
+    assert ib.parse_speculative(args) == expected
+
+
+def test_recipe_marks_speculative_candidates_apart():
+    """A speculating candidate must not share a regime with a plain one.
+
+    Speculation changes how many tokens a step emits, so reusing a
+    non-speculative anchor for it silently under-predicts throughput.
+    """
+    plain = ib.recipe_from_spec(ib.ServingSpec(framework="vllm", model_path="m"))
+    mtp = ib.recipe_from_spec(
+        ib.ServingSpec(
+            framework="atom",
+            model_path="m",
+            extra_server_args="--method mtp --num-speculative-tokens 3",
+        )
+    )
+    assert plain["speculative"] == "off"
+    assert mtp["speculative"] == "spec:3"
+    assert plain["speculative"] != mtp["speculative"]
+
+
+def test_select_anchor_rejects_insane_anchor(tmp_path, monkeypatch):
+    """A corrupt curve is worse than no anchor: fall back to pure analysis.
+
+    Applies even to an operator-pinned anchor, which is the path most likely to
+    point at a hand-picked artifact nobody re-validated.
+    """
+    bad = tmp_path / "bad.json"
+    _write_curve(bad, [(16, 16.3), (64, 1.4)])
+    monkeypatch.setenv(ib.ENV_ANCHOR, str(bad))
+    monkeypatch.delenv(ib.ENV_ANCHOR_STORE, raising=False)
+    assert ib.select_anchor(ib.ServingSpec(framework="vllm", model_path="m")) is None
+
+    good = tmp_path / "good.json"
+    _write_curve(good, [(16, 12.0), (64, 20.0)])
+    monkeypatch.setenv(ib.ENV_ANCHOR, str(good))
+    choice = ib.select_anchor(ib.ServingSpec(framework="vllm", model_path="m"))
+    assert choice is not None and choice.path == str(good)
