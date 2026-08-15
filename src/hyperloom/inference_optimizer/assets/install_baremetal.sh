@@ -47,9 +47,9 @@ _FRAMEWORK_ENV_WAS_SET="${FRAMEWORK_ENV+x}"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
 # Framework versions track docs/compatibility.rst (SGLang v0.5.16, ROCm 7.2).
-# vLLM installs 0.24.0+rocm723 from the wheels.vllm.ai pip index, matching the
-# v0.24.0 Docker image version. The pip index publishes 0.24.0 only as the
-# rocm723 variant (ROCm 7.2.3), so the ROCm layer is 7.2.3. AITER_REF
+# vLLM installs 0.27.1+rocm723 from the wheels.vllm.ai pip index, matching the
+# vllm-v0.27.1-rocm7.2.3 Docker image. The rocm723 variant puts the vLLM ROCm
+# layer at 7.2.3, one patch level above the SGLang stack. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
 SGLANG_REF="${SGLANG_REF:-v0.5.16}"
@@ -65,7 +65,7 @@ fi
 SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-7.2.0}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
-VLLM_VERSION="${VLLM_VERSION:-0.24.0}"
+VLLM_VERSION="${VLLM_VERSION:-0.27.1}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm723}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
 VLLM_VENV_ROOT="${VLLM_VENV_ROOT:-/opt/hyperloom/vllm-venv}"
