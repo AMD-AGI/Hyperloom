@@ -313,17 +313,28 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
             }
         )
 
+    # Integrate applies a fusion from a patch file, its root and a target, and
+    # returns without any of them, while ``ok`` satisfies the KERNEL-entry
+    # idempotency gate -- so reported as a success such a run is both dropped
+    # and never retried. Checked here rather than assumed of the producer: the
+    # invariant lives in another repository and nothing here can enforce it.
     patch = artifacts.get("patch")
-    if kept and not (patch and src_file):
-        # Integrate applies a fusion from its patch and target file and returns
-        # without either, while ``ok`` satisfies the KERNEL-entry idempotency
-        # gate -- so reported as a success this is both dropped and never
-        # retried. The failed/REVERT defaults above are the retryable shape.
+    missing = next(
+        (
+            name for name, present in (
+                ("a patch", bool(patch)),
+                ("the patch file it named", bool(patch) and Path(str(patch)).is_file()),
+                ("a target file", bool(src_file)),
+                ("a patch root", bool(artifacts.get("repo_root"))),
+            )
+            if not present
+        ),
+        "",
+    )
+    if kept and missing:
+        # The failed/REVERT defaults above are already the retryable shape.
         result["error_class"] = "fusion_artifact_missing"
-        result["error"] = (
-            "forge-fuse kept a fusion but exported no "
-            f"{'patch' if not patch else 'source file'} to integrate"
-        )
+        result["error"] = f"forge-fuse kept a fusion but exported no {missing}"
         return result
 
     result.update(

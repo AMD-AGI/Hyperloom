@@ -296,6 +296,17 @@ def test_run_with_tree_timeout_reaps_on_timeout():
         )
 
 
+def _patch_file(output_dir) -> str:
+    """A real patch file, which is what KernelForge's manifest actually names.
+
+    ``artifacts.patch`` is a path, not the diff text, and integrate reads it off
+    disk -- so a fixture holding the text would not exercise what is checked.
+    """
+    path = Path(output_dir) / "fusion.patch"
+    path.write_text("diff --git a/foo.py b/foo.py\n", encoding="utf-8")
+    return str(path)
+
+
 def test_normalize_manifest_kept_writes_keep_result(tmp_path):
     output_dir = tmp_path / "out"
     output_dir.mkdir()
@@ -308,7 +319,7 @@ def test_normalize_manifest_kept_writes_keep_result(tmp_path):
         },
         "validation": {"kept": True, "kernel_speedup": 1.12},
         "artifacts": {
-            "patch": "diff --git a/foo.py",
+            "patch": _patch_file(output_dir),
             "changes": [{"path": "foo.py"}],
             # KernelForge sets repo_root exactly when it sets a patch.
             "repo_root": "/repo/root",
@@ -357,6 +368,41 @@ def test_normalize_manifest_refuses_a_keep_integrate_cannot_apply(tmp_path):
     assert result["status"] not in ("ok", "complete", "kept")
 
 
+@pytest.mark.parametrize(
+    ("drop", "expected"),
+    [
+        ("patch_file", "the patch file it named"),
+        ("source_file", "a target file"),
+        ("repo_root", "a patch root"),
+    ],
+)
+def test_normalize_manifest_checks_each_artifact_it_hands_to_integrate(
+    tmp_path, drop, expected
+):
+    """Verified rather than assumed: the producer is another repository."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    patch = _patch_file(output_dir)
+    if drop == "patch_file":
+        Path(patch).unlink()
+    manifest = {
+        "fusion_loop": {"kept": True, "best": {"kernel_speedup": 1.12}},
+        "artifacts": {
+            "patch": patch,
+            "changes": [],
+            "repo_root": "" if drop == "repo_root" else "/venv/site-packages",
+        },
+        "fusion": {"source_file": "" if drop == "source_file" else "/fw/foo.py"},
+    }
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["kept"] is False
+    assert result["error_class"] == "fusion_artifact_missing"
+    assert expected in result["error"]
+
+
 def _compile_pass_manifest(output_dir, *, kept: bool) -> dict:
     """A claimed framework compile pass: no authoring loop, no validation block."""
     return {
@@ -375,7 +421,7 @@ def _compile_pass_manifest(output_dir, *, kept: bool) -> dict:
             "kept": kept,
         },
         "artifacts": {
-            "patch": "diff --git a/vllm/config.py",
+            "patch": _patch_file(output_dir),
             "changes": [{"path": "vllm/config.py"}],
             "repo_root": "/venv/site-packages",
         }
@@ -403,7 +449,7 @@ def test_normalize_manifest_keeps_a_claimed_compile_pass(tmp_path):
     assert result["decision"] == "KEEP"
     assert result["status"] == "ok"
     assert result["micro_decision"] == "candidate"
-    assert result["patch"] == "diff --git a/vllm/config.py"
+    assert result["patch"] == str(output_dir / "fusion.patch")
     assert result["kernel_repo"] == "/venv/site-packages"
     assert result["requires_e2e_validation"] is True
     # The edit lives in the framework source, so there is no runtime flag to set.
@@ -510,7 +556,11 @@ def test_an_llm_outage_verdict_never_discards_a_validated_fusion(tmp_path):
         "verdict": "llm_unavailable",
         "fusion_loop": {"kept": True, "best": {"kernel_speedup": 1.2}},
         "validation": {"kept": True, "kernel_speedup": 1.2},
-        "artifacts": {"patch": "diff --git a/foo.py", "changes": [{"path": "foo.py"}]},
+        "artifacts": {
+            "patch": _patch_file(output_dir),
+            "changes": [{"path": "foo.py"}],
+            "repo_root": "/venv/site-packages",
+        },
         "fusion": {"source_file": str(output_dir / "foo.py")},
         "error": {"kind": "api_error", "attempts": 2, "message": "flaky"},
     }
@@ -522,7 +572,7 @@ def test_an_llm_outage_verdict_never_discards_a_validated_fusion(tmp_path):
     assert result["decision"] == "KEEP"
     assert result["status"] == "ok"
     assert result["requires_e2e_validation"] is True
-    assert result["patch"] == "diff --git a/foo.py"
+    assert result["patch"] == str(output_dir / "fusion.patch")
     assert "error_class" not in result
 
 
@@ -613,7 +663,7 @@ def test_normalize_manifest_prefers_artifacts_repo_root(tmp_path, monkeypatch):
         "fusion_loop": {"kept": True, "best": {"kernel_speedup": 1.2}},
         "validation": {"kept": True},
         "artifacts": {
-            "patch": "diff --git a/vllm/x.py",
+            "patch": _patch_file(output_dir),
             "changes": [{"path": "vllm/x.py"}],
             "repo_root": "/venv/site-packages",
         },
@@ -651,7 +701,11 @@ def test_main_kept_manifest_emits_keep_result(tmp_path, monkeypatch, capsys):
     manifest = {
         "fusion_loop": {"kept": True, "best": {"kernel_speedup": 1.05}},
         "validation": {},
-        "artifacts": {"patch": "diff --git a/foo.py", "changes": [{"path": "foo.py"}]},
+        "artifacts": {
+            "patch": _patch_file(output_dir),
+            "changes": [{"path": "foo.py"}],
+            "repo_root": "/venv/site-packages",
+        },
         "fusion": {"source_file": str(output_dir / "foo.py")},
     }
     input_json = tmp_path / "input.json"
@@ -689,7 +743,7 @@ def test_main_does_not_report_a_previous_runs_manifest(tmp_path, monkeypatch, ca
         json.dumps(
             {
                 "fusion_loop": {"kept": True, "best": {"kernel_speedup": 1.4}},
-                "artifacts": {"patch": "diff --git a/foo.py", "changes": []},
+                "artifacts": {"patch": _patch_file(output_dir), "changes": []},
                 "fusion": {"source_file": "/fw/foo.py"},
             }
         ),
