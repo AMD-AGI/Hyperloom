@@ -219,7 +219,6 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         # FRAMEWORK_AGENT phase transitions.
         "framework_agent_phase_done",  # FRAMEWORK_AGENT → EXPLORE normal completion (no more candidates)
         "framework_agent_plateau",  # FRAMEWORK_AGENT → EXPLORE; N consecutive resolved candidates with no KEEP (benchmarked or not)
-        "framework_agent_force_exit_low_budget",  # FRAMEWORK_AGENT → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
         "framework_agent_budget_cap",  # FRAMEWORK_AGENT → EXPLORE; per-phase wall-clock budget fraction reached
         # Cyclic phase machine back-edge reasons (transitions that reopen a macro-cycle).
         "cycle_reloop",  # SWEEP → FRAMEWORK/EXPLORE; opens a new macro-cycle while budget + leverage remain
@@ -280,7 +279,6 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "explore_force_exit_low_budget",
         "framework_agent_phase_done",
         "framework_agent_plateau",
-        "framework_agent_force_exit_low_budget",
         # R7: cyclic phase machine exhausted leverage across macro-cycles.
         "global_converged",
         # Context-window preflight: max_position_embeddings can't hold ISL+OSL.
@@ -367,37 +365,16 @@ DEFAULT_PLATEAU_KERNEL_REVERT_STREAK: int = 3
 DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT: float = 0.5
 DEFAULT_PLATEAU_KERNEL_LOOKBACK: int = 5
 
-# EXPLORE hard force-exit thresholds (IR-6 HARD time gate; overrides plateau).
-# Fires when remaining wall-clock < HOURS_REMAINING OR EXPLORE budget fraction < BUDGET_PCT.
-DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 3.0
+# EXPLORE hard force-exit (IR-6 HARD gate; overrides plateau). Fires on the
+# unspent fraction of EXPLORE's own charge-back budget, which already reserves
+# the KERNEL/SWEEP/CLOSE share — no session-remaining floor belongs here.
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT: float = 0.20
 
-# FRAMEWORK plateau/force-exit knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT; force-exit when remaining < RATIO * max_hours.
+# FRAMEWORK plateau knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT.
 DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK: int = 5
 DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT: float = 1.0
-import os as _os_fw_ratio  # noqa: E402
+import os as _os_env  # noqa: E402
 
-
-def _default_framework_force_exit_ratio() -> float:
-    """FRAMEWORK force-exit ratio; env-overridable via
-    ``INFERENCE_OPTIMIZER_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO``.
-
-    Default 0.6 reserves the last 40% of budget for later phases; lower it when
-    the FRAMEWORK pipeline is the primary objective so it can process forced
-    candidates instead of force-exiting with a full pending queue.
-    """
-    raw = (_os_fw_ratio.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO", "") or "").strip()
-    if raw:
-        try:
-            v = float(raw)
-            if 0.0 <= v <= 1.0:
-                return v
-        except (TypeError, ValueError):
-            pass  # malformed env override; fall through to the 0.6 default
-    return 0.6
-
-
-DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO: float = _default_framework_force_exit_ratio()
 # FRAMEWORK per-candidate plateau: after this many consecutive resolved
 # candidates without a KEEP (including non-benchmarked terminal outcomes), the
 # phase exits to EXPLORE. A KEEP — or a macro-cycle boundary — resets it.
@@ -422,7 +399,7 @@ def _default_cycle_reloop_min_remaining_sec() -> float:
     smaller of it and :data:`_CYCLE_RELOOP_BUDGET_RATIO` of their total budget,
     so a short session is not blocked by a threshold it can never satisfy.
     """
-    raw = (_os_fw_ratio.environ.get("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", "") or "").strip()
+    raw = (_os_env.environ.get("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", "") or "").strip()
     if raw:
         try:
             v = float(raw)
@@ -630,7 +607,7 @@ def _kernel_idle_max_ticks() -> int:
     still winding down promptly once candidates are genuinely exhausted, instead
     of spinning until the KERNEL wall-clock cap.
     """
-    raw = (_os_fw_ratio.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "") or "").strip()
+    raw = (_os_env.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "") or "").strip()
     try:
         val = int(raw)
         return val if val >= 1 else 3
@@ -653,7 +630,7 @@ def _kernel_idle_min_seconds() -> float:
     longer than any dispatch gap a healthy phase produces, while still cutting
     hours off a phase that has genuinely stopped moving.
     """
-    raw = (_os_fw_ratio.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", "") or "").strip()
+    raw = (_os_env.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", "") or "").strip()
     try:
         val = float(raw)
         return val if val > 0.0 else 600.0
@@ -730,13 +707,18 @@ def normalize_budget_pct(
 ) -> dict[str, float]:
     """Return a sanitized ``phase -> pct`` mapping (budgets are upper bounds, not renormalized to 1.0).
 
+    ``0.0`` is kept, not dropped: it is the sentinel
+    :func:`redistribute_budget_pct` writes for a phase the run turned off, and
+    overlaying the default back on it would leak that phase's share into the
+    charge-back denominator of every earlier phase.
+
     Args:
         budget (dict[str, float] | None): Raw ``phase -> pct`` overrides;
             unknown phases and out-of-range / unparseable values are dropped.
 
     Returns:
         dict[str, float]: The defaults overlaid with the valid overrides (each
-        in the ``(0.0, 1.0]`` range).
+        in the ``[0.0, 1.0]`` range).
     """
     out = dict(DEFAULT_PHASE_BUDGET_PCT)
     if not budget:
@@ -749,7 +731,7 @@ def normalize_budget_pct(
             f = float(val)
         except (TypeError, ValueError):
             continue
-        if not (0.0 < f <= 1.0):
+        if not (0.0 <= f <= 1.0):
             continue
         out[canon] = f
     return out
@@ -1080,14 +1062,18 @@ def _phase_budget_total_seconds(
             ``session_remaining_seconds`` / ``phase_elapsed_seconds``).
 
     Returns:
-        float | None: Effective total budget in seconds, or ``None`` when no
-        finite budget applies (unbounded window or the phase has no fraction).
+        float | None: Effective total budget in seconds, ``0.0`` when the phase
+        is explicitly allocated no budget, or ``None`` when no finite budget
+        applies (unbounded window, or an unset/unrecognized phase).
     """
     budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
     phase = (getattr(state, "phase", "") or "").strip().upper()
-    pct = float(budget.get(phase, 0.0))
-    if pct <= 0.0:
+    if phase not in budget:
         return None
+    pct = float(budget[phase])
+    if pct <= 0.0:
+        # Zero fraction = no time. ``None`` would read as "unbounded" to callers.
+        return 0.0
 
     session_remaining = session_remaining_seconds(state, now_unix=now_unix)
     if session_remaining is not None:
@@ -1183,12 +1169,17 @@ def phase_cap_seconds(
     :func:`is_long_run`.)
 
     Returns:
-        float | None: Cap in seconds, or ``None`` when no fraction applies.
+        float | None: Cap in seconds, ``0.0`` when the phase is explicitly
+        allocated no budget, or ``None`` when the phase is unset/unrecognized.
     """
     budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
-    pct = budget.get((getattr(state, "phase", "") or "").upper(), 0.0)
-    if pct <= 0:
+    phase = (getattr(state, "phase", "") or "").upper()
+    if phase not in budget:
         return None
+    pct = float(budget[phase])
+    if pct <= 0.0:
+        # Zero fraction = no wall-clock allowed, as opposed to no cap at all.
+        return 0.0
     proportional = effective_max_minutes(state) * 60.0 * pct
     abs_cap = math.ceil(PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES * pct) * 60.0
     return float(min(proportional, abs_cap))
@@ -1269,71 +1260,37 @@ def session_remaining_seconds(
 def should_force_exit_explore(
     state: Any,
     *,
-    hours_remaining_threshold: float = DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
     budget_pct_threshold: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Return ``(True, evidence)`` when HARD EXPLORE force-exit fires (IR-6).
 
-    Fires when session remaining ≤ hours_threshold*3600 OR phase remaining
-    pct ≤ budget_pct_threshold; ``evidence`` records which fired.
+    Fires when the unspent fraction of EXPLORE's own charge-back budget drops to
+    ``budget_pct_threshold`` or below. A freshly entered phase always reads 1.0,
+    however little of the session is left.
 
     Args:
         state (Any): Frozen SharedState view.
-        hours_remaining_threshold (float): Session-hours-remaining gate;
-            non-positive disables it.
         budget_pct_threshold (float): Phase-budget-fraction gate; non-positive
-            disables it.
+            disables the force-exit entirely.
         budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
             to ``state.phase_budget_pct`` when None.
         now_unix (float | None): Override for the current time.
 
     Returns:
         tuple[bool, dict[str, Any]]: ``(fired, evidence)`` — whether HARD
-        force-exit fires, and the evidence map recording which gate(s) fired.
+        force-exit fires, and the measurements behind that verdict.
     """
-    evidence: dict[str, Any] = {
-        "hours_remaining_threshold": float(hours_remaining_threshold),
-        "budget_pct_threshold": float(budget_pct_threshold),
-    }
-    fired = False
-    fired_reasons: list[str] = []
-
-    # Non-positive threshold = disabled; both disabled turns force-exit off.
-    hours_threshold_enabled = float(hours_remaining_threshold) > 0.0
-    pct_threshold_enabled = float(budget_pct_threshold) > 0.0
-
-    session_remaining = session_remaining_seconds(state, now_unix=now_unix)
-    if session_remaining is not None and hours_threshold_enabled:
-        evidence["session_remaining_seconds"] = round(session_remaining, 2)
-        threshold_sec = float(hours_remaining_threshold) * 3600.0
-        if session_remaining <= threshold_sec:
-            fired = True
-            fired_reasons.append("session_remaining")
-
-    phase_remaining = phase_budget_remaining_seconds(
-        state,
-        budget_pct=budget_pct,
-        now_unix=now_unix,
-    )
-    if phase_remaining is not None:
-        # Fraction of the phase's EFFECTIVE total budget — same helper that
-        # produced phase_remaining, so numerator and denominator stay in the same
-        # units (charge-back against the session for short runs, against the
-        # cycle-window-capped base for long bounded runs, flat per-window for
-        # unbounded runs).
-        phase_total_sec = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
-        if phase_total_sec and phase_total_sec > 0:
-            remaining_pct = phase_remaining / phase_total_sec
-            evidence["phase_remaining_pct"] = round(remaining_pct, 4)
-            evidence["phase_remaining_seconds"] = round(phase_remaining, 2)
-            if pct_threshold_enabled and remaining_pct <= float(budget_pct_threshold):
-                fired = True
-                fired_reasons.append("phase_remaining_pct")
-
-    evidence["fired_reasons"] = fired_reasons
-    return fired, evidence
+    evidence: dict[str, Any] = {"budget_pct_threshold": float(budget_pct_threshold)}
+    phase_total_sec = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
+    if not phase_total_sec:
+        return False, evidence
+    phase_remaining = max(0.0, phase_total_sec - phase_cumulative_seconds(state, now_unix=now_unix))
+    remaining_pct = phase_remaining / phase_total_sec
+    evidence["phase_remaining_pct"] = round(remaining_pct, 4)
+    evidence["phase_remaining_seconds"] = round(phase_remaining, 2)
+    return float(budget_pct_threshold) > 0.0 and remaining_pct <= float(budget_pct_threshold), evidence
 
 
 # plateau pure functions
@@ -1558,7 +1515,7 @@ def compute_plateau_kernel(
     }
 
 
-# terminal / abort (global)
+# terminal (global)
 def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
     """Return ``(stop_reason, evidence)`` for a phase-orthogonal stop.
 
@@ -1915,27 +1872,6 @@ def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     return None
 
 
-def abort_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
-    """Detect a PRELUDE-aborting stop reason on the state.
-
-    Recognizes terminal stop reasons (e.g. ``recipe_kb_t0_failed``,
-    ``time_exhausted_during_prelude``) so phase history captures the
-    boundary.
-
-    Args:
-        state: Object exposing a ``stop_reason`` attribute.
-
-    Returns:
-        A ``(reason, metadata)`` tuple when an abort reason is present,
-        otherwise ``None``.
-    """
-    # Treat these stop reasons as a PRELUDE abort so phase_history records it.
-    sr = (getattr(state, "stop_reason", "") or "").strip()
-    if sr in ("recipe_kb_t0_failed", "time_exhausted_during_prelude", "prelude_policy_loop", "user_stop_requested"):
-        return sr, {"reason_origin": "shared_state.stop_reason"}
-    return None
-
-
 def exit_normal_explore(
     state: Any,
     *,
@@ -1944,7 +1880,6 @@ def exit_normal_explore(
     plateau_lookback: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
     plateau_keep_gain_threshold_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
     plateau_empty_streak_threshold: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
-    force_exit_hours_remaining: float = DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
     force_exit_budget_pct: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
 ) -> tuple[str, dict[str, Any]] | None:
     """EXPLORE normal exit.
@@ -1964,8 +1899,6 @@ def exit_normal_explore(
             which the plateau gain arm is active.
         plateau_empty_streak_threshold: Consecutive empty specialist rounds
             required for the plateau streak arm.
-        force_exit_hours_remaining (float): Session-hours-remaining force-exit
-            threshold.
         force_exit_budget_pct (float): Phase-budget-fraction force-exit
             threshold.
 
@@ -1975,7 +1908,6 @@ def exit_normal_explore(
     """
     forced, force_ev = should_force_exit_explore(
         state,
-        hours_remaining_threshold=force_exit_hours_remaining,
         budget_pct_threshold=force_exit_budget_pct,
         budget_pct=budget_pct,
         now_unix=now_unix,
@@ -2356,27 +2288,20 @@ def _framework_agent_plateau_streak_threshold() -> int:
 def exit_normal_framework_agent(
     state: Any,
     *,
-    max_hours: float | None = None,
     now_unix: float | None = None,
-    force_exit_hours_remaining_ratio: float = (DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO),
     budget_pct: dict[str, float] | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """FRAMEWORK normal exit.
 
-    Priority: 0. HARD force-exit when remaining < ratio*max_hours →
-    ``framework_agent_force_exit_low_budget``; 0.5. per-phase budget cap reached →
-    ``framework_agent_budget_cap``; 1. plateau when
-    :func:`_framework_agent_consecutive_no_keep` ≥ threshold →
-    ``framework_agent_plateau``; 2. ``framework_agent_phase_done``; else ``None``.
+    Priority: 0. per-phase budget cap reached → ``framework_agent_budget_cap``;
+    1. plateau when :func:`_framework_agent_consecutive_no_keep` ≥ threshold →
+    ``framework_agent_plateau``; 2. ``framework_agent_phase_done``; else
+    ``None``.
 
     Args:
-        state (Any): Frozen SharedState view; may expose a ``remaining_minutes``
-            callable and ``framework_agent_phase_done`` flag.
-        max_hours (float | None): Session wall-clock budget in hours; enables
-            the force-exit gate when positive.
+        state (Any): Frozen SharedState view; may expose a
+            ``framework_agent_phase_done`` flag.
         now_unix (float | None): Override for the current time.
-        force_exit_hours_remaining_ratio (float): Fraction of ``max_hours``
-            below which the force-exit gate fires.
         budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
             to ``state.phase_budget_pct``. Enables the per-phase wall-clock cap.
 
@@ -2384,28 +2309,6 @@ def exit_normal_framework_agent(
         tuple[str, dict[str, Any]] | None: ``(reason, evidence)`` for the
         FRAMEWORK exit, or ``None`` when the phase should continue.
     """
-    if max_hours and max_hours > 0:
-        remaining_min_fn = getattr(state, "remaining_minutes", None)
-        if callable(remaining_min_fn):
-            try:
-                remaining_minutes = float(remaining_min_fn(now_unix=now_unix))
-            except TypeError:
-                remaining_minutes = float(remaining_min_fn())
-            except Exception:  # noqa: BLE001
-                remaining_minutes = float("inf")
-        else:
-            remaining_minutes = float("inf")
-        threshold_minutes = float(force_exit_hours_remaining_ratio) * float(max_hours) * 60.0
-        if remaining_minutes < threshold_minutes:
-            return "framework_agent_force_exit_low_budget", {
-                "evidence": "force_exit",
-                "remaining_minutes": remaining_minutes,
-                "threshold_minutes": threshold_minutes,
-                "hours_remaining_ratio": float(force_exit_hours_remaining_ratio),
-                "max_hours": float(max_hours),
-                "pending_candidate_count": _framework_agent_pending_candidate_count(state),
-            }
-
     # Per-phase wall-clock budget cap: rotate to EXPLORE once the phase has
     # burned its share so it cannot monopolise the run.
     if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
@@ -2468,11 +2371,10 @@ def compute_next_phase(
     now_unix: float | None = None,
     framework_agent_phase_enabled: bool = False,
     explore_enabled: bool = True,
-    max_hours: float | None = None,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``.
 
-    Priority (Inv-8.2): global terminal first, then abort > exit_terminal > exit_normal.
+    Priority (Inv-8.2): global terminal first, then exit_terminal > exit_normal.
 
     Args:
         state (Any): Frozen SharedState view exposing the current ``phase``.
@@ -2483,8 +2385,6 @@ def compute_next_phase(
         framework_agent_phase_enabled (bool): Whether the FRAMEWORK_AGENT phase runs
             after PRELUDE.
         explore_enabled (bool): Whether the EXPLORE phase is enabled.
-        max_hours (float | None): Session wall-clock budget in hours (used by
-            the FRAMEWORK force-exit gate).
 
     Returns:
         tuple[str, str, dict[str, Any]] | None: ``(next_phase, reason,
@@ -2500,9 +2400,6 @@ def compute_next_phase(
         return PHASE_CLOSE, reason, {"terminal": True, **evidence}
 
     if current == PHASE_PRELUDE:
-        ab = abort_prelude(state)
-        if ab is not None:
-            return PHASE_CLOSE, ab[0], {"terminal": True, **ab[1]}
         term = exit_terminal_prelude(state)
         if term is not None:
             return PHASE_CLOSE, term[0], {"terminal": True, **term[1]}
@@ -2525,14 +2422,7 @@ def compute_next_phase(
     if current == PHASE_FRAMEWORK_AGENT:
         norm = exit_normal_framework_agent(
             state,
-            max_hours=max_hours,
             now_unix=now_unix,
-            force_exit_hours_remaining_ratio=float(
-                overrides.get(
-                    "framework_agent_force_exit_hours_ratio",
-                    DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO,
-                )
-            ),
             budget_pct=budget_pct,
         )
         if norm is not None:
@@ -2568,12 +2458,6 @@ def compute_next_phase(
                 overrides.get(
                     "explore_empty_streak",
                     DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
-                )
-            ),
-            force_exit_hours_remaining=float(
-                overrides.get(
-                    "force_exit_hours_remaining",
-                    DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
                 )
             ),
             force_exit_budget_pct=float(
@@ -2992,7 +2876,6 @@ def record_lifecycle_event(
 
 __all__ = [
     "DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT",
-    "DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING",
     "DEFAULT_PHASE_BUDGET_PCT",
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
     "DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT",
@@ -3031,7 +2914,6 @@ __all__ = [
     "make_lifecycle_event",
     "DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK",
     "DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT",
-    "DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO",
     "DEFAULT_MAX_MACRO_CYCLES",
     "DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC",
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
@@ -3039,7 +2921,6 @@ __all__ = [
     "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
     "is_long_run",
     "should_reloop_to_explore",
-    "abort_prelude",
     "allowed_actions_for",
     "apply_escalate_budget_bump",
     "compute_next_phase",

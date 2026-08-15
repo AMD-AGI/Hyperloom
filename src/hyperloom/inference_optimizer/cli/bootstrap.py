@@ -113,8 +113,6 @@ def _seed_shared_state(
     if getattr(args, "plateau_kernel_lookback", None) is not None:
         plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
     # EXPLORE hard force-exit thresholds.
-    if getattr(args, "explore_force_exit_hours_remaining", None) is not None:
-        plateau_overrides["force_exit_hours_remaining"] = float(args.explore_force_exit_hours_remaining)
     if getattr(args, "explore_force_exit_budget_pct", None) is not None:
         plateau_overrides["force_exit_budget_pct"] = float(args.explore_force_exit_budget_pct)
 

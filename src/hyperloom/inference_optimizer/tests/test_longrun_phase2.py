@@ -62,7 +62,7 @@ def test_explore_plateau_is_actionable():
 
 def test_compute_next_phase_plateau_routes_explore_to_kernel():
     st = _plateaued_explore_state()
-    target, reason, evidence = ps.compute_next_phase(st, max_hours=96.0)
+    target, reason, evidence = ps.compute_next_phase(st)
     # Exhausted explore leverage switches lever to KERNEL.
     assert target == ps.PHASE_KERNEL_AGENT
     assert reason == "explore_no_more_leverage"

@@ -391,7 +391,6 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "explore_force_exit_low_budget": "EXPLORE force-exited: the remaining wall-clock budget was too low to start new work.",
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
     "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",
-    "framework_agent_force_exit_low_budget": "The framework-enablement agent force-exited on a low remaining budget.",
     "global_converged": "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain.",
     # Pre-flight gates (fail fast before booting a server).
     "model_context_window_too_small": "Preflight gate: the model's max context window cannot hold the requested ISL + OSL.",

@@ -47,7 +47,7 @@ def _sweep_state(
 # compute_next_phase SWEEP back-edge
 def test_sweep_reloops_to_explore_when_budget_and_leverage():
     st = _sweep_state(macro_cycle=0, cumulative_gain=5.0, gain_at_cycle_start=0.0)
-    nxt = ps.compute_next_phase(st, max_hours=96.0)
+    nxt = ps.compute_next_phase(st)
     assert nxt is not None
     target, reason, evidence = nxt
     assert target == ps.PHASE_EXPLORE
@@ -60,7 +60,7 @@ def test_sweep_closes_on_failed_conc_sweep_even_when_reloop_available():
     st = _sweep_state(macro_cycle=0, cumulative_gain=5.0, gain_at_cycle_start=0.0)
     st.last_sweep = {}
     st.last_conc_sweep = {"status": "failed"}
-    target, reason, evidence = ps.compute_next_phase(st, max_hours=96.0)
+    target, reason, evidence = ps.compute_next_phase(st)
     assert target == ps.PHASE_CLOSE
     assert reason == "conc_sweep_failed"
     assert evidence.get("conc_sweep_status") == "failed"
@@ -75,7 +75,7 @@ def test_sweep_closes_when_globally_converged():
         gain_at_cycle_start=5.0,
         no_gain_streak=2,
     )
-    target, reason, evidence = ps.compute_next_phase(st, max_hours=96.0)
+    target, reason, evidence = ps.compute_next_phase(st)
     assert target == ps.PHASE_CLOSE
     assert reason == "global_converged"
     assert evidence["terminal"] is True
@@ -85,7 +85,7 @@ def test_sweep_closes_when_globally_converged():
 def test_sweep_closes_when_insufficient_remaining():
     # Long run (48h) but only ~10min remain → below the reloop floor.
     st = _sweep_state(max_minutes=48 * 60, started_hours_ago=48 - 10 / 60.0)
-    target, reason, evidence = ps.compute_next_phase(st, max_hours=48.0)
+    target, reason, evidence = ps.compute_next_phase(st)
     assert target == ps.PHASE_CLOSE
     assert reason == "sweep_done"
     assert evidence["reloop_blocked"] == "insufficient_remaining"
@@ -105,7 +105,7 @@ def test_short_bounded_run_reloops_when_budget_and_leverage_remain():
     assert ev["reloop"] is True
     assert ev["next_cycle"] == 1
 
-    target, reason, evidence = ps.compute_next_phase(st, max_hours=12.0)
+    target, reason, evidence = ps.compute_next_phase(st)
     assert target == ps.PHASE_EXPLORE
     assert reason == "cycle_reloop"
     assert evidence["loopback"] is True
@@ -119,7 +119,7 @@ def test_short_bounded_run_closes_when_insufficient_remaining():
     assert reloop is False
     assert ev["reloop_blocked"] == "insufficient_remaining"
 
-    target, reason, evidence = ps.compute_next_phase(st, max_hours=12.0)
+    target, reason, evidence = ps.compute_next_phase(st)
     assert target == ps.PHASE_CLOSE
     assert reason == "sweep_done"
     assert "loopback" not in evidence
@@ -399,7 +399,7 @@ def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
 # Regression — short-run path now uses macro-loop while budget remains.
 def test_regression_short_run_sweep_evidence_carries_loopback():
     st = _sweep_state(max_minutes=12 * 60)
-    target, reason, evidence = ps.compute_next_phase(st, max_hours=12.0)
+    target, reason, evidence = ps.compute_next_phase(st)
     assert (target, reason) == (ps.PHASE_EXPLORE, "cycle_reloop")
     assert evidence["loopback"] is True
     assert evidence["next_cycle"] == 1

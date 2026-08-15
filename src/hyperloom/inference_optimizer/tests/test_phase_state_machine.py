@@ -133,7 +133,7 @@ def test_phase_exit_reasons_includes_required_vocab():
         "kernel_no_more_leverage",
         "framework_agent_phase_done",
         "framework_agent_plateau",
-        "framework_agent_force_exit_low_budget",
+        "framework_agent_budget_cap",
         "cycle_reloop",
         "global_converged",
         "robustness_escalated",
@@ -242,7 +242,6 @@ def test_exit_normal_explore_uses_budget_exhaustion():
     )
     out = phase_state.exit_normal_explore(
         state,
-        force_exit_hours_remaining=0.0,
         force_exit_budget_pct=0.0,
     )
     assert out is not None and out[0] == "explore_phase_budget_exhausted"
