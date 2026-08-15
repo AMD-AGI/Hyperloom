@@ -599,7 +599,7 @@ def _ready_stamp_path(server_log_path: str) -> Path:
     return Path(server_log_path).parent / _READY_STAMP_NAME
 
 
-def _stamp_server_ready(server_log_path: str, boot_sec: float = 0.0) -> None:
+def _stamp_server_ready(server_log_path: str, boot_sec: float) -> None:
     """Record, beside ``server_log_path``, that the server just reported ready.
 
     Two numbers, because they answer two questions and one clock cannot answer
@@ -628,7 +628,10 @@ def _stamp_server_ready(server_log_path: str, boot_sec: float = 0.0) -> None:
     Args:
         server_log_path: The ``<output_dir>/server.log`` path from the caller.
         boot_sec: Seconds from spawn to this moment, on the spawning process's
-            monotonic clock.
+            monotonic clock. Required rather than defaulted: a caller that
+            omitted it would write a well-formed stamp claiming the round booted
+            instantly, which reads as a whole round of benchmark and is the one
+            wrong answer the two-field format exists to make impossible.
     """
     try:
         _ready_stamp_path(server_log_path).write_text(
@@ -654,13 +657,13 @@ def clear_server_ready_stamp(server_log_path: str) -> None:
 def _read_ready_stamp(server_log_path: str) -> tuple[float, float] | None:
     """Return a round's ``(ready_unix, boot_sec)``, or ``None`` when unrecorded.
 
-    Args:
-        server_log_path: The ``<output_dir>/server.log`` path from the caller.
-
     Both fields are required. A stamp missing its boot is reported as no stamp at
     all rather than as a boot of zero: zero is a legitimate boot, so it cannot
     also stand for "not recorded", and reading it that way would hand the whole
     round to the benchmark -- the figure every later variant is then admitted on.
+
+    Args:
+        server_log_path: The ``<output_dir>/server.log`` path from the caller.
 
     Returns:
         tuple[float, float] | None: The wall-clock instant the stamp was written
