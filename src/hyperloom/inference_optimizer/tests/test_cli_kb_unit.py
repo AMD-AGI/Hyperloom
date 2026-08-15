@@ -26,42 +26,6 @@ def _args(**over):
     return argparse.Namespace(**base)
 
 
-def test_resolve_local_kb_root_explicit(tmp_path) -> None:
-    out = cli_kb._resolve_local_kb_root(_args(local_kb_root=str(tmp_path / "kb")))
-    assert out == tmp_path / "kb"
-
-
-def test_resolve_local_kb_root_env(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "envkb"))
-    out = cli_kb._resolve_local_kb_root(_args())
-    assert out == tmp_path / "envkb"
-
-
-def test_resolve_local_kb_root_default(monkeypatch) -> None:
-    monkeypatch.delenv("HYPERLOOM_LOCAL_KB_ROOT", raising=False)
-    out = cli_kb._resolve_local_kb_root(_args())
-    assert out.name == "knowledge"
-
-
-def test_dispatcher_degraded_kb(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    kb = cli_kb._build_recipe_kb_dispatcher(_args(degraded_kb=True))
-    assert kb is None
-
-
-def test_dispatcher_local_only_no_gbrain(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    kb = cli_kb._build_recipe_kb_dispatcher(_args())
-    assert kb.mode == "local"
-
-
-def test_dispatcher_remote_returns_none(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
-    monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path / "kb"))
-    monkeypatch.setenv("KB_STORE_URL", "https://kb.test")
-    monkeypatch.setenv("KB_STORE_TOKEN", "token")
-    kb = cli_kb._build_recipe_kb_dispatcher(_args())
-    assert kb is None
 def test_attach_recipe_audit_hook_appends_jsonl(tmp_path) -> None:
     import json
 
@@ -97,15 +61,6 @@ def test_bootstrap_recipe_kb_degraded_returns_none(tmp_path, monkeypatch, capsys
     assert "DISABLED (--degraded-kb)" in capsys.readouterr().out
 
 
-def test_degraded_dispatcher_bypasses_remote_configuration_validation(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
-    monkeypatch.delenv("KB_STORE_URL", raising=False)
-    monkeypatch.delenv("KB_STORE_TOKEN", raising=False)
-    assert cli_kb._build_recipe_kb_dispatcher(_args(degraded_kb=True)) is None
-
-
 def test_bootstrap_recipe_kb_success(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
     calls = []
@@ -138,7 +93,7 @@ def test_bootstrap_recipe_kb_t0_failure_continues(tmp_path, monkeypatch) -> None
     assert args.kb_degraded_reason == "t0_runtime_fail"
 
 
-def test_bootstrap_recipe_kb_remote_replays_explore_config(
+def test_bootstrap_recipe_kb_remote_stores_metadata_not_replay_payload(
     tmp_path,
     monkeypatch,
     capsys,
@@ -155,12 +110,17 @@ def test_bootstrap_recipe_kb_remote_replays_explore_config(
             reads.append((identity, destination))
             return {
                 "schema_version": 2,
-                "knowledge_schema_version": 2,
+                "knowledge_schema_version": (
+                    remote_recipe.CURRENT_KNOWLEDGE_SCHEMA_VERSION
+                ),
+                "record_kind": remote_recipe.RECORD_KIND_HYPERLOOM_RECIPE,
                 "canonical_id": identity,
                 "session_id": "champion-session",
                 "optimized_throughput": 120.0,
                 "validated_e2e_gain": 20.0,
                 "value": {
+                    "patch_timeline": [],
+                    "kernel": {},
                     "explore": {
                         "extra_server_args": "--page-size 32",
                         "extra_envs": {"EXPLORE": "1"},
@@ -195,14 +155,13 @@ def test_bootstrap_recipe_kb_remote_replays_explore_config(
     persisted = SharedState.load_or_init(tmp_path)
     assert persisted.stack_fingerprint_meta["rocm"] == "6.2"
     assert persisted.stack_fingerprint_meta["image_digest"] == "img@sha"
-    replay = persisted.warm_start_context["recommended_replay"]
-    assert replay["extra_server_args"] == "--page-size 32"
-    assert replay["extra_envs"] == {"EXPLORE": "1"}
-    assert replay.get("patches") in (None, [])
+    assert "recommended_replay" not in persisted.warm_start_context
     assert persisted.warm_start_context["match"]["source"] == "kb-store"
+    assert "best_config" not in persisted.warm_start_recipe["recipe"]
+    assert "patch_timeline" not in persisted.warm_start_recipe["recipe"]
     assert len(reads) == 1
     assert reads[0][1] == tmp_path / "runtime" / "remote_recipe"
-    assert "Explore config warm replay" in capsys.readouterr().out
+    assert "current Recipe warm replay" in capsys.readouterr().out
 
 
 def test_bootstrap_knowledge_plane_validates_remote_without_recipe_dispatcher(

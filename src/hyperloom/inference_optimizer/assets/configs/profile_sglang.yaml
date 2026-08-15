@@ -26,7 +26,7 @@
 # flag to EXTRA_SGLANG_ARGS; if it fails (version unsupported,
 # non-editable install layout, fs read-only, ...) we fall back to
 # today's safe behaviour: only --enable-profile-cuda-graph plus the
-# client-side PROFILE_EXTRA_BODY shape_discovery / roofline_annotations
+# client-side PROFILE_EXTRA_BODY shape_discovery / detailed_annotations
 # settings (which go through SGLang's /start_profile API and don't need
 # a patched server). Set HYPERLOOM_ENABLE_PATCH=0 to disable runtime
 # patching entirely.
@@ -51,7 +51,7 @@ benchmark:
     # --- Profiler: shape + callstack annotations (#126) ---
     SGLANG_PROFILE_WITH_STACK: "true"
     SGLANG_PROFILE_RECORD_SHAPE: "true"
-    SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE: "1"
+    SGLANG_GRAPH_BATCH_CAPTURE: "1"
     # --- Profiler: graph capture (#126; shape-discovery flag dropped
     # because the deployed SGLang argparse rejects it) ---
     EXTRA_SGLANG_ARGS: "--enable-profile-cuda-graph"
@@ -71,7 +71,7 @@ benchmark:
     #                  OSL is lowered until it fits
     #   start_step  (delay_iters) = OSL * (RANDOM_RANGE_RATIO + 1) * 3
     #                                 - max_iters / 2, clamped at 0
-    PROFILE_EXTRA_BODY: '{"shape_discovery": true, "roofline_annotations": true, "start_step": 40, "num_steps": 16, "merge_profiles": false, "profile_by_stage": false}'
+    PROFILE_EXTRA_BODY: '{"shape_discovery": true, "detailed_annotations": true, "start_step": 40, "num_steps": 16, "merge_profiles": false, "profile_by_stage": false}'
     # --- Profile mode: cap prompts to reduce trace size ---
     PROFILE: "1"
 

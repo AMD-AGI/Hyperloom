@@ -982,26 +982,142 @@ def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> in
     return count
 
 
-def _trace_input_sort_key(path: Path) -> tuple[int, str]:
+#: Directory name the splitter writes its per-phase output into. Everything
+#: below it is derived from a raw capture, never a capture itself.
+_SPLIT_DIR_NAME = "trace_split"
+
+#: How many discovered files the CPU-only preflight will open before giving up.
+#: A cost ceiling, not the thing that makes the preflight land on the capture --
+#: size ordering does that, and it holds whatever the fragments are called or
+#: where they sit. Reaching this limit means every large candidate was empty,
+#: which is a real capture problem rather than a selection one.
+_KERNEL_PROBE_LIMIT = 8
+
+#: Cumulative bytes of candidate traces the preflight will deserialise before
+#: giving up. Only the failing path spends this: with size ordering a healthy
+#: capture answers on the first probe. It exists because production rank traces
+#: reach hundreds of megabytes, and eight of those would turn a failure that
+#: used to take a second into one that takes minutes or exhausts memory.
+_KERNEL_PROBE_BYTE_BUDGET = 512 * 1024 * 1024
+
+#: Per-phase fragment names the splitter emits. Matched as well as the directory
+#: because a flat layout would otherwise leave them in the default bucket, and a
+#: capture with eight ranks would then spend the whole probe budget on fragments
+#: before reaching a rank file.
+_PHASE_FRAGMENT_RE = re.compile(
+    r"^(?:decode_only|mixed|prefill_only|prefilldecode)\w*_steady_state\w*"
+    r"_rank_\d+\.trace\.json(?:\.gz)?$"
+)
+
+
+def _is_derived_trace(path: Path, root: Path | None = None) -> bool:
+    """Whether a trace path is splitter output rather than a raw capture.
+
+    Three shapes, all derived: anything under the splitter's own output
+    directory, the per-iteration annotation sidecars it writes beside a capture,
+    and the per-phase fragment names themselves. They are a few hundred bytes
+    each and cover one phase of one iteration, so an analysis pointed at them
+    describes a sliver of the run.
+
+    The name test is not redundant with the directory test. Production nests
+    these under ``trace_split/`` today -- 276 of 276 capture directories with
+    fragments -- but the demotion should not depend on a layout that the
+    splitter is free to change.
+
+    ``root`` bounds the directory test to the capture being analysed. Paths
+    arrive absolute, so testing every component would demote *every* candidate
+    whenever an ancestor happened to be named ``trace_split`` -- pointing
+    ``--trace-input`` inside a previous split, say. With all candidates in the
+    same bucket the ordering collapses back to alphabetical and the original bug
+    returns, which is a lot of damage for a coincidence of naming.
+    """
+    relative = path
+    if root is not None:
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            relative = path
+    if _SPLIT_DIR_NAME in relative.parts:
+        return True
+    if _PHASE_FRAGMENT_RE.match(path.name):
+        return True
+    return bool(re.search(r"trace_annotation_iteration_\d+", path.name))
+
+
+def _trace_file_size(path: Path) -> int:
+    """Size in bytes, or 0 when it cannot be read."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _count_kernels_if_readable(path: Path) -> tuple[bool, int]:
+    """``(readable, kernel_count)`` for a candidate trace.
+
+    :func:`count_gpu_kernel_events` answers 0 both for a trace with no GPU work
+    and for one it could not parse. Those need different readers: the first is a
+    profiler problem, the second is a truncated or corrupt file. Collapsing them
+    is the same misdirection this module already sent people on once.
+
+    Still counts through :func:`count_gpu_kernel_events`, so it remains the one
+    place kernel events are recognised. The disambiguating parse runs only on a
+    zero answer, which is the only answer that is ambiguous -- a trace with
+    kernels in it demonstrably parsed.
+    """
+    count = count_gpu_kernel_events(path)
+    if count:
+        return True, count
+    try:
+        payload = open_json(path)
+    except Exception:  # noqa: BLE001 - unreadable is a distinct answer, not a crash
+        return False, 0
+    if not isinstance(payload, dict) or not isinstance(payload.get("traceEvents"), list):
+        return False, 0
+    return True, 0
+
+
+def _trace_input_sort_key(path: Path, root: Path | None = None) -> tuple[int, int, str]:
     """Compute the discovery sort key for a trace input path.
 
     Prefers the merged annotated trace over rank/phase shards (the TraceLens
     splitter needs the large trace).
 
+    Splitter output sorts last, and within a bucket the largest file leads.
+    Both parts exist because of the same bug: the fragments used to share the
+    default bucket with the raw capture, so alphabetical order decided, and
+    ``decode_only_steady_state_...`` beats ``rank_0.trace.json.gz`` on the first
+    letter. Every xDiT roofline attempt therefore analysed a 938-byte phase
+    fragment instead of the 910 KB capture beside it: runs whose fragment held
+    no GPU kernels failed the CPU-only preflight outright, and the one model
+    whose fragment happened to hold 512 produced a roofline computed from 2.6%
+    of its own trace, with no ceiling.
+
+    Size is the part that does not depend on recognising a name. A real capture
+    is orders of magnitude larger than a per-phase fragment or a sidecar like
+    ``execution_details.json``, so ordering by descending size puts the right
+    file first even for a fragment shape nobody has seen yet.
+
     Args:
         path: The trace file path to rank.
+        root: The capture directory being analysed, so the ``trace_split``
+            component is looked for below it rather than anywhere in an
+            absolute path.
 
     Returns:
-        A ``(priority, name)`` sort key (lower priority sorts first).
+        A ``(priority, -size, name)`` sort key (lower sorts first).
     """
     name = path.name
+    size = _trace_file_size(path)
+    if _is_derived_trace(path, root):
+        return (4, -size, name)
     if name.startswith("merged-"):
-        return (0, name)
+        return (0, -size, name)
     if re.search(r"TP-\d+-DECODE\.trace\.json(?:\.gz)?$", name):
-        return (2, name)
+        return (2, -size, name)
     if name.startswith("bs_") or name.startswith("graph_capture"):
-        return (3, name)
-    return (1, name)
+        return (3, -size, name)
+    return (1, -size, name)
 
 
 def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
@@ -1037,7 +1153,7 @@ def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
         if trace not in seen:
             seen.add(trace)
             unique.append(trace)
-    unique.sort(key=_trace_input_sort_key)
+    unique.sort(key=lambda p: _trace_input_sort_key(p, trace_input))
     if not unique:
         raise FileNotFoundError(f"no trace files found under capture directory: {trace_input}")
     return "capture_dir", unique
@@ -5669,7 +5785,7 @@ def run_command(
 # TRACELENS_REF). Overridable via env so a run can pin its own SHA.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
 # Head of release/hyperloom_integration_v1.0.
-_TRACELENS_REF_DEFAULT = "c3405111a2f9270fd820a1baa8edaaf6f61e7646"
+_TRACELENS_REF_DEFAULT = "cf3e4b19c2ac080a921a18a6add96b38526b4a8b"
 
 
 def _default_tracelens_root() -> Path:
@@ -7044,22 +7160,94 @@ def main() -> int:
         trace_input_type, trace_files = discover_trace_inputs(trace_input)
         append_log(log_path, f"trace_input_type={trace_input_type}")
         append_log(log_path, f"trace_files={len(trace_files)}")
+        # The file the analysis will actually read. Discovery order picks the
+        # default; the preflight below promotes whichever candidate it proves
+        # carries GPU kernels, because passing the check on one file and then
+        # analysing another is how an empty trace reaches TraceLens silently.
+        #
+        # Unconditional: discover_trace_inputs returns [trace_input] for a file
+        # and raises FileNotFoundError for a directory with no traces, so the
+        # list is never empty. Guarding it would type this as Path | None and
+        # push that None through every downstream call for a branch that cannot
+        # be taken.
+        analysis_trace_path = trace_files[0]
 
         # Fail-fast on CPU-only traces.
+        #
+        # Probes candidates in discovery order rather than only the first. A
+        # single-file probe reports the capture directory as CPU-only whenever
+        # the leading file happens to be a fragment with no kernels, and the
+        # error it raises then blames the profiler for a capture that is sitting
+        # in the same directory with thirty thousand kernel events in it.
+        #
+        # With size ordering the first candidate is normally the capture, so this
+        # loop exits on one probe and the promotion below stays quiet. It earns
+        # its keep on the layouts where it does not: a multi-rank capture whose
+        # leading rank recorded nothing.
         if not args.dry_run and trace_files:
-            kernel_event_count = count_gpu_kernel_events(trace_files[0])
+            kernel_event_count = 0
+            probed: list[str] = []
+            spent_bytes = 0
+            for candidate in trace_files[:_KERNEL_PROBE_LIMIT]:
+                # Each probe deserialises the whole file, so a directory of large
+                # empty captures could otherwise turn a fast failure into a slow
+                # one. Ordering puts the likeliest candidate first, so stopping
+                # on a byte budget costs the unlikely tail, not the answer.
+                if probed and spent_bytes >= _KERNEL_PROBE_BYTE_BUDGET:
+                    probed.append(f"(stopped after {spent_bytes} bytes probed)")
+                    break
+                spent_bytes += _trace_file_size(candidate)
+                readable, kernel_event_count = _count_kernels_if_readable(candidate)
+                if not readable:
+                    # Distinct from an empty trace on purpose: "unreadable" sends
+                    # a reader to the file, "no kernels" sends them to the
+                    # profiler, and conflating them is the misdirection this
+                    # whole change exists to remove.
+                    probed.append(f"{candidate.name}=unreadable")
+                    continue
+                probed.append(f"{candidate.name}={kernel_event_count}")
+                if kernel_event_count:
+                    analysis_trace_path = candidate
+                    break
             append_log(
                 log_path,
-                f"trace_gpu_kernel_events={kernel_event_count} (probe={trace_files[0].name})",
+                f"trace_gpu_kernel_events={kernel_event_count} "
+                f"(probed={', '.join(probed)})",
             )
+            if analysis_trace_path != trace_files[0]:
+                promotion_warning: dict[str, Any] = {
+                    "code": "trace_analysis_input_promoted",
+                    "severity": "info",
+                    "leading_candidate": trace_files[0].name,
+                    "analysed": analysis_trace_path.name,
+                    "probed": list(probed),
+                    "detail": (
+                        "the leading candidate carried no GPU kernel events or "
+                        "could not be read; the analysis ran on the first "
+                        "candidate that did"
+                    ),
+                }
+                # Structured as well as logged: a run that changed its own input
+                # has to be explicable from the artifacts, not only from a tool
+                # log nobody keeps.
+                trace_health_warnings.append(promotion_warning)
+                artifacts["tracelens_analysis_input"] = str(analysis_trace_path)
+                append_log(
+                    log_path,
+                    "trace_analysis_input promoted from "
+                    f"{trace_files[0].name} to {analysis_trace_path.name} "
+                    f"(probed={', '.join(probed)})",
+                )
             if kernel_event_count == 0:
                 raise RuntimeError(
-                    "Trace contains zero GPU kernel events "
-                    f"({trace_files[0]}); the upstream profile run "
-                    "captured CPU-only activity. Re-run profile with the "
+                    "Trace contains zero GPU kernel events in any of "
+                    f"{len(probed)} probed file(s) under {trace_input}: "
+                    f"{', '.join(probed)}. Either the upstream profile run "
+                    "captured CPU-only activity -- re-run profile with the "
                     "torch.profiler GPU activities enabled (no LD_PRELOAD "
-                    "competing for ROCprofiler-SDK) before invoking "
-                    "tracelens_analysis."
+                    "competing for ROCprofiler-SDK) -- or the traces listed as "
+                    "'unreadable' above are truncated or corrupt, which is a "
+                    "different problem in the same place."
                 )
 
         if not args.dry_run:
@@ -7160,12 +7348,16 @@ def main() -> int:
             # Split the full-window filtered trace into steady-state chunks via
             # TraceLens's own splitter, since the perf report expects a single
             # steady-state chunk.
-            cli_trace_path = trace_files[0]
+            # Whichever candidate the preflight proved has GPU kernels, which is
+            # trace_files[0] unless it was promoted. Analysing a different file
+            # from the one that passed the check would let an empty rank through
+            # on a sibling's evidence.
+            cli_trace_path = analysis_trace_path
             # The un-split source trace: analysis runs on the steady-state chunk
             # (cli_trace_path is reassigned below), but graph-capture health is a
             # whole-run property and must be read from the original trace -- the
             # chunk may drop the graph-launch runtime events the detector needs.
-            raw_trace_path = trace_files[0]
+            raw_trace_path = analysis_trace_path
             trace_split_blocked = False
             if not args.skip_split:
                 update_status(
@@ -7184,7 +7376,7 @@ def main() -> int:
                     sys.executable,
                     "-m",
                     "TraceLens.TraceUtils.split_inference_trace_annotation",
-                    str(trace_files[0]),
+                    str(analysis_trace_path),
                     "-o",
                     str(split_dir),
                     "--find-steady-state",
@@ -7244,7 +7436,7 @@ def main() -> int:
                 # Splitter produced nothing -> trace_split_no_steady_state failure.
                 if split_rc != 0 or not (mixed_chunks or decode_chunks or prefill_chunks):
                     warning = _build_trace_split_warning(
-                        trace_input=trace_files[0],
+                        trace_input=analysis_trace_path,
                         split_dir=split_dir,
                         split_rc=split_rc,
                         mixed_count=len(mixed_chunks),
@@ -7287,7 +7479,7 @@ def main() -> int:
                             "of the available_modes (or pass --steady-state-mode "
                             "directly when invoking tracelens_analysis.py)."
                         ),
-                        "trace_input": str(trace_files[0]),
+                        "trace_input": str(analysis_trace_path),
                         "split_dir": str(split_dir),
                     }
                     trace_health_warnings.append(warning)
@@ -7386,7 +7578,10 @@ def main() -> int:
             capture_folder: Path | None = (
                 Path(args.capture_folder).expanduser().resolve()
                 if args.capture_folder
-                else discover_capture_folder(trace_input_path, trace_files)
+                # The analysed trace, not the leading candidate: the helper looks
+                # for capture_traces/ beside the file it is given, and after a
+                # cross-directory promotion those are different places.
+                else discover_capture_folder(trace_input_path, [analysis_trace_path])
             )
             if capture_folder:
                 append_log(

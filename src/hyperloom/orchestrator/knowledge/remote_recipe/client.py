@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Recipe policy wrapper around the byte-identical vendored KB Store SDK."""
+"""Recipe policy wrapper around the vendored KB Store SDK."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import math
 import os
 import re
 import shutil
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -102,6 +103,11 @@ def flatten_recipe_document(envelope: dict[str, Any]) -> dict[str, Any]:
         "revision": revision,
         "version": envelope.get("version", revision),
         "selected_by": dict(raw_selection) if isinstance(raw_selection, dict) else {},
+        "view": (
+            dict(envelope.get("view") or {})
+            if isinstance(envelope.get("view"), dict)
+            else {}
+        ),
     }
     return {**business, **fixed}
 
@@ -141,6 +147,30 @@ def _validate_session_envelope(
         )
     if not isinstance(envelope.get("knowledge"), dict):
         raise RemoteRecipeValidationError("session envelope knowledge must be an object")
+    return envelope
+
+
+def _validate_hyperloom_view(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Require the service-owned replayability decision on normalized reads."""
+    view = envelope.get("view")
+    if not isinstance(view, dict):
+        raise RemoteRecipeValidationError(
+            "Hyperloom Recipe View is missing top-level view metadata"
+        )
+    source = str(view.get("source") or "")
+    if source not in {"current", "legacy_gbrain", "legacy_native"}:
+        raise RemoteRecipeValidationError(
+            f"Hyperloom Recipe View has invalid source: {source!r}"
+        )
+    if not isinstance(view.get("replayable"), bool):
+        raise RemoteRecipeValidationError(
+            "Hyperloom Recipe View replayable must be boolean"
+        )
+    reason = view.get("replay_disabled_reason")
+    if reason is not None and not isinstance(reason, str):
+        raise RemoteRecipeValidationError(
+            "Hyperloom Recipe View replay_disabled_reason must be a string or null"
+        )
     return envelope
 
 
@@ -233,8 +263,43 @@ def _verify_downloaded_files(
             )
 
 
+def _deactivate_destination(path: Path) -> None:
+    """Remove a destination without following a symlink."""
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        path.unlink(missing_ok=True)
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _view_artifact_manifest(
+    envelope: dict[str, Any],
+) -> dict[str, tuple[int, str]]:
+    """Validate and return the View-embedded artifact snapshot."""
+    artifacts = envelope.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise RemoteRecipeValidationError(
+            "Hyperloom Recipe View artifacts manifest must be an object"
+        )
+    files = artifacts.get("files")
+    if not isinstance(files, list):
+        raise RemoteRecipeValidationError(
+            "Hyperloom Recipe View artifacts.files must be a list"
+        )
+    manifest = _validate_download_listing({"files": files})
+    file_count = artifacts.get("file_count")
+    if (
+        isinstance(file_count, bool)
+        or not isinstance(file_count, int)
+        or file_count != len(manifest)
+    ):
+        raise RemoteRecipeValidationError(
+            "Hyperloom Recipe View artifacts.file_count does not match files"
+        )
+    return manifest
+
+
 class RemoteRecipeClient:
-    """Recipe-specific read/write policy over the unmodified upstream SDK."""
+    """Recipe-specific read/write policy over the vendored store client."""
 
     def __init__(self, store: KBStoreClient) -> None:
         self.store = store
@@ -259,9 +324,9 @@ class RemoteRecipeClient:
             )
         return cls(KBStoreClient(base, token))
 
-    def read(self, canonical_id: str, destination: str | Path) -> dict[str, Any] | None:
-        """Download the direct best record and emit flattened recipe.json + files/."""
-        envelope = self.store.get_best_record(canonical_id)
+    def get_view(self, canonical_id: str) -> dict[str, Any] | None:
+        """Read and validate one normalized View without downloading files."""
+        envelope = self.store.get_hyperloom_recipe_view(canonical_id)
         if envelope is None:
             return None
         session_id = (
@@ -274,12 +339,39 @@ class RemoteRecipeClient:
             canonical_id=canonical_id,
             session_id=session_id,
         )
+        envelope = _validate_hyperloom_view(envelope)
+        _view_artifact_manifest(envelope)
+        return envelope
+
+    def read(
+        self,
+        canonical_id: str,
+        destination: str | Path,
+        *,
+        envelope: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Activate a fully verified View bundle at the destination."""
         root = Path(destination)
-        if root.is_symlink():
-            raise RemoteRecipeValidationError(f"refusing symlink destination: {root}")
-        files_root = root / "files"
-        document = flatten_recipe_document(envelope)
+        generation: Path | None = None
+        if root.parent.is_dir():
+            for stale_generation in root.parent.glob(
+                f".{root.name}.generation-*"
+            ):
+                _deactivate_destination(stale_generation)
         try:
+            selected = envelope if envelope is not None else self.get_view(canonical_id)
+            if selected is None:
+                _deactivate_destination(root)
+                return None
+            session_id = str(selected.get("session_id") or "").strip()
+            selected = _validate_session_envelope(
+                selected,
+                canonical_id=canonical_id,
+                session_id=session_id,
+            )
+            selected = _validate_hyperloom_view(selected)
+            view_manifest = _view_artifact_manifest(selected)
+            document = flatten_recipe_document(selected)
             recipe_json = json.dumps(
                 document,
                 ensure_ascii=False,
@@ -288,86 +380,102 @@ class RemoteRecipeClient:
                 allow_nan=False,
             )
         except (TypeError, ValueError) as exc:
+            _deactivate_destination(root)
             raise RemoteRecipeValidationError(
                 f"downloaded recipe is not strict JSON: {exc}"
             ) from exc
-        with self._store_lock:
-            artifacts = envelope.get("artifacts")
-            embedded_files = (
-                artifacts.get("files")
-                if isinstance(artifacts, dict) and isinstance(artifacts.get("files"), list)
-                else None
-            )
-            embedded_file_count = (
-                artifacts.get("file_count")
-                if isinstance(artifacts, dict)
-                else None
-            )
-            no_artifacts = (
-                embedded_files == []
-                and embedded_file_count in (None, 0)
-            )
-            listing = (
-                {"files": []}
-                if no_artifacts
-                else self.store.list_session_files(canonical_id, session_id)
-            )
-            manifest = _validate_download_listing(listing)
-            if files_root.is_symlink():
-                raise RemoteRecipeValidationError(f"refusing symlink destination: {files_root}")
-            root.mkdir(parents=True, exist_ok=True)
-            for stale_path in list(root.iterdir()):
-                if stale_path.is_dir() and not stale_path.is_symlink():
-                    shutil.rmtree(stale_path)
-                else:
-                    stale_path.unlink()
-            if manifest:
-                # The upstream SDK lists internally. Pin that call to the already
-                # validated snapshot while holding the client-shared store lock.
-                original_listing_method = self.store.list_session_files
+        except Exception:
+            _deactivate_destination(root)
+            raise
 
-                def validated_listing(
-                    requested_canonical_id: str,
-                    requested_session_id: str,
-                    *,
-                    kind: str = "",
-                ) -> dict[str, Any]:
-                    if (
-                        requested_canonical_id != canonical_id
-                        or requested_session_id != session_id
-                        or kind
-                    ):
-                        return original_listing_method(
-                            requested_canonical_id,
-                            requested_session_id,
-                            kind=kind,
-                        )
-                    return listing
-
-                self.store.list_session_files = validated_listing  # type: ignore[method-assign]
-                try:
-                    self.store.download_session(
-                        canonical_id,
-                        session_id,
-                        root,
-                        include_values=False,
+        try:
+            with self._store_lock:
+                listing = self.store.list_session_files(
+                    canonical_id,
+                    session_id,
+                )
+                listing_manifest = _validate_download_listing(listing)
+                if listing_manifest != view_manifest:
+                    raise RemoteRecipeValidationError(
+                        "session file listing does not match the selected "
+                        "Hyperloom Recipe View artifact manifest"
                     )
-                finally:
-                    self.store.list_session_files = original_listing_method  # type: ignore[method-assign]
-            files_root.mkdir(parents=True, exist_ok=True)
-            _verify_downloaded_files(files_root, manifest)
-            for generated in list(root.iterdir()):
-                if generated.name == "files":
-                    continue
-                if generated.is_dir() and not generated.is_symlink():
-                    shutil.rmtree(generated)
-                else:
-                    generated.unlink()
-            (root / "recipe.json").write_text(recipe_json, encoding="utf-8")
-        return document
+                root.parent.mkdir(parents=True, exist_ok=True)
+                generation = Path(
+                    tempfile.mkdtemp(
+                        prefix=f".{root.name}.generation-",
+                        dir=root.parent,
+                    )
+                )
+                files_root = generation / "files"
+                if listing_manifest:
+                    # Pin the SDK's internal listing to the compared snapshot.
+                    original_listing_method = self.store.list_session_files
 
-    # Compatibility name for callers that explicitly describe the selection.
-    read_champion = read
+                    def validated_listing(
+                        requested_canonical_id: str,
+                        requested_session_id: str,
+                        *,
+                        kind: str = "",
+                    ) -> dict[str, Any]:
+                        if (
+                            requested_canonical_id != canonical_id
+                            or requested_session_id != session_id
+                            or kind
+                        ):
+                            return original_listing_method(
+                                requested_canonical_id,
+                                requested_session_id,
+                                kind=kind,
+                            )
+                        return listing
+
+                    self.store.list_session_files = validated_listing  # type: ignore[method-assign]
+                    try:
+                        self.store.download_session(
+                            canonical_id,
+                            session_id,
+                            generation,
+                            include_values=False,
+                        )
+                    finally:
+                        self.store.list_session_files = original_listing_method  # type: ignore[method-assign]
+                files_root.mkdir(parents=True, exist_ok=True)
+                _verify_downloaded_files(files_root, listing_manifest)
+                for generated in list(generation.iterdir()):
+                    if generated.name == "files":
+                        continue
+                    _deactivate_destination(generated)
+                (generation / "recipe.json").write_text(
+                    recipe_json,
+                    encoding="utf-8",
+                )
+                _deactivate_destination(root)
+                generation.replace(root)
+            return document
+        except Exception:
+            _deactivate_destination(root)
+            if generation is not None:
+                _deactivate_destination(generation)
+            raise
+
+    def search_identities(
+        self,
+        *,
+        scheme: str,
+        match: dict[str, str],
+        hardware_in: list[str] | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Return exact identity matches from the KB Store discovery endpoint."""
+        return self.store.search_identities(
+            scheme=scheme,
+            match=match,
+            hardware_in=hardware_in,
+            offset=offset,
+            limit=limit,
+        )
 
     def write_if_better(
         self,
@@ -404,69 +512,6 @@ class RemoteRecipeClient:
                 session_id,
                 optimized_throughput,
             )
-        return self._publish(
-            canonical_id,
-            session_id,
-            bundle,
-            score=optimized_throughput,
-            files_dir=files_dir,
-            metric=metric,
-        )
-
-    def write_record(
-        self,
-        canonical_id: str,
-        session_id: str,
-        bundle: KnowledgeBundle,
-        *,
-        score: float,
-        files_dir: Path,
-        metric: str,
-    ) -> RemoteWriteResult:
-        """Publish a record whose contents were already reconciled by the caller.
-
-        An identity that accumulates — where a session contributes some entries
-        and inherits the rest — cannot be gated on a single document score:
-        adding a second kernel does not raise the best gain, yet still has to be
-        published. Such a caller decides what survives and hands the result
-        here.
-        """
-        if not math.isfinite(score):
-            raise RemoteRecipeValidationError(f"score must be finite, got {score!r}")
-        bundle.knowledge = sanitize_shared_knowledge(bundle.knowledge)
-        return self._publish(
-            canonical_id,
-            session_id,
-            bundle,
-            score=score,
-            files_dir=files_dir,
-            metric=metric,
-            supersede_equal=True,
-        )
-
-    def _publish(
-        self,
-        canonical_id: str,
-        session_id: str,
-        bundle: KnowledgeBundle,
-        *,
-        score: float,
-        files_dir: Path,
-        metric: str,
-        supersede_equal: bool = False,
-    ) -> RemoteWriteResult:
-        """Upload the files, replace the knowledge, then move the champion.
-
-        The store promotes whatever it is told — it accepts an equal or even a
-        lower value and moves the champion down — so keep-if-better lives here,
-        and a 409 means a concurrent write, not a refused value.
-
-        ``supersede_equal`` re-promotes over an equally scored incumbent after
-        such a conflict. A record that accumulates entries needs it: adding a
-        kernel that does not raise the best gain leaves the score unchanged, and
-        leaving the champion on the older session would hide the addition from
-        every reader. Records that merely compete keep the strict comparison.
-        """
         expected = {artifact.path for artifact in bundle.artifacts}
         if expected:
             refs = self.store.put_dir(canonical_id, session_id, files_dir)
@@ -488,28 +533,30 @@ class RemoteRecipeClient:
                 canonical_id,
                 session_id,
                 metric=metric,
-                value=score,
+                value=optimized_throughput,
             )
         except KBStoreError as exc:
             if "HTTP 409" not in str(exc):
                 raise
-            incumbent, winner, _ = _champion(
+            _, winner, _ = _champion(
                 self.store.get_rollup(canonical_id),
                 validate_metric=True,
                 expected_metric=metric,
             )
-            if incumbent == session_id:
-                # The record just written is already the one readers resolve to,
-                # so a refused promotion changes nothing.
-                return RemoteWriteResult("written", "", canonical_id, session_id, score)
-            if winner < score or (supersede_equal and winner == score):
+            if winner < optimized_throughput:
                 self.store.set_champion(
                     canonical_id,
                     session_id,
                     metric=metric,
-                    value=score,
+                    value=optimized_throughput,
                 )
-        return RemoteWriteResult("written", "", canonical_id, session_id, score)
+        return RemoteWriteResult(
+            "written",
+            "",
+            canonical_id,
+            session_id,
+            optimized_throughput,
+        )
 
 
 __all__ = [

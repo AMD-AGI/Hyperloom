@@ -580,6 +580,37 @@ class TestForgeGemmHelperCoverage:
 
         assert (snapshot / "vllm" / "model_executor" / "models" / "qwen3.py").read_text(encoding="utf-8") == "new = 2\n"
 
+    def test_materialize_unified_patch_snapshot_accepts_missing_final_newline(
+        self,
+        tmp_path,
+    ):
+        """Legacy KB patches may omit the final newline but remain valid diffs."""
+        repo = tmp_path / "site-packages"
+        (repo / "vllm").mkdir(parents=True)
+        target = repo / "vllm" / "model.py"
+        target.write_text("old = 1\n", encoding="utf-8")
+        patch = tmp_path / "legacy.patch"
+        patch.write_text(
+            "diff --git a/vllm/model.py b/vllm/model.py\n"
+            "--- a/vllm/model.py\n"
+            "+++ b/vllm/model.py\n"
+            "@@ -1 +1 @@\n"
+            "-old = 1\n"
+            "+new = 2",
+            encoding="utf-8",
+        )
+
+        snapshot = Path(
+            krh.materialize_unified_patch_snapshot(
+                patch_path=patch,
+                repo_root=repo,
+            )
+        )
+
+        assert (snapshot / "vllm" / "model.py").read_text(
+            encoding="utf-8"
+        ) == "new = 2\n"
+
     def test_materialize_unified_patch_snapshot_nongit_new_file_timestamped(self, tmp_path):
         """A created file whose ``+++`` line carries a tab-suffixed timestamp
         must still be recognized as a create on a NON-git root.
