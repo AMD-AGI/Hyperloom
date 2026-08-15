@@ -426,6 +426,60 @@ def test_submit_vendor_playbook_dedupes_dispatch_and_combine_into_one_session(mo
     # A second forge worktree/workspace copy is never made for the reused role.
     assert not (tmp_path / "forge" / "session1" / "attempt_combine" / "worktree").exists()
 
+    # --- regression: the reused (combine) attempt must not lose the artifact ---
+    # A real run caught this: kernel_optimization.py's invoke_backend()
+    # unconditionally overwrites result["output_dir"] with THIS attempt's own
+    # (empty, never-populated-by-submit) directory right after submit()
+    # returns; _candidate_artifact_paths() only looks under
+    # cli_workspace/optimized_versions and output_dir/optimized_versions, so
+    # combine's empty tree made artifact_valid=False and make_proposal()
+    # return PARTIAL even though dispatch's speedup fields were present.
+    combine_output_dir = tmp_path / "forge" / "session1" / "attempt_combine"
+    assert (combine_output_dir / "optimized_versions").is_dir()
+    assert list((combine_output_dir / "optimized_versions").iterdir()), (
+        "the reused attempt's own output_dir must carry a physical copy of "
+        "the artifact, since kernel_optimization.py's invoke_backend() "
+        "clobbers backend_paths['output_dir'] to point here regardless of "
+        "what submit() returned"
+    )
+    combine_attempt = {
+        "attempt_id": "forge-e2e-combine",
+        "backend": "forge",
+        "status": "completed",
+        "backend_paths": {
+            # Mirrors invoke_backend()'s real behavior: output_dir is always
+            # reset to *this* attempt's own directory, while cli_workspace
+            # is copied through verbatim from whatever submit() returned
+            # (the winner's, for a reused result).
+            "output_dir": str(combine_output_dir),
+            "cli_workspace": combine_result["cli_workspace"],
+        },
+        "optimized_path": str(combine_output_dir / "forge-e2e-combine_stdout.log"),
+        "mean_case_speedup": combine_result["mean_case_speedup"],
+        "total_improved": combine_result["total_improved"],
+        "incremental_improved": combine_result["incremental_improved"],
+        "improved": combine_result["improved"],
+        "pristine_baseline_ms": None,
+        "best_ms": combine_result["best_ms"],
+    }
+    combine_args = argparse.Namespace(
+        source_file=str(
+            tmp_path / "forge" / "session1" / "attempt_dispatch" / "worktree" / "mori_ep_config.py"
+        ),
+        kernel_repo="",
+        correctness_passed=True,
+        accuracy_passed=None,
+        micro_speedup=None,
+        e2e_gain_pct=None,
+        dry_run=False,
+    )
+    combine_verification = ko.build_verification(
+        combine_args, [combine_attempt], benchmark_available=False
+    )
+    assert combine_verification["artifact_valid"] is True, combine_verification["artifact_error"]
+    combine_proposal = ko.make_proposal(combine_verification)
+    assert combine_proposal["decision"] == "KEEP", combine_proposal["reasons"]
+
 
 def test_submit_vendor_playbook_reports_missing_forge_path(monkeypatch, tmp_path):
     monkeypatch.delenv("FORGE_PATH", raising=False)
@@ -449,6 +503,83 @@ def test_submit_vendor_playbook_reports_missing_forge_path(monkeypatch, tmp_path
     assert result["skipped"] is True
     assert result["returncode"] == 2
     assert "FORGE_PATH" in result["stderr_tail"]
+
+
+def test_submit_vendor_playbook_writes_result_when_bundle_copy_raises(monkeypatch, tmp_path):
+    """A raised exception after claiming must not orphan claimed.lock.
+
+    Regression: the claimed section used to have no blanket exception
+    handling -- only a couple of specific call sites (e.g.
+    _copy_vendor_task_bundle's OSError) were caught. Anything else raised
+    after the claim (a bad env lookup, an unexpected failure resolving the
+    branch/gpu target, etc.) propagated straight out of submit() with
+    claimed.lock left on disk and no result.json ever written -- every
+    subsequent submission for that group (siblings this session, or a
+    retry) would then wait the full poll deadline and still find nothing,
+    forever. This raises from _new_forge_branch, a call site with no
+    dedicated try/except of its own, specifically to exercise the
+    catch-all wrapper in _submit_vendor_playbook rather than one of the
+    pre-existing specific except clauses.
+    """
+    forge_path = tmp_path / "KernelForge"
+    _write_fake_mori_bundle(forge_path)
+    monkeypatch.setenv("FORGE_PATH", str(forge_path))
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(forge_submit, "_resolve_gpu_target", lambda _candidate: "gfx942")
+
+    def _boom(_output_dir, _source_file):
+        raise RuntimeError("simulated unexpected failure resolving the forge branch")
+
+    monkeypatch.setattr(forge_submit, "_new_forge_branch", _boom)
+
+    playbook = match_vendor_operator_playbook(_mori_dispatch_candidate())
+    candidate = _mori_dispatch_candidate(
+        patch_strategy="vendor_playbook",
+        vendor_operator_playbook=playbook,
+        vendor_playbook_role="dispatch",
+    )
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("# fallback prompt\n", encoding="utf-8")
+    output_dir = tmp_path / "forge" / "session3" / "attempt_dispatch"
+
+    result = forge_submit.submit(
+        source_file=_MORI_SITE_PACKAGES_FILE,
+        prompt_file=prompt_file,
+        output_dir=output_dir,
+        candidate=candidate,
+        timeout_s=3600,
+    )
+
+    # submit() must return a graceful failure, never raise.
+    assert result["skipped"] is True
+    assert result["returncode"] == 2
+    assert "simulated unexpected failure" in result["stderr_tail"]
+
+    lock_dir = forge_submit._vendor_playbook_lock_dir(output_dir, "mori_ep_dispatch_combine")
+    assert (lock_dir / "claimed.lock").is_file()
+    # The critical assertion: a result.json MUST exist, or the lock is
+    # orphaned and no sibling/retry for this group can ever proceed again.
+    assert (lock_dir / "result.json").is_file()
+    cached = forge_submit._read_vendor_playbook_cached_result(lock_dir)
+    assert cached is not None
+    assert cached["skipped"] is True
+
+    # A sibling (e.g. combine) submitted right after must get the cached
+    # failure back immediately, not hang until the wait deadline.
+    combine_candidate = _mori_combine_candidate(
+        patch_strategy="vendor_playbook",
+        vendor_operator_playbook=dict(playbook, role="combine"),
+        vendor_playbook_role="combine",
+    )
+    combine_result = forge_submit.submit(
+        source_file=_MORI_SITE_PACKAGES_FILE,
+        prompt_file=prompt_file,
+        output_dir=tmp_path / "forge" / "session3" / "attempt_combine",
+        candidate=combine_candidate,
+        timeout_s=3600,
+    )
+    assert combine_result["vendor_playbook_reused"] is True
+    assert combine_result["skipped"] is True
 
 
 def test_registry_json_is_valid_and_ships_in_package_data():

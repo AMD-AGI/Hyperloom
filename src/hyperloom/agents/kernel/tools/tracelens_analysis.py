@@ -4686,10 +4686,26 @@ def _apply_vendor_operator_playbook_grouping(top: list[dict[str, Any]]) -> None:
     for group_id, members in groups.items():
         aggregate = round(sum(float(m.get("gpu_pct") or 0.0) for m in members), 3)
         member_ids = [str(m.get("kernel_id") or "") for m in members]
+        floor: float | None = None
+        for member in members:
+            playbook = member.get("vendor_operator_playbook")
+            if isinstance(playbook, dict) and playbook.get("min_gpu_pct_floor") is not None:
+                try:
+                    floor = float(playbook["min_gpu_pct_floor"])
+                except (TypeError, ValueError):
+                    floor = None
+                break
         for member in members:
             member["vendor_playbook_group_id"] = group_id
             member["aggregate_gpu_pct"] = aggregate
             member["vendor_playbook_group_kernel_ids"] = list(member_ids)
+            if floor is not None:
+                # Consumed by effective_hot_kernel_min_gpu_pct() in the
+                # orchestrator's hot-kernel gate (_kernel_decisions.py /
+                # request_handlers.py) so a heavier forge-loop-session
+                # playbook isn't dispatched below its own floor even when
+                # HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT is loosened elsewhere.
+                member["vendor_playbook_min_gpu_pct_floor"] = floor
 
 
 def _candidate_resolution_method(item: dict[str, Any]) -> str:

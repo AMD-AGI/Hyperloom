@@ -34,6 +34,8 @@ from ..state.kernel_decision_settings import (
     _DEFAULT_KERNEL_OPT_MAX_PARTIAL,
     _MAX_INTEGRATE_FAULT_ATTEMPTS,
     _now_iso,
+    effective_hot_kernel_gpu_pct,
+    effective_hot_kernel_min_gpu_pct,
     resolve_hot_kernel_min_gpu_pct,
     resolve_kernel_opt_max_failures,
 )
@@ -1566,7 +1568,11 @@ def untried_hot_reusable_kernels(
             gpu_pct = float(k.get("gpu_pct") or 0.0)
         except (TypeError, ValueError):
             gpu_pct = 0.0
-        if gpu_pct < min_gpu_pct:
+        # Vendor-playbook groups (mori's dispatch+combine) are gated on the
+        # sum of the group's members, not each member's own share, and may
+        # pin a per-playbook floor -- see effective_hot_kernel_gpu_pct's
+        # docstring. Ranking below still sorts on the per-row gpu_pct.
+        if effective_hot_kernel_gpu_pct(k) < effective_hot_kernel_min_gpu_pct(k, min_gpu_pct):
             continue
         kid = str(k.get("kernel_id") or "")
         if not kid:

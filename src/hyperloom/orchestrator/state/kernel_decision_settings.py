@@ -70,6 +70,62 @@ def resolve_hot_kernel_min_gpu_pct() -> float:
         return _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
 
 
+def effective_hot_kernel_gpu_pct(candidate: dict) -> float:
+    """GPU-time share used for the hot-kernel gate.
+
+    A vendor-playbook group (e.g. mori's dispatch+combine, deliberately
+    submitted as one forge-loop session -- see
+    ``agents/kernel/tools/_vendor_operator_playbooks.py``) stamps
+    ``aggregate_gpu_pct`` as the summed share across the whole group, so a
+    split load (7% + 5%) is not silently dropped as below-threshold on
+    either member despite the pair clearing it together. Prefer the
+    aggregate over the per-row ``gpu_pct`` whenever it is present and larger
+    (never smaller, so this can only let a grouped row through a gate it
+    would otherwise fail -- it cannot cause an ungrouped row to fail one it
+    would otherwise pass).
+
+    Returns:
+        float: The larger of ``gpu_pct`` and ``aggregate_gpu_pct`` (when the
+            latter is present and parses); ``gpu_pct`` alone otherwise.
+    """
+    try:
+        row_pct = float(candidate.get("gpu_pct") or 0.0)
+    except (TypeError, ValueError):
+        row_pct = 0.0
+    aggregate = candidate.get("aggregate_gpu_pct")
+    if aggregate is None:
+        return row_pct
+    try:
+        return max(row_pct, float(aggregate))
+    except (TypeError, ValueError):
+        return row_pct
+
+
+def effective_hot_kernel_min_gpu_pct(candidate: dict, min_gpu_pct: float) -> float:
+    """Threshold ``candidate`` must clear, honoring a playbook's own floor.
+
+    A vendor playbook may pin a ``min_gpu_pct_floor`` (see
+    ``vendor_operator_playbooks.json``) so its group is never dispatched
+    below that share even when ``HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT`` is
+    loosened for other purposes (e.g. a smaller test fixture) -- the
+    playbook's own forge-loop session is a heavier investment than an
+    ordinary per-file rewrite attempt, so the floor can only raise the
+    effective threshold, never lower it below the caller's own ``min_gpu_pct``.
+
+    Returns:
+        float: The larger of ``min_gpu_pct`` and the candidate's stamped
+            ``vendor_playbook_min_gpu_pct_floor`` (when present and parses);
+            ``min_gpu_pct`` alone otherwise.
+    """
+    floor = candidate.get("vendor_playbook_min_gpu_pct_floor")
+    if floor is None:
+        return min_gpu_pct
+    try:
+        return max(min_gpu_pct, float(floor))
+    except (TypeError, ValueError):
+        return min_gpu_pct
+
+
 # Only the top-N reusable hot kernels are enforced.
 _DEFAULT_HOT_KERNEL_GATE_TOP_N = 5
 
