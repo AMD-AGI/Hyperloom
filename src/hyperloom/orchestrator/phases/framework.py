@@ -3522,9 +3522,9 @@ class FrameworkPhase(PhaseHandler):
     async def _enqueue_framework_agent_task(self, candidate: dict[str, Any]) -> None:
         """Enqueue a single ``framework_agent`` task for ``candidate``.
 
-        Builds the task params (candidate, batch id, baseline throughput,
-        framework) and creates an idempotent ``framework_agent`` task whose
-        lanes and lease TTL come from the action catalogue. On enqueue failure,
+        Builds the task params (candidate, batch id, baseline throughput, KEEP
+        threshold, framework) and creates an idempotent ``framework_agent`` task
+        whose lanes and lease TTL come from the action catalogue. On enqueue failure,
         records an ``enqueue_failed`` progress row so the pump skips the
         candidate next tick instead of spinning.
 
@@ -3532,11 +3532,18 @@ class FrameworkPhase(PhaseHandler):
             candidate (dict[str, Any]): The discovered PR candidate to apply
                 and benchmark.
         """
+        from ..actions.executors._multi_node_env import is_multi_node
+
         state = self.shared_state
         params = {
             "candidate": candidate,
             "batch_id": candidate.get("batch_id") or "",
             "base_tput": resolve_grading_anchor_tput(state),
+            # Same decaying bar the explore and integrate_patch dispatch paths inject.
+            "keep_threshold_pct": _phase_state.decaying_keep_threshold_pct(
+                int(getattr(state, "macro_cycle", 0) or 0),
+                multi_node=is_multi_node(),
+            ),
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
             # Source patches require the accuracy gate for KEEP.
             "require_accuracy_for_keep": True,

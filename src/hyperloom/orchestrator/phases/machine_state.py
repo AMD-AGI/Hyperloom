@@ -423,9 +423,10 @@ DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES: int = 3
 # (percentage points); guards against float noise being read as progress.
 DEFAULT_CYCLE_MIN_GAIN_PCT: float = 1e-6
 
-# Decaying acceptance curve: the marginal-gain bar shrinks each macro-cycle. The
-# KEEP threshold, stack-stable threshold (=keep/2) and convergence gain bar all
-# ride this single curve.
+# Decaying acceptance curve: the marginal-gain bar shrinks each macro-cycle. It
+# is injected at dispatch for explore, integrate_patch and framework_agent, and
+# also sets the stack-stable threshold (=keep/2) and the convergence gain bar.
+# The kernel-owned families hold their own fixed thresholds instead.
 KEEP_THRESHOLD_FLOOR_PCT: float = 0.1
 KEEP_THRESHOLD_SPAN_PCT: float = 0.9
 # Multi-node baseline noise floor is ~2x single-node; scale the curve to match.
