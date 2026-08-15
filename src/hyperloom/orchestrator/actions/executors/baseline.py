@@ -366,7 +366,8 @@ def _stopped_round_result(
 def _round_headroom_sec(state: Any, session_deadline_sec: float | None) -> tuple[float | None, dict[str, Any]]:
     """Seconds this round's budget may still spend, and the numbers behind it.
 
-    In PRELUDE that is the phase's own share
+    In PRELUDE that is what the session has left once the optimization phases'
+    reserve is held back
     (:func:`~...phases.machine_state.prelude_affordable_seconds`), which is the
     same figure the post-warmup gate judges the measured round against. Outside
     it a re-baseline answers to what is left before the session deadline, the
@@ -3440,7 +3441,7 @@ class BaselineExecutor:
         if headroom_sec is None:
             return True, evidence
         try:
-            cost = float(warmup_runtime_sec or 0.0)
+            cost = max(0.0, float(warmup_runtime_sec or 0.0))
         except (TypeError, ValueError):
             cost = 0.0
         return headroom_sec >= cost, {"expected_cost_sec": round(cost, 1), **evidence}

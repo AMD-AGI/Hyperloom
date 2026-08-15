@@ -245,25 +245,33 @@ def test_prelude_can_afford_an_arm_the_budget_still_covers():
     state = _prelude_state(spent_sec=600.0, usable_sec=10_000.0)
     affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=300.0)
     assert affordable is True
-    assert evidence["prelude_spent_sec"] == 600.0
+    # Half of 180 minutes is held for the optimization phases; the rest is PRELUDE's.
+    assert evidence["affordable_sec"] == pytest.approx(4600.0)
 
 
-def test_prelude_refuses_an_arm_past_its_own_ceiling():
+def test_prelude_refuses_an_arm_that_would_eat_the_optimization_reserve():
     """The Qwen3.5-397B shape: 51 minutes of baseline, then a roofline that costs another 45+."""
     state = _prelude_state(spent_sec=3090.0, usable_sec=7700.0)
     affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=2706.0)
     assert affordable is False
-    assert evidence["bound"] == "prelude_ceiling"
-    # 40% of 180 minutes is 4320s; 3090 spent leaves 1230s, well under the arm.
-    assert evidence["affordable_sec"] == pytest.approx(1230.0)
-
-
-def test_prelude_refuses_an_arm_that_would_eat_the_optimization_reserve():
-    """Under the phase ceiling but over the session reserve: the tighter bound wins."""
-    state = _prelude_state(spent_sec=60.0, usable_sec=6000.0)
-    affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=3000.0)
-    assert affordable is False
     assert evidence["bound"] == "optimization_reserve"
+    # 7700s left, 5400s of it spoken for, so the arm may cost at most 2300s.
+    assert evidence["affordable_sec"] == pytest.approx(2300.0)
+
+
+def test_a_resumed_prelude_is_not_charged_for_what_the_earlier_leg_spent():
+    """Banked phase spend and the session clock answer to different origins.
+
+    A resume that reanchors the budget restarts the session clock while the
+    phase ledger keeps every second the earlier leg banked. A bound read off
+    the ledger therefore declared preparation overspent on a session that had
+    its whole budget ahead of it, and the measured half of the baseline was
+    refused on every resumed run. Only the clock decides.
+    """
+    state = _prelude_state(spent_sec=10_000.0, usable_sec=10_000.0)
+    affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=2706.0)
+    assert affordable is True
+    assert evidence["affordable_sec"] == pytest.approx(4600.0)
 
 
 def test_prelude_budget_policy_is_inert_without_a_clock():

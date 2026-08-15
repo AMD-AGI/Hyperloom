@@ -381,7 +381,7 @@ def _run_double_run_baseline(tmp_path, shared_state) -> dict:
 
 
 def test_a_budget_that_cannot_pay_for_the_measured_round_keeps_the_cold_warmup(tmp_path):
-    """Preparation has spent the share the second pass needs; the first still ran.
+    """The session clock cannot pay for the second pass; the first still ran.
 
     Nothing is predicted before the warmup, so the round starts and the warmup's
     GPU time is spent before the shortfall is known. Refusing to keep its figure
@@ -400,7 +400,7 @@ def test_a_budget_that_cannot_pay_for_the_measured_round_keeps_the_cold_warmup(t
     assert result["_rounds_run"] == 1, "the measured round ran on a budget that cannot pay for it"
     assert result["output_throughput"] == pytest.approx(_COLD_TPUT)
     assert MEASURE_ROUND_DROPPED_WARNING in result["nonfatal_warnings"]
-    assert result["measure_round_dropped"]["bound"] == "prelude_ceiling"
+    assert result["measure_round_dropped"]["bound"] == "optimization_reserve"
 
 
 def test_a_round_whose_overheads_spend_the_share_is_caught_after_the_warmup(tmp_path):
@@ -411,11 +411,18 @@ def test_a_round_whose_overheads_spend_the_share_is_caught_after_the_warmup(tmp_
     the teardown behind it are wall-clock the cap never bounded. Asking after
     the pass, against the clock rather than against the cap, is what catches
     that -- and is why nothing is predicted before the pass instead.
+
+    The round enters with 7200s on the clock, of which 3600s is held for the
+    optimization phases, so a gate asked before the warmup would have found
+    3600s of headroom and waved through a pass of any length. The round then
+    charges 4000s -- the pass itself returns at once, the overheads around it do
+    not -- and the same question asked afterwards finds the clock 400s into the
+    reserve.
     """
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     state = _BudgetedState(remaining_sec=7200.0, double_run=True)
-    fake_run, calls = _capturing_fake_run(state=state, charge_sec=3000.0)
+    fake_run, calls = _capturing_fake_run(state=state, charge_sec=4000.0)
     executor = BaselineExecutor(
         magpie_python=sys.executable,
         default_config_path=base,
@@ -1899,18 +1906,17 @@ class _BudgetedState:
     Production reads one session through two accessors -- the deadline the round
     reaper is handed and the usable-seconds figure the phase policy reads -- and
     a double that lets them drift cannot see the regime where they disagree.
-    Both are derived from one deadline here, and PRELUDE's spend is whatever the
-    session has already used, which is what a run that has not left PRELUDE has
-    spent it on.
+    Both are derived from one deadline here.
 
     A pass calls :meth:`charge` for the wall-clock it burned, which is the only
     way a test can reach the case this whole mechanism exists for: a round whose
     first pass leaves the second one nothing.
 
-    ``max_minutes`` defaults to a session that has just started with
-    ``remaining_sec`` on the clock, so a test that only cares how much is left
-    says only that. Give it explicitly to place the round part-way through a
-    session, which is what decides how much of PRELUDE's own share is gone.
+    It carries no phase clock on purpose. An earlier version set
+    ``phase_started_unix`` to zero, which the budget policy of the day read as a
+    preparation phase running since the epoch, and a test meant to show a
+    round's overheads exhausting the session passed on that arithmetic instead.
+    The policy answers to the session clock alone, so that is all this offers.
     """
 
     def __init__(
@@ -1918,18 +1924,13 @@ class _BudgetedState:
         *,
         remaining_sec: float | None,
         measured_expected_sec: float = 0.0,
-        max_minutes: float | None = None,
         phase: str = "PRELUDE",
         double_run: bool = False,
     ) -> None:
         self.baseline_double_run = double_run
         self.baseline_runtime_sec = measured_expected_sec
         self.phase = phase
-        if remaining_sec is None:
-            self.max_minutes = 0.0
-        else:
-            self.max_minutes = remaining_sec / 60.0 if max_minutes is None else max_minutes
-        self.phase_started_unix = 0.0
+        self.max_minutes = 0.0 if remaining_sec is None else remaining_sec / 60.0
         self._deadline = None if remaining_sec is None else time.monotonic() + remaining_sec
 
     def charge(self, seconds: float) -> None:
@@ -1942,13 +1943,6 @@ class _BudgetedState:
 
     def session_budget_usable_sec(self) -> float | None:
         return None if self._deadline is None else self._deadline - time.monotonic()
-
-    @property
-    def phase_elapsed_totals(self) -> dict[str, float]:
-        usable = self.session_budget_usable_sec()
-        if usable is None:
-            return {}
-        return {"PRELUDE": max(0.0, self.max_minutes * 60.0 - usable)}
 
 
 def _capturing_fake_run(
@@ -2034,7 +2028,6 @@ def _run_baseline_under_budget(
     produces_workspace: bool = True,
     measured_expected_sec: float = 0.0,
     pass_duration_sec: float = 0.0,
-    max_minutes: float | None = None,
     phase: str = "PRELUDE",
     executor_cls=BaselineExecutor,
 ) -> tuple[dict, list[dict]]:
@@ -2044,7 +2037,6 @@ def _run_baseline_under_budget(
     state = _BudgetedState(
         remaining_sec=remaining_sec,
         measured_expected_sec=measured_expected_sec,
-        max_minutes=max_minutes,
         phase=phase,
     )
     fake_run, calls = _capturing_fake_run(
