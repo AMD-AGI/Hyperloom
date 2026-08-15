@@ -589,6 +589,99 @@ def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
     return None
 
 
+# Name of the stamp written beside the caller's ``server.log`` the moment the
+# server first reports ready.
+_READY_STAMP_NAME = "server_ready_at"
+
+
+def _ready_stamp_path(server_log_path: str) -> Path:
+    """Return where a round's ready stamp lives, given its ``server.log`` path."""
+    return Path(server_log_path).parent / _READY_STAMP_NAME
+
+
+def _stamp_server_ready(server_log_path: str) -> None:
+    """Record, beside ``server_log_path``, that the server just reported ready.
+
+    Written as a wall-clock (``time.time()``) instant rather than the
+    ``time.monotonic()`` one the gates run on, because the process that reads it
+    is not always the one that wrote it: on the Ray path the round runs inside an
+    actor, and a monotonic reading means nothing outside the process that took
+    it. A file is used for the same reason -- it crosses the actor boundary that
+    the round's return value would otherwise have to be widened to cross, and the
+    round's output directory is already how post-mortem evidence gets back (the
+    caller reads the same directory's ``server.log`` to classify server deaths).
+
+    Best effort: a round whose stamp cannot be written loses a measurement, which
+    callers already have to handle, and must not lose the round.
+
+    Args:
+        server_log_path: The ``<output_dir>/server.log`` path from the caller.
+    """
+    try:
+        _ready_stamp_path(server_log_path).write_text(f"{time.time():.3f}\n", encoding="utf-8")
+    except OSError as exc:
+        log.warning("_subprocess_kill: could not stamp server-ready time (%s)", exc)
+
+
+def clear_server_ready_stamp(server_log_path: str) -> None:
+    """Drop any ready stamp an earlier round left in this output directory.
+
+    Args:
+        server_log_path: The ``<output_dir>/server.log`` path from the caller.
+    """
+    try:
+        _ready_stamp_path(server_log_path).unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("_subprocess_kill: could not clear stale server-ready stamp (%s)", exc)
+
+
+def server_ready_unix(server_log_path: str) -> float | None:
+    """Return when the server reported ready, or ``None`` when nothing recorded it.
+
+    Args:
+        server_log_path: The ``<output_dir>/server.log`` path from the caller.
+
+    Returns:
+        float | None: The wall-clock instant, or ``None`` when no stamp exists or
+        it is unreadable.
+    """
+    try:
+        stamped = float(_ready_stamp_path(server_log_path).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return stamped if stamped > 0.0 else None
+
+
+def post_ready_runtime_sec(
+    server_log_path: str,
+    *,
+    started_unix: float,
+    runtime_sec: float,
+) -> float | None:
+    """Return how long a round ran *after* its server was ready.
+
+    This is the part of a round's wall-clock that is the benchmark itself, with
+    boot, weight load, compile and graph capture excluded. It is what makes two
+    rounds comparable when one paid for a cold start and the other re-attached to
+    a server already up.
+
+    Args:
+        server_log_path: The ``<output_dir>/server.log`` path from the caller.
+        started_unix: When the round was spawned.
+        runtime_sec: The round's full wall-clock.
+
+    Returns:
+        float | None: Seconds after ready, bounded by the round's own runtime, or
+        ``None`` when the round never reported ready or the only stamp present
+        predates it (an earlier round's, left behind by a failed clear -- reading
+        it would report a cold round as though it had never booted).
+    """
+    ready_unix = server_ready_unix(server_log_path)
+    if ready_unix is None or ready_unix < started_unix:
+        return None
+    return max(0.0, min(float(runtime_sec), started_unix + float(runtime_sec) - ready_unix))
+
+
 def _resolve_scan_logs(server_log_path: str) -> list[str]:
     """Return the log files to scan for markers, newest-nesting first.
 
@@ -1141,6 +1234,10 @@ def _communicate_with_soft_deadline(
             if scan.saw_ready and server_ready_since is None:
                 server_ready_since = now
                 last_activity_at = now  # start the silence clock at ready
+                # Recorded for the caller, which prices later work off the
+                # post-ready segment rather than the whole round: a pass that
+                # re-attaches to this server pays none of the boot.
+                _stamp_server_ready(server_log_path)  # type: ignore[arg-type]
             if scan.saw_eval_start and not soft_deadline_suspended:
                 soft_deadline_suspended = True
                 log.info(
@@ -1238,10 +1335,13 @@ __all__ = [
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "STOP_GATE_POLL_SECONDS",
     "TERM_GRACE_SECONDS",
+    "clear_server_ready_stamp",
     "kill_my_spawned_server",
     "new_session_kwargs",
+    "post_ready_runtime_sec",
     "run_with_session_kill",
     "server_log_death_excerpt",
+    "server_ready_unix",
     "session_deadline_to_remaining_sec",
     "session_remaining_to_deadline_sec",
 ]

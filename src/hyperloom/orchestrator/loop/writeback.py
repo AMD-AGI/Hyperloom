@@ -3046,6 +3046,17 @@ class WritebackCollaborator:
             elif float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0) != 0.0:
                 self.shared_state.baseline_warm_runtime_sec = 0.0
                 changed = True
+            # Promote the cold round's boot/benchmark split. Cleared the same way
+            # the warm figure is when a later baseline does not carry one, so a
+            # stale split can never be subtracted from a fresh total and reported
+            # as this workload's boot.
+            post_ready_raw = result.get("post_ready_runtime_sec")
+            if isinstance(post_ready_raw, (int, float)) and post_ready_raw > 0:
+                self.shared_state.baseline_post_ready_runtime_sec = float(post_ready_raw)
+                changed = True
+            elif float(getattr(self.shared_state, "baseline_post_ready_runtime_sec", 0.0) or 0.0) != 0.0:
+                self.shared_state.baseline_post_ready_runtime_sec = 0.0
+                changed = True
         # current_best.tput follows the same hot baseline contract so the
         # gain numerator and denominator stay aligned. Once the stack carries a
         # validated layer, current_best belongs to the stack top and a baseline
