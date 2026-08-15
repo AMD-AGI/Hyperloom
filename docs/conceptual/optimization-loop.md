@@ -73,10 +73,15 @@ PRELUDE -> FRAMEWORK_AGENT -> EXPLORE -> KERNEL_AGENT -> SWEEP -> CLOSE
 
 Cyclic macro-cycling is always enabled. After SWEEP, the Coordinator can
 `cycle_reloop` back to `FRAMEWORK_AGENT` / `EXPLORE` for another pass while
-budget and leverage remain, regardless of whether the session is shorter than
-24 hours. The 24-hour threshold now only selects long-run budget accounting:
-short bounded runs keep charge-back phase budgeting, while long / unbounded
-runs use the fixed per-cycle budget window.
+budget and leverage remain. The effective minimum remaining budget to justify
+opening a new cycle scales with session length (capped at the 3-hour absolute
+floor), so shorter sessions can also reloop when they have proportionally
+sufficient time left. The 24-hour threshold only selects long-run budget
+accounting: short bounded runs keep charge-back phase budgeting, while long /
+unbounded runs use the fixed per-cycle budget window.
+
+Whether another cycle is feasible is surfaced as `cycle_reloop_feasible` in
+the ``=== Phase ===`` block for the four middle phases.
 
 `machine_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which
 actions can run in each phase. Coordinator-owned actions such as
@@ -215,7 +220,9 @@ canonical `explore` ledger:
 - `specialist` delegates targeted research or patch proposals. A single
   unified specialist covers single-domain, cross-domain (`scope=domains`),
   and free-form (`scope=freeform`) investigations through its dispatch dials
-  (`scope` / `mode` / `bench` / `lane`).
+  (`scope` / `mode` / `bench` / `lane`). Specialist is also available in
+  FRAMEWORK_AGENT and KERNEL_AGENT so source-level failures can go straight
+  to investigation without waiting for a reloop.
 - `integrate_patch` applies Critic-reviewed specialist patches and
   benchmarks them.
 
@@ -237,9 +244,6 @@ admits these actions:
 
 - `kernel_opt`
 - `integrate`
-- `deep_kernel_analysis`
-- `operator_tuning`
-- `vendor_kernel_config`
 - `gemm_tuning`
 - `roofline`
 - `profile`

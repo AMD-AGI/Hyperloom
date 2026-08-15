@@ -123,7 +123,7 @@ def _policy_denied_symptoms(
                 },
                 subject={"agent": source},
                 source="coordinator_events",
-                suggestion="escalate_strategy_change to review ActionRegistry / role config",
+                suggestion="escalate_strategy_change to review the action catalogue / role config",
             )
         )
     return out

@@ -37,9 +37,18 @@ from hyperloom.inference_optimizer.session.session_paths import (
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
 
-def test_session_dir_default_is_workspace_hyperloom(monkeypatch):
+def test_session_dir_default_follows_the_host(monkeypatch, tmp_path):
+    """/workspace is a container convention, absent on bare metal off root."""
+    import os as _os
+
     monkeypatch.delenv(paths.ENV_USER_DATA_PATH, raising=False)
+
+    monkeypatch.setattr(_os, "access", lambda _p, _m: True)
     assert paths.session_dir() == Path("/workspace/hyperloom")
+
+    monkeypatch.setattr(_os, "access", lambda _p, _m: False)
+    monkeypatch.chdir(tmp_path)
+    assert paths.session_dir() == tmp_path / "session"
 
 
 def test_session_dir_user_data_path_overrides_default(tmp_path, monkeypatch):
@@ -465,7 +474,7 @@ async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
-    """`target_analysis` is not in _runs_actions() — runner shouldn't fabricate a path."""
+    """`target_analysis` is not in _RUNS_ACTIONS — runner shouldn't fabricate a path."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "x.db")

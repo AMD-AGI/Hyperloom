@@ -481,7 +481,10 @@ class RooflineExecutor:
             roofline_output_name = "kernel_roofline_opt.json"
         else:
             roofline_output_name = "kernel_roofline_current.json"
-        ta_payload: dict[str, Any] = {"trace_input": str(trace_path)}
+        ta_payload: dict[str, Any] = {
+            "trace_input": str(trace_path),
+            "framework": framework,
+        }
         workspace_path = _task_params.get("workspace_path")
         if workspace_path not in (None, ""):
             ta_payload["workspace_path"] = workspace_path
@@ -534,6 +537,7 @@ class RooflineExecutor:
             )
             ta_payload_retry: dict[str, Any] = {
                 "trace_input": str(trace_path),
+                "framework": framework,
                 "steady_state_mode": retry_mode,
                 # Marker against retry loops.
                 "_n26_auto_retry": True,
@@ -663,7 +667,10 @@ class RooflineExecutor:
                 cb_profile = await profile_executor(cb_ctx)
                 cb_trace = _extract_trace_path(cb_profile) if isinstance(cb_profile, dict) else ""
                 if cb_trace:
-                    cb_payload: dict[str, Any] = {"trace_input": str(cb_trace)}
+                    cb_payload: dict[str, Any] = {
+                        "trace_input": str(cb_trace),
+                        "framework": framework,
+                    }
                     if roofline_arm:
                         cb_payload["roofline_arm"] = roofline_arm
                     if roofline_output_name:

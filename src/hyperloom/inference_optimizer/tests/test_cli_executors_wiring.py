@@ -4,23 +4,22 @@
 """Unit tests for :mod:`hyperloom.inference_optimizer.cli.executors`.
 
 Cover the specialist-executor factory (subprocess and in-process branches) and
-the ``_register_executors`` wiring / ``_noop_prep`` stub without launching any
-real ``claude`` subprocess.
+the ``_register_executors`` wiring without launching any real ``claude``
+subprocess.
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
 
 from hyperloom.inference_optimizer.cli import executors as cli_executors
+from hyperloom.inference_optimizer.protocol.action_surfaces import KERNEL_AGENT_OWNED_ACTIONS
 from hyperloom.inference_optimizer.cli.executors import (
     _build_specialist_executor,
-    _noop_prep,
     _register_executors,
     _REAL_EXECUTORS_FULL,
 )
@@ -35,12 +34,6 @@ def _spec_args(dispatch_mode: str) -> argparse.Namespace:
         specialist_dispatch_mode=dispatch_mode,
         specialist_mcp_config=None,
     )
-
-
-def test_noop_prep_returns_success_envelope():
-    ctx = SimpleNamespace(task=SimpleNamespace(kind="rewrite_kernel"))
-    out = asyncio.run(_noop_prep(ctx))
-    assert out == {"status": "succeeded", "kind": "rewrite_kernel", "note": "noop-stub"}
 
 
 def test_build_specialist_executor_inprocess_when_no_claude(monkeypatch, tmp_path):
@@ -136,9 +129,9 @@ def _fake_coordinator() -> SimpleNamespace:
     return SimpleNamespace(sub=_FakeSub(), shared_state=SimpleNamespace())
 
 
-def test_register_executors_wires_full_set_and_kernel_noops():
+def test_register_executors_wires_full_set():
     coord = _fake_coordinator()
-    _register_executors(coord, no_kernel=False, session_dir=None)
+    _register_executors(coord, session_dir=None)
     reg = coord.sub.executor_registry
     for kind in _REAL_EXECUTORS_FULL:
         assert kind in reg
@@ -149,7 +142,6 @@ def test_register_executors_wires_full_set_and_kernel_noops():
     assert "framework_agent" in reg
     assert "framework" not in reg
     assert "roofline" in reg
-    assert any(fn is _noop_prep for fn in reg.values())
 
 
 def test_register_executors_covers_every_phase_allowed_action():
@@ -168,23 +160,27 @@ def test_register_executors_covers_every_phase_allowed_action():
     async def _spec(ctx):  # noqa: ANN001, ANN202 - test stub
         return {}
 
-    _register_executors(coord, no_kernel=False, session_dir=None, specialist_executor=_spec)
+    _register_executors(coord, session_dir=None, specialist_executor=_spec)
     reg = coord.sub.executor_registry
 
     expected: set[str] = set()
     for actions in PHASE_ALLOWED_ACTIONS.values():
         expected |= set(actions)
+    # Kernel-owned actions never become tasks: PolicyGate denies delegate /
+    # propose_action for them, and the Coordinator routes them over the bus.
+    expected -= KERNEL_AGENT_OWNED_ACTIONS
     missing = sorted(kind for kind in expected if kind not in reg)
     assert not missing, f"phase-allowed actions with no executor: {missing}"
 
 
-def test_register_executors_no_kernel_skips_noops_and_debug_log(caplog):
+def test_register_executors_never_wires_kernel_owned_actions(caplog):
+    """Kernel-owned actions are REQUEST-only, so they get no executor at all."""
     coord = _fake_coordinator()
     with caplog.at_level(logging.DEBUG, logger=cli_executors.log.name):
-        _register_executors(coord, no_kernel=True, session_dir=None)
+        _register_executors(coord, session_dir=None)
     reg = coord.sub.executor_registry
     assert "roofline" in reg
-    assert not any(fn is _noop_prep for fn in reg.values())
+    assert not (set(reg) & KERNEL_AGENT_OWNED_ACTIONS)
 
 
 def test_register_executors_registers_optional_specialist():
@@ -193,7 +189,7 @@ def test_register_executors_registers_optional_specialist():
     async def _spec(ctx):  # noqa: ANN001, ANN202 - test stub
         return {}
 
-    _register_executors(coord, no_kernel=True, specialist_executor=_spec, session_dir=Path("."))
+    _register_executors(coord, specialist_executor=_spec, session_dir=Path("."))
     assert coord.sub.executor_registry["specialist"] is _spec
 
 
@@ -203,7 +199,7 @@ async def _spec_stub(ctx):  # noqa: ANN001, ANN202 - test stub
 
 def _fully_wired_registry() -> dict[str, object]:
     coord = _fake_coordinator()
-    _register_executors(coord, no_kernel=False, specialist_executor=_spec_stub, session_dir=None)
+    _register_executors(coord, specialist_executor=_spec_stub, session_dir=None)
     return coord.sub.executor_registry
 
 
@@ -233,28 +229,23 @@ def test_no_executor_is_registered_under_an_unknown_action_name():
     A registration whose name is not in the action catalogue can never be
     enqueued, so it is dead weight that also makes the real gap harder to see.
     """
-    from hyperloom.orchestrator.actions.registry import ActionRegistry
+    from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 
     registry = _fully_wired_registry()
-    catalogue = {meta.name for meta in ActionRegistry().load().all()}
+    catalogue = {meta.name for meta in ACTION_CATALOGUE.values()}
 
     phantom = sorted(set(registry) - catalogue)
-    assert not phantom, f"executor keys with no actions/_meta/*.yaml: {phantom}"
+    assert not phantom, f"executor keys absent from ACTION_CATALOGUE: {phantom}"
 
 
 def test_conditional_registrations_are_exactly_the_documented_exceptions():
     """Pin which kinds may legitimately be absent, so the exception set cannot drift.
 
-    Only two conditions remove an executor: ``--no-kernel`` drops the
-    kernel-owned stubs, and a zero research-lane capacity drops the
-    specialist. Anything else disappearing is a wiring bug.
+    Only one condition removes an executor now: a zero research-lane capacity
+    drops the specialist. Anything else disappearing is a wiring bug.
     """
-    from hyperloom.inference_optimizer.protocol.action_surfaces import (
-        KERNEL_AGENT_OWNED_ACTIONS,
-    )
-
     minimal = _fake_coordinator()
-    _register_executors(minimal, no_kernel=True, specialist_executor=None, session_dir=None)
+    _register_executors(minimal, specialist_executor=None, session_dir=None)
 
     optional = set(_fully_wired_registry()) - set(minimal.sub.executor_registry)
-    assert optional == set(KERNEL_AGENT_OWNED_ACTIONS) | {"specialist"}
+    assert optional == {"specialist"}

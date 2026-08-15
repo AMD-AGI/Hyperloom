@@ -1,25 +1,4 @@
-# Kernel Optimization (harness, apply safety, E2E retry)
-
-## Pre-GEAK Unittest Harness (unittest skill)
-
-Before `backend=geak` attempts, the main agent generates a GEAK-compatible test
-harness by following `src/hyperloom/agents/kernel/skills/unittest/SKILL.md`. The skill searches
-for existing tests, collects shapes/dtypes from TraceLens and profiling data,
-and generates a 4-mode harness (`--correctness` / `--profile` / `--benchmark` /
-`--full-benchmark`) that matches GEAK's evaluation contract.
-
-The resulting `test_command` is passed via `--test-command` to
-`kernel_optimization.py`, which forwards it to GEAK. If the skill fails to
-produce a valid harness (after up to 3 retries), `--test-command` is omitted and
-GEAK falls back to its own test discovery cascade.
-
-Validation uses `src/hyperloom/agents/kernel/skills/unittest/validate_harness.py` for both
-static checks (argparse + 4 flags + GEAK output markers) and runtime
-verification (run correctness + benchmark with reduced iterations).
-
-The Coordinator does NOT need to drive this step — the main agent executes the
-unittest skill before calling `kernel_optimization.py`. Observability shows up as
-`test_command` in `optimization_attempts.jsonl[].backend_paths`.
+# Kernel Optimization (apply safety, E2E retry)
 
 ## Kernel Apply Safety
 

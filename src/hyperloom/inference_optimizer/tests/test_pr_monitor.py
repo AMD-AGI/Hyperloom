@@ -50,13 +50,6 @@ def test_plane_enabled_returns_mcp_url():
     assert plane.specialist_mcp_url() == "http://pr.test/mcp/"
 
 
-def test_plane_reset_round_caches_is_noop():
-    plane = KnowledgePlane.from_clients(
-        pr_monitor=PRMonitorClient.from_args(),
-    )
-    plane.reset_round_caches()
-
-
 def test_default_specialist_tools_include_all_pr_monitor_mcp_tools():
     for t in PR_MONITOR_MCP_TOOLS:
         assert t in DEFAULT_SPECIALIST_TOOLS

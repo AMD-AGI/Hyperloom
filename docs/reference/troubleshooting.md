@@ -47,6 +47,35 @@ See [Hyperloom authentication and credentials](authentication.md) for credential
 
 ---
 
+## A rotated API key does not take effect
+
+**Symptom**: A new key is written into `.env`, but the run keeps failing on
+credentials. `tr '\0' '\n' < /proc/<pid>/environ | grep ANTHROPIC_API_KEY` on the
+running optimizer shows the previous key.
+
+**Cause**: `install.sh` snapshots the resolved credentials into
+`$USER_DATA_PATH/runtime/kernel-agent.env.sh`, and every launch sources `.env`
+first and that file second. The snapshot is a fallback, so the rotated value
+wins — but only if it is in the environment when the file is sourced. Sourcing
+the file in a shell that never loaded the new `.env` still yields the old key.
+
+**Fix**:
+
+1. Source `.env` before `kernel-agent.env.sh`, which is the documented launch
+   order:
+   ```bash
+   set -a; . "$REPO_ROOT/.env"; set +a
+   . "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
+   ```
+   The file prints `ANTHROPIC_API_KEY differs from the install-time snapshot` on
+   a mismatch; that line means the rotated value is the one in effect.
+2. To refresh the snapshot itself, re-run the installer:
+   ```bash
+   bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
+   ```
+
+---
+
 ## TLS or certificate errors against the LLM gateway
 
 **Symptom**: Preflight or an LLM client fails before authentication with one of:
@@ -324,7 +353,7 @@ appear under the selected local KB root.
 
 **Cause**: The selected local root is read-only/full, permission is denied, a
 one-time legacy Recipe migration failed, or the explicitly selected remote
-GBrain backend is unreachable.
+KB Store backend is unreachable.
 
 **Fix**:
 
@@ -335,8 +364,9 @@ GBrain backend is unreachable.
    mkdir -p "$KB_ROOT"
    touch "$KB_ROOT/.write-test" && rm "$KB_ROOT/.write-test"
    ```
-2. If `KNOWLEDGE_STORE_MODE=remote`, verify `GBRAIN_BASE_URL` reachability and
-   the token from the same pod. Remote mode does not fall back to local.
+2. If `KNOWLEDGE_STORE_MODE=remote`, verify `KB_STORE_URL` reachability and
+   `KB_STORE_TOKEN` from the same pod. Remote mode does not fall back to local
+   and currently writes only at CLOSE.
 3. After an upgrade, inspect the startup error before moving data manually.
    Stop old writers, back up `$USER_DATA_PATH/kb` (or
    `/workspace/hyperloom/kb`), correct permissions, and retry the one-time

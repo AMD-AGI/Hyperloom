@@ -290,8 +290,31 @@ class ClosePhase(PhaseHandler):
         # Writes update_recipe + finalises the local journal (final_throughput /
         # total_gain_pct). Recorded as the ``fact_finalize`` close_step.
         try:
-            self.finalize_recipe_and_journal()
-            await self._record_close_step("fact_finalize", status="done")
+            outcome = self.finalize_recipe_and_journal() or {}
+            kb_status = str(outcome.get("status") or "done")
+            close_status = (
+                "failed"
+                if kb_status == "error"
+                else "skipped"
+                if kb_status in {"disabled", "skipped"}
+                else "done"
+            )
+            detail = " ".join(
+                f"{key}={outcome[key]}"
+                for key in (
+                    "status",
+                    "reason",
+                    "backend",
+                    "canonical_id",
+                    "session_id",
+                )
+                if outcome.get(key) not in (None, "")
+            )
+            await self._record_close_step(
+                "fact_finalize",
+                status=close_status,
+                detail=detail,
+            )
         except Exception as exc:  # noqa: BLE001
             log.exception("CLOSE step 4 (fact_finalize) failed")
             await self._record_close_step(

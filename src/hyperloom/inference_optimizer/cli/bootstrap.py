@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.orchestrator.state.shared_state import SharedState
 from .parser import (
     DEFAULT_ISL,
@@ -211,13 +212,8 @@ def _seed_shared_state(
     # KB architecture tags from config.json; fresh-launch only.
     _cfg_tags = _load_model_config_tags(str(args.model))
 
-    # Persist the kernel optimizer under the same hard rule used by the runtime:
-    # only exact KERNEL_OPT_BACKEND_ORDER=forge opts into per-kernel forge.
-    _kernel_optimizer_record = (
-        "native"
-        if str(os.environ.get("KERNEL_OPT_BACKEND_ORDER") or "").strip().lower() == "forge"
-        else "geak"
-    )
+    # Persisted for the session breakdown; the runtime reads the env directly.
+    _kernel_optimizer_record = "native" if forge_explicitly_enabled() else "geak"
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority
     # base for the baseline server args.
@@ -546,58 +542,34 @@ def _read_failure_summary(session_dir: Path) -> dict | None:
 def _resolve_reference_recipe(
     args: argparse.Namespace,
 ) -> tuple[str, dict[str, str], str, str]:
-    """Resolve the reference launch recipe for a fresh launch (fail-soft).
+    """Resolve the reference launch recipe for a fresh launch.
 
-    Returns ``(server_args, envs, model, source)``. Discovery is gated on the
-    operator opting in via ``--reference-script``:
-
-    - **No ``--reference-script``** -> return empty and do NOT auto-discover.
-    - **``--reference-script`` resolves to a usable recipe** -> use it.
-    - **``--reference-script`` given but unreadable / yields no flags** -> fall
-      back to auto-discovering an ``exact`` InferenceX single-node match (a
-      ``fuzzy`` match is logged as a candidate but NOT applied).
+    Returns ``(server_args, envs, model, source)``, empty when
+    ``--reference-script`` was not given. A flag pointing at a recipe that cannot
+    be read or yields nothing usable exits with ``SystemExit(2)``.
     """
     source = (getattr(args, "reference_script", None) or "").strip()
-    # No flag: never auto-discover.
     if not source:
         return ("", {}, "", "")
 
     framework = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
-    from ..reference_script import (
-        discover_reference_script,
-        parse_reference_script,
-    )
+    from ..reference_script import parse_reference_script
 
-    recipe = parse_reference_script(source, framework=framework)
-    if recipe.server_args or recipe.envs:
-        print(f"Reference script: {source} ({len(recipe.server_args.split())} arg tokens, {len(recipe.envs)} env(s))")
-        return (recipe.server_args, dict(recipe.envs), recipe.model or "", source)
+    try:
+        recipe = parse_reference_script(source, framework=framework)
+    except Exception as exc:
+        print(f"ERROR: --reference-script {source!r} could not be parsed: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
 
-    # Explicit source unreadable / yielded nothing: auto-discover instead.
-    print(
-        f"Reference script: {source} not usable (unreadable or no flags lifted); falling back to auto-discovery",
-        file=sys.stderr,
-    )
-    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
-    if not inferencex_path:
-        return ("", {}, "", "")
-    path, tier = discover_reference_script(
-        inferencex_path,
-        model_path=str(args.model or ""),
-        precision=(getattr(args, "precision", None) or os.environ.get("PRECISION", "")),
-        gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
-        framework=framework,
-    )
-    if path and tier == "exact":
-        recipe = parse_reference_script(path, framework=framework)
-        print(f"Reference script: {path} (auto-discovered, exact match)")
-        return (recipe.server_args, dict(recipe.envs), recipe.model or "", path)
-    if path and tier == "fuzzy":
+    if not recipe.server_args and not recipe.envs:
         print(
-            f"Reference script: candidate {path} (fuzzy match — NOT applied; pass --reference-script {path} to use it)",
+            f"ERROR: --reference-script {source!r} lifted no server flags and no env exports",
             file=sys.stderr,
         )
-    return ("", {}, "", "")
+        raise SystemExit(2)
+
+    print(f"Reference script: {source} ({len(recipe.server_args.split())} arg tokens, {len(recipe.envs)} env(s))")
+    return (recipe.server_args, dict(recipe.envs), recipe.model or "", source)
 
 
 def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:

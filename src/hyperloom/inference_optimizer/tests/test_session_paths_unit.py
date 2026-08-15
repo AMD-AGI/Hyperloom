@@ -89,7 +89,6 @@ def test_trace_paths():
     assert sp.llm_calls_path(SD).name == "llm_calls.jsonl"
     assert sp.decision_trace_path(SD).name == "decision_trace.jsonl"
     assert sp.conversations_path(SD).name == "conversations.jsonl"
-    assert sp.orchestration_turns_path(SD).name == "orchestration_turns.jsonl"
     assert sp.proposal_task_map_path(SD).name == "proposal_task_map.jsonl"
 
 

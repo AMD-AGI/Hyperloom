@@ -15,15 +15,16 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.llm_config import LLMConfigError
 from hyperloom.inference_optimizer.breakdown.reporters.llm_client import (
-    AnthropicHttpClient,
+    REPORT_HTTP_TIMEOUT_SEC,
+    AnthropicClient,
     NullClient,
     OpenAIHttpClient,
     build_client_from_env,
 )
 
 _LLM_CONFIG = "hyperloom.common.llm_config"
+_CLAUDE_ONESHOT = "hyperloom.common.claude_oneshot"
 
 _REPORT_ENV_VARS = (
     "HYPERLOOM_REPORT_LLM_BACKEND",
@@ -58,8 +59,13 @@ def _install_factories(
     *,
     openai_error: Exception | None = None,
     anthropic_error: Exception | None = None,
+    transport: str = "sdk",
 ) -> dict[str, list[dict[str, Any]]]:
-    """Patch both sync client factories; return per-provider construction kwargs."""
+    """Patch the OpenAI factory and the Anthropic transport probe.
+
+    ``transport`` stands in for the credential shape llm_config would resolve,
+    so a test can pick a branch without exporting provider variables.
+    """
     built: dict[str, list[dict[str, Any]]] = {"openai": [], "anthropic": []}
 
     def _openai(**kwargs: Any) -> str:
@@ -68,14 +74,14 @@ def _install_factories(
             raise openai_error
         return "openai-client"
 
-    def _anthropic(**kwargs: Any) -> str:
-        built["anthropic"].append(kwargs)
+    def _ensure_available() -> None:
+        built["anthropic"].append({})
         if anthropic_error is not None:
             raise anthropic_error
-        return "anthropic-client"
 
     monkeypatch.setattr(f"{_LLM_CONFIG}.get_openai_client", _openai)
-    monkeypatch.setattr(f"{_LLM_CONFIG}.get_anthropic_client", _anthropic)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport", lambda *_a, **_kw: transport)
+    monkeypatch.setattr(f"{_CLAUDE_ONESHOT}.ensure_available", _ensure_available)
     monkeypatch.setattr(f"{_LLM_CONFIG}.build_http_timeout", lambda **kwargs: kwargs)
     return built
 
@@ -105,22 +111,22 @@ def test_openai_client_delegates_to_the_shared_chat_helper(monkeypatch: pytest.M
     assert calls[0]["temperature"] == 0.2
 
 
-def test_anthropic_client_delegates_to_the_shared_messages_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_anthropic_client_delegates_to_the_single_shot_entry_point(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
 
-    def _fake(client: Any, **params: Any) -> _MessageReply:
-        calls.append({"client": client, **params})
+    def _fake(**params: Any) -> _MessageReply:
+        calls.append(params)
         return _MessageReply("narrative")
 
-    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_messages", _fake)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_completion", _fake)
 
-    client = AnthropicHttpClient(client="anthropic-client", model="m", max_output_tokens=8)
+    client = AnthropicClient(model="m", max_output_tokens=8, timeout_s=12.0)
     assert client.complete(system="sys", user="user") == "narrative"
-    assert calls[0]["client"] == "anthropic-client"
     assert calls[0]["model"] == "m"
     assert calls[0]["system"] == "sys"
     assert calls[0]["messages"] == [{"role": "user", "content": "user"}]
     assert calls[0]["max_tokens"] == 8
+    assert calls[0]["timeout_s"] == 12.0
 
 
 def test_provider_transport_errors_propagate_to_the_caller(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -173,17 +179,37 @@ def test_build_client_wires_the_anthropic_backend(monkeypatch: pytest.MonkeyPatc
 
     client = build_client_from_env()
 
-    assert isinstance(client, AnthropicHttpClient)
-    assert client.client == "anthropic-client"
+    assert isinstance(client, AnthropicClient)
+    assert client.timeout_s == REPORT_HTTP_TIMEOUT_SEC
     assert client.model == "claude-opus-5"
     assert client.max_output_tokens == 1024
     assert built["openai"] == []
 
 
-def test_build_client_falls_back_to_deterministic_when_credentials_are_missing(
+def test_build_client_skips_the_sdk_probe_on_the_http_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An API key needs no Claude CLI, so its absence must not disable the pass."""
+    built = _install_factories(
+        monkeypatch,
+        transport="http",
+        anthropic_error=RuntimeError("claude_agent_sdk is not installed"),
+    )
+    monkeypatch.setenv("HYPERLOOM_REPORT_LLM_BACKEND", "anthropic")
+
+    assert isinstance(build_client_from_env(), AnthropicClient)
+    assert built["anthropic"] == [], "the SDK probe belongs to the CLI transport only"
+
+
+def test_build_client_returns_none_without_an_anthropic_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_factories(monkeypatch, transport="")
+    monkeypatch.setenv("HYPERLOOM_REPORT_LLM_BACKEND", "anthropic")
+
+    assert build_client_from_env() is None
+
+
+def test_build_client_falls_back_to_deterministic_when_the_claude_sdk_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install_factories(monkeypatch, anthropic_error=LLMConfigError("ANTHROPIC_API_KEY not set in env"))
+    _install_factories(monkeypatch, anthropic_error=RuntimeError("claude_agent_sdk is not installed"))
     monkeypatch.setenv("HYPERLOOM_REPORT_LLM_BACKEND", "anthropic")
 
     assert build_client_from_env() is None

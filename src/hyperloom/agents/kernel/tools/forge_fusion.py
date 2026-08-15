@@ -78,7 +78,8 @@ def _inject_author_gateway_env(agent_backend: str) -> None:
     established behavior: credential alias resolution is delegated to
     :mod:`hyperloom.common.llm_config`, then Claude-specific process defaults are
     applied. Selection is driven only by the explicit backend contract, never by
-    a model-name prefix.
+    a model-name prefix. A ``CLAUDE_CODE_OAUTH_TOKEN`` is inherited as-is and
+    deliberately not mirrored into a key var, since either one would disable it.
     """
     if _validated_agent_backend(agent_backend) == "codex":
         return
@@ -88,7 +89,10 @@ def _inject_author_gateway_env(agent_backend: str) -> None:
     options = llm_config.claude_sdk_env_options(env=os.environ)
     resolved_env = options.get("env")
     if isinstance(resolved_env, dict):
-        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        # Exactly the synthesizable subset: mirroring the subscription token
+        # into a key slot is what would disable it, so the registry decides
+        # which forms may be copied here rather than a list kept in step by hand.
+        for name in llm_config.ANTHROPIC_SYNTHESIZABLE_KEY_ENVS:
             value = str(resolved_env.get(name) or "").strip()
             if value:
                 os.environ.setdefault(name, value)
@@ -126,10 +130,12 @@ def _git_toplevel(path: str) -> str:
     """
     if not path:
         return ""
+    from hyperloom.common.git_safety import safe_directory_args  # noqa: PLC0415 - standalone import-light
+
     try:
         parent = str(Path(path).parent)
         r = subprocess.run(
-            ["git", "-C", parent, "rev-parse", "--show-toplevel"],
+            ["git", *safe_directory_args(["-C", parent, "rev-parse", "--show-toplevel"])],
             capture_output=True,
             text=True,
             timeout=10,
@@ -139,7 +145,7 @@ def _git_toplevel(path: str) -> str:
             try:
                 rel = str(Path(path).resolve().relative_to(Path(toplevel).resolve()))
                 tracked = subprocess.run(
-                    ["git", "-C", toplevel, "ls-files", "--error-unmatch", "--", rel],
+                    ["git", *safe_directory_args(["-C", toplevel, "ls-files", "--error-unmatch", "--", rel])],
                     capture_output=True,
                     text=True,
                     timeout=10,

@@ -1,7 +1,7 @@
 ---
 myst:
     html_meta:
-        "description": "Learn how to configure the optional knowledge base integration in Hyperloom. Covers local recipe KB setup, gbrain remote reads, resolver order, and degraded-mode behavior."
+        "description": "Learn how to configure the optional knowledge base integration in Hyperloom. Covers local Recipe KB setup, KB Store remote writes, resolver order, and degraded-mode behavior."
         "keywords": "Hyperloom, knowledge base, KB, recipe KB, gbrain, local KB, LLM inference, AMD GPU, ROCm, optimization, warm-start, session, configuration"
 ---
 # Integrate Recipe knowledge base in Hyperloom
@@ -15,10 +15,9 @@ Hyperloom uses a recipe-snapshot KB and selects exactly one store:
 | KB path | Owner / process | Purpose |
 |---------|-----------------|---------|
 | Local recipe KB | `inference_optimizer` | Selected by local/default mode; reads and writes durable Recipe JSON, history, and attempts. |
-| Remote gbrain recipe KB | gbrain page store | Selected only by `KNOWLEDGE_STORE_MODE=remote`; reads and writes canonical GBrain pages directly. |
+| Remote Recipe KB | KB Store | Selected only by `KNOWLEDGE_STORE_MODE=remote`; reads the current Recipe View for warm replay and writes one final session at CLOSE. |
 
-Ambient GBrain credentials do not enable remote reads. `RECIPE_KB_MIRROR_MODE`
-is obsolete and ignored.
+Ambient KB Store or GBrain credentials do not select remote mode.
 
 ---
 
@@ -79,19 +78,40 @@ Recommended locations:
 
 ---
 
-## Remote recipe KB (gbrain)
+## Remote Recipe KB (KB Store)
 
-Remote mode reads and writes the gbrain page store directly:
+Remote mode writes the final session to KB Store:
 
 ```bash
 export KNOWLEDGE_STORE_MODE=remote
-export GBRAIN_BASE_URL=https://your-gbrain
-export GBRAIN_TOKEN=...
+export KB_STORE_URL=https://your-kb-store
+export KB_STORE_TOKEN=...
 ```
 
-Both credentials are required; missing credentials fail configuration. Remote
-mode does not fall back to local Recipe data. Use `--degraded-kb` to skip all
-Recipe KB hooks deliberately.
+Both credentials are required; missing credentials fail at startup. Remote mode
+selects metadata through `GET /v1/kb/{canonical_id}/views/hyperloom-recipe` and
+uses `/v1/kb/search` for bounded seven-tuple fallback. It downloads the selected
+session's exact file manifest and replays one combined Recipe: merged config,
+the ordered Explore/Framework overlay timeline, and Kernel GEMM/Fusion/Rewrite
+content. Remote mode does not construct the local Recipe dispatcher or fall
+back to local Recipe data. Runtime amendments are skipped and CLOSE performs
+one best-effort final write. Optional `GBRAIN_*` credentials remain available
+only to non-Recipe KG and Framework PR capabilities.
+
+Configuration replay requires an exact precision match. A bf16 run does not
+select an fp16 record, or vice versa, during degraded warm-start search. If an
+accepted owner patch disappears before staging, that owner section moves to
+the durable dead letter and CLOSE still publishes the final config, other
+owner sections, and Kernel knowledge.
+
+Records written before the unified Recipe contract are not rewritten in place.
+An incompatible record is skipped during View validation; a later successful
+CLOSE publishes the current document and artifacts.
+
+Graceful teardown and Ctrl-C retry an unfinished CLOSE write through the T4
+fallback. No in-process hook can run after SIGKILL, container force-deletion,
+host loss, or interpreter failure; preserving CLOSE-only knowledge across those
+failures requires the platform to resume the durable session and finalize it.
 
 ---
 

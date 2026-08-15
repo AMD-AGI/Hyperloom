@@ -153,9 +153,9 @@ def test_orchestration_prompt_has_no_scoreboard_block():
         FULL_ENABLED_ACTIONS,
         build_orchestration_prompt,
     )
-    from hyperloom.orchestrator.actions.registry import ActionRegistry
+    from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 
-    reg = ActionRegistry().load()
+    reg = ACTION_CATALOGUE
     prompt = build_orchestration_prompt(
         action_registry=reg,
         enabled_actions=FULL_ENABLED_ACTIONS,

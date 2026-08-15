@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 from concurrent.futures import TimeoutError as FuturesTimeoutError
@@ -246,6 +245,78 @@ def test_credentials_validate_and_reset_claude_config(tmp_path: Path, monkeypatc
     credentials._reset_claude_config_to_upstream("ignored", "https://anthropic.example")
 
 
+def test_reset_claude_config_leaves_file_alone_for_oauth_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """primaryApiKey is API-credits billing; with only a subscription token there
+    is no key to write, so the installers' no-op behaviour applies here too.
+
+    Path.home() is patched rather than HOME: the function returns before ever
+    resolving a home directory here, so an assertion that the file is absent
+    would hold even if the environment override had done nothing at all.
+    """
+    from hyperloom.inference_optimizer.cli import credentials
+
+    oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
+    monkeypatch.setenv(oauth_env, "sk-ant-oat01-fake")
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    # Pre-seeded so "left alone" is observable rather than indistinguishable
+    # from "was never going to be written".
+    cfg_path = tmp_path / ".claude" / "config.json"
+    cfg_path.parent.mkdir(parents=True)
+    cfg_path.write_text('{"customApiUrl": "https://operator.example"}\n', encoding="utf-8")
+
+    credentials._reset_claude_config_to_upstream("sk-ant-oat01-fake", "https://api.anthropic.com")
+
+    assert json.loads(cfg_path.read_text(encoding="utf-8")) == {"customApiUrl": "https://operator.example"}
+
+
+def test_reset_claude_config_refuses_a_token_that_also_sits_in_the_key_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one shape where this guard is the only thing standing in the way.
+
+    An operator who exports the same subscription token into both variables
+    makes anthropic_synthesizable_key() return it, so preflight hands it in as
+    the primary key and the subscription-mode check below sees a synthesizable
+    key and declines to fire. Without this guard the token is persisted into
+    ~/.claude/config.json, which both leaks it to disk and moves the run onto
+    API billing.
+    """
+    from hyperloom.inference_optimizer.cli import credentials
+
+    token = "sk-ant-oat01-same"
+    monkeypatch.setenv("_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")), token)
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), token)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+
+    credentials._reset_claude_config_to_upstream(token, "https://api.anthropic.com")
+
+    payload = json.loads((tmp_path / ".claude" / "config.json").read_text(encoding="utf-8"))
+    assert payload["primaryApiKey"] == "", "the subscription token must never be persisted"
+    assert payload["customApiUrl"] == "https://api.anthropic.com"
+
+
+def test_reset_claude_config_preserves_existing_file_for_oauth_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator's logged-in Claude config survives an oauth-only preflight."""
+    from hyperloom.inference_optimizer.cli import credentials
+
+    oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
+    monkeypatch.setenv(oauth_env, "sk-ant-oat01-fake")
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    cfg_path = tmp_path / ".claude" / "config.json"
+    cfg_path.parent.mkdir(parents=True)
+    cfg_path.write_text('{"theme": "light", "oauthAccount": {"emailAddress": "a@b.c"}}\n', encoding="utf-8")
+
+    credentials._reset_claude_config_to_upstream("", "https://api.anthropic.com")
+
+    payload = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert payload == {"theme": "light", "oauthAccount": {"emailAddress": "a@b.c"}}
+
+
 # ---------------------------------------------------------------------------
 # inference_optimizer.cli.recover
 # ---------------------------------------------------------------------------
@@ -350,22 +421,6 @@ def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, mo
 
 def test_cli_multi_node_gc_backend_and_replay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import multi_node as mn
-
-    root = tmp_path / "profile-traces"
-    old = root / "old"
-    keep = root / "keep"
-    new = root / "new"
-    for p in (old, keep, new):
-        p.mkdir(parents=True)
-    now = 10_000_000.0
-    os.utime(old, (now - 10 * 86400, now - 10 * 86400))
-    os.utime(keep, (now - 10 * 86400, now - 10 * 86400))
-    os.utime(new, (now, now))
-    monkeypatch.setattr(mn.time, "time", lambda: now)
-    mn._gc_old_profile_traces(str(root), retention_days=7, keep="keep")
-    assert not old.exists()
-    assert keep.exists()
-    assert new.exists()
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "infera")
     assert mn._resolve_mn_backend(argparse.Namespace(mn_backend=None)) == "infera"
@@ -1067,7 +1122,6 @@ def test_framework_static_audit_classification(tmp_path: Path, monkeypatch: pyte
     assert result["semantic_status"] == "not_present"
     assert result["applicability"] == "direct_apply"
     assert result["metrics"]["patch_source"] == "inline"
-    assert (tmp_path / "audit-direct" / "semantic_audit.json").is_file()
 
     already_diff = (
         "diff --git a/pkg/model.py b/pkg/model.py\n"
@@ -1298,6 +1352,22 @@ def test_gbrain_page_client_envelopes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gbrain.urllib.request, "urlopen", lambda req, timeout: (_ for _ in ()).throw(OSError("down")))
     with pytest.raises(gbrain.GbrainPageError, match="transport error"):
         client.call("search", {"query": "x"})
+
+    # An absent page is an in-band isError; get_page reports it as a miss.
+    class _MissingResp(_Resp):
+        def read(self, *_args):
+            payload = {"result": {"isError": True, "content": [{"text": "page_not_found"}]}}
+            return json.dumps(payload).encode()
+
+    monkeypatch.setattr(gbrain.urllib.request, "urlopen", lambda req, timeout: _MissingResp())
+    assert client.get_page("absent") is None
+    with pytest.raises(gbrain.GbrainPageError, match="page_not_found"):
+        client.call("get_page", {"slug": "absent"})
+
+    # A transport failure is still an outage, not a miss.
+    monkeypatch.setattr(gbrain.urllib.request, "urlopen", lambda req, timeout: (_ for _ in ()).throw(OSError("down")))
+    with pytest.raises(gbrain.GbrainPageError, match="transport error"):
+        client.get_page("page-1")
 
     monkeypatch.setenv("GBRAIN_BASE_URL", "https://gbrain.example")
     monkeypatch.setenv("GBRAIN_TOKEN", "tok")
@@ -1590,44 +1660,6 @@ def test_paths_helpers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert paths.find_latest_per_session_dir() is None
 
 
-# ---------------------------------------------------------------------------
-# orchestrator.actions.registry
-# ---------------------------------------------------------------------------
-
-
-def test_action_registry_names_all_and_lazy_load(tmp_path: Path) -> None:
-    from hyperloom.orchestrator.actions.registry import ActionRegistry
-
-    meta_dir = tmp_path / "_meta"
-    meta_dir.mkdir()
-    (meta_dir / "_ignored.yaml").write_text("name: ignored\n", encoding="utf-8")
-    (meta_dir / "target_analysis.yaml").write_text(
-        "\n".join(
-            [
-                "name: target_analysis",
-                "family: prep",
-                "cost_minutes_p50: 0.1",
-                "cost_minutes_p75: 0.2",
-                "expected_gain_pct: [0, 0]",
-                "accuracy_risk: 0",
-                "crash_risk: 0",
-                "requires_lanes: []",
-                "allowed_tools: [Read]",
-                "side_effects: [writes_state]",
-                "pipeline_phase: prep",
-                "verdict_class: archival",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    reg = ActionRegistry(tmp_path)
-    assert reg.names() == ["target_analysis"]
-    assert [meta.name for meta in reg.all()] == ["target_analysis"]
-    meta = reg.get("target_analysis")
-    assert meta is not None
-    assert meta.description == "target_analysis"
-    assert reg.get("missing") is None
 
 
 # ---------------------------------------------------------------------------
@@ -1635,38 +1667,23 @@ def test_action_registry_names_all_and_lazy_load(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_dispatcher_inline_whitelist_filters_and_registry_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dispatcher_inline_whitelist_filters_denied_unregistered_and_lane_holding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 
-    reg = SimpleNamespace(names=lambda: ["report", "missing", "lane_action", "ok_action"])
     coord = SimpleNamespace(
-        action_registry=reg,
+        action_registry={name: object() for name in ("report", "missing", "lane_action", "ok_action")},
         sub=SimpleNamespace(executor_registry={"lane_action": object(), "ok_action": object()}),
         _INLINE_ACTION_DENY=frozenset({"report"}),
     )
     disp = DispatcherCollaborator(coord)
     monkeypatch.setattr(disp, "_registry_lanes_ttl", lambda name: (["gpu"] if name == "lane_action" else [], 60))
+    # report is denied, missing has no executor, lane_action holds a lane.
     assert disp._inline_action_whitelist() == frozenset({"ok_action"})
 
-    coord.action_registry = SimpleNamespace(names=lambda: (_ for _ in ()).throw(RuntimeError("bad registry")))
+    coord.action_registry = {}
     assert disp._inline_action_whitelist() == frozenset()
-
-    coord.action_registry = None
-    assert disp._inline_action_whitelist() == frozenset()
-
-
-def test_dispatcher_inline_whitelist_all_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
-
-    reg = SimpleNamespace(all=lambda: [SimpleNamespace(name="from_all")])
-    coord = SimpleNamespace(
-        action_registry=reg,
-        sub=SimpleNamespace(executor_registry={"from_all": object()}),
-        _INLINE_ACTION_DENY=frozenset(),
-    )
-    disp = DispatcherCollaborator(coord)
-    monkeypatch.setattr(disp, "_registry_lanes_ttl", lambda _name: ([], 60))
-    assert disp._inline_action_whitelist() == frozenset({"from_all"})
 
 
 def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch: pytest.MonkeyPatch) -> None:

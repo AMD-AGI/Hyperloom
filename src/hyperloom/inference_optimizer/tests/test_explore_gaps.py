@@ -480,3 +480,46 @@ async def test_refresh_gaps_absorbs_recipe_kb_traverse_exception(coord):
     coord.shared_state.baseline_tput = 900.0
     # Must not raise.
     await coord._refresh_gaps(reason="recipe_kb_refresh")
+
+
+@pytest.mark.asyncio
+async def test_record_explore_round_gaps_carries_failure_artifacts(coord):
+    """When a per_variant_outcome carries failure_id/fingerprint/workspace, they flow into the attempt."""
+    s = coord.shared_state
+    s.baseline_tput = 900.0
+    s.upsert_gap(
+        {
+            "canonical_id": "issue.fp8.kv2",
+            "symptom": "fp8 kv test with artifacts",
+            "layer": "framework",
+        }
+    )
+    task = _StubTask(
+        task_id="explore-artifacts",
+        kind="explore",
+        params={"gap_canonical_id": "issue.fp8.kv2"},
+    )
+    coord._record_explore_round_gaps(
+        task=task,
+        result={
+            "per_variant_outcomes": [
+                {
+                    "variant_name": "kv_failed",
+                    "outcome": "FAILED",
+                    "failure_id": "fail.explore-artifacts.abc123",
+                    "fingerprint": "abc123456789",
+                    "stage": "warmup",
+                    "workspace": "/runs/v00_kv_failed",
+                    "server_log_path": "/runs/v00_kv_failed/server.log",
+                },
+            ],
+        },
+    )
+    gap = s.find_gap("issue.fp8.kv2")
+    assert gap is not None
+    attempt = gap["attempts"][0]
+    assert attempt.get("failure_id") == "fail.explore-artifacts.abc123"
+    assert attempt.get("fingerprint") == "abc123456789"
+    assert attempt.get("stage") == "warmup"
+    assert attempt.get("workspace") == "/runs/v00_kv_failed"
+    assert attempt.get("server_log_path") == "/runs/v00_kv_failed/server.log"

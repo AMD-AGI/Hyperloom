@@ -18,7 +18,6 @@ from hyperloom.inference_optimizer.cli.kb import (
 )
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
-    RemoteRecipeClientError,
     cid_to_path_components,
     recipe_canonical_id,
 )
@@ -35,7 +34,8 @@ def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
         "KB_SERVICE_TOKEN",
         "GBRAIN_BASE_URL",
         "GBRAIN_TOKEN",
-        "RECIPE_KB_MIRROR_MODE",
+        "KB_STORE_URL",
+        "KB_STORE_TOKEN",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -98,7 +98,7 @@ def test_item3_no_central_url_reads_and_writes_go_local(
 ) -> None:
     args = _ns(local_kb_root=str(tmp_path))
     kb = _build_recipe_kb_dispatcher(args)
-    assert kb.remote is None
+    assert kb.mode == "local"
 
     cid = recipe_canonical_id(
         model="m",
@@ -136,19 +136,12 @@ def test_item4_local_mode_ignores_central_credentials(
         precision="fp8",
     )
 
-    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
-
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "local")
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path))
-    monkeypatch.setenv("GBRAIN_BASE_URL", "https://ambient.invalid")
-    monkeypatch.setenv("GBRAIN_TOKEN", "ambient-secret")
-    monkeypatch.setattr(
-        grc,
-        "build_gbrain_remote_from_env",
-        lambda: pytest.fail("local mode constructed a GBrain client"),
-    )
+    monkeypatch.setenv("KB_STORE_URL", "https://ambient.invalid")
+    monkeypatch.setenv("KB_STORE_TOKEN", "ambient-secret")
     kb = _build_recipe_kb_dispatcher(_ns())
-    assert kb.remote is None
+    assert kb.mode == "local"
 
     kb.put_recipe(
         canonical_id=cid,
@@ -166,63 +159,6 @@ def test_item4_local_mode_ignores_central_credentials(
     out = kb.get_recipe(canonical_id=cid)
     assert out is not None
     assert out["best_throughput"] == 11111.0
-
-
-def test_item5_unreachable_central_falls_back_to_local(
-    env_clean: None,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    cid = recipe_canonical_id(
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-    )
-
-    class _BoomGbrain:
-        enabled = True
-
-        def get_recipe(self, *, canonical_id: str, version: int | None = None):
-            raise RemoteRecipeClientError("down", category="transport")
-
-        def search(self, **_k: Any):
-            raise RemoteRecipeClientError("down", category="transport")
-
-        def close(self) -> None:
-            pass
-
-    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
-
-    monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _BoomGbrain())
-    kb = _build_recipe_kb_dispatcher(_ns(local_kb_root=str(tmp_path)))
-
-    # Seed the local store so the fallback has something to return.
-    kb.local.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        best_throughput=22222.0,
-    )
-
-    # WRITE still goes local.
-    kb.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        best_throughput=33333.0,
-    )
-    # READ: remote raises → fall through to local.
-    out = kb.get_recipe(canonical_id=cid)
-    assert out is not None
-    assert out["best_throughput"] == 33333.0  # local hit
 
 
 def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:

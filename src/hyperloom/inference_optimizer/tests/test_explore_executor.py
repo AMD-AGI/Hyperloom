@@ -27,7 +27,7 @@ from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     apply_compatibility_filter,
 )
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     _RUN_EVAL_FALSE_VALUES as _RUN_EVAL_FALSE,
 )
 from hyperloom.orchestrator.actions.executors.explore import (
@@ -576,6 +576,58 @@ async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner
     assert reasons.get("v_risky") == "accuracy_unavailable"
     # Post-baseline accuracy failure reverts the variant but never halts the run.
     assert state.stop_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_explore_accuracy_gate_falls_back_to_shared_state(sub_agent_runner, tmp_path):
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.baseline_accuracy = 0.80
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=840.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-shared-acc"),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "v_risky",
+                    "extra_args": "--attention-backend ROCM_AITER_FA",
+                    "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-shared-acc",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    fp = canonical_fingerprint(
+        "--attention-backend ROCM_AITER_FA",
+        {"VLLM_ROCM_USE_AITER": "1"},
+    )
+    tested = res.result["explore_search_update"]["tested"][fp]
+    assert tested["outcome"] == "REVERT"
+    reasons = {lr["name"]: lr.get("reason") for lr in res.result["losers"]}
+    assert reasons.get("v_risky") == "accuracy_unavailable"
 
 
 @pytest.mark.asyncio
@@ -1302,6 +1354,13 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
     te = out["explore_search_update"]["tested"][fp]
     assert te["outcome"] == "FAILED"
     assert te["reason"] == "warmup_failed"
+    assert te["stage"] == "warmup"
+    assert "workspace" in te
+    pvo = [v for v in out["per_variant_outcomes"] if v["outcome"] == "FAILED"]
+    assert pvo, "expected FAILED entry in per_variant_outcomes"
+    assert pvo[0]["stage"] == "warmup"
+    assert "failure_id" in pvo[0]
+    assert pvo[0]["failure_id"].startswith("fail.")
 
 
 @pytest.mark.asyncio
@@ -1478,6 +1537,14 @@ async def test_explore_executor_killed_overtime_no_tput_no_keep(
     outcomes = {row["variant_name"]: row["outcome"] for row in out["per_variant_outcomes"]}
     assert outcomes["slow_variant"] == "KILLED_OVERTIME"
     assert fp in out["explore_search_update"]["last_round"]["killed_overtime"]
+    # KILLED_OVERTIME rows must carry the decision stage and a distinct error_class.
+    killed_pvo = [v for v in out["per_variant_outcomes"] if v["outcome"] == "KILLED_OVERTIME"]
+    assert killed_pvo
+    assert killed_pvo[0]["stage"] == "decision"
+    assert "failure_id" in killed_pvo[0]
+    assert killed_pvo[0]["failure_id"].startswith("fail.")
+    assert te["stage"] == "decision"
+    assert te["error_class"] == "killed_overtime"
 
 
 @pytest.mark.asyncio

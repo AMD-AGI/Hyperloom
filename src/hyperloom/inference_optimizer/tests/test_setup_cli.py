@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 
 from pathlib import Path
@@ -330,6 +332,9 @@ def _baremetal_credential_functions() -> str:
 _CLEAN_PROVIDER_ENV = [
     "unset OPENAI_BASE_URL OPENAI_API_KEY OPENAI_CUSTOM_HEADERS",
     "unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN",
+    # Now that the shell reads the subscription token too, a developer machine
+    # exporting one would otherwise change what these runs resolve.
+    "unset CLAUDE_CODE_OAUTH_TOKEN",
     "unset CLAUDE_MODEL CODEX_MODEL GEAK_CLAUDE_MODEL",
     "unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL",
 ]
@@ -509,6 +514,14 @@ _SHIM_CASES = {
         "_".join(("DEEPSEEK", "API", "KEY")): "sk-ds",
         "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
     },
+    # A subscription token is a configured Anthropic side, so a stale DEEPSEEK_*
+    # leftover must be ignored whole rather than pointing the run at DeepSeek's
+    # host -- where the migrated API key would also outrank the token and move
+    # the run onto API billing.
+    "subscription token already configured": {
+        "_".join(("DEEPSEEK", "API", "KEY")): "sk-ds",
+        "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")): "sk-ant-oat01-fake",
+    },
 }
 
 
@@ -681,7 +694,7 @@ def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
             encoding="utf-8",
         )
 
-        proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True)
+        proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, env=_oauth_only_env())
 
         assert proc.returncode != 0, f"{name}: mispaired credentials were accepted"
         assert "Conflicting LLM credentials" in proc.stderr, proc.stderr
@@ -722,10 +735,246 @@ def test_baremetal_setup_rejects_cross_provider_pairing(tmp_path: Path):
         encoding="utf-8",
     )
 
-    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True)
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, env=_oauth_only_env())
 
     assert proc.returncode != 0, "mispaired credentials were accepted"
     assert "Conflicting LLM credentials" in proc.stderr, proc.stderr
+
+
+def _oauth_only_env() -> dict[str, str]:
+    """Ambient provider credentials would mask an oauth-only preflight."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "OPENAI_", "DEEPSEEK_"))}
+    env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+    return env
+
+
+def test_install_preflights_accept_oauth_only_credentials(tmp_path: Path):
+    """A Claude subscription token alone is a self-consistent Anthropic side."""
+    script_paths = [
+        (
+            "install",
+            Path(setup.__file__).resolve().parent / "assets" / "install.sh",
+            ["preflight_load_dotenv() { :; }"],
+        ),
+        (
+            "kernel",
+            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            [],
+        ),
+    ]
+    for name, script_path, stubs in script_paths:
+        script_text = script_path.read_text(encoding="utf-8")
+        start = script_text.index("preflight_reject_cross_provider() {")
+        end = script_text.index(
+            "\npreflight_validate_credentials", script_text.index("preflight_validate_credentials() {")
+        )
+        runner = tmp_path / f"{name}-oauth-preflight.sh"
+        runner.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    "set -uo pipefail",
+                    f"REPO_ROOT={tmp_path}",
+                    "CHECK_ONLY=0",
+                    "DRY_RUN=0",
+                    "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test",
+                    "log() { :; }",
+                    'warn() { echo "$*" >&2; }',
+                    'die() { echo "$*" >&2; exit 99; }',
+                    *stubs,
+                    script_text[start:end],
+                    "preflight_validate_credentials",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, env=_oauth_only_env())
+
+        assert proc.returncode == 0, f"{name}: oauth-only rejected: {proc.stderr}"
+
+
+def test_baremetal_setup_accepts_oauth_only_without_mirroring_it(tmp_path: Path):
+    """Subscription token resolves on its own and stays out of API-key slots."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("read_dotenv_var() {")
+    end = script_text.index("\nwrite_runtime_dotenv() {")
+    credential_functions = script_text[start:end]
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("HYPERLOOM_RUN_MODE=baremetal\n", encoding="utf-8")
+    dump = tmp_path / "resolved.txt"
+    runner = tmp_path / "oauth-only-run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -uo pipefail",
+                f"DOTENV={dotenv}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "log() { :; }",
+                'warn() { echo "$*" >&2; }',
+                'die() { echo "$*" >&2; exit 99; }',
+                "is_interactive() { return 1; }",
+                credential_functions,
+                "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test",
+                "resolve_credentials",
+                f'printf "%s|%s|%s\\n" "${{CLAUDE_CODE_OAUTH_TOKEN:-}}" "${{ANTHROPIC_API_KEY:-}}"'
+                f' "${{ANTHROPIC_AUTH_TOKEN:-}}" > {dump}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, env=_oauth_only_env())
+
+    assert proc.returncode == 0, f"oauth-only rejected: {proc.stderr}"
+    assert dump.read_text(encoding="utf-8").strip() == "sk-ant-oat01-test||"
+    persisted = dotenv.read_text(encoding="utf-8")
+    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test" in persisted
+    assert "ANTHROPIC_API_KEY=" not in persisted
+    assert "ANTHROPIC_AUTH_TOKEN=" not in persisted
+
+
+def test_install_preflights_accept_oauth_alongside_bare_openai_key(tmp_path: Path):
+    """Mirrors the CLI: both keys imply their own official endpoint, so neither
+    borrows the other's and the pair is legal."""
+    script_paths = [
+        (
+            "install",
+            Path(setup.__file__).resolve().parent / "assets" / "install.sh",
+            ["preflight_load_dotenv() { :; }"],
+        ),
+        (
+            "kernel",
+            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            [],
+        ),
+    ]
+    for name, script_path, stubs in script_paths:
+        script_text = script_path.read_text(encoding="utf-8")
+        start = script_text.index("preflight_reject_cross_provider() {")
+        end = script_text.index(
+            "\npreflight_validate_credentials", script_text.index("preflight_validate_credentials() {")
+        )
+        runner = tmp_path / f"{name}-oauth-openai-pair.sh"
+        runner.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    "set -uo pipefail",
+                    f"REPO_ROOT={tmp_path}",
+                    "CHECK_ONLY=0",
+                    "DRY_RUN=0",
+                    "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test",
+                    "OPENAI_API_KEY=sk-openai-official",
+                    "log() { :; }",
+                    'warn() { echo "$*" >&2; }',
+                    'die() { echo "$*" >&2; exit 99; }',
+                    *stubs,
+                    script_text[start:end],
+                    "preflight_validate_credentials",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, env=_oauth_only_env())
+
+        assert proc.returncode == 0, f"{name}: oauth + official OpenAI key rejected: {proc.stderr}"
+
+
+def test_install_preflights_still_reject_gateway_url_with_bare_openai_key(tmp_path: Path):
+    """An explicit ANTHROPIC_BASE_URL keeps flagging an OpenAI key that lost its
+    own base URL."""
+    script_paths = [
+        (
+            "install",
+            Path(setup.__file__).resolve().parent / "assets" / "install.sh",
+            ["preflight_load_dotenv() { :; }"],
+        ),
+        (
+            "kernel",
+            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            [],
+        ),
+    ]
+    for name, script_path, stubs in script_paths:
+        script_text = script_path.read_text(encoding="utf-8")
+        start = script_text.index("preflight_reject_cross_provider() {")
+        end = script_text.index(
+            "\npreflight_validate_credentials", script_text.index("preflight_validate_credentials() {")
+        )
+        runner = tmp_path / f"{name}-gateway-bare-openai.sh"
+        runner.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    "set -uo pipefail",
+                    f"REPO_ROOT={tmp_path}",
+                    "CHECK_ONLY=0",
+                    "DRY_RUN=0",
+                    "ANTHROPIC_BASE_URL=https://gw.example.com/anthropic",
+                    "ANTHROPIC_API_KEY=gw-key",
+                    "OPENAI_API_KEY=gw-key",
+                    "log() { :; }",
+                    'warn() { echo "$*" >&2; }',
+                    'die() { echo "$*" >&2; exit 99; }',
+                    *stubs,
+                    script_text[start:end],
+                    "preflight_validate_credentials",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, env=_oauth_only_env())
+
+        assert proc.returncode != 0, f"{name}: gateway URL with bare OpenAI key was accepted"
+        assert "Conflicting LLM credentials" in proc.stderr, proc.stderr
+
+
+def test_baremetal_setup_accepts_oauth_alongside_bare_openai_key(tmp_path: Path):
+    """install_baremetal.sh mirrors the same relaxed pairing rule."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("read_dotenv_var() {")
+    end = script_text.index("\nwrite_runtime_dotenv() {")
+    credential_functions = script_text[start:end]
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("HYPERLOOM_RUN_MODE=baremetal\n", encoding="utf-8")
+    runner = tmp_path / "oauth-openai-pair-run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -uo pipefail",
+                f"DOTENV={dotenv}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "OPENAI_BASE_URL_ARG=",
+                "log() { :; }",
+                'warn() { echo "$*" >&2; }',
+                'die() { echo "$*" >&2; exit 99; }',
+                "is_interactive() { return 1; }",
+                credential_functions,
+                "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test",
+                "OPENAI_API_KEY=sk-openai-official",
+                "resolve_credentials",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, env=_oauth_only_env())
+
+    assert proc.returncode == 0, f"oauth + official OpenAI key rejected: {proc.stderr}"
 
 
 def test_baremetal_install_no_longer_accepts_openai_safe_credential_flags():
@@ -772,6 +1021,9 @@ def test_baremetal_runtime_deps_probe_vllm_venv_for_isolated_vllm(tmp_path: Path
                 f"VLLM_VENV_ROOT={vllm_root}",
                 "FRAMEWORK_ENV=isolated",
                 "FRAMEWORKS=sglang,vllm",
+                # sgl_kernel is only probed once SGLang itself imported.
+                "sglang_ok=1",
+                "INSTALL_FRAMEWORK=none",
                 'log() { :; }',
                 'warn() { :; }',
                 '_py_has() { printf "probe %s %s\\n" "$1" "$2"; return 0; }',
@@ -797,6 +1049,256 @@ def test_baremetal_runtime_deps_probe_vllm_venv_for_isolated_vllm(tmp_path: Path
         f"probe {vllm_py} aiter",
         f"probe {host_py} sgl_kernel",
     ]
+
+
+def _runtime_dep_loop(install_script: Path) -> str:
+    script_text = install_script.read_text(encoding="utf-8")
+    loop_start = script_text.index("  local m", script_text.index('  if [ "$any_fw" -eq 0 ]; then'))
+    loop_end = script_text.index('\n\n  [ "$rc" -ne 0 ]', loop_start)
+    return script_text[loop_start:loop_end]
+
+
+def test_baremetal_runtime_deps_skip_sgl_kernel_without_sglang(tmp_path: Path):
+    """An atom-only host must not be told sgl_kernel is missing.
+
+    atom images ship neither SGLang nor its sgl_kernel companion, so probing for
+    it there only produces a scary 'missing' line about a dependency the run
+    will never use.
+    """
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+
+    host_py = tmp_path / "host-python"
+    host_py.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    host_py.chmod(0o755)
+
+    runner = tmp_path / "runtime-deps-atom.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"py={host_py}",
+                f"VLLM_VENV_ROOT={tmp_path}/absent",
+                "FRAMEWORK_ENV=shared",
+                "FRAMEWORKS=sglang,vllm,atom",
+                "sglang_ok=0",
+                "INSTALL_FRAMEWORK=none",
+                "log() { :; }",
+                "warn() { :; }",
+                '_py_has() { printf "probe %s\\n" "$2"; return 0; }',
+                "run_probe() {",
+                _runtime_dep_loop(install_script),
+                "}",
+                "run_probe",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out = subprocess.run(
+        ["bash", str(runner)], check=True, text=True, stdout=subprocess.PIPE
+    ).stdout.splitlines()
+
+    assert out == ["probe triton", "probe aiter"]
+
+
+def test_baremetal_preflight_probes_atom_by_default():
+    """Phase 1 must accept an atom-only host without extra flags.
+
+    The default probe list gated on sglang/vllm alone, so setup inside an
+    atom-only image died with 'no serving framework importable' even though
+    atom was installed and is a registered framework.
+    """
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    text = install_script.read_text(encoding="utf-8")
+
+    m = re.search(r'^FRAMEWORKS="\$\{FRAMEWORKS:-([^}]+)\}"', text, re.MULTILINE)
+    assert m, "install_baremetal.sh must define an overridable FRAMEWORKS default"
+    assert "atom" in m.group(1).split(","), (
+        "atom must be in the default Phase 1 probe list; otherwise setup inside "
+        "an atom-only image fails preflight"
+    )
+
+
+def test_baremetal_triton_pin_is_advisory_when_installing_nothing():
+    """A prebuilt image may carry its own triton.
+
+    The torch/triton pin exists to protect a framework build. When
+    --install-framework is none there is nothing to build, so a drifting triton
+    must warn rather than fail the whole preflight -- rocm/atom:latest ships a
+    triton newer than torch's pin.
+    """
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    text = install_script.read_text(encoding="utf-8")
+
+    guard = re.search(
+        r'if \[ "\$INSTALL_FRAMEWORK" = "none" \]; then\s*\n'
+        r'\s*check_torch_triton_alignment "\$py" \|\| true\s*\n'
+        r"\s*else\s*\n"
+        r'\s*check_torch_triton_alignment "\$py" \|\| rc=1',
+        text,
+    )
+    assert guard, (
+        "the triton alignment check must be advisory when --install-framework "
+        "is none and fatal only when a framework layer will be built"
+    )
+
+
+def _sourceable_installer(install_script: Path, tmp_path: Path) -> Path:
+    """The real installer with its ``main`` invocation stripped.
+
+    Lets a test source the script and drive its actual functions against a fake
+    host, so behaviour is asserted end to end rather than by matching source
+    text.
+    """
+    text = install_script.read_text(encoding="utf-8")
+    marker = '\nmain "$@"\n'
+    assert marker in text, "install_baremetal.sh must end by invoking main"
+    lib = tmp_path / "installer_lib.sh"
+    lib.write_text(text.replace(marker, "\n"), encoding="utf-8")
+    return lib
+
+
+def _fake_python(tmp_path: Path, importable: set[str], hip: str = "7.2.0") -> Path:
+    """A python stub that answers ``_py_has`` probes and the torch.version.hip read."""
+    cases = "\n".join(f"""  *"find_spec('{name}')"*) exit 0 ;;""" for name in sorted(importable))
+    stub = tmp_path / "fake-python"
+    stub.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                'case "$*" in',
+                cases,
+                "  *find_spec*) exit 1 ;;",
+                f"  -) printf '{hip}\\n'; exit 0 ;;",
+                "esac",
+                "exit 0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def _drive_installer(
+    tmp_path: Path,
+    *,
+    importable: set[str],
+    dotenv: Path,
+    body: str,
+    install_framework: str = "none",
+) -> subprocess.CompletedProcess:
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lib = _sourceable_installer(install_script, tmp_path)
+    py = _fake_python(tmp_path, importable)
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f"source {lib}",
+                f'DOTENV="{dotenv}"',
+                f'USER_DATA_PATH="{tmp_path}/data"',
+                f'INSTALL_FRAMEWORK="{install_framework}"',
+                "FRAMEWORK_ENV=shared",
+                f'VLLM_VENV_ROOT="{tmp_path}/absent"',
+                "DRY_RUN=0",
+                "CHECK_ONLY=0",
+                f'resolve_python() {{ printf "%s" "{py}"; }}',
+                body,
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return subprocess.run(["bash", str(runner)], text=True, capture_output=True)
+
+
+def _dotenv_lines(dotenv: Path) -> list[str]:
+    return dotenv.read_text(encoding="utf-8").splitlines()
+
+
+def test_baremetal_atom_only_host_writes_framework_atom(tmp_path: Path):
+    """The whole point of probing atom: the .env downstream skills read must say so.
+
+    Preflight accepting atom is not enough — resolution used to return only
+    sglang/vllm, so an atom-only host finished setup with no FRAMEWORK at all
+    and every downstream skill defaulted to the wrong engine.
+    """
+    dotenv = tmp_path / ".env"
+    res = _drive_installer(
+        tmp_path, importable={"atom"}, dotenv=dotenv, body="write_runtime_dotenv"
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "FRAMEWORK=atom" in _dotenv_lines(dotenv)
+
+
+def test_baremetal_clears_stale_framework_when_none_importable(tmp_path: Path):
+    """A re-imaged host must not keep pointing at an engine that is gone."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("FRAMEWORK=sglang\nKEEP_ME=1\n", encoding="utf-8")
+
+    res = _drive_installer(
+        tmp_path, importable=set(), dotenv=dotenv, body="write_runtime_dotenv"
+    )
+
+    assert res.returncode == 0, res.stderr
+    lines = _dotenv_lines(dotenv)
+    assert not [ln for ln in lines if ln.startswith("FRAMEWORK=")], lines
+    assert "KEEP_ME=1" in lines
+
+
+def test_baremetal_framework_resolution_keeps_sglang_precedence(tmp_path: Path):
+    """Adding atom must not change what an existing sglang host resolves to."""
+    dotenv = tmp_path / ".env"
+    res = _drive_installer(
+        tmp_path, importable={"sglang", "atom"}, dotenv=dotenv, body="write_runtime_dotenv"
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "FRAMEWORK=sglang" in _dotenv_lines(dotenv)
+
+
+def test_baremetal_next_steps_names_the_detected_framework(tmp_path: Path):
+    """The closing prompt hardcoded sglang, sending atom hosts down a dead path."""
+    res = _drive_installer(
+        tmp_path,
+        importable={"atom"},
+        dotenv=tmp_path / ".env",
+        body="print_next_steps",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "- Framework: atom" in res.stdout
+
+
+def test_baremetal_profiler_hotfix_accepts_an_atom_only_host(tmp_path: Path):
+    """The hotfix patches ROCm profiler libs, which torch.profiler uses on any engine."""
+    res = _drive_installer(
+        tmp_path,
+        importable={"atom"},
+        dotenv=tmp_path / ".env",
+        body="rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE",
+    )
+
+    assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
+    assert "neither sglang nor vllm" not in res.stderr
+
+
+def test_baremetal_profiler_hotfix_still_skipped_without_any_framework(tmp_path: Path):
+    res = _drive_installer(
+        tmp_path,
+        importable=set(),
+        dotenv=tmp_path / ".env",
+        body="rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE",
+    )
+
+    assert "HOTFIX_ELIGIBLE" not in res.stdout
+    assert "no serving framework importable" in res.stderr
 
 
 def test_baremetal_aiter_install_preserves_system_triton_and_rechecks_alignment(tmp_path: Path):

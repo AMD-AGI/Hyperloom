@@ -21,7 +21,6 @@ def _args(**overrides):
     base = {
         "backends": "",
         "benchmark_file": "",
-        "test_harness_path": "",
         "micro_speedup": None,
         "e2e_gain_pct": None,
         "accuracy_passed": None,
@@ -48,7 +47,6 @@ def _candidate(**overrides):
 
 def test_choose_backends_default_does_not_select_forge(monkeypatch):
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
 
     selected, notes = ko.choose_backends(_args(), _candidate())
 
@@ -57,7 +55,6 @@ def test_choose_backends_default_does_not_select_forge(monkeypatch):
 
 
 def test_choose_backends_geak_env_does_not_select_per_kernel_backend(monkeypatch):
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "geak")
 
     selected, notes = ko.choose_backends(_args(), _candidate())
@@ -67,7 +64,6 @@ def test_choose_backends_geak_env_does_not_select_per_kernel_backend(monkeypatch
 
 
 def test_choose_backends_forge_env_is_explicit_opt_in(monkeypatch):
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
 
     selected, notes = ko.choose_backends(_args(), _candidate())
@@ -78,7 +74,6 @@ def test_choose_backends_forge_env_is_explicit_opt_in(monkeypatch):
 
 def test_choose_backends_forge_cli_does_not_enable_without_env(monkeypatch):
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
 
     selected, notes = ko.choose_backends(_args(backends="forge"), _candidate())
 
@@ -638,7 +633,6 @@ def test_benchmark_files_list_counts_as_benchmark(tmp_path):
     bench.write_text("print('ok')\n", encoding="utf-8")
     args = _args()
     args.benchmark_file = ""
-    args.test_harness_path = ""
     assert ko.has_benchmark(args, {"benchmark_files": [str(bench)]}) is True
 
 
@@ -1478,7 +1472,6 @@ def test_run_attempt_dry_run_emits_optimized_suffix_file(tmp_path):
         budget_minutes=60,
         num_gpus=1,
         target_platform="",
-        test_command="",
         kernel_id="k001",
     )
     log_path = tmp_path / "run.log"
@@ -1518,7 +1511,6 @@ def test_unrecoverable_forge_timeout_is_not_promoted_to_partial(
     args.session_id = "sess001"
     args.budget_minutes = 60
     args.num_gpus = 1
-    args.test_command = ""
     log_path = tmp_path / "run.log"
     log_path.write_text("")
 

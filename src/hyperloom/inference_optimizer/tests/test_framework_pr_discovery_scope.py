@@ -39,10 +39,19 @@ def test_operator_supplied_workload_queries_no_serving_repos():
     assert not _has_serving_repos(urls), f"serving repos leaked into a custom session: {urls}"
 
 
-def test_a_scriptable_framework_without_a_repo_map_is_also_scoped():
-    """The same hole applies to any scriptable framework with no repo URL."""
-    urls = _urls("hunyuan_image3")
-    assert not _has_serving_repos(urls), f"serving repos leaked: {urls}"
+def test_every_scriptable_framework_without_a_repo_map_is_also_scoped():
+    """The same hole applies to any scriptable framework with no repo URL.
+
+    Derived from the registry rather than named, so a future entry is covered
+    the moment it is added.
+    """
+    from hyperloom.inference_optimizer import framework_registry as fr
+
+    candidates = [name for name, spec in fr.FRAMEWORKS.items() if spec.kind == fr.SCRIPTABLE and not spec.repo_url]
+    assert candidates, "expected at least one scriptable framework with no upstream repo"
+    for framework in candidates:
+        urls = _urls(framework)
+        assert not _has_serving_repos(urls), f"serving repos leaked into {framework}: {urls}"
 
 
 def test_scriptable_framework_with_a_repo_still_queries_only_its_own():

@@ -28,14 +28,17 @@ DOTENV="${REPO_ROOT}/.env"
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
 
 HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
-HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.0.0a3}"
+HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.0.0b1}"
 ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 
 DEFAULT_OPENAI_BASE_URL="${DEFAULT_OPENAI_BASE_URL:-https://your-openai-compatible-gateway.example.com/v1}"
 OPENAI_API_KEY_PLACEHOLDER="ak-your-api-key-here"
 
-FRAMEWORKS="sglang,vllm"
+# Phase 1 probes every serving framework Hyperloom can benchmark, not just the
+# two it can install. An atom image ships neither sglang nor vllm, so gating the
+# preflight on those alone made every `--framework atom` host fail setup.
+FRAMEWORKS="${FRAMEWORKS:-sglang,vllm,atom}"
 INSTALL_FRAMEWORK="none"
 # Track whether the operator explicitly picked a framework env (via $FRAMEWORK_ENV
 # or --framework-env). When unset, vLLM defaults to isolated (its wheel pins a
@@ -44,9 +47,9 @@ _FRAMEWORK_ENV_WAS_SET="${FRAMEWORK_ENV+x}"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
 # Framework versions track docs/compatibility.rst (SGLang v0.5.16, ROCm 7.2).
-# vLLM installs 0.24.0+rocm723 from the wheels.vllm.ai pip index, matching the
-# v0.24.0 Docker image version. The pip index publishes 0.24.0 only as the
-# rocm723 variant (ROCm 7.2.3), so the ROCm layer is 7.2.3. AITER_REF
+# vLLM installs 0.27.1+rocm723 from the wheels.vllm.ai pip index, matching the
+# vllm-v0.27.1-rocm7.2.3 Docker image. The rocm723 variant puts the vLLM ROCm
+# layer at 7.2.3, one patch level above the SGLang stack. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
 SGLANG_REF="${SGLANG_REF:-v0.5.16}"
@@ -62,7 +65,7 @@ fi
 SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-7.2.0}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
-VLLM_VERSION="${VLLM_VERSION:-0.24.0}"
+VLLM_VERSION="${VLLM_VERSION:-0.27.1}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm723}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
 VLLM_VENV_ROOT="${VLLM_VENV_ROOT:-/opt/hyperloom/vllm-venv}"
@@ -85,7 +88,9 @@ runtime env. Stops BEFORE launching.
 Options:
   --user-data-path PATH  Writable artifact root (default: /workspace/hyperloom)
   --deps-root PATH       Directory for auto-cloned dependency checkouts
-  --frameworks LIST      Comma list to verify in Phase 1 (default: sglang,vllm)
+  --frameworks LIST      Comma list to verify in Phase 1 (default:
+                         sglang,vllm,atom). Phase 1 passes when at least one
+                         entry imports.
   --install-framework FW Install a missing bare-metal framework layer.
                          Supported: none, sglang, vllm. Default: none.
   --framework-env MODE   Install target for framework packages: shared or
@@ -103,10 +108,11 @@ Options:
 
 Credential resolution (highest precedence first): env > .env > interactive
 prompt (TTY + not --yes). Configure Anthropic
-(ANTHROPIC_BASE_URL+ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN), matching runtime
-credential rules. A dual-protocol gateway such as DeepSeek additionally sets
-OPENAI_BASE_URL+OPENAI_API_KEY on the same host; retired DEEPSEEK_* values are
-migrated automatically.
+(ANTHROPIC_BASE_URL+ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN) or a Claude
+subscription token (CLAUDE_CODE_OAUTH_TOKEN, from "claude setup-token"),
+matching runtime credential rules. A dual-protocol gateway such as DeepSeek
+additionally sets OPENAI_BASE_URL+OPENAI_API_KEY on the same host; retired
+DEEPSEEK_* values are migrated automatically.
 Env overrides honored: REPO_ROOT,
 USER_DATA_PATH, HYPERLOOM_DEPS_ROOT / HYPERLOOM_CACHE_DIR,
 PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON,
@@ -179,18 +185,34 @@ resolve_python() {
 # interpreter does not auto-load the util submodule.
 _py_has() { "$1" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$2') else 1)" 2>/dev/null; }
 
-# Print the serving framework (sglang|vllm), or nothing when none is importable.
+# The interpreter that owns a given framework. vLLM lives in its own venv under
+# FRAMEWORK_ENV=isolated; every other engine uses the shared interpreter. Every
+# framework probe goes through here so preflight, framework resolution and the
+# profiler hotfix can never disagree about where an engine is installed.
+framework_probe_python() {
+  local fw="$1" default_py="$2"
+  if [ "$fw" = "vllm" ] && [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
+    printf '%s' "${VLLM_VENV_ROOT}/bin/python"
+  else
+    printf '%s' "$default_py"
+  fi
+}
+
+# Print the serving framework to record for downstream skills, or nothing when
+# none is importable. Walks $FRAMEWORKS in order — the same list Phase 1 probes
+# — so an engine that passes preflight is always the one written to .env.
 resolve_installed_framework() {
   if [ "$INSTALL_FRAMEWORK" = "sglang" ] || [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
     printf '%s' "$INSTALL_FRAMEWORK"; return 0
   fi
-  local py; py="$(resolve_python)" || return 0
-  if _py_has "$py" sglang; then printf 'sglang'; return 0; fi
-  local vllm_py="$py"
-  if [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
-    vllm_py="${VLLM_VENV_ROOT}/bin/python"
-  fi
-  if _py_has "$vllm_py" vllm; then printf 'vllm'; return 0; fi
+  local py fw probe_py _rif_arr
+  py="$(resolve_python)" || return 0
+  IFS=',' read -r -a _rif_arr <<< "$FRAMEWORKS"
+  for fw in "${_rif_arr[@]}"; do
+    fw="$(echo "$fw" | tr -d '[:space:]')"; [ -z "$fw" ] && continue
+    probe_py="$(framework_probe_python "$fw" "$py")"
+    if _py_has "$probe_py" "$fw"; then printf '%s' "$fw"; return 0; fi
+  done
   return 0
 }
 
@@ -332,17 +354,21 @@ PY
     log "torch: ${tv} (hip=${thip}) ROCm OK"
     check_torch_rocm_shared_libs "$py" || rc=1
     check_rocm_toolchain_alignment "$thip" || rc=1
-    check_torch_triton_alignment "$py" || rc=1
+    # The torch/triton pin only has to hold when this run is about to build a
+    # framework layer against it. An image that already ships a working engine
+    # (atom, or a prebuilt sglang/vllm) is allowed to carry its own triton.
+    if [ "$INSTALL_FRAMEWORK" = "none" ]; then
+      check_torch_triton_alignment "$py" || true
+    else
+      check_torch_triton_alignment "$py" || rc=1
+    fi
   fi
 
-  local any_fw=0 fw
+  local any_fw=0 sglang_ok=0 fw
   IFS=',' read -r -a _fw_arr <<< "$FRAMEWORKS"
   for fw in "${_fw_arr[@]}"; do
     fw="$(echo "$fw" | tr -d '[:space:]')"; [ -z "$fw" ] && continue
-    local probe_py="$py"
-    if [ "$fw" = "vllm" ] && [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
-      probe_py="${VLLM_VENV_ROOT}/bin/python"
-    fi
+    local probe_py; probe_py="$(framework_probe_python "$fw" "$py")"
     if _py_has "$probe_py" "$fw"; then
       if [ "$probe_py" != "$py" ]; then
         log "framework ${fw}: OK (isolated: ${probe_py})"
@@ -350,6 +376,7 @@ PY
         log "framework ${fw}: OK"
       fi
       any_fw=1
+      [ "$fw" = "sglang" ] && sglang_ok=1
     elif [ "$REQUIRE_FRAMEWORKS" -eq 1 ]; then
       warn "framework ${fw}: MISSING (required). ${IMAGE_HINT}"; rc=1
     else
@@ -365,9 +392,14 @@ PY
     fi
   fi
 
-  # vLLM's ROCm stack owns triton/aiter in isolated mode; SGLang owns sgl_kernel.
-  local m dep_py
-  for m in triton aiter sgl_kernel; do
+  # vLLM's ROCm stack owns triton/aiter in isolated mode; SGLang owns sgl_kernel,
+  # so only look for it once SGLang is the engine actually in play — an atom or
+  # vLLM host has no use for it and should not be told a dependency is missing.
+  local m dep_py deps="triton aiter"
+  if [ "$sglang_ok" -eq 1 ] || [ "$INSTALL_FRAMEWORK" = "sglang" ]; then
+    deps="$deps sgl_kernel"
+  fi
+  for m in $deps; do
     dep_py="$py"
     if [ "$m" != "sgl_kernel" ] && [ "$FRAMEWORK_ENV" = "isolated" ] \
        && [ -x "${VLLM_VENV_ROOT}/bin/python" ] \
@@ -431,7 +463,7 @@ check_torch_triton_alignment() {
   [ -n "$required" ] || return 0
   current="$(installed_dist_version "$py" triton 2>/dev/null || true)"
   if [ "$current" != "$required" ]; then
-    warn "triton ${current:-missing} does not match torch requirement ${required}; reinstall the torch-pinned ROCm Triton before installing SGLang"
+    warn "triton ${current:-missing} does not match torch requirement ${required}; reinstall the torch-pinned ROCm Triton before installing a framework layer"
     return 1
   fi
 }
@@ -864,16 +896,18 @@ PY
     *) warn "torch.version.hip=${hip}; ROCm profiler hotfix is validated for ROCm 7.2 stacks, skipping" ; return 1 ;;
   esac
 
-  # Probe vLLM in the isolated venv when FRAMEWORK_ENV=isolated, mirroring
-  # resolve_installed_framework, so an isolated vLLM install still qualifies.
-  local vllm_py="$py"
-  if [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
-    vllm_py="${VLLM_VENV_ROOT}/bin/python"
-  fi
-  local found=""
-  _py_has "$py" sglang && found="sglang"
-  _py_has "$vllm_py" vllm && found="${found:+${found} }vllm"
-  [ -n "$found" ] || { warn "neither sglang nor vllm is importable; skipping ROCm profiler hotfix"; return 1; }
+  # The hotfix swaps the ROCm profiler libraries that torch.profiler loads, so
+  # it is engine-agnostic: gate it on "some serving framework is present", not
+  # on sglang/vllm specifically, or an atom-only host silently loses profiling.
+  # Walks $FRAMEWORKS for the same reason resolve_installed_framework does.
+  local found="" fw probe_py _hotfix_arr
+  IFS=',' read -r -a _hotfix_arr <<< "$FRAMEWORKS"
+  for fw in "${_hotfix_arr[@]}"; do
+    fw="$(echo "$fw" | tr -d '[:space:]')"; [ -z "$fw" ] && continue
+    probe_py="$(framework_probe_python "$fw" "$py")"
+    _py_has "$probe_py" "$fw" && found="${found:+${found} }${fw}"
+  done
+  [ -n "$found" ] || { warn "no serving framework importable from '${FRAMEWORKS}'; skipping ROCm profiler hotfix"; return 1; }
   log "framework imports: ${found}"
 }
 
@@ -1111,7 +1145,8 @@ migrate_legacy_deepseek_env() {
   # would send an explicit Anthropic credential to DeepSeek's host.
   if [ -n "${ANTHROPIC_BASE_URL:-$(read_dotenv_var ANTHROPIC_BASE_URL || true)}" ] \
      || [ -n "${ANTHROPIC_API_KEY:-$(read_dotenv_var ANTHROPIC_API_KEY || true)}" ] \
-     || [ -n "${ANTHROPIC_AUTH_TOKEN:-$(read_dotenv_var ANTHROPIC_AUTH_TOKEN || true)}" ]; then
+     || [ -n "${ANTHROPIC_AUTH_TOKEN:-$(read_dotenv_var ANTHROPIC_AUTH_TOKEN || true)}" ] \
+     || [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-$(read_dotenv_var CLAUDE_CODE_OAUTH_TOKEN || true)}" ]; then
     warn "DEEPSEEK_* is retired and ignored here: the Anthropic side is already configured"
     return 0
   fi
@@ -1156,6 +1191,7 @@ migrate_legacy_deepseek_env() {
 resolve_credentials() {
   log "Phase 4: credentials"
   local anthropic_key anthropic_token anthropic_url
+  local oauth_token dv_oauth_token
   local dv_anthropic_key dv_anthropic_token dv_anthropic_url
   local has_url=0 has_key=0 setup_env_authoritative=0 setup_llm_mode=""
 
@@ -1175,6 +1211,7 @@ resolve_credentials() {
   # .env fallbacks (used only for values missing from process env).
   dv_anthropic_key="$(read_dotenv_var ANTHROPIC_API_KEY || true)"
   dv_anthropic_token="$(read_dotenv_var ANTHROPIC_AUTH_TOKEN || true)"
+  dv_oauth_token="$(read_dotenv_var CLAUDE_CODE_OAUTH_TOKEN || true)"
   dv_anthropic_url="$(read_dotenv_var ANTHROPIC_BASE_URL || true)"
   setup_llm_mode="$(read_dotenv_var HYPERLOOM_LLM_MODE || true)"
   setup_llm_mode="$(echo "$setup_llm_mode" | tr '[:upper:]' '[:lower:]')"
@@ -1184,7 +1221,7 @@ resolve_credentials() {
     setup_env_authoritative=1
   fi
   if [ "$setup_env_authoritative" -eq 1 ] && [ -z "$setup_llm_mode" ]; then
-    if [ -n "$dv_anthropic_key" ] || [ -n "$dv_anthropic_token" ] || [ -n "$dv_anthropic_url" ]; then
+    if [ -n "$dv_anthropic_key" ] || [ -n "$dv_anthropic_token" ] || [ -n "$dv_oauth_token" ] || [ -n "$dv_anthropic_url" ]; then
       setup_llm_mode="anthropic"
     fi
   fi
@@ -1195,6 +1232,7 @@ resolve_credentials() {
   # Precedence: process env > .env.
   anthropic_key="${ANTHROPIC_API_KEY:-$dv_anthropic_key}"
   anthropic_token="${ANTHROPIC_AUTH_TOKEN:-$dv_anthropic_token}"
+  oauth_token="${CLAUDE_CODE_OAUTH_TOKEN:-$dv_oauth_token}"
   anthropic_url="${ANTHROPIC_BASE_URL:-$dv_anthropic_url}"
 
   # A dual-protocol gateway serves both protocols from ONE host, so its OpenAI
@@ -1233,22 +1271,29 @@ resolve_credentials() {
     fi
   fi
 
-  if [ -z "$anthropic_key" ] && [ -z "$anthropic_token" ] && is_interactive; then
+  if [ -z "$anthropic_key" ] && [ -z "$anthropic_token" ] && [ -z "$oauth_token" ] && is_interactive; then
     read -rsp "[install-baremetal] Enter Anthropic API key (or leave blank if already configured): " anthropic_key; echo >&2
   fi
 
   # Reject one provider's base URL paired with only the other provider's key,
   # matching the CLI preflight.
   local _x_akey _x_aend _x_conflict=""
-  _x_akey="${anthropic_key:-${anthropic_token:-}}"
+  _x_akey="${anthropic_key:-${anthropic_token:-${oauth_token:-}}}"
   _x_aend="${anthropic_url:-}"
+  # A subscription token only validates against Anthropic itself, so it implies
+  # the official endpoint and needs no ANTHROPIC_BASE_URL.
+  if [ -z "$_x_aend" ] && [ -n "$oauth_token" ]; then
+    _x_aend="https://api.anthropic.com"
+  fi
   if [ -n "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -n "$_x_akey" ]; then
     _x_conflict="OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an Anthropic-side key is configured"
   elif [ -n "$anthropic_url" ] && [ -z "$_x_akey" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
     _x_conflict="ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an OPENAI_API_KEY is configured"
   elif [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "$_x_akey" ] && [ -z "$_x_aend" ]; then
     _x_conflict="an Anthropic-side key is configured without ANTHROPIC_BASE_URL, while the OpenAI side points at OPENAI_BASE_URL"
-  elif [ -n "$_x_aend" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
+  # Only an explicit ANTHROPIC_BASE_URL signals a gateway-shaped deploy whose
+  # OPENAI_API_KEY is likely a gateway key missing its own URL.
+  elif [ -n "$anthropic_url" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
     _x_conflict="OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the Anthropic side points at ANTHROPIC_BASE_URL"
   fi
   if [ -n "$_x_conflict" ]; then
@@ -1259,13 +1304,13 @@ resolve_credentials() {
     fi
   fi
 
-  [ -n "$anthropic_url" ] && has_url=1
-  { [ -n "$anthropic_key" ] || [ -n "$anthropic_token" ]; } && has_key=1
+  { [ -n "$anthropic_url" ] || [ -n "$oauth_token" ]; } && has_url=1
+  { [ -n "$anthropic_key" ] || [ -n "$anthropic_token" ] || [ -n "$oauth_token" ]; } && has_key=1
   if [ "$has_url" -eq 0 ] || [ "$has_key" -eq 0 ]; then
     if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
       warn "LLM credentials not fully resolved (continuing: --check-only / --dry-run)"
     else
-      die "no usable LLM endpoint: configure ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN. A dual-protocol gateway such as DeepSeek also sets OPENAI_BASE_URL + OPENAI_API_KEY."
+      die "no usable LLM endpoint: configure ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN, or a Claude subscription token (CLAUDE_CODE_OAUTH_TOKEN). A dual-protocol gateway such as DeepSeek also sets OPENAI_BASE_URL + OPENAI_API_KEY."
     fi
   fi
 
@@ -1273,6 +1318,9 @@ resolve_credentials() {
   # inference_optimizer skill install and CLI preflight.
   [ -n "$anthropic_key" ] && export ANTHROPIC_API_KEY="$anthropic_key"
   [ -n "$anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$anthropic_token"
+  # Subscription token stays in its own variable; mirroring it into an API-key
+  # slot would move the run onto API billing.
+  [ -n "$oauth_token" ] && export CLAUDE_CODE_OAUTH_TOKEN="$oauth_token"
   [ -n "$anthropic_url" ] && export ANTHROPIC_BASE_URL="$anthropic_url"
 
   # Persist resolved values to .env (skip on check-only / dry-run).
@@ -1287,6 +1335,12 @@ resolve_credentials() {
       upsert_dotenv_var ANTHROPIC_BASE_URL "$anthropic_url"
     else
       remove_dotenv_var ANTHROPIC_BASE_URL
+    fi
+    # Persisted under its own key, never folded into an API-key slot.
+    if [ -n "$oauth_token" ]; then
+      upsert_dotenv_var CLAUDE_CODE_OAUTH_TOKEN "$oauth_token"
+    else
+      remove_dotenv_var CLAUDE_CODE_OAUTH_TOKEN
     fi
     if [ "$DUAL_PROTOCOL_GATEWAY" -eq 1 ]; then
       [ -n "${OPENAI_BASE_URL:-}" ] && upsert_dotenv_var OPENAI_BASE_URL "$OPENAI_BASE_URL"
@@ -1322,12 +1376,16 @@ resolve_credentials() {
 # VIRTUAL_ENV / VLLM_VENV_ROOT at launch (_derive_runtime_paths).
 write_runtime_dotenv() {
   if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then log "would update runtime env: ${DOTENV}"; return 0; fi
-  # FRAMEWORK for downstream demo skills; empty when none is importable.
+  # FRAMEWORK for downstream demo skills; empty when none is importable. A stale
+  # value from an earlier install on a re-imaged host would point the skills at
+  # an engine that is no longer there, so drop it rather than leave it behind.
   local detected_framework; detected_framework="$(resolve_installed_framework)"
   if [ -n "$detected_framework" ]; then
     log "detected serving framework: ${detected_framework}"
+    upsert_dotenv_var FRAMEWORK "$detected_framework"
   else
-    warn "no serving framework detected; leaving FRAMEWORK unset in ${DOTENV}"
+    warn "no serving framework detected; clearing FRAMEWORK in ${DOTENV}"
+    remove_dotenv_var FRAMEWORK
   fi
 
   upsert_dotenv_var USER_DATA_PATH "$USER_DATA_PATH"
@@ -1344,7 +1402,6 @@ write_runtime_dotenv() {
   [ -n "${HYPERLOOM_WHEEL_TAG:-}" ] && upsert_dotenv_var HYPERLOOM_WHEEL_TAG "$HYPERLOOM_WHEEL_TAG"
   [ -n "${HYPERLOOM_SKILL_PATH:-}" ] && upsert_dotenv_var HYPERLOOM_SKILL_PATH "$HYPERLOOM_SKILL_PATH"
   [ -n "${SGLANG_USE_AITER:-}" ] && upsert_dotenv_var SGLANG_USE_AITER "$SGLANG_USE_AITER"
-  [ -n "${detected_framework}" ] && upsert_dotenv_var FRAMEWORK "$detected_framework"
   upsert_dotenv_var HYPERLOOM_FRAMEWORK_ENV "$FRAMEWORK_ENV"
   if [ "$FRAMEWORK_ENV" = "isolated" ] && [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
     upsert_dotenv_var VLLM_VENV_ROOT "$VLLM_VENV_ROOT"
@@ -1356,7 +1413,13 @@ write_runtime_dotenv() {
 print_next_steps() {
   local framework_hint
   framework_hint="$INSTALL_FRAMEWORK"
-  [ "$framework_hint" = "none" ] && framework_hint="sglang"
+  if [ "$framework_hint" = "none" ]; then
+    # Nothing was installed, so the prompt must name the engine this host
+    # actually has. Falling back to a hardcoded sglang sent atom-only hosts
+    # down a framework that is not present.
+    framework_hint="$(resolve_installed_framework)"
+    [ -n "$framework_hint" ] || framework_hint="<none detected — install or pick one>"
+  fi
   cat <<EOF
 
 [install-baremetal] install complete.
@@ -1405,7 +1468,16 @@ main() {
   # Precedence: --user-data-path > process env > .env > default. The .env value
   # is honored so the setup skill's written USER_DATA_PATH is not silently lost.
   user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-$(read_dotenv_var USER_DATA_PATH)}}"
-  user_data="${user_data:-/workspace/hyperloom}"
+# Container images ship a writable /workspace; a bare-metal host off root has
+# neither it nor permission to create it, so the mkdir below would abort.
+_default_workspace_root() {
+  # The nearest existing ancestor decides: -w is false for a path that does not
+  # exist yet, which would divert root off a /workspace it can still create.
+  _ws_probe=/workspace
+  while [ ! -e "$_ws_probe" ] && [ "$_ws_probe" != / ]; do _ws_probe=$(dirname "$_ws_probe"); done
+  if [ -w "$_ws_probe" ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
+}
+  user_data="${user_data:-$(_default_workspace_root)}"
   export USER_DATA_PATH="$user_data"
   export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
 

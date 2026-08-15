@@ -54,7 +54,7 @@ from _idle_gate import (  # noqa: E402
     build_high_idle_warning,
     resolve_idle_pct_threshold,
 )
-from _denoise_steps import resolve_perstep_divisor  # noqa: E402
+from _denoise_steps import count_profiler_steps, resolve_perstep_divisor  # noqa: E402
 from _io_utils import atomic_write_json, utc_now, write_text  # noqa: E402
 
 
@@ -442,8 +442,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "(mixed / decode_only / prefilldecode); off values: '', 0, false, off, none.",
     )
     p.add_argument("--roofline-output-name", default="kernel_roofline.json")
-    # Denoise-step count for scriptable/diffusion workloads; 0 = infer.
-    p.add_argument("--num-denoise-steps", type=int, default=0)
+    # Denoise-step count for scriptable/diffusion workloads; 0 = infer. The env
+    # fallback matches the TraceLens CLI, so the divisor cannot differ by route.
+    p.add_argument(
+        "--num-denoise-steps",
+        type=int,
+        default=int(os.environ.get("HYPERLOOM_NUM_DENOISE_STEPS", "0") or 0),
+    )
     # Diffusion analytic-ceiling inputs shared with the TraceLens CLI surface;
     # parsed but unused on this route.
     p.add_argument("--model-path", default=os.environ.get("MODEL_PATH", ""))
@@ -473,6 +478,53 @@ def _should_enable_steady(*, steady_state_mode: str, framework: str, env_steady:
     """
     mode = (steady_state_mode or "").strip().lower()
     return bool(env_steady) or (framework or "").lower() == "xdit" or mode not in _STEADY_OFF_VALUES
+
+
+#: Mirrors of the ``framework_registry``, used only when that package is not
+#: importable (standalone invocation). Keep in sync when a framework is added;
+#: tests assert both against the registry so a divergence cannot land.
+_STANDALONE_UNITS = {"xdit": "img/s", "custom": "unit/s"}
+_STANDALONE_SCRIPTABLE = frozenset({"xdit", "custom"})
+
+
+def _is_scriptable_framework(framework: str | None) -> bool:
+    """Return whether ``framework`` is a server-less scriptable workload.
+
+    Args:
+        framework: Framework name (matched case-insensitively).
+
+    Returns:
+        bool: ``True`` for ``kind=scriptable`` frameworks.
+    """
+    try:
+        from hyperloom.inference_optimizer.framework_registry import is_scriptable
+
+        return is_scriptable(framework)
+    except ImportError:  # standalone invocation without the package installed.
+        return str(framework or "").strip().lower() in _STANDALONE_SCRIPTABLE
+
+
+def _throughput_unit(framework: str | None) -> str:
+    """Return the throughput unit ``framework`` reports, per the registry.
+
+    The registry is the single source of truth here, so an operator's ``custom``
+    workload reports its own neutral ``unit/s`` instead of being mislabelled
+    ``tok/s``. Falls back to ``_STANDALONE_UNITS`` for standalone invocation,
+    where the ``hyperloom`` package may not be importable (see the provenance
+    import above).
+
+    Args:
+        framework: Framework name (matched case-insensitively).
+
+    Returns:
+        str: The unit string, e.g. ``"tok/s"``, ``"img/s"`` or ``"unit/s"``.
+    """
+    try:
+        from hyperloom.inference_optimizer.framework_registry import throughput_unit
+
+        return throughput_unit(framework)
+    except ImportError:  # standalone invocation without the package installed.
+        return _STANDALONE_UNITS.get(str(framework or "").strip().lower(), "tok/s")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -621,12 +673,42 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
-    # Warn when the forwarded --num-denoise-steps differs from the count the
-    # reader inferred from ProfilerStep annotations.
+    # Corrupt durations outrank real kernels, since ranking is by summed time.
+    stream_overlap = (analyze.get("timeline") or {}).get("stream_overlap") or {}
+    if stream_overlap:
+        _severity = str(stream_overlap.get("severity") or "info")
+        _share_pct = float(stream_overlap.get("excess_share") or 0.0) * 100.0
+        _advice = (
+            "Kernel ranking is by summed duration, so treat the hot-kernel table as "
+            "unreliable until the trace is recaptured or the durations are repaired."
+            if _severity == "warning"
+            else "Kernel ranking is by summed duration, so the affected entries are "
+            "overstated by this much; the overall ordering is probably still usable."
+        )
+        trace_health_warnings.append(
+            {
+                "code": "bypass_impossible_kernel_durations",
+                "severity": _severity,
+                "message": (
+                    f"device stream (pid={stream_overlap.get('pid')}, tid={stream_overlap.get('tid')}): "
+                    f"{stream_overlap.get('overlapping_events')} event(s) run past the start of the "
+                    f"event after them, by {stream_overlap.get('excess_ms')} ms in total -- "
+                    f"{_share_pct:.1f}% of the {stream_overlap.get('device_ms')} ms of device time "
+                    "booked on that stream. That is impossible on a serial stream, so these "
+                    f"durations are corrupt. Worst offender: '{stream_overlap.get('worst_event')}' "
+                    f"overruns by {stream_overlap.get('worst_event_excess_ms')} ms. " + _advice
+                ),
+            }
+        )
+
+    # Steps present in the analyzed data. ``annotation_window_count`` is
+    # deliberately not a fallback: it counts user_annotation ranges, not steps.
     requested_denoise_steps = int(getattr(args, "num_denoise_steps", 0) or 0)
-    inferred_denoise_steps = int((steady_window or {}).get("step_count", 0) or 0) or int(
-        (analyze.get("attribution") or {}).get("annotation_window_count", 0) or 0
-    )
+    inferred_denoise_steps = int((steady_window or {}).get("step_count", 0) or 0)
+    if inferred_denoise_steps <= 0:
+        # Count in the file the reader resolved; a directory input may glob a
+        # different one.
+        inferred_denoise_steps = count_profiler_steps(str(analyze.get("trace_file") or args.trace_input))
     if requested_denoise_steps > 0 and inferred_denoise_steps > 0 and requested_denoise_steps != inferred_denoise_steps:
         trace_health_warnings.append(
             {
@@ -634,8 +716,8 @@ def main(argv: list[str] | None = None) -> int:
                 "severity": "info",
                 "message": (
                     f"requested --num-denoise-steps={requested_denoise_steps} differs from the "
-                    f"{inferred_denoise_steps} step(s) inferred from the trace annotations; the "
-                    "trace-inferred per-step window is used for kernel shares."
+                    f"{inferred_denoise_steps} step(s) found in the analyzed data; the requested "
+                    "count wins as the per-step divisor."
                 ),
             }
         )
@@ -694,7 +776,7 @@ def main(argv: list[str] | None = None) -> int:
     for cand in candidates.get("hot_kernels", []):
         cand["trace_report_path"] = str(analysis_md_path)
 
-    throughput_unit = "img/s" if (args.framework or "").lower() == "xdit" else "tok/s"
+    throughput_unit = _throughput_unit(args.framework)
     write_text(
         analysis_md_path,
         _report.render_analysis_md(
@@ -773,14 +855,17 @@ def main(argv: list[str] | None = None) -> int:
     # analytical roofline into an end-to-end workload roofline + per-denoise-step
     # split. Best-effort sidecar over all device kernels, independent of the
     # per-kernel high-idle gate, so still emitted in the high-idle regime.
+    # Gated on scriptable, not on a framework name: this sidecar is built purely
+    # from the trace, so it needs no denoiser config the operator may not supply.
     diffusion_roofline_path: str | None = None
-    if (args.framework or "").lower() == "xdit":
+    if _is_scriptable_framework(args.framework):
         try:
             from diffusion_roofline import build_report_from_bypass  # noqa: E402
 
-            # Per-step divisor is the denoise steps in the analyzed window
-            # (trace-inferred), not the requested full schedule.
-            _diff_steps = resolve_perstep_divisor(inferred_denoise_steps, requested_denoise_steps)
+            _diff_steps = resolve_perstep_divisor(
+                requested_steps=requested_denoise_steps,
+                inferred_steps=inferred_denoise_steps,
+            )
             # Workload totals cover all analyzed device kernels (not just top-k).
             _workload_totals = _report.build_workload_roofline_totals(analyze, target_platform=args.target_platform)
             _all_kernels = [k for k in (analyze.get("kernels") or []) if float(k.get("gpu_time_us") or 0.0) > 0]

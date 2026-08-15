@@ -38,6 +38,7 @@ authoritative.
 | `geak_invocations`   | Per-attempt detail: prompt path, optimized files, verification, decision, micro_speedup.                 |
 | `forge_invocations`  | Per-attempt detail for the forge backend.                                                               |
 | `kernel_lifecycle`   | 5 stages: `detected` / `recommended` / `optimized` / `adopted` / `rejected`.                             |
+| `collective`         | Collective-lane campaigns: `only_mode` / `attempts[]` / `last`. Adoption is decided by `integration_decision` (E2E gate), not `decision` (microbenchmark). |
 | `param_search`       | Compatibility alias for the merged explore ledger (tested / accepted / rejected / top_by_gain / winner_history). |
 | `sweep`              | Grid size, best_overall, pareto_front, every variant's benchmark numbers.                                |
 | `critic_robustness`  | Per-iter critic verdicts + robustness signals.                                                           |
@@ -71,9 +72,8 @@ watching this session live:
    observing this session.
 4. **Never** mid-action — collectors expect a coherent state snapshot.
 
-Dispatch action `session_breakdown` (yaml meta lives at
-`actions/_meta/session_breakdown.yaml`) — it's a single 1-minute action,
-no inputs required.
+Dispatch action `session_breakdown` — a single 1-minute action, no inputs
+required.
 
 ## How to invoke
 
@@ -139,6 +139,7 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 | `geak_invocations`   | `kernel-agent/runs/<sid>/{optimization_attempts.jsonl, prompts/, optimized/, results/, verification/}` filtered by `backend == "geak"` (also scans legacy `kernel-agent-workspace/.../kernel-agent/runs/...` for historical sessions). Per-attempt files under `optimized/` are discovered by `glob("<attempt_id>*")`, so both the historical `<attempt_id>_optimized.<suffix>` name and the post-2026-05 `<attempt_id>_stdout.log` name are picked up transparently — see `docs/conceptual/kernel-execution-path.md` § *Per-attempt stdout file naming*. |
 | `forge_invocations`  | Same as GEAK, filtered by `backend == "forge"`                                                                        |
 | `kernel_lifecycle`   | `runs/profile/*/benchmark_*/benchmark_report.json` (detected) + `state.last_trace_analyze` (recommended) + invocations folded (optimized) + `state.{kernel_integrate_attempts, rejected_kernel_*}` (adopted/rejected) |
+| `collective`         | `state.{collective_only_mode, collective_attempts, last_collective}`                                                  |
 | `param_search`       | `state.{explore_search, discovered_flags}` (`synergy_attempted` now comes from `explore_search`; `winner_history` / `backend_winners_history` are emitted empty); `params` / `backends` ledgers are historical aliases only |
 | `sweep`              | `state.last_sweep` + `runs/sweep/<task>/variant_*/benchmark_*/benchmark_report.json`                                |
 | `critic_robustness`  | `critic-workdir/<NNN>/{request,judge_bundle,emit,review}.json` + `robustness-workdir/<NNN>/{signal,action}.json`   |

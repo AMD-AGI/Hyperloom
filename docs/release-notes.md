@@ -1,18 +1,53 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 1.0.0a3, including Recipe-KB trace visibility, Cortex KB removal, and recipe-oriented naming."
+    "description": "Hyperloom release notes: headline capabilities for version 1.0.0b1, including the remote Recipe KB Store cutover, session-wide accuracy-eval opt-out, Claude subscription OAuth support, and enterprise gateway header handling."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
 
-The current packaged version is 1.0.0a3 (`pyproject.toml`). For the
+The current packaged version is 1.0.0b1 (`pyproject.toml`). For the
 per-change history since the initial snapshot, see
 [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
 or view a detailed breakdown of all previous Hyperloom pre-release versions under
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
 summarizes the headline capabilities.
+
+## Unreleased
+
+## Hyperloom 1.0.0b1 release
+
+The [1.0.0b1 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b1)
+is the first beta, building on 1.0.0a3 with the remote Recipe knowledge cutover
+to KB Store, a session-wide accuracy-eval opt-out, Claude subscription OAuth
+support, and enterprise gateway header handling.
+
+### 1.0.0b1 highlights
+
+- **Remote Recipe KB Store cutover**: remote Recipe reads and CLOSE writes use
+  the KB Store Recipe View with verified artifacts and combined config,
+  ordered Explore/Framework overlay, and Kernel replay. Local Recipe storage
+  and non-Recipe GBrain consumers are unchanged.
+
+- **`--no-eval` session-wide accuracy opt-out**: the accuracy eval can be turned
+  off for a whole run as an explicit choice, anchoring the baseline on throughput
+  instead of halting on the missing reference. It persists across `--resume` and
+  is refused once the session has anchored an accuracy. Runs made with the flag
+  are not accuracy-validated.
+
+- **Claude subscription OAuth support**: `CLAUDE_CODE_OAUTH_TOKEN` is now a
+  first-class Anthropic-side credential, so Claude Max/Pro subscribers can run
+  Hyperloom through the `claude` CLI without buying separate API credits. Install,
+  preflight, specialist subprocesses, and Ray-backed kernel work preserve the
+  token without mirroring it into API-key slots.
+
+- **Enterprise LLM gateway setup and headers**: the install docs now show how to
+  configure Anthropic-compatible enterprise gateways and custom auth headers,
+  including AMD APIM's `Ocp-Apim-Subscription-Key`. `.env` loading, setup
+  persistence, Ray runtime environments, and specialist secret forwarding preserve
+  `ANTHROPIC_CUSTOM_HEADERS` / `OPENAI_CUSTOM_HEADERS`, so header-authenticated
+  gateways work from a fresh shell.
 
 ## Hyperloom 1.0.0a3 release
 
@@ -98,9 +133,11 @@ The first public release of Hyperloom (1.0.0a1) combines features from the follo
 - **Unified macro-cycle orchestration and budget accounting**: Short and long
   sessions now share the same cyclic optimization model. Phase budgets use
   consistent charge-back accounting, short runs stop dispatching after their
-  phase budget is exhausted, and new macro-cycles only start when at least
-  three hours remain. This removes legacy cyclic-mode branches and makes phase
-  progression more predictable across bounded and long-horizon runs.
+  phase budget is exhausted, and new macro-cycles open when sufficient budget
+  remains (the effective floor scales with session length so short sessions are
+  not unconditionally blocked by the 3-hour absolute floor). This removes legacy
+  cyclic-mode branches and makes phase progression more predictable across
+  bounded and long-horizon runs.
 
 - **Ray-managed single-node serving and GPU execution**: The Ray path now places
   all serving and GPU-specialist operations under the whole-machine `serving_slot`

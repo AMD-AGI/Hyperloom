@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperloom-inference_optimizer"
-version = "1.0.0a3"
+version = "1.0.0b1"
 description = "Inference Optimizer — three-role (Orchestration/Critic/Robustness) autonomous LLM inference optimization runtime for AMD GPU platforms. Kernel optimization is handled by programmatic Python handlers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -144,7 +144,6 @@ hyperloom = [
     "SKILL.md",
     "README.md",
     "actions/*.md",
-    "actions/_meta/*.yaml",
     # Release-contract shell installers + configs.
     "assets/*.sh",
     "assets/*.example",
@@ -190,11 +189,6 @@ hyperloom = [
 # former agent skill file was replaced by docs/conceptual/kernel-execution-path.md.
 "hyperloom.agents.kernel" = [
     "scripts/*.sh",
-    "skills/unittest/SKILL.md",
-]
-# Non-Python data file the kernel tools read at runtime.
-"hyperloom.agents.kernel.tools" = [
-    "data/*.json",
 ]
 # ``agentx/deploy.py`` copies these into InferenceX ``benchmarks/`` at runtime
 # and raises FileNotFoundError when they are absent from the install.
@@ -240,6 +234,8 @@ omit = [
     "*/tests/*",
     "*/__init__.py",
     "*/__main__.py",
+    # Byte-identical upstream KB Store SDK; guarded by a blob checksum test.
+    "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/*",
     # CLI drivers.
     "src/hyperloom/inference_optimizer/cli/__init__.py",
     "src/hyperloom/inference_optimizer/multi_node/cli.py",
@@ -261,13 +257,9 @@ omit = [
     "src/hyperloom/agents/kernel/tools/parallel_e2e_runner.py",
     "src/hyperloom/agents/kernel/tools/apply_kernel_patch.py",
     "src/hyperloom/agents/kernel/tools/geak_prompt_patcher.py",
-    # Serve/bench/apply CLI primitives (live-serving plumbing).
-    "src/hyperloom/agents/kernel/tools/apply_and_bench.py",
     # Kernel-agent tool backends (subprocess submit).
     "src/hyperloom/agents/kernel/tools/backends/*",
     "src/hyperloom/agents/kernel/tools/_collective_names.py",
-    # Kernel-agent skill harness validator — standalone operator script.
-    "src/hyperloom/agents/kernel/skills/unittest/validate_harness.py",
     # quantization_agent CLI driver (argparse entrypoint).
     "src/hyperloom/agents/quantization/cli.py",
     # OOB server-side runtime (CLI, HTTP server, scheduler, auth proxy, agent
@@ -285,9 +277,8 @@ omit = [
     "src/hyperloom/orchestrator/actions/executors/_server_patcher.py",
     # Breakdown collectors — exercised end-to-end by the reporter tests.
     "src/hyperloom/inference_optimizer/breakdown/collectors/*",
-    # Operator CLIs and A/B experiment scripts, not library code.
+    # Operator CLIs, not library code.
     "src/hyperloom/inference_optimizer/tools/*",
-    "src/hyperloom/inference_optimizer/experiments/*",
     # Subprocess transports for the robustness / critic sub-agent runtimes.
     "src/hyperloom/orchestrator/roles/robustness_agent.py",
     "src/hyperloom/orchestrator/roles/critic_agent.py",

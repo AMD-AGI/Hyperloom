@@ -25,6 +25,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     RecipeKB,
     recipe_canonical_id,
 )
+from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
 
 
 _MODEL = "qwen3-30b-a3b"
@@ -43,7 +44,7 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
         "critic": MockBackend(idle),
         "robustness": MockBackend(idle),
     }
-    kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"), remote=None)
+    kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"))
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
@@ -99,6 +100,30 @@ def test_kb_amend_recipe_persists_pitfall(tmp_path: Path) -> None:
     assert row is not None
     descs = [p.get("description") for p in (row.get("pitfalls") or [])]
     assert "ep=8 OOMs on 30B" in descs
+
+
+def test_kb_amend_recipe_is_noop_in_remote_mode(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    coord = _make_coordinator(tmp_path)
+
+    class _ForbiddenRecipeKB:
+        def __getattr__(self, name: str):
+            raise AssertionError(f"remote amend accessed RecipeKB: {name}")
+
+    coord.recipe_kb = _ForbiddenRecipeKB()
+    coord.knowledge_plane = SimpleNamespace(
+        config=KnowledgeConfig.from_env(
+            {
+                "KNOWLEDGE_STORE_MODE": "remote",
+                "KB_STORE_URL": "https://kb.test",
+                "KB_STORE_TOKEN": "token",
+            }
+        )
+    )
+    coord._kb_amend_recipe(
+        append_lesson={"statement": "must not write", "measured_impact": ""}
+    )
 
 
 def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> None:
@@ -193,7 +218,7 @@ def test_kb_amend_recipe_skips_empty_architecture_tags(tmp_path: Path) -> None:
 def test_sdk_fallback_t0_anchors_into_self_recipe_kb(tmp_path: Path) -> None:
     """The SDK-fallback T0 anchor runs and writes into the SAME dispatcher the Coordinator holds."""
     coord = _make_coordinator(tmp_path)
-    # Clear the already-anchored markers and re-anchor with the 5-tuple seeded.
+    # Clear the markers and re-anchor the canonical Recipe identity.
     coord.shared_state.warm_start_ts = ""
     coord.shared_state.recipe_kb_session_id = ""
     coord._ensure_recipe_kb_t0_anchored()
