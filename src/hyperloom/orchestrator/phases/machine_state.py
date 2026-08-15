@@ -352,8 +352,7 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_CLOSE: 0.02,
 }
 
-# Share of the session PRELUDE may spend before its optional arms are dropped,
-# and the share held for the phases that actually produce a result.
+# Share of the session held back for the phases that actually produce a result.
 #
 # PRELUDE's ``DEFAULT_PHASE_BUDGET_PCT`` entry is 3%, but nothing enforced it:
 # :func:`exit_normal_prelude` tests only whether a baseline landed, so the phase
@@ -365,11 +364,20 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
 # nothing. Stopping the run on time is necessary and not sufficient -- the
 # phases that spend the budget have to be the ones that produce the result.
 #
-# These bound the preparation rather than the session. They are deliberately
+# This bounds the preparation rather than the session, and it is deliberately
 # looser than 3%: a baseline that legitimately takes an hour should still run,
 # it just cannot also buy an 80-minute roofline out of the optimization phases'
 # time.
-PRELUDE_SPEND_CEILING_PCT: float = 0.40
+#
+# A second bound used to sit beside it -- a ceiling on PRELUDE's own banked
+# spend -- and it was removed because the two clocks it straddled can disagree.
+# Banked phase spend accumulates against the phase ledger; the reserve is read
+# off the session clock. A session resumed with a reanchored budget restarts the
+# session clock and carries the ledger over, so preparation was born over its
+# ceiling with hours genuinely left, and every resumed session was refused the
+# measured half of its baseline. The reserve alone answers the question that
+# decides the matter: after this work, is enough left for the phases that
+# produce the result?
 OPTIMIZATION_RESERVE_PCT: float = 0.50
 
 # Wall-clock ceiling for an unbounded run (``max_minutes`` == 0): the container
@@ -2078,18 +2086,14 @@ def _session_usable_seconds(state: Any) -> float | None:
     return session_remaining_seconds(state)
 
 
-def prelude_affordable_seconds(
-    state: Any,
-    *,
-    now_unix: float | None = None,
-) -> tuple[float | None, dict[str, Any]]:
+def prelude_affordable_seconds(state: Any) -> tuple[float | None, dict[str, Any]]:
     """Seconds PRELUDE may still spend, and the numbers the figure is built from.
 
-    Two bounds apply and the tighter wins: what is left of PRELUDE's own share
-    (:data:`PRELUDE_SPEND_CEILING_PCT`), and what is left of the session once
-    the optimization phases' reserve (:data:`OPTIMIZATION_RESERVE_PCT`) is held
-    back. Work that fits neither is not work the session needed — it is work
-    the session could not have used the result of.
+    What is left on the session clock once the optimization phases' reserve
+    (:data:`OPTIMIZATION_RESERVE_PCT`) is held back, measured against the same
+    usable remainder every other budget decision reads, so the figure survives
+    a resume that reanchors the budget. Work that does not fit is not work the
+    session needed — it is work the session could not have used the result of.
 
     Read directly by callers that have to *size* a unit of work rather than
     judge one they can already price, which is the position a first baseline is
@@ -2098,28 +2102,23 @@ def prelude_affordable_seconds(
 
     Args:
         state (Any): Frozen SharedState view.
-        now_unix (float | None): Override for the current time.
 
     Returns:
         tuple[float | None, dict[str, Any]]: The affordable seconds — which may
-        be negative once the share is overspent — or ``None`` on an unbounded
-        budget, plus the evidence behind it.
+        be negative once the reserve is eaten into — or ``None`` on an
+        unbounded budget, plus the evidence behind it.
     """
     max_sec = _max_minutes(state) * 60.0
     usable = _session_usable_seconds(state)
     if max_sec <= 0.0 or usable is None:
         return None, {"reason": "unbounded_budget"}
-    spent = phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix)
-    phase_headroom = max_sec * PRELUDE_SPEND_CEILING_PCT - spent
-    session_headroom = usable - max_sec * OPTIMIZATION_RESERVE_PCT
-    affordable_sec = min(phase_headroom, session_headroom)
+    reserve_sec = max_sec * OPTIMIZATION_RESERVE_PCT
+    affordable_sec = usable - reserve_sec
     return affordable_sec, {
-        "prelude_spent_sec": round(spent, 1),
-        "prelude_ceiling_sec": round(max_sec * PRELUDE_SPEND_CEILING_PCT, 1),
-        "optimization_reserve_sec": round(max_sec * OPTIMIZATION_RESERVE_PCT, 1),
+        "optimization_reserve_sec": round(reserve_sec, 1),
         "session_usable_sec": round(usable, 1),
         "affordable_sec": round(affordable_sec, 1),
-        "bound": "prelude_ceiling" if phase_headroom <= session_headroom else "optimization_reserve",
+        "bound": "optimization_reserve",
     }
 
 
@@ -2127,7 +2126,6 @@ def prelude_can_afford(
     state: Any,
     *,
     expected_cost_sec: float,
-    now_unix: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Decide whether PRELUDE can still buy an optional arm costing ``expected_cost_sec``.
 
@@ -2140,7 +2138,6 @@ def prelude_can_afford(
             should anchor this on something this session measured; the static
             per-action estimates are calibrated on small models and understate
             a large one by an order of magnitude.
-        now_unix (float | None): Override for the current time.
 
     Returns:
         tuple[bool, dict[str, Any]]: ``(affordable, evidence)``. Evidence
@@ -2148,7 +2145,7 @@ def prelude_can_afford(
         and the phase record.
     """
     cost = max(0.0, float(expected_cost_sec or 0.0))
-    affordable_sec, evidence = prelude_affordable_seconds(state, now_unix=now_unix)
+    affordable_sec, evidence = prelude_affordable_seconds(state)
     priced = {"expected_cost_sec": round(cost, 1), **evidence}
     if affordable_sec is None:
         return True, priced
@@ -3335,7 +3332,6 @@ __all__ = [
     "DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING",
     "DEFAULT_PHASE_BUDGET_PCT",
     "OPTIMIZATION_RESERVE_PCT",
-    "PRELUDE_SPEND_CEILING_PCT",
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
     "DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT",
     "DEFAULT_PLATEAU_EXPLORE_LOOKBACK",
