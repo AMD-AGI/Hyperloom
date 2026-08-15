@@ -39,8 +39,6 @@ class _StubPrelude:
         self.session_dir = session_dir
         self.shared_state = SimpleNamespace(
             warm_kernel_kb_attempted=False,
-            warm_kernel_kb_plan=[],
-            warm_kernel_kb_outcome={},
             save=lambda *_a, **_k: None,
         )
         self._reader = reader

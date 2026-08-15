@@ -537,11 +537,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     warm_replay_outcome: dict = field(default_factory=dict)
     # One-shot guard for PRELUDE warm-kernel KB read/apply (resume can't re-fire).
     warm_kernel_kb_attempted: bool = False
-    # Resolved prior-champion kernel columns (gemm/fusion/rewrite) loaded from the
-    # KB Store warm-start record at PRELUDE, with local file paths resolved.
-    warm_kernel_kb_plan: list = field(default_factory=list)
-    # Structured warm-kernel KB outcome for reports/prompts.
-    warm_kernel_kb_outcome: dict = field(default_factory=dict)
     # Baseline COLD (warmup-round) full boot+bench wall-clock; the hard-cap
     # anchor from which ExploreExecutor derives the overtime-kill deadline.
     baseline_runtime_sec: float = 0.0

@@ -598,8 +598,7 @@ class PreludePhase(PhaseHandler):
             return {"status": "skipped", "reason": "already_attempted"}
         gated = self._warm_kernel_gate_reason()
         if gated:
-            state.warm_kernel_kb_outcome = {"status": "skipped", "reason": gated}
-            return state.warm_kernel_kb_outcome
+            return {"status": "skipped", "reason": gated}
         state.warm_kernel_kb_attempted = True
         # Persist the one-shot flag now: a crash mid-replay must not re-run the
         # whole (potentially hour-long) set on resume.
@@ -611,19 +610,15 @@ class PreludePhase(PhaseHandler):
             kb = self._open_warm_kernel_record()
         except Exception as exc:  # noqa: BLE001 — advisory; never block PRELUDE
             log.warning("warm-kernel KB: opening the record failed", exc_info=True)
-            state.warm_kernel_kb_outcome = {
+            return {
                 "status": "skipped",
                 "reason": f"record_unavailable:{type(exc).__name__}",
             }
-            return state.warm_kernel_kb_outcome
         if kb is None or not kb.active:
-            state.warm_kernel_kb_outcome = {"status": "skipped", "reason": "no_kernel_record"}
-            return state.warm_kernel_kb_outcome
+            return {"status": "skipped", "reason": "no_kernel_record"}
         plan = self._collect_warm_kernel_plan(kb)
-        state.warm_kernel_kb_plan = plan
         if not plan:
-            state.warm_kernel_kb_outcome = {"status": "empty"}
-            return state.warm_kernel_kb_outcome
+            return {"status": "empty"}
         kept = 0
         reverted = 0
         deferred = 0
@@ -749,7 +744,6 @@ class PreludePhase(PhaseHandler):
             "deferred": deferred,
             "errors": errors,
         }
-        state.warm_kernel_kb_outcome = outcome
         log.info(
             "PRELUDE warm-kernel KB: columns=%s total=%d kept=%d reverted=%d "
             "deferred=%d errors=%d",
