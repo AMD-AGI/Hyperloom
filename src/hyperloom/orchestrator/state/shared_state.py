@@ -595,6 +595,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Baseline WARM measure-round wall-clock (client-only, no boot); anchors the
     # explore overtime kill apples-to-apples. Zero => fall back to the cold anchor.
     baseline_warm_runtime_sec: float = 0.0
+    # The benchmark's own share of the COLD round above, from the server-ready
+    # marker onward. Kept beside that total rather than replacing it because the
+    # difference between them is what booting this workload costs, and every
+    # later variant boots again: the pair prices one variant, while this figure
+    # alone prices a pass that re-attaches. Zero => never measured.
+    baseline_post_ready_runtime_sec: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
     # Reference launch recipe from the operator's --reference-script: lowest-priority
     # base server args/envs seeding every baseline. Persisted.

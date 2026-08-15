@@ -68,6 +68,8 @@ from ._grid_runner import (
 from ._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
+    clear_server_ready_stamp,
+    post_ready_runtime_sec,
     run_with_session_kill,
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
@@ -287,6 +289,37 @@ def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:
     if framework_registry.is_scriptable(framework):
         return None
     return str(output_dir / "server.log")
+
+
+def _round_post_ready_sec(
+    server_log_path: str | None,
+    *,
+    started_unix: float,
+    runtime_sec: float,
+) -> float | None:
+    """How much of a round's wall-clock was the benchmark rather than the boot.
+
+    Splitting the two is what lets later work be priced on what it will actually
+    cost: an explore variant boots its own server and pays both, while a pass
+    that re-attaches to a server already up pays only the second.
+
+    Args:
+        server_log_path: The round's ``server.log``, or ``None`` for a scriptable
+            framework, which runs no server and therefore has no split to make.
+        started_unix: When the round was spawned.
+        runtime_sec: The round's full wall-clock.
+
+    Returns:
+        float | None: Seconds after the server reported ready, or ``None`` when
+        the round has no such boundary or nothing recorded one.
+    """
+    if not server_log_path:
+        return None
+    return post_ready_runtime_sec(
+        server_log_path,
+        started_unix=started_unix,
+        runtime_sec=runtime_sec,
+    )
 
 
 def _logged_session_clamp(timeout_sec: int, clamped: int, *, output_dir: Path) -> int:
@@ -3393,6 +3426,14 @@ class BaselineExecutor:
                         float(warmup_runtime),
                         2,
                     )
+                    # The split belongs to round 1 for the same reason its
+                    # wall-clock does: round 2 re-attached, so it has no boot to
+                    # separate and its own reading says nothing about what booting
+                    # this workload costs. Assigned with that wall-clock and not
+                    # beside it, so the total and the part of it reported here can
+                    # never come from different rounds -- their difference is
+                    # published as this workload's boot.
+                    result["post_ready_runtime_sec"] = warmup_result.get("post_ready_runtime_sec")
                 _hot = result.get("output_throughput") or 0.0
                 _cold = warmup_tput or 0.0
                 log.info(
@@ -4181,6 +4222,9 @@ class BaselineExecutor:
                 stale_server_log,
                 exc,
             )
+        # And the ready stamp beside it, for the same reason: a prior attempt's
+        # would make this attempt's boot look like it never happened.
+        clear_server_ready_stamp(str(stale_server_log))
         try:
             if serving_lease is not None:
                 # Ray-managed GPU execution (§12 T1): run inside the lease's
@@ -4472,6 +4516,16 @@ class BaselineExecutor:
             # promotes into ``SharedState.baseline_runtime_sec``, the explore
             # overtime-kill anchor. Omitted on failure paths.
             "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
+            # The benchmark's own share of that wall-clock, boot excluded. Kept
+            # separate rather than folded in because the two are spent by
+            # different things: every later variant boots again, so it is the
+            # sum that prices one, while only this part prices a pass that
+            # re-attaches. ``None`` when nothing recorded a ready boundary.
+            "post_ready_runtime_sec": _round_post_ready_sec(
+                watchdog_server_log,
+                started_unix=subprocess_started_unix,
+                runtime_sec=subprocess_runtime_sec,
+            ),
             # Authoritative (materialized-config) view of whether the serving
             # lm-eval ran this run. The accuracy-stop decision reads this rather
             # than re-deriving from params, so a YAML/reference-env RUN_EVAL=false
