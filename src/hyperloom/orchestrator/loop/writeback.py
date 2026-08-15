@@ -4318,12 +4318,16 @@ class WritebackCollaborator:
             return False
 
     async def _resume_recover_pending_integrate(self, report: dict[str, Any]) -> None:
-        """Recover a crashed integrate_patch window from the sentinel (Gap C).
+        """Recover a crashed integrate_patch window from the sentinel.
 
         Three-way decision keyed on whether a ``kept`` delegated-result exists
         for the sentinel's task: replay the missing append (crashed after KEEP),
         roll back the half-applied patch (crashed after apply, before KEEP), or
-        clear a stale sentinel. The sentinel is always cleared afterwards.
+        clear a stale sentinel. The sentinel is cleared only once one of those
+        three decisions is actually reached: a scan that could not read the
+        event log proves nothing, so it must neither roll back nor consume the
+        sentinel, or a transient DB error would reverse-apply a validated patch
+        and leave nothing for the next resume to retry.
 
         Args:
             report: The resume report dict to append fixes/warnings to.
@@ -4334,6 +4338,7 @@ class WritebackCollaborator:
             return
         task_id = str(pending.get("task_id") or "")
         kept_res: dict[str, Any] | None = None
+        scanned = False
         try:
             for msg in await self.bus.tail(topic="delegated_result", n=10_000):
                 payload = msg.payload or {}
@@ -4351,8 +4356,14 @@ class WritebackCollaborator:
                 ):
                     kept_res = res
                     break
+            scanned = True
         except Exception:  # noqa: BLE001
             log.exception("Coordinator: pending_integrate kept-result scan failed")
+        if not scanned:
+            report["warnings"].append(
+                {"kind": "pending_integrate_scan_failed", "task_id": task_id, "sentinel_retained": True}
+            )
+            return
         if kept_res is not None:
             appended = self._replay_keep_from_result("integrate_patch", kept_res)
             report["fixes"].append(

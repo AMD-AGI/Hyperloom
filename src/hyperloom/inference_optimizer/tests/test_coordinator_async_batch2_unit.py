@@ -292,6 +292,45 @@ async def test_resume_consistency_clears_stale_pending_integrate(coord: Coordina
 
 
 @pytest.mark.asyncio
+async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
+    coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable event log must not be treated as 'no KEEP exists'."""
+    coord._resumed_from["is_resume"] = True
+    sentinel = {
+        "task_id": "ti-unreadable",
+        "framework_source_root": "/tmp/framework",
+        "patches": ["/tmp/p.diff"],
+    }
+    coord.shared_state.pending_integrate = dict(sentinel)
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("database disk image is malformed")
+
+    monkeypatch.setattr(coord.bus, "tail", _boom)
+
+    rolled_back: list[dict] = []
+    monkeypatch.setattr(
+        coord.writeback,
+        "_resume_rollback_pending_integrate",
+        lambda pending: rolled_back.append(pending) or {"reversed": [], "failed": []},
+    )
+
+    report = await coord._resume_consistency_pass()
+
+    assert rolled_back == []
+    assert coord.shared_state.pending_integrate == sentinel
+    warning = next(w for w in report["warnings"] if w.get("kind") == "pending_integrate_scan_failed")
+    assert warning["task_id"] == "ti-unreadable"
+    assert warning["sentinel_retained"] is True
+    assert not any(
+        isinstance(f, dict) and f.get("kind") in {"rolled_back_pending_integrate", "cleared_stale_pending_integrate"}
+        for f in report["fixes"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_resume_consistency_discards_orphaned_integrate_keep_missing_workspace(
     coord: Coordinator,
     tmp_path: Path,
