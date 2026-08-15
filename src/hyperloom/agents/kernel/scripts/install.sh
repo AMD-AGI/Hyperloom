@@ -296,7 +296,7 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
       unset "_snap_prot_${_v}"
     done
     unset _v _snap_val _cur_val
-    unset _snap_anthropic_url _snap_anthropic_key _snap_anthropic_token _snap_anthropic_headers
+    unset _snap_anthropic_url _snap_anthropic_key _snap_anthropic_token _snap_claude_oauth _snap_anthropic_headers
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
