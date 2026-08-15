@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Smoke tests for the M1 factory."""
+"""Smoke tests for the factory."""
 
 from __future__ import annotations
 

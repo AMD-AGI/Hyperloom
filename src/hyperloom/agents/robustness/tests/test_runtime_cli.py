@@ -248,7 +248,7 @@ def test_subprocess_tick_help_smoke():
 
 
 # ---------------------------------------------------------------------------
-# M2 multi-node options plumbing
+# Multi-node options plumbing
 # ---------------------------------------------------------------------------
 
 

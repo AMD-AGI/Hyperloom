@@ -183,7 +183,7 @@ ownership.
 re-probes the primary every `source_recheck_interval_s` (default 30s).
 State transitions emit one WARN log; no spam in steady state.
 
-## LLM RCA (M1.5)
+## LLM RCA
 
 When `llm_base_url` and `llm_api_key` are both set (and
 `ROBUSTNESS_LLM_RCA_DISABLED` is not `1`), the factory wires
@@ -219,7 +219,7 @@ These records are the hand-off point for a future findings publisher
 that POSTs them to the robustness-server for dashboards / alerting;
 today they remain local-only.
 
-## Session-end postmortem (L1 + L2)
+## Session-end postmortem
 
 When the Coordinator sets `state.json::stop_reason` (run wind-down)
 the reactor fires :class:`hyperloom.agents.robustness.role.postmortem.PostmortemFinalizer`
@@ -237,7 +237,7 @@ finalizer post-hoc via
 `hyperloom.agents.robustness.role.postmortem.finalize_session(session_dir, session_id=...)`
 (noop when the marker exists).
 
-## Critic feedback loop (L4)
+## Critic feedback loop
 
 The Critic agent's `prepare-review` phase reads the most recent N HIGH-
 severity findings from `findings/<session>.jsonl` and injects them

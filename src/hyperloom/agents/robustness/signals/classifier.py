@@ -102,7 +102,7 @@ class SignalSpec:
 def _external_deps_extra_kwargs(classifier: "Classifier") -> dict[str, Any]:
     """Inject the shared TraceLens CLI latch into ``evaluate_external_deps_signals``.
 
-    The latch is a configless one-shot helper owned by the classifier (so J3
+    The latch is a configless one-shot helper owned by the classifier (so the rule
     fires at most once per session); it is a sibling of the external_deps row
     rather than its own signal.
 
@@ -209,7 +209,7 @@ _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
         CriticHealthConfig,
         evaluator=evaluate_critic_health_signals,
     ),
-    # F1 ray-pending is stateful; F2/F5 live in the module helper — both
+    # Ray-pending is stateful; the other two live in the module helper — both
     # driven off one KernelPipelineConfig slot.
     SignalSpec(
         "ray_pending",
@@ -230,7 +230,7 @@ _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
         StateIntegrityConfig,
         evaluator=evaluate_state_integrity_signals,
     ),
-    # TraceLens CLI latch is owned by the classifier and injected here so J3
+    # TraceLens CLI latch is owned by the classifier and injected here so it
     # fires at most once per session.
     SignalSpec(
         "external_deps",

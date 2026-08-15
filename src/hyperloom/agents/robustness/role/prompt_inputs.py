@@ -174,7 +174,7 @@ class InboxItem:
 class SharedStateSnapshot:
     """Subset of the Coordinator SharedState the robustness reactor reads.
 
-    Only the fields the M1 reactor consumes are parsed; every other
+    Only the fields the reactor consumes are parsed; every other
     rendered line is ignored. All fields default to a neutral value so a
     parse miss degrades to "no signal" rather than raising.
 
@@ -232,9 +232,8 @@ class SharedStateSnapshot:
 class ReactorContext:
     """Per-tick input for :class:`Reactor`.
 
-    Built by :func:`from_coordinator_prompt` (SINGLE_PROC) or
-    :func:`from_inbox_jsonl` (MULTI_CLI; M3).  The reactor does not need
-    to know which transport produced the context.
+    Built by :func:`from_coordinator_prompt` from the rendered Coordinator
+    prompt, which is the only transport.
 
     Attributes:
         tick_index (int): In-process tick counter.

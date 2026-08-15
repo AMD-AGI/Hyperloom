@@ -154,7 +154,7 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
     # Disable the ``external_deps`` probe (TraceLens CLI / WekaFS mount) on inert CI hosts.
     if "external_deps_enabled" in options:
         config.external_deps_enabled = bool(options["external_deps_enabled"])
-    # B3 ``no_levers_found`` floor knobs override the default window.
+    # ``no_levers_found`` floor knobs override the default window.
     if "progress_no_levers_min_minutes" in options:
         config.progress_no_levers_min_minutes = float(options["progress_no_levers_min_minutes"])
     if "progress_no_levers_min_ticks" in options:
@@ -219,7 +219,7 @@ def _cmd_tick(args: argparse.Namespace) -> None:
 
 
 def _cmd_finalize(args: argparse.Namespace) -> None:
-    """Run the L1+L2 postmortem finalizer as a one-shot operator tool.
+    """Run the postmortem finalizer as a one-shot operator tool.
 
     Use when the reactor never observed ``stop_reason`` going
     non-empty (e.g. Coordinator killed by SIGKILL before the wind-down
@@ -290,7 +290,7 @@ def _build_parser() -> argparse.ArgumentParser:
     finalize = sub.add_parser(
         "finalize",
         help=(
-            "Run the L1+L2 postmortem finalizer post-hoc "
+            "Run the postmortem finalizer post-hoc "
             "(for sessions whose Coordinator died before stop_reason "
             "was written)."
         ),

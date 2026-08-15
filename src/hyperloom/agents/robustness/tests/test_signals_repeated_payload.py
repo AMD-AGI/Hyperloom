@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the ``same_payload_loop`` signal (B1)."""
+"""Unit tests for the ``same_payload_loop`` signal."""
 
 from __future__ import annotations
 

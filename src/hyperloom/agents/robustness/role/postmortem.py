@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Session-end postmortem + decision trace finalizer (L1 + L2).
+"""Session-end postmortem + decision trace finalizer.
 
 Fired once per session on the first non-empty ``stop_reason``; idempotent
 via a ``.robustness_finalized`` marker under ``<session_dir>/reports/``.
@@ -34,7 +34,7 @@ _FINALIZED_MARKER_NAME: str = ".robustness_finalized"
 _POSTMORTEM_FILENAME: str = "robustness_postmortem.md"
 _DECISION_TRACE_FILENAME: str = "decision_trace.json"
 
-# Action families scanned under ``runs/`` for L2.
+# Action families scanned under ``runs/`` for the decision trace.
 _DECISION_TRACE_ACTION_DIRS: tuple[str, ...] = (
     "baseline",
     "profile",
@@ -69,7 +69,7 @@ class PostmortemFinalizerConfig:
 
 
 class PostmortemFinalizer:
-    """Once-per-session aggregator for L1 (flashpoint) + L2 (decision trace).
+    """Once-per-session aggregator for the flashpoint report + decision trace.
 
     Lifecycle: callers (the reactor) invoke :meth:`finalize` once when
     ``stop_reason`` is first observed non-empty. Re-running has no
@@ -125,7 +125,7 @@ class PostmortemFinalizer:
         return self.marker_path.is_file()
 
     def finalize(self, *, stop_reason: str) -> bool:
-        """Run the L1+L2 pipeline. Returns True if we wrote new files.
+        """Run the finalizer pipeline. Returns True if we wrote new files.
 
         Best-effort: any IO error is logged and swallowed. The reactor
         must never crash because the postmortem failed to write.

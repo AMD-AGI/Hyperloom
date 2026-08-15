@@ -336,7 +336,7 @@ async def test_coordinator_zombie_alert_only():
 
 
 async def test_gateway_auth_outage_alert_only():
-    """J1: HIGH alert — the operator has to rotate the gateway key."""
+    """HIGH alert — the operator has to rotate the gateway key."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -356,7 +356,7 @@ async def test_gateway_auth_outage_alert_only():
 
 
 async def test_wekafs_degraded_alert_only():
-    """J2: HIGH alert — operator decides wait vs remount."""
+    """HIGH alert — operator decides wait vs remount."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -377,7 +377,7 @@ async def test_wekafs_degraded_alert_only():
 
 
 async def test_tracelens_cli_missing_alert_only():
-    """J3: HIGH alert — the operator has to re-run install.sh."""
+    """HIGH alert — the operator has to re-run install.sh."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("tracelens_cli_missing", SymptomSeverity.HIGH, evidence={"cli_names": ["a", "b"]}, subject={})],
@@ -428,7 +428,7 @@ async def test_critic_runtime_stuck_alert_only():
 
 
 async def test_ray_pending_starvation_alert_only():
-    """F1: kernel pipeline is wedged — alert + suggestion only.
+    """Kernel pipeline is wedged — alert + suggestion only.
     The auto prune_branch was dropped."""
     ladder = ActionLadder()
     out = await ladder.decide(
@@ -463,7 +463,7 @@ async def test_geak_budget_starvation_emits_alert_plus_prune_kernel_opt():
 
 
 async def test_kernel_opt_no_progress_emits_alert_plus_prune_kernel_opt():
-    """F5: pipeline structurally cannot optimise — prune kernel_opt toward params/sweep."""
+    """Pipeline structurally cannot optimise — prune kernel_opt toward params/sweep."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("kernel_opt_no_progress", SymptomSeverity.HIGH, evidence={"kernel_count": 3}, subject={})],
@@ -478,7 +478,7 @@ async def test_kernel_opt_no_progress_emits_alert_plus_prune_kernel_opt():
 
 
 async def test_critic_prune_stuck_falls_to_medium_alert():
-    """E4 — MEDIUM severity → alert only, no destructive action."""
+    """MEDIUM severity → alert only, no destructive action."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("critic_prune_stuck", SymptomSeverity.MEDIUM, subject={})],

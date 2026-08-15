@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""E1 / E2 / E4 / E5 critic-health signal tests."""
+"""Critic-health signal tests."""
 
 from __future__ import annotations
 

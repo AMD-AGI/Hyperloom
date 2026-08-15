@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""End-to-end reactor tests plus L1/L2 finalizer integration. The subprocess-transport JSON-IO contract is exercised in test_runtime_cli.py."""
+"""End-to-end reactor tests plus postmortem finalizer integration. The subprocess-transport JSON-IO contract is exercised in test_runtime_cli.py."""
 
 from __future__ import annotations
 
