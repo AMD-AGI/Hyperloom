@@ -327,6 +327,18 @@ def test_anchor_curve_sanity_gate_missing_file(tmp_path):
     assert ib.anchor_curve_is_sane(str(tmp_path / "nope.json")) is False
 
 
+@pytest.mark.parametrize("payload", ["[]", '[{"batch": 1}]', '"text"', "12"])
+def test_anchor_curve_sanity_gate_rejects_non_object_json(tmp_path, payload):
+    """A JSON file that is not an artifact is rejected, not a crash.
+
+    The anchor store sits next to analysis output, so the gate is pointed at
+    whatever JSON is on disk; a list or scalar must not raise past the caller.
+    """
+    art = tmp_path / "not_an_artifact.json"
+    art.write_text(payload)
+    assert ib.anchor_curve_is_sane(str(art)) is False
+
+
 @pytest.mark.parametrize(
     "args, expected",
     [
