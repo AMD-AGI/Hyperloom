@@ -2080,9 +2080,21 @@ def baseline_round_cost_sec(state: Any, *, double_run: bool) -> float | None:
     """What a baseline round costs, or ``None`` when unmeasured.
 
     A round is one or two passes and they are priced apart, because they buy
-    different things. The first brings a server up and then benchmarks it, so it
-    costs what any measured variant costs. The second re-attaches to the server
-    the first left running, so it costs a benchmark and no second boot.
+    different things. The first brings a server up and benchmarks it cold, paying
+    the first request's kernel compile on the way; the session has measured that
+    whole pass directly, so it is read rather than reconstructed. The second
+    re-attaches to the server the first left running, so it costs a benchmark and
+    no second boot.
+
+    Reconstructing the first pass as boot-plus-hot-benchmark would drop the
+    compile and under-price the round, which matters because this figure guards
+    ignition while the post-warmup gate that follows prices the same work from
+    the pass it just watched. A round admitted here and then certainly refused
+    there costs a whole cold pass to learn nothing.
+
+    Reading the measured total also gives a price to rounds with no boot/benchmark
+    split to reconstruct from -- multi-node and scriptable workloads, which never
+    report one -- so those are gated rather than waved through.
 
     Args:
         state (Any): Frozen SharedState view.
@@ -2093,7 +2105,7 @@ def baseline_round_cost_sec(state: Any, *, double_run: bool) -> float | None:
         float | None: Seconds the round costs, or ``None`` when the session has
         measured nothing to price it from.
     """
-    first_pass_sec = one_more_measurement_sec(state)
+    first_pass_sec = measured_seconds(state, "baseline_runtime_sec")
     if first_pass_sec is None or not double_run:
         return first_pass_sec
     second_pass_sec = benchmark_cost_sec(state)

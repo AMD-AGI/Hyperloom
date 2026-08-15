@@ -378,9 +378,9 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "prelude_baseline_failed": "PRELUDE baseline failed before optimization could start; see the baseline failure summary.",
     "prelude_policy_loop": "The policy gate detected a decision loop during PRELUDE and stopped.",
     "time_exhausted_during_prelude": (
-        "The wall-clock budget PRELUDE had was exhausted before optimization began — either the session clock ran "
-        "out, or what was left of PRELUDE's share could no longer pay for a whole baseline round (a discarded "
-        "warmup pass and the measured pass it makes comparable)."
+        "The session's wall-clock budget ran out during preparation, before optimization began. Whatever PRELUDE "
+        "was doing when the clock reached zero — measuring the baseline, bringing up the framework agent, taking "
+        "the roofline — is where the time went; the phase record shows which arms ran and what each cost."
     ),
     "prelude_cold_anchor_low_budget": (
         "The baseline's hot pass was skipped because the clock could not cover it together with one variant to "
