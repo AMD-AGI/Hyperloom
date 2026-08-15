@@ -60,7 +60,7 @@ class Config:
     Note:
         Many additional threshold, interval, and per-signal fields exist
         on this dataclass; see the inline comments grouped by signal
-        family (A–L) for their meaning.
+        family for their meaning.
     """
 
     session_dir: Path = field(default_factory=lambda: Path(tempfile.gettempdir()) / "robustness-session")
@@ -107,7 +107,7 @@ class Config:
 
     # -- multi-node knobs --
     # Required in multi-node runs: per-pod ps/HTTP/rocm-smi probes false-fire
-    # local_server_unreachable / ray_head_dead on Ray workers without a server.
+    # local_server_unreachable / ray_head_dead on Ray workers.
     disable_local_probe: bool = False
     # Informational only (mirrors --nodes); policy driven by the flags above.
     nodes: int = 1
@@ -283,11 +283,11 @@ class Config:
     )
 
     @classmethod
-    async def discover(cls) -> "Config":
+    def discover(cls) -> "Config":
         """Auto-detect all configuration from the runtime environment.
 
-        Discovers the session directory, the LLM
-        endpoint, and reads LLM credentials from the sandbox environment.
+        Scans for the session directory and reads the LLM credentials and
+        the env-only knobs from the sandbox environment.
 
         Returns:
             Config: A new instance populated with the discovered values.

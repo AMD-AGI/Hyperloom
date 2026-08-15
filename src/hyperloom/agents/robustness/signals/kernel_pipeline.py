@@ -44,7 +44,7 @@ class KernelPipelineConfig:
     min_pending_ticks: int = 3
     # Same kernel_id has GEAK backend SIGTERM'd this many times.
     min_geak_sigterm_attempts: int = 2
-    # Kernel_ids with no >=1.2x microbench speedup and no KEEP integrate
+    # kernel_ids with no >=1.2x microbench speedup and no KEEP integrate
     # decision across the recent oob_attempts window.
     min_kernels_with_no_progress: int = 3
 

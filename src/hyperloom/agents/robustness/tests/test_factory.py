@@ -91,7 +91,7 @@ async def test_config_discover_normalizes_retired_deepseek_env(monkeypatch, tmp_
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
     monkeypatch.delenv("ROBUSTNESS_LLM_MODEL", raising=False)
     monkeypatch.delenv("LLM_MODEL", raising=False)
-    config = await Config.discover()
+    config = Config.discover()
 
     # The OpenAI side is filled too, and it is checked first.
     assert config.llm_provider == "openai"
@@ -111,7 +111,7 @@ async def test_config_discover_uses_dual_protocol_gateway_anthropic_side(monkeyp
     monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
-    config = await Config.discover()
+    config = Config.discover()
 
     assert config.llm_provider == "anthropic"
     assert config.llm_base_url == "https://api.deepseek.com/anthropic"
@@ -135,7 +135,7 @@ async def test_config_discover_selects_anthropic_for_a_subscription_token(monkey
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
     monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
-    config = await Config.discover()
+    config = Config.discover()
 
     assert config.llm_provider == "anthropic"
     assert config.llm_api_key == ""
@@ -150,7 +150,7 @@ async def test_config_discover_anthropic_model_follows_claude_model(monkeypatch,
     monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
-    config = await Config.discover()
+    config = Config.discover()
 
     assert config.llm_provider == "anthropic"
     assert config.llm_model == "claude-opus-4-6"
@@ -164,7 +164,7 @@ async def test_config_discover_openai_model_follows_codex_model(monkeypatch, tmp
     monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
     monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
     monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
-    config = await Config.discover()
+    config = Config.discover()
 
     assert config.llm_provider == "openai"
     assert config.llm_model == "gpt-5.5"
@@ -179,7 +179,7 @@ async def test_config_discover_does_not_treat_gateway_key_as_official_openai(mon
     monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
     monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
     monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
-    config = await Config.discover()
+    config = Config.discover()
 
     assert config.llm_base_url == ""
     assert config.llm_api_key == ""
@@ -364,9 +364,9 @@ async def test_factory_propagates_severity_min_config(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_factory_uses_quiet_fallback_when_local_probe_disabled(tmp_path: Path):
+async def test_factory_uses_quiet_source_when_local_probe_disabled(tmp_path: Path):
     """``disable_local_probe`` swaps the LocalProbe for a quiet stub that never yields high-severity local symptoms."""
-    from hyperloom.agents.robustness.factory import _QuietFallback
+    from hyperloom.agents.robustness.factory import _QuietSource
     from hyperloom.agents.robustness.sources.local_probe import LocalProbeSource
 
     config = Config(session_dir=tmp_path, disable_local_probe=True)
@@ -374,7 +374,7 @@ async def test_factory_uses_quiet_fallback_when_local_probe_disabled(tmp_path: P
     try:
         router = bundle.components.router
         primary = router._primary  # type: ignore[attr-defined]
-        assert isinstance(primary, _QuietFallback)
+        assert isinstance(primary, _QuietSource)
         assert not isinstance(primary, LocalProbeSource)
         data = await primary.fetch(None)
         assert data.local_processes == []

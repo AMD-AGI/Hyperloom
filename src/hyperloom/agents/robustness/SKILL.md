@@ -44,7 +44,7 @@ src/hyperloom/agents/robustness/
 │   ├── policy_aware.py     # local PolicyGate-equivalent payload guard
 │   ├── action_ladder.py    # symptom -> intent (+ Finding) translation (async)
 │   └── rca_engine.py       # NoopRcaEngine | LlmRcaEngine | AnthropicRcaEngine + RcaThrottle
-├── signals/                # 15 detector modules
+├── signals/                # 17 detector modules
 │   ├── classifier.py       # composes the rules and de-duplicates
 │   └── symptom.py          # Symptom / SymptomSeverity dataclasses
 ├── sources/

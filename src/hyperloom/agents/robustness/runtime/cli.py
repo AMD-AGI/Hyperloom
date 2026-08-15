@@ -132,7 +132,7 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
     context = dict(request.get("context") or {})
     options = dict(request.get("options") or {})
 
-    config = await Config.discover()
+    config = Config.discover()
     if "session_dir" in options:
         config.session_dir = Path(str(options["session_dir"]))
     if "llm_rca_enabled" in options:

@@ -314,6 +314,9 @@ async def test_run_tick_surfaces_rca_llm_usage(tmp_path: Path, monkeypatch):
             def drain_usage(self):
                 return usage
 
+            async def aclose(self):
+                return None
+
         bundle.components.rca = _StubRca()
         return bundle
 
