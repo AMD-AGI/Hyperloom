@@ -418,12 +418,18 @@ def _stopped_round_result(
 def _round_headroom_sec(state: Any, session_deadline_sec: float | None) -> tuple[float | None, dict[str, Any]]:
     """Seconds this round's budget may still spend, and the numbers behind it.
 
-    In PRELUDE that is what the session has left once the optimization phases'
-    reserve is held back
-    (:func:`~...phases.machine_state.prelude_affordable_seconds`), which is the
-    same figure the post-warmup gate judges the measured round against. Outside
-    it a re-baseline answers to what is left before the session deadline, the
-    only bound the round is under there.
+    The session's own usable remainder, which is what every other admission
+    decision reads, so a round cannot be judged against a figure the rest of the
+    run disagrees with. Not a share of it: the share held back for the
+    optimization phases
+    (:func:`~...phases.machine_state.prelude_affordable_seconds`) sizes the
+    *optional* arms of preparation, where the question is proportion. A round is
+    a feasibility question, and answering it with a percentage refuses rounds
+    that fit -- a session with ninety minutes left and a twelve-minute pass to
+    run is told it has six.
+
+    Falls back to the session deadline for a caller with no session state at all,
+    and to no bound when there is neither.
 
     Args:
         state: The session ``SharedState``, or ``None`` when the caller has no
@@ -434,13 +440,13 @@ def _round_headroom_sec(state: Any, session_deadline_sec: float | None) -> tuple
         tuple[float | None, dict[str, Any]]: The headroom, or ``None`` when the
             round is under no budget at all, plus the evidence behind it.
     """
-    if state is None:
-        outside: dict[str, Any] = {"reason": "no_session_state"}
+    if state is not None:
+        usable_sec = _phase_state.session_usable_seconds(state)
+        if usable_sec is not None:
+            return usable_sec, {"bound": "session_usable", "affordable_sec": round(usable_sec, 1)}
+        outside: dict[str, Any] = {"reason": "unbounded_session_budget"}
     else:
-        phase = str(getattr(state, "phase", "") or "").strip().upper()
-        if phase == _phase_state.PHASE_PRELUDE:
-            return _phase_state.prelude_affordable_seconds(state)
-        outside = {"reason": "not_prelude", "phase": phase}
+        outside = {"reason": "no_session_state"}
     if session_deadline_sec is None:
         return None, outside
     remaining_sec = max(0.0, session_deadline_sec - time.monotonic())
@@ -476,26 +482,47 @@ def _cold_anchor_from_warmup(
     return warmup_result
 
 
-def _measured_runtime_sec(state: Any, field: str) -> float | None:
-    """Read a runtime some earlier round measured, or ``None`` when none did.
+def _a_use_must_follow_the_round(state: Any) -> bool:
+    """Whether this round is only worth running if something can be measured after it.
 
-    Absent and zero are the same answer: both mean no round has landed an anchor
-    yet. Neither may read as a round that cost nothing, which is what a plain
-    ``float(... or 0.0)`` would make of them.
+    A PRELUDE baseline is not a result. It is the denominator later results are
+    read against and the anchor their overtime kill uses, so a session that
+    cannot afford one variant after it would spend the wall-clock on a number
+    nothing ever reads.
+
+    A re-baseline in a later phase is the opposite: it re-measures the stack the
+    session has assembled, and that measurement is the deliverable. Requiring a
+    successor would refuse exactly the round that validates the run's own answer,
+    at the point in the budget where it is most likely to be the last thing left.
 
     Args:
         state: The session ``SharedState``, or ``None``.
-        field: The SharedState attribute holding the runtime.
 
     Returns:
-        float | None: The measured seconds, or ``None`` when there is no
-            measurement to predict from.
+        bool: ``True`` while the round's worth depends on a successor.
+    """
+    phase = str(getattr(state, "phase", "") or "").strip().upper()
+    return phase == _phase_state.PHASE_PRELUDE
+
+
+def _positive_seconds(value: Any) -> float | None:
+    """Coerce a duration a round reported to seconds, or ``None`` when it did not.
+
+    Absent, unparseable and zero are one answer: nothing was measured. None of
+    them may read as work that took no time, which is what a plain
+    ``float(... or 0.0)`` would make of them.
+
+    Args:
+        value: The reported duration, from a round's result.
+
+    Returns:
+        float | None: The seconds, or ``None`` when there is no measurement.
     """
     try:
-        value = float(getattr(state, field, 0.0) or 0.0)
+        seconds = float(value or 0.0)
     except (TypeError, ValueError):
         return None
-    return value if value > 0.0 else None
+    return seconds if seconds > 0.0 else None
 
 
 def _disable_cuda_graph_flag(framework: str) -> str:
@@ -3058,14 +3085,28 @@ class BaselineExecutor:
                 started=False,
             )
             stopped_result["budget_shortfall"] = ignition_evidence
-            log.warning(
-                "baseline_executor: a whole round is expected to cost %.0fs and "
-                "only %.0fs is left (bound=%s), so nothing is booted. The anchor "
-                "this session already measured stands.",
-                ignition_evidence.get("expected_cost_sec", 0.0),
-                ignition_evidence.get("affordable_sec", 0.0),
-                ignition_evidence.get("bound", ""),
-            )
+            if ignition_evidence.get("one_more_measurement_sec"):
+                log.warning(
+                    "baseline_executor: this round (%.0fs) and one variant to read "
+                    "against it (%.0fs) need %.0fs, and %.0fs is left (bound=%s), so "
+                    "nothing is booted. A baseline no variant can follow is a "
+                    "denominator with no numerator; the anchor this session already "
+                    "measured stands.",
+                    ignition_evidence.get("round_sec", 0.0),
+                    ignition_evidence.get("one_more_measurement_sec", 0.0),
+                    ignition_evidence.get("expected_cost_sec", 0.0),
+                    ignition_evidence.get("affordable_sec", 0.0),
+                    ignition_evidence.get("bound", ""),
+                )
+            else:
+                log.warning(
+                    "baseline_executor: this round needs %.0fs and only %.0fs is left "
+                    "(bound=%s), so nothing is booted. The anchor this session already "
+                    "measured stands.",
+                    ignition_evidence.get("expected_cost_sec", 0.0),
+                    ignition_evidence.get("affordable_sec", 0.0),
+                    ignition_evidence.get("bound", ""),
+                )
             return stopped_result
 
         before_apply_sha = _git_head_sha(patch_target)
@@ -3334,6 +3375,7 @@ class BaselineExecutor:
                 return warmup_result
             warmup_tput = warmup_result.get("output_throughput")
             warmup_runtime = warmup_result.get("subprocess_runtime_sec")
+            warmup_post_ready = warmup_result.get("post_ready_runtime_sec")
             await report_progress(
                 unit="baseline_round",
                 label="warmup",
@@ -3347,18 +3389,33 @@ class BaselineExecutor:
             if not defer_accuracy_until_after_measure:
                 affordable, gate_evidence = self._measure_round_affordable(
                     warmup_runtime_sec=warmup_runtime,
+                    warmup_post_ready_sec=warmup_post_ready,
                     ctx_extra=extra,
                 )
                 if not affordable:
+                    if gate_evidence.get("one_more_measurement_sec"):
+                        why = (
+                            "a hot pass (%.0fs) and one variant to read against it "
+                            "(%.0fs) need %.0fs" % (
+                                gate_evidence.get("measure_round_sec", 0.0),
+                                gate_evidence.get("one_more_measurement_sec", 0.0),
+                                gate_evidence.get("expected_cost_sec", 0.0),
+                            )
+                        )
+                    else:
+                        why = "a hot pass needs %.0fs" % (
+                            gate_evidence.get("expected_cost_sec", 0.0),
+                        )
                     log.warning(
-                        "baseline_executor: the warmup took %.0fs and only %.0fs is "
-                        "left (bound=%s), so the measured round cannot follow it. "
-                        "Keeping the warmup as the baseline; it is the cold anchor a "
-                        "single-round baseline would have produced, and the GPU time "
-                        "it cost is already spent. The marker below says the figure "
-                        "is cold so the session's later gains can be read against a "
-                        "known-depressed denominator.",
-                        float(warmup_runtime or 0.0),
+                        "baseline_executor: %s, and %.0fs is left (bound=%s), so the hot "
+                        "pass is not run. It would have bought a denominator nothing "
+                        "could then be compared to, and its own overtime anchor would "
+                        "have gone unused. Keeping the warmup as the baseline; it is the "
+                        "cold anchor a single-round baseline would have produced, and "
+                        "the GPU time it cost is already spent. The marker below says "
+                        "the figure is cold so the session's later gains can be read "
+                        "against a known-depressed denominator.",
+                        why,
                         gate_evidence.get("affordable_sec", 0.0),
                         gate_evidence.get("bound", ""),
                     )
@@ -3407,6 +3464,31 @@ class BaselineExecutor:
                 result["warm_patch_canonical_target"] = patch_target
                 result["warm_kernel_apply_results"] = list(
                     params.get("warm_kernel_apply_results") or []
+                )
+            if (
+                result.get("status") != "succeeded"
+                and result.get("error_class") == SESSION_TIME_EXHAUSTED_CLASS
+            ):
+                # The gate before this pass admitted it and the run's clock took
+                # it anyway -- the pass overran what it was priced at. Reporting
+                # the round as failed would throw away the warmup's figure too,
+                # leaving the session with nothing from GPU time it has already
+                # spent, so the warmup is kept and marked exactly as a refusal
+                # keeps it. Only a reap is handled this way: a pass that failed
+                # for a reason of its own is a failure worth surfacing, and the
+                # warmup having succeeded does not make it comparable.
+                log.warning(
+                    "baseline_executor: the run's clock stopped the measured "
+                    "round mid-flight, so the warmup stands as the baseline. It "
+                    "is the cold anchor a single-round baseline would have "
+                    "produced, and the marker below says so.",
+                )
+                return _cold_anchor_from_warmup(
+                    warmup_result,
+                    dropped={
+                        "reason": "measure_round_reaped_by_the_run",
+                        "measure_round_error": result.get("error"),
+                    },
                 )
             if result.get("status") == "succeeded":
                 result.setdefault("nonfatal_warnings", [])
@@ -3538,82 +3620,41 @@ class BaselineExecutor:
             if bench_lease is not None:
                 bench_lease.close()
 
-    def _last_round_cost_sec(
-        self,
-        *,
-        double_run: bool,
-        ctx_extra: dict[str, Any] | None = None,
-    ) -> float | None:
-        """What an earlier round of this session actually cost.
-
-        An over-prediction of what the next one will cost, and knowingly so. The
-        figure comes from a pass that paid the one-time JIT compile on a fresh
-        kernel cache, which a later pass on the same signature does not pay
-        again; the executor's own cache probe is built on that difference, and
-        picks a cap 20 minutes shorter when it finds the cache warm.
-
-        Over-predicting is the tolerable direction *for this caller only*, and
-        the reason is in :meth:`_round_affordable_before_ignition`: a refusal
-        here costs the session a fresh anchor it can do without, because the
-        anchor it already has still stands. No caller that would end a session on
-        this figure may use it.
-
-        The two passes are priced apart because they buy different things -- the
-        first boots the server and pays the compile and the graph capture, the
-        second re-attaches a client to a server already up -- and each is added
-        only once it has been measured.
-
-        A session can hold the cold figure without the hot one, and that is not a
-        corner case: a round whose measured pass was dropped for budget promotes
-        its cold number as the anchor and has no hot number to write. Such a
-        session is the one most in need of this gate, so its cold pass is still
-        priced; only the pass it cannot price is left out, and whether that one
-        may follow is settled after the warmup as usual.
-
-        Args:
-            double_run: Whether this round will run both passes.
-            ctx_extra: The runner context extras carrying ``shared_state``.
-
-        Returns:
-            float | None: What an earlier round cost, or ``None`` when the
-                session has measured nothing to predict from.
-        """
-        state = (ctx_extra or {}).get("shared_state") or self.shared_state
-        cold_sec = _measured_runtime_sec(state, "baseline_runtime_sec")
-        if cold_sec is None or not double_run:
-            return cold_sec
-        warm_sec = _measured_runtime_sec(state, "baseline_warm_runtime_sec")
-        return cold_sec if warm_sec is None else cold_sec + warm_sec
-
     def _round_affordable_before_ignition(
         self,
         *,
         double_run: bool,
         ctx_extra: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
-        """Whether the budget still holds a whole round, asked before anything boots.
+        """Whether the budget holds a whole round *and a use for it*, before anything boots.
 
         The companion to :meth:`_measure_round_affordable`, and the two divide
         the session's baselines between them. A session's first round is not
         asked this question, because there is nothing to ask it with: the
         measured runtimes are written only once an anchor lands, so a gate here
         would either refuse every first baseline or wave every one through. That
-        round runs, and whether a second pass may follow is settled afterwards
+        round runs, and whether its second pass may follow is settled afterwards
         against what the first actually cost.
 
-        Every later round has at least the previous one's cold figure, and by then
-        an anchor already exists. That is what makes this gate safe to build on an
-        over-predicting figure: the two outcomes are not symmetric. Igniting a
-        round that cannot finish costs a boot, a compile and a graph capture for a
-        number that must then be marked cold. Refusing one that would have fitted
-        costs a fresh anchor the session did not need, because the anchor it
-        measured earlier still stands and every later comparison is made against
-        that one.
+        Every later round is asked, and a resumed session's first round is the
+        case that most needs it: it holds the earlier leg's measurements, so a
+        round that cannot lead anywhere can be refused before a single second of
+        GPU time is spent on it, and the refusal names a number an operator can
+        act on.
 
-        The asymmetry is the whole justification, so it may not be borrowed. A
-        caller that would *end the session* on this figure would be trading the
-        rest of the run against a systematic over-prediction, and needs a bound
-        that errs the other way.
+        What is required in PRELUDE is the round *plus one further measured
+        variant*, not the round alone. A baseline is not a result there; it is the
+        denominator later results are read against, and one that nothing is ever
+        compared to is wall-clock spent on a number no one uses. A variant's own
+        measurement is a result, which is why the variant gates ask only whether
+        the variant itself fits -- and why a re-baseline in a later phase is asked
+        the same narrower question by :func:`_a_use_must_follow_the_round`.
+
+        The round is priced by
+        :func:`~...phases.machine_state.baseline_round_cost_sec`, which the phase
+        machine also reads to decide whether a session stopped for this reason may
+        try again on a fresh clock. Two definitions would let the executor refuse
+        rounds the phase machine had just decided were affordable.
 
         Args:
             double_run: Whether this round will run both passes.
@@ -3623,46 +3664,71 @@ class BaselineExecutor:
             tuple[bool, dict[str, Any]]: ``(affordable, evidence)``.
         """
         state = (ctx_extra or {}).get("shared_state") or self.shared_state
-        cost = self._last_round_cost_sec(
-            double_run=double_run,
-            ctx_extra=ctx_extra,
-        )
-        if cost is None:
+        round_sec = _phase_state.baseline_round_cost_sec(state, double_run=double_run)
+        if round_sec is None:
             return True, {"reason": "no_measured_round_to_predict_from"}
+        use_sec = 0.0
+        if _a_use_must_follow_the_round(state):
+            use_sec = _phase_state.one_more_measurement_sec(state) or 0.0
         headroom_sec, evidence = _round_headroom_sec(state, None)
         if headroom_sec is None:
             return True, evidence
-        priced = {"expected_cost_sec": round(cost, 1), **evidence}
+        cost = round_sec + use_sec
+        priced = {
+            "expected_cost_sec": round(cost, 1),
+            "round_sec": round(round_sec, 1),
+            "one_more_measurement_sec": round(use_sec, 1),
+            **evidence,
+        }
         return headroom_sec >= cost, priced
 
     def _measure_round_affordable(
         self,
         *,
         warmup_runtime_sec: Any,
+        warmup_post_ready_sec: Any = None,
         ctx_extra: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
-        """Whether PRELUDE's remaining budget still covers the measured round.
+        """Whether the budget covers the measured round *and a use for it*.
 
-        Asked after the warmup rather than before it, and priced with what that
-        pass actually cost rather than a prediction of what it would. The
-        warmup's own wall-clock is available exactly when this question is asked,
-        and it is an upper bound rather than an estimate: the measured round
-        re-attaches to a server this pass has already booted, so it cannot cost
-        more.
-
-        This is the gate every round faces, including the first, which is the one
+        Asked after the warmup rather than before it, and priced from what that
+        pass just measured rather than from a prediction. This is the gate every
+        round faces, including the first, which is the one
         :meth:`_round_affordable_before_ignition` cannot judge.
 
-        A round that fails here has still produced a number. It is the cold one
-        the double run exists to discard, so the caller keeps it as the anchor
-        and marks it -- the GPU time is spent either way, and a marked cold
-        anchor beats no anchor.
+        The measured round re-attaches to the server the warmup left running, so
+        it costs a benchmark and no boot. The warmup's post-ready segment is what
+        prices it: the same pass, with its boot taken off. That segment still
+        over-predicts, since it also paid the first request's kernel compile, but
+        it is the tightest honest figure a session has before its hot pass has
+        ever run -- and far tighter than the warmup's whole wall-clock, which
+        prices a client-only pass as though it booted a server.
 
-        Only PRELUDE is guarded — a re-baseline in a later phase answers to that
-        phase's budget.
+        In PRELUDE, covering the pass is not enough to justify running it. A hot
+        baseline is an input there, not a result: it is the denominator later
+        variants are read against, and it is what anchors their overtime kill.
+        Neither buys anything if no variant can follow, so what is required is the
+        pass plus one further measured variant -- a boot and a benchmark, because
+        a variant's config differs in the very knobs that decide how a server
+        comes up and it cannot re-attach to anyone else's. A re-baseline in a
+        later phase is its own deliverable and is asked only to cover its pass;
+        :func:`_a_use_must_follow_the_round` draws that line.
+
+        A round that fails here has still produced a number. It is the cold one
+        the double run exists to discard, so the caller keeps it as the anchor and
+        marks it -- the GPU time is spent either way, and a marked cold anchor
+        beats no anchor.
 
         Args:
             warmup_runtime_sec: Wall-clock the warmup round took.
+            warmup_post_ready_sec: The part of it that ran after the server was
+                ready, or ``None`` when nothing recorded the boundary -- a
+                scriptable workload, which runs no server, or a stamp that could
+                not be written. Both terms then fall back to the warmup's whole
+                wall-clock, which remains an upper bound on each: the measured
+                round re-attaches to a server this pass booted, and a variant is a
+                boot plus a benchmark where this figure is a boot plus a benchmark
+                that also paid the first request's compile.
             ctx_extra: The runner context extras carrying ``shared_state``.
 
         Returns:
@@ -3672,11 +3738,27 @@ class BaselineExecutor:
         headroom_sec, evidence = _round_headroom_sec(state, None)
         if headroom_sec is None:
             return True, evidence
-        try:
-            cost = max(0.0, float(warmup_runtime_sec or 0.0))
-        except (TypeError, ValueError):
-            cost = 0.0
-        return headroom_sec >= cost, {"expected_cost_sec": round(cost, 1), **evidence}
+        warmup_sec = _positive_seconds(warmup_runtime_sec) or 0.0
+        benchmark_sec = _positive_seconds(warmup_post_ready_sec)
+        if benchmark_sec is None:
+            priced_by = "warmup_wall_clock"
+            benchmark_sec = warmup_sec
+            boot_sec = 0.0
+        else:
+            priced_by = "warmup_post_ready"
+            boot_sec = max(0.0, warmup_sec - benchmark_sec)
+        use_sec = 0.0
+        if _a_use_must_follow_the_round(state):
+            use_sec = boot_sec + benchmark_sec
+        cost = benchmark_sec + use_sec
+        priced = {
+            "expected_cost_sec": round(cost, 1),
+            "priced_by": priced_by,
+            "measure_round_sec": round(benchmark_sec, 1),
+            "one_more_measurement_sec": round(use_sec, 1),
+            **evidence,
+        }
+        return headroom_sec >= cost, priced
 
     def _double_run_enabled(
         self,

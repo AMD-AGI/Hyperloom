@@ -382,6 +382,13 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "out, or what was left of PRELUDE's share could no longer pay for a whole baseline round (a discarded "
         "warmup pass and the measured pass it makes comparable)."
     ),
+    "prelude_cold_anchor_low_budget": (
+        "The baseline's hot pass was skipped because the clock could not cover it together with one variant to "
+        "measure against it, so the only figure available is the cold pass's — depressed by the server boot, the "
+        "first request's kernel compile and the graph capture. Optimizing against it would report every variant as "
+        "an improvement over a baseline that was never the baseline, so the run stopped with the figure kept and "
+        "marked. Resume with more budget to measure a comparable baseline."
+    ),
     # Recipe KB knowledge-plane bootstrap failures.
     "recipe_kb_t0_failed": "Recipe KB knowledge-plane bootstrap (t0) failed; the run stopped early.",
     "recipe_kb_drain_failed": "Recipe KB knowledge-plane drain failed; the run stopped early.",

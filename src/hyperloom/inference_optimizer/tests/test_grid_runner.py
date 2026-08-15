@@ -1519,6 +1519,49 @@ class TestSessionGridBounds:
         state = SimpleNamespace(baseline_runtime_sec=600.0)
         assert _grid_runner.session_grid_bounds(state) == (None, 600.0)
 
+    def test_a_variant_is_priced_as_a_boot_and_a_benchmark(self):
+        """What a variant actually spends, rather than what the baseline spent.
+
+        A variant cannot re-attach to anyone else's server -- its config differs
+        in the very knobs that decide how one comes up -- so it pays a boot and
+        then a benchmark. The baseline's 900s cold round is 350s of boot and 550s
+        of benchmarking that also paid the first request's kernel compile; the
+        variant pays that boot and the 400s a benchmark costs once the compile is
+        cached. Admitting on the 900s abandons 150s of every variant's worth of
+        tail budget.
+        """
+        state = SimpleNamespace(
+            grid_session_deadline_sec=lambda: 4242.0,
+            baseline_runtime_sec=900.0,
+            baseline_post_ready_runtime_sec=550.0,
+            baseline_warm_runtime_sec=400.0,
+        )
+
+        deadline, variant_sec = _grid_runner.session_grid_bounds(state)
+
+        assert deadline == 4242.0
+        assert variant_sec == pytest.approx(750.0)
+
+    def test_a_baseline_with_no_hot_pass_prices_the_benchmark_from_the_cold_one(self):
+        """The post-ready segment stands in, over-predicting by the compile."""
+        state = SimpleNamespace(
+            grid_session_deadline_sec=lambda: None,
+            baseline_runtime_sec=900.0,
+            baseline_post_ready_runtime_sec=550.0,
+        )
+
+        assert _grid_runner.session_grid_bounds(state)[1] == pytest.approx(900.0)
+
+    def test_a_baseline_that_never_reported_its_boot_falls_back_to_the_whole_round(self):
+        """A scriptable workload runs no server, so there is no split to read."""
+        state = SimpleNamespace(
+            grid_session_deadline_sec=lambda: None,
+            baseline_runtime_sec=900.0,
+            baseline_warm_runtime_sec=400.0,
+        )
+
+        assert _grid_runner.session_grid_bounds(state)[1] == pytest.approx(900.0)
+
 
 class TestSessionBudgetAdmission:
     """A variant is admitted on what it is expected to need, not on its backstop.
