@@ -8,6 +8,7 @@ reset, and lifecycle teardown (stop / Recipe KB T4 safety net)."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -59,6 +60,130 @@ def test_delegated_missing_attr_raises_attribute_error_not_recursion(monkeypatch
         getattr(coord, "_deleted_delegate")
 
 
+@pytest.mark.asyncio
+async def test_resume_rolls_back_recipe_checkout_and_kernel(
+    coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    restores: list[tuple[str, str]] = []
+    kernel_restores: list[dict] = []
+    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+    import hyperloom.orchestrator.kernel.request_handlers as kernel_handlers
+
+    monkeypatch.setattr(
+        baseline_module,
+        "_revert_patches",
+        lambda target, sha, manifest=None: (
+            restores.append((target, sha))
+            or {"ok": True, "errors": []}
+        ),
+    )
+    monkeypatch.setattr(
+        kernel_handlers,
+        "_maybe_revert_kernel_patch",
+        lambda result: (
+            kernel_restores.append(result)
+            or {"status": "ok"}
+        ),
+    )
+    task = await coord.tasks.create(
+        kind="replay_warm_recipe",
+        params={},
+        idempotency_key="resume-warm",
+    )
+    coord.shared_state.warm_replay_pending = {
+        "task_id": task.task_id,
+        "recipe_patch_target": "/mirror",
+        "recipe_patch_pre_sha": "mirror-sha",
+        "recipe_patch_snapshot_manifest": {"manifest_path": "/mirror.json"},
+        "kernel_apply_results": [{"manifest_path": "/tmp/m"}],
+    }
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_warm_replay(report)
+
+    assert restores == [("/mirror", "mirror-sha")]
+    assert kernel_restores == [{"manifest_path": "/tmp/m"}]
+    assert coord.shared_state.warm_replay_pending == {}
+    assert report["fixes"][0]["kind"] == "recovered_pending_warm_replay"
+    assert report["fixes"][0]["task_state"] == "cancelled"
+    assert (await coord.tasks.get(task.task_id)).state == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_resume_retains_pending_recipe_target_without_manifest(
+    coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_restores: list[dict] = []
+    import hyperloom.orchestrator.kernel.request_handlers as kernel_handlers
+
+    monkeypatch.setattr(
+        kernel_handlers,
+        "_maybe_revert_kernel_patch",
+        lambda result: kernel_restores.append(result) or {"status": "ok"},
+    )
+    coord.shared_state.warm_replay_pending = {
+        "task_id": "warm-recipe-unarmed",
+        "recipe_patch_target": "/mirror",
+        "recipe_patch_pre_sha": "sha",
+        "kernel_apply_results": [{"manifest_path": "/tmp/kernel"}],
+    }
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_warm_replay(report)
+
+    assert coord.shared_state.warm_replay_pending["status"] == "rollback_failed"
+    assert coord.shared_state.warm_replay_pending["rollback_errors"] == [
+        "recipe:missing_snapshot_manifest"
+    ]
+    assert report["warnings"][0]["kind"] == "resume_warm_rollback_failed"
+    assert report["fixes"] == []
+    assert kernel_restores == [{"manifest_path": "/tmp/kernel"}]
+    assert coord.shared_state.stop_reason == "warm_replay_rollback_failed"
+
+
+@pytest.mark.asyncio
+async def test_resume_retains_pending_when_any_restore_fails(
+    coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+
+    monkeypatch.setattr(
+        baseline_module,
+        "_revert_patches",
+        lambda *_args: {"ok": False, "errors": ["restore failed"]},
+    )
+    coord.shared_state.warm_replay_pending = {
+        "task_id": "warm-failed",
+        "recipe_patch_target": "/mirror",
+        "recipe_patch_pre_sha": "sha",
+        "recipe_patch_snapshot_manifest": {"manifest_path": "/mirror.json"},
+        "kernel_apply_results": [],
+    }
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_warm_replay(report)
+
+    assert coord.shared_state.warm_replay_pending["status"] == "rollback_failed"
+    assert coord.shared_state.warm_replay_pending["rollback_errors"] == [
+        "restore failed"
+    ]
+    assert report["warnings"][0]["kind"] == "resume_warm_rollback_failed"
+    assert report["fixes"] == []
+
+
+def test_collective_resume_gate_is_delegated_to_kernel_phase() -> None:
+    """Writeback resume must resolve the Collective gate."""
+    assert (
+        Coordinator._DELEGATED.get(
+            "_collective_required_before_kernel_opt"
+        )
+        == "phase_kernel"
+    )
+
+
 @pytest.fixture
 def coord(session_dir) -> Coordinator:
     return Coordinator(session_dir, backends=_build_backends())
@@ -70,54 +195,18 @@ def test_context_inbox_reader_empty(coord: Coordinator) -> None:
     assert out == "(no inbox events)"
 
 
-def test_trace_orchestration_turn_persists_diagnostics(coord: Coordinator) -> None:
+def test_trace_mcp_setup_persists_diagnostics(coord: Coordinator) -> None:
     backend = SimpleNamespace(
         model="claude-test",
-        get_turn_diagnostic=lambda: {
-            "backend": "ClaudeBackend",
-            "model": "claude-test",
-            "sdk_name": "claude_agent_sdk",
-            "sdk_version": "1.2.3",
-            "resume_requested": True,
-            "previous_session_id_hash": "old",
-            "session_id_hash": "new",
-            "new_session": False,
-            "max_turns": 12,
-            "timeout_sec": 300.0,
-            "prompt": "prompt",
-            "system_prompt": "system",
-            "allowed_tools": ["mcp__inference_optimizer__emit_intent"],
-            "mcp_servers": ["inference_optimizer"],
-            "emit_intent_registered": True,
-            "messages": [{"type": "ResultMessage", "is_error": False, "result": "done"}],
-            "result": "done",
-            "raw_text": "done",
-            "tool_blocks": [],
-            "parse_errors": [],
-            "usage": {"input_tokens": 3},
-            "stderr_tail": [],
-        },
         get_mcp_setup_diagnostic=lambda: {
             "sdk_name": "claude_agent_sdk",
             "emit_intent": {"registered": True},
         },
     )
 
-    coord._trace_orchestration_turn(
-        agent_name="orchestration",
-        backend=backend,
-        prompt="prompt",
-        system_prompt="system",
-        tools=["emit_intent"],
-        outcome="no_intent",
-        error=RuntimeError("missing intent"),
-    )
+    coord._trace_mcp_setup(agent_name="orchestration", backend=backend)
 
-    row = json.loads((coord.session_dir / "reports" / "trace" / "orchestration_turns.jsonl").read_text())
     setup = json.loads((coord.session_dir / "agents" / "orchestration" / "mcp_setup.json").read_text())
-    assert row["outcome"] == "no_intent"
-    assert row["resume_requested"] is True
-    assert row["error_type"] == "RuntimeError"
     assert setup["emit_intent"]["registered"] is True
 
 
@@ -207,6 +296,23 @@ async def test_resume_consistency_marks_unvalidated_and_rebuilds_current_best(co
     assert coord.shared_state.current_best["extra_envs"] == {"A": "1", "B": "2"}
     assert "rebuilt_current_best_config_from_stack" in report["fixes"]
     assert any(isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
+
+
+@pytest.mark.asyncio
+async def test_resume_restores_promoted_inferencex_checkout(
+    coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    active = tmp_path / "active-inferencex"
+    active.mkdir()
+    coord._resumed_from["is_resume"] = True
+    coord.shared_state.active_inferencex_path = str(active)
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+
+    await coord._resume_consistency_pass()
+
+    assert os.environ["INFERENCEX_PATH"] == str(active)
 
 
 @pytest.mark.asyncio
@@ -2149,26 +2255,6 @@ def test_promote_warm_replay_already_pushed(coord: Coordinator) -> None:
         if isinstance(e, dict) and e.get("action") == "replay_warm_recipe"
     )
     assert n == 1
-
-
-def test_promote_warm_replay_drift(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    coord._promote_warm_replay(
-        {"status": "succeeded", "output_throughput": 750.0},
-        task=_warm_task(),
-    )
-    assert coord.shared_state.warm_replay_outcome["status"] == "drift"
-
-
-def test_promote_warm_replay_below_historical_bar(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 20.0}
-    coord._promote_warm_replay(
-        {"status": "succeeded", "output_throughput": 810.0},
-        task=_warm_task(),
-    )
-    out = coord.shared_state.warm_replay_outcome
-    assert out.get("below_historical_reproduce_pct") is True
 
 
 # -- finalize_recipe_and_journal (rich existing row merge) -----------

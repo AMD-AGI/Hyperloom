@@ -743,3 +743,152 @@ def test_steady_state_with_zero_annotations_falls_back(tmp_path):
     assert out["aggregation_scope"] == "full_trace"
     assert out.get("steady_window_status")
     assert len(out["kernels"]) == 2
+
+
+# ---- device-stream duration sanity ---------------------------------------
+def _stream_trace(path: Path, events: list[dict]) -> Path:
+    path.write_bytes(json.dumps({"traceEvents": events}).encode("utf-8"))
+    return path
+
+
+def _gpu(name: str, ts: float, dur: float, pid: int = 1, tid: int = 1) -> dict:
+    return {"cat": "kernel", "ph": "X", "name": name, "ts": ts, "dur": dur, "pid": pid, "tid": tid, "args": {}}
+
+
+def test_stream_overlap_absent_on_consistent_trace(tmp_path):
+    """Durations that fit between their neighbours must not be flagged."""
+    tf = _write_trace(tmp_path / "ok.trace.json")
+    out = reader.analyze_trace(tf, top_k=0)
+    assert "stream_overlap" not in (out.get("timeline") or {})
+
+
+def test_stream_overlap_detects_impossible_duration(tmp_path):
+    """An event overrunning its successor on a serial stream is corrupt.
+
+    The corrupt event also extends the stream's span, so a sum-vs-span ratio
+    would read ~1.0 here; the pairwise check still catches it.
+    """
+    events = [
+        _gpu("k_a", 1000, 100),
+        _gpu("corrupt_kernel", 1100, 20_000),  # ends 21100, next starts 1200
+        _gpu("k_b", 1200, 100),
+        _gpu("k_c", 1300, 100),
+    ]
+    tf = _stream_trace(tmp_path / "bad.trace.json", events)
+    out = reader.analyze_trace(tf, top_k=0)
+    so = (out.get("timeline") or {}).get("stream_overlap")
+    assert so, "corrupt duration should be reported"
+    assert (so["pid"], so["tid"]) == (1, 1)
+    assert so["worst_event"] == "corrupt_kernel"
+    assert so["overlapping_events"] == 1
+    # Overruns k_b's start (1200) by 19900us.
+    assert so["worst_event_excess_ms"] == 19.9
+
+    # A naive sum-vs-span ratio would have looked innocent.
+    total_dur = sum(e["dur"] for e in events)
+    span = max(e["ts"] + e["dur"] for e in events) - min(e["ts"] for e in events)
+    assert total_dur / span < 1.02
+
+
+def test_stream_overlap_not_triggered_by_concurrent_streams(tmp_path):
+    """Two genuinely concurrent streams must not be mistaken for corruption.
+
+    Pooling every device event would make the summed duration twice the wall
+    span here, which is exactly the false positive the per-stream check avoids.
+    """
+    events = []
+    for i in range(5):
+        events.append(_gpu(f"s1_{i}", 1000 + i * 100, 100, pid=1, tid=1))
+        events.append(_gpu(f"s2_{i}", 1000 + i * 100, 100, pid=1, tid=2))
+    tf = _stream_trace(tmp_path / "concurrent.trace.json", events)
+    out = reader.analyze_trace(tf, top_k=0)
+    assert "stream_overlap" not in (out.get("timeline") or {})
+
+
+def test_stream_overlap_reports_worst_stream():
+    # Overruns must clear the absolute floor (1 ms) to be reported at all.
+    mild = [(0.0, 5_000.0, "mild"), (2_000.0, 4_000.0, "b"), (10_000.0, 10_000.0, "c")]
+    severe = [(0.0, 30_000.0, "severe"), (1_000.0, 2_000.0, "b"), (10_000.0, 10_000.0, "c")]
+    worst = reader._stream_overlap_health({(1, 1): list(mild), (1, 2): list(severe)})
+    assert worst["tid"] == 2
+    assert worst["worst_event"] == "severe"
+
+
+def test_stream_overlap_ignores_rounding_and_short_streams():
+    # Sub-microsecond overrun is timestamp rounding, not corruption.
+    tiny = [(0.0, 100.5, "a"), (100.0, 200.0, "b"), (1000.0, 1000.0, "c")]
+    assert reader._stream_overlap_health({(1, 1): tiny}) == {}
+    # Real but immaterial overlap stays below the reporting share.
+    small = [(0.0, 110.0, "a"), (100.0, 200.0, "b"), (100_000.0, 100_000.0, "c")]
+    assert reader._stream_overlap_health({(1, 1): small}) == {}
+    # Degenerate inputs must not divide by zero.
+    assert reader._stream_overlap_health({(1, 1): [(0.0, 10.0, "only")]}) == {}
+    assert reader._stream_overlap_health({(1, 1): [(5.0, 5.0, "a"), (5.0, 5.0, "b")]}) == {}
+    assert reader._stream_overlap_health({}) == {}
+
+
+def test_stream_overlap_final_event_is_not_detectable():
+    """Documented limitation: nothing follows the last event to contradict it."""
+    evs = [(0.0, 100.0, "a"), (100.0, 99_999.0, "corrupt_last")]
+    assert reader._stream_overlap_health({(1, 1): evs}) == {}
+
+
+# ---- review round 2: threshold denominator, absolute floor, severity ------
+def _spread(n: int, dur: float, stride: float, prefix: str = "k") -> list[tuple[float, float, str]]:
+    return [(i * stride, i * stride + dur, f"{prefix}{i}") for i in range(n)]
+
+
+def test_threshold_uses_summed_device_time_not_span():
+    """A lone corrupt duration must not hide behind the span it inflates.
+
+    1000 kernels spread over 60 s with one duration written as 2 s: the corrupt
+    event is 95% of the summed device time but only ~3% of the wall span, so a
+    span-denominator threshold reported nothing -- the same blind spot the
+    pairwise detector exists to avoid, moved into the threshold.
+    """
+    evs = _spread(1000, 100.0, 60_000_000 / 1000)
+    evs[500] = (evs[500][0], evs[500][0] + 2_000_000.0, "corrupt_2s")
+    device_us = sum(e - s for s, e, _ in evs)
+    span_us = max(e for _s, e, _ in evs) - evs[0][0]
+
+    out = reader._stream_overlap_health({(1, 1): list(evs)})
+    assert out, "corrupt duration dominating summed device time must be reported"
+    assert out["worst_event"] == "corrupt_2s"
+    assert out["severity"] == "warning"
+    # The share is meaningful against summed device time, negligible against span.
+    assert out["excess_share"] > 0.9
+    assert (out["excess_ms"] * 1000.0) / span_us < 0.05
+    assert abs(out["device_ms"] - device_us / 1000.0) < 1e-3
+
+
+def test_dense_jitter_is_not_escalated():
+    """Many sub-millisecond overruns are profiler jitter, not corruption.
+
+    Accumulates well past the 5% share while the worst single overrun is 4 us;
+    telling the user to recapture the trace here is a false alarm.
+    """
+    evs = _spread(20_000, 10.0, 6.0)  # each overruns the next by 4 us
+    assert reader._stream_overlap_health({(1, 1): list(evs)}) == {}
+
+
+def test_identical_timestamps_are_not_overlap():
+    """Events sharing a ts cannot contradict each other."""
+    same = [(0.0, 50_000.0, "a"), (0.0, 50_000.0, "b"), (0.0, 50_000.0, "c"), (100_000.0, 100_000.0, "d")]
+    assert reader._stream_overlap_health({(1, 1): same}) == {}
+
+
+def test_severity_grades_with_share_of_device_time():
+    """Marginal distortion is info; a materially wrong ranking is a warning."""
+    # ~10% of summed device time -> info.
+    mild = _spread(40, 10_000.0, 10_000.0)
+    mild[0] = (0.0, 10_000.0 + 40_000.0, "mild_overrun")
+    out_mild = reader._stream_overlap_health({(1, 1): list(mild)})
+    assert out_mild and out_mild["severity"] == "info"
+    assert 0.05 <= out_mild["excess_share"] < 0.25
+
+    # One event swamping the stream -> warning.
+    severe = _spread(40, 10_000.0, 10_000.0)
+    severe[0] = (0.0, 10_000.0 + 900_000.0, "severe_overrun")
+    out_severe = reader._stream_overlap_health({(1, 1): list(severe)})
+    assert out_severe and out_severe["severity"] == "warning"
+    assert out_severe["excess_share"] >= 0.25

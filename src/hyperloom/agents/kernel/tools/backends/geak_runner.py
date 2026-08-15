@@ -22,9 +22,9 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -81,7 +81,7 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200, python
     handoff_path.write_text(json.dumps(handoff, indent=2), encoding="utf-8")
 
     runner = _resolve_runner()
-    py = python_bin or shutil.which("python3") or "python3"
+    py = python_bin or sys.executable
     cmd = [py, runner, str(handoff_path), str(result_path)]
 
     env = dict(os.environ)

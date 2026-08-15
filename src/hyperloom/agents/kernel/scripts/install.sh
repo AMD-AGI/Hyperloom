@@ -55,9 +55,18 @@ HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}
 # can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
 # or empty, which is exactly the case the :- default below would absorb.
 _user_data_was_set="${USER_DATA_PATH:+1}"
-USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
+# Container images ship a writable /workspace; a bare-metal host off root has
+# neither it nor permission to create it, so the mkdir below would abort.
+_default_workspace_root() {
+  # The nearest existing ancestor decides: -w is false for a path that does not
+  # exist yet, which would divert root off a /workspace it can still create.
+  _ws_probe=/workspace
+  while [ ! -e "$_ws_probe" ] && [ "$_ws_probe" != / ]; do _ws_probe=$(dirname "$_ws_probe"); done
+  if [ -w "$_ws_probe" ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
+}
+USER_DATA_PATH="${USER_DATA_PATH:-$(_default_workspace_root)}"
 if [ -z "${_user_data_was_set}" ]; then
-  echo "[install WARN] USER_DATA_PATH not set; defaulting to /workspace/hyperloom. Set USER_DATA_PATH to persist artifacts under your data root." >&2
+  echo "[install WARN] USER_DATA_PATH not set; defaulting to ${USER_DATA_PATH}. Set USER_DATA_PATH to persist artifacts under your data root." >&2
 fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
@@ -152,7 +161,7 @@ TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
 # the matching release/hyperloom_integration_v1.0 branch of
 # AMD-AGI/TraceLens-internal, but Hyperloom keeps no pin/URL for it — the
 # operator supplies it via TRACELENS_INTERNAL_ROOT.
-TRACELENS_REF="c3405111a2f9270fd820a1baa8edaaf6f61e7646"
+TRACELENS_REF="cf3e4b19c2ac080a921a18a6add96b38526b4a8b"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
 # The persistent kernel-agent env re-exports the resolved default path, so a
 # presence-only check (${VAR:+1}) would misclassify it as an override and skip
@@ -167,6 +176,20 @@ _canonicalize_path() {
   local p="${1:-}"
   [ -z "$p" ] && return 0
   readlink -f -- "$p" 2>/dev/null || printf '%s' "${p%/}"
+}
+# Mirror Path.home() (posixpath.expanduser) so paths written here land where the
+# Python readers look: a *present* HOME wins even when empty, else the uid's passwd entry.
+_home_dir() {
+  local h
+  if [ -n "${HOME+x}" ]; then
+    h="${HOME}"
+  else
+    h="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
+    # Nothing left to resolve; Path.home() raises on this same input.
+    [ -n "$h" ] || return 1
+  fi
+  while [ -n "$h" ] && [ "${h%/}" != "$h" ]; do h="${h%/}"; done
+  printf '%s' "${h:-/}"
 }
 # Resolve a git ref to a commit SHA (7-40 hex passes through; branch/tag via
 # ls-remote, falling back to the raw ref). The SHA keys the per-revision cache.
@@ -237,11 +260,14 @@ MAGPIE_PATH INFERENCEX_PATH TRACELENS_ROOT TRACELENS_INTERNAL_ROOT
 GEAK_ROOT GEAK_E2E_RUNNER PYTHONPATH'
 
 if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
-   || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+   || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
   if [ -f "$REPO_ROOT/.env" ]; then
     _snap_anthropic_url="${ANTHROPIC_BASE_URL-}"
     _snap_anthropic_key="${ANTHROPIC_API_KEY-}"
     _snap_anthropic_token="${ANTHROPIC_AUTH_TOKEN-}"
+    # The subscription token is snapshotted like the other three: without it a
+    # stale token in .env silently replaces the one the caller exported.
+    _snap_claude_oauth="${CLAUDE_CODE_OAUTH_TOKEN-}"
     # Snapshotted like the credentials above rather than via
     # _DOTENV_PROTECTED_VARS, whose mismatch warning prints the value -- this one
     # usually carries the gateway secret.
@@ -256,6 +282,7 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     [ -n "$_snap_anthropic_url" ] && export ANTHROPIC_BASE_URL="$_snap_anthropic_url"
     [ -n "$_snap_anthropic_key" ] && export ANTHROPIC_API_KEY="$_snap_anthropic_key"
     [ -n "$_snap_anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$_snap_anthropic_token"
+    [ -n "$_snap_claude_oauth" ] && export CLAUDE_CODE_OAUTH_TOKEN="$_snap_claude_oauth"
     [ -n "$_snap_anthropic_headers" ] && export ANTHROPIC_CUSTOM_HEADERS="$_snap_anthropic_headers"
     for _v in $_DOTENV_PROTECTED_VARS; do
       eval "_snap_val=\"\${_snap_prot_${_v}-}\""
@@ -317,6 +344,9 @@ esac
 # Split-provider aware per-side credentials: each protocol side keeps its own
 # base URL/key. A dual-protocol gateway simply has both pointed at one host.
 _ANTHROPIC_BASE_URL_VAL="${ANTHROPIC_BASE_URL:-}"
+# API-credits credentials only. CLAUDE_CODE_OAUTH_TOKEN must never reach this
+# variable: it feeds ~/.claude/config.json primaryApiKey, which would move a
+# subscription run onto API billing.
 _ANTHROPIC_KEY_VAL="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
 # Part of the Anthropic-side credential for a header-authenticated gateway, and
 # not derivable from the key, so it is persisted alongside the URL and key.
@@ -427,15 +457,22 @@ verify_die() {
 # DeepSeek serves its own Anthropic-compatible endpoint, so its key counts as one.
 preflight_reject_cross_provider() {
   local a_key a_endpoint conflict=""
-  a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
+  a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${CLAUDE_CODE_OAUTH_TOKEN:-}}}"
   a_endpoint="${ANTHROPIC_BASE_URL:-}"
+  # A subscription token only validates against Anthropic itself, so it implies
+  # the official endpoint and needs no ANTHROPIC_BASE_URL.
+  if [ -z "$a_endpoint" ] && [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    a_endpoint="https://api.anthropic.com"
+  fi
   if [ -n "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -n "$a_key" ]; then
     conflict="OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an Anthropic-side key is configured"
   elif [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ -z "$a_key" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
     conflict="ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an OPENAI_API_KEY is configured"
   elif [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "$a_key" ] && [ -z "$a_endpoint" ]; then
     conflict="an Anthropic-side key is configured without ANTHROPIC_BASE_URL, while the OpenAI side points at OPENAI_BASE_URL"
-  elif [ -n "$a_endpoint" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
+  # Only an explicit ANTHROPIC_BASE_URL signals a gateway-shaped deploy whose
+  # OPENAI_API_KEY is likely a gateway key missing its own URL.
+  elif [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
     conflict="OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the Anthropic side points at ANTHROPIC_BASE_URL"
   fi
   [ -z "$conflict" ] && return 0
@@ -459,6 +496,8 @@ preflight_validate_credentials() {
   { [ -n "${ANTHROPIC_BASE_URL:-}" ] &&
     { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; }; } &&
     has_anthropic=1
+  # A subscription token carries its own endpoint, so it is self-consistent alone.
+  [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && has_anthropic=1
   { [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; } && has_openai=1
   preflight_reject_cross_provider || return 1
   if [ "$has_anthropic" -eq 1 ] || [ "$has_openai" -eq 1 ]; then
@@ -497,7 +536,10 @@ Fix one of:
      A gateway serving only its own models also needs the model ids. Known
      hosts default themselves; otherwise set CLAUDE_MODEL (Anthropic side)
      and CODEX_MODEL (OpenAI side).
-  3. Copy .env from a working worktree into this one:
+  3. Claude Max/Pro subscription (run \`claude setup-token\`):
+       export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+       # leave ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN unset
+  4. Copy .env from a working worktree into this one:
        cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
 EOF
   exit 2
@@ -562,8 +604,9 @@ ensure_python() {
 #     Still tolerates whitespace and single-line drift, the common
 #     point-release case the fuzzy fallback was designed for.
 #
-# Stripped runtime images (`lmsysorg/sglang:v0.5.9-rocm700-mi30x` and the
-# minimal vLLM serving images) sometimes ship without one or both binaries.
+# Stripped upstream runtime images (minimal SGLang/vLLM serving images, as
+# opposed to the `rocm/hyperloom` ones) sometimes ship without one or both
+# binaries.
 # `_server_patcher` fail-softs in that case → `--enable-shape-discovery-
 # for-cuda-graph-profile` is silently never injected → graph-replayed
 # kernels stay opaque, exactly what #194 §5 was trying to fix.
@@ -612,14 +655,15 @@ ensure_patch_tools() {
 # `cmd 2>&1 | ts '[%H:%M:%S]'` shim the optimizer fork-execs) doesn't blow
 # up with `ts: command not found`.
 #
-# Background: stripped runtime images (e.g. `lmsysorg/sglang:v0.5.9-rocm700-mi30x`
-# and the minimal vLLM serving images) ship without moreutils. When a wrapper
-# pipes its stdout/stderr through `ts` for per-line timestamps and `ts` is
-# missing, bash propagates exit code 127 up through the pipeline. The driving
-# inference_optimizer validate_stack executor sees `subprocess_nonzero`,
-# classifies the run as a baseline failure, and loops — burning minutes per
-# iteration on a one-line apt fix. moreutils itself is a tiny perl-only
-# package (<1 MB with deps), so this is a strict win over the retry cost.
+# Background: stripped upstream runtime images (minimal SGLang/vLLM serving
+# images, as opposed to the `rocm/hyperloom` ones) ship without moreutils.
+# When a wrapper pipes its stdout/stderr through `ts` for per-line timestamps
+# and `ts` is missing, bash propagates exit code 127 up through the pipeline.
+# The driving inference_optimizer validate_stack executor sees
+# `subprocess_nonzero`, classifies the run as a baseline failure, and loops —
+# burning minutes per iteration on a one-line apt fix. moreutils itself is a
+# tiny perl-only package (<1 MB with deps), so this is a strict win over the
+# retry cost.
 #
 # Same shape as ensure_patch_tools(): cheap apt-install with dry-run /
 # check-only / no-apt-get fail-soft semantics. fail-soft on install error
@@ -1064,6 +1108,28 @@ write_env_file() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
   fi
+  # Emit one credential into the env file as a fallback, not an override.
+  #
+  # Credentials are runtime input owned by .env / the caller; the paths beside
+  # them in that file are install-time results owned by this script. Every
+  # documented launch sources .env first and the env file second, and only the
+  # first install runs install.sh -- so a credential re-exported unconditionally
+  # outranks a key the operator just rotated, on every later launch, with nothing
+  # to show for it (#1169). Assigning only when unset keeps the snapshot useful
+  # for the slurm/Ray paths that source the env file alone, and announces a
+  # mismatch (never a value) so a rotation that has not reached this file stays
+  # visible at launch. Defined here so the emitted block travels with the
+  # function body.
+  _emit_credential_fallback() {
+    local _name="$1"
+    local _value="$2"
+    echo "if [ -n \"\${${_name}:-}\" ]; then"
+    echo "  [ \"\${${_name}}\" = '${_value}' ] || \\"
+    echo "    echo '[kernel-agent] ${_name} differs from the install-time snapshot in this file; keeping the value already in the environment (re-run install.sh to refresh it)' >&2"
+    echo "else"
+    echo "  export ${_name}='${_value}'"
+    echo "fi"
+  }
   # Strict protocol-side separation: each side keeps its own canonical values;
   # GEAK aliases are never written back to provider slots.
   local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-}"
@@ -1099,13 +1165,18 @@ write_env_file() {
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
     # The kernel-agent drives Claude Code, so only the Anthropic side is
-    # exported here; gateway/OpenAI credentials are never persisted. The custom
-    # header goes with them: a header-authenticated gateway rejects the CLI
-    # without it, and single-quoting keeps any ${VAR} reference intact for
-    # parse_custom_headers to expand.
-    [ -n "${_anthropic_url}" ] && echo "export ANTHROPIC_BASE_URL='${_anthropic_url}'"
-    [ -n "${_anthropic_key}" ] && echo "export ANTHROPIC_API_KEY='${_anthropic_key}'"
-    [ -n "${_anthropic_headers}" ] && echo "export ANTHROPIC_CUSTOM_HEADERS='${_anthropic_headers}'"
+    # exported here; gateway/OpenAI credentials are never persisted.
+    [ -n "${_anthropic_url}" ] && _emit_credential_fallback ANTHROPIC_BASE_URL "${_anthropic_url}"
+    [ -n "${_anthropic_key}" ] && _emit_credential_fallback ANTHROPIC_API_KEY "${_anthropic_key}"
+    # A header-authenticated gateway rejects the CLI without this, and it cannot
+    # be re-derived from the key, so it is a credential in its own right. The
+    # single quotes _emit_credential_fallback writes keep any ${VAR} reference
+    # intact for parse_custom_headers to expand.
+    [ -n "${_anthropic_headers}" ] && _emit_credential_fallback ANTHROPIC_CUSTOM_HEADERS "${_anthropic_headers}"
+    # A subscription token is the Anthropic side on its own: an oauth-only host
+    # resolves neither URL nor key, so without this line sourcing the file
+    # leaves the kernel-agent with no Anthropic credential at all.
+    [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && _emit_credential_fallback CLAUDE_CODE_OAUTH_TOKEN "${CLAUDE_CODE_OAUTH_TOKEN}"
     # Pin TRACELENS_ROOT and TRACELENS_INTERNAL_ROOT to the (possibly
     # mirrored) values resolved by ensure_tracelens(). This is what lets
     # setsid nohup python -m hyperloom.inference_optimizer.cli optimize →
@@ -1125,7 +1196,9 @@ write_env_file() {
     # Pin the claude binary the GEAK SDK path uses (else claude_agent_sdk may
     # fall back to its older bundled CLI). run_e2e.py maps this to cli_path.
     _geak_claude_bin=""
-    for _c in "${HOME}/.local/bin/claude" "/usr/local/bin/claude" "$(command -v claude 2>/dev/null || true)"; do
+    local _probe_home
+    _probe_home="$(_home_dir || true)"
+    for _c in "${_probe_home:+${_probe_home}/.local/bin/claude}" "/usr/local/bin/claude" "$(command -v claude 2>/dev/null || true)"; do
       if [ -n "${_c}" ] && [ -x "${_c}" ]; then _geak_claude_bin="${_c}"; break; fi
     done
     [ -n "${_geak_claude_bin}" ] && echo "export GEAK_CLAUDE_BIN='${_geak_claude_bin}'"
@@ -1171,6 +1244,13 @@ write_env_file() {
     upsert_dotenv_var ANTHROPIC_API_KEY "$_anthropic_key"
   else
     remove_dotenv_var ANTHROPIC_API_KEY
+  fi
+  # The subscription token is a credential form of its own, not another
+  # spelling of the API key, so it is persisted beside the slot above rather
+  # than folded into it. Write-only: an unset token means the operator
+  # authenticates some other way this run, not that a stored one should go.
+  if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    upsert_dotenv_var CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"
   fi
   # Only the Anthropic side is persisted here. The OpenAI-side entries in the
   # shared .env are owned elsewhere and left untouched -- which is also what
@@ -1289,22 +1369,42 @@ ensure_forge_claude_cli() {
   # still serves (e.g. retired Opus 4). When unset, keep the legacy behaviour:
   # install the latest only when the CLI is absent.
   if command -v npm >/dev/null 2>&1; then
+    # A global install needs a writable prefix. Off root /usr/local is not one,
+    # and `run` has no failure path, so this would abort the whole installer.
+    local _npm_prefix="/usr/local" _npm_home
+    if [ ! -w /usr/local/lib ]; then
+      _npm_home="$(_home_dir || true)"
+      if [ -z "$_npm_home" ]; then
+        warn "no writable npm prefix (/usr/local and HOME both unavailable); forge claude CLI unavailable"
+        return 0
+      fi
+      # ~/.local/bin is where the CLI probe in write_env_file already looks.
+      _npm_prefix="${_npm_home}/.local"
+      mkdir -p "${_npm_prefix}/lib" "${_npm_prefix}/bin"
+    fi
     if [ -n "${HYPERLOOM_CLAUDE_CODE_VERSION:-}" ]; then
-      run npm config set prefix /usr/local
+      run npm config set prefix "${_npm_prefix}"
       run npm install -g "@anthropic-ai/claude-code@${HYPERLOOM_CLAUDE_CODE_VERSION}"
     elif ! command -v claude >/dev/null 2>&1; then
-      run npm config set prefix /usr/local
+      run npm config set prefix "${_npm_prefix}"
       run npm install -g @anthropic-ai/claude-code
     fi
   fi
   # ~/.claude authenticates the Claude Code CLI for Anthropic-compatible flows.
+  # Its readers resolve Path.home(), so ~ must come from _home_dir here too.
   local _claude_key="${_ANTHROPIC_KEY_VAL:-}"
   if [ -n "$_claude_key" ]; then
-    mkdir -p /root/.claude
+    local _claude_home
+    _claude_home="$(_home_dir || true)"
+    if [ -z "$_claude_home" ]; then
+      warn "no home directory for uid $(id -u) (HOME unset, no passwd entry); ~/.claude/config.json not written"
+      return 0
+    fi
+    mkdir -p "${_claude_home}/.claude"
     local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-}"
     _anthropic_url="${_anthropic_url%/}"
     _anthropic_url="${_anthropic_url%/v1}"
-    cat > /root/.claude/config.json <<EOF
+    cat > "${_claude_home}/.claude/config.json" <<EOF
 {
   "theme": "dark",
   "hasCompletedOnboarding": true,
@@ -1312,7 +1412,10 @@ ensure_forge_claude_cli() {
   "customApiUrl": "${_anthropic_url}"
 }
 EOF
-    chmod 600 /root/.claude/config.json
+    chmod 600 "${_claude_home}/.claude/config.json"
+    log "wrote ${_claude_home}/.claude/config.json"
+  elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    log "subscription token in use; ~/.claude/config.json left alone (primaryApiKey would override it)"
   else
     warn "Anthropic/DeepSeek key not set; ~/.claude/config.json not written"
   fi

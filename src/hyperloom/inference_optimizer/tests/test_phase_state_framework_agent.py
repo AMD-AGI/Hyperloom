@@ -75,7 +75,7 @@ def test_framework_action_allowlist():
     assert "profile" in allowed
     assert "recover" in allowed
     assert "explore" not in allowed
-    assert "specialist" not in allowed
+    assert "specialist" in allowed
 
 
 def test_phase_action_helpers_return_empty_for_unknown_phase():

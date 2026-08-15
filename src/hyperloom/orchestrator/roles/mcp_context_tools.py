@@ -93,7 +93,7 @@ class ContextProvider:
         Returns:
             The open-gaps summary string.
         """
-        return self._safe(self.shared_state.to_gaps_summary, "gaps")
+        return self._safe(lambda: self.shared_state.to_gaps_summary(max_attempts=5), "gaps")
 
     def warm_start(self) -> str:
         """Return the warm-start summary projection.
@@ -212,6 +212,55 @@ class ContextProvider:
             return "(read_reference not wired)"
         return self._safe(lambda: self.reference_reader(name), "read_reference")
 
+    def get_failure(self, failure_id: str = "") -> str:
+        """Return one failure evidence packet as JSON.
+
+        Args:
+            failure_id: The stable failure id to look up.
+
+        Returns:
+            The JSON-encoded packet, or a not-found marker.
+        """
+        fid = str(failure_id or "").strip()
+        if not fid:
+            return "(get_failure: failure_id is required)"
+
+        def _read() -> str:
+            fe = self.shared_state.find_failure(fid)
+            if fe is None:
+                # Evicted from the in-memory cap, or never existed; the mirror
+                # under reports/failures/ answers both cases.
+                return (
+                    f"(get_failure: {fid!r} not in memory; "
+                    f"Read $SESSION_DIR/reports/failures/{fid}.json)"
+                )
+            return json.dumps(fe, default=str, indent=2)
+
+        return self._safe(_read, "get_failure")
+
+    def get_variant_failures(self, task_id: str = "", top_k: int = 10) -> str:
+        """Return recent failure evidence packets, newest first.
+
+        Args:
+            task_id: When non-empty, restricts the result to that task.
+            top_k: Maximum number of entries to return.
+
+        Returns:
+            One JSON object per line.
+        """
+        k = max(1, min(top_k, 50))
+
+        def _read() -> str:
+            if task_id:
+                entries = self.shared_state.failures_for_task(task_id)
+            else:
+                entries = list(reversed(self.shared_state.failures or []))
+            if not entries:
+                return "(no failure entries)"
+            return "\n".join(json.dumps(e, default=str) for e in entries[:k])
+
+        return self._safe(_read, "get_variant_failures")
+
 
 # Tool descriptors: (tool_name, description, input_schema, provider-method).
 _NO_ARGS_SCHEMA: dict[str, Any] = {
@@ -244,8 +293,20 @@ _REFERENCE_SCHEMA: dict[str, Any] = {
     "required": ["name"],
     "additionalProperties": False,
 }
-
-
+_FAILURE_ID_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"failure_id": {"type": "string"}},
+    "required": ["failure_id"],
+    "additionalProperties": False,
+}
+_VARIANT_FAILURES_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "task_id": {"type": "string"},
+        "top_k": {"type": "integer", "minimum": 1, "maximum": 50},
+    },
+    "additionalProperties": False,
+}
 CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
     (
         "get_mission_status",
@@ -266,7 +327,8 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
     (
         "get_gaps",
         "Return the structured gaps[] ledger: canonical_id / layer / "
-        "severity / symptom / attempts for each open performance gap.",
+        "severity / symptom / attempt count and up to 5 recent attempts "
+        "(each with action, outcome, error_class, and failure_id when present).",
         _NO_ARGS_SCHEMA,
         "gaps",
     ),
@@ -358,6 +420,28 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         _REFERENCE_SCHEMA,
         "read_reference",
     ),
+    (
+        "get_failure",
+        "Return the full structured failure evidence packet for a single "
+        "failure_id (from a delegated_result failure line or gap attempt). "
+        "Carries variant args, stage, error_class, error_excerpt, "
+        "server_log_path, and workspace so you can then `Read` the actual "
+        "log file.  Only the most recent packets stay in memory; an older "
+        "failure_id is still readable with "
+        "`Read($SESSION_DIR/reports/failures/<failure_id>.json)`.",
+        _FAILURE_ID_SCHEMA,
+        "get_failure",
+    ),
+    (
+        "get_variant_failures",
+        "Return the most recent failure evidence entries across the session, "
+        "optionally filtered to a single task_id.  Each entry is a JSON "
+        "object with failure_id, variant_name, stage, error_class, "
+        "error_excerpt, server_log_path, and workspace.  Use this to find "
+        "failure_ids you can then inspect with get_failure.",
+        _VARIANT_FAILURES_SCHEMA,
+        "get_variant_failures",
+    ),
 )
 
 
@@ -422,6 +506,10 @@ def _make_handler(
                 kwargs["params"] = args["params"]
             if "name" in args:
                 kwargs["name"] = str(args["name"])
+            if "failure_id" in args:
+                kwargs["failure_id"] = str(args["failure_id"])
+            if "task_id" in args:
+                kwargs["task_id"] = str(args["task_id"])
         try:
             text = method(**kwargs)
         except Exception as exc:  # noqa: BLE001 — never crash a pull

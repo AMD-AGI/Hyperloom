@@ -15,6 +15,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from hyperloom.common.git_safety import safe_directory_args
+
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
@@ -501,14 +503,15 @@ class FrameworkPhase(PhaseHandler):
                 continue
             try:
                 cp = subprocess.run(
-                    ["git", "-C", str(p), "rev-parse", "--is-inside-work-tree"],
+                    ["git", *safe_directory_args(["-C", str(p), "rev-parse", "--is-inside-work-tree"])],
                     capture_output=True,
                     text=True,
                     timeout=10,
                     check=False,
                 )
             except (FileNotFoundError, subprocess.TimeoutExpired):
-                return False
+                # One unusable root says nothing about the others.
+                continue
             if cp.returncode == 0 and cp.stdout.strip() == "true":
                 return True
         return False
@@ -1765,11 +1768,12 @@ class FrameworkPhase(PhaseHandler):
             _reset_baseline_failure_backstop()
             _stack_setup_commands()
             _stack_kept_runtime()
-            # Persist the actual materialized config used for the KEEP'd bench so
-            # the revalidation baseline re-runs the identical effective config.
             accepted_cfg = str(res.get("enablement_accepted_config_path") or "").strip()
             if accepted_cfg:
                 state.enablement.accepted_config_path = accepted_cfg
+            effective = res.get("enablement_effective_config")
+            if isinstance(effective, dict) and effective:
+                state.enablement.accepted_config = dict(effective)
             if str(state.enablement.origin or "") == "eval":
                 # eval-origin: the patch boots and re-passed accuracy in the gate,
                 # but tput/accuracy only become official once a GENUINE baseline
@@ -3060,77 +3064,34 @@ class FrameworkPhase(PhaseHandler):
                 return fw
         return ""
 
-    def _write_prs_tested_from_framework_agent(
+    def _emit_framework_agent_kg_decision(
         self,
         *,
         task: "Task",
         result: Any,
         kept: bool,
     ) -> None:
-        """Write framework KEEP/REVERT patch into recipe.prs_tested for warm-replay reuse."""
-        if self.recipe_kb is None:
-            return
+        """Emit a real-time KG edge for a framework-agent KEEP/REVERT decision."""
+        del task, kept
         result_dict = result.result if hasattr(result, "result") else (result or {})
         if not isinstance(result_dict, dict):
             return
         status = str(result_dict.get("status") or "")
         if status not in ("kept", "kept_inert", "reverted"):
             return
-        # Extract patch info from result
         patches_applied = result_dict.get("patches_applied") or []
         patch_path = patches_applied[0] if patches_applied else ""
         delta_pct = result_dict.get("delta_pct") or 0.0
-        candidate = result_dict.get("candidate") or {}
-        pr_url = candidate.get("pr_url") or candidate.get("url") or ""
-        repo = candidate.get("repo") or ""
         error_class = result_dict.get("error_class") or ""
-        # Build prs_tested entry
-        # An inert KEEP is not a throughput win: the code is applied but every
-        # switch is off, so warm replay must not reuse it as a proven recipe.
+        # An inert KEEP is not a throughput win, so ``_emit_kg_decision`` only
+        # records an IMPROVES edge for a positive-gain KEEP or a REVERT edge.
         outcome = "KEEP" if status == "kept" else "KEEP_INERT" if status == "kept_inert" else "REVERT"
-        ss = self.shared_state
-        entry = {
-            "repo": repo
-            or (
-                pr_url.split("/")[3] + "/" + pr_url.split("/")[4]
-                if pr_url and len(pr_url.split("/")) > 4
-                else "unknown"
-            ),
-            "number": int(candidate.get("pr_number") or candidate.get("number") or 0),
-            "outcome": outcome,
-            "patch_file": str(patch_path),
-            "measured_gain_pct": float(delta_pct or 0.0),
-            "applicable_arch": list(getattr(ss, "model_architectures", None) or []),
-            "applicable_precision": str(getattr(ss, "precision", "") or ""),
-            "applicable_platform": "rocm",
-            "error_class": error_class if outcome == "REVERT" else "",
-            "notes": f"{outcome}: {candidate.get('title', patch_path)} ({delta_pct:+.1f}%)",
-            "source_session_id": self._source_session_id(),
-            "tested_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        }
-        # Read-modify-write prs_tested
-        try:
-            live = self._read_local_recipe_row()
-            existing_prs = list(live.get("prs_tested") or [])
-            existing_prs.append(entry)
-            self._kb_amend_recipe(recipe_overrides={"prs_tested": existing_prs})
-            log.info(
-                "framework: wrote prs_tested[%s] for %s (gain=%+.1f%%)",
-                outcome,
-                patch_path,
-                delta_pct,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("framework: prs_tested write failed")
-        # Real-time KG write-back: reflect this KEEP/REVERT as native link-graph
-        # edge(s) immediately so the live graph is queryable before the next
-        # mirror cron. Best-effort and native-only (see _emit_kg_decision).
         self._emit_kg_decision(
             patch_file=str(patch_path),
             outcome=outcome,
             gain_pct=float(delta_pct or 0.0),
             error_class=str(error_class or ""),
-            archs=list(entry.get("applicable_arch") or []),
+            archs=list(getattr(self.shared_state, "model_architectures", None) or []),
         )
 
     def _emit_kg_decision(
@@ -3523,7 +3484,7 @@ class FrameworkPhase(PhaseHandler):
 
         Builds the task params (candidate, batch id, baseline throughput,
         framework) and creates an idempotent ``framework_agent`` task whose
-        lanes and lease TTL come from the action registry. On enqueue failure,
+        lanes and lease TTL come from the action catalogue. On enqueue failure,
         records an ``enqueue_failed`` progress row so the pump skips the
         candidate next tick instead of spinning.
 
@@ -3549,14 +3510,12 @@ class FrameworkPhase(PhaseHandler):
         lanes, ttl = self._registry_lanes_ttl("framework_agent")
         try:
             # A framework candidate rebuilds and benchmarks, so it cannot share
-            # the GPU. ``_registry_lanes_ttl`` also answers ([], 0) when the
-            # registry failed to load, and enqueueing then would run this
-            # unserialised against every other task; refuse instead. The
-            # handler below turns it into a warning plus a progress row.
+            # the GPU. Enqueueing without lanes would run it unserialised
+            # against every other task; the handler below turns this into a
+            # warning plus a progress row.
             if not lanes:
                 raise RuntimeError(
-                    "framework_agent resolved to no lanes — the action registry is missing "
-                    "or failed to load, so the task would run without GPU exclusivity."
+                    "framework_agent resolved to no lanes; the task would run without GPU exclusivity."
                 )
             await self.tasks.create_or_return_existing(
                 kind="framework_agent",
@@ -4413,8 +4372,6 @@ class FrameworkPhase(PhaseHandler):
         boot the model before KEEP is declared.
         """
         try:
-            from ..state.task_registry import TERMINAL_STATES
-
             all_tasks = []
             for st in ("succeeded", "failed"):
                 all_tasks.extend(
@@ -4573,9 +4530,11 @@ class FrameworkPhase(PhaseHandler):
         """Enqueue one genuine baseline to revalidate a KEEP'd eval-origin patch.
 
         Uses the accepted config from the KEEP'd candidate bench (preferred) or
-        falls back to the original probe config.  The frozen eval controls from
-        the carrier params ensure RUN_EVAL and eval task/limit match the trigger
-        contract. Idempotent and one-at-a-time.
+        falls back to the original probe config, plus that bench's env/arg layers,
+        which the YAML does not carry and without which a different configuration
+        would be graded. The frozen eval controls from the carrier params ensure
+        RUN_EVAL and eval task/limit match the trigger contract. Idempotent and
+        one-at-a-time.
         """
         state = self.shared_state
         if not bool(state.enablement.validation_pending):
@@ -4596,14 +4555,15 @@ class FrameworkPhase(PhaseHandler):
             "disable_run_eval": False,
             **_enablement_carrier_params(state),
         }
-        # Prefer the accepted (post-fix) config so revalidation uses the same
-        # effective config the KEEP'd candidate ran; fall back to the trigger
-        # probe config only when no accepted config was recorded.
         accepted_cfg = str(state.enablement.accepted_config_path or "").strip()
         probe_cfg = str(state.enablement.probe_config_path or "").strip()
         cfg = accepted_cfg or probe_cfg
         if cfg:
             params["config_path"] = cfg
+        effective = state.enablement.accepted_config
+        for key in ("extra_envs", "extra_server_args", "remove_args", "unset_envs", "args_mode"):
+            if effective.get(key):
+                params[key] = effective[key]
         # Carry the active runtime override so the revalidation baseline runs
         # under the same framework runtime as the KEEP'd candidate.
         active_rt = state.enablement.active_runtime or {}

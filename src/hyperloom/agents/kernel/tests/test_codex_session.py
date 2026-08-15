@@ -101,17 +101,6 @@ class _FakeSDKModule:
     Sandbox = _FakeSandbox
 
 
-class _FakeItem:
-    """Typed thread item stand-in exposing a pydantic-style dump."""
-
-    def __init__(self, payload: dict[str, Any], *, wrap_root: bool = False) -> None:
-        self._payload = payload
-        self.root = self if not wrap_root else _FakeItem(payload)
-
-    def model_dump(self, by_alias: bool = False, mode: str = "python") -> dict[str, Any]:
-        return dict(self._payload)
-
-
 class _FakeUsageBreakdown:
     """``TokenUsageBreakdown`` stand-in."""
 
@@ -129,12 +118,10 @@ class _FakeTurnResult:
         self,
         *,
         final_response: str | None = "done",
-        items: tuple[Any, ...] = (),
         usage: Any = None,
         error: Any = None,
     ) -> None:
         self.final_response = final_response
-        self.items = list(items)
         self.usage = usage
         self.error = error
 
@@ -1229,14 +1216,10 @@ def test_load_codex_sdk_returns_the_installed_module():
 # --------------------------------------------------------------------------- #
 
 
-def test_run_codex_turn_normalizes_typed_items_and_usage(tmp_path, monkeypatch):
-    """Typed SDK items and the turn's token usage become plain data."""
+def test_run_codex_turn_normalizes_usage(tmp_path, monkeypatch):
+    """The turn's token usage is normalized into the canonical four-key dict."""
     result = _FakeTurnResult(
         final_response="  wrote the report  ",
-        items=(
-            _FakeItem({"type": "commandExecution", "command": "ls", "exitCode": 0}),
-            _FakeItem({"type": "agentMessage", "text": "hello"}, wrap_root=True),
-        ),
         usage=type(
             "_Usage",
             (),
@@ -1268,7 +1251,6 @@ def test_run_codex_turn_normalizes_typed_items_and_usage(tmp_path, monkeypatch):
     assert session.text == "wrote the report"
     assert session.thread_id == "thread-fake"
     assert session.error == ""
-    assert [item["type"] for item in session.items] == ["commandExecution", "agentMessage"]
     assert session.usage == {
         "input_tokens": 120,
         "output_tokens": 34,
@@ -1359,41 +1341,6 @@ def test_normalize_codex_usage_tolerates_missing_and_malformed_counts():
         "cache_read_input_tokens": 0,
         "reasoning_output_tokens": 0,
     }
-
-
-def test_normalize_codex_items_tolerates_mapping_items():
-    """Plain mappings pass through so callers can build fixtures without pydantic."""
-    result = _FakeTurnResult(items=({"type": "agentMessage", "text": "hi"},))
-
-    assert cs.normalize_codex_items(result) == ({"type": "agentMessage", "text": "hi"},)
-
-
-def test_codex_item_type_folds_the_sdk_spelling():
-    """Callers must not depend on the SDK's camelCase item type spelling."""
-    assert cs.codex_item_type({"type": "commandExecution"}) == "commandexecution"
-    assert cs.codex_item_type({"type": "command_execution"}) == "commandexecution"
-    assert cs.codex_item_type({}) == ""
-
-
-def test_describe_codex_item_summarizes_the_three_reported_kinds():
-    """Command, file-change and message items each get a readable log line."""
-    assert cs.describe_codex_item({"type": "agentMessage", "text": " done "}) == "done"
-    assert cs.describe_codex_item({"type": "commandExecution", "command": "ls", "exitCode": 2}) == "$ ls (exit 2)"
-    assert cs.describe_codex_item({"type": "commandExecution", "command": "ls"}) == "$ ls"
-    assert (
-        cs.describe_codex_item({"type": "fileChange", "changes": [{"path": "/out/analysis.md"}]})
-        == "wrote /out/analysis.md"
-    )
-    assert cs.describe_codex_item({"type": "reasoning"}) == ""
-    assert cs.describe_codex_item({"type": "fileChange", "changes": "not-a-list"}) == ""
-    assert cs.describe_codex_item({"type": "commandExecution", "exitCode": 0}) == ""
-
-
-def test_codex_file_changes_keeps_only_real_paths():
-    """Malformed change entries are dropped rather than surfaced as paths."""
-    item = {"type": "fileChange", "changes": [{"path": "/a"}, {"kind": "add"}, "junk", {"path": 7}]}
-
-    assert cs.codex_file_changes(item) == ("/a",)
 
 
 # --------------------------------------------------------------------------- #

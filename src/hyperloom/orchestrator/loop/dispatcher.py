@@ -54,23 +54,20 @@ class DispatcherCollaborator:
         return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
-        """Resolve ``(requires_lanes, lease_ttl_sec)`` from the ActionRegistry; lanes filtered to KNOWN_LANES, returns ([], 0) for unknown actions.
+        """Resolve ``(requires_lanes, lease_ttl_sec)`` from the action catalogue; lanes filtered to KNOWN_LANES.
 
         Args:
             kind: The action name to resolve.
 
         Returns:
-            A ``(requires_lanes, lease_ttl_sec)`` tuple; ``([], 0)`` when the
-            action is unknown or no registry is loaded.
+            A ``(requires_lanes, lease_ttl_sec)`` tuple; ``([], 0)`` for an
+            action the catalogue does not know.
         """
-        reg = getattr(self, "action_registry", None)
-        if reg is None:
-            return [], 0
-        meta = reg.get(kind)
+        meta = self.action_registry.get(kind)
         if meta is None:
             return [], 0
-        lanes = [lane for lane in (getattr(meta, "requires_lanes", ()) or ()) if lane in KNOWN_LANES]
-        return lanes, int(getattr(meta, "lease_ttl_sec", 0) or 0)
+        lanes = [lane for lane in meta.requires_lanes if lane in KNOWN_LANES]
+        return lanes, meta.lease_ttl_sec
 
     def _cycle_idem_suffix(self) -> str:
         """Idempotency-key suffix scoping a per-cycle internal singleton to the
@@ -996,17 +993,33 @@ class DispatcherCollaborator:
                         "apply_fail retry drain failed for task=%s",
                         task.task_id,
                     )
-            # Auto-promote succeeded results into CORE_STATE_FIELDS (Coordinator-only writer).
-            kept = result.state == "succeeded" and self._is_promotable_result(task.kind, result.result or {})
+            # Auto-promote succeeded results into CORE_STATE_FIELDS
+            # (Coordinator-only writer).  Warm replay is deliberately routed
+            # through its promote handler even when dispatch itself failed:
+            # that handler owns rollback of pre-applied framework patches and
+            # clears the PRELUDE ``in_flight`` gate.
+            result_payload = dict(result.result or {})
+            replay_needs_cleanup = (
+                task.kind == "replay_warm_recipe"
+                and result.state != "succeeded"
+            )
+            if replay_needs_cleanup:
+                result_payload.setdefault("status", "failed")
+                result_payload.setdefault("error_class", "dispatch_failed")
+                if result.error:
+                    result_payload.setdefault("error", str(result.error))
+            kept = (
+                result.state == "succeeded" or replay_needs_cleanup
+            ) and self._is_promotable_result(task.kind, result_payload)
             try:
                 if kept:
                     await self._promote_to_shared_state(
                         task.kind,
-                        result.result,
+                        result_payload,
                         task=task,
                     )
                 elif task.task_id not in self._dead_holder_accounted:
-                    await self._handle_unpromotable_result(task, result.result)
+                    await self._handle_unpromotable_result(task, result_payload)
             except Exception as exc:  # noqa: BLE001
                 log.exception(
                     "dispatcher: promotion/unpromotable handling failed for task=%s",
@@ -1031,16 +1044,17 @@ class DispatcherCollaborator:
                         stage="dispatcher_fact_write",
                         exc=exc,
                     )
-            # Framework prs_tested write-back: record KEEP/REVERT patches.
+            # Real-time KG edge for a framework KEEP/REVERT (best-effort).
             if task.kind == "framework_agent":
                 try:
-                    self._write_prs_tested_from_framework_agent(task=task, result=result, kept=kept)
-                except Exception:  # noqa: BLE001 — defensive
+                    self._emit_framework_agent_kg_decision(
+                        task=task, result=result, kept=kept
+                    )
+                except Exception:  # noqa: BLE001 — real-time KG edge is best-effort
                     log.exception(
-                        "dispatcher: prs_tested write-back failed for task=%s",
+                        "dispatcher: framework KG decision emit failed for task=%s",
                         task.task_id,
                     )
-                    continue
             # explore-round gap update: append per-variant KEEP/REVERT, then re-run the global refresh.
             if task.kind == "explore":
                 result_dict = result.result if isinstance(result.result, dict) else {}
@@ -1244,26 +1258,12 @@ class DispatcherCollaborator:
         """Derive the set of actions safe to run inline (A3): lane-light, registered executor, not in _INLINE_ACTION_DENY. PolicyGate remains the real security boundary.
 
         Returns:
-            A frozenset of action names eligible for inline execution; empty
-            when no action registry is loaded.
+            A frozenset of action names eligible for inline execution.
         """
         coord = object.__getattribute__(self, "_coord")
-        reg = getattr(coord, "action_registry", None)
-        if reg is None:
-            return frozenset()
         executors = getattr(coord.sub, "executor_registry", {}) or {}
-        names_fn = getattr(reg, "names", None)
-        try:
-            if callable(names_fn):
-                names = list(names_fn())
-            else:
-                all_fn = getattr(reg, "all", None)
-                metas = list(all_fn()) if callable(all_fn) else []
-                names = [str(getattr(meta, "name", "") or "") for meta in metas]
-        except Exception:  # noqa: BLE001 — defensive
-            names = []
         allowed: set[str] = set()
-        for name in names:
+        for name in coord.action_registry:
             if name in self._INLINE_ACTION_DENY:
                 continue
             if name not in executors:

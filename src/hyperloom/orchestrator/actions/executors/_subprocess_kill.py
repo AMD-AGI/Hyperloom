@@ -241,6 +241,15 @@ DETOKENIZER_STALL_RETURNCODE: int = -911
 # ``error_class="agentx_preflight"`` and surface the guidance instead of crashing.
 AGENTX_PREFLIGHT_RETURNCODE: int = -912
 
+# -913 is ``_ray_serving._RAY_ACTOR_DIED_RC``.
+
+# Sentinel ``returncode`` returned by the _run_magpie eval hook when the
+# generation bounds / pathology probe cannot be installed even though the target
+# file is present and this variant runs eval. Distinct so callers label it
+# ``error_class="eval_probe_unpatchable"`` -- the same class the baseline arm
+# already fails with, so a bounds gap reads identically on both arms.
+EVAL_PROBE_UNPATCHABLE_RETURNCODE: int = -914
+
 # Server-ready markers: their appearance in ``server.log`` means the server has
 # finished startup and is accepting traffic. Only after one is observed does the
 # detokenizer-stall clock start. Covers the uvicorn frontend (vLLM + sglang) and
@@ -959,7 +968,9 @@ def _communicate_with_soft_deadline(
 
 
 __all__ = [
+    "AGENTX_PREFLIGHT_RETURNCODE",
     "DETOKENIZER_STALL_RETURNCODE",
+    "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
     "OVERTIME_KILL_RETURNCODE",
     "SERVER_DEAD_RETURNCODE",
     "kill_my_spawned_server",

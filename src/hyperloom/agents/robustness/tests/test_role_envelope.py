@@ -155,7 +155,7 @@ def test_kill_task_requires_both_fields(task_id, reason):
 
 
 def test_delegate_rejects_kernel_owned_action():
-    for kernel_owned in ("kernel_opt", "integrate", "deep_kernel_analysis"):
+    for kernel_owned in ("kernel_opt", "integrate", "gemm_tuning"):
         with pytest.raises(ValueError):
             build_delegate(kernel_owned)
 

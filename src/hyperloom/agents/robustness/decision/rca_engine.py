@@ -7,14 +7,15 @@
 * :class:`LlmRcaEngine` — OpenAI-compatible chat endpoint, cost-bounded by
   :class:`RcaThrottle`: severity gate (default high), per-dedup-key cooldown
   (default 60s), per-tick cap (default 1 call).
-* :class:`AnthropicRcaEngine` — :class:`LlmRcaEngine` subclass speaking the
-  Anthropic Messages API; the factory selects it when the discovered provider
-  is ``anthropic``.
+* :class:`AnthropicRcaEngine` — :class:`LlmRcaEngine` subclass issuing a single
+  tool-free Anthropic completion; the factory selects it when the discovered
+  provider is ``anthropic``.
 
 Both LLM engines reach their provider through ``hyperloom.common.llm_config``,
-which owns client construction (credentials, base URL, gateway custom headers,
-the single ``anthropic-version`` default) and the request/response shape. This
-module therefore holds only the prompt, the throttle, and the usage ledger.
+which owns credential resolution and, on the Anthropic side, the choice between
+the Messages API and the Claude CLI — the latter being the only channel that
+accepts a Max/Pro subscription token. This module therefore holds only the
+prompt, the throttle, and the usage ledger.
 """
 
 from __future__ import annotations
@@ -201,6 +202,12 @@ def load_rca_system_prompt() -> str:
     return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 
 
+# Floor for the Claude CLI transport's wall-clock budget. The RCA timeout is
+# sized for an HTTP round trip; the CLI spends part of its budget spawning a
+# process, so the HTTP figure would expire before the model is even reached.
+_CLI_MIN_TIMEOUT_SEC = 60.0
+
+
 def _client_timeout(timeout_s: float) -> Any:
     """Build the uniform per-request timeout both engines run with."""
     return llm_config.build_http_timeout(connect=timeout_s, read=timeout_s, write=timeout_s, pool=timeout_s)
@@ -237,6 +244,9 @@ class LlmRcaEngine:
     client: Any = None
     _owns_client: bool = field(default=False, init=False, repr=False)
     _config_warned: bool = field(default=False, init=False, repr=False)
+    # Set once a failure proves further calls cannot succeed, so a permanent
+    # misconfiguration costs one ERROR rather than a warning every tick.
+    _disabled: bool = field(default=False, init=False, repr=False)
     _current_tick_id: int = field(default=-1, init=False, repr=False)
     # Token-usage accumulator across the calls made since the last drain, so
     # the host (Coordinator) can fold the RCA LLM spend into its trace ledger.
@@ -247,10 +257,18 @@ class LlmRcaEngine:
 
     def __post_init__(self) -> None:
         """Warn about missing credentials and install the default throttle."""
-        if not self.base_url or not self.api_key:
+        if not self._is_configured():
             log.warning("%s constructed without base_url/api_key; calls will be skipped", type(self).__name__)
         if self.throttle is None:
             self.throttle = RcaThrottle()
+
+    def _is_configured(self) -> bool:
+        """Whether this engine holds everything a call needs.
+
+        Returns:
+            bool: True when an RCA call can be issued.
+        """
+        return bool(self.base_url and self.api_key)
 
     def _new_client(self) -> Any:
         """Build the OpenAI-compatible client this engine calls through."""
@@ -319,7 +337,7 @@ class LlmRcaEngine:
         Returns:
             str: The (truncated) root-cause summary, or an empty string.
         """
-        if not self.base_url or not self.api_key:
+        if self._disabled or not self._is_configured():
             return ""
         now_unix = time.time()
         # tick_id = -1 = single shared bucket when no caller sets one;
@@ -332,6 +350,21 @@ class LlmRcaEngine:
         text = await self._call(symptom)
         self.throttle.record(symptom, now_unix=now_unix)
         return _truncate(text, self.max_chars)
+
+    def _note_call_failure(self, exc: BaseException) -> None:
+        """Record a failed call, disabling the engine when it can only recur.
+
+        A missing credential or an unusable transport is not a transient
+        provider error: every later tick would fail identically and log
+        identically. Those are reported once at ERROR and stop the engine;
+        everything else stays a warning and is retried.
+        """
+        permanent = isinstance(exc, llm_config.LLMConfigError) or not self._is_configured()
+        if permanent:
+            self._disabled = True
+            log.error("%s disabled; RCA cannot run in this configuration: %r", type(self).__name__, exc)
+            return
+        log.warning("%s: completion failed: %r", type(self).__name__, exc)
 
     def _accumulate_usage(self, usage: Any, *, latency_ms: int) -> None:
         """Fold one chat response's ``usage`` object into the accumulator.
@@ -394,7 +427,7 @@ class LlmRcaEngine:
         try:
             result = await llm_config.achat_completion(self._ensure_client(), **params)
         except Exception as exc:  # noqa: BLE001 - degrade-to-empty is this engine's contract
-            log.warning("LlmRcaEngine: chat completion failed: %r", exc)
+            self._note_call_failure(exc)
             return ""
         self._accumulate_usage(result.usage, latency_ms=int((time.perf_counter() - _t0) * 1000))
         return str(result.text or "").strip()
@@ -402,33 +435,49 @@ class LlmRcaEngine:
 
 @dataclass
 class AnthropicRcaEngine(LlmRcaEngine):
-    """Anthropic Messages-compatible RCA engine.
+    """Anthropic-side RCA engine, issuing one single-shot completion.
 
     Only the transport differs from :class:`LlmRcaEngine`; the throttle, the
-    usage ledger, and the prompt are inherited unchanged.
+    usage ledger, and the prompt are inherited unchanged. It holds no client of
+    its own because :func:`llm_config.aanthropic_completion` owns transport
+    selection, which can resolve to a per-call Claude CLI session.
     """
 
-    def _new_client(self) -> Any:
-        """Build the Anthropic client this engine calls through."""
-        return llm_config.get_async_anthropic_client(
-            env=_provider_env(
-                api_key_env="ANTHROPIC_API_KEY",
-                api_key=self.api_key,
-                base_url_env="ANTHROPIC_BASE_URL",
-                base_url=self.base_url,
-            ),
-            timeout=_client_timeout(self.timeout_s),
+    def _is_configured(self) -> bool:
+        """Whether a completion could actually be issued.
+
+        Defers to the transport probe rather than the inherited
+        ``base_url and api_key`` test: a subscription token reaches this
+        process as neither, and answering an unconditional ``True`` would let a
+        host with no Anthropic credential at all — or with a token but no
+        Claude CLI — retry a doomed call on every tick.
+        """
+        return llm_config.anthropic_transport_ready(self._resolved_env())
+
+    def _resolved_env(self) -> dict[str, str]:
+        """Environment carrying whatever ``Config.discover`` resolved.
+
+        The discovered pair may come from provider-specific variables, so the
+        canonical names have to be overlaid before the transport reads them.
+        """
+        return _provider_env(
+            api_key_env="ANTHROPIC_API_KEY",
+            api_key=self.api_key,
+            base_url_env="ANTHROPIC_BASE_URL",
+            base_url=self.base_url,
         )
 
-    async def _aclose_client(self) -> None:
-        """Close the Anthropic client (an ``httpx.AsyncClient``)."""
-        await self.client.aclose()
-
     async def _call(self, symptom: Symptom) -> str:
-        """Issue an Anthropic Messages request and extract text content.
+        """Issue one tool-free Anthropic completion and extract text content.
 
         Degrades to an empty string on failure for the same reason as
-        :meth:`LlmRcaEngine._call`.
+        :meth:`LlmRcaEngine._call`. ``temperature`` matches the OpenAI engine's
+        0.2 and reaches the model on the HTTP path; the CLI path drops it,
+        having no such knob, and relies on the prompt to pin the output shape.
+
+        The CLI transport gets its own budget instead of ``timeout_s``: that
+        knob is sized for an HTTP round trip, while the CLI spawns a process
+        first, so reusing it would time out during startup on every call.
 
         Args:
             symptom (Symptom): The symptom whose evidence is sent to the LLM.
@@ -438,16 +487,18 @@ class AnthropicRcaEngine(LlmRcaEngine):
         """
         _t0 = time.perf_counter()
         try:
-            result = await llm_config.aanthropic_messages(
-                self._ensure_client(),
+            result = await llm_config.aanthropic_completion(
                 model=self.model,
                 system=load_rca_system_prompt(),
                 messages=[{"role": "user", "content": _build_user_prompt(symptom)}],
                 max_tokens=600,
                 temperature=0.2,
+                env=self._resolved_env(),
+                timeout=_client_timeout(self.timeout_s),
+                timeout_s=max(self.timeout_s, _CLI_MIN_TIMEOUT_SEC),
             )
         except Exception as exc:  # noqa: BLE001 - degrade-to-empty is this engine's contract
-            log.warning("AnthropicRcaEngine: messages call failed: %r", exc)
+            self._note_call_failure(exc)
             return ""
         self._accumulate_anthropic_usage(result.usage, latency_ms=int((time.perf_counter() - _t0) * 1000))
         return str(result.text or "").strip()

@@ -136,9 +136,18 @@ load_dotenv_no_clobber
 # can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
 # or empty, which is exactly the case the :- default below would absorb.
 _user_data_was_set="${USER_DATA_PATH:+1}"
-USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
+# Container images ship a writable /workspace; a bare-metal host off root has
+# neither it nor permission to create it, so the mkdir below would abort.
+_default_workspace_root() {
+  # The nearest existing ancestor decides: -w is false for a path that does not
+  # exist yet, which would divert root off a /workspace it can still create.
+  _ws_probe=/workspace
+  while [ ! -e "$_ws_probe" ] && [ "$_ws_probe" != / ]; do _ws_probe=$(dirname "$_ws_probe"); done
+  if [ -w "$_ws_probe" ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
+}
+USER_DATA_PATH="${USER_DATA_PATH:-$(_default_workspace_root)}"
 if [ -z "${_user_data_was_set}" ]; then
-  echo "[install WARN] USER_DATA_PATH not set; defaulting to /workspace/hyperloom. Set USER_DATA_PATH to persist artifacts under your data root." >&2
+  echo "[install WARN] USER_DATA_PATH not set; defaulting to ${USER_DATA_PATH}. Set USER_DATA_PATH to persist artifacts under your data root." >&2
 fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
@@ -402,7 +411,8 @@ normalize_legacy_deepseek_env() {
   # Adopt the gateway whole or not at all. Anything already on the Anthropic
   # side means the retired variables are stale leftovers: half-adopting them
   # would send an explicit Anthropic credential to DeepSeek's host.
-  if [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+  if [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] \
+     || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     warn "DEEPSEEK_* is retired and ignored here: the Anthropic side is already configured"
     return 0
   fi
@@ -440,15 +450,22 @@ normalize_legacy_deepseek_env() {
 # Reject one provider's base URL paired with only the other provider's key.
 preflight_reject_cross_provider() {
   local a_key a_endpoint conflict=""
-  a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
+  a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${CLAUDE_CODE_OAUTH_TOKEN:-}}}"
   a_endpoint="${ANTHROPIC_BASE_URL:-}"
+  # A subscription token only validates against Anthropic itself, so it implies
+  # the official endpoint and needs no ANTHROPIC_BASE_URL.
+  if [ -z "$a_endpoint" ] && [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    a_endpoint="https://api.anthropic.com"
+  fi
   if [ -n "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -n "$a_key" ]; then
     conflict="OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an Anthropic-side key is configured"
   elif [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ -z "$a_key" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
     conflict="ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an OPENAI_API_KEY is configured"
   elif [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "$a_key" ] && [ -z "$a_endpoint" ]; then
     conflict="an Anthropic-side key is configured without ANTHROPIC_BASE_URL, while the OpenAI side points at OPENAI_BASE_URL"
-  elif [ -n "$a_endpoint" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
+  # Only an explicit ANTHROPIC_BASE_URL signals a gateway-shaped deploy whose
+  # OPENAI_API_KEY is likely a gateway key missing its own URL.
+  elif [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
     conflict="OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the Anthropic side points at ANTHROPIC_BASE_URL"
   fi
   [ -z "$conflict" ] && return 0
@@ -474,6 +491,8 @@ preflight_validate_credentials() {
   { [ -n "${ANTHROPIC_BASE_URL:-}" ] &&
     { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; }; } &&
     has_anthropic=1
+  # A subscription token carries its own endpoint, so it is self-consistent alone.
+  [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && has_anthropic=1
   { [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; } && has_openai=1
   preflight_reject_cross_provider || return 1
   if [ "$has_anthropic" -eq 1 ] || [ "$has_openai" -eq 1 ]; then
@@ -512,7 +531,10 @@ Fix one of:
      A gateway serving only its own models also needs the model ids. Known
      hosts default themselves; otherwise set CLAUDE_MODEL (Anthropic side)
      and CODEX_MODEL (OpenAI side).
-  3. Copy .env from a working worktree into this one:
+  3. Claude Max/Pro subscription (run \`claude setup-token\`):
+       export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+       # leave ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN unset
+  4. Copy .env from a working worktree into this one:
        cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
 EOF
   exit 2

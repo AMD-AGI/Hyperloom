@@ -23,7 +23,8 @@
 #   MODEL_BASE        local model base dir (optional; backend fills if empty)
 #   POLL_INTERVAL_S   seconds between polls             (default 30)
 #   POLL_MAX          max polls before timeout          (default 120 => ~60min)
-#   KNOWLEDGE_STORE_MODE  explicit local|remote mode     (default remote)
+#   KNOWLEDGE_STORE_MODE  explicit local|remote mode     (default local)
+#   KB_STORE_URL / KB_STORE_TOKEN  required together when mode=remote
 #   CI_E2E_PR_CHECK_BASE  base dir for per-PR checkouts (default /tmp/ci-e2e)
 #   CI_E2E_CACERT / CI_E2E_INSECURE   TLS to the API endpoint (CA bundle / skip-verify)
 #
@@ -45,7 +46,7 @@ TP="${TP:-1}"
 MAX_HOURS="${MAX_HOURS:-0.5}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-30}"
 POLL_MAX="${POLL_MAX:-120}"
-KNOWLEDGE_STORE_MODE="${KNOWLEDGE_STORE_MODE:-remote}"
+KNOWLEDGE_STORE_MODE="${KNOWLEDGE_STORE_MODE:-local}"
 
 : "${E2E_API_BASE:?E2E_API_BASE is required}"
 : "${E2E_API_KEY:?E2E_API_KEY is required}"
@@ -56,6 +57,10 @@ case "$KNOWLEDGE_STORE_MODE" in
   local|remote) ;;
   *) echo "KNOWLEDGE_STORE_MODE must be local or remote" >&2; exit 2 ;;
 esac
+if [ "$KNOWLEDGE_STORE_MODE" = "remote" ]; then
+  : "${KB_STORE_URL:?KB_STORE_URL is required when KNOWLEDGE_STORE_MODE=remote}"
+  : "${KB_STORE_TOKEN:?KB_STORE_TOKEN is required when KNOWLEDGE_STORE_MODE=remote}"
+fi
 if [ "$E2E_INFRA_TYPE" != "kubernetes" ]; then
   echo "CI E2E supports only E2E_INFRA_TYPE=kubernetes; source-SHA pinning is not implemented for '$E2E_INFRA_TYPE'" >&2
   exit 2
@@ -200,10 +205,17 @@ body="$(jq -n \
   --arg name "ci-pr-${PR_NUMBER:-manual}-${GITHUB_RUN_ID:-local}" \
   --arg uname "${CI_E2E_USER_NAME:-}" --arg itype "$E2E_INFRA_TYPE" \
   --arg knowledge_mode "$KNOWLEDGE_STORE_MODE" \
+  --arg kb_store_url "${KB_STORE_URL:-}" \
+  --arg kb_store_token "${KB_STORE_TOKEN:-}" \
   --argjson gpus "$GPUS" --argjson params "$params" \
   '{name:$name, infra_type:$itype, kind:"hyperloom", replicas:1,
     gpu_per_replica:$gpus,
-    template:{params:$params, env:{HL_CI_E2E:"1", KNOWLEDGE_STORE_MODE:$knowledge_mode}}}
+    template:{params:$params, env:
+      ({HL_CI_E2E:"1", KNOWLEDGE_STORE_MODE:$knowledge_mode}
+       + (if $knowledge_mode == "remote"
+          then {KB_STORE_URL:$kb_store_url, KB_STORE_TOKEN:$kb_store_token}
+          else {}
+          end))}}
    + (if $uname == "" then {} else {user_name:$uname} end)')"
 
 echo "[ci-e2e] submitting: model=$MODEL ref=$HEAD_REF sha=$HEAD_SHA gpus=$GPUS tp=$TP max_hours=$MAX_HOURS"

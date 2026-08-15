@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from .. import framework_registry
+from hyperloom.common import llm_config
+from hyperloom.common.llm_config import has_anthropic_credential
 from hyperloom.inference_optimizer.session.session_paths import agent_dir
 from hyperloom.orchestrator.roles import (
     ClaudeBackend,
@@ -28,6 +30,11 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
 
+CRITIC_PROTOCOL_CHOICES: tuple[str, ...] = ("auto", "openai", "anthropic")
+
+
+def _any_env_set(names: tuple[str, ...]) -> bool:
+    return any((os.environ.get(name) or "").strip() for name in names)
 
 
 def _official_anthropic_only() -> bool:
@@ -44,6 +51,66 @@ def _official_openai_only() -> bool:
     return llm_config.is_openai_only()
 
 
+def _resolve_critic_protocol(requested: str, *, provider_anthropic_only: bool) -> str:
+    """Pick the critic's review protocol and verify that side is configured.
+
+    ``auto`` reproduces the historical derivation, with one widening: a
+    subscription token now counts as a configured Anthropic side, so an
+    oauth-only host resolves to ``anthropic`` instead of falling through to an
+    OpenAI side it does not have. An explicit choice is a hard contract: a
+    missing credential fails at startup instead of silently routing the review
+    somewhere the operator did not ask for.
+
+    Args:
+        requested: One of :data:`CRITIC_PROTOCOL_CHOICES`.
+        provider_anthropic_only: Whether only the Anthropic side is configured.
+
+    Returns:
+        Either ``"openai"`` or ``"anthropic"``.
+
+    Raises:
+        ValueError: If ``requested`` is unknown, or the forced side has no
+            usable credential.
+    """
+    if requested not in CRITIC_PROTOCOL_CHOICES:
+        raise ValueError(f"_build_backends: critic_protocol={requested!r} not in {set(CRITIC_PROTOCOL_CHOICES)}")
+
+    if requested == "auto":
+        return "anthropic" if provider_anthropic_only else "openai"
+
+    if requested == "anthropic":
+        # Asked through the registry rather than a local list of names, so a
+        # newly recognized credential form is accepted here the moment it is
+        # registered instead of being rejected by a copy nobody updated.
+        if not has_anthropic_credential():
+            raise ValueError(
+                "--critic-protocol=anthropic requires one of "
+                + " / ".join(llm_config.ANTHROPIC_CREDENTIAL_ENV_ORDER)
+            )
+        return requested
+
+    # Ask the resolver the review client will actually use, rather than
+    # re-deriving its key chain here. The local copy listed only OPENAI_API_KEY
+    # and LLM_GATEWAY_KEY, so it rejected an Anthropic-only host whose gateway
+    # token and derived base URL do configure this client -- a config that runs.
+    if requested == "openai":
+        try:
+            resolved = llm_config.resolve_openai_client_config()
+        except llm_config.LLMConfigError as exc:
+            raise ValueError(f"--critic-protocol=openai requires an OpenAI-capable credential: {exc}") from exc
+        # A gateway key is scoped to its gateway. Judged on the resolved base
+        # URL, not on OPENAI_BASE_URL alone, so a URL derived from the Anthropic
+        # side counts; with none the client would fall back to official OpenAI
+        # and send the gateway key there.
+        if resolved.base_url is None and not _any_env_set(("OPENAI_API_KEY",)):
+            raise ValueError(
+                "--critic-protocol=openai with only a gateway key requires a base URL "
+                "(OPENAI_BASE_URL, or ANTHROPIC_BASE_URL to derive it from); otherwise "
+                "the gateway key is sent to the official OpenAI endpoint"
+            )
+    return requested
+
+
 def _load_action_verdict_policy() -> dict[str, str]:
     """Return the registry-derived per-action verdict policy (or empty on error).
 
@@ -51,13 +118,9 @@ def _load_action_verdict_policy() -> dict[str, str]:
     critic-agent approves exploration / archival actions without demanding the
     before/after evidence they themselves produce.
     """
-    try:
-        from hyperloom.orchestrator.actions.registry import ActionRegistry
+    from ..protocol.action_surfaces import ACTION_CATALOGUE
 
-        _reg = ActionRegistry().load()
-        return {a.name: a.verdict_class for a in _reg.all()}
-    except Exception:  # noqa: BLE001 — degrade to empty policy
-        return {}
+    return {a.name: a.verdict_class for a in ACTION_CATALOGUE.values()}
 
 
 def _build_backends(
@@ -72,6 +135,7 @@ def _build_backends(
     robustness_agent_root: Path | None = None,
     robustness_options: dict[str, Any] | None = None,
     codex_follows_claude: bool = False,
+    critic_protocol: str = "auto",
 ) -> dict[str, Any]:
     """Construct all per-role backends.
 
@@ -94,17 +158,26 @@ def _build_backends(
             ``robustness_choice='agent'``.
         robustness_options: Optional ``request.options`` overrides for the
             robustness agent.
+        codex_follows_claude: Whether the Codex model id follows the Claude one.
+        critic_protocol: Review transport selector (``auto``, ``openai`` or
+            ``anthropic``).
 
     Returns:
         A mapping of role name to its constructed backend.
 
     Raises:
-        ValueError: If ``critic_choice`` / ``robustness_choice`` is invalid, or
-            an ``agent`` choice is missing its required agent root.
+        ValueError: If ``critic_choice`` / ``robustness_choice`` /
+            ``critic_protocol`` is invalid, an ``agent`` choice is missing its
+            required agent root, or a forced protocol has no credential.
     """
     if critic_choice not in ("mock", "agent"):
         raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
 
+    # The two operands differ only in when they were evaluated, and that is the
+    # point: the caller samples this before _preflight() derives OPENAI_BASE_URL
+    # from ANTHROPIC_BASE_URL. Re-deriving it here alone would read an
+    # Anthropic-only deploy as two-sided, purely because preflight filled in the
+    # endpoint. Only `auto` consults this; an explicit --critic-protocol wins.
     provider_anthropic_only = codex_follows_claude or _official_anthropic_only()
     provider_openai_only = (not codex_follows_claude) and (
         _official_openai_only()
@@ -113,34 +186,36 @@ def _build_backends(
 
     if critic_choice == "mock":
         critic_backend: Any = MockCriticBackend()
-    elif provider_anthropic_only and critic_agent_root is not None:
-        # Anthropic-only: keep the full KB+tools critic-agent, driving review
-        # inference over the native /v1/messages endpoint.
-        critic_backend = CriticAgentBackend(
-            critic_agent_root=critic_agent_root,
-            session_dir=session_dir,
-            protocol="anthropic",
-            claude_model=claude_model,
-            codex_model=codex_model,
-            kb_mode=critic_kb_mode,
-            action_verdict_policy=_load_action_verdict_policy(),
-        )
-    elif provider_anthropic_only:
-        # Fallback: critic-agent runtime unresolved, degrade to Claude tool-use.
-        critic_backend = ClaudeBackend(
-            model=claude_model,
-            max_turns_default=4,
-        )
     else:  # "agent"
+        # No degraded critic: dropping the runtime would silently discard KB
+        # priors, session memory and reviewed_msg_ids dedupe. Operators who
+        # genuinely want no review pass --critic-mock.
         if critic_agent_root is None:
             raise ValueError("_build_backends: critic_choice='agent' requires critic_agent_root")
-        critic_backend = CriticAgentBackend(
-            critic_agent_root=critic_agent_root,
-            session_dir=session_dir,
-            codex_model=codex_model,
-            kb_mode=critic_kb_mode,
-            action_verdict_policy=_load_action_verdict_policy(),
+        protocol = _resolve_critic_protocol(
+            critic_protocol,
+            provider_anthropic_only=provider_anthropic_only,
         )
+        _policy = _load_action_verdict_policy()
+        if protocol == "anthropic":
+            critic_backend = CriticAgentBackend(
+                critic_agent_root=critic_agent_root,
+                session_dir=session_dir,
+                protocol="anthropic",
+                claude_model=claude_model,
+                codex_model=codex_model,
+                kb_mode=critic_kb_mode,
+                action_verdict_policy=_policy,
+            )
+        else:
+            critic_backend = CriticAgentBackend(
+                critic_agent_root=critic_agent_root,
+                session_dir=session_dir,
+                protocol="openai",
+                codex_model=codex_model,
+                kb_mode=critic_kb_mode,
+                action_verdict_policy=_policy,
+            )
 
     if robustness_choice not in ("mock", "agent"):
         raise ValueError(f"_build_backends: robustness_choice={robustness_choice!r} not in {{'mock','agent'}}")

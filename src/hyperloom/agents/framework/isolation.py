@@ -25,6 +25,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom.common.git_safety import safe_directory_args
+
 from .logging_setup import get_logger
 from .models import Candidate, ExploreRequest
 
@@ -72,6 +74,9 @@ def _run_subprocess(args: list[str], *, cwd: Path | None = None, timeout_sec: in
 def _run_git(args: list[str], *, cwd: Path | None = None, timeout_sec: int = 1800) -> None:
     """Run a git command with a timeout; thin wrapper over :func:`_run_subprocess`.
 
+    Carries a ``safe.directory`` exception so a repo owned by another uid (the
+    bind-mounted container case) stays operable. ``cwd`` locates it absent ``-C``.
+
     Args:
         args (list[str]): Full git argument vector (including ``"git"``).
         cwd (Path | None): Working directory, or ``None`` for the current one.
@@ -81,7 +86,8 @@ def _run_git(args: list[str], *, cwd: Path | None = None, timeout_sec: int = 180
         subprocess.CalledProcessError: If git exits non-zero.
         subprocess.TimeoutExpired: If git exceeds ``timeout_sec``.
     """
-    _run_subprocess(args, cwd=cwd, timeout_sec=timeout_sec)
+    executable, *rest = args
+    _run_subprocess([executable, *safe_directory_args(rest, cwd=cwd)], cwd=cwd, timeout_sec=timeout_sec)
 
 
 # ---------------------------------------------------------------------------

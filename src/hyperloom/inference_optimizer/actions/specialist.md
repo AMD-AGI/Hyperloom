@@ -45,8 +45,9 @@ write source patches. The new contract is:
 
 ## When to delegate
 
-The current phase MUST be `EXPLORE`. Inside EXPLORE the Orchestration
-LLM should dispatch specialists as the **primary** entry into a round:
+Specialist is available in `EXPLORE`, `FRAMEWORK_AGENT`, and
+`KERNEL_AGENT`.  Inside EXPLORE the Orchestration LLM should dispatch
+specialists as the **primary** entry into a round:
 
 1. Read `SharedState.gaps[]` (or fall back to `last_action_failures` +
    `explore_search.winners_history` when gaps are empty).

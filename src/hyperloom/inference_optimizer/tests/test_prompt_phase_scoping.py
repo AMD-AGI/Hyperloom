@@ -10,10 +10,12 @@ decision needs survive every phase.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir, asset_system_prompts_dir
-from hyperloom.orchestrator.actions.registry import ActionRegistry
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.phases import machine_state as _ps
 from hyperloom.orchestrator.prompts.prompt_builder import (
     _filter_rules_fragment,
@@ -74,11 +76,11 @@ ALWAYS_ON = (
 
 
 @pytest.fixture(scope="module")
-def registry() -> ActionRegistry:
-    return ActionRegistry().load()
+def registry() -> dict:
+    return ACTION_CATALOGUE
 
 
-def _build(registry: ActionRegistry, phase: str) -> str:
+def _build(registry: dict, phase: str) -> str:
     return build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
@@ -488,6 +490,60 @@ def test_inject_phase_constraints_is_a_noop_without_a_phase():
     _inject_phase_constraints(bundle, "")
     assert "phase" not in bundle
     assert "review_constraints" not in bundle
+
+
+# Reloop feasibility must reach the phases where the defer/advance call is made.
+
+
+def _render_state(phase: str, max_minutes: float = 120.0):
+    """Build a minimal SharedState parked in ``phase`` with a live clock."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    s = SharedState()
+    s.phase = phase
+    s.max_minutes = max_minutes
+    s.start_ts = datetime.now(timezone.utc).isoformat()
+    return s
+
+
+def _reloop_line(phase: str) -> str | None:
+    out = _render_state(phase).to_phase_status_summary()
+    return next((line for line in out.splitlines() if line.startswith("reloop")), None)
+
+
+def test_reloop_line_reaches_every_mid_chain_phase():
+    for phase in (_ps.PHASE_FRAMEWORK_AGENT, _ps.PHASE_EXPLORE, _ps.PHASE_KERNEL_AGENT, _ps.PHASE_SWEEP):
+        line = _reloop_line(phase)
+        assert line is not None, f"reloop line missing for {phase}"
+        # The field name is the prompt/doc contract; models grep for it verbatim.
+        assert "cycle_reloop_feasible=" in line
+        assert "threshold_sec=" in line
+        assert "session_remaining_sec=" in line
+
+
+def test_reloop_line_absent_in_wind_down_phases():
+    for phase in (_ps.PHASE_PRELUDE, _ps.PHASE_CLOSE):
+        assert _reloop_line(phase) is None, f"reloop line leaked into {phase}"
+
+
+def test_reloop_is_a_projection_before_sweep():
+    assert "(projected)" in (_reloop_line(_ps.PHASE_EXPLORE) or "")
+    assert "(projected)" not in (_reloop_line(_ps.PHASE_SWEEP) or "")
+
+
+def test_reloop_feasibility_matches_the_transition_decision():
+    s = _render_state(_ps.PHASE_SWEEP)
+    reloop, _ = _ps.should_reloop_to_explore(s)
+    expected = "true" if reloop else "false"
+    assert f"cycle_reloop_feasible={expected}" in (_reloop_line(_ps.PHASE_SWEEP) or "")
+
+
+def test_reloop_infeasible_when_both_target_phases_are_disabled():
+    s = _render_state(_ps.PHASE_SWEEP)
+    s.explore_enabled = False
+    s.framework_agent_phase_enabled = False
+    line = next(line for line in s.to_phase_status_summary().splitlines() if line.startswith("reloop"))
+    assert "cycle_reloop_feasible=false" in line
 
 
 def test_the_payload_contract_lists_only_required_keys():

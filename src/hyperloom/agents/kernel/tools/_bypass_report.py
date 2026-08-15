@@ -29,7 +29,11 @@ from _bypass_fusion import analyze_fusion
 from _analysis_md import render_report
 from _bypass_roofline import compute_roofline
 from _kernel_category import canonical_category
-from _bypass_source_resolver import editable_trace_source, resolve_by_kernel_name, resolve_source
+from _bypass_source_resolver import (
+    resolve_by_kernel_name,
+    resolve_source,
+    resolve_triton_py,
+)
 from _idle_gate import resolve_idle_pct_threshold
 from _roofline_source import PLACEHOLDER as _RL_PLACEHOLDER
 from _task_group_contract import (
@@ -162,6 +166,7 @@ def _launch_grid_shape_entries(grid: Any, block: Any, call_count: int) -> list[d
     direct-launch, graph replay): the launch grid/block is coarse geometry, not
     dispatch-grade operand dims. Returns ``[]`` when no positive dimension is present.
     """
+
     def _dims(v: Any) -> list[int]:
         out: list[int] = []
         for d in v if isinstance(v, (list, tuple)) else []:
@@ -263,9 +268,7 @@ def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]
         reported_source = src
         operation = str(c.get("name") or "")
         function_name = operation
-        legacy_function_name = str(
-            c.get("device_kernel_name") or operation
-        )
+        legacy_function_name = str(c.get("device_kernel_name") or operation)
         source_kind = "native" if src.lower().endswith(_NATIVE_SOURCE_EXTS) else "py"
         identity = build_operator_identity(
             source_kind=source_kind,
@@ -379,10 +382,7 @@ def _implementation_contract(
     """Derive source type and kind only from explicit trace/source evidence."""
     traced_kind = str(trace_kernel_kind or "").strip().lower().replace("-", "_")
     normalized_op = str(op_name or "").strip().lower()
-    if "flydsl" in traced_kind or (
-        normalized_op.startswith("pseudo_op::")
-        and "flydsl" in normalized_op
-    ):
+    if "flydsl" in traced_kind or (normalized_op.startswith("pseudo_op::") and "flydsl" in normalized_op):
         return "flydsl", "flydsl"
     if "triton" in traced_kind:
         return "triton", "triton"
@@ -432,16 +432,48 @@ def build_candidates(
         kernel_id = f"k{idx:03d}"
         display = op_name or _short_name(kname)
 
-        # Source resolution. Priority: (1) a Triton kernel_file from the trace's
-        # cpu_op args; (2) op_to_source.json lookup; (3) repo-scan by device
-        # kernel name; else unresolved.
-        source_file = editable_trace_source(k.get("op_kernel_file", "") or "", k.get("op_kernel_backend", "") or "")
-        source_method = "trace_kernel_file" if source_file else "unresolved"
-        if not source_file and op_name:
+        # Source resolution. Priority: (1) a Triton .py kernel_file from the
+        # trace's cpu_op args, with the exact @triton.jit def line pinned via AST
+        # (resolve_triton_py, method "trace_kernel_file[_ast]"); (2) native
+        # .cu/.hip active-finder lookup by device kernel symbol (resolve_source ->
+        # source_resolver, method "symbol_index"); (3) repo-scan by device kernel
+        # name; else unresolved. There is no static op_to_source map.
+        source_file, source_line, source_method = resolve_triton_py(
+            k.get("op_kernel_file", "") or "",
+            k.get("op_kernel_backend", "") or "",
+            symbol=kname,
+        )
+        # Native lookup is driven by the device symbol (kname), not op_name:
+        # the finder ignores op_name, and device kernels with no correlated
+        # cpu_op (common under HIP graphs) arrive with op_name="". Gating on
+        # kname keeps those resolvable.
+        #
+        # finder_patchable carries the finder's authoritative patchability
+        # verdict onto the candidate (op_to_source_* below); it stays None for a
+        # Triton/repo-scan hit, which the classifier handles instead.
+        finder_patchable: bool | None = None
+        finder_status = ""
+        finder_reason = ""
+        if not source_file and kname:
             source_file, method = resolve_source(op_name, framework=framework, device_kernel_name=kname)
             if source_file:
                 source_method = method
-        if not source_file and kname:
+                finder_patchable = True
+                finder_status = "resolved"
+            elif method == "non_patchable":
+                # A positive "known not rewritable" verdict (e.g. a CK template
+                # instantiation), NOT a miss. Record it and DO NOT fall through
+                # to the repo-scan tier, which could otherwise override the
+                # finder with a coincidental kernel-name hit.
+                source_method = method
+                finder_patchable = False
+                finder_status = "non_rewritable"
+                finder_reason = (
+                    "non-patchable kernel (symbol-detected: CK template / no single editable __global__ source)"
+                )
+        # Repo-scan is the last resort, and only for a genuine miss -- never when
+        # the finder already returned an authoritative non_patchable verdict.
+        if not source_file and kname and source_method != "non_patchable":
             source_file, method = resolve_by_kernel_name(kname)
             if source_file:
                 source_method = method
@@ -515,13 +547,25 @@ def build_candidates(
             "backend": framework,
             "framework": framework,
             "source_file": source_file,
+            # AST-pinned @triton.jit def line for .py sources (None when unpinned
+            # or for native .cu kernels resolved by the symbol index).
+            "source_line": source_line,
             "source_resolution_method": source_method,
             "source_type": source_type,
             "kernel_kind": kernel_kind,
             "reusable_native_kernel": kc.reusable,
-            # Non-reusable keeps the classifier reason; a reusable kernel with no
-            # resolved source is not dispatchable.
-            "skip_reason": (kc.skip_reason if not kc.reusable else ("" if source_file else "source file not resolved")),
+            # Non-reusable keeps the classifier reason; a reusable kernel with a
+            # finder non_patchable verdict reports that verdict; a reusable
+            # kernel with no resolved source is simply not dispatchable.
+            "skip_reason": (
+                kc.skip_reason
+                if not kc.reusable
+                else (
+                    ""
+                    if source_file
+                    else (f"source: {finder_reason}" if finder_patchable is False else "source file not resolved")
+                )
+            ),
             "recommended_backends": list(_REUSABLE_BACKENDS) if kc.reusable else [],
             # Seeds for the GEAK harness + rocprof enrichment (only when
             # discover_benchmarks is set).
@@ -538,6 +582,14 @@ def build_candidates(
             # the report and routing do not claim a geometry-only kernel is ready.
             "shape_dispatchable": shape_provenance in _DISPATCHABLE_SHAPE_PROVENANCE,
         }
+        # Carry the finder's authoritative patchability verdict (method
+        # "symbol_index") so the downstream gate honors it instead of
+        # re-deriving from heuristics, and so a non_patchable verdict is not
+        # silently indistinguishable from an unresolved miss.
+        if finder_patchable is not None:
+            cand["op_to_source_status"] = finder_status
+            cand["op_to_source_patchable"] = finder_patchable
+            cand["op_to_source_reason"] = finder_reason
         # Analytical roofline: derive bound_type / AI / efficiency from captured
         # shapes + measured time for EVERY estimable kernel (rocprof enrichment
         # later refines it to a measured roofline). Only precise operand shapes
@@ -545,9 +597,7 @@ def build_candidates(
         # tile-name fallbacks are geometry, not operand dims, so they would
         # poison the roofline -- skip analytical estimation for them.
         _roofline_shape = (
-            shape_entries[0]["shape"]
-            if shape_entries and shape_provenance in _DISPATCHABLE_SHAPE_PROVENANCE
-            else ""
+            shape_entries[0]["shape"] if shape_entries and shape_provenance in _DISPATCHABLE_SHAPE_PROVENANCE else ""
         )
         rl = compute_roofline(
             category=kc.category,
@@ -1151,9 +1201,7 @@ def _render_bypass_extra_sections(
                 )
                 L.append(
                     f"**Source**: `{src}` (via {c.get('source_resolution_method') or 'unknown'}); "
-                    f"{_dispatch_note}"
-                    + (f"; task group `{tg}`" if tg else "")
-                    + "."
+                    f"{_dispatch_note}" + (f"; task group `{tg}`" if tg else "") + "."
                 )
             else:
                 L.append(

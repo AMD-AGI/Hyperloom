@@ -66,6 +66,7 @@ htmlcov/
 # PR description scratchpads and local review notes.
 pr.md
 pr_*.md
+*.issue.md
 Specialist.discuss.md
 specialist.discuss*.md
 specialist.info.md
@@ -79,12 +80,15 @@ specialist.info.md
 # claude files
 *.claude
 CLAUDE.md
+.agents
+skills-lock.json
 
 # temp file
 code_functions_guidance_v2
 .gen_funcdocs.wf.js
 .gen_funcdocs_reboot.wf.js
 evaluation_analysis
+code-clean-ref
 
 
 # Operator runtime env (contains real API keys — never commit)
@@ -100,3 +104,7 @@ resume_kernel_forge.sh
 skyseg.onnx
 # Local prompt-audit scratch (rendered prompts, session dumps, audit notes)
 .prompt-audit/
+# Scratch plan and revision files
+revise.plan.md
+# Experiment and repro artefacts
+/prefix_cache_repro/

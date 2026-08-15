@@ -3,9 +3,10 @@
 
 """Unit tests for :class:`LlmRcaEngine` and :class:`RcaThrottle`.
 
-The engines call through ``hyperloom.common.llm_config``. Those entry points
-are patched with ``raising=False`` so this suite is independent of whether the
-provider contract has landed in the module yet.
+The engines call through ``hyperloom.common.llm_config``. Those entry points are
+patched by name, and deliberately with ``raising=True``: they are this repo's
+own symbols, so a rename should fail the patch here rather than leave the suite
+silently stubbing nothing and passing against the real transport.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from hyperloom.agents.robustness.decision.rca_engine import (
     load_rca_system_prompt,
 )
 from hyperloom.agents.robustness.signals import Symptom, SymptomSeverity
+from hyperloom.common import llm_config
 
 _LLM_CONFIG = "hyperloom.common.llm_config"
 
@@ -55,6 +57,37 @@ class _StubClient:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class _StubAnthropicCompletion:
+    """Stands in for ``llm_config.aanthropic_completion`` and records its params.
+
+    The Anthropic engine holds no client of its own now: llm_config owns
+    transport selection, so the seam is the entry point rather than an object.
+    """
+
+    def __init__(self, *, reply: _Reply | None = None, error: Exception | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._reply = reply
+        self._error = error
+
+    async def __call__(self, **params: Any) -> _Reply:
+        self.calls.append(params)
+        if self._error is not None:
+            raise self._error
+        return self._reply if self._reply is not None else _Reply("ok")
+
+
+def _install_anthropic_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reply: _Reply | None = None,
+    error: Exception | None = None,
+) -> _StubAnthropicCompletion:
+    """Route the Anthropic engine's single-shot entry point to a recorder."""
+    stub = _StubAnthropicCompletion(reply=reply, error=error)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.aanthropic_completion", stub)
+    return stub
 
 
 def _sym(
@@ -95,44 +128,24 @@ def _install_chat(
             raise error
         return reply if reply is not None else _Reply("ok")
 
-    monkeypatch.setattr(f"{_LLM_CONFIG}.achat_completion", _fake, raising=False)
-    return calls
-
-
-def _install_messages(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    reply: _Reply | None = None,
-    error: Exception | None = None,
-) -> list[dict[str, Any]]:
-    """Patch the async Anthropic Messages entry point; return the recorded calls."""
-    calls: list[dict[str, Any]] = []
-
-    async def _fake(client: Any, **params: Any) -> _Reply:
-        calls.append({"client": client, **params})
-        if error is not None:
-            raise error
-        return reply if reply is not None else _Reply("ok")
-
-    monkeypatch.setattr(f"{_LLM_CONFIG}.aanthropic_messages", _fake, raising=False)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.achat_completion", _fake)
     return calls
 
 
 def _install_client_factories(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[dict[str, Any]]]:
-    """Patch both client factories; return per-provider construction kwargs."""
-    built: dict[str, list[dict[str, Any]]] = {"openai": [], "anthropic": []}
+    """Patch the OpenAI client factory; return its construction kwargs.
+
+    Only the OpenAI engine builds a client. The Anthropic engine calls
+    llm_config's single-shot entry point, which owns its own transport.
+    """
+    built: dict[str, list[dict[str, Any]]] = {"openai": []}
 
     def _openai(**kwargs: Any) -> _StubClient:
         built["openai"].append(kwargs)
         return _StubClient()
 
-    def _anthropic(**kwargs: Any) -> _StubClient:
-        built["anthropic"].append(kwargs)
-        return _StubClient()
-
-    monkeypatch.setattr(f"{_LLM_CONFIG}.get_async_openai_client", _openai, raising=False)
-    monkeypatch.setattr(f"{_LLM_CONFIG}.get_async_anthropic_client", _anthropic, raising=False)
-    monkeypatch.setattr(f"{_LLM_CONFIG}.build_http_timeout", lambda **kwargs: kwargs, raising=False)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.get_async_openai_client", _openai)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.build_http_timeout", lambda **kwargs: kwargs)
     return built
 
 
@@ -191,16 +204,16 @@ async def test_llm_engine_uses_max_completion_tokens_for_gpt5_models(monkeypatch
 
 @pytest.mark.asyncio
 async def test_anthropic_rca_engine_calls_messages_contract_and_returns_text(monkeypatch: pytest.MonkeyPatch):
-    calls = _install_messages(
+    stub = _install_anthropic_completion(
         monkeypatch,
         reply=_Reply("anthropic root cause", usage={"input_tokens": 11, "output_tokens": 7}),
     )
+    calls = stub.calls
 
     engine = AnthropicRcaEngine(
         base_url="https://api.deepseek.com/anthropic",
         api_key="deepseek-token",
         model="deepseek-v4-pro",
-        client=_StubClient(),
         throttle=_open_throttle(),
     )
     engine.set_tick(1)
@@ -232,6 +245,7 @@ async def test_anthropic_rca_engine_calls_messages_contract_and_returns_text(mon
 async def test_llm_engine_builds_its_client_from_the_openai_factory(monkeypatch: pytest.MonkeyPatch):
     built = _install_client_factories(monkeypatch)
     calls = _install_chat(monkeypatch, reply=_Reply("ok"))
+    anthropic = _install_anthropic_completion(monkeypatch)
 
     engine = LlmRcaEngine(
         base_url="https://gateway.example/v1",
@@ -243,9 +257,9 @@ async def test_llm_engine_builds_its_client_from_the_openai_factory(monkeypatch:
     await engine.summarize(_sym(name="a", subject={"k": "1"}))
     await engine.summarize(_sym(name="b", subject={"k": "2"}))
 
-    # Built lazily, exactly once, and never through the Anthropic factory.
+    # Built lazily, exactly once, and never through the Anthropic entry point.
     assert len(built["openai"]) == 1
-    assert built["anthropic"] == []
+    assert anthropic.calls == []
     assert built["openai"][0]["env"]["OPENAI_API_KEY"] == "openai-token"
     assert built["openai"][0]["env"]["OPENAI_BASE_URL"] == "https://gateway.example/v1"
     assert built["openai"][0]["timeout"] == {"connect": 3.0, "read": 3.0, "write": 3.0, "pool": 3.0}
@@ -253,22 +267,126 @@ async def test_llm_engine_builds_its_client_from_the_openai_factory(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_anthropic_engine_builds_its_client_from_the_anthropic_factory(monkeypatch: pytest.MonkeyPatch):
+async def test_anthropic_engine_calls_the_entry_point_without_in_process_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """llm_config resolves the credential, so only the budgets cross over.
+
+    Passing no base_url/api_key is the normal shape for a subscription-token
+    host, and the call must still be issued.
+    """
     built = _install_client_factories(monkeypatch)
-    _install_messages(monkeypatch, reply=_Reply("ok"))
+    stub = _install_anthropic_completion(monkeypatch)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: True)
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", timeout_s=7.0, throttle=_open_throttle())
+    engine.set_tick(1)
+    await engine.summarize(_sym())
+
+    assert len(stub.calls) == 1
+    assert built["openai"] == [], "the Anthropic engine must not build an OpenAI client"
+    assert engine.client is None, "the Anthropic engine owns no client to leak"
+    # The CLI spends part of its budget spawning a process, so the HTTP-sized
+    # timeout is floored rather than forwarded.
+    assert stub.calls[0]["timeout_s"] >= 60.0
+
+
+@pytest.mark.asyncio
+async def test_anthropic_engine_hands_the_discovered_credentials_to_the_transport(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Config.discover may resolve the pair from provider-specific variables,
+    so the canonical names have to be overlaid before the transport reads
+    them — otherwise the CLI re-reads whatever the ambient environment holds."""
+    stub = _install_anthropic_completion(monkeypatch)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: True)
 
     engine = AnthropicRcaEngine(
-        base_url="https://api.deepseek.com/anthropic",
-        api_key="deepseek-token",
+        base_url="https://gw.example/anthropic",
+        api_key="discovered-key",
         throttle=_open_throttle(),
     )
     engine.set_tick(1)
     await engine.summarize(_sym())
 
-    assert len(built["anthropic"]) == 1
-    assert built["openai"] == []
-    assert built["anthropic"][0]["env"]["ANTHROPIC_API_KEY"] == "deepseek-token"
-    assert built["anthropic"][0]["env"]["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    env = stub.calls[0]["env"]
+    assert env["ANTHROPIC_API_KEY"] == "discovered-key"
+    assert env["ANTHROPIC_BASE_URL"] == "https://gw.example/anthropic"
+
+
+@pytest.mark.asyncio
+async def test_engine_disables_itself_after_a_missing_credential(monkeypatch: pytest.MonkeyPatch):
+    """A missing credential fails identically on every later tick, so it costs
+    one ERROR and stops the engine rather than a warning per symptom."""
+    calls: list[int] = []
+
+    async def _raise(**_kw: Any) -> Any:
+        calls.append(1)
+        raise llm_config.LLMConfigError("no Anthropic credential configured")
+
+    monkeypatch.setattr(f"{_LLM_CONFIG}.aanthropic_completion", _raise)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: True)
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", throttle=_open_throttle())
+    engine.set_tick(1)
+
+    assert await engine.summarize(_sym()) == ""
+    assert await engine.summarize(_sym()) == ""
+    assert len(calls) == 1, "the second tick must not retry a call that cannot succeed"
+
+
+@pytest.mark.asyncio
+async def test_engine_keeps_retrying_after_a_transient_failure(monkeypatch: pytest.MonkeyPatch):
+    """A provider-side error may well not recur, so it must not be latched."""
+    calls: list[int] = []
+
+    async def _raise(**_kw: Any) -> Any:
+        calls.append(1)
+        raise RuntimeError("anthropic messages failed: HTTP 503")
+
+    monkeypatch.setattr(f"{_LLM_CONFIG}.aanthropic_completion", _raise)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: True)
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", throttle=_open_throttle())
+    engine.set_tick(1)
+
+    await engine.summarize(_sym())
+    await engine.summarize(_sym())
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_engine_disables_itself_when_the_transport_disappears(monkeypatch: pytest.MonkeyPatch):
+    """The claude CLI going missing mid-run is permanent for this process, and
+    is recognised by re-probing rather than by matching the error text."""
+    ready = {"value": True}
+
+    async def _raise(**_kw: Any) -> Any:
+        ready["value"] = False
+        raise RuntimeError("the claude CLI is not available")
+
+    monkeypatch.setattr(f"{_LLM_CONFIG}.aanthropic_completion", _raise)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: ready["value"])
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", throttle=_open_throttle())
+    engine.set_tick(1)
+    await engine.summarize(_sym())
+
+    assert engine._disabled is True
+
+
+@pytest.mark.asyncio
+async def test_anthropic_engine_skips_when_no_transport_is_available(monkeypatch: pytest.MonkeyPatch):
+    """A host with no Anthropic credential — or a subscription token but no
+    claude CLI — must not retry a doomed call on every tick."""
+    stub = _install_anthropic_completion(monkeypatch)
+    monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: False)
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", throttle=_open_throttle())
+    engine.set_tick(1)
+
+    assert await engine.summarize(_sym()) == ""
+    assert stub.calls == []
 
 
 @pytest.mark.asyncio
@@ -283,22 +401,34 @@ async def test_no_client_is_built_before_the_first_call(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("engine_cls", [LlmRcaEngine, AnthropicRcaEngine])
-async def test_aclose_closes_only_engine_owned_clients(monkeypatch: pytest.MonkeyPatch, engine_cls):
+async def test_aclose_closes_only_engine_owned_clients(monkeypatch: pytest.MonkeyPatch):
     _install_client_factories(monkeypatch)
     _install_chat(monkeypatch, reply=_Reply("ok"))
-    _install_messages(monkeypatch, reply=_Reply("ok"))
 
-    owned = engine_cls(base_url="https://gateway.example/v1", api_key="token", throttle=_open_throttle())
+    owned = LlmRcaEngine(base_url="https://gateway.example/v1", api_key="token", throttle=_open_throttle())
     owned.set_tick(1)
     await owned.summarize(_sym())
     await owned.aclose()
     assert owned.client.closed is True
 
     injected = _StubClient()
-    borrowed = engine_cls(base_url="https://gateway.example/v1", api_key="token", client=injected)
+    borrowed = LlmRcaEngine(base_url="https://gateway.example/v1", api_key="token", client=injected)
     await borrowed.aclose()
     assert injected.closed is False
+
+
+@pytest.mark.asyncio
+async def test_anthropic_engine_aclose_is_a_noop_without_a_client(monkeypatch: pytest.MonkeyPatch):
+    """Nothing to close: the entry point owns any transport a call needs."""
+    _install_client_factories(monkeypatch)
+    _install_anthropic_completion(monkeypatch)
+
+    engine = AnthropicRcaEngine(base_url="", api_key="", throttle=_open_throttle())
+    engine.set_tick(1)
+    await engine.summarize(_sym())
+    await engine.aclose()
+
+    assert engine.client is None
 
 
 # Usage ledger
@@ -443,16 +573,12 @@ async def test_llm_engine_returns_empty_when_the_provider_call_fails(monkeypatch
 
 @pytest.mark.asyncio
 async def test_anthropic_engine_returns_empty_when_the_provider_call_fails(monkeypatch: pytest.MonkeyPatch):
-    _install_messages(monkeypatch, error=TimeoutError("slow"))
-
-    engine = AnthropicRcaEngine(
-        base_url="https://api.anthropic.com",
-        api_key="key",
-        client=_StubClient(),
-    )
+    stub = _install_anthropic_completion(monkeypatch, error=TimeoutError("slow"))
+    engine = AnthropicRcaEngine(base_url="https://api.anthropic.com", api_key="key")
     engine.set_tick(1)
 
     assert await engine.summarize(_sym()) == ""
+    assert len(stub.calls) == 1, "the call must be attempted, not skipped"
 
 
 @pytest.mark.asyncio
@@ -477,15 +603,14 @@ def test_load_rca_system_prompt_reads_package_asset():
 
 @pytest.mark.asyncio
 async def test_anthropic_engine_sends_asset_as_system_field(monkeypatch: pytest.MonkeyPatch):
-    calls = _install_messages(monkeypatch)
+    stub = _install_anthropic_completion(monkeypatch)
 
     engine = AnthropicRcaEngine(
         base_url="https://api.anthropic.com",
         api_key="key",
-        client=_StubClient(),
         throttle=_open_throttle(),
     )
     engine.set_tick(1)
     await engine.summarize(_sym())
 
-    assert calls[0]["system"] == load_rca_system_prompt()
+    assert stub.calls[0]["system"] == load_rca_system_prompt()

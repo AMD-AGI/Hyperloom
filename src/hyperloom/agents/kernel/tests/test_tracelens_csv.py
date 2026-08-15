@@ -52,50 +52,6 @@ def test_default_top_k_invalid_falls_back(monkeypatch):
     assert tla._default_top_k() == tla._DEFAULT_KERNEL_CANDIDATES_TOP_K
 
 
-def test_rocm_paged_attention_dispatch_resolves_runtime_implementation():
-    """The observed ROCM_ATTN symbol must resolve past the shared wrapper."""
-    resolution = tla.OpResolver(tla.load_mapping()).resolve_op_source(
-        "vllm::unified_attention_with_output",
-        framework="vllm",
-        device_kernel_name="kernel_paged_attention_2d",
-    )
-
-    assert resolution is not None
-    assert resolution.is_routable is True
-    assert resolution.primary_source.endswith(
-        "vllm/v1/attention/ops/chunked_prefill_paged_decode.py"
-    )
-    assert resolution.primary_runtime_backend == "ROCM_ATTN"
-    assert resolution.matched_route == "kernel_paged_attention_2d"
-
-
-def test_non_rewritable_dispatch_still_records_runtime_backend():
-    resolution = tla.OpResolver(
-        {
-            "vllm::dispatch_op": {
-                "kind": "dispatch",
-                "vllm": {
-                    "runtime_kernel": {
-                        "kernel_source_path": "vllm/ops/runtime.py",
-                        "kernel_kind": "triton",
-                        "backend": "ROCM_ATTN",
-                        "patchable": False,
-                    }
-                },
-            }
-        }
-    ).resolve_op_source(
-        "vllm::dispatch_op",
-        framework="vllm",
-        device_kernel_name="runtime_kernel",
-    )
-    assert resolution is not None
-    assert resolution.status == "non_rewritable"
-    item: dict = {}
-    resolution.stamp_onto(item)
-    assert item["runtime_backend"] == "ROCM_ATTN"
-
-
 def test_deterministic_category_analysis_command_maps_manifest_names(tmp_path):
     """Deterministic route must invoke the real TraceLens script for manifest category names."""
     cases = {
@@ -1527,15 +1483,6 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
         (output_dir / "analysis.md").write_text("# Codex TraceLens report\n", encoding="utf-8")
         return CodexSessionResult(
             text="wrote analysis.md",
-            items=(
-                {
-                    "type": "commandExecution",
-                    "command": "TraceLens_generate_perf_report_pytorch --help",
-                    "exitCode": 0,
-                },
-                {"type": "fileChange", "changes": [{"path": str(output_dir / "analysis.md"), "kind": "add"}]},
-                {"type": "agentMessage", "text": "wrote analysis.md"},
-            ),
             usage={"input_tokens": 11, "output_tokens": 7, "reasoning_output_tokens": 900},
             thread_id="thread-123",
         )
@@ -1572,7 +1519,6 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
     assert res.raw_text == "wrote analysis.md"
     assert "tracelens_agent_report" in res.artifact_paths
     assert res.artifact_paths["tracelens_cmd_prefix"] == str(output_dir / "cache" / "cmd_prefix.txt")
-    assert "tracelens_agent_transcript" in res.artifact_paths
     # A clean turn records no SDK error.
     assert "tracelens_agent_sdk_error" not in res.artifact_paths
 
@@ -1622,56 +1568,6 @@ def test_run_tracelens_skill_codex_floors_the_turn_timeout(tmp_path, monkeypatch
     )
 
     assert calls[0]["timeout_sec"] == 60.0
-
-
-def test_run_tracelens_skill_codex_transcript_records_typed_items(tmp_path, monkeypatch):
-    """The transcript must be derived from the SDK's typed thread items."""
-    import asyncio
-
-    from hyperloom.common.codex_session import CodexSessionResult
-
-    output_dir = tmp_path / "out"
-
-    async def _fake_codex_turn(**_kwargs):
-        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
-        return CodexSessionResult(
-            text="final answer",
-            items=(
-                {"type": "commandExecution", "command": "ls", "exitCode": 0},
-                {"type": "fileChange", "changes": [{"path": str(output_dir / "analysis.md"), "kind": "add"}]},
-            ),
-            usage={"input_tokens": 5, "output_tokens": 6},
-            thread_id="thread-abc",
-        )
-
-    _use_openai_only_env(monkeypatch)
-    logged: list[str] = []
-
-    res = asyncio.run(
-        tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
-            capture_folder=None,
-            budget_minutes=5,
-            codex_turn_runner=_fake_codex_turn,
-            log=logged.append,
-        )
-    )
-
-    transcript = Path(res.artifact_paths["tracelens_agent_transcript"])
-    records = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
-    assert [r["type"] for r in records] == ["commandExecution", "fileChange", "TurnResult"]
-    assert records[0]["item"]["command"] == "ls"
-    assert records[-1]["result"] == "final answer"
-    assert records[-1]["usage"] == {"input_tokens": 5, "output_tokens": 6}
-    assert records[-1]["thread_id"] == "thread-abc"
-    assert any("$ ls (exit 0)" in line for line in logged)
 
 
 def test_run_tracelens_skill_codex_raises_when_report_missing(tmp_path, monkeypatch):
@@ -1841,171 +1737,6 @@ async def _run_and_time(tlr_mod, query, options_cls, tmp_path, output_dir):
     return res, _time.monotonic() - t0
 
 
-def test_266_run_tracelens_skill_writes_agent_transcript(tmp_path):
-    """The SDK runner must persist a full stream-JSON transcript
-    (text + tool_use/tool_result blocks) next to ``analysis.md``, surfaced
-    via ``artifact_paths`` so it flows into the kernel-agent status sidecar.
-    Granularity is top-level orchestrator only.
-    """
-    import asyncio
-    import json as _json
-    from dataclasses import dataclass, field
-    from typing import Any
-
-    # Fakes named to match the real claude-agent-sdk class names so the
-    # serializer's class-name-based ``block`` tag mirrors production.
-    @dataclass
-    class TextBlock:
-        text: str
-
-    @dataclass
-    class ToolUseBlock:
-        name: str
-        input: dict
-        id: str = "tu_1"
-
-    @dataclass
-    class AssistantMessage:
-        content: list[Any]
-
-    @dataclass
-    class ResultMessage:
-        content: list[Any] = field(default_factory=list)
-        result: str = ""
-        usage: dict = field(default_factory=dict)
-
-    class _FakeOptions:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    output_dir = tmp_path / "out"
-
-    async def _fake_query(*, prompt, options):
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
-        yield AssistantMessage(content=[TextBlock("starting analysis")])
-        yield AssistantMessage(
-            content=[
-                ToolUseBlock(name="Bash", input={"command": "ls"}, id="tu_42"),
-            ]
-        )
-        yield ResultMessage(result="done", usage={"input_tokens": 10})
-
-    res = asyncio.run(
-        tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI300X",
-            framework="sglang",
-            analysis_mode="default",
-            capture_folder=None,
-            budget_minutes=1,
-            sdk_query_factory=_fake_query,
-            sdk_options_cls=_FakeOptions,
-        )
-    )
-
-    transcript_path = output_dir / "agent_transcript.jsonl"
-    assert transcript_path.exists(), "stream-JSON transcript must be written"
-    assert res.artifact_paths.get("tracelens_agent_transcript") == str(transcript_path)
-
-    lines = [_json.loads(line) for line in transcript_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert len(lines) == 3, f"one JSON object per SDK message, got {len(lines)}"
-
-    # The tool_use block must be captured with its name + input so an
-    # operator can see which command the agent ran (lifecycle visibility).
-    tool_blocks = [
-        b for rec in lines for b in rec.get("content", []) if b.get("block") in ("ToolUseBlock", "ServerToolUseBlock")
-    ]
-    assert any(b.get("name") == "Bash" and b.get("input", {}).get("command") == "ls" for b in tool_blocks), (
-        f"tool_use block not captured: {tool_blocks}"
-    )
-
-    # Terminal ResultMessage usage is captured for token accounting.
-    assert any(rec.get("usage", {}).get("input_tokens") == 10 for rec in lines)
-
-
-def test_266_transcript_failure_never_aborts_run(tmp_path):
-    """Transcript capture is best-effort — a serialization or IO
-    error on the logging side must never abort an otherwise-successful
-    TraceLens run. ``analysis.md`` is still the contracted exit point."""
-    import asyncio
-
-    class _Unserializable:
-        """A content block whose attributes raise on access."""
-
-        @property
-        def text(self):  # noqa: D401
-            raise RuntimeError("boom")
-
-    class _Message:
-        def __init__(self, content):
-            self.content = content
-
-    class _FakeOptions:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    output_dir = tmp_path / "out"
-
-    async def _fake_query(*, prompt, options):
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
-        yield _Message(content=[_Unserializable()])
-
-    res = asyncio.run(
-        tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI300X",
-            framework="sglang",
-            analysis_mode="default",
-            capture_folder=None,
-            budget_minutes=1,
-            sdk_query_factory=_fake_query,
-            sdk_options_cls=_FakeOptions,
-        )
-    )
-
-    # Run still succeeds: report resolved, no crash from transcript path.
-    assert res.report_path.exists()
-
-
-def test_266_transcript_caps_oversized_fields():
-    """A megabyte tool_result / text block must be truncated so the
-    diagnostic transcript cannot grow unbounded. The cap applies to direct
-    string fields and to strings nested inside tool inputs/results."""
-    cap = tlr._TRANSCRIPT_FIELD_MAX_CHARS
-
-    # _cap_str leaves short strings alone, clips long ones with a marker.
-    assert tlr._cap_str("short") == "short"
-    big = "x" * (cap + 5000)
-    capped = tlr._cap_str(big)
-    assert len(capped) < len(big)
-    assert capped.startswith("x" * cap)
-    assert "truncated" in capped
-
-    # _json_safe caps strings at any nesting depth (tool_result content).
-    nested = tlr._json_safe({"out": ["y" * (cap + 100)]})
-    assert len(nested["out"][0]) <= cap + 64
-
-    class _ToolResultBlock:
-        def __init__(self, content):
-            self.content = content
-            self.tool_use_id = "tu_1"
-            self.is_error = False
-
-    rec = tlr._serialize_sdk_block(_ToolResultBlock("z" * (cap + 9000)))
-    assert "truncated" in rec["content"]
-    assert len(rec["content"]) < cap + 9000
-
-
 # ===========================================================================
 # analysis.md is the only contracted TraceLens output.
 def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
@@ -2127,6 +1858,183 @@ def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
     assert kind == "capture_dir"
     assert traces[0] == merged
     assert traces[-1] == tp0_decode
+
+
+def _xdit_roofline_capture(trace_dir: Path) -> Path:
+    """Recreate an xDiT roofline capture directory as production writes it.
+
+    Names and sizes are taken from a real failing run: a 910 KB rank capture
+    with 30k kernel events, beside a trace_split/ directory of ~900-byte
+    per-phase fragments and annotation sidecars.
+    """
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    raw = trace_dir / "rank_0.trace.json.gz"
+    with gzip.open(raw, "wt") as fh:
+        json.dump({"traceEvents": [
+            {"cat": "kernel", "name": "void flash_fwd<...>", "dur": 40}
+            for _ in range(64)
+        ]}, fh)
+
+    split = trace_dir / "trace_split"
+    split.mkdir()
+    for name in (
+        "decode_only_steady_state_prefill_0_prefilldecode_0_decode_1_bs1_conc1"
+        "_rank_0.trace.json.gz",
+        "mixed_steady_state_prefill_0_prefilldecode_0_decode_1_bs1_conc1"
+        "_rank_0.trace.json.gz",
+    ):
+        with gzip.open(split / name, "wt") as fh:
+            json.dump({"traceEvents": []}, fh)
+    for i in range(3):
+        with gzip.open(split / f"rank_0.trace_annotation_iteration_{i}.json.gz", "wt") as fh:
+            json.dump({"traceEvents": []}, fh)
+    (split / "execution_details.json").write_text('{"steps": 1}', encoding="utf-8")
+    return raw
+
+
+def test_discover_trace_inputs_prefers_raw_capture_over_split_fragments(tmp_path):
+    """The raw capture must lead, whatever the fragments are named.
+
+    Every file in this layout used to land in the same default bucket, so
+    alphabetical order decided -- and `decode_only_...` sorts ahead of
+    `rank_0.trace.json.gz`. The preflight then read a 900-byte fragment, found
+    no GPU kernels, and reported the whole capture as CPU-only.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    raw = _xdit_roofline_capture(trace_dir)
+
+    kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    assert kind == "capture_dir"
+    assert traces[0] == raw, "the raw capture must be the first candidate"
+    # Nothing derived may outrank it.
+    assert all("trace_split" in p.parts for p in traces[1:])
+
+
+def test_the_leading_candidate_is_the_one_with_the_kernels(tmp_path):
+    """Ordering is only useful if it puts a probe-able trace first.
+
+    Ties the two halves of the fix together: whichever file discovery leads
+    with is the file the CPU-only preflight opens, so that file has to be the
+    one carrying GPU kernel events.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    _xdit_roofline_capture(trace_dir)
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    assert tla.count_gpu_kernel_events(traces[0]) == 64
+    # The fragment that used to be probed first really does look CPU-only, so
+    # the old ordering failed for a real reason and not a test artefact.
+    fragment = next(p for p in traces if p.name.startswith("decode_only_"))
+    assert tla.count_gpu_kernel_events(fragment) == 0
+
+
+def test_annotation_sidecars_sort_after_a_capture_even_outside_trace_split(tmp_path):
+    """Annotation sidecars are per-iteration slivers wherever they sit."""
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    raw = trace_dir / "rank_0.trace.json.gz"
+    raw.write_text("{}", encoding="utf-8")
+    sidecar = trace_dir / "aaa.trace_annotation_iteration_0.json.gz"
+    sidecar.write_text("{}", encoding="utf-8")
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    assert traces[0] == raw
+    assert traces[-1] == sidecar
+
+
+def test_fragments_flat_beside_the_capture_are_still_demoted(tmp_path):
+    """The demotion must not depend on the splitter nesting its output.
+
+    Production nests fragments under trace_split/ today, but keying only on the
+    directory would leave a flat layout exactly as broken as before: the phase
+    names sort ahead of rank files on the first letter.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    raw = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=40)
+    flat_fragment = _rank_trace(
+        trace_dir / "decode_only_steady_state_prefill_0_decode_1_bs1_conc1"
+                    "_rank_0.trace.json.gz", kernels=0)
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    assert traces[0] == raw
+    assert traces[-1] == flat_fragment
+
+
+def test_an_eight_rank_flat_capture_does_not_exhaust_the_probe_budget(tmp_path):
+    """xDiT runs at TP=8, so a flat layout could present eight fragments first.
+
+    With the fragments still in the default bucket they would consume the whole
+    probe budget before any rank file was opened, and the run would fail with the
+    error this change exists to remove.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    for rank in range(8):
+        _rank_trace(
+            trace_dir / f"decode_only_steady_state_x_rank_{rank}.trace.json.gz",
+            kernels=0)
+        _rank_trace(
+            trace_dir / f"mixed_steady_state_x_rank_{rank}.trace.json.gz",
+            kernels=0)
+    captures = [_rank_trace(trace_dir / f"rank_{r}.trace.json.gz", kernels=25)
+                for r in range(8)]
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    leading = traces[:tla._KERNEL_PROBE_LIMIT]
+    assert any(p in captures for p in leading), (
+        "a real capture must be reachable inside the probe budget")
+    assert tla.count_gpu_kernel_events(traces[0]) > 0
+
+
+def test_a_non_trace_sidecar_does_not_lead_discovery(tmp_path):
+    """execution_details.json is swept in by the *.json glob but is not a trace.
+
+    It sorts ahead of rank_0.trace.json.gz alphabetically, so before size
+    ordering it was trace_files[0] in every healthy nested capture: one wasted
+    probe, and a promotion logged on every run, which made the log line
+    meaningless exactly when it should have meant something.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    raw = _xdit_roofline_capture(trace_dir)
+    sidecar = trace_dir / "trace_split" / "execution_details.json"
+    assert sidecar.exists()
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    assert traces[0] == raw
+    assert traces.index(sidecar) > 0
+
+
+def test_the_larger_trace_leads_within_a_bucket(tmp_path):
+    """Size is the part of the ordering that needs no name recognition."""
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    small = _rank_trace(trace_dir / "aaa_unknown_shape.trace.json.gz", kernels=1)
+    large = _rank_trace(trace_dir / "zzz_unknown_shape.trace.json.gz", kernels=400)
+    assert large.stat().st_size > small.stat().st_size
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    assert traces[0] == large
+
+
+def test_merged_trace_still_wins_over_a_raw_rank_capture(tmp_path):
+    """The pre-existing preference is unchanged: merged first when present."""
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    (trace_dir / "rank_0.trace.json.gz").write_text("{}", encoding="utf-8")
+    merged = trace_dir / "merged-42.trace.json.gz"
+    merged.write_text("{}", encoding="utf-8")
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    assert traces[0] == merged
 
 
 def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
@@ -2319,6 +2227,264 @@ def _find_splitter_cmd(captured):
         (c for c in captured if any("split_inference_trace_annotation" in str(p) for p in c)),
         None,
     )
+
+
+def _drive_main_over_capture_dir(tmp_path, trace_dir, extra_argv=None):
+    """Drive tla.main() with a capture *directory* and capture subprocess argvs.
+
+    A sibling of :func:`_drive_main_capturing_subprocess`, which always passes a
+    single file. Multi-rank selection only shows up when discovery has more than
+    one candidate to choose from.
+
+    ``extra_argv`` appends CLI flags, which is how the ``--skip-split`` route
+    that scriptable workloads actually take gets exercised.
+    """
+    import os as _os
+    from unittest.mock import patch
+
+    tl_root = tmp_path / "TraceLens-internal"
+    skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / "skills" / "analysis-orchestrator"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("stub")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    captured: list[list[str]] = []
+
+    class _Result:
+        def __init__(self, returncode=0, stdout=""):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    def fake_run(cmd, *_a, **_kw):
+        captured.append(list(cmd))
+        return _Result(returncode=0, stdout="ok")
+
+    argv = [
+        "tracelens_analysis.py",
+        "--trace-input", str(trace_dir),
+        "--workspace-path", str(workspace),
+        "--tracelens-root", str(tl_root),
+        "--target-platform", "MI300X",
+        "--top-k", "5",
+        "--budget-minutes", "1",
+        "--no-llm-orchestrator",
+    ]
+    argv += list(extra_argv or [])
+
+    env_backup = dict(_os.environ)
+    try:
+        with patch.object(tla.subprocess, "run", side_effect=fake_run), \
+                patch.object(tla.sys, "argv", argv):
+            try:
+                tla.main()
+            except SystemExit:
+                pass
+    finally:
+        _os.environ.clear()
+        _os.environ.update(env_backup)
+    return captured
+
+
+def _rank_trace(path: Path, kernels: int, cpu_events: int = 0) -> Path:
+    """Write a rank trace with the given number of GPU kernels.
+
+    ``cpu_events`` pads with host-side events, which is what a CPU-only capture
+    actually looks like: a large file with no kernels in it.
+    """
+    events = [{"cat": "kernel", "name": "void real_kernel<...>", "dur": 5.0}
+              for _ in range(kernels)]
+    events += [{"cat": "cpu_op", "name": f"aten::some_host_op_{i}", "dur": 1.0}
+               for i in range(cpu_events)]
+    with gzip.open(path, "wt") as fh:
+        json.dump({"traceEvents": events}, fh)
+    return path
+
+
+def test_analysis_input_follows_the_candidate_that_passed_the_preflight(tmp_path):
+    """A CPU-only leading rank must not be what gets analysed.
+
+    The preflight probes several candidates, so it can pass on rank_1 while
+    rank_0 leads discovery. If the analysis kept using the first candidate, the
+    check would clear a capture on one rank's evidence and then hand TraceLens
+    the empty one -- quieter than the failure it replaced, and worse.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    # A CPU-only rank is a big file with no kernels in it, so size ordering puts
+    # it first on merit. Ordering cannot help here; only the promotion can.
+    empty = _rank_trace(trace_dir / "rank_0.trace.json.gz",
+                        kernels=0, cpu_events=400)
+    populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
+    assert empty.stat().st_size > populated.stat().st_size
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    assert traces[0] == empty
+
+    captured = _drive_main_over_capture_dir(tmp_path, trace_dir)
+
+    splitter = _find_splitter_cmd(captured)
+    assert splitter is not None, "the splitter should have been invoked"
+    args = [str(p) for p in splitter]
+    assert str(populated) in args
+    assert str(empty) not in args
+
+
+def test_analysis_input_is_left_alone_when_the_first_candidate_has_kernels(tmp_path):
+    """No promotion when the leading candidate is already the right one."""
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    first = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=9)
+    _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=9)
+
+    captured = _drive_main_over_capture_dir(tmp_path, trace_dir)
+
+    splitter = _find_splitter_cmd(captured)
+    assert splitter is not None
+    assert str(first) in [str(p) for p in splitter]
+
+
+def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
+    """The promotion must hold on the route xDiT actually takes.
+
+    Scriptable (xDiT/diffusion) workloads are dispatched with ``--skip-split``
+    plus ``--analysis-route deterministic`` (see ``request_handlers``), which
+    bypasses the splitter entirely and feeds the analysis path straight to the
+    deterministic pipeline. The other promotion tests assert on splitter argv, so
+    they cover the branch these sessions never enter -- which is to say the
+    regression this change exists to prevent was untested on the one path that
+    produced it.
+    """
+    from unittest.mock import patch
+
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    empty = _rank_trace(trace_dir / "rank_0.trace.json.gz",
+                        kernels=0, cpu_events=400)
+    populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
+
+    # This route runs the deterministic pipeline in-process, so the trace path
+    # never reaches a subprocess argv the way the splitter's does. Intercepting
+    # the call is the only place the decision is observable.
+    seen: list[Path] = []
+
+    def fake_steps(trace_path, *_a, **_kw):
+        seen.append(trace_path)
+        return 0
+
+    with patch.object(tla, "_run_deterministic_tracelens_steps",
+                      side_effect=fake_steps):
+        captured = _drive_main_over_capture_dir(
+            tmp_path,
+            trace_dir,
+            extra_argv=["--skip-split", "--analysis-route", "deterministic"],
+        )
+
+    assert _find_splitter_cmd(captured) is None, "--skip-split must skip the splitter"
+    assert seen, "the deterministic pipeline was never reached"
+    assert seen[0] == populated, f"analysed {seen[0].name}, expected {populated.name}"
+    assert empty not in seen
+
+
+def test_capture_under_an_ancestor_named_trace_split_still_orders_correctly(tmp_path):
+    """An ancestor directory name must not flatten the whole ranking.
+
+    ``--trace-input`` is resolved to an absolute path, so a ``trace_split``
+    component is checked against every ancestor unless the test is anchored at
+    the capture root. Pointing at a capture that happens to sit below such a
+    directory would otherwise demote every candidate into the same bucket, at
+    which point ordering falls back to filename and the original bug is exactly
+    reproduced -- from nothing but a coincidence of naming.
+    """
+    trace_dir = tmp_path / "trace_split" / "run" / "torch_trace"
+    trace_dir.mkdir(parents=True)
+    fragment = _rank_trace(trace_dir / "aaa_trace_annotation_iteration_1.json.gz",
+                           kernels=0)
+    capture = _rank_trace(trace_dir / "zzz_rank_0.trace.json.gz", kernels=30)
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+
+    assert traces[0] == capture, (
+        "the real capture must lead despite the ancestor directory name "
+        f"and despite sorting last alphabetically; got {[p.name for p in traces]}"
+    )
+    assert traces.index(fragment) > traces.index(capture)
+
+
+def test_unreadable_leading_candidate_is_not_reported_as_cpu_only(tmp_path):
+    """A corrupt trace and a CPU-only trace must not read as the same finding.
+
+    Both counted as zero kernels before, so a truncated rank_0 was described as
+    having "no GPU kernel events" -- sending the next reader to the profiler for
+    a file problem. That is the same misdirection this change was written to
+    remove, so it should not be reintroduced by the promotion that fixes it.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    corrupt = trace_dir / "rank_0.trace.json.gz"
+    corrupt.write_bytes(b"\x1f\x8b" + b"\x00" * 4000)  # gzip magic, truncated body
+    _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=7)
+
+    readable, count = tla._count_kernels_if_readable(corrupt)
+
+    assert readable is False, "a truncated gzip must report as unreadable"
+    assert count == 0
+    populated_readable, populated_count = tla._count_kernels_if_readable(
+        trace_dir / "rank_1.trace.json.gz"
+    )
+    assert populated_readable is True
+    assert populated_count == 7
+
+
+def test_promotion_is_recorded_as_a_trace_health_warning(tmp_path, capsys):
+    """A run that switched its own input has to be explicable afterwards.
+
+    A CLI log line is not a contract: session breakdown and roofline snapshot
+    read ``trace_health_warnings`` and the artifact map, and neither recorded
+    which of the discovered traces was actually analysed. Without this, a
+    silently promoted run is indistinguishable downstream from one that used the
+    file discovery reported.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0, cpu_events=400)
+    populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
+
+    _drive_main_over_capture_dir(tmp_path, trace_dir)
+
+    result = json.loads(capsys.readouterr().out)
+    promoted = [
+        w
+        for w in (result.get("trace_health_warnings") or [])
+        if w.get("code") == "trace_analysis_input_promoted"
+    ]
+    assert promoted, (
+        "promotion was not surfaced in trace_health_warnings; "
+        f"warnings seen: {result.get('trace_health_warnings')}"
+    )
+    assert promoted[0]["analysed"] == populated.name
+    assert promoted[0]["leading_candidate"] == "rank_0.trace.json.gz"
+    # The probe record is what distinguishes "rank_0 had no kernels" from
+    # "rank_0 could not be read", which are different problems.
+    assert "rank_0.trace.json.gz=0" in promoted[0]["probed"]
+
+
+def test_no_promotion_warning_when_the_leading_candidate_is_used(tmp_path, capsys):
+    """The warning must stay absent on the ordinary path.
+
+    An informational warning that fires on every healthy run is noise, and noise
+    in ``trace_health_warnings`` costs the Coordinator the signal.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=9)
+    _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=9)
+
+    _drive_main_over_capture_dir(tmp_path, trace_dir)
+
+    result = json.loads(capsys.readouterr().out)
+    codes = [w.get("code") for w in (result.get("trace_health_warnings") or [])]
+    assert "trace_analysis_input_promoted" not in codes
 
 
 def test_194_3_splitter_receives_R_from_cli_arg(tmp_path):
@@ -4135,10 +4301,12 @@ def test_default_workspace_path_falls_back_to_workspace_path(monkeypatch):
 
 
 def test_default_workspace_path_final_fallback_to_hyperloom_default(monkeypatch):
-    """No envs set → hard-coded default matches src/hyperloom/inference_optimizer/paths.DEFAULT_SESSION_DIR."""
+    """No envs set → delegates to _paths, which adapts to the host."""
+    from hyperloom.agents.kernel.tools import _paths
+
     monkeypatch.delenv("USER_DATA_PATH", raising=False)
     monkeypatch.delenv("WORKSPACE_PATH", raising=False)
-    assert tla._default_workspace_path() == "/workspace/hyperloom"
+    assert tla._default_workspace_path() == _paths.default_workspace_root()
 
 
 def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch):

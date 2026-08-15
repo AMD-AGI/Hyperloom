@@ -18,10 +18,12 @@ import os
 import shlex
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.llm_config import parse_custom_headers
+from hyperloom.common import llm_config
+from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV, parse_custom_headers
 from .executors import (
     _build_specialist_executor,
     _register_executors,
@@ -34,6 +36,8 @@ from .backends import (
     _build_backends,
     _build_proposal_scorer,
     _build_robustness_options,
+    _official_anthropic_only,
+    _official_openai_only,
     _robustness_server_configured,
 )
 from .model_gate import (
@@ -69,7 +73,6 @@ from .credentials import (
 )
 from .multi_node import (
     _prepare_multi_node_state as _prepare_multi_node_state,
-    _dump_mn_input_params as _dump_mn_input_params,
     _resolve_mn_backend as _resolve_mn_backend,
 )
 from .quantization import (
@@ -83,7 +86,7 @@ from .recover import (
 __all__ = ["main"]
 from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
-from hyperloom.orchestrator.actions.registry import ActionRegistry
+from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
 from hyperloom.orchestrator.state.objective import Objective, build_objective
@@ -261,7 +264,7 @@ def _build_orchestration_prompt(
     cycle_directive: str = "",
     phase: str = "",
     transport: str = TRANSPORT_TOOLS,
-    action_registry: ActionRegistry | None = None,
+    action_registry: Mapping[str, ActionMetadata] | None = None,
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides).
 
@@ -278,13 +281,13 @@ def _build_orchestration_prompt(
             behaviour that phase cannot reach. Empty renders every module.
         transport (str): How the orchestration backend carries an intent; omits
             the prompt modules describing a tool surface it does not mount.
-        action_registry (ActionRegistry | None): The action registry to use;
-            a fresh loaded registry is built when ``None``.
+        action_registry (Mapping[str, ActionMetadata] | None): The action
+            catalogue to use; defaults to :data:`ACTION_CATALOGUE`.
 
     Returns:
         str: The composed Orchestration system prompt.
     """
-    registry = action_registry or ActionRegistry().load()
+    registry = action_registry or ACTION_CATALOGUE
     enabled = default_enabled_actions(no_kernel=no_kernel, no_explore=no_explore)
     kind, value = _objective_summary_for_prompt(objective)
     return build_orchestration_prompt(
@@ -672,30 +675,35 @@ def _same_gateway(anthropic_url: str, openai_url: str) -> bool:
 
 def _codex_model_should_follow_claude() -> bool:
     """True when the operator supplied only Anthropic config."""
-    has_anthropic = bool(
-        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-    )
-    has_openai = bool(
-        (os.environ.get("OPENAI_BASE_URL") or "").strip() or (os.environ.get("OPENAI_API_KEY") or "").strip()
-    )
-    return has_anthropic and not has_openai
+    return _official_anthropic_only()
 
 
 def _claude_model_should_follow_codex() -> bool:
     """True when the operator supplied only OpenAI-compatible config."""
     if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
         return True
-    has_openai = bool(
-        (os.environ.get("OPENAI_BASE_URL") or "").strip() or (os.environ.get("OPENAI_API_KEY") or "").strip()
+    return _official_openai_only()
+
+
+def _catalog_probe_has_no_credential() -> bool:
+    """True when a Claude subscription token is the only credential available.
+
+    The catalog probe is a bearer-authenticated ``GET <base>/models``; a
+    subscription token is not accepted there, so probing would only produce a
+    misleading auth failure.
+    """
+    if not os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip():
+        return False
+    # Any other Anthropic-side form can authenticate the probe, so the list of
+    # what disqualifies "oauth-only" is the registry minus the token itself,
+    # derived rather than restated. OPENAI_API_KEY joins it because the probe
+    # accepts either side's bearer. Read off the module so the registry stays a
+    # single source at call time, not a tuple frozen at import.
+    bearer_capable = (
+        *(n for n in llm_config.ANTHROPIC_CREDENTIAL_ENV_ORDER if n != CLAUDE_OAUTH_TOKEN_ENV),
+        "OPENAI_API_KEY",
     )
-    has_anthropic = bool(
-        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-    )
-    return has_openai and not has_anthropic
+    return not any(os.environ.get(name, "").strip() for name in bearer_capable)
 
 
 def _custom_orch_model_allowed() -> bool:
@@ -719,20 +727,14 @@ def _custom_orch_model_explicitly_disabled() -> bool:
     return raw is not None and raw.strip().lower() in {"0", "false", "no", "off"}
 
 
-def _critic_agent_runtime_needed(
-    critic_choice: str,
-    *,
-    codex_follows_claude: bool = False,
-) -> bool:
+def _critic_agent_runtime_needed(critic_choice: str) -> bool:
     """Whether the selected critic path will actually instantiate critic-agent.
 
-    Provider-only setups (including Anthropic-only) still run the full
-    critic-agent — its KB two-phase runtime is protocol-independent, and the
-    review inference is driven over the native provider endpoint. The runtime is
-    only skipped when the caller explicitly signals a plain Claude fallback via
-    ``codex_follows_claude``.
+    Every provider shape runs the full critic-agent: its KB two-phase runtime is
+    protocol-independent, and both review transports keep it. There is no
+    degraded critic to fall back to — ``--critic-mock`` is the only opt-out.
     """
-    return critic_choice == "agent" and not codex_follows_claude
+    return critic_choice == "agent"
 
 
 def _validate_and_resolve_claude_model(
@@ -797,6 +799,14 @@ def _validate_and_resolve_claude_model(
     # host outright (single probe, no fallback).
     catalog_ids: set[str] | frozenset[str] | None = None
     override_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
+    if not override_url and _catalog_probe_has_no_credential():
+        # The static allowlist gate above already ran; this is the only check the
+        # probe would have added, so proceed with the operator's id.
+        print(
+            "Preflight: catalog probe skipped: oauth-only credential "
+            f"(CLAUDE_CODE_OAUTH_TOKEN); cannot verify --claude-model={chosen!r}. Proceeding."
+        )
+        return None
     if override_url:
         api_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
@@ -826,12 +836,16 @@ def _validate_and_resolve_claude_model(
             elif anthropic_url:
                 candidates.append((anthropic_url, anthropic_key))
         else:
-            if anthropic_url:
+            # A keyless Anthropic candidate can only fail — a subscription token
+            # is not a catalog credential — so it must not consume the one probe
+            # slot and leave a configured OpenAI gateway unverified.
+            if anthropic_url and anthropic_key:
                 candidates.append((anthropic_url, anthropic_key))
-            if openai_url and anthropic_url and _same_gateway(anthropic_url, openai_url):
-                candidates.append((openai_url, openai_key))
-            elif openai_url and not anthropic_url:
-                # pure single-gateway with only OPENAI_BASE_URL configured
+            if openai_url and (
+                (anthropic_url and _same_gateway(anthropic_url, openai_url)) or not candidates
+            ):
+                # One gateway serving both protocols, or the only side left once
+                # a keyless Anthropic side was skipped above.
                 candidates.append((openai_url, openai_key))
         seen_urls: set[str] = set()
         for cand_url, cand_key in candidates:
@@ -1542,10 +1556,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             if v:
                 os.environ[env_key] = v
 
-    # Multi-node: dump resolved input params (CLI + env) for env->CLI tracing.
-    if nodes_resolved >= 2:
-        _dump_mn_input_params(args, nodes_resolved)
-
     # Stale aiter JIT lock sweep: killed runs leave locks that block subsequent starts (locks <5min preserved).
     aiter_sweep = clean_stale_aiter_locks()
     if aiter_sweep["dir"] and aiter_sweep["deleted"]:
@@ -2101,6 +2111,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
     # Resolve critic backend + runtime root before _build_backends; abort rc=2 if --critic-agent runtime unreachable.
     critic_choice = _resolve_critic_choice(args)
+    if critic_choice == "mock" and args.critic_protocol != "auto":
+        # The mock critic issues no review inference, so there is no transport
+        # for the flag to select. Warned rather than rejected: the pairing is
+        # harmless, and failing here would break scripts that pass a protocol
+        # unconditionally and toggle the mock per run.
+        print(
+            f"WARNING: --critic-protocol={args.critic_protocol} is ignored with the mock critic, "
+            "which performs no review inference.",
+            file=sys.stderr,
+        )
     critic_agent_root: Path | None = None
     critic_kb_mode = os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower()
     if critic_kb_mode not in ("inmemory", "live"):
@@ -2109,10 +2129,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         sys.exit(2)
-    if _critic_agent_runtime_needed(
-        critic_choice,
-        codex_follows_claude=codex_follows_claude,
-    ):
+    if _critic_agent_runtime_needed(critic_choice):
         critic_agent_root = _resolve_agent_root("critic")
         if critic_agent_root is None:
             print(
@@ -2167,6 +2184,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         robustness_agent_root=robustness_agent_root,
         robustness_options=robustness_options,
         codex_follows_claude=codex_follows_claude,
+        critic_protocol=args.critic_protocol,
     )
     # Expose active session_dir to in-process executors via the canonical pin
     # env var; reinforced here for --resume paths. Do NOT overwrite
@@ -2303,7 +2321,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     _register_executors(
         coordinator,
-        no_kernel=no_kernel,
         compare_against_gpu=getattr(args, "compare_against_gpu", None),
         session_dir=session_dir,
         specialist_executor=specialist_executor,
@@ -2330,13 +2347,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     kernel_str = "DISABLED" if no_kernel else "programmatic"
     if critic_choice == "mock":
         critic_str = "mock"
-    elif _backend_kind("critic") == "Claude":
-        critic_str = f"Claude({args.claude_model})"
     else:  # "agent"
-        # Provider-only (Anthropic / DeepSeek) drives the review over the Claude
-        # model; an OpenAI-compatible gateway drives it over Codex.
-        _review_model = args.claude_model if _codex_model_should_follow_claude() else args.codex_model
-        critic_str = f"critic-agent(kb={critic_kb_mode}, model={_review_model}, root={critic_agent_root})"
+        # Read off the backend rather than re-derived from the environment:
+        # --critic-protocol can override that derivation, and the banner would
+        # then report the model of a transport this run is not using.
+        _review_protocol = str(getattr(backends.get("critic"), "protocol", "") or "openai")
+        _review_model = args.claude_model if _review_protocol == "anthropic" else args.codex_model
+        critic_str = (
+            f"critic-agent(kb={critic_kb_mode}, protocol={_review_protocol}, "
+            f"model={_review_model}, root={critic_agent_root})"
+        )
     if robustness_choice == "mock":
         robustness_str = "mock"
     else:

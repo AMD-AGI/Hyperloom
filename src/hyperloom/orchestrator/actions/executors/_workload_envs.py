@@ -39,6 +39,7 @@ from hyperloom.inference_optimizer.session.paths import asset_root, deps_cache_r
 from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
 from hyperloom.orchestrator.framework.paths import GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.orchestrator.framework.paths import flydsl_extra_source_dirs
+from ._accuracy_gate import _RUN_EVAL_FALSE_VALUES
 from ._grid_runner import (
     compact_json_server_args,
     dedup_vllm_server_args,
@@ -406,10 +407,6 @@ def _remove_moe_runner_backend_arg(args: str) -> str:
 # Warn once per process when the accuracy gate is disabled.
 _RUN_EVAL_DISABLED_WARN_EMITTED = False
 
-# Truthy-false spellings that disable the accuracy gate.
-_RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
-
-
 def _model_requires_remote_code(model_path: str | None) -> bool:
     """Return whether benchmark server/client must trust custom HF code.
 
@@ -549,7 +546,6 @@ _BASELINE_CONFIG_BY_FRAMEWORK: dict[str, Path] = {
     "atom": Path("assets/configs/baseline_atom.yaml"),
     "vllm": Path("assets/configs/baseline_vllm.yaml"),
     "xdit": Path("assets/configs/baseline_xdit.yaml"),
-    "hunyuan_image3": Path("assets/configs/baseline_hunyuan_image3.yaml"),
     "custom": Path("assets/configs/baseline_custom.yaml"),
 }
 _DEFAULT_BASELINE_CONFIG = Path("assets/configs/baseline_sglang.yaml")
@@ -1062,13 +1058,10 @@ def materialize_config_with_envs(
                 ("max_iterations", f"--profiler-config.max_iterations {max_iters}"),
             ]
             if tracelens_patch_ok:
-                # TraceLens-patched vLLM exposes capture_torch_profiler_dir +
-                # detailed_trace_annotation; unpatched vLLM rejects them.
-                capture_dir = output_dir / "capture_traces"
                 profiler_flags.append(
                     (
-                        "capture_torch_profiler_dir",
-                        f"--profiler-config.capture_torch_profiler_dir {capture_dir}",
+                        "capture_torch_profiler",
+                        "--profiler-config.capture_torch_profiler True",
                     )
                 )
                 profiler_flags.append(("detailed_trace_annotation", "--profiler-config.detailed_trace_annotation True"))
@@ -1139,7 +1132,7 @@ def materialize_config_with_envs(
                             _model,
                         )
             extra_body["shape_discovery"] = _shape_disc
-            extra_body.setdefault("roofline_annotations", True)
+            extra_body.setdefault("detailed_annotations", True)
             # NOTE: this write happens before the per-task ``extra_envs`` merge, so
             # an ``extra_envs`` entry for PROFILE_EXTRA_BODY can still drop
             # start_step/num_steps the way ``args_mode="replace"`` used to drop

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from .. import framework_registry
+from .backends import CRITIC_PROTOCOL_CHOICES
 from hyperloom.common.llm_config import provider_model_defaults
 from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CLAUDE_MODEL,
@@ -532,13 +533,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Reference launch recipe (.sh path or http(s) URL). Its serve "
-            "flags + whitelisted exports seed the baseline server args at "
-            "lowest priority (EXPLORE can override). Model-gated: ignored if "
-            "the run's model differs from the recipe's. If the given path is "
-            "unreadable / yields no flags, a matching InferenceX single-node "
-            "recipe is auto-discovered (exact filename match only; fuzzy "
-            "matches are logged, not used). When this flag is omitted, no "
-            "discovery runs and the baseline is unchanged."
+            "flags plus the exports the denylist allows seed the baseline "
+            "server args at lowest priority (EXPLORE can override); shell-unsafe, "
+            "credential-shaped and optimizer-owned workload variables are "
+            "dropped. The recipe is applied as given — there is no model gate "
+            "and no auto-discovery — so a path that cannot be read, or that "
+            "yields neither a flag nor an export, exits 2 instead of falling "
+            "back. Omit the flag to leave the baseline unchanged."
         ),
     )
     opt.add_argument("--precision", type=str, default=None, help=f"Model precision (default {DEFAULT_PRECISION})")
@@ -805,6 +806,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "review_constraints). Requires CRITIC_AGENT_ROOT or a sibling "
         "$REPO_ROOT/critic-agent/ directory.",
     )
+    opt.add_argument(
+        "--critic-protocol",
+        dest="critic_protocol",
+        choices=CRITIC_PROTOCOL_CHOICES,
+        default="auto",
+        help="Protocol for the Critic's review inference. 'openai' uses the "
+        "OpenAI SDK; 'anthropic' uses the Messages API, or the Claude CLI when a "
+        "CLAUDE_CODE_OAUTH_TOKEN subscription is the only credential. "
+        "'auto' (default) derives it from the configured credentials; an "
+        "explicit value fails at startup when that side has no credential. "
+        "Ignored (with a warning) under --critic-mock, which runs no review "
+        "inference.",
+    )
     # Robustness backend selection (mirrors critic)
     opt.add_argument(
         "--robustness-mock",
@@ -979,7 +993,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0.7,
         help="Minimum ``warm_start_recipe.confidence`` required to "
         "trigger the auto-replay. Default 0.7 means an ``exact`` "
-        "5-tuple hit (conf 1.0) and a server-returned ``relative`` "
+        "seven-tuple hit (conf 1.0) and a server-returned ``relative`` "
         "match (conf 0.7) both fire, while a ``miss`` (conf 0.0) "
         "does not. Raise it above 0.7 to require an exact hit "
         "before spending a verify on the warm config.",

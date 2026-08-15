@@ -17,6 +17,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hyperloom.common.llm_config import (
+    ANTHROPIC_SYNTHESIZABLE_KEY_ENVS,
+    CLAUDE_OAUTH_TOKEN_ENV,
+    anthropic_synthesizable_key,
+    has_anthropic_credential,
+)
+
 log = logging.getLogger(__name__)
 
 _OFFICIAL_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
@@ -187,8 +194,14 @@ def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
     return True
 
 
+def _has_claude_oauth_token() -> bool:
+    """True when a ``claude setup-token`` subscription credential is exported."""
+    return bool(os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip())
+
+
 def _has_explicit_anthropic_key() -> bool:
-    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    """True for any credential form in ``ANTHROPIC_CREDENTIAL_ENV_ORDER``."""
+    return has_anthropic_credential()
 
 
 def _has_explicit_openai_key() -> bool:
@@ -241,12 +254,34 @@ def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: s
             leaves any existing key untouched. Callers should pass the
             Anthropic-side key (``ANTHROPIC_API_KEY``) so a split-entrypoint
             deploy authenticates Claude with its own key rather than the shared
-            gateway key.
+            gateway key. A subscription OAuth token is rejected here, and with
+            no other key the file is left untouched.
         anthropic_base_url (str): The upstream gateway URL; blank is a no-op.
     """
     import json as _json
 
     if not anthropic_base_url:
+        return
+    oauth_token = os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip()
+    if oauth_token and primary_api_key.strip() == oauth_token:
+        # primaryApiKey is an API-credits credential; persisting the subscription
+        # token here would move the run off the Max/Pro plan onto API billing.
+        # The variable name is spelled out rather than interpolated from
+        # CLAUDE_OAUTH_TOKEN_ENV: a token-named constant reads as a secret to
+        # static analysis even when only its name reaches the message.
+        print(
+            "Preflight: refusing to write CLAUDE_CODE_OAUTH_TOKEN into "
+            "~/.claude/config.json primaryApiKey (subscription credential)"
+        )
+        primary_api_key = ""
+    if oauth_token and not anthropic_synthesizable_key():
+        # Subscription mode: the token is only valid against Anthropic itself,
+        # so writing customApiUrl would point the CLI away from the endpoint
+        # that accepts it. The test is "is this run on the subscription", not
+        # "is primary_api_key empty" -- the caller passes ANTHROPIC_API_KEY, so
+        # a host authenticating through ANTHROPIC_AUTH_TOKEN also arrives with
+        # an empty key while genuinely needing the gateway URL written.
+        print("Preflight: subscription token in use; ~/.claude/config.json left alone")
         return
     claude_config_path = Path.home() / ".claude" / "config.json"
     config_data: dict = {}
@@ -285,15 +320,21 @@ def _reject_cross_provider_pairing() -> None:
     whose only endpoint would come from the other provider.
 
     Reads the *raw* environment, before :func:`_resolve_llm_endpoints` fills in
-    any implied endpoint. Official provider keys may omit their own
-    ``*_BASE_URL`` while the other side is unconfigured.
+    any implied endpoint. A key that implies its own official endpoint may omit
+    its ``*_BASE_URL``, so official-key pairings across both sides are legal.
     """
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
     openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    anthropic_key = (
-        os.environ.get("ANTHROPIC_API_KEY", "").strip() or os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
-    )
+    anthropic_key = has_anthropic_credential()
+    # A subscription OAuth token only validates against Anthropic itself, so it
+    # implies the official endpoint and completes the side without a base URL.
+    if anthropic_url:
+        anthropic_endpoint = anthropic_url
+    elif _has_claude_oauth_token():
+        anthropic_endpoint = _OFFICIAL_ANTHROPIC_BASE_URL
+    else:
+        anthropic_endpoint = ""
     offender = ""
     if openai_url and not openai_key and anthropic_key:
         offender = (
@@ -305,12 +346,14 @@ def _reject_cross_provider_pairing() -> None:
             "ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an "
             "OPENAI_API_KEY is configured"
         )
-    elif openai_url and anthropic_key and not anthropic_url:
+    elif openai_url and anthropic_key and not anthropic_endpoint:
         offender = (
             "an Anthropic-side key is configured without ANTHROPIC_BASE_URL, "
             "while the OpenAI side points at OPENAI_BASE_URL"
         )
     elif anthropic_url and openai_key and not openai_url:
+        # Only an explicit ANTHROPIC_BASE_URL signals a gateway-shaped deploy
+        # whose OPENAI_API_KEY is likely a gateway key missing its own URL.
         offender = (
             "OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the "
             "Anthropic side points at ANTHROPIC_BASE_URL"
@@ -336,25 +379,93 @@ def _reject_cross_provider_pairing() -> None:
     sys.exit(2)
 
 
+def _warn_on_shadowed_oauth_token() -> None:
+    """Warn when an API key will silently outrank the subscription token.
+
+    The Claude CLI prefers an API key over the OAuth token, so this combination
+    bills API credits even though the operator configured a subscription.
+    """
+    if not _has_claude_oauth_token():
+        return
+    shadowing = [name for name in ANTHROPIC_SYNTHESIZABLE_KEY_ENVS if os.environ.get(name, "").strip()]
+    if not shadowing:
+        return
+    names = " and ".join(shadowing)
+    print(
+        f"Preflight: WARNING — CLAUDE_CODE_OAUTH_TOKEN is set alongside {names}; "
+        "the Claude CLI prefers the API key, so this run bills API credits rather "
+        f"than your subscription. Unset {names} to use the subscription.",
+        file=sys.stderr,
+    )
+
+
+def _warn_on_oauth_against_a_foreign_endpoint() -> None:
+    """Warn when a subscription token is pointed at a non-Anthropic endpoint.
+
+    The token authenticates against Anthropic itself and nothing else, so this
+    pairing cannot succeed. It is worth its own message because the failure is
+    not the operator's first concern here: reaching a third-party gateway means
+    the subscription credential is put on the wire to a host that was never
+    meant to see it.
+    """
+    if not _has_claude_oauth_token() or anthropic_synthesizable_key():
+        return
+    base_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+    if not base_url or base_url.rstrip("/") == _OFFICIAL_ANTHROPIC_BASE_URL:
+        return
+    print(
+        "Preflight: WARNING — CLAUDE_CODE_OAUTH_TOKEN is set with "
+        f"ANTHROPIC_BASE_URL={base_url}. A subscription token is only valid against "
+        f"{_OFFICIAL_ANTHROPIC_BASE_URL}, so this run cannot authenticate, and the "
+        "token would be sent to that endpoint. Unset ANTHROPIC_BASE_URL to use the "
+        "subscription, or supply an API key that endpoint accepts.",
+        file=sys.stderr,
+    )
+
+
+def _warn_on_oauth_widened_provider_shape() -> None:
+    """Warn when a subscription token turns an OpenAI-only deploy dual-sided.
+
+    The token is a full Anthropic side, so its mere presence in the shell moves
+    orchestration off the gateway and onto the subscription — surprising for an
+    operator who only configured the OpenAI side.
+    """
+    if not _has_claude_oauth_token():
+        return
+    if anthropic_synthesizable_key() or os.environ.get("DEEPSEEK_API_KEY", "").strip():
+        return
+    if os.environ.get("ANTHROPIC_BASE_URL", "").strip():
+        return
+    if not (os.environ.get("OPENAI_BASE_URL", "").strip() and os.environ.get("OPENAI_API_KEY", "").strip()):
+        return
+    print(
+        "Preflight: WARNING — CLAUDE_CODE_OAUTH_TOKEN is set alongside a fully "
+        "configured OpenAI side, so orchestration runs on the Claude subscription "
+        "rather than OPENAI_BASE_URL. Unset CLAUDE_CODE_OAUTH_TOKEN for an "
+        "OpenAI-only run.",
+        file=sys.stderr,
+    )
+
+
 def _validate_credentials() -> None:
     """Fail fast when no usable LLM endpoint/key is configured.
 
     Requires a base URL (``OPENAI_BASE_URL`` / ``ANTHROPIC_BASE_URL``, or an
-    official provider key that implies its default endpoint) plus at least one
-    key (``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN``).
-    Split Anthropic/OpenAI entrypoints and single gateways (same key under both
+    official provider credential that implies its default endpoint) plus at
+    least one key (``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` /
+    ``ANTHROPIC_AUTH_TOKEN`` / ``CLAUDE_CODE_OAUTH_TOKEN``). Split
+    Anthropic/OpenAI entrypoints and single gateways (same key under both
     provider env names) are both accepted.
     """
     _reject_cross_provider_pairing()
+    _warn_on_shadowed_oauth_token()
+    _warn_on_oauth_against_a_foreign_endpoint()
+    _warn_on_oauth_widened_provider_shape()
     anthropic_url, openai_url = _resolve_llm_endpoints()
-    has_key = bool(
-        os.environ.get("OPENAI_API_KEY")
-        or os.environ.get("ANTHROPIC_API_KEY")
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-    )
+    has_anthropic_side = has_anthropic_credential()
+    has_key = bool(os.environ.get("OPENAI_API_KEY") or has_anthropic_side)
     has_usable_endpoint = bool(
-        (anthropic_url and (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")))
-        or (openai_url and os.environ.get("OPENAI_API_KEY"))
+        (anthropic_url and has_anthropic_side) or (openai_url and os.environ.get("OPENAI_API_KEY"))
     )
     if has_usable_endpoint and has_key:
         return
@@ -363,7 +474,10 @@ def _validate_credentials() -> None:
     if not has_usable_endpoint:
         missing.append("a usable endpoint/key pair")
     if not has_key:
-        missing.append("an API key (OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN)")
+        missing.append(
+            "an API key (OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / "
+            "CLAUDE_CODE_OAUTH_TOKEN)"
+        )
     repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
     env_file = Path(repo_root) / ".env"
     env_status = "present" if env_file.exists() else "not found"
@@ -389,7 +503,11 @@ def _validate_credentials() -> None:
         "       export OPENAI_BASE_URL=https://api.deepseek.com/v1            OPENAI_API_KEY=sk-xxx\n"
         "     A gateway serving only its own models also needs the model ids;\n"
         "     known hosts default themselves, otherwise set CLAUDE_MODEL (the\n"
-        "     Anthropic side) and CODEX_MODEL (the OpenAI side) yourself.",
+        "     Anthropic side) and CODEX_MODEL (the OpenAI side) yourself.\n"
+        "  4. Claude Max/Pro subscription (no API credits; run `claude setup-token`):\n"
+        "       export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-xxx\n"
+        "       # leave ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN unset: either one\n"
+        "       # switches the Claude CLI off subscription mode.",
         file=sys.stderr,
     )
     sys.exit(2)

@@ -1494,6 +1494,12 @@ def collect_enablement(
     accepted_cfg = str(_eg(state, "accepted_config_path", "") or "")
     if accepted_cfg:
         out["accepted_config_path"] = _rel(Path(accepted_cfg), session_dir) or accepted_cfg
+    accepted_config = _eg(state, "accepted_config")
+    if isinstance(accepted_config, dict) and accepted_config:
+        out["accepted_config"] = {
+            "extra_server_args": str(accepted_config.get("extra_server_args") or ""),
+            "extra_envs": {str(k): str(v) for k, v in (accepted_config.get("extra_envs") or {}).items()},
+        }
     if have_eval:
         out["trigger_kind"] = eval_kind
         out["observed_accuracy"] = float(_eg(state, "observed_accuracy", 0.0) or 0.0)

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import sys
 import textwrap
 from pathlib import Path
 
@@ -108,6 +110,35 @@ def test_inner_timeout_is_reduced_by_flush_grace(tmp_path, monkeypatch):
     assert out["status"] == "ok"
     assert out["inner_budget"] == "420"
     assert out["returncode"] == 0
+
+
+def test_call_geak_uses_current_python_when_path_is_polluted(tmp_path, monkeypatch):
+    """GEAK must run in Hyperloom's Python, not a framework venv from PATH."""
+    fake_vllm_bin = tmp_path / "vllm-venv" / "bin"
+    fake_vllm_bin.mkdir(parents=True)
+    fake_python = fake_vllm_bin / "python3"
+    fake_python.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+
+    runner = _write_fake_runner(
+        tmp_path,
+        """
+        import json, sys
+        with open(sys.argv[2], "w") as fh:
+            json.dump({"status": "ok", "python": sys.executable}, fh)
+        sys.exit(0)
+    """,
+    )
+    monkeypatch.setenv("GEAK_E2E_RUNNER", str(runner))
+    monkeypatch.setenv(
+        "PATH",
+        str(fake_vllm_bin) + os.pathsep + os.environ.get("PATH", ""),
+    )
+
+    out = psr.call_geak(_handoff(), tmp_path / "out", timeout_s=600)
+
+    assert out["status"] == "ok"
+    assert out["python"] == sys.executable
 
 
 def test_sigterm_grace_lets_child_flush_result(tmp_path, monkeypatch):

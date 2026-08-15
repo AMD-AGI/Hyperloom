@@ -10,8 +10,9 @@ module; no ad-hoc string concatenation elsewhere.
 
 from __future__ import annotations
 
-from functools import lru_cache
 from pathlib import Path
+
+from ..protocol.action_surfaces import ACTION_CATALOGUE
 
 
 # Top-level files
@@ -56,7 +57,7 @@ def optimizer_lock_path(session_dir: Path) -> Path:
     return Path(session_dir) / "runtime" / "optimizer.lock"
 
 
-# Phases (from the ActionRegistry ``pipeline_phase`` field) whose executors own
+# Phases (from the catalogue ``pipeline_phase`` field) whose executors own
 # a per-task ``runs/<action>/<task_id>/`` workspace.
 _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset(
     {
@@ -69,48 +70,11 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset(
     }
 )
 
-# Fallback used only when ActionRegistry can't load. Must be kept in sync BY HAND
-# with the registry actions whose _meta pipeline_phase is in
-# _RUNS_WORKSPACE_PHASES (see _runs_actions below) — no test enforces this.
-_RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset(
-    {
-        "baseline",
-        "replay_warm_recipe",
-        "roofline",
-        "profile",
-        "sweep",
-        "conc_sweep",
-        "explore",
-        "specialist",
-        "integrate_patch",
-        "framework_agent",
-        "integrate",
-        "kernel_opt",
-        "deep_kernel_analysis",
-        "gemm_tuning",
-        "operator_tuning",
-        "vendor_kernel_config",
-        "recover",
-    }
+
+# Action names that own a ``runs/<kind>/<task_id>/`` workspace.
+_RUNS_ACTIONS: frozenset[str] = frozenset(
+    a.name for a in ACTION_CATALOGUE.values() if a.pipeline_phase in _RUNS_WORKSPACE_PHASES
 )
-
-
-@lru_cache(maxsize=1)
-def _runs_actions() -> frozenset[str]:
-    """Action names that own a ``runs/<kind>/<task_id>/`` workspace, from
-    action metadata. Lazy + cached; falls back to ``_RUNS_ACTIONS_FALLBACK``
-    when the registry can't load.
-
-    Returns:
-        The set of action names that own a runs-workspace.
-    """
-    try:
-        from hyperloom.orchestrator.actions.registry import ActionRegistry  # local: avoid import cycle
-
-        registry = ActionRegistry().load()
-    except Exception:
-        return _RUNS_ACTIONS_FALLBACK
-    return frozenset(a.name for a in registry.all() if a.pipeline_phase in _RUNS_WORKSPACE_PHASES)
 
 
 def _validate_action(action: str) -> str:
@@ -124,13 +88,11 @@ def _validate_action(action: str) -> str:
         str: The stripped action name when it is recognised.
 
     Raises:
-        ValueError: If the action is not one of the names returned by
-            :func:`_runs_actions`.
+        ValueError: If the action does not own a runs-workspace.
     """
     a = str(action or "").strip()
-    valid = _runs_actions()
-    if a not in valid:
-        raise ValueError(f"runs_dir: unknown action {action!r}; expected one of {sorted(valid)!r}")
+    if a not in _RUNS_ACTIONS:
+        raise ValueError(f"runs_dir: unknown action {action!r}; expected one of {sorted(_RUNS_ACTIONS)!r}")
     return a
 
 
@@ -184,6 +146,40 @@ def runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
     a = _validate_action(action)
     tid = _validate_id_component(task_id, field="runs_dir.task_id")
     return runs_root(session_dir) / a / tid
+
+
+# Suffix probes before unique_runs_dir gives up.
+_MAX_RUNS_DIR_ATTEMPTS: int = 200
+
+
+def unique_runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
+    """Create a fresh :func:`runs_dir` workspace, suffixing ``-2``, ``-3``, …
+    when earlier attempts already claimed the name. ``mkdir(exist_ok=False)``
+    makes the claim atomic against concurrent callers.
+
+    Args:
+        session_dir (Path): The session root directory.
+        action (str): The owning action name; validated against the
+            runs-workspace action set.
+        task_id (str): The task identifier; blank/empty falls back to
+            ``"unknown"``.
+
+    Returns:
+        Path: The newly created workspace directory.
+
+    Raises:
+        ValueError: If ``action`` is not a recognised runs-workspace action.
+        RuntimeError: If every suffix up to ``_MAX_RUNS_DIR_ATTEMPTS`` is taken.
+    """
+    base = runs_dir(session_dir, action, task_id)
+    for suffix in range(1, _MAX_RUNS_DIR_ATTEMPTS + 1):
+        candidate = base if suffix == 1 else base.with_name(f"{base.name}-{suffix}")
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"unique_runs_dir: {base} still taken after {_MAX_RUNS_DIR_ATTEMPTS} suffixes")
 
 
 def kernel_agent_runs_root(session_dir: Path) -> Path:
@@ -387,11 +383,6 @@ def conversations_path(session_dir: Path) -> Path:
         ``<session_dir>/reports/trace/conversations.jsonl``.
     """
     return trace_dir(session_dir) / "conversations.jsonl"
-
-
-def orchestration_turns_path(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/orchestration_turns.jsonl``."""
-    return trace_dir(session_dir) / "orchestration_turns.jsonl"
 
 
 def research_hints_md(session_dir: Path) -> Path:
@@ -669,7 +660,7 @@ def recipe_snapshot_dir(session_dir: Path) -> Path:
 
 def recipe_snapshot_audit_jsonl(session_dir: Path) -> Path:
     """``<sd>/runtime/recipe_snapshot/.audit.jsonl`` — append-only audit of
-    every recipe-snapshot remote READ call (writes are local-only and skip it).
+    local Recipe operations and remote KB Store publish attempts.
 
     Args:
         session_dir: The session root directory.
@@ -780,6 +771,31 @@ def allocate_turn_workdir(session_dir: Path, subdir: str, turn_idx: int, *, keep
     return wd
 
 
+def session_failures_dir(session_dir: Path) -> Path:
+    """Compute ``<sd>/reports/failures/`` — durable failure evidence store.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        Path: ``<session_dir>/reports/failures``.
+    """
+    return reports_dir(session_dir) / "failures"
+
+
+def failure_evidence_path(session_dir: Path, failure_id: str) -> Path:
+    """Compute the path for one failure evidence JSON file.
+
+    Args:
+        session_dir: The session root directory.
+        failure_id: The failure's stable id (from ``make_failure_id``).
+
+    Returns:
+        Path: ``<session_dir>/reports/failures/<failure_id>.json``.
+    """
+    return session_failures_dir(session_dir) / f"{failure_id}.json"
+
+
 __all__ = [
     "allocate_turn_workdir",
     "agent_dir",
@@ -806,10 +822,11 @@ __all__ = [
     "kernel_agent_runs_root",
     "llm_calls_path",
     "manifest_path",
-    "orchestration_turns_path",
     "patches_dir",
+    "failure_evidence_path",
     "reports_dir",
     "research_hints_json",
+    "session_failures_dir",
     "research_hints_md",
     "runs_dir",
     "runs_root",
