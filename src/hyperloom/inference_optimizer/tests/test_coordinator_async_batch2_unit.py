@@ -140,7 +140,7 @@ def test_reset_orchestration_conversation_swallows_hook_error(coord: Coordinator
 
 
 @pytest.mark.asyncio
-async def test_resume_consistency_marks_unvalidated_and_rebuilds_current_best(coord: Coordinator) -> None:
+async def test_resume_consistency_marks_unvalidated_keeps(coord: Coordinator) -> None:
     coord._resumed_from["is_resume"] = True
     coord.shared_state.optimization_stack = [
         {
@@ -159,18 +159,53 @@ async def test_resume_consistency_marks_unvalidated_and_rebuilds_current_best(co
         },
     ]
     coord.shared_state.cumulative_gain_validated_stack_len = 1
-    coord.shared_state.current_best = {"extra_server_args": "--stale 1", "extra_envs": {}}
+    coord.shared_state.current_best = {"extra_server_args": "--a 1 --b 2", "extra_envs": {"A": "1", "B": "2"}}
 
     report = await coord._resume_consistency_pass()
 
     warning_kinds = {w["kind"] for w in report["warnings"]}
     assert "resume_unvalidated_keeps" in warning_kinds
-    assert "resume_inconsistent_current_best" in warning_kinds
     assert coord.shared_state.resume_pending_revalidation is True
-    assert coord.shared_state.current_best["extra_server_args"] == "--a 1 --b 2"
-    assert coord.shared_state.current_best["extra_envs"] == {"A": "1", "B": "2"}
-    assert "rebuilt_current_best_config_from_stack" in report["fixes"]
     assert any(isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
+
+
+@pytest.mark.asyncio
+async def test_resume_consistency_leaves_current_best_alone(coord: Coordinator) -> None:
+    """Resume must not rewrite the config: the lift is its only author.
+
+    A replay from the stack cannot reconstruct what the lift merged (an env a
+    later winner unset would come back), so a disagreement is not something to
+    'repair' here.
+    """
+    coord._resumed_from["is_resume"] = True
+    coord.shared_state.optimization_stack = [
+        {
+            "action": "explore",
+            "variant_name": "v1",
+            "candidate_extra_server_args": "--a 1",
+            "extra_envs": {"OLD": "1"},
+            "tput": 110.0,
+        },
+        {
+            "action": "explore",
+            "variant_name": "v2",
+            "candidate_extra_server_args": "--b 2",
+            "extra_envs": {"NEW": "1"},
+            "unset_envs": ["OLD"],
+            "tput": 120.0,
+        },
+    ]
+    coord.shared_state.cumulative_gain_validated_stack_len = 2
+    coord.shared_state.current_best = {"extra_server_args": "--b 2", "extra_envs": {"NEW": "1"}}
+
+    report = await coord._resume_consistency_pass()
+
+    assert coord.shared_state.current_best["extra_envs"] == {"NEW": "1"}
+    assert coord.shared_state.current_best["extra_server_args"] == "--b 2"
+    assert not any(
+        isinstance(w, dict) and w.get("kind") == "resume_inconsistent_current_best" for w in report["warnings"]
+    )
+    assert "rebuilt_current_best_config_from_stack" not in report["fixes"]
 
 
 @pytest.mark.asyncio

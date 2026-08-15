@@ -4056,10 +4056,11 @@ class WritebackCollaborator:
         """One-shot resume audit + recovery for stack/current_best consistency.
 
         Order matters: recover half-applied / orphaned KEEPs FIRST (they mutate
-        the stack), then reconcile ``current_best`` against the resulting stack,
-        then compensate the validation watermark by enqueuing a single
-        full-stack end-to-end rebench. Idempotent — only runs on a resumed
-        session and every recovery step dedupes, so a second pass is a no-op.
+        the stack through the same lift the live path uses, so ``current_best``
+        follows along), then compensate the validation watermark by enqueuing a
+        single full-stack end-to-end rebench. Idempotent — only runs on a
+        resumed session and every recovery step dedupes, so a second pass is a
+        no-op.
         """
         if not self._resumed_from.get("is_resume"):
             return {"skipped": True, "reason": "not_resume"}
@@ -4085,46 +4086,10 @@ class WritebackCollaborator:
         # that crashed before the append landed; surface ambiguous ones loudly.
         await self._resume_recover_orphaned_keeps(report)
 
-        # (3) current_best <-> stack reconcile (after 1/2 may have grown stack).
-        stack = [e for e in (getattr(state, "optimization_stack", []) or []) if isinstance(e, dict)]
-        cb = state.current_best if isinstance(state.current_best, dict) else {}
-        if stack:
-            rebuilt = self._materialize_stack_config_for_resume()
-            cb_args = str(cb.get("extra_server_args") or "")
-            cb_envs = (
-                {str(k): str(v) for k, v in (cb.get("extra_envs") or {}).items()}
-                if isinstance(cb.get("extra_envs"), Mapping)
-                else {}
-            )
-            if cb_args != rebuilt["extra_server_args"] or cb_envs != rebuilt["extra_envs"]:
-                # The append-only stack is authoritative; a disagreeing
-                # current_best is the inconsistency, recorded distinctly from the
-                # rebuild fix so operators can see a stale best was detected.
-                report["warnings"].append(
-                    {
-                        "kind": "resume_inconsistent_current_best",
-                        "current_best_args": cb_args,
-                        "stack_args": rebuilt["extra_server_args"],
-                    }
-                )
-                new_cb = dict(cb)
-                new_cb.update(
-                    {
-                        "action": rebuilt["action"],
-                        "variant_name": rebuilt["variant_name"],
-                        "extra_server_args": rebuilt["extra_server_args"],
-                        "extra_envs": rebuilt["extra_envs"],
-                        "optimization_stack": list(stack),
-                        "source": "resume_consistency_rebuild_from_stack",
-                    }
-                )
-                if rebuilt["tput"] is not None and not isinstance(new_cb.get("tput"), (int, float)):
-                    new_cb["tput"] = rebuilt["tput"]
-                if rebuilt["workspace"] and not new_cb.get("workspace"):
-                    new_cb["workspace"] = rebuilt["workspace"]
-                state.current_best = new_cb
-                report["fixes"].append("rebuilt_current_best_config_from_stack")
-        elif cb:
+        # (3) current_best is written only by the lift, which merges onto the
+        # previous config as it appends, so a stack without a matching config is
+        # the one shape worth reporting.
+        if not (getattr(state, "optimization_stack", None) or []) and state.current_best:
             report["warnings"].append({"kind": "current_best_without_stack"})
 
         # (4) Validation-watermark compensation: unvalidated
