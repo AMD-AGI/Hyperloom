@@ -45,14 +45,12 @@ src/hyperloom/agents/robustness/
 │   ├── policy_aware.py     # local PolicyGate-equivalent payload guard
 │   ├── action_ladder.py    # symptom -> intent (+ Finding) translation (async)
 │   └── rca_engine.py       # NoopRcaEngine | LlmRcaEngine | AnthropicRcaEngine + RcaThrottle
-├── signals/                # 17 detector modules
+├── signals/                # 15 detector modules
 │   ├── classifier.py       # composes the rules and de-duplicates
 │   └── symptom.py          # Symptom / SymptomSeverity dataclasses
 ├── sources/
 │   ├── base.py             # Source / SourceData / DegradeRouter
-│   ├── server_client.py    # robustness-server REST + Source adapter
-│   ├── cluster_decoder.py  # cluster pods/GPU/fault payload decoding
-│   └── local_probe.py      # local fallback (coordinator.db, ps, df, parsed rocm-smi, http probes, log error patterns)
+│   └── local_probe.py      # the collector (coordinator.db, ps, df, parsed rocm-smi, http probes, log error patterns)
 ├── factory.py              # Config -> ReactorBundle (build_reactor_components)
 ├── config.py               # discovery + tunables
 ├── state_store.py          # per-detector state persisted across ticks
@@ -85,9 +83,8 @@ python -m hyperloom.agents.robustness.runtime.cli tick \
   "raw_prompt": "=== Shared session state ===\n...",
   "context": {"tick_index": 0, "now_unix": 1700000000.0},
   "options": {"session_dir": "/tmp/sess-1",
-              "robustness_server_url": "http://...",
               "llm_rca_enabled": false,
-              "metrics_window_s": 300}
+              "disable_local_probe": false}
 }
 ```
 

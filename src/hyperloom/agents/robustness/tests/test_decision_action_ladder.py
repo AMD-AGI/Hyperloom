@@ -82,17 +82,17 @@ async def test_high_crash_emits_alert_only():
     assert alert.payload["detail"]["suggestion"] == "revert"
 
 
-async def test_high_cluster_fault_emits_alert_only():
-    """Cluster faults are diagnostic — alert + suggestion only."""
+async def test_high_diagnostic_symptom_emits_alert_only():
+    """Diagnostic symptoms are alert + suggestion only."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
             _sym(
-                "cluster_fault",
+                "log_error_pattern",
                 SymptomSeverity.HIGH,
-                summary="cluster fault on g53",
-                subject={"node": "g53", "fault": "g53-gpu_ecc"},
-                suggestion="drain g53",
+                summary="CUDA out of memory in server.log",
+                subject={"pattern": "CUDA out of memory"},
+                suggestion="lower the batch size",
             )
         ],
         tick_index=0,
@@ -103,18 +103,18 @@ async def test_high_cluster_fault_emits_alert_only():
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
     alert = next(i for i in out.intents if i.type is IntentType.ALERT)
     assert alert.payload["severity"] == "high"
-    assert alert.payload["detail"]["suggestion"] == "drain g53"
+    assert alert.payload["detail"]["suggestion"] == "lower the batch size"
 
 
-async def test_medium_cluster_fault_emits_alert_only():
+async def test_medium_diagnostic_symptom_emits_alert_only():
     ladder = ActionLadder()
     out = await ladder.decide(
         [
             _sym(
-                "cluster_fault",
+                "log_error_pattern",
                 SymptomSeverity.MEDIUM,
-                summary="cluster fault on g53",
-                subject={"node": "g53", "fault": "g53-gpu_ecc"},
+                summary="RuntimeError in server.log",
+                subject={"pattern": "RuntimeError"},
             )
         ],
         tick_index=0,

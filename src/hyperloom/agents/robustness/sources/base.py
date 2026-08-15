@@ -61,8 +61,6 @@ class SourceData:
     produced each tick; ``degraded_reason`` is set on fallback.
     """
 
-    session_pods: list[dict[str, Any]] = field(default_factory=list)
-    cluster_faults: list[dict[str, Any]] = field(default_factory=list)
     local_gpu: dict[str, Any] = field(default_factory=dict)
     local_processes: list[dict[str, Any]] = field(default_factory=list)
     local_disk: dict[str, Any] = field(default_factory=dict)

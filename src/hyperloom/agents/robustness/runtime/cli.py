@@ -18,9 +18,8 @@ accepts on its ``coordinator_inbox`` shape::
         "raw_prompt": "=== Shared session state ===\\n...",
         "context":   {"tick_index": 0, "now_unix": 1700000000.0},
         "options":   {"session_dir": "/tmp/sess-1",
-                      "robustness_server_url": "http://...",
                       "llm_rca_enabled": false,
-                      "metrics_window_s": 300}
+                      "disable_local_probe": false}
     }
 
 ``raw_prompt`` is parsed by :func:`from_coordinator_prompt`; ``context``
@@ -136,28 +135,10 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
     config = await Config.discover()
     if "session_dir" in options:
         config.session_dir = Path(str(options["session_dir"]))
-    if "robustness_server_url" in options:
-        config.robustness_server_url = str(options["robustness_server_url"] or "")
     if "llm_rca_enabled" in options:
         config.llm_rca_enabled = bool(options["llm_rca_enabled"])
-    if "metrics_window_s" in options:
-        config.metrics_window_s = int(options["metrics_window_s"])
     if "disable_local_probe" in options:
         config.disable_local_probe = bool(options["disable_local_probe"])
-    if "enable_cluster_pod_metrics" in options:
-        config.enable_cluster_pod_metrics = bool(options["enable_cluster_pod_metrics"])
-    if "pod_metrics_categories" in options:
-        raw_cats = options["pod_metrics_categories"]
-        if isinstance(raw_cats, str):
-            cats = tuple(part.strip() for part in raw_cats.split(",") if part.strip())
-        elif isinstance(raw_cats, (list, tuple)):
-            cats = tuple(str(c).strip() for c in raw_cats if str(c).strip())
-        else:
-            cats = ()
-        if cats:
-            config.pod_metrics_categories = cats
-    if "workload_uid" in options:
-        config.workload_uid = str(options["workload_uid"] or "")
     if "nodes" in options:
         try:
             config.nodes = max(1, int(options["nodes"]))

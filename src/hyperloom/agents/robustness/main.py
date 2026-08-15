@@ -70,9 +70,8 @@ async def _run_reactor_mode(config: Config) -> None:
             pass
 
     log.info(
-        "Reactor mode running tick=%.1fs server=%s session_dir=%s",
+        "Reactor mode running tick=%.1fs session_dir=%s",
         config.standalone_tick_interval_s,
-        config.robustness_server_url or "(local-only)",
         config.session_dir,
     )
 

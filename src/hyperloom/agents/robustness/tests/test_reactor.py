@@ -157,16 +157,18 @@ async def test_reactor_emits_alert_for_crash_count_and_persists_finding(tmp_path
 
 @pytest.mark.asyncio
 async def test_reactor_falls_back_to_secondary_when_primary_fails(tmp_path: Path):
-    primary = _FakeSource("server", SourceUnavailable("down"))
+    primary = _FakeSource("local-probe", SourceUnavailable("down"))
     fallback = _FakeSource(
-        "local",
+        "quiet-fallback",
         SourceData(
-            session_pods=[{"pod": {"namespace": "ns", "name": "p"}, "phase": "Failed"}],
-            sources_used=["local"],
+            local_log_errors=[{"pattern": "CUDA out of memory", "line": "boom"}],
+            sources_used=["quiet-fallback"],
         ),
     )
     reactor, _ = _build_reactor(primary=primary, fallback=fallback, tmp_path=tmp_path)
     intents = await reactor.tick(_ctx())
+    assert primary.calls == 1
+    assert fallback.calls == 1
     assert any(i.type is IntentType.ALERT for i in intents)
     assert any(i.payload.get("severity") == "high" for i in intents if i.type is IntentType.ALERT)
 

@@ -3,13 +3,11 @@
 
 """Configuration for the Robustness Agent.
 
-Env-first with auto-detection fallbacks: session_dir (``SESSION_DIR``), the
-robustness-server endpoint (``ROBUSTNESS_SERVER_URL``) and the LLM endpoint /
-credentials (``OPENAI_BASE_URL`` / ``OPENAI_API_KEY``, plus Anthropic and
-DeepSeek variants) fall back to probing well-known paths and endpoints when
-unset. ``ROBUSTNESS_DISABLE_LOCAL_PROBE``,
-``ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS`` and ``ROBUSTNESS_NODES`` are env-only
-with fixed defaults.
+Env-first with auto-detection fallbacks: session_dir (``SESSION_DIR``) and the
+LLM endpoint / credentials (``OPENAI_BASE_URL`` / ``OPENAI_API_KEY``, plus
+Anthropic and DeepSeek variants) fall back to probing well-known paths and
+endpoints when unset. ``ROBUSTNESS_DISABLE_LOCAL_PROBE`` and
+``ROBUSTNESS_NODES`` are env-only with fixed defaults.
 """
 
 from __future__ import annotations
@@ -21,8 +19,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import httpx
-
 from hyperloom.common.env import env_bool, env_int
 from hyperloom.common.llm_config import (
     CLAUDE_OAUTH_TOKEN_ENV,
@@ -31,14 +27,6 @@ from hyperloom.common.llm_config import (
 )
 
 log = logging.getLogger(__name__)
-
-# Primary data source: an optional explicit endpoint (ROBUSTNESS_SERVER_URL),
-# then generic in-cluster / local-dev fallbacks. No internal cluster DNS is
-# hardcoded; set ROBUSTNESS_SERVER_URL for a specific deployment.
-ROBUSTNESS_SERVER_CANDIDATES: list[str] = [u for u in (os.environ.get("ROBUSTNESS_SERVER_URL", "").strip(),) if u] + [
-    "http://robustness-server:8000",
-    "http://localhost:8000",
-]
 
 SESSION_DIR_CANDIDATES: list[Path] = [
     Path("/workspace/session"),
@@ -59,8 +47,6 @@ class Config:
     Attributes:
         session_dir (Path): Directory containing the session's storage
             (including ``coordinator.db``).
-        robustness_server_url (str): Primary M1 data source endpoint;
-            empty means skip the server and use only the local probe.
         llm_model (str): Model name used for LLM-driven root-cause
             analysis.
         llm_base_url (str): LLM API base URL discovered from the sandbox. Empty
@@ -70,8 +56,6 @@ class Config:
             without ever handing it to this process.
         llm_rca_enabled (Optional[bool]): Tri-state RCA activation flag;
             ``None`` auto-enables when credentials are present.
-        metrics_window_s (int): Rolling window, in seconds, over which
-            metrics-based signals are evaluated.
 
     Note:
         Many additional threshold, interval, and per-signal fields exist
@@ -80,9 +64,6 @@ class Config:
     """
 
     session_dir: Path = field(default_factory=lambda: Path(tempfile.gettempdir()) / "robustness-session")
-
-    # Primary data source; empty means "skip server, only use local probe".
-    robustness_server_url: str = ""
 
     @property
     def coordinator_db_path(self) -> Path:
@@ -116,8 +97,6 @@ class Config:
 
     # -- reactor knobs --
     cooldown_ticks: int = 5
-    metrics_window_s: int = 300
-    server_request_timeout_s: float = 5.0
     source_fail_threshold: int = 3
     source_recheck_interval_s: float = 30.0
     standalone_tick_interval_s: float = 10.0
@@ -130,11 +109,6 @@ class Config:
     # Required in multi-node runs: per-pod ps/HTTP/rocm-smi probes false-fire
     # local_server_unreachable / ray_head_dead on Ray workers without a server.
     disable_local_probe: bool = False
-    # RobustnessServerSource fan-out so local_health sees per-pod GPU snapshots.
-    enable_cluster_pod_metrics: bool = False
-    pod_metrics_categories: tuple[str, ...] = ("gpu",)
-    # Resolves the full multi-node RayJob pod set via the hierarchy endpoint.
-    workload_uid: str = ""
     # Informational only (mirrors --nodes); policy driven by the flags above.
     nodes: int = 1
 
@@ -319,43 +293,29 @@ class Config:
             Config: A new instance populated with the discovered values.
         """
         session_dir = _discover_session_dir()
-        server_url = await _probe_robustness_server()
         llm_base_url, llm_api_key, llm_provider = _discover_llm_credentials()
-        workload_uid = _discover_workload_uid()
         disable_local_probe = env_bool("ROBUSTNESS_DISABLE_LOCAL_PROBE", False)
-        enable_cluster_pod_metrics = env_bool(
-            "ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS",
-            False,
-        )
         nodes = env_int("ROBUSTNESS_NODES", 1)
 
         config = cls(
             session_dir=session_dir,
-            robustness_server_url=server_url,
             llm_model=_discover_llm_model(llm_provider),
             llm_base_url=llm_base_url,
             llm_api_key=llm_api_key,
             llm_provider=llm_provider,
-            workload_uid=workload_uid,
             disable_local_probe=disable_local_probe,
-            enable_cluster_pod_metrics=enable_cluster_pod_metrics,
             nodes=nodes,
         )
 
         log.info(
-            "Config discovered: session_dir=%s server=%s llm=%s "
-            "nodes=%d workload_uid=%s disable_local_probe=%s "
-            "enable_cluster_pod_metrics=%s",
+            "Config discovered: session_dir=%s llm=%s nodes=%d disable_local_probe=%s",
             config.session_dir,
-            config.robustness_server_url or "(local-only)",
             # A subscription-token host resolves no base_url at all, so the URL
             # alone would report "(not available)" for an RCA engine that is
             # about to start issuing calls.
             "(configured)" if (config.llm_base_url or config.llm_provider == "anthropic") else "(not available)",
             config.nodes,
-            config.workload_uid or "(unset)",
             config.disable_local_probe,
-            config.enable_cluster_pod_metrics,
         )
         return config
 
@@ -392,33 +352,6 @@ def _discover_session_dir() -> Path:
     fallback = SESSION_DIR_CANDIDATES[-1]
     log.warning("No session dir found, using fallback: %s", fallback)
     return fallback
-
-
-async def _probe_robustness_server() -> str:
-    """Probe known robustness-server endpoints + ROBUSTNESS_SERVER_URL env.
-
-    Returns:
-        str: The first candidate URL whose ``/healthz`` endpoint returns
-        200, or an empty string if none are reachable.
-    """
-    candidates: list[str] = []
-    env_url = os.environ.get("ROBUSTNESS_SERVER_URL", "").strip()
-    if env_url:
-        candidates.append(env_url.rstrip("/"))
-    candidates.extend(ROBUSTNESS_SERVER_CANDIDATES)
-
-    for url in candidates:
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as client:
-                resp = await client.get(f"{url}/healthz")
-                if resp.status_code == 200:
-                    log.info("Robustness-server reachable at %s", url)
-                    return url
-        except Exception:
-            continue
-
-    log.info("Robustness-server not reachable, will use local-only fallback")
-    return ""
 
 
 def _provider_env() -> dict[str, str]:
@@ -478,26 +411,3 @@ def _discover_llm_model(provider: str) -> str:
     return env.get("ANTHROPIC_MODEL", "").strip() or env.get("CLAUDE_MODEL", "").strip() or "claude-opus-5"
 
 
-_WORKLOAD_UID_ENV_KEYS: tuple[str, ...] = (
-    "ROBUSTNESS_WORKLOAD_UID",
-    "CLAW_WORKLOAD_UID",
-    "WORKLOAD_UID",
-    "KUBE_WORKLOAD_UID",
-    "RAY_JOB_ID",
-)
-
-
-def _discover_workload_uid() -> str:
-    """Resolve the multi-node workload uid (first non-empty env key above).
-
-    Lets a RayJob sandbox opt into hierarchy-based pod discovery; single-node
-    runs leave every key unset and discover no pods from the server.
-
-    Returns:
-        The first non-empty workload-uid env value, or ``""`` if none set.
-    """
-    for key in _WORKLOAD_UID_ENV_KEYS:
-        value = (os.environ.get(key) or "").strip()
-        if value:
-            return value
-    return ""

@@ -294,11 +294,7 @@ async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
             **_REQUEST_HEARTBEAT,
             "options": {
                 "session_dir": str(tmp_path),
-                "robustness_server_url": "",
                 "disable_local_probe": True,
-                "enable_cluster_pod_metrics": True,
-                "pod_metrics_categories": "gpu,memory",
-                "workload_uid": "wl-123",
                 "nodes": 4,
             },
         }
@@ -307,9 +303,6 @@ async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
 
     config = captured["config"]
     assert config.disable_local_probe is True
-    assert config.enable_cluster_pod_metrics is True
-    assert config.pod_metrics_categories == ("gpu", "memory")
-    assert config.workload_uid == "wl-123"
     assert config.nodes == 4
 
 
@@ -346,7 +339,7 @@ async def test_run_tick_surfaces_rca_llm_usage(tmp_path: Path, monkeypatch):
     request = _coerce_request(
         {
             **_REQUEST_HEARTBEAT,
-            "options": {"session_dir": str(tmp_path), "robustness_server_url": ""},
+            "options": {"session_dir": str(tmp_path)},
         }
     )
     emit = await _run_tick(request)
@@ -376,7 +369,7 @@ async def test_run_tick_omits_llm_usage_when_none(tmp_path: Path, monkeypatch):
     request = _coerce_request(
         {
             **_REQUEST_HEARTBEAT,
-            "options": {"session_dir": str(tmp_path), "robustness_server_url": ""},
+            "options": {"session_dir": str(tmp_path)},
         }
     )
     emit = await _run_tick(request)

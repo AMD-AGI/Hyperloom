@@ -76,7 +76,7 @@ async def _drive_reactor_with_prompt(config, prompt: str):
 async def test_backend_intents_pass_upstream_policy_gate(tmp_path):
     from hyperloom.agents.robustness.config import Config
 
-    config = Config(session_dir=tmp_path, robustness_server_url="")
+    config = Config(session_dir=tmp_path)
     intents, bundle = await _drive_reactor_with_prompt(
         config,
         "=== Shared session state ===\n"
@@ -102,7 +102,7 @@ async def test_backend_intents_pass_upstream_policy_gate(tmp_path):
 async def test_backend_high_severity_path_passes_gate(tmp_path):
     from hyperloom.agents.robustness.config import Config
 
-    config = Config(session_dir=tmp_path, robustness_server_url="")
+    config = Config(session_dir=tmp_path)
     intents, bundle = await _drive_reactor_with_prompt(
         config,
         "=== Shared session state ===\n"
@@ -131,7 +131,6 @@ async def test_heartbeat_passes_gate(tmp_path):
     # Disable auto-probe so an inert test host doesn't fire alerts that mask the heartbeat.
     config = Config(
         session_dir=tmp_path,
-        robustness_server_url="",
         auto_probe_inference_server=False,
         # Inert hosts have no Ray head; disable the probe so it doesn't fire alongside the heartbeat.
         ray_probe_enabled=False,
@@ -167,7 +166,7 @@ async def test_gpu_memory_leaked_round_trips_through_upstream_policy_gate(tmp_pa
     )
     from hyperloom.agents.robustness.sources.base import SourceData
 
-    config = Config(session_dir=tmp_path, robustness_server_url="")
+    config = Config(session_dir=tmp_path)
     bundle = build_reactor_components(config)
     try:
         classifier = bundle.components.classifier
@@ -240,7 +239,7 @@ async def test_gpu_memory_leaked_silent_when_live_owner_present(tmp_path):
     )
     from hyperloom.agents.robustness.sources.base import SourceData
 
-    config = Config(session_dir=tmp_path, robustness_server_url="")
+    config = Config(session_dir=tmp_path)
     bundle = build_reactor_components(config)
     try:
         full_with_owner = SourceData(
@@ -316,7 +315,7 @@ async def test_repeated_failure_emits_prune_branch_passing_gate(tmp_path):
     conn.commit()
     conn.close()
 
-    config = Config(session_dir=tmp_path, robustness_server_url="")
+    config = Config(session_dir=tmp_path)
     intents, bundle = await _drive_reactor_with_prompt(
         config,
         "=== Shared session state ===\n"

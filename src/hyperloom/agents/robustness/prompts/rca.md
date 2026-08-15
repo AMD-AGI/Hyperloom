@@ -26,7 +26,7 @@ Symptoms come from these signal families; knowing the family helps you interpret
 | H — Time / budget | `budget_strategy_drift`, `budget_burn_no_gain`, `deadline_imminent`, `deadline_warning`, `deadline_hard_cutoff` |
 | I — State integrity | `state_json_corrupt`, `coordinator_wal_bloat`, `stale_lease`, `inbox_bloat`, `coordinator_zombie` |
 | J — External deps | `gateway_auth_outage`, `wekafs_degraded`, `tracelens_cli_missing` |
-| baseline / stall | `agent_stall`, `crash_count_rising`, `crash_count_high`, `crash_count_emergency`, `repeated_policy_denied`, `repeated_failure`, `recover_unsuccessful`, `cluster_fault` |
+| baseline / stall | `agent_stall`, `crash_count_rising`, `crash_count_high`, `crash_count_emergency`, `repeated_policy_denied`, `repeated_failure`, `recover_unsuccessful` |
 
 ## Output contract
 

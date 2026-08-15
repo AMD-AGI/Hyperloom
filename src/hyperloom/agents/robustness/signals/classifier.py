@@ -22,7 +22,6 @@ from ..sources.base import SourceData
 from ..state_store import DetectorStateStore
 from .aiter_jit import AiterJitConfig, AiterJitDetector
 from .budget import BudgetConfig, evaluate_budget_signals
-from .cluster_fault import ClusterFaultConfig, evaluate_cluster_fault_signals
 from .conversation_progress import ConversationProgressConfig, evaluate_conversation_progress_signals
 from .crash import CrashConfig, evaluate_crash_signals
 from .critic_health import (
@@ -40,7 +39,6 @@ from .external_deps import (
     evaluate_external_deps_signals,
 )
 from .gpu_leak import GpuLeakConfig, GpuLeakDetector
-from .health import evaluate_health_signals
 from .kernel_pipeline import (
     KernelPipelineConfig,
     RayPendingDetector,
@@ -125,7 +123,6 @@ _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
     SignalSpec("stall", "stall", StallConfig, evaluator=evaluate_stall_signals),
     SignalSpec("crash", "crash", CrashConfig, evaluator=evaluate_crash_signals),
     SignalSpec("event", "event", EventConfig, evaluator=evaluate_event_signals),
-    SignalSpec("health", None, None, evaluator=evaluate_health_signals),
     SignalSpec(
         "local_health",
         "local_health",
@@ -138,12 +135,6 @@ _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
         GpuLeakConfig,
         detector_cls=GpuLeakDetector,
         state_view_key="gpu_leak",
-    ),
-    SignalSpec(
-        "cluster_fault",
-        "cluster_fault",
-        ClusterFaultConfig,
-        evaluator=evaluate_cluster_fault_signals,
     ),
     SignalSpec(
         "budget",

@@ -38,7 +38,6 @@ from .backends import (
     _build_robustness_options,
     _official_anthropic_only,
     _official_openai_only,
-    _robustness_server_configured,
 )
 from .model_gate import (
     _autodetect_gpu_type,
@@ -1137,8 +1136,8 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     """Resolve the active robustness backend choice (arg → DEFAULT_ROBUSTNESS_BACKEND); hard-fails on invalid.
 
     Multi-node policy: on ``nodes>=2`` the agent's LocalProbe targets sandbox-local resources that live in
-    separate pods (HIGH false positives). Keep ``agent`` only when a robustness-server is configured; else
-    auto-downgrade to ``mock`` (explicit --robustness-agent gets a WARN).
+    separate pods (HIGH false positives), so the choice auto-downgrades to ``mock`` (explicit
+    --robustness-agent gets a WARN).
 
     Args:
         args (argparse.Namespace): The parsed CLI namespace (reads
@@ -1159,18 +1158,15 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
         args=args,
     )
     nodes = int(getattr(args, "nodes", 1) or 1)
-    if nodes >= 2 and chosen == "agent" and not _robustness_server_configured(args):
+    if nodes >= 2 and chosen == "agent":
         if explicit:
             print(
-                f"WARN: --robustness-agent selected but nodes={nodes} and "
-                f"no robustness-server configured — the agent's LocalProbe "
-                f"family targets sandbox-local resources (ray, inference "
-                f"server, GPU, ...) that all live in separate pods on "
-                f"multi-node and surface as HIGH false positives. "
-                f"Auto-downgrading to --robustness-mock; configure "
-                f"--robustness-server-url / ROBUSTNESS_SERVER_URL to keep "
-                f"the agent backend, or pass --robustness-mock explicitly "
-                f"to suppress this warning. See "
+                f"WARN: --robustness-agent selected but nodes={nodes} — the "
+                f"agent's LocalProbe family targets sandbox-local resources "
+                f"(ray, inference server, GPU, ...) that all live in separate "
+                f"pods on multi-node and surface as HIGH false positives. "
+                f"Auto-downgrading to --robustness-mock; pass "
+                f"--robustness-mock explicitly to suppress this warning. See "
                 f"src/hyperloom/inference_optimizer/multi_node/SKILL.md "
                 f"(Robustness limitation in multi-node mode).",
                 file=sys.stderr,
