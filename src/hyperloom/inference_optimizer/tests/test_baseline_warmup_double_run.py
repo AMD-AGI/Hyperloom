@@ -46,6 +46,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
 )
+from hyperloom.orchestrator.actions.stop_attribution import STOPPED_BY_THE_RUN
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.trace.task_progress import progress_scope
 
@@ -453,6 +454,109 @@ def test_measured_round_survives_a_budget_that_still_covers_it(tmp_path):
     assert result["_rounds_run"] == 2
     assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
     assert "budget_shortfall" not in result
+
+
+class TestARoundThatCannotFinishIsNotIgnited:
+    """The gate in front of a round, and the one thing it may be asked with.
+
+    A round is refused before it boots only on what earlier rounds measured, so
+    the session's first one is never refused: it has nothing to be judged by, and
+    a gate that guessed would either refuse every first baseline or wave every
+    one through. From the second on, the figures exist and an anchor exists with
+    them, so refusing costs the session nothing it had while igniting costs it a
+    boot, a compile and a graph capture for a number it would then have to mark
+    as cold.
+
+    Every session here has 3600s on its clock, half of which is held for the
+    phases that produce a result, so a round is judged against 1800s.
+    """
+
+    def test_a_first_round_is_not_judged_at_all(self, tmp_path):
+        """Nothing measured yet, so nothing to refuse it with."""
+        result, calls = _run_baseline_under_budget(tmp_path, remaining_sec=3600.0)
+
+        assert result["status"] == "succeeded"
+        assert calls, "a first baseline was refused on a prediction the session cannot have"
+
+    def test_a_round_larger_than_what_is_left_boots_nothing(self, tmp_path):
+        result, calls = _run_baseline_under_budget(
+            tmp_path,
+            remaining_sec=3600.0,
+            measured_expected_sec=1900.0,
+        )
+
+        assert calls == [], "GPU time was spent on a round the session cannot finish"
+        assert result["status"] == "failed"
+        assert result["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
+        assert result["returncode"] is None, "a round that never launched reported a returncode"
+        assert result["error"] == STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS].never_started
+        assert result["budget_shortfall"]["expected_cost_sec"] == pytest.approx(1900.0)
+        assert result["budget_shortfall"]["affordable_sec"] == pytest.approx(1800.0, abs=1.0)
+
+    def test_a_round_that_still_fits_is_ignited(self, tmp_path):
+        """The gate must not turn a merely expensive round into a refused one."""
+        result, calls = _run_baseline_under_budget(
+            tmp_path,
+            remaining_sec=3600.0,
+            measured_expected_sec=1700.0,
+        )
+
+        assert result["status"] == "succeeded"
+        assert calls
+
+    def test_a_double_run_pays_for_both_of_its_passes(self, tmp_path):
+        """Priced on the round, not on the pass: 1500s fits, 1500s plus 400s does not."""
+        result, calls = _run_baseline_under_budget(
+            tmp_path,
+            remaining_sec=3600.0,
+            measured_expected_sec=1500.0,
+            measured_warm_sec=400.0,
+            double_run=True,
+        )
+
+        assert calls == [], "the round was priced on one pass while planning to run two"
+        assert result["budget_shortfall"]["expected_cost_sec"] == pytest.approx(1900.0)
+
+    def test_a_single_round_pays_for_the_one_pass_it_runs(self, tmp_path):
+        """The same two figures, with no second pass to buy, still fit."""
+        result, calls = _run_baseline_under_budget(
+            tmp_path,
+            remaining_sec=3600.0,
+            measured_expected_sec=1500.0,
+            measured_warm_sec=400.0,
+        )
+
+        assert result["status"] == "succeeded"
+        assert calls
+
+    def test_a_missing_hot_figure_still_pays_for_the_cold_pass(self, tmp_path):
+        """The state a previous cold-anchor drop leaves, and the one to catch.
+
+        A round whose measured pass was dropped for budget promotes its cold
+        number and has no hot number to write. Going inert on a half-measured
+        session would exempt exactly the session that already ran out of budget
+        once.
+        """
+        result, calls = _run_baseline_under_budget(
+            tmp_path,
+            remaining_sec=3600.0,
+            measured_expected_sec=3000.0,
+            double_run=True,
+        )
+
+        assert calls == []
+        assert result["budget_shortfall"]["expected_cost_sec"] == pytest.approx(3000.0)
+
+    def test_a_hot_pass_that_cannot_be_priced_does_not_refuse_a_cold_one_that_fits(self, tmp_path):
+        """Only the provable part refuses; the rest is the post-warmup gate's."""
+        result, calls = _run_baseline_under_budget(
+            tmp_path,
+            remaining_sec=3600.0,
+            measured_expected_sec=1500.0,
+            double_run=True,
+        )
+
+        assert calls, "a round was refused for a pass the session could not price"
 
 
 def test_deferred_accuracy_skips_eval_when_hot_throughput_regresses(
@@ -1924,11 +2028,13 @@ class _BudgetedState:
         *,
         remaining_sec: float | None,
         measured_expected_sec: float = 0.0,
+        measured_warm_sec: float = 0.0,
         phase: str = "PRELUDE",
         double_run: bool = False,
     ) -> None:
         self.baseline_double_run = double_run
         self.baseline_runtime_sec = measured_expected_sec
+        self.baseline_warm_runtime_sec = measured_warm_sec
         self.phase = phase
         self.max_minutes = 0.0 if remaining_sec is None else remaining_sec / 60.0
         self._deadline = None if remaining_sec is None else time.monotonic() + remaining_sec
@@ -2027,8 +2133,10 @@ def _run_baseline_under_budget(
     returncode: int = 0,
     produces_workspace: bool = True,
     measured_expected_sec: float = 0.0,
+    measured_warm_sec: float = 0.0,
     pass_duration_sec: float = 0.0,
     phase: str = "PRELUDE",
+    double_run: bool = False,
     executor_cls=BaselineExecutor,
 ) -> tuple[dict, list[dict]]:
     """Run one baseline round against a session with ``remaining_sec`` left."""
@@ -2037,7 +2145,9 @@ def _run_baseline_under_budget(
     state = _BudgetedState(
         remaining_sec=remaining_sec,
         measured_expected_sec=measured_expected_sec,
+        measured_warm_sec=measured_warm_sec,
         phase=phase,
+        double_run=double_run,
     )
     fake_run, calls = _capturing_fake_run(
         returncode,

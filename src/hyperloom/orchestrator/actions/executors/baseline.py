@@ -37,7 +37,11 @@ from ...framework.paths import resolve_session_framework_root
 from ...loop.sub_agent_runner import RunnerContext
 from ...trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
-from ..stop_attribution import StoppedByTheRun
+from ..stop_attribution import (
+    SESSION_TIME_EXHAUSTED_CLASS,
+    STOPPED_BY_THE_RUN,
+    StoppedByTheRun,
+)
 from . import _server_lifecycle as _lifecycle
 from ._file_lock import best_effort_file_lock
 from ._aiter_jit import (
@@ -318,6 +322,7 @@ def _stopped_round_result(
     runtime_sec: float,
     output_dir: Path,
     capture_meta: dict[str, Any],
+    started: bool = True,
 ) -> dict[str, Any]:
     """Build the result for a round the run itself stopped.
 
@@ -333,25 +338,39 @@ def _stopped_round_result(
     Nothing here arms a retry either: the cause is the run, and a resume meets it
     again.
 
+    A round the budget stopped *before* it booted anything is the same cause and
+    carries the same class; only the wording and the absent returncode differ, so
+    a reader is told whether GPU time was spent.
+
     Args:
         stopped: How to record the cause.
         round_label: Which round was stopped, for the log line.
-        returncode: The stopped round's returncode.
+        returncode: The stopped round's returncode, or ``None`` when nothing ran.
         runtime_sec: Wall-clock seconds the round had run for.
         output_dir: The task workspace, echoed onto the result.
         capture_meta: Config/eval-contract facts every failure result carries.
+        started: Whether the round had begun. ``False`` selects the wording for
+            work that never launched.
 
     Returns:
         dict[str, Any]: The failed result carrying the stop's own error class.
     """
-    detail = stopped.interrupted
-    log.warning(
-        "baseline_executor: %s reaped after %.1fs: %s; error_class=%s.",
-        round_label,
-        runtime_sec,
-        detail,
-        stopped.error_class,
-    )
+    detail = stopped.interrupted if started else stopped.never_started
+    if started:
+        log.warning(
+            "baseline_executor: %s reaped after %.1fs: %s; error_class=%s.",
+            round_label,
+            runtime_sec,
+            detail,
+            stopped.error_class,
+        )
+    else:
+        log.warning(
+            "baseline_executor: %s not launched: %s; error_class=%s.",
+            round_label,
+            detail,
+            stopped.error_class,
+        )
     return {
         "status": "failed",
         "error_class": stopped.error_class,
@@ -393,6 +412,28 @@ def _round_headroom_sec(state: Any, session_deadline_sec: float | None) -> tuple
         return None, outside
     remaining_sec = max(0.0, session_deadline_sec - time.monotonic())
     return remaining_sec, {**outside, "bound": "session_deadline", "affordable_sec": round(remaining_sec, 1)}
+
+
+def _measured_runtime_sec(state: Any, field: str) -> float | None:
+    """Read a runtime some earlier round measured, or ``None`` when none did.
+
+    Absent and zero are the same answer: both mean no round has landed an anchor
+    yet. Neither may read as a round that cost nothing, which is what a plain
+    ``float(... or 0.0)`` would make of them.
+
+    Args:
+        state: The session ``SharedState``, or ``None``.
+        field: The SharedState attribute holding the runtime.
+
+    Returns:
+        float | None: The measured seconds, or ``None`` when there is no
+            measurement to predict from.
+    """
+    try:
+        value = float(getattr(state, field, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0.0 else None
 
 
 def _disable_cuda_graph_flag(framework: str) -> str:
@@ -2935,6 +2976,36 @@ class BaselineExecutor:
             materialized_config_path
         )
 
+        # Asked before the lease, because a round that will not be run should not
+        # hold a GPU while being refused.
+        ignitable, ignition_evidence = self._round_affordable_before_ignition(
+            double_run=double_run,
+            ctx_extra=extra,
+        )
+        if not ignitable:
+            stopped_result = _stopped_round_result(
+                STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
+                round_label="baseline round",
+                returncode=None,
+                runtime_sec=0.0,
+                output_dir=output_dir,
+                capture_meta={
+                    "materialized_config": str(materialized_config_path),
+                    "run_eval_disabled": bool(run_eval_disabled),
+                },
+                started=False,
+            )
+            stopped_result["budget_shortfall"] = ignition_evidence
+            log.warning(
+                "baseline_executor: a whole round is expected to cost %.0fs and "
+                "only %.0fs is left (bound=%s), so nothing is booted. The anchor "
+                "this session already measured stands.",
+                ignition_evidence.get("expected_cost_sec", 0.0),
+                ignition_evidence.get("affordable_sec", 0.0),
+                ignition_evidence.get("bound", ""),
+            )
+            return stopped_result
+
         before_apply_sha = _git_head_sha(patch_target)
         def _persist_recipe_snapshot(manifest: dict[str, Any]) -> bool:
             if live_shared_state is None:
@@ -3074,7 +3145,6 @@ class BaselineExecutor:
                 len(applied_patches),
                 [p["patch_file"] for p in applied_patches],
             )
-
         # Ray-managed GPU execution (§12 T1): one held Ray lease (``num_gpus=TP``)
         # spans this baseline's benchmark rounds — a double-run's warmup +
         # measure reuse one persistent server, so both must run under the same
@@ -3403,6 +3473,85 @@ class BaselineExecutor:
             if bench_lease is not None:
                 bench_lease.close()
 
+    def _round_cost_lower_bound_sec(
+        self,
+        *,
+        double_run: bool,
+        ctx_extra: dict[str, Any] | None = None,
+    ) -> float | None:
+        """What this round will cost at least, from what earlier rounds measured.
+
+        A lower bound rather than an estimate, so that refusing on it is sound:
+        if the part the session can prove does not fit, the whole round does not.
+        The two passes are priced apart because they buy different things -- the
+        first boots the server and pays the one-time compile and graph capture,
+        the second re-attaches a client to a server already up -- and each is
+        added only once it has been measured.
+
+        A session can hold the cold figure without the hot one, and that is not a
+        corner case: a round whose measured pass was dropped for budget promotes
+        its cold number as the anchor and has no hot number to write. Such a
+        session is the one most in need of this gate, so its cold pass is still
+        priced; only the pass it cannot price is left out, and whether that one
+        may follow is settled after the warmup as usual.
+
+        Args:
+            double_run: Whether this round will run both passes.
+            ctx_extra: The runner context extras carrying ``shared_state``.
+
+        Returns:
+            float | None: Seconds the round will cost at least, or ``None`` when
+                the session has measured nothing to predict from.
+        """
+        state = (ctx_extra or {}).get("shared_state") or self.shared_state
+        cold_sec = _measured_runtime_sec(state, "baseline_runtime_sec")
+        if cold_sec is None or not double_run:
+            return cold_sec
+        warm_sec = _measured_runtime_sec(state, "baseline_warm_runtime_sec")
+        return cold_sec if warm_sec is None else cold_sec + warm_sec
+
+    def _round_affordable_before_ignition(
+        self,
+        *,
+        double_run: bool,
+        ctx_extra: dict[str, Any] | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """Whether the budget still holds a whole round, asked before anything boots.
+
+        The companion to :meth:`_measure_round_affordable`, and the two divide
+        the session's baselines between them. A session's first round is not
+        asked this question, because there is nothing to ask it with: the
+        measured runtimes are written only once an anchor lands, so a gate here
+        would either refuse every first baseline or wave every one through. That
+        round runs, and whether a second pass may follow is settled afterwards
+        against what the first actually cost.
+
+        Every later round has at least the previous one's cold figure, and by then
+        an anchor already exists. So a session too poor to finish a round should
+        not spend a cold pass discovering it: refusing costs the session nothing
+        it had, while igniting costs it the boot, the compile, and the capture for
+        a number it will then have to mark as cold.
+
+        Args:
+            double_run: Whether this round will run both passes.
+            ctx_extra: The runner context extras carrying ``shared_state``.
+
+        Returns:
+            tuple[bool, dict[str, Any]]: ``(affordable, evidence)``.
+        """
+        state = (ctx_extra or {}).get("shared_state") or self.shared_state
+        cost = self._round_cost_lower_bound_sec(
+            double_run=double_run,
+            ctx_extra=ctx_extra,
+        )
+        if cost is None:
+            return True, {"reason": "no_measured_round_to_predict_from"}
+        headroom_sec, evidence = _round_headroom_sec(state, None)
+        if headroom_sec is None:
+            return True, evidence
+        priced = {"expected_cost_sec": round(cost, 1), **evidence}
+        return headroom_sec >= cost, priced
+
     def _measure_round_affordable(
         self,
         *,
@@ -3412,14 +3561,14 @@ class BaselineExecutor:
         """Whether PRELUDE's remaining budget still covers the measured round.
 
         Asked after the warmup rather than before it, and priced with what that
-        pass actually cost rather than a prediction of what it would. A session's
-        first baseline has nothing to predict from -- the measured runtimes are
-        written only once an anchor lands -- so a gate that ran first would
-        either refuse every first baseline or wave every one through. The
+        pass actually cost rather than a prediction of what it would. The
         warmup's own wall-clock is available exactly when this question is asked,
         and it is an upper bound rather than an estimate: the measured round
         re-attaches to a server this pass has already booted, so it cannot cost
         more.
+
+        This is the gate every round faces, including the first, which is the one
+        :meth:`_round_affordable_before_ignition` cannot judge.
 
         A round that fails here has still produced a number. It is the cold one
         the double run exists to discard, so the caller keeps it as the anchor
