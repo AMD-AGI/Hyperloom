@@ -784,11 +784,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # dispatch / KEEP.
     rounds_since_last_specialist: dict[str, int] = field(default_factory=dict)
     rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
-    # Legacy session_steward slots (steward removed); kept only for resume back-compat, never written.
-    steward_continuation_used: bool = False
-    steward_infra_failures_by_round: dict[str, int] = field(
-        default_factory=dict,
-    )
     # last specialist task snapshot (parity with other ``last_<action>`` mirrors).
     last_specialist: dict[str, Any] = field(default_factory=dict)
     # Per-specialist patch verdict ledger by task_id; Critic must approve/advise before PolicyGate allows the integrate_patch delegate.

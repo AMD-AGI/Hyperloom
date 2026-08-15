@@ -49,14 +49,8 @@ class Recovery(TypedDict, total=False):
         crash_timestamps (list[str]): ISO UTC timestamps of recent crashes
             (bounded tail).
         degraded_mode (bool): Whether the run entered degraded operation.
-        steward_continuation_used (bool): The steward continued the run after an
-            interruption / budget event.
         resume_pending_revalidation (bool): Accepted stack awaits post-resume
             revalidation (validated gain not yet re-trusted).
-        steward_infra_failures_total (int): Sum of steward-observed infra
-            failures across rounds.
-        steward_infra_failures_by_round (dict[str, int]): Per-round infra
-            failure counts.
         last_tick_exception (dict[str, Any] | None): Compact summary of the last
             Coordinator tick exception (tick / stage / type / message), traceback
             omitted.
@@ -66,10 +60,7 @@ class Recovery(TypedDict, total=False):
     crash_count: int
     crash_timestamps: list[str]
     degraded_mode: bool
-    steward_continuation_used: bool
     resume_pending_revalidation: bool
-    steward_infra_failures_total: int
-    steward_infra_failures_by_round: dict[str, int]
     last_tick_exception: dict[str, Any] | None
 
 

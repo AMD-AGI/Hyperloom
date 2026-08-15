@@ -2669,7 +2669,7 @@ class FrameworkPhase(PhaseHandler):
         if not model:
             return None
         state = self.shared_state
-        best = getattr(state, "best_throughput", None) or getattr(state, "baseline_throughput", None)
+        best = resolve_grading_anchor_tput(state) or None
         cap = 60
         listed = candidates[:cap]
         candidate_rows: list[str] = []

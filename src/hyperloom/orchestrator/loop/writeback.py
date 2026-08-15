@@ -1482,7 +1482,6 @@ class WritebackCollaborator:
         kernel_optimizations = self._coord._build_kernel_optimizations_from_state()
         cumulative_validated = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
         validated_stack_len = int(getattr(ss, "cumulative_gain_validated_stack_len", 0) or 0)
-        stack_fingerprint = getattr(ss, "stack_fingerprint", "") or ""
         # Workload-shape tags for shape-filtered warm-start queries (shared via _collect_workload_tags).
         workload_tags = self._coord._collect_workload_tags()
         # framework_version left unset here (manifest-derived); the T0 backfill writes it.
@@ -1492,7 +1491,6 @@ class WritebackCollaborator:
             "what_worked": what_worked,
             "what_failed": what_failed,
             "kernel_optimizations": kernel_optimizations,
-            "stack_fingerprint": {"sha": str(stack_fingerprint)} if stack_fingerprint else {},
             "last_profiled": str(getattr(ss, "cumulative_gain_validated_ts", "") or ""),
             "workload": workload_tags,
             "sessions": [
@@ -1828,14 +1826,6 @@ class WritebackCollaborator:
             if has_validated_win and my_tput > live_tput:
                 overrides["best_config"] = attrs["best_config"]
                 overrides["best_throughput"] = my_tput
-            # Merge stack_fingerprint rather than replace (CLOSE only has the sha; T0 stamps version keys).
-            merged_fp = dict(existing_row.get("stack_fingerprint") or {})
-            for fp_key, fp_val in (attrs.get("stack_fingerprint") or {}).items():
-                if fp_val not in (None, "", {}):
-                    merged_fp[fp_key] = fp_val
-            if merged_fp:
-                overrides["stack_fingerprint"] = merged_fp
-
             self._kb_amend_recipe(
                 recipe_overrides=overrides,
                 provenance_details={
@@ -1989,20 +1979,6 @@ class WritebackCollaborator:
                 "mn_auto_materialize: bridge raised for task=%s (continuing)",
                 task.task_id,
             )
-
-        # ``_route_steward_verdict`` has no definition anywhere, so this branch
-        # cannot succeed — the except below swallows the AttributeError.
-        if domain == "session_steward_specialist":
-            try:
-                await self._route_steward_verdict(
-                    task=task,
-                    done_payload=done_payload,
-                )
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception(
-                    "steward routing failed for task=%s; no phase-routing change applied",
-                    task.task_id,
-                )
 
         # Harvest research-scout output (hints, competitor target, gap seeds, PR dedup). Fail-soft.
         if domain == "research_scout_specialist":

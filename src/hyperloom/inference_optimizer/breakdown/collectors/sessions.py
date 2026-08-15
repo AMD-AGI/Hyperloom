@@ -576,30 +576,15 @@ def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
             "message": (str(lte.get("message") or "")[:500] or None),
         }
 
-    infra = state.get("steward_infra_failures_by_round")
-    infra_by_round: dict[str, int] = {}
-    infra_total = 0
-    if isinstance(infra, dict):
-        for k, v in infra.items():
-            iv = _to_int(v)
-            if iv is None:
-                continue
-            infra_by_round[str(k)] = iv
-            infra_total += iv
-
-    steward_continuation = bool(state.get("steward_continuation_used"))
     resume_pending = bool(state.get("resume_pending_revalidation"))
     degraded = bool(state.get("degraded_mode"))
-    recovered = bool(crash_count > 0 or crash_ts_iso or steward_continuation or resume_pending or last_exc)
+    recovered = bool(crash_count > 0 or crash_ts_iso or resume_pending or last_exc)
     return {
         "recovered": recovered,
         "crash_count": crash_count,
         "crash_timestamps": crash_ts_iso,
         "degraded_mode": degraded,
-        "steward_continuation_used": steward_continuation,
         "resume_pending_revalidation": resume_pending,
-        "steward_infra_failures_total": infra_total,
-        "steward_infra_failures_by_round": infra_by_round,
         "last_tick_exception": last_exc,
     }
 
