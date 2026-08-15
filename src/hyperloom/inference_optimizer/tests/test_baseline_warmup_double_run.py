@@ -547,6 +547,24 @@ class TestARoundThatCannotFinishIsNotIgnited:
         assert calls == []
         assert result["budget_shortfall"]["expected_cost_sec"] == pytest.approx(3000.0)
 
+    def test_a_refused_round_carries_nothing_that_could_replace_the_anchor(self, tmp_path):
+        """The property the whole gate rests on, asserted rather than assumed.
+
+        The figure this gate judges by over-predicts: it comes from a pass that
+        paid a one-time compile on a cold kernel cache, which a later pass on a
+        warm one does not pay again. Refusing too readily is tolerable only
+        because the anchor the session already measured survives a refusal, so
+        the round must come back with no throughput to promote over it.
+        """
+        result, _calls = _run_baseline_under_budget(
+            tmp_path,
+            remaining_sec=3600.0,
+            measured_expected_sec=1900.0,
+        )
+
+        assert result.get("output_throughput") in (None, 0, 0.0)
+        assert not result.get("nonfatal_warnings"), "a refused round volunteered a warning to promote"
+
     def test_a_hot_pass_that_cannot_be_priced_does_not_refuse_a_cold_one_that_fits(self, tmp_path):
         """Only the provable part refuses; the rest is the post-warmup gate's."""
         result, calls = _run_baseline_under_budget(
