@@ -599,26 +599,42 @@ def _ready_stamp_path(server_log_path: str) -> Path:
     return Path(server_log_path).parent / _READY_STAMP_NAME
 
 
-def _stamp_server_ready(server_log_path: str) -> None:
+def _stamp_server_ready(server_log_path: str, boot_sec: float = 0.0) -> None:
     """Record, beside ``server_log_path``, that the server just reported ready.
 
-    Written as a wall-clock (``time.time()``) instant rather than the
-    ``time.monotonic()`` one the gates run on, because the process that reads it
-    is not always the one that wrote it: on the Ray path the round runs inside an
-    actor, and a monotonic reading means nothing outside the process that took
-    it. A file is used for the same reason -- it crosses the actor boundary that
-    the round's return value would otherwise have to be widened to cross, and the
-    round's output directory is already how post-mortem evidence gets back (the
-    caller reads the same directory's ``server.log`` to classify server deaths).
+    Two numbers, because they answer two questions and one clock cannot answer
+    both. ``boot_sec`` is how long the round took to come up, measured from spawn
+    to this moment on one ``time.monotonic()`` reading in the process that
+    spawned the child. The wall-clock instant beside it only ever says *which
+    round* the stamp belongs to.
+
+    Keeping the boot a duration is what makes it safe to read across a process
+    boundary. On the Ray path the round runs inside an actor, possibly on another
+    host; subtracting the actor's wall-clock from the driver's would charge the
+    boot for whatever the two clocks disagree by, and a positive disagreement
+    inflates the boot and makes the budget gates refuse rounds that fit. A
+    duration crosses the boundary meaning the same thing on both sides -- the
+    same reason ``session_remaining_sec`` is passed to the actor as a duration
+    rather than as a deadline.
+
+    A file is used because it crosses that boundary without widening the round's
+    return value, and the round's output directory is already how post-mortem
+    evidence gets back (the caller reads the same directory's ``server.log`` to
+    classify server deaths).
 
     Best effort: a round whose stamp cannot be written loses a measurement, which
     callers already have to handle, and must not lose the round.
 
     Args:
         server_log_path: The ``<output_dir>/server.log`` path from the caller.
+        boot_sec: Seconds from spawn to this moment, on the spawning process's
+            monotonic clock.
     """
     try:
-        _ready_stamp_path(server_log_path).write_text(f"{time.time():.3f}\n", encoding="utf-8")
+        _ready_stamp_path(server_log_path).write_text(
+            f"{time.time():.3f} {max(0.0, float(boot_sec)):.3f}\n",
+            encoding="utf-8",
+        )
     except OSError as exc:
         log.warning("_subprocess_kill: could not stamp server-ready time (%s)", exc)
 
@@ -635,6 +651,30 @@ def clear_server_ready_stamp(server_log_path: str) -> None:
         log.warning("_subprocess_kill: could not clear stale server-ready stamp (%s)", exc)
 
 
+def _read_ready_stamp(server_log_path: str) -> tuple[float, float] | None:
+    """Return a round's ``(ready_unix, boot_sec)``, or ``None`` when unrecorded.
+
+    Args:
+        server_log_path: The ``<output_dir>/server.log`` path from the caller.
+
+    Both fields are required. A stamp missing its boot is reported as no stamp at
+    all rather than as a boot of zero: zero is a legitimate boot, so it cannot
+    also stand for "not recorded", and reading it that way would hand the whole
+    round to the benchmark -- the figure every later variant is then admitted on.
+
+    Returns:
+        tuple[float, float] | None: The wall-clock instant the stamp was written
+        and the boot it measured, or ``None`` when no readable stamp exists.
+    """
+    try:
+        fields = _ready_stamp_path(server_log_path).read_text(encoding="utf-8").split()
+        ready_unix = float(fields[0])
+        boot_sec = float(fields[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return (ready_unix, max(0.0, boot_sec)) if ready_unix > 0.0 else None
+
+
 def server_ready_unix(server_log_path: str) -> float | None:
     """Return when the server reported ready, or ``None`` when nothing recorded it.
 
@@ -645,11 +685,8 @@ def server_ready_unix(server_log_path: str) -> float | None:
         float | None: The wall-clock instant, or ``None`` when no stamp exists or
         it is unreadable.
     """
-    try:
-        stamped = float(_ready_stamp_path(server_log_path).read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return None
-    return stamped if stamped > 0.0 else None
+    stamp = _read_ready_stamp(server_log_path)
+    return None if stamp is None else stamp[0]
 
 
 def post_ready_runtime_sec(
@@ -665,6 +702,11 @@ def post_ready_runtime_sec(
     rounds comparable when one paid for a cold start and the other re-attached to
     a server already up.
 
+    The round's wall-clock less the boot the stamp measured. The boot is a
+    duration taken on one clock, so this holds however far apart the writer and
+    the reader are; ``started_unix`` is only compared against the stamp's own
+    instant, to tell this round's stamp from one an earlier round left behind.
+
     Args:
         server_log_path: The ``<output_dir>/server.log`` path from the caller.
         started_unix: When the round was spawned.
@@ -676,10 +718,10 @@ def post_ready_runtime_sec(
         predates it (an earlier round's, left behind by a failed clear -- reading
         it would report a cold round as though it had never booted).
     """
-    ready_unix = server_ready_unix(server_log_path)
-    if ready_unix is None or ready_unix < started_unix:
+    stamp = _read_ready_stamp(server_log_path)
+    if stamp is None or stamp[0] < started_unix:
         return None
-    return max(0.0, min(float(runtime_sec), started_unix + float(runtime_sec) - ready_unix))
+    return max(0.0, min(float(runtime_sec), float(runtime_sec) - stamp[1]))
 
 
 def _resolve_scan_logs(server_log_path: str) -> list[str]:
@@ -1278,8 +1320,10 @@ def _communicate_with_soft_deadline(
                 last_activity_at = now  # start the silence clock at ready
                 # Recorded for the caller, which prices later work off the
                 # post-ready segment rather than the whole round: a pass that
-                # re-attaches to this server pays none of the boot.
-                _stamp_server_ready(server_log_path)  # type: ignore[arg-type]
+                # re-attaches to this server pays none of the boot. Taken as
+                # ``now - start`` so the boot is measured end to end on this
+                # process's own clock, whatever host the caller reads it on.
+                _stamp_server_ready(server_log_path, now - start)  # type: ignore[arg-type]
             if scan.saw_eval_start and not soft_deadline_suspended:
                 soft_deadline_suspended = True
                 log.info(

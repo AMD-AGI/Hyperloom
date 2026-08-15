@@ -19,6 +19,8 @@ from __future__ import annotations
 import sys
 import time
 
+import pytest
+
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     OVERTIME_KILL_RETURNCODE,
     clear_server_ready_stamp,
@@ -243,6 +245,53 @@ class TestARoundIsPricedByItsTwoParts:
             "the boot/benchmark split was withdrawn along with the stall watchdog"
         )
 
+    def test_a_reader_on_another_clock_gets_the_same_boot(self, tmp_path):
+        """The split survives being read where it was not written.
+
+        On the Ray path the round runs inside an actor, possibly on another host,
+        and the caller subtracting its own clock from the actor's would charge the
+        boot for whatever the two disagree by -- inflating it, and making the
+        budget gates refuse rounds that fit. The boot is a duration taken on one
+        clock, so a reader whose clock is five seconds off reads the same figure.
+        """
+        log_path = tmp_path / "server.log"
+        script = (
+            "import sys, time\n"
+            "f = open(sys.argv[1], 'w')\n"
+            "f.write('INFO loading weights\\n'); f.flush()\n"
+            "time.sleep(3)\n"
+            "f.write('Application startup complete\\n'); f.flush()\n"
+            "time.sleep(1)\n"
+            "raise SystemExit(0)\n"
+        )
+        started_unix = time.time()
+        cp = run_with_session_kill(
+            [sys.executable, "-c", script, str(log_path)],
+            timeout=30,
+            server_log_path=str(log_path),
+            detok_stall_grace_sec=_LONG_STALL_GRACE,
+        )
+        runtime_sec = time.time() - started_unix
+        assert cp.returncode == 0
+
+        agreed = post_ready_runtime_sec(
+            str(log_path),
+            started_unix=started_unix,
+            runtime_sec=runtime_sec,
+        )
+        # A caller whose clock runs five seconds behind the writer's. The instant
+        # is still this round's, so the stamp is accepted, and the boot it
+        # reports does not move.
+        skewed = post_ready_runtime_sec(
+            str(log_path),
+            started_unix=started_unix - 5.0,
+            runtime_sec=runtime_sec,
+        )
+        assert agreed is not None
+        assert skewed == pytest.approx(agreed), (
+            f"a five-second clock disagreement moved the boot: {skewed} vs {agreed}"
+        )
+
     def test_a_round_that_never_came_up_is_not_priced(self, tmp_path):
         """No ready marker means no split, reported as unknown rather than guessed."""
         log_path = tmp_path / "server.log"
@@ -278,7 +327,8 @@ class TestARoundIsPricedByItsTwoParts:
         """
         log_path = tmp_path / "server.log"
         log_path.write_text("INFO loading weights\n", encoding="utf-8")
-        (tmp_path / "server_ready_at").write_text(f"{time.time() - 600.0:.3f}\n", encoding="utf-8")
+        # A complete stamp, so what rejects it can only be its instant.
+        (tmp_path / "server_ready_at").write_text(f"{time.time() - 600.0:.3f} 30.000\n", encoding="utf-8")
 
         assert (
             post_ready_runtime_sec(
@@ -293,7 +343,7 @@ class TestARoundIsPricedByItsTwoParts:
         """Clearing is what keeps the case above from arising in a reused dir."""
         log_path = tmp_path / "server.log"
         stamp = tmp_path / "server_ready_at"
-        stamp.write_text(f"{time.time():.3f}\n", encoding="utf-8")
+        stamp.write_text(f"{time.time():.3f} 30.000\n", encoding="utf-8")
         assert server_ready_unix(str(log_path)) is not None
 
         clear_server_ready_stamp(str(log_path))
@@ -303,15 +353,17 @@ class TestARoundIsPricedByItsTwoParts:
         # Idempotent: a round whose dir never had one must not fail to start.
         clear_server_ready_stamp(str(log_path))
 
-    def test_a_clock_that_disagrees_cannot_produce_a_negative_price(self, tmp_path):
-        """The writer and the reader can be different hosts, so skew is possible.
+    def test_a_boot_longer_than_the_round_cannot_produce_a_negative_price(self, tmp_path):
+        """A corrupt stamp must cost a measurement, never produce a nonsense one.
 
-        A stamp after the round's own end would price the benchmark at less than
-        nothing; it is floored instead, and the round's total caps the other end.
+        The two figures come from two places -- the boot from inside the round,
+        the total from the caller around it -- so nothing structurally forbids a
+        boot larger than the total. It is floored, and the total caps the other
+        end.
         """
         log_path = tmp_path / "server.log"
         started_unix = time.time()
-        (tmp_path / "server_ready_at").write_text(f"{started_unix + 500.0:.3f}\n", encoding="utf-8")
+        (tmp_path / "server_ready_at").write_text(f"{started_unix + 10.0:.3f} 500.000\n", encoding="utf-8")
 
         priced = post_ready_runtime_sec(
             str(log_path),
@@ -320,3 +372,25 @@ class TestARoundIsPricedByItsTwoParts:
         )
 
         assert priced == 0.0
+
+    def test_a_stamp_with_no_boot_recorded_is_no_stamp_at_all(self, tmp_path):
+        """A missing boot must not read as a round that never booted.
+
+        Zero is a legitimate boot, so it cannot also mean "not recorded" --
+        reading it that way hands the whole round to the benchmark, which is the
+        figure every later variant is then admitted on, and every one of them is
+        reaped. Unmeasured is reported as unmeasured; the gates know what to do
+        with that.
+        """
+        log_path = tmp_path / "server.log"
+        started_unix = time.time()
+        (tmp_path / "server_ready_at").write_text(f"{started_unix + 10.0:.3f}\n", encoding="utf-8")
+
+        assert (
+            post_ready_runtime_sec(
+                str(log_path),
+                started_unix=started_unix,
+                runtime_sec=100.0,
+            )
+            is None
+        )
