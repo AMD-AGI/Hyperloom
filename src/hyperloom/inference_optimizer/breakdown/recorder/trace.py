@@ -25,7 +25,9 @@ thousands of fragments and this must not arrive mixed into output someone
 enabled to read something else. Nothing here may raise or slow down a run that
 has it switched off: every entry point is guarded by one level check and
 wrapped against its own failure, since a broken trace must never be the reason
-a fact went unrecorded.
+a fact went unrecorded. What it emits is redacted on the way out, because a
+line drawn from payloads and fragment names must not be the one copy of a
+credential that the code persisting those same values took care to mask.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom.common.env import env_bool
+from hyperloom.common.env_safety import redact_secret_values
 
 #: Below ``DEBUG`` (10). See the module docstring: this is a per-write firehose,
 #: so it cannot share a level with output read for any other purpose.
@@ -237,7 +240,12 @@ def trace_write(
         fields.append(_call_site())
         if error is not None:
             fields.append(f"error={type(error).__name__}:{_short(error)}")
-        log.log(TRACE, "breakdown %s", " ".join(fields))
+        # Every part of this line is producer text at one remove: payload
+        # values, and fragment names built from ids that can carry an error
+        # excerpt. Those are redacted where they are persisted, so the trace
+        # has to redact too or it becomes the widest copy of what the rest of
+        # the code is careful about.
+        log.log(TRACE, "breakdown %s", redact_secret_values(" ".join(fields)))
     except Exception:  # noqa: BLE001 - a trace must never break a recording
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
 

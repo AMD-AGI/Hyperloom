@@ -33,9 +33,7 @@ def test_the_trace_is_silent_until_it_is_asked_for(tmp_path, caplog):
     caplog.set_level(trace_mod.TRACE, logger=trace_mod.log.name)
     trace_mod.enable_trace(False)
 
-    record_measurement(
-        tmp_path, measurement_id="m-1", name="final_throughput", value=5081.01
-    )
+    record_measurement(tmp_path, measurement_id="m-1", name="final_throughput", value=5081.01)
 
     assert not trace_mod.trace_enabled()
     assert caplog.records == []
@@ -72,9 +70,7 @@ def test_an_overwritten_reading_is_named_with_both_values(tmp_path, traced):
     results. Here it is a line saying so, at the moment it happens.
     """
     for value in (5081.0100767, 5100.763142143991):
-        record_measurement(
-            tmp_path, measurement_id="m-final", name="final_throughput", value=value
-        )
+        record_measurement(tmp_path, measurement_id="m-final", name="final_throughput", value=value)
 
     first, second = (record.getMessage() for record in traced.records)
 
@@ -86,9 +82,7 @@ def test_an_overwritten_reading_is_named_with_both_values(tmp_path, traced):
 def test_a_rewrite_that_changes_nothing_says_nothing_changed(tmp_path, traced):
     """Recording the same fact twice is normal, and worth telling apart."""
     for _ in range(2):
-        record_measurement(
-            tmp_path, measurement_id="m-1", name="final_throughput", value=5081.01
-        )
+        record_measurement(tmp_path, measurement_id="m-1", name="final_throughput", value=5081.01)
 
     second = list(traced.records)[-1].getMessage()
 
@@ -148,6 +142,32 @@ def test_a_trace_that_breaks_does_not_break_the_write(tmp_path, traced, monkeypa
 
     assert target.exists()
     assert any("trace failed" in record.getMessage() for record in traced.records)
+
+
+def test_a_credential_in_a_recorded_value_is_masked(tmp_path, traced):
+    """Producers record diagnostic text, and text is where credentials hide.
+
+    The values a merging write names are the ones worth reading in full, which
+    is exactly what makes this line the widest copy of whatever a producer put
+    in the payload.
+    """
+    for detail in ("Authorization: Bearer tok-aaaaaaaaaaaa", "retry failed"):
+        record_operation(tmp_path, operation_id="op-1", kind="integrate", error=detail)
+
+    line = list(traced.records)[-1].getMessage()
+
+    assert "tok-aaaaaaaaaaaa" not in line
+    assert "[REDACTED]" in line
+
+
+def test_a_credential_in_an_entity_id_is_masked(tmp_path, traced):
+    """An id can be built from an error excerpt, and it names the fragment file."""
+    record_operation(tmp_path, operation_id="op-ak-liveseecret123", kind="integrate")
+
+    line = list(traced.records)[-1].getMessage()
+
+    assert "liveseecret123" not in line
+    assert "[REDACTED]" in line
 
 
 def test_the_trace_level_stays_below_debug():
