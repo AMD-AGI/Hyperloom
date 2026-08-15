@@ -1135,13 +1135,9 @@ _VALID_ROBUSTNESS_BACKENDS = ("mock", "agent")
 def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     """Resolve the active robustness backend choice (arg → DEFAULT_ROBUSTNESS_BACKEND); hard-fails on invalid.
 
-    Multi-node policy: on ``nodes>=2`` the agent's LocalProbe targets sandbox-local resources that live in
-    separate pods (HIGH false positives), so the choice auto-downgrades to ``mock`` (explicit
-    --robustness-agent gets a WARN).
-
     Args:
         args (argparse.Namespace): The parsed CLI namespace (reads
-            ``robustness_backend`` / ``nodes`` and server config).
+            ``robustness_backend``).
 
     Returns:
         str: The resolved robustness backend (one of
@@ -1150,28 +1146,13 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     Raises:
         SystemExit: With code 2 when the chosen backend is invalid.
     """
-    chosen, explicit = _resolve_choice(
+    chosen, _ = _resolve_choice(
         "robustness_backend",
         DEFAULT_ROBUSTNESS_BACKEND,
         _VALID_ROBUSTNESS_BACKENDS,
         "--robustness-mock / --robustness-agent or INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND",
         args=args,
     )
-    nodes = int(getattr(args, "nodes", 1) or 1)
-    if nodes >= 2 and chosen == "agent":
-        if explicit:
-            print(
-                f"WARN: --robustness-agent selected but nodes={nodes} — the "
-                f"agent's LocalProbe family targets sandbox-local resources "
-                f"(ray, inference server, GPU, ...) that all live in separate "
-                f"pods on multi-node and surface as HIGH false positives. "
-                f"Auto-downgrading to --robustness-mock; pass "
-                f"--robustness-mock explicitly to suppress this warning. See "
-                f"src/hyperloom/inference_optimizer/multi_node/SKILL.md "
-                f"(Robustness limitation in multi-node mode).",
-                file=sys.stderr,
-            )
-        chosen = "mock"
     return chosen
 
 

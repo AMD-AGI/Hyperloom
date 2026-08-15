@@ -1014,6 +1014,14 @@ def test_resolve_robustness_choice_explicit_mock_wins():
     assert cli._resolve_robustness_choice(args) == "mock"
 
 
+def test_resolve_robustness_choice_keeps_the_agent_on_multi_node():
+    """Multi-node runs the agent on its node-agnostic signals; the local probe
+    is what gets disabled, not the whole backend."""
+    args = _make_args(robustness_backend=None, nodes=4)
+
+    assert cli._resolve_robustness_choice(args) == "agent"
+
+
 def test_resolve_robustness_choice_env_override_still_works(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND", "mock")
     reloaded_cli = importlib.reload(cli)

@@ -825,15 +825,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "or a sibling $REPO_ROOT/robustness-agent/ directory.",
     )
     opt.add_argument(
-        "--robustness-server-url",
-        dest="robustness_server_url",
-        type=str,
-        default=None,
-        help="Override the robustness-server base URL forwarded into "
-        "request.options. Honoured only when --robustness-agent is "
-        "selected.",
-    )
-    opt.add_argument(
         "--robustness-llm-rca",
         dest="robustness_llm_rca",
         action="store_true",
@@ -847,16 +838,6 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="robustness_llm_rca",
         action="store_false",
         help="Forward llm_rca_enabled=false into request.options.",
-    )
-    opt.add_argument(
-        "--robustness-workload-uid",
-        dest="robustness_workload_uid",
-        type=str,
-        default=None,
-        help="Forward workload_uid into request.options. The robustness-server "
-        "resolves it to every pod (head + workers) backing the RayJob via "
-        "the cluster/workloads/{uid}/hierarchy endpoint. Falls back to "
-        "$CLAW_WORKLOAD_UID / $WORKLOAD_UID / $RAY_JOB_ID when unset.",
     )
     opt.add_argument(
         "--robustness-disable-local-probe",
@@ -895,30 +876,6 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Force auto_probe_inference_server=true (keep the 127.0.0.1:8888 "
         "/health auto-probe even in multi-node mode).",
-    )
-    opt.add_argument(
-        "--robustness-enable-cluster-pod-metrics",
-        dest="robustness_enable_cluster_pod_metrics",
-        action="store_true",
-        default=None,
-        help="Force enable_cluster_pod_metrics=true so the robustness-agent "
-        "fans out per-pod metrics through robustness-server and feeds "
-        "the local_health rules with cluster-decoded GPU snapshots.",
-    )
-    opt.add_argument(
-        "--no-robustness-enable-cluster-pod-metrics",
-        dest="robustness_enable_cluster_pod_metrics",
-        action="store_false",
-        help="Force enable_cluster_pod_metrics=false.",
-    )
-    opt.add_argument(
-        "--robustness-pod-metrics-categories",
-        dest="robustness_pod_metrics_categories",
-        type=str,
-        default=None,
-        help="Comma-separated metric categories forwarded into "
-        "pod_metrics_categories (e.g. 'gpu,memory'). Default 'gpu' is "
-        "applied by the runtime when this flag is omitted.",
     )
     opt.add_argument(
         "--orch-prompt", type=str, default=None, help="Override Orchestration system prompt (file path or inline)"

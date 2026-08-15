@@ -375,74 +375,28 @@ def test_proposal_scorer_models_without_enable_stays_off(monkeypatch) -> None:
     assert clib._build_proposal_scorer(args) is None
 
 
-def test_robustness_server_configured_via_arg() -> None:
-    args = argparse.Namespace(robustness_server_url="http://rob:9000")
-    assert clib._robustness_server_configured(args) is True
-
-
-def test_robustness_server_configured_via_env(monkeypatch) -> None:
-    monkeypatch.delenv("ROBUSTNESS_SERVER_URL", raising=False)
-    args = argparse.Namespace(robustness_server_url=None)
-    assert clib._robustness_server_configured(args) is False
-    monkeypatch.setenv("ROBUSTNESS_SERVER_URL", "http://env:9000")
-    assert clib._robustness_server_configured(args) is True
-
-
-def test_robustness_options_single_node_minimal(monkeypatch) -> None:
-    for k in clib._MULTI_NODE_WORKLOAD_UID_ENV_KEYS:
-        monkeypatch.delenv(k, raising=False)
+def test_robustness_options_single_node_minimal() -> None:
     args = argparse.Namespace(
-        robustness_server_url=None,
         robustness_llm_rca=None,
         nodes=1,
-        robustness_workload_uid=None,
         robustness_disable_local_probe=None,
-        robustness_enable_cluster_pod_metrics=None,
-        robustness_pod_metrics_categories=None,
     )
     opts = clib._build_robustness_options(args)
     assert "auto_probe_inference_server" not in opts
     assert "nodes" not in opts
 
 
-def test_robustness_options_multi_node_defaults(monkeypatch) -> None:
-    for k in clib._MULTI_NODE_WORKLOAD_UID_ENV_KEYS:
-        monkeypatch.delenv(k, raising=False)
+def test_robustness_options_multi_node_defaults() -> None:
     args = argparse.Namespace(
-        robustness_server_url="http://rob",
         robustness_llm_rca=True,
         nodes=4,
-        robustness_workload_uid="wl-1",
         robustness_disable_local_probe=None,
-        robustness_enable_cluster_pod_metrics=None,
-        robustness_pod_metrics_categories="gpu,net",
     )
     opts = clib._build_robustness_options(args)
     assert opts["nodes"] == 4
-    assert opts["robustness_server_url"] == "http://rob"
     assert opts["llm_rca_enabled"] is True
-    assert opts["workload_uid"] == "wl-1"
     assert opts["disable_local_probe"] is True
-    assert opts["enable_cluster_pod_metrics"] is True
-    assert opts["pod_metrics_categories"] == ["gpu", "net"]
     assert opts["auto_probe_inference_server"] is False
     assert opts["progress_no_levers_min_minutes"] == 60.0
-
-
-def test_robustness_options_workload_uid_from_env(monkeypatch) -> None:
-    for k in clib._MULTI_NODE_WORKLOAD_UID_ENV_KEYS:
-        monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("RAY_JOB_ID", "ray-42")
-    args = argparse.Namespace(
-        robustness_server_url=None,
-        robustness_llm_rca=None,
-        nodes=1,
-        robustness_workload_uid=None,
-        robustness_disable_local_probe=None,
-        robustness_enable_cluster_pod_metrics=None,
-        robustness_pod_metrics_categories=None,
-    )
-    opts = clib._build_robustness_options(args)
-    assert opts["workload_uid"] == "ray-42"
 
 
