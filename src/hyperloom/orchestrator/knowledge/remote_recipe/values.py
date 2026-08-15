@@ -665,10 +665,7 @@ def build_remote_knowledge(
     framework_entries = [item for item in stack if _entry_origin(item) == "framework"]
     current_best = _mapping(getattr(state, "current_best", {}))
     optimized_throughput = _number(current_best.get("tput"))
-    validated_gain = _number(
-        getattr(state, "cumulative_gain_validated", 0.0)
-        or getattr(state, "cumulative_gain", 0.0)
-    )
+    validated_gain = _number(getattr(state, "cumulative_gain_validated", 0.0))
     gains = list(getattr(state, "gain_per_stack_entry", []) or [])
     worked = _experience(state, "what_worked") or _worked_from_stack(stack, gains)
     value = {

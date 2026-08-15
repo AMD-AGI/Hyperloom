@@ -38,7 +38,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     final_tput = f.get("throughput_tok_s_per_gpu")
     base_tput = b.get("throughput_tok_s_per_gpu")
     gain_v = f.get("cumulative_gain_pct_validated")
-    gain_round = f.get("cumulative_gain_pct_per_round_sum")
     val_stack_len = f.get("validated_at_stack_len")
     val_ts = f.get("validated_ts")
     stack_changed = bool(f.get("stack_changed_after_validation"))
@@ -74,11 +73,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             note = " (negative = faster)" if framework_registry.is_scriptable(fw) else ""
             facts.append(f"Delta vs baseline: {final_v - base_v:+.2f} {_unit}{note}.")
     if is_provisional:
-        if gain_round is not None:
-            facts.append(
-                f"Provisional cumulative gain: {fmt_pct(gain_round, plus=True)} "
-                "— PENDING same-harness revalidation, NOT yet validated."
-            )
+        facts.append("Cumulative gain is PENDING same-harness revalidation, so no validated number is available.")
         warnings.append(
             "Reported gain is PROVISIONAL and cross-harness "
             f"(provenance={gain_provenance or 'unknown'}): the numerator was "
@@ -96,10 +91,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                     metric_pct=float(gain_v),
                     rationale=f"validated at stack_len={val_stack_len} ts={val_ts}",
                 )
-            )
-        if gain_round is not None and not headline_unvalidated:
-            facts.append(
-                f"Per-round summed gain: {fmt_pct(gain_round)} (non-additive, do not present as the user-visible number)."
             )
     if geak_pending and geak_pending.get("status") == "awaiting_rebench":
         self_gain = geak_pending.get("self_reported_gain_pct")
@@ -139,7 +130,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ("final_throughput_tok_s_per_gpu", final_tput),
             ("throughput_unit", f.get("throughput_unit") or None),
             ("cumulative_gain_pct_validated", gain_v),
-            ("cumulative_gain_pct_per_round_sum", gain_round),
             ("cumulative_gain_provenance", gain_provenance or None),
             ("revalidation_pending", revalidation_pending or None),
             ("geak_pending", geak_pending or None),

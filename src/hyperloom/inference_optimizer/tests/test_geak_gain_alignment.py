@@ -330,14 +330,13 @@ async def test_geak_harness_fallback_no_promote_below_current_best(
 # ── Fix B: report renders a PROVISIONAL gain honestly (not "+0.00% validated") ─
 
 
-def _final_breakdown(*, provenance: str, pending: bool, gain_v: float, gain_round: float) -> dict:
+def _final_breakdown(*, provenance: str, pending: bool, gain_v: float) -> dict:
     return {
         "session": {"image": ""},
         "baseline": {"throughput_tok_s_per_gpu": 2844.2},
         "final": {
             "throughput_tok_s_per_gpu": 3236.5,
             "cumulative_gain_pct_validated": gain_v,
-            "cumulative_gain_pct_per_round_sum": gain_round,
             "cumulative_gain_provenance": provenance,
             "revalidation_pending": pending,
             "validated_at_stack_len": 2,
@@ -354,13 +353,11 @@ def test_report_shows_provisional_not_zero_validated() -> None:
             provenance="geak_cross_harness_provisional",
             pending=True,
             gain_v=0.0,  # collectors coerces a pending/unstamped validated to 0.0
-            gain_round=13.79,
         )
     )
     facts = " ".join(sec.key_facts)
     warns = " ".join(sec.warnings)
-    assert "Provisional" in facts
-    assert "13.79" in facts or "13.8" in facts
+    assert "PENDING same-harness revalidation" in facts
     assert "Validated cumulative gain" not in facts  # must NOT claim validation
     assert "+0.00%" not in facts  # must NOT read as no-op
     assert "PROVISIONAL" in warns and "cross-harness" in warns
@@ -373,7 +370,6 @@ def test_report_shows_validated_when_same_harness_confirmed() -> None:
             provenance="geak_orch_harness_validated",
             pending=False,
             gain_v=13.5,
-            gain_round=13.5,
         )
     )
     facts = " ".join(sec.key_facts)
@@ -523,7 +519,6 @@ def test_record_candidate_writes_pending_not_headline(tmp_path: Path) -> None:
     ss = coord.shared_state
     # Headline is UNCHANGED — no premature promote.
     assert ss.current_best == before_best
-    assert ss.cumulative_gain == pytest.approx(0.0)
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
     assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
     # The candidate is recorded as pending with audit-only self-reported numbers.
@@ -557,7 +552,6 @@ def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None
     assert ss.current_best["extra_server_args"] == "--max-num-batched-tokens 24576"
     assert ss.current_best["extra_envs"].get("VLLM_ROCM_USE_AITER") == "0"
     assert ss.cumulative_gain_validated == pytest.approx(expected_pct)
-    assert ss.cumulative_gain == pytest.approx(expected_pct)
     assert ss.cumulative_gain_provenance == "geak_orch_harness_validated"
     assert ss.resume_pending_revalidation is False
     assert any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
@@ -573,7 +567,6 @@ def test_report_shows_pending_candidate_excluded_from_headline() -> None:
         "final": {
             "throughput_tok_s_per_gpu": 2844.2,
             "cumulative_gain_pct_validated": 0.0,
-            "cumulative_gain_pct_per_round_sum": 0.0,
             "cumulative_gain_provenance": "",
             "revalidation_pending": False,
             "action_path": [],

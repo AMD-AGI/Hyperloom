@@ -323,7 +323,6 @@ class Final(TypedDict, total=False):
     Attributes:
         throughput_tok_s_per_gpu (float | None): Final throughput (tok/s/GPU), or None.
         cumulative_gain_pct_validated (float): Validated cumulative gain percent.
-        cumulative_gain_pct_per_round_sum (float): Sum of per-round gain percents.
         validated_at_stack_len (int): Stack depth at which validation occurred.
         validated_ts (str): ISO UTC timestamp of the validation.
         stack_changed_after_validation (bool): Whether the stack changed post-validation.
@@ -343,7 +342,6 @@ class Final(TypedDict, total=False):
     throughput_tok_s_per_gpu: float | None
     throughput_unit: str  # "tok/s" (serving) or "img/s" (scriptable xDiT)
     cumulative_gain_pct_validated: float
-    cumulative_gain_pct_per_round_sum: float
     validated_at_stack_len: int
     validated_ts: str
     stack_changed_after_validation: bool

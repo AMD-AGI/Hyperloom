@@ -853,7 +853,6 @@ def _snapshot_v4_run(rec, st: Any) -> None:
                 "baseline_throughput": to_float(getattr(st, "baseline_tput", None)),
                 "baseline_accuracy": to_float(getattr(st, "baseline_accuracy", None)),
                 "current_best": current_best,
-                "cumulative_gain_pct": to_float(getattr(st, "cumulative_gain", None)),
                 "cumulative_gain_validated_pct": to_float(
                     getattr(st, "cumulative_gain_validated", None)
                 ),
@@ -956,7 +955,6 @@ def _snapshot_final(rec, st: Any) -> None:
             "e2el_mean_ms": e2el,
             "ttft_mean_ms": to_float(cb.get("ttft_mean_ms")),
             "cumulative_gain_pct_validated": to_float(getattr(st, "cumulative_gain_validated", 0.0)) or 0.0,
-            "cumulative_gain_pct_per_round_sum": to_float(getattr(st, "cumulative_gain", 0.0)) or 0.0,
             "validated_ts": str(getattr(st, "cumulative_gain_validated_ts", "") or ""),
             "stack_len": len(stack),
             "extra_server_args": str(cb.get("extra_server_args") or ""),

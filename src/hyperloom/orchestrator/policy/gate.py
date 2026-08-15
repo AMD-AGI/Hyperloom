@@ -524,7 +524,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "current_best",
         "stop_reason",
         "last_tick_exception",
-        "cumulative_gain",
         "cumulative_gain_validated",
         "cumulative_gain_validated_ts",
         "cumulative_gain_validated_stack_len",

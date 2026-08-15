@@ -1081,7 +1081,7 @@ class KernelPhase(PhaseHandler):
 
         Stores the accepted config + the optimizer's own (audit-only)
         throughput/speedup under ``geak_pending`` without touching
-        ``current_best`` / ``optimization_stack`` / ``cumulative_gain*``. The
+        ``current_best`` / ``optimization_stack`` / ``cumulative_gain_validated*``. The
         headline is written later from a measured rebench by
         ``_promote_geak_from_candidate``; the config is captured verbatim as the
         source the rebench launches from.

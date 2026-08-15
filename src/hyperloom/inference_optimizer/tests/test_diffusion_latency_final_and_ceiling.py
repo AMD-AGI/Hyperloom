@@ -53,7 +53,7 @@ class TestCollectRooflineProgressLatencyCeiling:
         return {
             "framework": "xdit",
             "baseline_tput": 0.168919,
-            "cumulative_gain": 550.5,
+            "cumulative_gain_validated": 550.5,
             "optimization_stack": [
                 {"ts": "2026-01-01T00:00:00", "tput": 1.098901, "variant_name": "v", "action": "explore"}
             ],
@@ -118,7 +118,6 @@ class _St:
         self.current_best = kw.get("current_best", {})
         self.optimization_stack = kw.get("optimization_stack", [])
         self.cumulative_gain_validated = kw.get("cumulative_gain_validated", 0.0)
-        self.cumulative_gain = kw.get("cumulative_gain", 0.0)
         self.cumulative_gain_validated_ts = kw.get("cumulative_gain_validated_ts", "")
 
 

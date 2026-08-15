@@ -77,8 +77,8 @@ delegate{
 8. Decide:
    - KEEP — bench tput ≥ baseline * (1 + keep_threshold_pct/100) AND
      accuracy did not drop more than 0.05 absolute. Append the patch + config_changes to
-     `SharedState.optimization_stack`, update `current_best`, increment
-     `cumulative_gain`.
+     `SharedState.optimization_stack`, update `current_best`, restamp
+     `cumulative_gain_validated`.
    - REVERT — any gate failure. `git checkout` the framework source
      roots, drop `config_changes`, restart with the previous config,
      record evidence in `last_action_failures`.

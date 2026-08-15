@@ -1127,7 +1127,6 @@ def collect_final(
         # Which field holds the primary result (e2el_mean_ms vs throughput).
         "primary_metric": framework_registry.primary_metric_name(state.get("framework")),
         "cumulative_gain_pct_validated": _to_float(state.get("cumulative_gain_validated")) or 0.0,
-        "cumulative_gain_pct_per_round_sum": _to_float(state.get("cumulative_gain")) or 0.0,
         # Provenance/basis of the recorded gain (same-harness validated vs
         # cross-harness PROVISIONAL). Empty on native/legacy sessions.
         "cumulative_gain_provenance": str(state.get("cumulative_gain_provenance") or ""),

@@ -51,7 +51,6 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
         "final": {
             "throughput_tok_s_per_gpu": 2447.5,
             "cumulative_gain_pct_validated": 10.99,
-            "cumulative_gain_pct_per_round_sum": 10.99,
             "validated_at_stack_len": 1,
             "validated_ts": "2026-05-12T11:54:00Z",
             "stack_changed_after_validation": False,

@@ -1481,7 +1481,6 @@ class WritebackCollaborator:
             what_failed.append(rev)
         kernel_optimizations = self._coord._build_kernel_optimizations_from_state()
         cumulative_validated = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
-        cumulative_total = float(getattr(ss, "cumulative_gain", 0.0) or 0.0)
         validated_stack_len = int(getattr(ss, "cumulative_gain_validated_stack_len", 0) or 0)
         stack_fingerprint = getattr(ss, "stack_fingerprint", "") or ""
         # Workload-shape tags for shape-filtered warm-start queries (shared via _collect_workload_tags).
@@ -1499,7 +1498,7 @@ class WritebackCollaborator:
             "sessions": [
                 {
                     "session_id": str(getattr(ss, "recipe_kb_session_id", "") or self.session_dir.name),
-                    "gain_pct": cumulative_validated or cumulative_total,
+                    "gain_pct": cumulative_validated,
                     "stack_len": validated_stack_len or len(opt_stack),
                     # arbor-shape provenance so the session row is self-describing (before/after tput + knobs).
                     "throughput_before": float(getattr(ss, "baseline_tput", 0.0) or 0.0),
@@ -1643,9 +1642,7 @@ class WritebackCollaborator:
             ss = self.shared_state
             cb = getattr(ss, "current_best", {}) or {}
             final_tput = float(cb.get("tput", 0.0)) if isinstance(cb, dict) else 0.0
-            total_gain = float(
-                getattr(ss, "cumulative_gain_validated", 0.0) or getattr(ss, "cumulative_gain", 0.0) or 0.0,
-            )
+            total_gain = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
             journal.finalize(
                 final_throughput=final_tput if final_tput > 0 else None,
                 total_gain_pct=total_gain,
@@ -2437,10 +2434,6 @@ class WritebackCollaborator:
             if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
                 current_best["args_mode"] = "replace"
         self.shared_state.current_best = current_best
-        if self.shared_state.baseline_tput > 0:
-            self.shared_state.cumulative_gain = (
-                (float(best_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
-            )
         return True
 
     def _should_run_prelude_bootstrap(self, tput: Any) -> bool:
@@ -3676,7 +3669,7 @@ class WritebackCollaborator:
                 # The name used to be prefixed, which made an empty key look
                 # non-empty to the stack's guard and stacked a nameless entry.
                 # The bare key is falsy, so the append is skipped — current_best
-                # and cumulative_gain are set regardless, further down. The win
+                # is set regardless, further down. The win
                 # therefore counts without leaving a step anything can reconcile,
                 # dedupe or replay, which is worth saying out loud.
                 log.warning(

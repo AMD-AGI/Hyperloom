@@ -22,7 +22,7 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 def _sweep_state(
     *,
     macro_cycle: int = 0,
-    cumulative_gain: float = 5.0,
+    validated_gain: float = 5.0,
     gain_at_cycle_start: float = 0.0,
     no_gain_streak: int = 0,
     max_minutes: int = 96 * 60,
@@ -35,7 +35,7 @@ def _sweep_state(
         start_ts=(now - timedelta(hours=started_hours_ago)).isoformat(),
         max_minutes=max_minutes,
         macro_cycle=macro_cycle,
-        cumulative_gain_validated=cumulative_gain,
+        cumulative_gain_validated=validated_gain,
         gain_at_cycle_start=gain_at_cycle_start,
         no_gain_cycle_streak=no_gain_streak,
     )
@@ -46,7 +46,7 @@ def _sweep_state(
 
 # compute_next_phase SWEEP back-edge
 def test_sweep_reloops_to_explore_when_budget_and_leverage():
-    st = _sweep_state(macro_cycle=0, cumulative_gain=5.0, gain_at_cycle_start=0.0)
+    st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
     nxt = ps.compute_next_phase(st)
     assert nxt is not None
     target, reason, evidence = nxt
@@ -57,7 +57,7 @@ def test_sweep_reloops_to_explore_when_budget_and_leverage():
 
 
 def test_sweep_closes_on_failed_conc_sweep_even_when_reloop_available():
-    st = _sweep_state(macro_cycle=0, cumulative_gain=5.0, gain_at_cycle_start=0.0)
+    st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
     st.last_sweep = {}
     st.last_conc_sweep = {"status": "failed"}
     target, reason, evidence = ps.compute_next_phase(st)
@@ -71,7 +71,7 @@ def test_sweep_closes_when_globally_converged():
     # No gain this cycle + streak at 2 → effective 3 ≥ threshold.
     st = _sweep_state(
         macro_cycle=2,
-        cumulative_gain=5.0,
+        validated_gain=5.0,
         gain_at_cycle_start=5.0,
         no_gain_streak=2,
     )
@@ -97,7 +97,7 @@ def test_short_bounded_run_reloops_when_budget_and_leverage_remain():
     st = _sweep_state(
         max_minutes=12 * 60,
         started_hours_ago=1.0,
-        cumulative_gain=5.0,
+        validated_gain=5.0,
         gain_at_cycle_start=0.0,
     )
     reloop, ev = ps.should_reloop_to_explore(st)

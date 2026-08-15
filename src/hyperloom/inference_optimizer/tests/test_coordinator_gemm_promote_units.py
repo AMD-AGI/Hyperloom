@@ -321,7 +321,6 @@ class TestPromoteFusionIntegrateKeep:
         coord = _coord(
             tmp_path,
             baseline_tput=100.0,
-            cumulative_gain=20.0,
             cumulative_gain_validated=20.0,
             cumulative_gain_validated_stack_len=1,
             optimization_stack=[
@@ -1634,7 +1633,6 @@ class TestValidateForgeGemmTuningE2E:
             "AITER_CONFIG_FMOE": str(fmoe_candidate),
             "AITER_DENSE": "/dense.json",
         }
-        assert coord.shared_state.cumulative_gain == pytest.approx(32.0)
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(32.0)
 
         # Result rewritten to the E2E-validated outcome.

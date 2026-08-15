@@ -303,20 +303,20 @@ class TestApplyChanges:
     def test_core_field_dropped_when_allow_core_false(self):
         # A non-privileged (allow_core=False) changes dict must not write a core field.
         s = SharedState()
-        before = s.cumulative_gain  # cumulative_gain is a core field
+        before = s.cumulative_gain_validated  # cumulative_gain_validated is a core field
         applied = s.apply_changes(
-            {"current_action": "baseline", "cumulative_gain": 999.0},
+            {"current_action": "baseline", "cumulative_gain_validated": 999.0},
             allow_core=False,
         )
         assert applied == {"current_action": "baseline"}
         assert s.current_action == "baseline"
-        assert s.cumulative_gain == before  # core write dropped
+        assert s.cumulative_gain_validated == before  # core write dropped
 
     def test_core_field_written_when_allow_core_true(self):
         s = SharedState()
-        applied = s.apply_changes({"cumulative_gain": 999.0}, allow_core=True)
-        assert applied == {"cumulative_gain": 999.0}
-        assert s.cumulative_gain == 999.0
+        applied = s.apply_changes({"cumulative_gain_validated": 999.0}, allow_core=True)
+        assert applied == {"cumulative_gain_validated": 999.0}
+        assert s.cumulative_gain_validated == 999.0
 
 
 class TestKernelPatchIdentity:

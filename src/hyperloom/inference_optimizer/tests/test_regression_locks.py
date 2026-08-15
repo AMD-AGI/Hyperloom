@@ -48,7 +48,7 @@ async def test_report_resolves_session_dir_from_env(tmp_path, monkeypatch):
     """ReportExecutor resolves session_dir from $USER_DATA_PATH."""
     sd = tmp_path / "real-session"
     sd.mkdir()
-    state = SharedState(session_id=sd.name, model_name="qwen3-8b", baseline_tput=800.0, cumulative_gain=2.5)
+    state = SharedState(session_id=sd.name, model_name="qwen3-8b", baseline_tput=800.0, cumulative_gain_validated=2.5)
     state.save(sd)
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 

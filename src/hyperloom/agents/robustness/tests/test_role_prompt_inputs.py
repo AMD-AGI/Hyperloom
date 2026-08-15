@@ -40,7 +40,7 @@ def test_no_new_messages_yields_empty_inbox():
             session_id=sess-1
             model=qwen3-8b  class=qwen3
             baseline_tput=10.5  baseline_acc=0.8
-            cumulative_gain=12.5%
+            cumulative_gain_validated=12.5%
             crash_count=0
             current_action=(idle)
             """
@@ -58,7 +58,7 @@ def test_no_new_messages_yields_empty_inbox():
     assert ctx.shared_state.model_name == "qwen3-8b"
     assert ctx.shared_state.model_class == "qwen3"
     assert ctx.shared_state.baseline_tput == 10.5
-    assert ctx.shared_state.cumulative_gain == 12.5
+    assert ctx.shared_state.cumulative_gain_validated == 12.5
     assert ctx.shared_state.crash_count == 0
     assert ctx.shared_state.current_action == ""
     assert ctx.inbox == []

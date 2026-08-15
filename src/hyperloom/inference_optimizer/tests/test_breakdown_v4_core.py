@@ -451,7 +451,6 @@ def test_v4_state_snapshot_does_not_infer_canonical_entities_from_stack(tmp_path
         baseline_tput=100.0,
         baseline_accuracy=0.75,
         current_best={"tput": 110.0},
-        cumulative_gain=10.0,
         cumulative_gain_validated=10.0,
         cumulative_gain_validated_ts="",
         versions={},

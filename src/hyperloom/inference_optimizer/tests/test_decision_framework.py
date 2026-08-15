@@ -271,7 +271,6 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
         assert c.shared_state.current_best["action"] == "gemm_tuning"
         # The measured rebench, not baseline_tput * best_speedup (1024.0).
         assert c.shared_state.current_best["tput"] == 900.0
-        assert c.shared_state.cumulative_gain == pytest.approx(12.5)
         assert c.shared_state.cumulative_gain_validated == pytest.approx(12.5)
         assert c.shared_state.optimization_stack[-1]["action"] == "gemm_tuning"
         assert c._gemm_tuning_required_before_kernel_opt() is False

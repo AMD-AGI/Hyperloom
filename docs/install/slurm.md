@@ -189,7 +189,7 @@ cat <data-root>/<key>/$SID/state.json
 
 The artifact directory `<data-root>/<model_key>/<CLAW_SESSION_ID>/` contains:
 
-- `state.json`: live status (`baseline_tput`, `current_best`, `cumulative_gain`);
+- `state.json`: live status (`baseline_tput`, `current_best`, `cumulative_gain_validated`);
 - `manifest.json`: session manifest;
 - `ci_metrics.json`: baseline/optimized throughput plus `gain_pct`;
 - `optimizer_runs/`: `launch_<sid>.json` and logs;

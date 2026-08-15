@@ -718,7 +718,7 @@ class PreludePhase(PhaseHandler):
                 # Book the win. Without this the env switches live only inside
                 # that one measurement (the next server launch drops them) and
                 # CLOSE's scrape never sees the replayed champions, so neither
-                # current_best nor cumulative_gain counts them.
+                # current_best nor cumulative_gain_validated counts them.
                 await self._record_warm_kernel_keep(
                     result_dict, pending, merged_envs, server_args, applied
                 )

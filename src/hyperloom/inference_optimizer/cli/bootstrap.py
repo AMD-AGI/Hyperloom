@@ -254,7 +254,7 @@ def _seed_shared_state(
         continue_kernel_after_gemm=bool(getattr(args, "continue_kernel_after_gemm", True)),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
-        cumulative_gain=0.0,
+        cumulative_gain_validated=0.0,
         reference_server_args=_ref_args,
         reference_envs=_ref_envs,
         reference_model=_ref_model,
@@ -384,7 +384,6 @@ def _print_final_summary(
             )
             if failure_summary.get("server_log"):
                 print(f"  server_log           : {failure_summary.get('server_log')}")
-    print(f"  cumulative_gain      : {state.cumulative_gain:.2f}% (per-round sum — informational)")
     if state.cumulative_gain_validated_ts:
         stale = (
             " ⚠ stack changed since validation"
@@ -491,7 +490,7 @@ def _default_target_summary(args: argparse.Namespace) -> str:
     if args.target_gain:
         return (
             f"Establish baseline on {Path(args.model).name} then drive "
-            f"cumulative_gain to >= {args.target_gain}% within "
+            f"cumulative_gain_validated to >= {args.target_gain}% within "
             f"{args.max_hours}h."
         )
     if args.target_tput:

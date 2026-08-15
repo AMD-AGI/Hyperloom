@@ -1748,11 +1748,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
             self.shared_state.save(self.session_dir)
             log.info(
-                "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f cumulative_gain=%.2f%% max_minutes=%.0f",
+                "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "
+                "cumulative_gain_validated=%.2f%% max_minutes=%.0f",
                 tick_n,
                 stop_reason or "unknown",
                 self.shared_state.baseline_tput,
-                self.shared_state.cumulative_gain,
+                self.shared_state.cumulative_gain_validated,
                 max_minutes_value,
             )
             # Best-effort cleanup of installed signal handlers.

@@ -1619,7 +1619,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
         print(f"  prior baseline_tput   : {state.baseline_tput:.1f}")
-        print(f"  prior cumul_gain      : {state.cumulative_gain:.2f}%")
+        print(f"  prior cumul_gain      : {state.cumulative_gain_validated:.2f}%")
         print(
             f"  prior current_best    : "
             f"{(state.current_best or {}).get('action')}/"

@@ -100,7 +100,7 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
     assert coord.shared_state.geak_pending["self_reported_tput"] == 116.0
     # No premature headline: current_best / gain / stack are untouched.
     assert coord.shared_state.current_best["action"] == "baseline"
-    assert coord.shared_state.cumulative_gain == pytest.approx(0.0)
+    assert coord.shared_state.cumulative_gain_validated == pytest.approx(0.0)
     assert not any(e.get("action") == "geak_e2e" for e in coord.shared_state.optimization_stack)
     assert coord.shared_state.pending_escalate_hint == ESCALATE_HINT_SKIP_TO_SWEEP
 

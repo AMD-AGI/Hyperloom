@@ -25,7 +25,8 @@ Fields::
     current_best        dict  — champion snapshot: ``action`` + ``tput`` plus
                                 per-writer detail (variant_name, extra_server_args,
                                 extra_envs, workspace, latency means)
-    cumulative_gain     float — % over baseline
+    cumulative_gain_validated
+                        float — % over baseline at the last stack rebench
     stop_reason         str   — set when graceful stop fires
     current_action      str   — what's running right now (set by Orchestration)
     crash_count         int   — incremented by the Coordinator when a tick/agent
@@ -558,8 +559,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
     # Index-aligned with ``optimization_stack``: per-entry incremental gain pct; missing => None.
     gain_per_stack_entry: list[float | None] = field(default_factory=list)
-    cumulative_gain: float = 0.0
-    # Validated cumulative gain: re-baselined fresh server with every KEEP (per-round gains don't compose linearly); standalone validate_stack denied by PolicyGate.
+    # Total gain over ``baseline_tput``, stamped only from a measurement taken
+    # with the whole stack applied; standalone validate_stack denied by PolicyGate.
     cumulative_gain_validated: float = 0.0
     cumulative_gain_validated_ts: str = ""
     # Provenance/basis of the currently-recorded gain (provisional cross-harness
@@ -1589,7 +1590,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "stop_reason": self.stop_reason or "",
             "closing_phase": bool(self.closing_phase),
             "degraded_mode": bool(self.degraded_mode),
-            "cumulative_gain": round(float(self.cumulative_gain or 0.0), 2),
             "cumulative_gain_validated": round(
                 float(self.cumulative_gain_validated or 0.0),
                 2,

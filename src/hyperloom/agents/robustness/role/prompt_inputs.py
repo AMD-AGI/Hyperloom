@@ -79,7 +79,6 @@ _CONVERSATION_PROGRESS_LINE_RE = re.compile(
 # SharedState lines we care about.
 _SCALAR_KEYS = {
     "baseline_tput",
-    "cumulative_gain",
     "cumulative_gain_validated",
     "crash_count",
     "current_action",
@@ -183,7 +182,6 @@ class SharedStateSnapshot:
         model_class (str): Target model class, or ``""`` when unset.
         baseline_tput (float): Baseline throughput reported by the
             Coordinator.
-        cumulative_gain (float): Cumulative (unvalidated) gain percentage.
         cumulative_gain_validated (float): Cumulative validated gain
             percentage.
         crash_count (int): Number of crashes recorded this session.
@@ -211,7 +209,6 @@ class SharedStateSnapshot:
     model_name: str = ""
     model_class: str = ""
     baseline_tput: float = 0.0
-    cumulative_gain: float = 0.0
     cumulative_gain_validated: float = 0.0
     crash_count: int = 0
     current_action: str = ""
@@ -467,7 +464,6 @@ def _coerce_cumulative_gain_validated(head: str) -> float:
 #: separately because they set a shared flag idempotently rather than a 1:1 attr.
 _SCALAR_FIELD_TABLE: dict[str, tuple[str, Callable[[str], Any]]] = {
     "baseline_tput": ("baseline_tput", lambda head: to_float(head, default=0.0)),
-    "cumulative_gain": ("cumulative_gain", lambda head: to_float(head.rstrip("%"), default=0.0)),
     "cumulative_gain_validated": ("cumulative_gain_validated", _coerce_cumulative_gain_validated),
     "crash_count": ("crash_count", lambda head: to_int(head, default=0)),
     "current_action": ("current_action", lambda head: "" if head == "(idle)" else head),

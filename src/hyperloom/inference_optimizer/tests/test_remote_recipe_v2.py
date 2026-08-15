@@ -79,7 +79,6 @@ def _state(tmp_path: Path) -> SimpleNamespace:
             "extra_envs": {"FINAL": "1"},
         },
         cumulative_gain_validated=30.0,
-        cumulative_gain=30.0,
         optimization_stack=[
             {
                 "action": "explore",
@@ -1641,7 +1640,6 @@ def test_nonfinite_built_metrics_are_normalized(tmp_path: Path) -> None:
     state = _state(tmp_path)
     state.current_best["tput"] = float("nan")
     state.cumulative_gain_validated = float("inf")
-    state.cumulative_gain = float("-inf")
     bundle = build_remote_knowledge(state, tmp_path / "finite-knowledge")
     assert bundle.knowledge["optimized_throughput"] == 0.0
     assert bundle.knowledge["validated_e2e_gain"] == 0.0

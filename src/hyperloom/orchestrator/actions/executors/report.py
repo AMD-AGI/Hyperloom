@@ -453,7 +453,6 @@ def _build_summary_dict(
         "baseline_tput": state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
         "current_best": state.current_best,
-        "cumulative_gain": state.cumulative_gain,
         # Validated gain (what the run actually delivered).
         "cumulative_gain_validated": state.cumulative_gain_validated,
         "cumulative_gain_validated_ts": state.cumulative_gain_validated_ts,
@@ -543,9 +542,8 @@ def _format_md(summary: dict[str, Any]) -> str:
             f"- current_best        : `{framework_registry.format_primary_metric(_fw, cb_tput)}` "
             f"(action=`{cb.get('action', '?')}`)"
         )
-    # Per-round sum — informational, not end-to-end deliverable.
-    lines.append(f"- cumulative_gain     : `{summary['cumulative_gain']:.2f}%`  *(per-round sum — informational only)*")
-    # Validated gain — always printed so the report never quotes only the raw sum.
+    # Always printed, including the never-validated case, so the absence of a
+    # full-stack measurement is visible rather than implied.
     val_gain = summary.get("cumulative_gain_validated", 0.0) or 0.0
     val_ts = summary.get("cumulative_gain_validated_ts") or ""
     val_len = summary.get("cumulative_gain_validated_stack_len", 0) or 0
@@ -1307,10 +1305,9 @@ class ReportExecutor:
         md_path.write_text(_format_md(summary), encoding="utf-8")
 
         log.info(
-            "report_executor: wrote %s and %s (cumulative_gain=%.2f%% per_round_sum / %.2f%% validated)",
+            "report_executor: wrote %s and %s (cumulative_gain_validated=%.2f%%)",
             md_path,
             json_path,
-            state.cumulative_gain,
             state.cumulative_gain_validated,
         )
         publish_result = self._maybe_publish_results(session_dir, state)

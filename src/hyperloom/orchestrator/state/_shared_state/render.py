@@ -108,8 +108,7 @@ class _RenderMixin:
         lines = [
             f"baseline  : {framework_registry.format_primary_metric(self.framework, self.baseline_tput)}",
             f"current   : {self._format_current_best_for_mission()}",
-            f"gain      : per-round-sum={self.cumulative_gain:.2f}% "
-            f"validated={self.cumulative_gain_validated:.2f}%{validated_age}",
+            f"gain      : validated={self.cumulative_gain_validated:.2f}%{validated_age}",
             f"stack     : {len(self.optimization_stack)} entries "
             f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
             f"{unvalidated_tag}{resume_revalidation_tag}{geak_pending_tag}",
@@ -546,7 +545,6 @@ class _RenderMixin:
             f"baseline_failure_streak={self.baseline_failure_streak}",
             f"current_best={self.current_best or '(none)'}",
             f"optimization_stack={self._format_optimization_stack()}",
-            f"cumulative_gain={self.cumulative_gain}%",
             (
                 f"cumulative_gain_validated={self.cumulative_gain_validated}% "
                 f"(stack_len_at_validation={self.cumulative_gain_validated_stack_len}, "

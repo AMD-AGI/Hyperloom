@@ -1074,7 +1074,7 @@ export SESSION="${INFERENCE_OPTIMIZER_SESSION_DIR:-$(python3 -c 'import json,sys
 python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state.py" "$SESSION"
 ```
 
-It prints `stop_reason`, `baseline_tput`, `cumulative_gain`, `current_best`,
+It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_best`,
 `last_kernel_opt`, `last_trace_analyze`, `last_sweep`, `explore_last_round`,
 `phase`, plus the recent lifecycle events.
 
@@ -1239,7 +1239,7 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 Report concise status:
 
 - session id (from `manifest.json`) and log path
-- `cumulative_gain` and `current_best`
+- `cumulative_gain_validated` and `current_best`
 - explore accepted/rejected summary
 - last kernel optimized, correctness, micro speedup, E2E gain, decision
 - whether the process is still running or stopped and why

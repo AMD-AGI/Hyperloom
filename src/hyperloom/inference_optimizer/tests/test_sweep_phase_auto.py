@@ -999,7 +999,7 @@ async def test_phase_transition_into_sweep_enqueues_conc_sweep_e2e(tmp_path: Pat
     coord.shared_state.phase = "KERNEL"
     coord.shared_state.kernel_enabled = True
     coord.shared_state.baseline_tput = 100.0
-    coord.shared_state.cumulative_gain = 12.0
+    coord.shared_state.cumulative_gain_validated = 12.0
     coord.shared_state.last_profile_trace = "/tmp/dummy.trace.json.gz"
     coord.shared_state.phase_history = [
         {"to_phase": "EXPLORE", "evidence": {}, "reason": "prelude_done"},

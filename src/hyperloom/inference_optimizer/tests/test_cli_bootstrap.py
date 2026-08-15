@@ -327,7 +327,6 @@ def test_read_failure_summary_and_final_summary_output(tmp_path: Path, capsys) -
         session_id="s",
         model_name="m",
         baseline_tput=10.0,
-        cumulative_gain=1.25,
         cumulative_gain_validated=1.0,
         cumulative_gain_validated_ts="2026-01-01T00:00:00Z",
         cumulative_gain_validated_stack_len=0,

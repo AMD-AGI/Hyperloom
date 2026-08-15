@@ -522,7 +522,6 @@ async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir)
     assert entry["baseline_enablement"] is True
     assert entry["attribution_eligible"] is False
     assert s.gain_per_stack_entry == [None]
-    assert s.cumulative_gain == 0.0
     assert s.cumulative_gain_validated == 0.0
     assert s.pending_integrate == {}
 
@@ -603,7 +602,7 @@ async def test_promote_framework_agent_kept_without_a_candidate_key_is_skipped_l
     undecorated key is falsy, so ``_lift_to_current_best``'s guard now skips the
     append instead.
 
-    Only the append: current_best and cumulative_gain are set unconditionally
+    Only the append: current_best is set unconditionally
     further down, so the win still counts — it just is not recorded as a step
     anything can later reconcile, dedupe or replay. Pinned because that split is
     easy to misread in either direction, and because a KEEP that leaves no trace

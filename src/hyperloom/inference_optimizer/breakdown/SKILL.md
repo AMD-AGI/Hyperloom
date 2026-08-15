@@ -132,7 +132,7 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 | `session`            | `manifest.json` + `state.{session_id, stop_reason, max_minutes, tick, start_ts}`                                     |
 | `workload`           | `manifest.{framework, model_*, gpu_type, tp, workload, objective}` + `state.{model_class, framework, gpu_type}`      |
 | `baseline`           | `state.{baseline_tput, baseline_accuracy, last_baseline.workspace, baseline_attempts}` + `<workspace>/benchmark_*/benchmark_report.json` |
-| `final`              | `state.{current_best, cumulative_gain, cumulative_gain_validated_*, optimization_stack}`                            |
+| `final`              | `state.{current_best, cumulative_gain_validated, cumulative_gain_validated_*, optimization_stack}`                  |
 | `phase_timeline`     | `state.{<action>_attempts, kernel_opt_attempts.history, kernel_integrate_attempts.attempts}` sorted by `ts`           |
 | `capability_summary` | Reduces invocations + per-action attempts + search ledgers into 8 rows: geak / forge / explore / sweep / specialist plus the backends / params / validate_stack compatibility rows |
 | `geak_invocations`   | `kernel-agent/runs/<sid>/{optimization_attempts.jsonl, prompts/, optimized/, results/, verification/}` filtered by `backend == "geak"` (also scans legacy `kernel-agent-workspace/.../kernel-agent/runs/...` for historical sessions). Per-attempt files under `optimized/` are discovered by `glob("<attempt_id>*")`, so both the historical `<attempt_id>_optimized.<suffix>` name and the post-2026-05 `<attempt_id>_stdout.log` name are picked up transparently — see `docs/conceptual/kernel-execution-path.md` § *Per-attempt stdout file naming*. |
