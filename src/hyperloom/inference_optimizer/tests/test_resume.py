@@ -131,6 +131,40 @@ class TestAClosedSessionIsReopenedOnResume:
         finally:
             await coordinator.stop()
 
+    @pytest.mark.asyncio
+    async def test_the_reopened_leg_may_actually_measure_the_baseline_it_reopened_for(
+        self,
+        session_dir,
+    ):
+        """Reopening the phase is only half of it; the round has to be admissible.
+
+        A cold anchor is a positive ``baseline_tput``, which is what the singleton
+        rule refuses repeats on -- so the leg would reopen at PRELUDE, decline to
+        finish while the mark is set, decline to close while the clock is healthy,
+        and have the one round that clears the mark denied on its way in. This is
+        the last link in the chain the whole cold-anchor design rests on, and
+        nothing above it can tell whether it holds.
+        """
+        SharedState(
+            session_id="cold",
+            phase="CLOSE",
+            baseline_tput=1000.0,
+            baseline_measure_round_dropped=True,
+        ).save(session_dir)
+
+        coordinator = Coordinator(session_dir, backends=_backends_full())
+        try:
+            assert coordinator.shared_state.phase == "PRELUDE"
+            coordinator.policy.validate_intent(
+                "orchestration",
+                Intent(
+                    type=IntentType.DELEGATE,
+                    payload={"action_name": "baseline", "params": {}},
+                ),
+            )
+        finally:
+            await coordinator.stop()
+
 
 @pytest.mark.asyncio
 async def test_existing_events_triggers_resume(session_dir):

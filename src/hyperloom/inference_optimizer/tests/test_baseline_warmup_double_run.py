@@ -156,7 +156,7 @@ def _cold_then_hot_fake_run(
                 clock.advance(boot_sec)
                 if server_log_path:
                     Path(server_log_path).parent.mkdir(parents=True, exist_ok=True)
-                    _stamp_server_ready(server_log_path)
+                    _stamp_server_ready(server_log_path, boot_sec)
             clock.advance(benchmark_sec)
         state["calls"] += 1
         _fake_workspace(slot, tput=tput)
@@ -2608,7 +2608,7 @@ def _capturing_fake_run(
             server_log_path = kwargs.get("server_log_path")
             if server_log_path:
                 Path(server_log_path).parent.mkdir(parents=True, exist_ok=True)
-                _stamp_server_ready(server_log_path)
+                _stamp_server_ready(server_log_path, boot_sec)
             clock.advance(benchmark_sec)
         if state is not None:
             state.charge(charge_sec if charge_sec is not None else ran_sec)
