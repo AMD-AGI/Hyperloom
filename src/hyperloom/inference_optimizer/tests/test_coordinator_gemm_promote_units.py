@@ -371,11 +371,11 @@ class TestPromoteFusionIntegrateKeep:
         assert stack[1]["gain_pct"] == pytest.approx(50.0)
         assert stack[1]["extra_envs"]["SGLANG_USE_AITER"] == "1"
         assert stack[1]["extra_envs"]["ZAYA_FUSED_HYBRID_RESIDUAL"] == "1"
-        assert stack[1]["kernel_speedup"] == 3.05
         assert coord.shared_state.current_best["action"] == "fusion"
-        assert coord.shared_state.current_best["backend"] == "forge"
-        assert coord.shared_state.current_best["engine"] == "forge_fusion"
         assert coord.shared_state.current_best["tput"] == 180.0
+        # current_best is a config record; the forge labels live on the entry.
+        assert "engine" not in coord.shared_state.current_best
+        assert "backend" not in coord.shared_state.current_best
         assert coord.shared_state.cumulative_gain_validated == 80.0
         assert coord.shared_state.gain_per_stack_entry == [20.0, 80.0]
         assert coord.shared_state.cumulative_gain_validated_stack_len == 2
@@ -402,7 +402,8 @@ class TestPromoteFusionIntegrateKeep:
         phase._promote_fusion_integrate_keep(fusion, integ)
 
         assert len(coord.shared_state.optimization_stack) == 1
-        assert coord.shared_state.current_best["patch_path"] == "/tmp/fusion.patch"
+        assert coord.shared_state.optimization_stack[0]["patch_path"] == "/tmp/fusion.patch"
+        assert coord.shared_state.current_best["variant_name"] == "forge_fusion:fusion.patch"
 
     @pytest.mark.asyncio
     async def test_handle_fusion_result_posts_and_integrates_kept_candidate(self, tmp_path, monkeypatch):
@@ -487,7 +488,8 @@ class TestPromoteFusionIntegrateKeep:
         assert calls[0]["snapshot_dir"] == str(tmp_path / "snapshot")
         assert calls[0]["extra_envs"] == {"SGLANG_USE_AITER": "1", "ZAYA_FUSED": "1"}
         assert coord.shared_state.last_fusion_integrate["decision"] == "KEEP"
-        assert coord.shared_state.current_best["engine"] == "forge_fusion"
+        assert coord.shared_state.current_best["action"] == "fusion"
+        assert coord.shared_state.optimization_stack[-1]["engine"] == "forge_fusion"
         assert coord.bus.messages[-1].payload["kind"] == "fusion_integrate_done"
 
     @pytest.mark.asyncio
@@ -819,9 +821,10 @@ class TestForgeGemmRuntimeConfigMerge:
             "AITER_CONFIG_FMOE": str(fmoe_candidate),
             "AITER_CONFIG_DENSE": str(dense_candidate),
         }
-        assert coord.shared_state.current_best["engine"] == "forge"
+        assert coord.shared_state.current_best["variant_name"] == "forge_fmoe_ck"
         assert coord.shared_state.current_best["tput"] == 130.0
         assert coord.shared_state.optimization_stack[0]["variant_name"] == "forge_fmoe_ck"
+        assert coord.shared_state.optimization_stack[0]["backend"] == "forge"
         assert result["decision"] == "KEEP"
         assert result["recommended_env"] == {
             "AITER_CONFIG_FMOE": str(fmoe_candidate)
@@ -1626,9 +1629,14 @@ class TestValidateForgeGemmTuningE2E:
             "gemm_tune_e2e_dense_gemm",
         }
         cb = coord.shared_state.current_best
-        assert cb["engine"] == "forge"
+        assert cb["variant_name"] == "forge_dense_gemm"
         assert cb["tput"] == pytest.approx(132.0)
         assert cb["extra_server_args"] == "--moe-runner-backend aiter"
+        # Both tuners' envs accumulate onto current_best, one lift each.
+        assert cb["extra_envs"] == {
+            "AITER_CONFIG_FMOE": str(fmoe_candidate),
+            "AITER_DENSE": "/dense.json",
+        }
         assert coord.shared_state.cumulative_gain == pytest.approx(32.0)
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(32.0)
 

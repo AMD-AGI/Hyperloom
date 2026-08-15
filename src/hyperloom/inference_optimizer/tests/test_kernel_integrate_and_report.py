@@ -1434,7 +1434,7 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
         assert result["decision"] == "KEEP"
         assert result["new_tput"] == 900.0
         assert c.shared_state.current_best["action"] == "integrate"
-        assert c.shared_state.current_best["kernel_id"] == "k1"
+        assert c.shared_state.current_best["variant_name"] == "k1"
         assert any(
             item.get("action") == "integrate" and item.get("kernel_id") == "k1"
             for item in c.shared_state.optimization_stack

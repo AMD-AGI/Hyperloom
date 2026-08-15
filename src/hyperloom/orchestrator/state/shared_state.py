@@ -1046,19 +1046,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             else {}
         )
         serving_config = {
-            "engine": str(current_best.get("engine") or "").strip().lower(),
             "extra_server_args": str(
                 current_best.get("extra_server_args") or ""
             ).strip(),
             "extra_envs": extra_envs,
         }
-        if any(
-            (
-                serving_config["engine"],
-                serving_config["extra_server_args"],
-                extra_envs,
-            )
-        ):
+        if any((serving_config["extra_server_args"], extra_envs)):
             context["serving_config"] = serving_config
         return context
 

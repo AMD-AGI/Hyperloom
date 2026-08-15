@@ -3913,8 +3913,6 @@ def _active_forge_fusion_env_flags(state: Any) -> dict[str, str]:
         return {}
     if str(current_best.get("action") or "") != "fusion":
         return {}
-    if str(current_best.get("engine") or "") != "forge_fusion":
-        return {}
     envs = current_best.get("extra_envs") if isinstance(current_best, dict) else {}
     if not isinstance(envs, dict):
         return {}

@@ -7,7 +7,6 @@ the initial baseline/roofline internal-analysis task enqueue."""
 from __future__ import annotations
 import logging as _logging
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from . import machine_state as _phase_state
@@ -1074,28 +1073,10 @@ class PreludePhase(PhaseHandler):
                 state.save(self.session_dir)
                 return
             outcome["status"] = "reproduced"
-            # Push warm best_config onto the stack (schema mirrors explore-KEEP).
-            stack_entry = {
-                "action": "replay_warm_recipe",
-                "source_phase": "PRELUDE",
-                "name": "warm_replay",
-                "variant_name": "warm_replay",
-                "task_id": str(getattr(task, "task_id", "") or ""),
-                "extra_server_args": warm_args,
-                "extra_envs": warm_envs,
-                "tput": float(single_round_tput),
-                "hot_tput": float(hot_tput),
-                "cold_tput": float(cold_round_tput) if cold_round_tput > 0 else None,
-                "gain_pct": round(measured_gain, 3),
-                "workspace": str(result.get("workspace") or ""),
-                "ts": datetime.now(timezone.utc).isoformat(),
-                # source_tier records the warm-recipe tier for breakdown attribution.
-                "source_tier": outcome.get("warm_recipe_tier", ""),
-                "source_confidence": outcome.get("warm_recipe_conf", 0.0),
-            }
             # Resume safety: do not clobber existing stack entries.
             state.optimization_stack = list(state.optimization_stack or [])
-            # Idempotency guard: skip push if a prior promote already pushed it.
+            # Idempotency guard: a prior promote that already pushed the entry
+            # owns the outcome; re-running the rest would re-journal it.
             already_pushed = any(
                 isinstance(e, dict) and e.get("action") == "replay_warm_recipe" for e in state.optimization_stack
             )
@@ -1107,26 +1088,28 @@ class PreludePhase(PhaseHandler):
                 state.warm_replay_outcome = outcome
                 state.save(self.session_dir)
                 return
-            state.optimization_stack.append(stack_entry)
-            # gain_per_stack_entry runs in lock-step with optimization_stack.
-            gp = list(getattr(state, "gain_per_stack_entry", []) or [])
-            gp.append(round(measured_gain, 3))
-            state.gain_per_stack_entry = gp
-            # Cumulative gain is absolute tput vs baseline, not additive deltas.
-            total_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
-            state.cumulative_gain = round(total_gain, 3)
-            state.cumulative_gain_validated = round(total_gain, 3)
-            state.cumulative_gain_validated_ts = stack_entry["ts"]
-            state.cumulative_gain_validated_stack_len = len(state.optimization_stack)
-            state.current_best = {
-                "action": "warm_replay",
-                "name": "warm_replay",
-                "tput": single_round_tput,
-                "hot_tput": hot_tput,
-                "cold_tput": cold_round_tput if cold_round_tput > 0 else None,
-                "extra_server_args": warm_args,
-                "extra_envs": warm_envs,
-            }
+            self._lift_to_current_best(
+                "replay_warm_recipe",
+                float(single_round_tput),
+                {
+                    "name": "warm_replay",
+                    "candidate_extra_server_args": warm_args,
+                    "extra_envs": warm_envs,
+                    "source_phase": "PRELUDE",
+                    "task_id": str(getattr(task, "task_id", "") or ""),
+                    "workspace": str(result.get("workspace") or ""),
+                },
+                entry_extra={
+                    "gain_pct": round(measured_gain, 3),
+                    "hot_tput": float(hot_tput),
+                    "cold_tput": float(cold_round_tput) if cold_round_tput > 0 else None,
+                    # source_tier records the warm-recipe tier for breakdown attribution.
+                    "source_tier": outcome.get("warm_recipe_tier", ""),
+                    "source_confidence": outcome.get("warm_recipe_conf", 0.0),
+                },
+            )
+            if baseline_tput > 0:
+                self._update_cumulative_gain_validated(single_round_tput)
             log.info(
                 "warm-replay REPRODUCED: measured=+%.2f%% (expected=+%.2f%%, "
                 "min_required=+%.2f%%); pushed warm_replay onto stack",

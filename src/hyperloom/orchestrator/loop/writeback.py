@@ -258,11 +258,10 @@ class WritebackCollaborator:
     async def _record_integrate_keep(self, result: dict[str, Any]) -> None:
         """Promote a kernel integrate KEEP into the optimization stack.
 
-        Appends a deduped ``integrate`` entry to the optimization stack, mirrors
-        the gain into the per-entry gain ledger, updates ``current_best`` and
-        ``cumulative_gain`` / ``cumulative_gain_validated``, and fires a
-        watermark roofline when the gain crosses the threshold. No-op when the
-        result lacks a positive ``new_tput``.
+        Stamps ``cumulative_gain_validated`` and fires a watermark roofline once
+        the lift is accepted. No-op when the result lacks a positive
+        ``new_tput``, when the same patch application is already stacked, or when
+        the measurement does not beat the current anchor.
 
         Args:
             result (dict[str, Any]): The integrate-patch executor result.
@@ -270,55 +269,17 @@ class WritebackCollaborator:
         new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
-        cb = self.shared_state.current_best or {}
-        extra_args = (
-            str(result.get("extra_server_args") or "")
-            or (str(cb.get("extra_server_args") or "") if isinstance(cb, dict) else "")
-        ).strip()
-        # An integrate carries no env delta of its own except a forge-GEMM tuning
-        # KEEP, so inherit the stack's env layer and let that delta win. Dropping
-        # it published a current_best whose args and envs came from different
-        # configs, which every dispatch site then seeded from.
-        extra_envs = dict((cb.get("extra_envs") or {}) if isinstance(cb, dict) else {})
-        if isinstance(result.get("extra_envs"), dict):
-            extra_envs.update({str(k): str(v) for k, v in result["extra_envs"].items()})
-        apply_result = result.get("apply_result") or {}
-        backup_manifest = apply_result.get("manifest_path") if isinstance(apply_result, dict) else None
-        if not backup_manifest and isinstance(apply_result, dict):
-            stack_applies = apply_result.get("stack_apply_results")
-            if isinstance(stack_applies, list):
-                for applied in stack_applies:
-                    if isinstance(applied, dict) and applied.get("manifest_path"):
-                        backup_manifest = applied.get("manifest_path")
-                        break
-        entry = {
-            "action": "integrate",
-            "source_phase": str(getattr(self.shared_state, "phase", "") or "KERNEL_AGENT"),
-            "integration_id": result.get("integration_id"),
-            "kernel_id": result.get("kernel_id"),
-            "task_group_key": result.get("task_group_key"),
-            "identity_route": result.get("identity_route"),
-            "patch_path": result.get("patch_path"),
-            "target_file": result.get("target_file"),
-            "backup_manifest": backup_manifest,
-            "gain_pct": result.get("gain_pct"),
-            "tput": float(new_tput),
-            "workspace": result.get("workspace"),
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
-        stack_kernel_ids = result.get("stack_kernel_ids")
-        if isinstance(stack_kernel_ids, list) and stack_kernel_ids:
-            entry["stack_kernel_ids"] = [str(kid) for kid in stack_kernel_ids if str(kid)]
-        integrate_gap_cid = str(result.get("gap_canonical_id") or "").strip()
-        if integrate_gap_cid:
-            entry["gap_canonical_id"] = integrate_gap_cid
+        # An integrate is identified by the whole patch application, not by one
+        # field: the same kernel can be integrated by different patches, so this
+        # stays a call-site precondition rather than folding into the lift's
+        # (action, variant_name) dedupe.
         key = (
-            entry.get("integration_id"),
-            entry["kernel_id"],
-            entry["patch_path"],
-            entry["target_file"],
+            result.get("integration_id"),
+            result.get("kernel_id"),
+            result.get("patch_path"),
+            result.get("target_file"),
         )
-        existing = {
+        already_stacked = key in {
             (
                 item.get("integration_id"),
                 item.get("kernel_id"),
@@ -328,34 +289,37 @@ class WritebackCollaborator:
             for item in self.shared_state.optimization_stack
             if isinstance(item, dict) and item.get("action") == "integrate"
         }
-        if key not in existing:
-            self.shared_state.optimization_stack.append(entry)
-            # Mirror into gain_per_stack_entry so breakdown attribution works without re-walking the event log.
-            self.shared_state.append_stack_gain_entry(
-                action="integrate",
-                variant_name=entry.get("kernel_id"),
-                new_tput=new_tput,
-                extra_server_args=extra_args,
-                ts=entry["ts"],
-            )
-
-        self.shared_state.current_best = {
-            "action": "integrate",
-            "tput": float(new_tput),
-            "integration_id": result.get("integration_id"),
-            "kernel_id": result.get("kernel_id"),
-            "extra_server_args": extra_args,
-            "extra_envs": extra_envs,
-            "optimization_stack": list(self.shared_state.optimization_stack),
+        if already_stacked:
+            return
+        bv = {
+            "name": result.get("kernel_id"),
+            "candidate_extra_server_args": str(result.get("extra_server_args") or "").strip(),
+            "extra_envs": {str(k): str(v) for k, v in (result.get("extra_envs") or {}).items()},
+            "source_phase": str(getattr(self.shared_state, "phase", "") or "KERNEL_AGENT"),
             "ttft_mean_ms": result.get("ttft_mean_ms"),
             "e2el_mean_ms": result.get("e2el_mean_ms"),
             "tpot_mean_ms": result.get("tpot_mean_ms"),
             "workspace": result.get("workspace"),
         }
+        stack_kernel_ids = [str(kid) for kid in (result.get("stack_kernel_ids") or []) if str(kid)]
+        if not self._lift_to_current_best(
+            "integrate",
+            float(new_tput),
+            bv,
+            gap_canonical_id=str(result.get("gap_canonical_id") or "").strip(),
+            entry_extra={
+                "integration_id": result.get("integration_id"),
+                "kernel_id": result.get("kernel_id"),
+                "task_group_key": result.get("task_group_key"),
+                "identity_route": result.get("identity_route"),
+                "patch_path": result.get("patch_path"),
+                "target_file": result.get("target_file"),
+                "gain_pct": result.get("gain_pct"),
+                "stack_kernel_ids": stack_kernel_ids,
+            },
+        ):
+            return
         if self.shared_state.baseline_tput > 0:
-            self.shared_state.cumulative_gain = (
-                (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
-            )
             # Integrate KEEP is already rebench-validated: promote into cumulative_gain_validated + watermark.
             self._update_cumulative_gain_validated(new_tput)
             await self._maybe_enqueue_watermark_roofline(
@@ -2269,12 +2233,16 @@ class WritebackCollaborator:
         bv: dict[str, Any],
         *,
         gap_canonical_id: str = "",
+        entry_extra: Mapping[str, Any] | None = None,
     ) -> bool:
         """Lift a winner only when it improves the current throughput anchor.
 
-        The stack append is skipped when the winner is already applied, keyed by
-        ``(action, variant_name)`` or by ``fingerprint``, so a rerun of an
-        already-stacked config cannot double-apply it.
+        The single writer of ``current_best`` and ``optimization_stack``: it is
+        the only place that merges a winner onto the previous config rather than
+        replacing it, so ``unset_envs`` and cumulative args stay correct across
+        the whole stack. The stack append is skipped when the winner is already
+        applied, keyed by ``(action, variant_name)`` or by ``fingerprint``, so a
+        rerun of an already-stacked config cannot double-apply it.
 
         Args:
             task_kind: The action kind that produced the winner (stamped on the
@@ -2283,6 +2251,9 @@ class WritebackCollaborator:
             bv: The winning variant dict (args, envs, metrics, provenance).
             gap_canonical_id: When known, stamped onto the stack entry so
                 provenance resolves by gap id rather than name.
+            entry_extra: Per-action metadata for the stack entry only — the
+                artifact and provenance handles downstream collectors join on.
+                ``current_best`` stays a pure config record and never takes it.
 
         Returns:
             ``True`` when the winner was lifted, ``False`` when it was refused
@@ -2301,6 +2272,9 @@ class WritebackCollaborator:
         base_args = ""
         if isinstance(previous, dict):
             base_args = str(previous.get("extra_server_args") or "").strip()
+        _overlay = str((bv.get("final_overlay") if isinstance(bv, dict) else "") or "").strip()
+        if not _overlay and isinstance(previous, dict):
+            _overlay = str(previous.get("final_overlay") or "").strip()
         candidate_args = ""
         if isinstance(bv, dict):
             candidate_args = str(bv.get("candidate_extra_server_args") or bv.get("extra_server_args") or "").strip()
@@ -2443,6 +2417,11 @@ class WritebackCollaborator:
                     for _origin_key in ("domain", "gap_layer"):
                         if bv.get(_origin_key):
                             stack_entry[_origin_key] = str(bv.get(_origin_key))
+                if _overlay:
+                    stack_entry["final_overlay"] = _overlay
+                for _extra_key, _extra_val in (entry_extra or {}).items():
+                    if _extra_val not in (None, "", [], {}):
+                        stack_entry[str(_extra_key)] = _extra_val
                 self.shared_state.optimization_stack.append(stack_entry)
                 # Mirror append into gain_per_stack_entry so the two lists stay index-aligned.
                 self.shared_state.append_stack_gain_entry(
@@ -2466,6 +2445,9 @@ class WritebackCollaborator:
             "variant_name": variant_name,
             "extra_server_args": full_args,
             "extra_envs": _merged_envs,
+            # An authored-kernel overlay outlives the KEEP that built it, so a
+            # later winner that carries none inherits the active one.
+            "final_overlay": _overlay,
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
             "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,

@@ -157,7 +157,7 @@ async def test_drain_pending_keep_integrates_records_result_once(
     assert c.shared_state.kernel_integrate_attempts
     assert c.shared_state.next_pending_keep_kernel_id() == ""
     assert c.shared_state.current_best["action"] == "integrate"
-    assert c.shared_state.current_best["kernel_id"] == "k004"
+    assert c.shared_state.current_best["variant_name"] == "k004"
 
 
 def test_pending_keep_kernel_ids_prioritize_trace_impact_over_micro():
@@ -388,7 +388,7 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
     await c._maybe_validate_positive_needs_review_stack()
 
     assert c.shared_state.current_best["action"] == "integrate"
-    assert c.shared_state.current_best["kernel_id"] == "k001+k004"
+    assert c.shared_state.current_best["variant_name"] == "k001+k004"
     assert c.shared_state.cumulative_gain_validated == pytest.approx(2.0)
     assert validation_calls == 1
     resolved_entries = [
@@ -469,7 +469,7 @@ async def test_recovers_pending_stack_validation_after_crash(tmp_path: Path):
     await c._recover_interrupted_stack_validation()
 
     assert validation_calls == 0
-    assert c.shared_state.current_best["kernel_id"] == "k001+k004"
+    assert c.shared_state.current_best["variant_name"] == "k001+k004"
     assert not c.shared_state.pending_stack_validation_result
     resolved = [
         entry
@@ -564,7 +564,7 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
     await c._on_enter_sweep(from_phase="KERNEL")
 
     assert len(validation_calls) == 1
-    assert c.shared_state.current_best["kernel_id"] == "k001+k004"
+    assert c.shared_state.current_best["variant_name"] == "k001+k004"
 
 
 @pytest.mark.asyncio

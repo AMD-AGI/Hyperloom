@@ -53,6 +53,13 @@ class _StubSharedState:
     def save(self, *args, **kwargs):  # noqa: D401 — stub
         pass
 
+    def append_stack_gain_entry(self, *, action, variant_name, new_tput, extra_server_args="", ts=None):
+        from hyperloom.common.gain_math import gain_pct
+
+        entry_gain_pct = gain_pct(float(new_tput or 0.0), float(self.baseline_tput or 0.0))
+        self.gain_per_stack_entry.append(entry_gain_pct)
+        return entry_gain_pct
+
 
 class _StubTaskRegistry:
     """Captures ``create_or_return_existing`` calls so tests can assert."""
@@ -411,7 +418,7 @@ def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     assert coord.shared_state.cumulative_gain_validated == 23.0
     assert coord.shared_state.cumulative_gain_validated_ts
     assert coord.shared_state.cumulative_gain_validated_stack_len == 1
-    assert coord.shared_state.current_best["action"] == "warm_replay"
+    assert coord.shared_state.current_best["action"] == "replay_warm_recipe"
     assert coord.shared_state.current_best["tput"] == 738.0
 
 
@@ -514,7 +521,7 @@ def test_promote_warm_replay_passes_quality_gate_is_promoted(tmp_path):
     outcome = coord.shared_state.warm_replay_outcome
     assert outcome["status"] == "reproduced"
     assert len(coord.shared_state.optimization_stack) == 1
-    assert coord.shared_state.current_best["action"] == "warm_replay"
+    assert coord.shared_state.current_best["action"] == "replay_warm_recipe"
 
 
 def test_promote_warm_replay_double_run_uses_hot_measure_round(tmp_path):
@@ -544,10 +551,11 @@ def test_promote_warm_replay_double_run_uses_hot_measure_round(tmp_path):
     coord._promote_warm_replay(result, task=task)
 
     cb = coord.shared_state.current_best
-    assert cb["action"] == "warm_replay"
+    assert cb["action"] == "replay_warm_recipe"
     assert cb["tput"] == 738.0
-    assert cb["hot_tput"] == 738.0
-    assert cb["cold_tput"] == 690.0
+    # The measured rounds are audit metadata on the stack entry, not config.
+    assert "hot_tput" not in cb
+    assert "cold_tput" not in cb
     entry = coord.shared_state.optimization_stack[0]
     assert entry["tput"] == 738.0
     assert entry["hot_tput"] == 738.0
@@ -580,7 +588,7 @@ def test_promote_warm_replay_adopts_on_any_positive_gain(tmp_path):
     assert outcome["actual_gain_pct"] == 10.0
     assert outcome.get("below_historical_reproduce_pct") is True
     assert len(coord.shared_state.optimization_stack) == 1
-    assert coord.shared_state.current_best["action"] == "warm_replay"
+    assert coord.shared_state.current_best["action"] == "replay_warm_recipe"
 
 
 def test_promote_warm_replay_no_gain_is_drift(tmp_path):

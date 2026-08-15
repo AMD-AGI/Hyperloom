@@ -190,14 +190,12 @@ class TestProfileWorkloadContext:
             framework="vllm",
             precision="fp8",
             current_best={
-                "engine": "forge",
                 "extra_server_args": " --attention-backend AITER ",
                 "extra_envs": {"B": 2, "A": 1},
             },
         )
 
         assert state.profile_workload_context()["serving_config"] == {
-            "engine": "forge",
             "extra_server_args": "--attention-backend AITER",
             "extra_envs": {"A": "1", "B": "2"},
         }

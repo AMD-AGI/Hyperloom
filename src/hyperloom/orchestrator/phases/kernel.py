@@ -76,13 +76,12 @@ class KernelPhase(PhaseHandler):
             else {}
         )
         payload = {
-            "engine": str(serving_config.get("engine") or "").strip().lower(),
             "extra_server_args": str(
                 serving_config.get("extra_server_args") or ""
             ).strip(),
             "extra_envs": envs,
         }
-        if not any((payload["engine"], payload["extra_server_args"], envs)):
+        if not any((payload["extra_server_args"], envs)):
             return ""
         return "hyperloom-profile-config:" + json.dumps(
             payload,
@@ -1146,11 +1145,10 @@ class KernelPhase(PhaseHandler):
     ) -> None:
         """Write the GEAK headline from a MEASURED main-flow rebench.
 
-        The single headline writer: lifts ``current_best`` (config/overlay/scripts
-        + the measured tput), appends the ``geak_e2e`` optimization_stack entry +
-        gain ledger, and stamps ``cumulative_gain`` / ``cumulative_gain_validated``
-        as the same-harness total ``(measured - baseline)/baseline``. Clears
-        ``geak_pending`` and the revalidation flag.
+        Lifts the measured config/overlay onto ``current_best`` and stamps
+        ``cumulative_gain_validated`` as the same-harness total
+        ``(measured - baseline)/baseline``. Clears ``geak_pending`` and the
+        revalidation flag.
         """
         if not isinstance(result, dict):
             return
@@ -1210,69 +1208,29 @@ class KernelPhase(PhaseHandler):
             return
         accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
 
-        cb = dict(self.shared_state.current_best or {})
-        cb_envs = dict(cb.get("extra_envs") or {}) if isinstance(cb.get("extra_envs"), Mapping) else {}
-        cb_envs.update(parsed_envs)
-        cb.update(
+        self._lift_to_current_best(
+            "geak_e2e",
+            measured,
             {
-                "action": "geak_e2e",
-                "tput": measured,
-                "ttft_mean_ms": result.get("ttft_ms"),
-                "tpot_mean_ms": result.get("tpot_ms"),
-                "extra_server_args": accepted_flags,
-                "extra_envs": cb_envs,
-                "geak_launch_script": result.get("final_launch_script"),
-                "geak_bench_script": result.get("bench_script"),
-                "geak_eval_dir": result.get("eval_dir"),
-                "final_overlay": result.get("final_overlay") or "",
-                "workspace": result.get("eval_dir"),
-            }
-        )
-        # Audit cross-check: GEAK's own within-harness speedups (not the headline).
-        am = result.get("alignment_metrics") or {}
-        cb["geak_alignment"] = {
-            "hot_geak_speedup": am.get("hot_geak_speedup"),
-            "cold_geak_speedup": am.get("cold_geak_speedup"),
-            "hot_speedup": am.get("hot_speedup"),
-            "cold_speedup": am.get("cold_speedup"),
-            "final_basis": am.get("final_basis") or result.get("final_throughput_basis"),
-            "geak_throughput_speedup": result.get("throughput_speedup"),
-        }
-        self.shared_state.current_best = cb
-
-        ts = datetime.now(timezone.utc).isoformat()
-        if not self._geak_win_already_recorded():
-            entry = {
-                "action": "geak_e2e",
-                "source_phase": "KERNEL_AGENT",
-                "variant_name": "geak_e2e",
-                "tput": measured,
+                "name": "geak_e2e",
                 "candidate_extra_server_args": accepted_flags,
                 "extra_envs": dict(parsed_envs),
                 "final_overlay": result.get("final_overlay") or "",
+                "source_phase": "KERNEL_AGENT",
+                "ttft_mean_ms": result.get("ttft_ms"),
+                "tpot_mean_ms": result.get("tpot_ms"),
                 "workspace": result.get("eval_dir"),
+            },
+            entry_extra={
                 "accepted_kernels": result.get("accepted_kernels") or [],
                 "accepted_heads": result.get("accepted_heads") or [],
                 "report_path": result.get("report_path"),
                 "source": "geak_e2e",
-                "ts": ts,
-            }
-            self.shared_state.optimization_stack.append(entry)
-            self.shared_state.append_stack_gain_entry(
-                action="geak_e2e",
-                variant_name="geak_e2e",
-                new_tput=measured,
-                extra_server_args=accepted_flags,
-                ts=ts,
-            )
+            },
+        )
 
-        base = float(self.shared_state.baseline_tput or 0.0)
-        if base > 0:
-            gain = (measured - base) / base * 100.0
-            self.shared_state.cumulative_gain = gain
-            self.shared_state.cumulative_gain_validated = gain
-            self.shared_state.cumulative_gain_validated_ts = ts
-            self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+        if self.shared_state.baseline_tput > 0:
+            self._update_cumulative_gain_validated(measured)
         self.shared_state.cumulative_gain_provenance = provenance
         self.shared_state.resume_pending_revalidation = False
         self.shared_state.geak_pending = {}
@@ -2149,7 +2107,6 @@ class KernelPhase(PhaseHandler):
         stacked_envs: dict[str, str] = {}
         kept: list[dict[str, Any]] = []
         reverted: list[dict[str, Any]] = []
-        ts = datetime.now(timezone.utc).isoformat()
         try:
             from ..actions.executors.explore import _compute_explore_variant_timeout
 
@@ -2321,34 +2278,31 @@ class KernelPhase(PhaseHandler):
                     }
                 )
 
-                entry = {
-                    "action": "gemm_tuning",
-                    "source_phase": "KERNEL_AGENT",
-                    "variant_name": f"{backend}_{tuner_name}",
-                    "tuned_file": (
-                        env.get(cand["env_var"])
-                        or next(iter(env.values()), "")
-                    ),
-                    "gain_pct": gain_pct,
-                    "tput": new_tput,
-                    "workspace": result.get("workspace"),
-                    "extra_server_args": extra_server_args,
-                    "extra_envs": dict(stacked_envs),
-                    "backend": backend,
-                    "source": "kernel_entry_auto",
-                    "ts": ts,
-                }
-                self.shared_state.optimization_stack.append(entry)
-                self.shared_state.append_stack_gain_entry(
-                    action="gemm_tuning",
-                    variant_name=f"{backend}_{tuner_name}",
-                    new_tput=new_tput,
-                    ts=ts,
+                lifted = self._lift_to_current_best(
+                    "gemm_tuning",
+                    new_tput,
+                    {
+                        "name": f"{backend}_{tuner_name}",
+                        "candidate_extra_server_args": extra_server_args,
+                        "extra_envs": dict(env),
+                        "source_phase": "KERNEL_AGENT",
+                        "workspace": result.get("workspace"),
+                    },
+                    entry_extra={
+                        "tuned_file": (
+                            env.get(cand["env_var"])
+                            or next(iter(env.values()), "")
+                        ),
+                        "gain_pct": gain_pct,
+                        "backend": backend,
+                        "source": "kernel_entry_auto",
+                    },
                 )
-                self._journal_gemm_tuning_keep(
-                    entry,
-                    task_id=f"gemm_tune_e2e_{tuner_name}",
-                )
+                if lifted:
+                    self._journal_gemm_tuning_keep(
+                        self.shared_state.optimization_stack[-1],
+                        task_id=f"gemm_tune_e2e_{tuner_name}",
+                    )
             else:
                 reason = f"decision={decision}, gain={gain_pct:.2f}%"
                 if coverage is not None and not coverage.get("artifact_applied"):
@@ -2357,22 +2311,12 @@ class KernelPhase(PhaseHandler):
                     reason = f"tuned_config_never_applied ({reason})"
                 reverted.append({**cand, "reason": reason})
 
-        # Update current_best and cumulative_gain with final stacked result.
+        # current_best already advanced per KEEP; only the validated watermark
+        # is a whole-run statement and has to wait for the last one.
         if kept:
-            self.shared_state.current_best = {
-                "action": "gemm_tuning",
-                "engine": backend,
-                "tput": running_tput,
-                "variant_name": f"{backend}_gemm_tuned",
-                "extra_server_args": "--moe-runner-backend aiter" if "AITER_CONFIG_FMOE" in stacked_envs else "",
-                "extra_envs": stacked_envs,
-                "workspace": result.get("workspace"),
-            }
             total_gain = (running_tput - baseline_tput) / baseline_tput * 100.0 if baseline_tput > 0 else 0.0
-            self.shared_state.cumulative_gain = total_gain
-            self.shared_state.cumulative_gain_validated = total_gain
-            self.shared_state.cumulative_gain_validated_ts = ts
-            self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack or [])
+            if baseline_tput > 0:
+                self._update_cumulative_gain_validated(running_tput)
             log.info(
                 "gemm E2E: %d tuners KEEP (total gain=+%.2f%%), %d REVERT",
                 len(kept),
@@ -2669,69 +2613,41 @@ class KernelPhase(PhaseHandler):
             return
 
         patch = str(fusion_result.get("patch") or integrate_result.get("patch_path") or "")
-        existing = {
-            str(item.get("patch_path") or "")
-            for item in (self.shared_state.optimization_stack or [])
-            if isinstance(item, dict) and item.get("action") == "fusion"
-        }
-        ts = datetime.now(timezone.utc).isoformat()
         envs = dict(extra_envs or integrate_result.get("extra_envs") or fusion_result.get("env_flags") or {})
         extra_args = str(integrate_result.get("extra_server_args") or "")
-        entry = {
-            "action": "fusion",
-            "source_phase": "KERNEL_AGENT",
-            "variant_name": "forge_fusion",
-            "backend": "forge",
-            "engine": "forge_fusion",
-            "provenance": "forge_fusion",
-            "source": "kernel_entry_auto",
-            "tput": new_tput,
-            # integrate reports the increment against its own base_tput (the
-            # currently active stack). Keep that local meaning on the entry;
-            # the session headline below must use the original baseline.
-            "gain_pct": incremental_gain,
-            "workspace": integrate_result.get("workspace"),
-            "patch_path": patch,
-            "target_file": fusion_result.get("source_file") or integrate_result.get("target_file"),
-            "extra_envs": envs,
-            "extra_server_args": extra_args,
-            "kernel_speedup": fusion_result.get("kernel_speedup"),
-            "best_pattern": fusion_result.get("best_pattern"),
-            "ts": ts,
-        }
-        if patch not in existing:
-            self.shared_state.optimization_stack.append(entry)
-            self.shared_state.append_stack_gain_entry(
-                action="fusion",
-                variant_name="forge_fusion",
-                new_tput=new_tput,
-                extra_server_args=extra_args,
-                ts=ts,
-            )
-        self.shared_state.current_best = {
-            "action": "fusion",
-            "backend": "forge",
-            "engine": "forge_fusion",
-            "tput": new_tput,
-            "variant_name": "forge_fusion",
-            "workspace": integrate_result.get("workspace"),
-            "patch_path": patch,
-            "target_file": entry["target_file"],
-            "extra_envs": envs,
-            "extra_server_args": extra_args,
-        }
+        lifted = self._lift_to_current_best(
+            "fusion",
+            new_tput,
+            {
+                # The patch is the identity: two fusions differ by what they
+                # rewrote, not by the engine that produced them.
+                "name": f"forge_fusion:{Path(patch).name}" if patch else "forge_fusion",
+                "candidate_extra_server_args": extra_args,
+                "extra_envs": envs,
+                "source_phase": "KERNEL_AGENT",
+                "provenance": "forge_fusion",
+                "workspace": integrate_result.get("workspace"),
+            },
+            entry_extra={
+                "backend": "forge",
+                "engine": "forge_fusion",
+                "source": "kernel_entry_auto",
+                # integrate reports the increment against its own base_tput (the
+                # currently active stack). Keep that local meaning on the entry;
+                # the session headline uses the original baseline.
+                "gain_pct": incremental_gain,
+                "patch_path": patch,
+                "target_file": fusion_result.get("source_file") or integrate_result.get("target_file"),
+            },
+        )
+        if not lifted:
+            return
         try:
             baseline_tput = float(self.shared_state.baseline_tput or 0.0)
         except (TypeError, ValueError):
             baseline_tput = 0.0
         if baseline_tput > 0:
-            total_gain = (new_tput - baseline_tput) / baseline_tput * 100.0
-            self.shared_state.cumulative_gain = total_gain
-            self.shared_state.cumulative_gain_validated = total_gain
-            self.shared_state.cumulative_gain_validated_ts = ts
-            self.shared_state.cumulative_gain_validated_stack_len = len(
-                self.shared_state.optimization_stack or []
-            )
+            self._update_cumulative_gain_validated(new_tput)
 
     def _current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed).

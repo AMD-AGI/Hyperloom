@@ -1180,6 +1180,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_build_recipe_attrs_from_state": "writeback",
         "finalize_recipe_and_journal": "writeback",
         "_lift_to_current_best": "writeback",
+        "_update_cumulative_gain_validated": "writeback",
         "_promote_to_shared_state": "writeback",
         "_should_run_prelude_bootstrap": "writeback",
         "_detect_resume_state": "writeback",
