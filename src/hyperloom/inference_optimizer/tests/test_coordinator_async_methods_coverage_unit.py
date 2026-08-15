@@ -88,6 +88,81 @@ async def test_promote_single_round_baseline_clears_stale_warm_runtime(coord: Co
 
 
 @pytest.mark.asyncio
+async def test_promote_baseline_carries_the_boot_and_benchmark_split(coord: Coordinator) -> None:
+    """The two figures that let later work be priced on what it will spend.
+
+    The whole round and the part of it that ran after the server was ready; the
+    difference between them is what booting this workload costs, and every
+    variant boots again.
+    """
+    await coord._promote_to_shared_state(
+        "baseline",
+        {
+            "output_throughput": 1000.0,
+            "subprocess_runtime_sec": 900.0,
+            "post_ready_runtime_sec": 550.0,
+            "workspace": "/tmp/ws",
+        },
+    )
+
+    assert coord.shared_state.baseline_runtime_sec == 900.0
+    assert coord.shared_state.baseline_post_ready_runtime_sec == 550.0
+
+
+@pytest.mark.asyncio
+async def test_promote_baseline_clears_a_split_a_later_round_did_not_report(
+    coord: Coordinator,
+) -> None:
+    """A stale split would be subtracted from a fresh total and called the boot."""
+    coord.shared_state.baseline_post_ready_runtime_sec = 550.0
+
+    await coord._promote_to_shared_state(
+        "baseline",
+        {
+            "output_throughput": 1000.0,
+            "subprocess_runtime_sec": 900.0,
+            "workspace": "/tmp/ws",
+        },
+    )
+
+    assert coord.shared_state.baseline_post_ready_runtime_sec == 0.0
+
+
+@pytest.mark.asyncio
+async def test_promote_baseline_carries_a_dropped_hot_pass_to_the_session(
+    coord: Coordinator,
+) -> None:
+    """The marker drives a session-level decision, so it has to reach the session.
+
+    PRELUDE routes to CLOSE on it rather than optimizing against a denominator
+    that was never the baseline, and it is cleared by the next baseline that does
+    land a hot figure -- otherwise a session resumed with a fresh clock stays
+    condemned by the earlier leg's shortfall.
+    """
+    await coord._promote_to_shared_state(
+        "baseline",
+        {
+            "output_throughput": 1000.0,
+            "subprocess_runtime_sec": 900.0,
+            "measure_round_dropped": {"reason": "measure_round_reaped_by_the_run"},
+            "workspace": "/tmp/ws",
+        },
+    )
+    assert coord.shared_state.baseline_measure_round_dropped is True
+
+    await coord._promote_to_shared_state(
+        "baseline",
+        {
+            "output_throughput": 1200.0,
+            "subprocess_runtime_sec": 900.0,
+            "measure_round_runtime_sec": 400.0,
+            "workspace": "/tmp/ws",
+        },
+    )
+    assert coord.shared_state.baseline_measure_round_dropped is False
+
+
+@pytest.mark.asyncio
 async def test_promote_baseline_non_dict_is_noop(coord: Coordinator) -> None:
     await coord._promote_to_shared_state("baseline", "not-a-dict")  # type: ignore[arg-type]
 

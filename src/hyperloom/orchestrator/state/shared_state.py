@@ -595,6 +595,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Baseline WARM measure-round wall-clock (client-only, no boot); anchors the
     # explore overtime kill apples-to-apples. Zero => fall back to the cold anchor.
     baseline_warm_runtime_sec: float = 0.0
+    # Whether the baseline's hot pass was dropped because the budget could not
+    # cover it plus one variant to read against it, leaving the cold pass's
+    # depressed figure as the anchor. Routes PRELUDE to CLOSE rather than letting
+    # later phases compare against a denominator that was never the baseline, and
+    # keeps a resumed session from treating preparation as finished.
+    baseline_measure_round_dropped: bool = False
     # The benchmark's own share of the COLD round above, from the server-ready
     # marker onward. Kept beside that total rather than replacing it because the
     # difference between them is what booting this workload costs, and every

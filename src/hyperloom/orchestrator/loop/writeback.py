@@ -3046,6 +3046,19 @@ class WritebackCollaborator:
             elif float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0) != 0.0:
                 self.shared_state.baseline_warm_runtime_sec = 0.0
                 changed = True
+            # Whether this baseline had to keep its cold figure because the budget
+            # could not fund a hot pass and a variant to use it. Carried on the
+            # session because the decision it drives is the session's: PRELUDE
+            # routes to CLOSE rather than optimizing against a denominator that
+            # was never the baseline. Cleared by a baseline that does land a hot
+            # figure, so a resumed session with a fresh clock is not held to the
+            # earlier leg's shortfall.
+            measure_round_dropped = bool(result.get("measure_round_dropped"))
+            if measure_round_dropped != bool(
+                getattr(self.shared_state, "baseline_measure_round_dropped", False)
+            ):
+                self.shared_state.baseline_measure_round_dropped = measure_round_dropped
+                changed = True
             # Promote the cold round's boot/benchmark split. Cleared the same way
             # the warm figure is when a later baseline does not carry one, so a
             # stale split can never be subtracted from a fresh total and reported
