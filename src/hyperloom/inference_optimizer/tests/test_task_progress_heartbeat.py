@@ -420,9 +420,11 @@ async def test_a_cancel_landing_in_teardown_still_cancels_the_step() -> None:
     await entered.wait()
     await asyncio.sleep(0.02)  # the body has returned; teardown is waiting
     step.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
+    try:
         await step
+        pytest.fail("expected the cancelled step to raise CancelledError")
+    except asyncio.CancelledError:
+        pass
 
 
 @pytest.mark.asyncio
@@ -453,8 +455,11 @@ async def test_a_cancelled_progress_write_leaves_the_connection_usable(tmp_path,
     writing = asyncio.create_task(sub.tasks.record_progress(task.task_id, {"unit": "variant"}))
     await asyncio.to_thread(begun.wait, 5.0)
     writing.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    try:
         await writing
+        pytest.fail("expected the cancelled write to raise CancelledError")
+    except asyncio.CancelledError:
+        pass
 
     assert not sub.tasks.db.raw.in_transaction
     await sub.tasks.record_progress(task.task_id, {"unit": "variant", "label": "after"})
@@ -512,8 +517,11 @@ async def test_the_loop_keeps_running_while_a_cancelled_write_rolls_back(tmp_pat
     await asyncio.to_thread(holding.wait, _ROLLBACK_BACKSTOP_S)
     writing.cancel()
     cancelled.set()
-    with pytest.raises(asyncio.CancelledError):
+    try:
         await writing
+        pytest.fail("expected the cancelled write to raise CancelledError")
+    except asyncio.CancelledError:
+        pass
     ticker.cancel()
     await asyncio.gather(ticker, return_exceptions=True)
 
@@ -593,8 +601,11 @@ async def test_a_cancel_landing_on_the_rollback_does_not_release_the_lock_early(
 
     assert not writing.done(), "the write returned with its rollback still queued behind the abandoned worker"
     release.set()
-    with pytest.raises(asyncio.CancelledError):
+    try:
         await writing
+        pytest.fail("expected the cancelled write to raise CancelledError")
+    except asyncio.CancelledError:
+        pass
 
     assert not db.raw.in_transaction
     assert not db._async_lock.locked()
@@ -652,14 +663,17 @@ async def test_a_rollback_the_connection_cannot_do_is_logged_not_raised(tmp_path
     monkeypatch.setattr(db, "_rollback", _rollback_on_a_closed_connection)
     try:
         with caplog.at_level(logging.WARNING):
-            with pytest.raises(ValueError, match="body failed"):
+            try:
                 async with db.transaction():
                     raise ValueError("body failed")
+            except ValueError as exc:
+                assert "body failed" in str(exc)
+            else:
+                pytest.fail("the body's exception was lost behind the rollback")
+            assert "rollback after a failed transaction did not complete" in caplog.text
+            assert "Cannot operate on a closed database" in caplog.text
     finally:
         db.close()
-
-    assert "rollback after a failed transaction did not complete" in caplog.text
-    assert "Cannot operate on a closed database" in caplog.text
 
 
 def test_the_tally_is_safe_to_advance_from_reader_threads() -> None:
