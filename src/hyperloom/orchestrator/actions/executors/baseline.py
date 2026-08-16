@@ -3695,6 +3695,14 @@ class BaselineExecutor:
             # is what it is: a boot and a benchmark that pays the compile. The
             # same fallback the phase machine uses, so the two agree on when a
             # stopped session may try again.
+            #
+            # Known gap: a multi-node variant runs two client passes, not one
+            # (``_grid_runner`` reserves for it as ``x (1 + _mn_warmup_rounds)``),
+            # so one pass is left unreserved here. It needs a multi-node round to
+            # reach PRELUDE with an earlier one already measured, which takes an
+            # enablement round holding the phase open past an anchor that would
+            # otherwise finish it -- narrow enough not to be worth teaching the
+            # phase machine's pricing what shape the cluster is.
             use_sec = _phase_state.one_more_measurement_sec(state) or cold_sec
         headroom_sec, evidence = _round_headroom_sec(state, None)
         if headroom_sec is None:
