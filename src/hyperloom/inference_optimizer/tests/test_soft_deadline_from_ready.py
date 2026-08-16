@@ -232,7 +232,6 @@ class TestARoundIsPricedByItsTwoParts:
             "time.sleep(1)\n"
             "raise SystemExit(0)\n"
         )
-        started_unix = time.time()
         cp = run_with_session_kill(
             [sys.executable, "-c", script, str(log_path)],
             timeout=30,

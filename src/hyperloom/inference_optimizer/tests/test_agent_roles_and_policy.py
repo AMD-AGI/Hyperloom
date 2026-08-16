@@ -5,11 +5,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
 import pytest
 
-from hyperloom.common.timeutil import iso_z
 from hyperloom.orchestrator.roles.agent_role import (
     BackendType,
     DEFAULT_CLAUDE_MODEL,
@@ -742,7 +739,9 @@ def test_gate_update_state_cannot_move_a_session_end_time(gate):
 def test_a_forged_closing_reserve_would_have_spent_the_session_outright():
     """Names what the lock prevents: one field, and the run has no usable time left."""
     state = SharedState(session_id="s", max_minutes=100)
-    state.start_ts = iso_z(datetime.now(timezone.utc) - timedelta(minutes=90))
+    # Freeze elapsed time: two live ``session_budget_usable_sec`` reads race
+    # the clock by tens of microseconds, which is enough for ``==`` to fail.
+    state.elapsed_minutes = lambda **_kw: 90.0  # type: ignore[method-assign]
     honest = state.session_budget_usable_sec()
 
     applied = state.apply_changes({"closing_grace_sec": 1e9}, allow_core=False)

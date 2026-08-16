@@ -464,8 +464,5 @@ def serving_lease_on_a_ray_double(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "ray", RayDouble())
     monkeypatch.setattr(rb, "get_ray_backend", lambda: SimpleNamespace(ensure=lambda **_kw: None))
-    lease = rs.ServingLease(num_gpus=1)
-    try:
+    with rs.ServingLease(num_gpus=1) as lease:
         yield lease
-    finally:
-        lease.close()
