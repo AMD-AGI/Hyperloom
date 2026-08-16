@@ -14,13 +14,15 @@
 #      vllm_*.sh when PROFILE=1.
 # These are required for TraceLens fusion / roofline analysis.
 #
-# Issue #194 §4: `capture_torch_profiler_dir` and
-# `detailed_trace_annotation` are *not* in upstream vLLM 0.19 — they
-# come from the TraceLens patch set at
+# Issue #194 §4: `capture_torch_profiler` and `detailed_trace_annotation`
+# ship upstream from vLLM 0.26; below that they come from the TraceLens
+# patch set at
 # TraceLens-internal/examples/custom_workflows/inference_analysis/vllm_patches/.
+# On 0.26+ the patcher only verifies the fields are present. Below it,
 # Hyperloom's runtime patcher (HYPERLOOM_ENABLE_PATCH=1, default) tries
 # to apply the matching `config_vllm_v<version>.patch` against the
-# in-container vLLM install at the start of every profile. If patching
+# in-container vLLM install at the start of every profile. Capture
+# sidecars land under <torch_profiler_dir>/capture_traces. If patching
 # succeeds, materialize_config_with_envs auto-appends those two flags
 # to EXTRA_VLLM_ARGS; if it fails (version unsupported, fs read-only,
 # already-patched fork, etc.) we fall back to today's safe behaviour:

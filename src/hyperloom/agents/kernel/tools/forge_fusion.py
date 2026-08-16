@@ -130,10 +130,12 @@ def _git_toplevel(path: str) -> str:
     """
     if not path:
         return ""
+    from hyperloom.common.git_safety import safe_directory_args  # noqa: PLC0415 - standalone import-light
+
     try:
         parent = str(Path(path).parent)
         r = subprocess.run(
-            ["git", "-C", parent, "rev-parse", "--show-toplevel"],
+            ["git", *safe_directory_args(["-C", parent, "rev-parse", "--show-toplevel"])],
             capture_output=True,
             text=True,
             timeout=10,
@@ -143,7 +145,7 @@ def _git_toplevel(path: str) -> str:
             try:
                 rel = str(Path(path).resolve().relative_to(Path(toplevel).resolve()))
                 tracked = subprocess.run(
-                    ["git", "-C", toplevel, "ls-files", "--error-unmatch", "--", rel],
+                    ["git", *safe_directory_args(["-C", toplevel, "ls-files", "--error-unmatch", "--", rel])],
                     capture_output=True,
                     text=True,
                     timeout=10,

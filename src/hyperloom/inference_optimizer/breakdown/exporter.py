@@ -419,6 +419,12 @@ def build(
         warnings,
         default={},
     )
+    collective = _safe_collect(
+        "collective",
+        lambda: collectors.collect_collective(state),
+        warnings,
+        default={},
+    )
     # Canonical optimization read model.  This is the single downstream entry
     # point for adopted warm-replay, Explore, Framework Agent, and Kernel Agent
     # changes; the historical sections below remain compatibility/audit data.
@@ -603,6 +609,9 @@ def build(
         "action_timeline": phase_timeline,
         "capability_summary": capability_summary,
         "kernel_lifecycle": kernel_lifecycle,
+        # Collective lane audit trail; survives a campaign the E2E gate rejected,
+        # which never reaches ``optimizations``.
+        "collective": collective,
         "param_search": explore_search,
         # v2-native name for the merged ledger; mirrors ``param_search``.
         "explore_search": explore_search,

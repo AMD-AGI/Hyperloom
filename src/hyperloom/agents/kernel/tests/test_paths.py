@@ -33,9 +33,10 @@ def test_workspace_root_warns_once_when_unset(monkeypatch, caplog):
     monkeypatch.delenv("USER_DATA_PATH", raising=False)
     paths = _reload_paths()
 
+    expected = paths.default_workspace_root()
     with caplog.at_level(logging.WARNING, logger="_paths"):
-        assert paths.workspace_root() == "/workspace/hyperloom"
-        assert paths.workspace_root() == "/workspace/hyperloom"
+        assert paths.workspace_root() == expected
+        assert paths.workspace_root() == expected
 
     warnings = [r for r in caplog.records if "USER_DATA_PATH" in r.message]
     assert len(warnings) == 1

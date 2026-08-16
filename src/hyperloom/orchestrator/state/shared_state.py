@@ -39,12 +39,16 @@ Fields::
     last_profile_trace  str   — set by Coordinator when `profile` returns a
                                 trace path; consumed by Orch to populate
                                 `trace_analyze` REQUEST `trace_input` param
+    last_collective     dict  — latest collective campaign and integration state
+    collective_attempts list  — capped collective campaign audit
+    collective_only_mode bool — disable non-collective KERNEL lanes
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shlex
 import time
@@ -536,13 +540,22 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     warm_history_injected: bool = False
     # Structured warm-replay outcome for reports/prompts (status reproduced|drift|failed|skipped, etc.).
     warm_replay_outcome: dict = field(default_factory=dict)
+    # Crash-safe rollback/bookkeeping state for the combined Recipe + Kernel
+    # PRELUDE validation. Cleared only after KEEP/REVERT settles.
+    warm_replay_pending: dict = field(default_factory=dict)
+    # Session-authoritative InferenceX checkout. A successful isolated warm
+    # replay promotes its already-patched checkout here without re-applying.
+    active_inferencex_path: str = ""
+    # Durable post-save handoffs for section KB staging. Rows are removed only
+    # after the idempotent draft write succeeds.
+    kb_stage_outbox: list = field(default_factory=list)
+    # Owner sections dropped because their persisted artifacts disappeared.
+    kb_stage_dead_letter: list = field(default_factory=list)
     # One-shot guard for PRELUDE warm-kernel KB read/apply (resume can't re-fire).
     warm_kernel_kb_attempted: bool = False
-    # Resolved prior-champion kernel columns (gemm/fusion/rewrite) loaded from the
-    # KB Store warm-start record at PRELUDE, with local file paths resolved.
+    # Resolved prior-champion kernel columns (gemm/fusion/rewrite) loaded at
+    # PRELUDE from the Recipe ``value.kernel`` section, with file paths resolved.
     warm_kernel_kb_plan: list = field(default_factory=list)
-    # Structured warm-kernel KB outcome for reports/prompts.
-    warm_kernel_kb_outcome: dict = field(default_factory=dict)
     # Baseline COLD (warmup-round) full boot+bench wall-clock; the hard-cap
     # anchor from which ExploreExecutor derives the overtime-kill deadline.
     baseline_runtime_sec: float = 0.0
@@ -753,6 +766,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # so resume does not rerun a completed fusion loop or lose the adoption audit.
     last_fusion: dict[str, Any] = field(default_factory=dict)
     last_fusion_integrate: dict[str, Any] = field(default_factory=dict)
+    # Most recent collective campaign and capped integration audit.
+    last_collective: dict[str, Any] = field(default_factory=dict)
+    collective_attempts: list[dict[str, Any]] = field(default_factory=list)
+    collective_only_mode: bool = False
     # Most recent run_optimization dispatch skipped with no eligible kernels;
     # recorded as a non-failure so the breakdown can surface it.
     last_kernel_opt_dispatch_skip: dict[str, Any] = field(default_factory=dict)
@@ -945,10 +962,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # ISO UTC timestamp of the T0 snapshot; empty under --degraded-kb or T0 failure.
     warm_start_ts: str = ""
-    # Model-facing WarmStartContext built by ``recipe_kb_t0`` from the KB recipe
-    # row (parallel to the raw ``warm_start_recipe`` envelope). Carries an
-    # explicit ``status``, a ready-to-replay ``recommended_replay`` champion, and
-    # the experiential lists. Empty dict when T0 was bypassed or failed.
+    # Model-facing advisory context built by ``recipe_kb_t0``. Current remote
+    # records carry match/history/KG data only; local legacy records may also
+    # carry their compatibility replay projection.
     warm_start_context: dict[str, Any] = field(default_factory=dict)
 
     # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only _refresh_gaps; CORE_STATE_FIELDS); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
@@ -1875,6 +1891,292 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             return str(latest.get("top_bottleneck") or "")
         return ""
 
+    def current_comm_pct(self) -> float | None:
+        """Return the latest exposed-communication percentage."""
+        snaps = self.roofline_snapshots if isinstance(self.roofline_snapshots, list) else []
+        if not snaps:
+            return None
+        latest = snaps[-1]
+        if not isinstance(latest, dict):
+            raise ValueError("Latest roofline snapshot must be a mapping")
+        value = latest.get("comm_pct")
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError("Latest comm_pct must be numeric")
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0:
+            raise ValueError("Latest comm_pct must be finite and non-negative")
+        return parsed
+
+    @staticmethod
+    def _collective_attempt_snapshot(result: dict[str, Any]) -> dict[str, Any]:
+        """Build one compact collective campaign record."""
+        return {
+            "collective_attempt_id": str(result["collective_attempt_id"]),
+            "integration_id": str(result.get("integration_id") or ""),
+            "experiment_id": str(result.get("experiment_id") or ""),
+            "analysis_key": str(result.get("analysis_key") or ""),
+            "status": str(result.get("status") or ""),
+            "decision": str(result.get("decision") or ""),
+            "kept": result["kept"],
+            "requires_e2e_validation": result[
+                "requires_e2e_validation"
+            ],
+            "integration_status": str(
+                result.get("integration_status") or ""
+            ),
+            "integration_decision": str(
+                result.get("integration_decision") or ""
+            ),
+            "kernel_id": str(result.get("kernel_id") or ""),
+            "kernel_name": str(result.get("kernel_name") or ""),
+            "source_file": str(
+                result.get("source_file") or result.get("target_file") or ""
+            ),
+            "kernel_repo": str(result.get("kernel_repo") or ""),
+            "backend": "forge_collective",
+            "engine": str(result.get("engine") or "forge_collective"),
+            "kernel_speedup": result.get("kernel_speedup"),
+            "gpu_pct": result.get("gpu_pct"),
+            "collective_op": str(result.get("collective_op") or ""),
+            "world_size": result.get("world_size"),
+            "workspace": str(result.get("workspace") or ""),
+            "patch_path": str(
+                result.get("patch") or result.get("patch_path") or ""
+            ),
+            "iterations": result.get("iterations"),
+            "salvaged": bool(result.get("salvaged")),
+            "duration_sec": (
+                result.get("duration_sec")
+                or result.get("elapsed_sec")
+                or result.get("runtime_sec")
+            ),
+            "error_class": str(result.get("error_class") or ""),
+            "error": str(result.get("error") or "")[-1200:],
+            "ts": str(result.get("ts") or _now_iso()),
+        }
+
+    @staticmethod
+    def _collective_integration_snapshot(
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build the integration fields stored on a collective campaign."""
+        revert = result.get("revert_result")
+        finalize = result.get("finalize_result")
+        return {
+            "integration_status": str(result["integration_status"]),
+            "integration_recovery_action": str(
+                result.get("integration_recovery_action") or ""
+            ),
+            "integration_decision": str(result["decision"]).strip().upper(),
+            "integration_result_status": str(result.get("status") or ""),
+            "integration_gain_pct": result.get("gain_pct"),
+            "integration_base_tput": result.get("base_tput"),
+            "integration_new_tput": result.get("new_tput"),
+            "integration_workspace": str(result.get("workspace") or ""),
+            "integration_report_path": str(result.get("report_path") or ""),
+            "integration_error_class": str(result.get("error_class") or ""),
+            "integration_error": str(result.get("error") or "")[-1200:],
+            "integration_revert_status": (
+                str(revert.get("status") or "")
+                if isinstance(revert, dict)
+                else ""
+            ),
+            "integration_finalize_status": (
+                str(finalize.get("status") or "")
+                if isinstance(finalize, dict)
+                else ""
+            ),
+            "integration_ts": _now_iso(),
+        }
+
+    def record_collective(self, result: dict[str, Any], session_dir: Path) -> None:
+        """Upsert and persist one collective campaign."""
+        if not isinstance(result, dict):
+            raise TypeError("Collective result must be a mapping")
+        incoming = dict(result)
+        incoming_attempt_id = str(
+            incoming.get("collective_attempt_id") or ""
+        ).strip()
+        previous = (
+            dict(self.last_collective)
+            if isinstance(self.last_collective, dict)
+            and incoming_attempt_id
+            and str(
+                self.last_collective.get("collective_attempt_id") or ""
+            ).strip()
+            == incoming_attempt_id
+            else {}
+        )
+        recorded = {**previous, **incoming}
+        recorded.setdefault("ts", _now_iso())
+        status = recorded.get("status")
+        decision = recorded.get("decision")
+        if not isinstance(status, str) or not status.strip():
+            raise ValueError("Collective result is missing status")
+        if decision not in {"KEEP", "REVERT"}:
+            raise ValueError("Collective result has invalid decision")
+        if recorded.get("engine") != "forge_collective":
+            raise ValueError("Collective result has invalid engine")
+        kept = recorded.setdefault("kept", False)
+        requires_e2e = recorded.setdefault(
+            "requires_e2e_validation",
+            False,
+        )
+        if not isinstance(kept, bool) or not isinstance(requires_e2e, bool):
+            raise ValueError("Collective result E2E flags must be boolean")
+        if kept != (decision == "KEEP") or requires_e2e != kept:
+            raise ValueError("Collective result contract is inconsistent")
+        attempt_id = str(
+            recorded.get("collective_attempt_id") or ""
+        ).strip()
+        if not attempt_id:
+            raise ValueError("Collective result is missing a stable attempt identity")
+        recorded["collective_attempt_id"] = attempt_id
+        if kept and not str(recorded.get("integration_id") or "").strip():
+            raise ValueError("Collective KEEP is missing integration_id")
+        for field_name in ("kernel_speedup", "gpu_pct"):
+            value = recorded.get(field_name)
+            if value is None:
+                continue
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or (field_name == "kernel_speedup" and value <= 0)
+                or (field_name == "gpu_pct" and value < 0)
+            ):
+                raise ValueError(
+                    f"Collective result has invalid {field_name}"
+                )
+        recorded.setdefault(
+            "integration_status",
+            "pending"
+            if requires_e2e
+            else "complete",
+        )
+
+        snapshot = self._collective_attempt_snapshot(recorded)
+        if not isinstance(self.collective_attempts, list) or any(
+            not isinstance(item, dict) for item in self.collective_attempts
+        ):
+            raise ValueError("collective_attempts must contain mappings")
+        history = [dict(item) for item in self.collective_attempts]
+        for index, item in enumerate(history):
+            if str(item.get("collective_attempt_id") or "") == attempt_id:
+                history[index] = snapshot
+                break
+        else:
+            history.append(snapshot)
+        previous_last = self.last_collective
+        previous_history = self.collective_attempts
+        self.last_collective = recorded
+        self.collective_attempts = history[-_DEFAULT_ATTEMPTS_HISTORY:]
+        try:
+            self.save(session_dir)
+        except Exception:
+            self.last_collective = previous_last
+            self.collective_attempts = previous_history
+            raise
+
+    def record_collective_integration(
+        self,
+        result: dict[str, Any],
+        session_dir: Path,
+        *,
+        integration_id: str = "",
+    ) -> None:
+        """Attach and persist an integration verdict to its campaign."""
+        if not isinstance(result, dict):
+            raise TypeError("Collective integration result must be a mapping")
+        integration = dict(result)
+        integration_id = str(
+            integration_id or integration.get("integration_id") or ""
+        ).strip()
+        if not integration_id:
+            raise ValueError("Collective integration is missing integration_id")
+        decision = str(integration.get("decision") or "").strip().upper()
+        if decision not in {"KEEP", "REVERT", "NEEDS_REVIEW"}:
+            raise ValueError(
+                f"Invalid collective integration decision: {decision!r}"
+            )
+        integration_status = str(
+            integration.get("integration_status") or ""
+        ).strip()
+        if integration_status not in {"complete", "recovery_required"}:
+            raise ValueError(
+                "Collective integration_status must be complete or "
+                "recovery_required"
+            )
+        recovery_action = str(
+            integration.get("integration_recovery_action") or ""
+        ).strip()
+        if integration_status == "complete" and recovery_action:
+            raise ValueError(
+                "Completed collective integration cannot require recovery"
+            )
+        if (
+            integration_status == "recovery_required"
+            and recovery_action not in {"finalize", "revert"}
+        ):
+            raise ValueError(
+                "Collective recovery action must be finalize or revert"
+            )
+        for field_name in ("gain_pct", "base_tput", "new_tput"):
+            value = integration.get(field_name)
+            if value is None:
+                continue
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                raise ValueError(
+                    f"Collective integration has invalid {field_name}"
+                )
+        integration["decision"] = decision
+        integration["integration_status"] = integration_status
+        if not isinstance(self.last_collective, dict):
+            raise ValueError("last_collective must be a mapping")
+        last = dict(self.last_collective)
+        if str(last.get("integration_id") or "") != integration_id:
+            raise ValueError(
+                "Collective integration_id does not match last_collective"
+            )
+        attempt_id = str(last.get("collective_attempt_id") or "").strip()
+        if not attempt_id:
+            raise ValueError("last_collective is missing collective_attempt_id")
+        if not isinstance(self.collective_attempts, list) or any(
+            not isinstance(item, dict) for item in self.collective_attempts
+        ):
+            raise ValueError("collective_attempts must contain mappings")
+        history = [dict(item) for item in self.collective_attempts]
+        matches = [
+            index
+            for index, item in enumerate(history)
+            if str(item.get("collective_attempt_id") or "") == attempt_id
+            and str(item.get("integration_id") or "") == integration_id
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                "Collective integration must match exactly one campaign"
+            )
+        integration_fields = self._collective_integration_snapshot(integration)
+        last.update(integration_fields)
+        history[matches[0]].update(integration_fields)
+
+        previous_last = self.last_collective
+        previous_history = self.collective_attempts
+        self.last_collective = last
+        self.collective_attempts = history
+        try:
+            self.save(session_dir)
+        except Exception:
+            self.last_collective = previous_last
+            self.collective_attempts = previous_history
+            raise
+
     def mark_bottleneck_switch(self, prev_bottleneck: str = "") -> None:
         """Flag that the next macro-cycle should redirect off ``prev_bottleneck`` (R3).
 
@@ -2138,17 +2440,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
 
-        outcome = _m.record_kernel_integrate_result(
+        return _m.record_kernel_integrate_result(
             self,
             result,
             max_attempts=max_attempts,
             keep_threshold_pct=keep_threshold_pct,
             max_fault_attempts=max_fault_attempts,
         )
-        # An integrate result is a rewrite/fusion round completion; re-stage the
-        # kernel KB columns so the run owns them with their per-patch verdicts.
-        self._stage_kernel_kb_columns()
-        return outcome
 
     def record_kernel_opt(self, result: dict[str, Any]) -> None:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
@@ -2161,24 +2459,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         from ..kernel import _kernel_decisions as _m
 
         _m.record_gemm_tuning(self, result)
-        # Staging deliberately does NOT happen here: the ``gemm_tuning`` row the
-        # column is built from is appended later by promote/validate, so a stage
-        # at record time would see nothing. The GEMM handler stages once that row
-        # exists.
-
-    def _stage_kernel_kb_columns(self) -> None:
-        """Best-effort per-round stage of the kernel KB sub-columns.
-
-        No-op when no KB draft directory is configured (local mode / tests):
-        :meth:`KernelAgentKB.open` returns an inactive facade. Never raises into
-        the caller — knowledge is advisory.
-        """
-        try:
-            from ..knowledge.kernel_kb_columns import stage_kernel_columns
-
-            stage_kernel_columns(self)
-        except Exception:  # noqa: BLE001 — knowledge write must not fail a round
-            log.debug("kernel kb: per-round staging failed", exc_info=True)
 
     # Multi-KEEP integrate queue helpers.
     def _kernel_ids_with_integrate_attempts(self) -> set[str]:
@@ -2743,7 +3023,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             or artifacts.get("tracelens_steady_state_trace")
             or ""
         )
-        summary, kernel_roofline, reusable_ids = self._build_hot_kernel_summaries(result, kernel_roofline_path)
+        summary, kernel_roofline, reusable_ids, withheld_collective = (
+            self._build_hot_kernel_summaries(result, kernel_roofline_path)
+        )
 
         # Project skipped (non-routable) candidates so the LLM sees unoptimizable operators.
         skipped = result.get("skipped_kernels") or []
@@ -2770,6 +3052,26 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             for entry in raw_warnings:
                 if isinstance(entry, dict) and entry.get("code"):
                     warnings_cleaned.append(dict(entry))
+        if withheld_collective:
+            log.warning(
+                "kernel targets: withholding %d collective kernel(s) from kernel_opt "
+                "for the collective lane: %s",
+                len(withheld_collective),
+                ", ".join(
+                    f"{item['kernel_id']}({item['name'][:60]})"
+                    for item in withheld_collective
+                ),
+            )
+            warnings_cleaned.append(
+                {
+                    "code": "collective_lane_withheld_kernels",
+                    "detail": (
+                        "reserved for the collective lane and removed from the "
+                        "kernel_opt target list; unreachable unless that lane runs"
+                    ),
+                    "kernels": withheld_collective,
+                }
+            )
 
         # Monotonic snapshot counter: read previous value + 1.
         prev_snapshot_id = 0
@@ -2868,13 +3170,24 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         self,
         result: dict[str, Any],
         kernel_roofline_path: str,
-    ) -> "tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]":
-        """Build ``(summary, kernel_roofline, reusable_ids)`` from the top-N hot
-        kernels, merging the optional per-kernel rocprof roofline sidecar."""
+    ) -> "tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[dict[str, Any]]]":
+        """Build ``(summary, kernel_roofline, reusable_ids, withheld)`` from the
+        top-N hot kernels, merging the optional per-kernel rocprof roofline sidecar.
+
+        ``reusable_ids`` drives the kernel_opt target list offered to the LLM,
+        so collective candidates are withheld: they are owned by the dedicated
+        collective lane and ``_batch_kernel_candidates`` drops them, which would
+        otherwise dispatch an empty batch for every id picked from this list.
+        ``withheld`` names them, because a kernel that no lane will touch must
+        not simply vanish from the target list.
+        """
+        from ..kernel import _kernel_decisions as _m
+
         hot = result.get("hot_kernels") or []
         summary: list[dict[str, Any]] = []
         kernel_roofline: list[dict[str, Any]] = []
         reusable_ids: list[str] = []
+        withheld: list[dict[str, Any]] = []
         rocprof_by_kernel_id: dict[str, Any] = {}
         if kernel_roofline_path:
             try:
@@ -2917,6 +3230,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 "rocprof_roofline": rocprof_roofline,
                 "source_file": entry.get("source_file"),
                 "reusable_native_kernel": reusable,
+                "kernel_contract": entry.get("kernel_contract"),
+                "is_multigpu": entry.get("is_multigpu") is True,
+                # Carries the collective lane's ownership test downstream; without
+                # it every reader would re-derive ownership from the name alone.
+                "candidate_source": entry.get("candidate_source") or "",
                 "recommended_backends": entry.get("recommended_backends") or [],
                 "recommended_actions": entry.get("recommended_actions") or [],
             }
@@ -2937,8 +3255,17 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             ):
                 kernel_roofline.append(dict(summary_entry))
             if reusable and kid:
-                reusable_ids.append(str(kid))
-        return summary, kernel_roofline, reusable_ids
+                if _m.is_collective_candidate(summary_entry):
+                    withheld.append(
+                        {
+                            "kernel_id": str(kid),
+                            "name": str(entry.get("name") or ""),
+                            "gpu_pct": entry.get("gpu_pct"),
+                        }
+                    )
+                else:
+                    reusable_ids.append(str(kid))
+        return summary, kernel_roofline, reusable_ids, withheld
 
     def _append_roofline_snapshot_history(
         self,
