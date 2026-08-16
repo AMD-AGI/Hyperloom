@@ -31,7 +31,6 @@ from hyperloom.common import io as _common_io
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
-from ...kernel.conc_sweep import conc_sweep_declined_to_run
 from ...state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import db_path_for
 
@@ -450,6 +449,11 @@ def _explain_conc_sweep_skip(state) -> str:
     last = getattr(state, "last_conc_sweep", None)
     if not isinstance(last, dict) or not last.get("was_skipped"):
         return ""
+    # Imported here, not at module scope: ``kernel.conc_sweep`` imports the
+    # grid runner in this same package, so a top-level import is the edge
+    # CodeQL reports as a cycle.
+    from ...kernel.conc_sweep import conc_sweep_declined_to_run  # noqa: PLC0415
+
     detail = str(last.get("skip_reason") or "").strip() or "no reason recorded"
     if conc_sweep_declined_to_run(last):
         return f"Post-sweep concurrency sweep did not run ({detail}); the phase settled and the run closed."
