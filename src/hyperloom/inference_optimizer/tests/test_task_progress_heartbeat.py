@@ -659,13 +659,17 @@ async def test_a_rollback_the_connection_cannot_do_is_logged_not_raised(tmp_path
         raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
 
     monkeypatch.setattr(db, "_rollback", _rollback_on_a_closed_connection)
+    caught = False
     try:
         with caplog.at_level(logging.WARNING):
-            with pytest.raises(ValueError, match="body failed"):
+            try:
                 async with db.transaction():
                     raise ValueError("body failed")
-            assert "rollback after a failed transaction did not complete" in caplog.text
-            assert "Cannot operate on a closed database" in caplog.text
+            except ValueError:
+                caught = True
+        assert caught, "the body's exception was lost behind the rollback"
+        assert "rollback after a failed transaction did not complete" in caplog.text
+        assert "Cannot operate on a closed database" in caplog.text
     finally:
         db.close()
 
