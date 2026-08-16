@@ -388,14 +388,27 @@ def select_anchor(spec: ServingSpec) -> AnchorChoice | None:
 
     store = AnchorStore(store_root)
     recipe = recipe_from_spec(spec)
-    entries = store.entries()
-    if spec.model_path:
-        named = [e for e in entries if e.get("model") in (None, spec.model_path)]
-        entries = named or entries
-    if not entries:
-        return None
 
     from infera.projection.core.projection.inference_projection.search import regime
+
+    # Only this model's warmups may calibrate this model. The names arrive in
+    # different spellings -- the spec carries a checkout path or a preset, the
+    # artifact carries a HuggingFace id -- so they are compared loosely rather
+    # than for equality, which never held and left the filter inert.
+    #
+    # An anchor with no recorded model is allowed: a structural warmup names no
+    # checkpoint, and the regime axes still have to agree before it is used.
+    # But when the store holds anchors and none of them are for this model, the
+    # answer is that there is no anchor. This used to fall back to using any
+    # anchor at all, which calibrated qwen3 against gpt-oss and returned the
+    # same decode step for every model in the sweep, labelled "calibrated".
+    target = resolve_preset(spec.model_path) or spec.model_path
+    entries = [
+        e for e in store.entries()
+        if not e.get("model") or regime.models_match(target, e["model"])
+    ]
+    if not entries:
+        return None
 
     def rank(entry: dict[str, Any]) -> tuple[int, int, float]:
         """Sort key: regime distance, then *fidelity*, then transport closeness.
