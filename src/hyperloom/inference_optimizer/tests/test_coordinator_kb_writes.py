@@ -218,7 +218,7 @@ def test_kb_amend_recipe_skips_empty_architecture_tags(tmp_path: Path) -> None:
 def test_sdk_fallback_t0_anchors_into_self_recipe_kb(tmp_path: Path) -> None:
     """The SDK-fallback T0 anchor runs and writes into the SAME dispatcher the Coordinator holds."""
     coord = _make_coordinator(tmp_path)
-    # Clear the already-anchored markers and re-anchor with the 5-tuple seeded.
+    # Clear the markers and re-anchor the canonical Recipe identity.
     coord.shared_state.warm_start_ts = ""
     coord.shared_state.recipe_kb_session_id = ""
     coord._ensure_recipe_kb_t0_anchored()

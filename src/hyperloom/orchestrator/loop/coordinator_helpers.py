@@ -18,10 +18,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..actions.executors._grid_server_args import (
-    tokenize_server_args_preserving_json,
-)
-
 log = logging.getLogger(__name__)
 
 # Constants below are read from other modules; listed here to mark them as
@@ -441,6 +437,14 @@ def _dedupe_extra_server_args(args_str: str) -> str:
     """
     if not args_str:
         return ""
+    # Imported here, not at module scope: ``actions.executors`` re-enters this
+    # module through ``session_breakdown``, so a top-level import makes any
+    # importer that reaches ``coordinator_helpers`` first (e.g. phases.kernel)
+    # fail on a partially initialised module.
+    from ..actions.executors._grid_server_args import (  # noqa: PLC0415
+        tokenize_server_args_preserving_json,
+    )
+
     parsed = tokenize_server_args_preserving_json(args_str)
     if parsed is None:
         return args_str

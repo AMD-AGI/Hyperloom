@@ -8,7 +8,7 @@ over presigned URLs; only small JSON control messages touch the service.
 Typical producer flow::
 
     store = KBStoreClient.from_env()
-    store.put_knowledge(cid, {"prs_tested": [...]})
+    store.put_knowledge(cid, {"lessons": [...]})
     ref = store.put_file(cid, session_id, "patches/pr-123.patch",
                          local_path, kind="patch",
                          meta={"pr_url": url, "outcome": "integrated"})
@@ -198,27 +198,40 @@ class KBStoreClient:
                 return None
             raise
 
-    def get_record(self, rid: str) -> dict[str, Any] | None:
-        """Fetch a record by UUID alone, or ``None`` when it does not exist."""
+    def get_hyperloom_recipe_view(
+        self, canonical_id: str
+    ) -> dict[str, Any] | None:
+        """Read the selected record normalized for Hyperloom replay."""
         try:
-            return self._request("GET", f"/v1/records/{self._quote(rid)}")
+            return self._request(
+                "GET",
+                f"/v1/kb/{self._quote(canonical_id)}/views/hyperloom-recipe",
+            )
         except KBStoreError as exc:
             if "HTTP 404" in str(exc):
                 return None
             raise
 
-    def get_best_record(self, canonical_id: str) -> dict[str, Any] | None:
-        """The record to act on for an identity, or ``None`` if there is none.
-
-        Answers from the v1 recipe page when an identity predates this store,
-        so a caller does not have to know which plane its data lives in.
-        """
-        try:
-            return self._request("GET", f"/v1/kb/{self._quote(canonical_id)}")
-        except KBStoreError as exc:
-            if "HTTP 404" in str(exc):
-                return None
-            raise
+    def search_identities(
+        self,
+        *,
+        scheme: str,
+        match: dict[str, str] | None = None,
+        hardware_in: list[str] | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Discover exact canonical identities without fuzzy matching."""
+        payload: dict[str, Any] = {
+            "scheme": str(scheme),
+            "match": dict(match or {}),
+            "offset": int(offset),
+            "limit": int(limit),
+        }
+        if hardware_in is not None:
+            payload["hardware_in"] = [str(value) for value in hardware_in]
+        result = self._request("POST", "/v1/kb/search", payload)
+        return dict(result or {})
 
     def get_rollup(self, canonical_id: str) -> dict[str, Any] | None:
         """Read the candidate index, or ``None`` when nothing is recorded."""
@@ -228,16 +241,6 @@ class KBStoreClient:
             if "HTTP 404" in str(exc):
                 return None
             raise
-
-    def list_identity_files(
-        self, canonical_id: str, *, kind: str = ""
-    ) -> list[dict[str, Any]]:
-        """Artifacts across all sessions of an identity, deduped by digest."""
-        path = f"/v1/kb/{self._quote(canonical_id)}/files"
-        if kind:
-            path += "?" + urllib.parse.urlencode({"kind": kind})
-        result = self._request("GET", path) or {}
-        return list(result.get("files") or [])
 
     def set_champion(
         self, canonical_id: str, session_id: str, *, metric: str = "throughput", value: float = 0.0

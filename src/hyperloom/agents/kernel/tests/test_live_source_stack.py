@@ -8,7 +8,7 @@
 """Opt-in LIVE integration test for the v2 source-resolver stack.
 
 Runs the three real modules against the *actually installed* framework tree
-inside a real vLLM ROCm container (e.g. ``vllm/vllm-openai-rocm:v0.26.0``) --
+inside a real vLLM ROCm container (e.g. ``rocm/hyperloom:vllm-v0.27.1-rocm7.2.3``) --
 no fakes, no GPU needed (this only scans source):
 
 1. ``source_env``            -> discover_frameworks() dictionaries + metadata,

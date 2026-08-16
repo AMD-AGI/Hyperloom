@@ -44,6 +44,16 @@ _GIT_TIMEOUT_SEC = 30
 _SGLANG_DEFAULT_ALLOWED_MINORS: tuple[str, ...] = ("0.5",)
 _SGLANG_EXACT_VERSIONS_ENV = "HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS"
 _SGLANG_ALLOWED_MINORS_ENV = "HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS"
+_VLLM_EXACT_VERSIONS_ENV = "HYPERLOOM_VLLM_PATCH_EXACT_VERSIONS"
+
+# vLLM >= 0.26 ships the profiler fields upstream; the patch set covers <= 0.25.
+_VLLM_NATIVE_PROFILER_MIN_VERSION: tuple[int, ...] = (0, 26)
+
+# Required in ``vllm/config/profiler.py`` for the server to accept the flags.
+_VLLM_PROFILER_SENTINELS: tuple[str, ...] = (
+    "capture_torch_profiler",
+    "detailed_trace_annotation",
+)
 
 # Vendor-shipped manifest filename(s). When present, the manifest is the
 # source of truth for supported versions (operator env pins still win). Format:
@@ -254,20 +264,32 @@ def _resolve_versioned_patches_dir(
 def ensure_vllm_patched_for_tracelens(
     tracelens_root: Path | str | None = None,
 ) -> bool:
-    """Apply the TraceLens config patch matching the installed vLLM version.
-
-    Returns ``True`` when patched at exit, ``False`` on any fail-soft outcome
-    (callers MUST then skip the TraceLens-only profiler flags).
+    """Ensure the installed vLLM accepts the TraceLens profiler flags.
 
     Args:
         tracelens_root: TraceLens checkout root; falls back to
             ``$TRACELENS_ROOT`` when ``None``.
 
     Returns:
-        True if the vLLM install is in patched state at exit, False on any
-        fail-soft outcome.
+        True when the running vLLM accepts the flags.
     """
-    plan = _discover_vllm_plan(tracelens_root)
+    install = _discover_vllm_install()
+    if install is None:
+        return False
+    version, install_root = install
+    if _vllm_profiler_is_native(version) and not _vllm_patch_pinned_by_operator():
+        sentinel = install_root / "vllm" / "config" / "profiler.py"
+        if _markers_present(sentinel, _VLLM_PROFILER_SENTINELS):
+            log.info("_server_patcher: vLLM %s needs no patch", version)
+            return True
+        log.warning(
+            "_server_patcher: vLLM %s is missing %s in %s",
+            version,
+            ", ".join(_VLLM_PROFILER_SENTINELS),
+            sentinel,
+        )
+        return False
+    plan = _discover_vllm_plan(tracelens_root, install=install)
     if plan is None:
         return False
     return _ensure_patched(plan)
@@ -355,6 +377,41 @@ class _PatchPlan:
     optional_patches: frozenset[str] = frozenset()
 
 
+#: Annotation-pipeline sentinels as ``(path under the sglang package, markers)``.
+#: A release that does not patch a given file simply drops out of the set.
+_SGLANG_ANNOTATION_SENTINELS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("srt", "managers", "scheduler.py"), ("detailed_annotations",)),
+    (
+        ("srt", "managers", "scheduler_components", "profiler_manager.py"),
+        ("detailed_annotations", "shape_discovery", "kernel_shape_profiler"),
+    ),
+    (("srt", "managers", "io_struct.py"), ("shape_discovery", "detailed_annotations")),
+    (("srt", "model_executor", "step_span_utils.py"), ("detailed_annotations",)),
+)
+
+
+def _patch_target_paths(patches: Sequence[Path]) -> frozenset[str]:
+    """Return the slash-joined paths a patch set writes to."""
+    targets: set[str] = set()
+    for patch in patches:
+        # An unreadable patch would silently shrink the sentinel set, which is
+        # the detection hole this derivation exists to close.
+        text = patch.read_text(encoding="utf-8", errors="replace")
+        for line in text.splitlines():
+            if not line.startswith("+++ "):
+                continue
+            target = line[4:].split("\t", 1)[0].strip()
+            if target and target != "/dev/null":
+                targets.add(target.replace("\\", "/"))
+    return frozenset(targets)
+
+
+def _patch_set_writes(targets: frozenset[str], parts: tuple[str, ...]) -> bool:
+    """Return whether any patch target ends with this package-relative path."""
+    suffix = "/".join(("sglang", *parts))
+    return any(target.endswith(suffix) for target in targets)
+
+
 def _resolve_tracelens_root(arg: Path | str | None) -> Path | None:
     """Resolve TRACELENS_ROOT from arg → env → None; fail-soft when unset or
     missing on disk.
@@ -427,7 +484,7 @@ def _resolve_vllm_patch_file(patches_dir: Path, version: str) -> Path | None:
             available[vt] = p
     if not available:
         return None
-    env_pin = os.environ.get("HYPERLOOM_VLLM_PATCH_EXACT_VERSIONS", "").strip()
+    env_pin = os.environ.get(_VLLM_EXACT_VERSIONS_ENV, "").strip()
     if env_pin:
         for token in (t.strip() for t in env_pin.split(",")):
             vt = _version_tuple(token)
@@ -491,27 +548,24 @@ def _probe_isolated_vllm() -> tuple[str, Path] | None:
     return version, site
 
 
-def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
-    """Build the vLLM patch plan for the installed vLLM version.
+def _vllm_profiler_is_native(version: str) -> bool:
+    """True when ``version`` ships the profiler fields upstream."""
+    vt = _version_tuple(version)
+    return vt is not None and vt >= _VLLM_NATIVE_PROFILER_MIN_VERSION
 
-    Probes the importable ``vllm`` module, locates the matching
-    TraceLens patch file and install layout, and assembles the
-    sentinel markers used to detect an already-patched install.
 
-    Args:
-        arg (Path | str | None): TraceLens checkout root, or ``None``
-            to read ``$TRACELENS_ROOT``.
+def _vllm_patch_pinned_by_operator() -> bool:
+    """True when ``$HYPERLOOM_VLLM_PATCH_EXACT_VERSIONS`` pins a patch version."""
+    return bool(os.environ.get(_VLLM_EXACT_VERSIONS_ENV, "").strip())
+
+
+def _discover_vllm_install() -> tuple[str, Path] | None:
+    """Resolve ``(version, install_root)`` for the vLLM this run will profile.
 
     Returns:
-        _PatchPlan | None: A fully-resolved plan, or ``None`` on any
-        fail-soft condition (TraceLens missing, vLLM not importable,
-        no matching patch, unexpected install layout).
+        The ``(version, install_root)`` pair, or ``None`` when vLLM is not
+        discoverable or reports no version.
     """
-    tracelens_root = _resolve_tracelens_root(arg)
-    if tracelens_root is None:
-        log.info("_server_patcher: TRACELENS_ROOT (public) unset/missing — skip vLLM patch")
-        return None
-
     version = ""
     install_root: Path | None = None
     try:
@@ -539,6 +593,36 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
     if not version:
         log.info("_server_patcher: vllm has no __version__; skip patch")
         return None
+    return version, install_root
+
+
+def _discover_vllm_plan(
+    arg: Path | str | None,
+    *,
+    install: tuple[str, Path] | None = None,
+) -> _PatchPlan | None:
+    """Build the vLLM patch plan for the installed vLLM version.
+
+    Args:
+        arg (Path | str | None): TraceLens checkout root, or ``None``
+            to read ``$TRACELENS_ROOT``.
+        install: Pre-probed ``(version, install_root)`` from
+            :func:`_discover_vllm_install`; probed here when ``None``.
+
+    Returns:
+        _PatchPlan | None: A fully-resolved plan, or ``None`` on any
+        fail-soft condition (TraceLens missing, vLLM not discoverable,
+        no matching patch, unexpected install layout).
+    """
+    tracelens_root = _resolve_tracelens_root(arg)
+    if tracelens_root is None:
+        log.info("_server_patcher: TRACELENS_ROOT (public) unset/missing — skip vLLM patch")
+        return None
+
+    resolved = install if install is not None else _discover_vllm_install()
+    if resolved is None:
+        return None
+    version, install_root = resolved
 
     patches_dir = _patch_tree(tracelens_root, "vllm_patches")
     patch_file = _resolve_vllm_patch_file(patches_dir, version)
@@ -576,7 +660,7 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
         apply_root=install_root,
         patches=(patch_file,),
         sentinel_file=sentinel,
-        sentinel_text=("capture_torch_profiler_dir", "detailed_trace_annotation"),
+        sentinel_text=_VLLM_PROFILER_SENTINELS,
     )
 
 
@@ -673,25 +757,18 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     # ``sglang/srt/utils/kernel_shape_profiler.py`` in both layouts.
     sentinel = sglang_module.parent / "srt" / "utils" / "kernel_shape_profiler.py"
     sglang_pkg = sglang_module.parent
-    # Also verify the annotation pipeline sentinels so a partial apply (main
-    # sentinel present but annotations missing) is still detected.
-    extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = (
-        (
-            sglang_pkg / "srt" / "managers" / "scheduler.py",
-            ("_build_profile_annotation", "profile_annotation"),
-        ),
-        (
-            sglang_pkg / "srt" / "managers" / "scheduler_profiler_mixin.py",
-            ("roofline_annotations", "execute_", "torch.profiler.record_function"),
-        ),
-        (
-            sglang_pkg / "srt" / "managers" / "io_struct.py",
-            ("shape_discovery", "roofline_annotations"),
-        ),
-        (
-            sglang_pkg / "srt" / "entrypoints" / "http_server.py",
-            ("shape_discovery", "roofline_annotations"),
-        ),
+    # Also verify the annotation pipeline so a partial apply (main sentinel
+    # present but annotations missing) is still detected: scheduler callback ->
+    # profiler_manager toggle -> io_struct request fields -> step-span
+    # aggregates. Which of these a patch set writes moved across TraceLens
+    # releases, so applicability is read from the set in hand rather than
+    # pinned: a file the set does write must carry its markers, and one it
+    # never writes is not a sentinel at all.
+    written = _patch_target_paths(filtered_patches)
+    extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = tuple(
+        (sglang_pkg.joinpath(*parts), markers)
+        for parts, markers in _SGLANG_ANNOTATION_SENTINELS
+        if _patch_set_writes(written, parts)
     )
     optional_patches = frozenset(
         p.name
@@ -906,6 +983,17 @@ def _ensure_patched(plan: _PatchPlan) -> bool:
         return _apply_atomic(plan)
 
 
+def _markers_present(path: Path, markers: Sequence[str]) -> bool:
+    """True iff ``path`` exists and contains every marker substring."""
+    try:
+        if not path.exists():
+            return False
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return all(marker in content for marker in markers)
+
+
 def _is_patched(plan: _PatchPlan) -> bool:
     """True iff the sentinel file (and every extra_sentinel) exists with all of
     its marker substrings present. The all-of-N rule lowers false positives.
@@ -917,24 +1005,11 @@ def _is_patched(plan: _PatchPlan) -> bool:
         True when every sentinel file exists with all required markers, False
         otherwise (including on read error).
     """
-    try:
-        if not plan.sentinel_file.exists():
-            return False
-        content = plan.sentinel_file.read_text(
-            encoding="utf-8",
-            errors="replace",
-        )
-        if not all(marker in content for marker in plan.sentinel_text):
-            return False
-        for path, markers in plan.extra_sentinels:
-            if not path.exists():
-                return False
-            extra = path.read_text(encoding="utf-8", errors="replace")
-            if not all(marker in extra for marker in markers):
-                return False
-        return True
-    except OSError:
+    if not _markers_present(plan.sentinel_file, plan.sentinel_text):
         return False
+    # The plan only keeps sentinels this patch set writes, so an absent file is
+    # an incomplete apply, not an inapplicable layout.
+    return all(_markers_present(path, markers) for path, markers in plan.extra_sentinels)
 
 
 def _apply_atomic(plan: _PatchPlan) -> bool:
