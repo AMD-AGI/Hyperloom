@@ -96,7 +96,7 @@ benchmark:
     TP: 1
     ROCR_VISIBLE_DEVICES: '0'
     PROFILE_EXTRA_BODY: '{"start_step": 6080, "num_steps": 128, "shape_discovery":
-      true, "roofline_annotations": true}'
+      true, "detailed_annotations": true}'
     NUM_PROMPTS: 776
     NUM_WARMUPS: 8
     EXTRA_SGLANG_ARGS: --watchdog-timeout 1800

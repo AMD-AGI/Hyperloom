@@ -381,6 +381,14 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "recipe_kb_t0_failed": "Recipe KB knowledge-plane bootstrap (t0) failed; the run stopped early.",
     "recipe_kb_drain_failed": "Recipe KB knowledge-plane drain failed; the run stopped early.",
     "recipe_kb_commit_failed": "Recipe KB knowledge-plane commit failed; the run stopped early.",
+    "warm_replay_rollback_failed": (
+        "Warm replay rollback could not restore every Recipe/Kernel mutation; "
+        "the run stopped to avoid continuing from an uncertain code state."
+    ),
+    "active_inferencex_checkout_missing": (
+        "The session-authoritative InferenceX checkout is missing during "
+        "resume; the run stopped instead of falling back to a different tree."
+    ),
     # Search / phase plateaus and completions.
     "plateau_explore": "EXPLORE plateaued: no new leverage was found in the search space.",
     "plateau_kernel": "KERNEL_AGENT plateaued: no further validated kernel win was found.",
