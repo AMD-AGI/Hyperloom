@@ -216,9 +216,14 @@ orchestration turn returns HTTP 401 and the run idles in `PRELUDE` for the whole
 budget. See [Authentication and credentials](../reference/authentication.md).
 
 ```bash
+# .env fills gaps only: re-exporting the non-empty pre-source snapshot keeps every
+# value the caller exported. Wider than install.sh, which guards a fixed list.
+_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
 set -a
 . <(grep -E '^(ANTHROPIC|OPENAI)_(CUSTOM_HEADERS|API_KEY|BASE_URL)=' "$REPO_ROOT/.env")
 set +a
+eval "$_dotenv_prev"
+unset _dotenv_prev
 ```
 
 **Sessions.** `USER_DATA_PATH` sets the session root, and each `optimize`

@@ -15,7 +15,7 @@ Hyperloom uses a recipe-snapshot KB and selects exactly one store:
 | KB path | Owner / process | Purpose |
 |---------|-----------------|---------|
 | Local recipe KB | `inference_optimizer` | Selected by local/default mode; reads and writes durable Recipe JSON, history, and attempts. |
-| Remote Recipe KB | KB Store | Selected only by `KNOWLEDGE_STORE_MODE=remote`; writes one final session at CLOSE. |
+| Remote Recipe KB | KB Store | Selected only by `KNOWLEDGE_STORE_MODE=remote`; reads the current Recipe View for warm replay and writes one final session at CLOSE. |
 
 Ambient KB Store or GBrain credentials do not select remote mode.
 
@@ -89,16 +89,24 @@ export KB_STORE_TOKEN=...
 ```
 
 Both credentials are required; missing credentials fail at startup. Remote mode
-reads the direct best-session record returned by `GET /v1/kb/{canonical_id}`;
-candidate rollups remain under `/sessions`, and Hyperloom does not issue a
-second session-document GET. The selected session ID is still used to list and
-download its files. Remote mode does not construct the legacy Recipe
-dispatcher, does not fall back to local Recipe data, and currently replays only
-the best record's Explore args/env through the existing T0/PRELUDE executor.
-Framework, Kernel, and patch replay remain deferred. Runtime amendments are
-skipped and CLOSE performs one best-effort final write. Optional `GBRAIN_*`
-credentials remain available only to non-Recipe KG and Framework PR
-capabilities.
+selects metadata through `GET /v1/kb/{canonical_id}/views/hyperloom-recipe` and
+uses `/v1/kb/search` for bounded seven-tuple fallback. It downloads the selected
+session's exact file manifest and replays one combined Recipe: merged config,
+the ordered Explore/Framework overlay timeline, and Kernel GEMM/Fusion/Rewrite
+content. Remote mode does not construct the local Recipe dispatcher or fall
+back to local Recipe data. Runtime amendments are skipped and CLOSE performs
+one best-effort final write. Optional `GBRAIN_*` credentials remain available
+only to non-Recipe KG and Framework PR capabilities.
+
+Configuration replay requires an exact precision match. A bf16 run does not
+select an fp16 record, or vice versa, during degraded warm-start search. If an
+accepted owner patch disappears before staging, that owner section moves to
+the durable dead letter and CLOSE still publishes the final config, other
+owner sections, and Kernel knowledge.
+
+Records written before the unified Recipe contract are not rewritten in place.
+An incompatible record is skipped during View validation; a later successful
+CLOSE publishes the current document and artifacts.
 
 Graceful teardown and Ctrl-C retry an unfinished CLOSE write through the T4
 fallback. No in-process hook can run after SIGKILL, container force-deletion,

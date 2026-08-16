@@ -9,7 +9,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from ..framework.paths import resolve_session_framework_root, resolve_source_file_allowlist
@@ -20,6 +20,7 @@ from ..bus.gpu_pool import (
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
+    COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
     INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_AGENT_OWNED_ACTIONS,
     KERNEL_REQUEST_KIND_ALIASES,
@@ -430,6 +431,14 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
 # scopes outside the session directory. Real-path containment prevents escapes.
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file", "framework_source_root"})
 
+# Coordinator-owned warm replay may deploy a KB patch into the active framework
+# checkout.  The exception is intentionally narrower than SOURCE_LIKE_FIELDS:
+# only target_file values paired with a patch downloaded into this session's
+# remote-recipe bundle are admitted, and only at dispatch-time for this action.
+_WARM_REPLAY_ACTION = "replay_warm_recipe"
+_REMOTE_RECIPE_FILES_PARTS = ("runtime", "remote_recipe", "files")
+_MAX_POLICY_PATCH_BYTES = 4 * 1024 * 1024
+
 
 # Multi-node profile trace dirs live outside session_dir but must be referenceable by trace_dir / main_trace_path / trace_input (runtime-resolved).
 def _trace_path_allowlist() -> tuple[str, ...]:
@@ -550,6 +559,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "warm_start_lessons",
         "warm_start_ts",
         "warm_start_context",
+        "kb_stage_outbox",
+        "kb_stage_dead_letter",
         # KB tag completeness (Coordinator-populated; LLM reads via prompt).
         "stack_fingerprint_meta",
         "baseline_workload_extra",
@@ -635,6 +646,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "kernel_opt_attempts",
         "kernel_opt_task_attempts",
         "pending_kernel_integrations",
+        "last_collective",
+        "collective_attempts",
+        "collective_only_mode",
         # closing_phase and baseline_config_path are Coordinator-only fact
         # fields, locked here so non-coordinator roles cannot mutate them via
         # UPDATE_STATE.
@@ -772,7 +786,17 @@ class PolicyGate:
         role = self.role_registry.get("orchestration")
         if role is None:
             raise PolicyDenied("unknown agent 'orchestration'", rule="role")
-        self._validate_payload_paths(role, IntentType.DELEGATE, payload)
+        trusted_framework_targets: frozenset[str] = frozenset()
+        if kind == _WARM_REPLAY_ACTION:
+            trusted_framework_targets = self._validate_warm_replay_targets(
+                params_dict
+            )
+        self._validate_payload_paths(
+            role,
+            IntentType.DELEGATE,
+            payload,
+            trusted_framework_targets=trusted_framework_targets,
+        )
         # Coordinator-managed internal actions (roofline / profile /
         # replay_warm_recipe / framework_agent / conc_sweep) are dispatched by
         # the Coordinator itself, never LLM-delegated, so they receive path
@@ -1145,6 +1169,21 @@ class PolicyGate:
         # resolve a request-kind alias (e.g. apply_patch -> integrate) to its
         # canonical owned action so the phase-action gate applies identically.
         gated_kind = KERNEL_REQUEST_KIND_ALIASES.get(kind, kind)
+        if gated_kind in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS:
+            raise PolicyDenied(
+                f"request kind {gated_kind!r} is a Coordinator-owned kernel lane "
+                f"and not LLM-requestable ({role.name})",
+                rule="phase_incompatible",
+                hint=(
+                    "run_fusion / run_collective are dispatched by the "
+                    "Coordinator at KERNEL entry once their deterministic gate "
+                    "passes; their outcomes arrive as run_fusion_done / "
+                    "run_collective_done responses. Requesting one directly "
+                    "skips that gate, the lane's SharedState accounting, and "
+                    "its integrate step. Propose ``kernel_opt`` for a "
+                    "source-level kernel instead."
+                ),
+            )
         # R1 phase_incompatible: treat REQUEST kind as the action name for kernel_agent-owned + coordinator-internal kinds.
         if (
             target == "kernel_agent" and gated_kind in KERNEL_AGENT_OWNED_ACTIONS
@@ -2080,11 +2119,177 @@ class PolicyGate:
         """
         return any(_resolved_within(value, p) for p in _trace_path_allowlist())
 
+    def _remote_recipe_files_root(self) -> Path | None:
+        """Return the session-owned root containing downloaded KB artifacts."""
+        if self.session_dir is None:
+            return None
+        try:
+            return self.session_dir.resolve().joinpath(
+                *_REMOTE_RECIPE_FILES_PARTS
+            )
+        except (OSError, RuntimeError):
+            return None
+
+    @staticmethod
+    def _patch_declared_targets(patch_path: Path) -> frozenset[str]:
+        """Read safe relative targets from unified-diff ``+++`` headers."""
+        try:
+            if (
+                not patch_path.is_file()
+                or patch_path.stat().st_size > _MAX_POLICY_PATCH_BYTES
+            ):
+                return frozenset()
+            text = patch_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return frozenset()
+
+        targets: set[str] = set()
+        for line in text.splitlines():
+            if not line.startswith("+++ "):
+                continue
+            raw = line[4:].split("\t", 1)[0].strip()
+            if raw == "/dev/null":
+                continue
+            if raw.startswith("b/"):
+                raw = raw[2:]
+            parsed = PurePosixPath(raw)
+            if parsed.is_absolute() or ".." in parsed.parts or not parsed.parts:
+                return frozenset()
+            targets.add(parsed.as_posix())
+        return frozenset(targets)
+
+    def _framework_relative_candidates(self, target_file: str) -> frozenset[str]:
+        """Return patch-relative spellings for one trusted framework target."""
+        try:
+            target = Path(target_file).resolve()
+        except (OSError, RuntimeError):
+            return frozenset()
+
+        candidates: set[str] = set()
+        for raw_root in resolve_source_file_allowlist():
+            try:
+                root = Path(raw_root).resolve()
+                relative = target.relative_to(root)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            relative_posix = relative.as_posix()
+            if relative_posix and relative_posix != ".":
+                candidates.add(relative_posix)
+                if root.name:
+                    candidates.add(
+                        (PurePosixPath(root.name) / relative_posix).as_posix()
+                    )
+        return frozenset(candidates)
+
+    def _validate_warm_replay_targets(
+        self,
+        params: dict[str, Any],
+    ) -> frozenset[str]:
+        """Validate the sole framework-target exception for warm replay.
+
+        Every admitted target must resolve under a detected framework source
+        root, be paired with a patch inside the session's downloaded KB bundle,
+        and correspond to a target declared by that patch.  The returned
+        realpaths are the only out-of-session ``target_file`` values accepted by
+        the generic recursive path guard.
+        """
+        if self.session_dir is None or not self.strict_paths:
+            return frozenset()
+        plan = params.get("warm_kernel_plan") or []
+        if not isinstance(plan, list):
+            raise PolicyDenied(
+                "replay_warm_recipe warm_kernel_plan must be a list",
+                rule="warm_replay_plan_invalid",
+            )
+
+        kb_root = self._remote_recipe_files_root()
+        admitted: set[str] = set()
+        patch_coverage: dict[str, tuple[frozenset[str], set[str]]] = {}
+        for index, entry in enumerate(plan):
+            if not isinstance(entry, dict):
+                raise PolicyDenied(
+                    f"replay_warm_recipe warm_kernel_plan[{index}] must be an object",
+                    rule="warm_replay_plan_invalid",
+                )
+            raw_target = entry.get("target_file")
+            if not raw_target:
+                continue
+            if not isinstance(raw_target, str):
+                raise PolicyDenied(
+                    f"replay_warm_recipe warm_kernel_plan[{index}].target_file must be a string",
+                    rule="warm_replay_plan_invalid",
+                )
+            if not self._path_in_source_allowlist(raw_target):
+                raise PolicyDenied(
+                    f"replay_warm_recipe target_file={raw_target!r} is outside "
+                    "trusted framework source roots",
+                    rule="warm_replay_target_outside_framework_roots",
+                )
+
+            raw_patch = entry.get("patch_path")
+            if not isinstance(raw_patch, str) or not raw_patch.strip():
+                raise PolicyDenied(
+                    f"replay_warm_recipe target_file={raw_target!r} has no patch_path",
+                    rule="warm_replay_patch_missing",
+                )
+            if kb_root is None or not _resolved_within(raw_patch, str(kb_root)):
+                raise PolicyDenied(
+                    f"replay_warm_recipe patch_path={raw_patch!r} is outside "
+                    f"the session KB download root={kb_root!s}",
+                    rule="warm_replay_patch_outside_kb_download",
+                )
+
+            declared_targets = self._patch_declared_targets(Path(raw_patch))
+            target_candidates = self._framework_relative_candidates(raw_target)
+            if not declared_targets or declared_targets.isdisjoint(
+                target_candidates
+            ):
+                raise PolicyDenied(
+                    f"replay_warm_recipe target_file={raw_target!r} does not "
+                    f"match patch targets={sorted(declared_targets)!r}",
+                    rule="warm_replay_patch_target_mismatch",
+                )
+            try:
+                patch_key = str(Path(raw_patch).resolve())
+            except (OSError, RuntimeError) as exc:
+                raise PolicyDenied(
+                    f"replay_warm_recipe patch_path={raw_patch!r} cannot be resolved",
+                    rule="warm_replay_patch_outside_kb_download",
+                ) from exc
+            known_targets, covered_targets = patch_coverage.setdefault(
+                patch_key,
+                (declared_targets, set()),
+            )
+            if known_targets != declared_targets:
+                raise PolicyDenied(
+                    f"replay_warm_recipe patch_path={raw_patch!r} changed during validation",
+                    rule="warm_replay_patch_target_mismatch",
+                )
+            covered_targets.update(target_candidates)
+            try:
+                admitted.add(str(Path(raw_target).resolve()))
+            except (OSError, RuntimeError) as exc:
+                raise PolicyDenied(
+                    f"replay_warm_recipe target_file={raw_target!r} cannot be resolved",
+                    rule="warm_replay_target_outside_framework_roots",
+                ) from exc
+        for patch_key, (declared_targets, covered_targets) in patch_coverage.items():
+            uncovered = declared_targets - covered_targets
+            if uncovered:
+                raise PolicyDenied(
+                    f"replay_warm_recipe patch_path={patch_key!r} declares "
+                    f"targets with no matching target_file={sorted(uncovered)!r}",
+                    rule="warm_replay_patch_target_mismatch",
+                )
+        return frozenset(admitted)
+
     def _validate_payload_paths(
         self,
         role: "AgentRole",
         intent_type: IntentType,
         payload: dict[str, Any],
+        *,
+        trusted_framework_targets: frozenset[str] = frozenset(),
     ) -> None:
         """Walk payload (recursively); reject path-like values escaping session_dir. No-op when session_dir is None or strict_paths is False.
 
@@ -2151,6 +2356,13 @@ class PolicyGate:
             if key not in PATH_LIKE_FIELDS:
                 return
             if not self._path_under_session(node):
+                if key == "target_file" and trusted_framework_targets:
+                    try:
+                        resolved = str(Path(node).resolve())
+                    except (OSError, RuntimeError):
+                        resolved = ""
+                    if resolved in trusted_framework_targets:
+                        return
                 # Multi-node profile traces live outside session_dir; allow trace-input fields against the trace allowlist.
                 if key in TRACE_PATH_LIKE_FIELDS and self._path_in_trace_allowlist(node):
                     return

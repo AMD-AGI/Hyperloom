@@ -7,7 +7,7 @@ The on-disk ``recipe.json`` layout follows the arbor ``Recipe`` dataclass so
 an operator who knows arbor can read our local files without translation:
 
 * ``model`` / ``hardware`` / ``best_config`` / ``best_throughput`` /
-  ``stack_fingerprint`` / ``last_profiled`` / ``sessions`` / ``prs_tested``
+  ``stack_fingerprint`` / ``last_profiled`` / ``sessions``
   are all top-level fields.
 * The four experience arrays use arbor's names — ``what_worked`` /
   ``what_failed`` / ``remaining_gaps`` / ``pitfalls``.
@@ -120,16 +120,6 @@ class Gap:
 
     description: str
     metrics: str
-
-
-@dataclass
-class PRResult:
-    """An upstream PR that was tried during the optimisation run."""
-
-    repo: str
-    number: int
-    outcome: str
-    notes: str = ""
 
 
 @dataclass
@@ -316,7 +306,7 @@ class Recipe:
     created_at: str = ""
     updated_at: str = ""
 
-    # ----- 5-tuple identity (arbor 2-tuple is model + hardware) -----
+    # ----- 7-tuple identity -----
     model: str = ""
     hardware: str = ""
     framework_name: str = ""
@@ -329,7 +319,6 @@ class Recipe:
     what_worked: list[Finding] = field(default_factory=list)
     what_failed: list[Failure] = field(default_factory=list)
     remaining_gaps: list[Gap] = field(default_factory=list)
-    prs_tested: list[PRResult] = field(default_factory=list)
     pitfalls: list[Pitfall] = field(default_factory=list)
     lessons: list[Lesson] = field(default_factory=list)
     last_profiled: str = ""
@@ -353,7 +342,7 @@ class Recipe:
     def to_dict(self) -> dict[str, Any]:
         """Serialise the recipe to the on-disk ``recipe.json`` shape.
 
-        Nested sub-shapes (findings, failures, gaps, PRs, pitfalls,
+        Nested sub-shapes (findings, failures, gaps, pitfalls,
         lessons, sessions, kernel optimizations, stack fingerprint)
         are expanded to plain dicts, and free-form ``extras`` are
         splatted at the top level without shadowing well-known keys.
@@ -378,10 +367,6 @@ class Recipe:
             ],
             "what_failed": [{"description": f.description, "reason": f.reason} for f in self.what_failed],
             "remaining_gaps": [{"description": g.description, "metrics": g.metrics} for g in self.remaining_gaps],
-            "prs_tested": [
-                {"repo": p.repo, "number": int(p.number), "outcome": p.outcome, "notes": p.notes}
-                for p in self.prs_tested
-            ],
             "pitfalls": [{"description": p.description, "severity": p.severity} for p in self.pitfalls],
             "lessons": [{"statement": l.statement, "measured_impact": l.measured_impact} for l in self.lessons],
             "last_profiled": str(self.last_profiled),
@@ -445,7 +430,6 @@ class Recipe:
             "what_worked",
             "what_failed",
             "remaining_gaps",
-            "prs_tested",
             "pitfalls",
             "lessons",
             "last_profiled",
@@ -460,6 +444,7 @@ class Recipe:
             # recipe row, never persisted into extras.
             "_field_sources",
             "_sources",
+            "prs_tested",
         }
         extras = {k: v for k, v in d.items() if k not in well_known}
         return cls(
@@ -498,16 +483,6 @@ class Recipe:
                 )
                 for g in (d.get("remaining_gaps") or [])
                 if isinstance(g, dict)
-            ],
-            prs_tested=[
-                PRResult(
-                    repo=str(p.get("repo") or ""),
-                    number=int(p.get("number") or 0),
-                    outcome=str(p.get("outcome") or ""),
-                    notes=str(p.get("notes") or ""),
-                )
-                for p in (d.get("prs_tested") or [])
-                if isinstance(p, dict)
             ],
             pitfalls=[
                 Pitfall(
@@ -635,7 +610,6 @@ __all__ = [
     "KernelOptimization",
     "Lesson",
     "Pitfall",
-    "PRResult",
     "Recipe",
     "SessionSummary",
     "StackFingerprint",

@@ -80,6 +80,13 @@ def test_build_task_without_baseline():
     assert "Run baseline at most once" in task
 
 
+def test_build_task_bounded_search_skips_root_home():
+    """The bounded-search list must not send the agent probing /root."""
+    task = gt._build_task(gt._parse_args(["--benchmark-script", "/b.sh"]), Path("/ws"))
+    assert "~/.claude/skills" in task
+    assert "/root/.claude/skills" not in task
+
+
 def test_latest_gemm_workspace_none_when_missing(tmp_path):
     assert gt._latest_gemm_workspace(tmp_path) is None
 

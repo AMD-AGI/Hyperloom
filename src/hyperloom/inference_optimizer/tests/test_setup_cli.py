@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 
 from pathlib import Path
@@ -1020,6 +1021,9 @@ def test_baremetal_runtime_deps_probe_vllm_venv_for_isolated_vllm(tmp_path: Path
                 f"VLLM_VENV_ROOT={vllm_root}",
                 "FRAMEWORK_ENV=isolated",
                 "FRAMEWORKS=sglang,vllm",
+                # sgl_kernel is only probed once SGLang itself imported.
+                "sglang_ok=1",
+                "INSTALL_FRAMEWORK=none",
                 'log() { :; }',
                 'warn() { :; }',
                 '_py_has() { printf "probe %s %s\\n" "$1" "$2"; return 0; }',
@@ -1045,6 +1049,256 @@ def test_baremetal_runtime_deps_probe_vllm_venv_for_isolated_vllm(tmp_path: Path
         f"probe {vllm_py} aiter",
         f"probe {host_py} sgl_kernel",
     ]
+
+
+def _runtime_dep_loop(install_script: Path) -> str:
+    script_text = install_script.read_text(encoding="utf-8")
+    loop_start = script_text.index("  local m", script_text.index('  if [ "$any_fw" -eq 0 ]; then'))
+    loop_end = script_text.index('\n\n  [ "$rc" -ne 0 ]', loop_start)
+    return script_text[loop_start:loop_end]
+
+
+def test_baremetal_runtime_deps_skip_sgl_kernel_without_sglang(tmp_path: Path):
+    """An atom-only host must not be told sgl_kernel is missing.
+
+    atom images ship neither SGLang nor its sgl_kernel companion, so probing for
+    it there only produces a scary 'missing' line about a dependency the run
+    will never use.
+    """
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+
+    host_py = tmp_path / "host-python"
+    host_py.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    host_py.chmod(0o755)
+
+    runner = tmp_path / "runtime-deps-atom.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"py={host_py}",
+                f"VLLM_VENV_ROOT={tmp_path}/absent",
+                "FRAMEWORK_ENV=shared",
+                "FRAMEWORKS=sglang,vllm,atom",
+                "sglang_ok=0",
+                "INSTALL_FRAMEWORK=none",
+                "log() { :; }",
+                "warn() { :; }",
+                '_py_has() { printf "probe %s\\n" "$2"; return 0; }',
+                "run_probe() {",
+                _runtime_dep_loop(install_script),
+                "}",
+                "run_probe",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out = subprocess.run(
+        ["bash", str(runner)], check=True, text=True, stdout=subprocess.PIPE
+    ).stdout.splitlines()
+
+    assert out == ["probe triton", "probe aiter"]
+
+
+def test_baremetal_preflight_probes_atom_by_default():
+    """Phase 1 must accept an atom-only host without extra flags.
+
+    The default probe list gated on sglang/vllm alone, so setup inside an
+    atom-only image died with 'no serving framework importable' even though
+    atom was installed and is a registered framework.
+    """
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    text = install_script.read_text(encoding="utf-8")
+
+    m = re.search(r'^FRAMEWORKS="\$\{FRAMEWORKS:-([^}]+)\}"', text, re.MULTILINE)
+    assert m, "install_baremetal.sh must define an overridable FRAMEWORKS default"
+    assert "atom" in m.group(1).split(","), (
+        "atom must be in the default Phase 1 probe list; otherwise setup inside "
+        "an atom-only image fails preflight"
+    )
+
+
+def test_baremetal_triton_pin_is_advisory_when_installing_nothing():
+    """A prebuilt image may carry its own triton.
+
+    The torch/triton pin exists to protect a framework build. When
+    --install-framework is none there is nothing to build, so a drifting triton
+    must warn rather than fail the whole preflight -- rocm/atom:latest ships a
+    triton newer than torch's pin.
+    """
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    text = install_script.read_text(encoding="utf-8")
+
+    guard = re.search(
+        r'if \[ "\$INSTALL_FRAMEWORK" = "none" \]; then\s*\n'
+        r'\s*check_torch_triton_alignment "\$py" \|\| true\s*\n'
+        r"\s*else\s*\n"
+        r'\s*check_torch_triton_alignment "\$py" \|\| rc=1',
+        text,
+    )
+    assert guard, (
+        "the triton alignment check must be advisory when --install-framework "
+        "is none and fatal only when a framework layer will be built"
+    )
+
+
+def _sourceable_installer(install_script: Path, tmp_path: Path) -> Path:
+    """The real installer with its ``main`` invocation stripped.
+
+    Lets a test source the script and drive its actual functions against a fake
+    host, so behaviour is asserted end to end rather than by matching source
+    text.
+    """
+    text = install_script.read_text(encoding="utf-8")
+    marker = '\nmain "$@"\n'
+    assert marker in text, "install_baremetal.sh must end by invoking main"
+    lib = tmp_path / "installer_lib.sh"
+    lib.write_text(text.replace(marker, "\n"), encoding="utf-8")
+    return lib
+
+
+def _fake_python(tmp_path: Path, importable: set[str], hip: str = "7.2.0") -> Path:
+    """A python stub that answers ``_py_has`` probes and the torch.version.hip read."""
+    cases = "\n".join(f"""  *"find_spec('{name}')"*) exit 0 ;;""" for name in sorted(importable))
+    stub = tmp_path / "fake-python"
+    stub.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                'case "$*" in',
+                cases,
+                "  *find_spec*) exit 1 ;;",
+                f"  -) printf '{hip}\\n'; exit 0 ;;",
+                "esac",
+                "exit 0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def _drive_installer(
+    tmp_path: Path,
+    *,
+    importable: set[str],
+    dotenv: Path,
+    body: str,
+    install_framework: str = "none",
+) -> subprocess.CompletedProcess:
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lib = _sourceable_installer(install_script, tmp_path)
+    py = _fake_python(tmp_path, importable)
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f"source {lib}",
+                f'DOTENV="{dotenv}"',
+                f'USER_DATA_PATH="{tmp_path}/data"',
+                f'INSTALL_FRAMEWORK="{install_framework}"',
+                "FRAMEWORK_ENV=shared",
+                f'VLLM_VENV_ROOT="{tmp_path}/absent"',
+                "DRY_RUN=0",
+                "CHECK_ONLY=0",
+                f'resolve_python() {{ printf "%s" "{py}"; }}',
+                body,
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return subprocess.run(["bash", str(runner)], text=True, capture_output=True)
+
+
+def _dotenv_lines(dotenv: Path) -> list[str]:
+    return dotenv.read_text(encoding="utf-8").splitlines()
+
+
+def test_baremetal_atom_only_host_writes_framework_atom(tmp_path: Path):
+    """The whole point of probing atom: the .env downstream skills read must say so.
+
+    Preflight accepting atom is not enough — resolution used to return only
+    sglang/vllm, so an atom-only host finished setup with no FRAMEWORK at all
+    and every downstream skill defaulted to the wrong engine.
+    """
+    dotenv = tmp_path / ".env"
+    res = _drive_installer(
+        tmp_path, importable={"atom"}, dotenv=dotenv, body="write_runtime_dotenv"
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "FRAMEWORK=atom" in _dotenv_lines(dotenv)
+
+
+def test_baremetal_clears_stale_framework_when_none_importable(tmp_path: Path):
+    """A re-imaged host must not keep pointing at an engine that is gone."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("FRAMEWORK=sglang\nKEEP_ME=1\n", encoding="utf-8")
+
+    res = _drive_installer(
+        tmp_path, importable=set(), dotenv=dotenv, body="write_runtime_dotenv"
+    )
+
+    assert res.returncode == 0, res.stderr
+    lines = _dotenv_lines(dotenv)
+    assert not [ln for ln in lines if ln.startswith("FRAMEWORK=")], lines
+    assert "KEEP_ME=1" in lines
+
+
+def test_baremetal_framework_resolution_keeps_sglang_precedence(tmp_path: Path):
+    """Adding atom must not change what an existing sglang host resolves to."""
+    dotenv = tmp_path / ".env"
+    res = _drive_installer(
+        tmp_path, importable={"sglang", "atom"}, dotenv=dotenv, body="write_runtime_dotenv"
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "FRAMEWORK=sglang" in _dotenv_lines(dotenv)
+
+
+def test_baremetal_next_steps_names_the_detected_framework(tmp_path: Path):
+    """The closing prompt hardcoded sglang, sending atom hosts down a dead path."""
+    res = _drive_installer(
+        tmp_path,
+        importable={"atom"},
+        dotenv=tmp_path / ".env",
+        body="print_next_steps",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "- Framework: atom" in res.stdout
+
+
+def test_baremetal_profiler_hotfix_accepts_an_atom_only_host(tmp_path: Path):
+    """The hotfix patches ROCm profiler libs, which torch.profiler uses on any engine."""
+    res = _drive_installer(
+        tmp_path,
+        importable={"atom"},
+        dotenv=tmp_path / ".env",
+        body="rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE",
+    )
+
+    assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
+    assert "neither sglang nor vllm" not in res.stderr
+
+
+def test_baremetal_profiler_hotfix_still_skipped_without_any_framework(tmp_path: Path):
+    res = _drive_installer(
+        tmp_path,
+        importable=set(),
+        dotenv=tmp_path / ".env",
+        body="rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE",
+    )
+
+    assert "HOTFIX_ELIGIBLE" not in res.stdout
+    assert "no serving framework importable" in res.stderr
 
 
 def test_baremetal_aiter_install_preserves_system_triton_and_rechecks_alignment(tmp_path: Path):
@@ -1500,6 +1754,7 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
                 "DRY_RUN=0",
                 "_ANTHROPIC_BASE_URL_VAL=https://api.anthropic.com",
                 "_ANTHROPIC_KEY_VAL=anthropic-real-key",
+                "_ANTHROPIC_CUSTOM_HEADERS_VAL='Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}'",
                 "_OPENAI_BASE_URL_VAL=",
                 "_OPENAI_KEY_VAL=",
                 "LLM_GATEWAY_KEY=",
@@ -1542,6 +1797,9 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
     # kernel-agent env mirrors the same Anthropic values and no OpenAI leak.
     assert "export ANTHROPIC_API_KEY='anthropic-real-key'" in kernel_text
     assert "export ANTHROPIC_BASE_URL='https://api.anthropic.com'" in kernel_text
+    # A header-authenticated gateway needs its header here too, and the single
+    # quotes must keep ${VAR} intact for parse_custom_headers to expand.
+    assert "export ANTHROPIC_CUSTOM_HEADERS='Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}'" in kernel_text
     assert "export OPENAI_API_KEY=" not in kernel_text
     assert "OPENAI_API_KEY=" not in dotenv_text
 

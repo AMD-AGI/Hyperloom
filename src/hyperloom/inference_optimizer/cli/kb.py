@@ -403,7 +403,7 @@ def _bootstrap_recipe_kb(
             save_state=True,
         )
         if kb is None:
-            print("Recipe KB       : REMOTE (KB Store Explore config warm replay)")
+            print("Recipe KB       : REMOTE (KB Store current Recipe warm replay)")
     except Exception as exc:  # noqa: BLE001 — defensive
         print(
             f"WARNING: T0 recipe-snapshot anchor failed mid-flight: {exc}\n"

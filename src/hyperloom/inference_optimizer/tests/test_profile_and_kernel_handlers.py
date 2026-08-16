@@ -29,6 +29,7 @@ from hyperloom.orchestrator.actions.executors.profile import (
     ProfileExecutor,
     _default_profile_config,
     _sanitize_profile_server_args,
+    _trace_files_for_dir,
 )
 from hyperloom.orchestrator.roles import (
     MockBackend,
@@ -510,7 +511,7 @@ def test_materialize_profile_bounds_survive_a_replacing_candidate(
     assert "--profiler-config.max_iterations 128" in extra, extra
     # The frontend profiler tracks no iterations, so it has to come back too.
     assert "--profiler-config.ignore_frontend True" in extra, extra
-    assert "--profiler-config.capture_torch_profiler_dir " in extra, extra
+    assert "--profiler-config.capture_torch_profiler True" in extra, extra
     # The candidate's own flags must still take effect, JSON value unmangled.
     assert "--no-enable-prefix-caching" in extra, extra
     assert '--compilation-config {"cudagraph_capture_sizes":[17,34,1088]}' in extra, extra
@@ -611,12 +612,12 @@ def test_materialize_profile_cap_wins_over_a_max_iterations_pinned_in_the_yaml(
     assert extra.rindex("max_iterations 128") > extra.rindex("max_iterations 100000"), extra
 
 
-def test_materialize_profile_capture_dir_wins_over_a_stale_yaml_path(
+def test_materialize_profile_capture_flag_wins_over_a_stale_yaml_value(
     tmp_path,
     monkeypatch,
 ):
-    """A stale capture dir left in the YAML would send this run's traces to the
-    previous session's directory, so this run's dir has to be injected after it."""
+    """A YAML that disables the capture would leave the run with no sidecar traces,
+    so the injected value has to land after it and win the last-wins resolution."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -628,13 +629,15 @@ def test_materialize_profile_capture_dir_wins_over_a_stale_yaml_path(
             "CONC": 32,
             "ISL": 256,
             "OSL": 1024,
-            "EXTRA_VLLM_ARGS": "--profiler-config.capture_torch_profiler_dir /stale/run",
+            "EXTRA_VLLM_ARGS": "--profiler-config.capture_torch_profiler False",
         },
     )
     out = _materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
-    assert "capture_traces" in extra, extra
-    assert extra.rindex("capture_traces") > extra.rindex("/stale/run"), extra
+    assert "--profiler-config.capture_torch_profiler True" in extra, extra
+    assert extra.rindex("capture_torch_profiler True") > extra.rindex(
+        "capture_torch_profiler False"
+    ), extra
 
 
 def test_materialize_profile_restore_rejects_a_zero_max_iterations(
@@ -728,7 +731,7 @@ def test_materialize_profile_restore_accepts_a_bound_that_already_holds(
                 "--profiler-config.delay_iterations 6080 "
                 "--profiler-config.max_iterations 64 "
                 "--profiler-config.ignore_frontend True "
-                "--profiler-config.capture_torch_profiler_dir /x "
+                "--profiler-config.capture_torch_profiler True "
                 "--profiler-config.detailed_trace_annotation True"
             ),
         },
@@ -793,7 +796,7 @@ def test_materialize_profile_restores_max_iterations_even_when_delay_survives(
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.max_iterations 128" in extra, extra
     assert "--profiler-config.ignore_frontend True" in extra, extra
-    assert "--profiler-config.capture_torch_profiler_dir " in extra, extra
+    assert "--profiler-config.capture_torch_profiler True" in extra, extra
     # The candidate's own delay value is left alone; only the missing flags return.
     assert extra.count("--profiler-config.delay_iterations") == 1, extra
 
@@ -980,7 +983,7 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
     tmp_path,
     monkeypatch,
 ):
-    """Patcher True for vLLM ⇒ EXTRA_VLLM_ARGS gains capture_torch_profiler_dir + detailed_trace_annotation on top of the default iteration count."""
+    """Patcher True for vLLM ⇒ EXTRA_VLLM_ARGS gains capture_torch_profiler + detailed_trace_annotation on top of the default iteration count."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -990,7 +993,7 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
-    assert "--profiler-config.capture_torch_profiler_dir " in extra, extra
+    assert "--profiler-config.capture_torch_profiler True" in extra, extra
     assert "--profiler-config.detailed_trace_annotation True" in extra, extra
     # Per-framework dispatch: the SGLang patcher must NOT run for a vLLM YAML.
     assert counts == {"vllm": 1, "sglang": 0}, counts
@@ -1012,7 +1015,7 @@ def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     extra = envs["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
-    assert "capture_torch_profiler_dir" not in extra, extra
+    assert "capture_torch_profiler" not in extra, extra
     assert "detailed_trace_annotation" not in extra, extra
     assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
     assert envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
@@ -1076,7 +1079,7 @@ def test_materialize_profile_kill_switch_skips_patcher_entirely(
     # Safe profiler flags still present.
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     # TraceLens-only flags absent.
-    assert "capture_torch_profiler_dir" not in extra, extra
+    assert "capture_torch_profiler" not in extra, extra
     assert "detailed_trace_annotation" not in extra, extra
     # Patchers never invoked.
     assert counts == {"vllm": 0, "sglang": 0}, counts
@@ -1719,10 +1722,11 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     # The workspace must be created inside the fake to count as this run's output.
     ws_name = "benchmark_sglang_20260501_001122"
 
-    def _fake_run(cmd, *args, **kwargs):
+    async def _fake_baseline(_self, _ctx):
         workspace = output_dir / ws_name
         workspace.mkdir(parents=True, exist_ok=True)
-        (workspace / "benchmark_report.json").write_text(
+        report_path = workspace / "benchmark_report.json"
+        report_path.write_text(
             json.dumps(
                 {
                     "success": True,
@@ -1743,7 +1747,14 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
         trace_dir.mkdir()
         (trace_dir / "177-TP-0-DECODE.trace.json.gz").write_bytes(b"fake-trace")
         (trace_dir / "merged-177.trace.json.gz").write_bytes(b"fake-trace")
-        return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
+        return {
+            "status": "succeeded",
+            "framework": "sglang",
+            "model": "/path/models/Qwen-Qwen3-8B",
+            "output_throughput": 800.0,
+            "workspace": str(workspace),
+            "report_path": str(report_path),
+        }
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
     task = await tr.create(
@@ -1752,7 +1763,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
         idempotency_key="prof-1",
     )
     sub.register_executor("profile", pe)
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
         res = await sub.run_task(task)
 
     workspace = output_dir / ws_name
@@ -4435,3 +4446,70 @@ def test_resolve_integrate_payload_falls_back_to_kernel_opt_attempts_ledger(
     assert resolved.get("source_file") == "/p/moe_op.py", (
         "source_file must fall back to kernel_opt_attempts[k001].last_source_file"
     )
+
+
+def _gz_trace(path: Path, payload_bytes: int) -> Path:
+    """Write a ``*.trace.json.gz`` of roughly the requested size."""
+    import gzip
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wt") as fh:
+        json.dump({"traceEvents": [{"n": "x" * payload_bytes}]}, fh)
+    return path
+
+
+def test_trace_files_for_dir_excludes_split_chunks_and_leads_with_the_capture(tmp_path):
+    """Splitter chunks must never lead the discovered trace list.
+
+    Two consumers fall back to ``trace_files[0]`` when ``main_trace_path`` is
+    absent (the roofline trace extractor and the writeback path). Under
+    alphabetical order a 900-byte ``trace_split/`` chunk sorted ahead of
+    ``rank_0.trace.json.gz``, and a single chunk handed to ``--trace-input``
+    takes the single-file branch of discovery, where the multi-candidate probing
+    downstream cannot rescue it. This function already excludes ``capture_traces``
+    sidecars for the same reason.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    chunk = _gz_trace(trace_dir / "trace_split" / "aaa_mixed_0.trace.json.gz", 32)
+    capture = _gz_trace(trace_dir / "zzz_rank_0.trace.json.gz", 40_000)
+    sidecar = _gz_trace(
+        trace_dir / "capture_traces" / "aaa_graph_capture_0.pt.trace.json.gz", 32
+    )
+
+    found = _trace_files_for_dir(trace_dir)
+
+    assert chunk not in found, "trace_split chunks must be excluded"
+    assert sidecar not in found, "capture_traces sidecars must stay excluded"
+    assert found[0] == capture
+
+
+def test_trace_files_for_dir_orders_by_size_not_name(tmp_path):
+    """Size ordering, so the fallback does not depend on a naming rule.
+
+    The real discriminator between a fragment and a capture is that one is
+    hundreds of bytes and the other is hundreds of kilobytes. Ranking on size
+    gets this right without knowing any of the splitter's filename conventions,
+    which it is free to change.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    small = _gz_trace(trace_dir / "aaa_first_by_name.trace.json.gz", 16)
+    large = _gz_trace(trace_dir / "zzz_last_by_name.trace.json.gz", 60_000)
+
+    found = _trace_files_for_dir(trace_dir)
+
+    assert found == [large, small]
+
+
+def test_trace_files_for_dir_survives_an_ancestor_named_trace_split(tmp_path):
+    """An ancestor named ``trace_split`` must not empty the list.
+
+    The exclusion is relative to the scanned directory. Tested absolutely, a
+    capture that happened to live below such a directory would have every one of
+    its traces excluded, and the caller reads an empty list as "no traces here".
+    """
+    trace_dir = tmp_path / "trace_split" / "run" / "torch_trace"
+    capture = _gz_trace(trace_dir / "rank_0.trace.json.gz", 40_000)
+
+    found = _trace_files_for_dir(trace_dir)
+
+    assert found == [capture]
