@@ -402,10 +402,15 @@ def select_anchor(spec: ServingSpec) -> AnchorChoice | None:
     # answer is that there is no anchor. This used to fall back to using any
     # anchor at all, which calibrated qwen3 against gpt-oss and returned the
     # same decode step for every model in the sweep, labelled "calibrated".
-    target = resolve_preset(spec.model_path) or spec.model_path
+    # A target has two names and either one identifies it. The checkout path
+    # ("/models/DeepSeek-R1") usually shares a spelling with the artifact's id,
+    # while the preset names an architecture and can legitimately cover several
+    # checkpoints -- deepseek_v3 is the preset for DeepSeek-R1, and matching only
+    # on that would reject R1's own warmup.
+    names = [n for n in (spec.model_path, resolve_preset(spec.model_path)) if n]
     entries = [
         e for e in store.entries()
-        if not e.get("model") or regime.models_match(target, e["model"])
+        if not e.get("model") or any(regime.models_match(n, e["model"]) for n in names)
     ]
     if not entries:
         return None
