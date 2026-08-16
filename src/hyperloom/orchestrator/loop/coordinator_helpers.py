@@ -220,14 +220,16 @@ _DEFAULT_ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 _MAX_ROOFLINE_FAILURE_RETRIES: int = 3
 
 
-# Actions that must stay startable no matter how little budget is left: they are
-# how a session ends cleanly (report/breakdown) or unsticks itself (recover), so
-# a time gate that refused them would strand the run with nothing to show.
+# Actions that must stay startable no matter how little budget is left: they
+# are how a session ends cleanly, so a time gate that refused them would
+# strand the run with nothing to show. ``recover`` is not among them — it
+# takes the server-lifecycle lane, prices at five catalogue minutes, and
+# holds a twenty-minute lease; treating it as a closing action is what let a
+# spent session keep working past the wall clock.
 TIME_BUDGET_EXEMPT_ACTIONS: frozenset[str] = frozenset(
     {
         "report",
         "session_breakdown",
-        "recover",
     }
 )
 

@@ -318,12 +318,24 @@ class TestTimeBudgetGate:
         _set_budget(coord, minutes=1)
         assert coord._time_budget_denial_for_action("frobnicate") is None
 
+    def test_only_the_closing_actions_are_exempt_from_the_budget(self):
+        """Recover restarts the server; it is not how a session ends."""
+        assert TIME_BUDGET_EXEMPT_ACTIONS == frozenset({"report", "session_breakdown"})
+
     def test_the_closing_actions_stay_startable_on_an_empty_budget(self, coord: Coordinator):
         """Refusing these would strand the session with nothing to show."""
         _set_budget(coord, minutes=60, elapsed_min=60.0)
         assert coord.shared_state.session_budget_usable_sec() == 0.0
         for action in TIME_BUDGET_EXEMPT_ACTIONS:
             assert coord._time_budget_denial_for_action(action) is None, action
+
+    def test_recover_is_refused_on_an_empty_budget(self, coord: Coordinator):
+        """A spent session that still starts recover cannot close."""
+        _set_budget(coord, minutes=60, elapsed_min=60.0)
+        assert coord.shared_state.session_budget_usable_sec() == 0.0
+        denied = coord._time_budget_denial_for_action("recover")
+        assert isinstance(denied, PolicyDenied)
+        assert denied.rule == "time_budget"
 
     def test_a_stopping_session_leaves_the_gate_to_the_stop_path(self, coord: Coordinator):
         _set_budget(coord, minutes=1)
@@ -491,6 +503,24 @@ class TestPreDispatchBackstop:
         )
         assert await coord.dispatcher._cancel_queued_task_over_budget(task) is False
         assert (await coord.tasks.get(task.task_id)).state == "queued"
+
+    @pytest.mark.asyncio
+    async def test_a_queued_recover_is_dropped_when_the_budget_is_spent(
+        self,
+        coord: Coordinator,
+    ):
+        _set_budget(coord, minutes=600)
+        task, _ = await coord.tasks.create_or_return_existing(
+            kind="recover",
+            params={},
+            idempotency_key="q-recover",
+        )
+        _set_budget(coord, minutes=600, elapsed_min=600.0)
+
+        spawned = await coord.dispatcher._spawn_fitting_queued(exclude_ids=set())
+
+        assert [t.task_id for t, _, _ in spawned] == []
+        assert (await coord.tasks.get(task.task_id)).state == "cancelled"
 
 
 # One of the closing actions, exempt from the budget because the closing reserve
