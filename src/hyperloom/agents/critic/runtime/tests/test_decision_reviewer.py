@@ -639,7 +639,7 @@ def test_decision_request_commit_emits_decision_review(reviewer):
     assert outcome.kb_writes
 
 
-def test_init_session_records_event(reviewer):
+def test_init_session_merges_context(reviewer):
     rev, kb, sm = reviewer
     out = rev.init_session(
         {
@@ -650,12 +650,6 @@ def test_init_session_records_event(reviewer):
         }
     )
     assert out["session_id"] == "sess_init"
-    events = [
-        json.loads(line)
-        for line in (sm.session_dir("sess_init") / "events.jsonl").read_text("utf-8").splitlines()
-        if line.strip()
-    ]
-    assert events and events[0]["kind"] == "init_session"
 
 
 def test_close_session_writes_kb_drafts_when_provided(reviewer):

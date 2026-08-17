@@ -560,7 +560,172 @@ class DecisionReviewer:
             bundle.required_context = critical_missing
             bundle.kb_read_skipped_reason = "missing_critical_context"
             bundle.notes.append("model and/or framework unknown — KB priors not fetched")
-            session_ctx = self.session_memory.load_context(req.session_id)
+            return bundle
+
+        # Skip KB reads only if explicitly disabled or inappropriate kind.
+        if req.kind in (KB_DRAFT_REQUEST,):
+            bundle.kb_read_skipped_reason = "kb_draft_does_not_need_priors"
+            return bundle
+
+        # KB reads disabled wholesale (operator switch) → reflect in bundle.
+        if not self.kb_writer.read_enabled:
+            bundle.kb_read_skipped_reason = "kb_read_disabled"
+            bundle.notes.append("KB_READ_ENABLED=false — proceeding without priors")
+            return bundle
+
+        # Breaker open from an earlier failure → skip another timeout.
+        if self.kb_writer.is_kb_unreachable():
+            bundle.kb_read_skipped_reason = "kb_unreachable"
+            bundle.notes.append("KB service unreachable (circuit breaker open); proceeding without priors")
+            bundle.review_constraints["kb_breaker"] = self.kb_writer.kb_breaker_state()
+            return bundle
+
+        scope = build_scope(req.context, session_context=merge.merged, require_critical=False)
+        # Hide "unknown" so the service doesn't filter to literal "unknown" rows.
+        scope_filter = {k: v for k, v in scope.items() if v != "unknown"}
+
+        topic_hits: dict[str, list[dict[str, Any]]] = {}
+        ctx = WriteContext(session_id=req.session_id, review_id=req.decision_id)
+        any_kb_unreachable = False
+        prior_limit = int(os.environ.get("CRITIC_KB_PRIOR_LIMIT", "5"))
+        priors_requests: list[dict[str, Any]] = []
+        if req.proposals:
+            for p in req.proposals:
+                topic = self._topic_for_proposal(p)
+                priors = self.kb_writer.list_priors(
+                    scope=scope_filter,
+                    kind=None,
+                    topic=topic,
+                    metadata_filter=None,
+                    limit=prior_limit,
+                    ctx=ctx,
+                )
+                topic_hits[p.msg_id] = priors.get("priors") or []
+                if priors.get("cache") == "kb_unreachable":
+                    any_kb_unreachable = True
+                priors_requests.append(
+                    {
+                        "msg_id": p.msg_id,
+                        "topic": topic,
+                        "cache": priors.get("cache"),
+                        "count": len(topic_hits[p.msg_id]),
+                    }
+                )
+            bundle.kb_priors_by_proposal = topic_hits
+        else:
+            topic = self._topic_for_decision(req)
+            priors = self.kb_writer.list_priors(
+                scope=scope_filter,
+                kind=None,
+                topic=topic,
+                metadata_filter=None,
+                limit=prior_limit,
+                ctx=ctx,
+            )
+            bundle.kb_priors_for_decision = priors.get("priors") or []
+            if priors.get("cache") == "kb_unreachable":
+                any_kb_unreachable = True
+            priors_requests.append(
+                {
+                    "msg_id": None,
+                    "topic": topic,
+                    "cache": priors.get("cache"),
+                    "count": len(bundle.kb_priors_for_decision),
+                }
+            )
+
+        # Audit trail for the historical KB prior reads (always injected).
+        bundle.kb_priors_trace = {
+            "configured": True,
+            "mode": "per_proposal" if req.proposals else "per_decision",
+            "client_mode": os.environ.get("CRITIC_KB_CLIENT_MODE", ""),
+            "scope_filter": dict(scope_filter),
+            "limit": prior_limit,
+            "requests": priors_requests,
+        }
+
+        if any_kb_unreachable:
+            bundle.kb_read_skipped_reason = "kb_unreachable"
+            bundle.notes.append("KB service unreachable for at least one lookup — priors may be incomplete")
+            bundle.review_constraints["kb_breaker"] = self.kb_writer.kb_breaker_state()
+
+        if scope.get("model") == "unknown" or scope.get("framework") == "unknown":
+            bundle.notes.append("scope partially unknown — proceed with caution")
+        bundle.notes.append(f"scope_cache_key={scope_cache_key(scope_filter)}")
+
+        # Best-effort recent Robustness findings; never blocks the review.
+        self._inject_robustness_priors(bundle)
+        return bundle
+
+    def _inject_robustness_priors(self, bundle: JudgeBundle) -> None:
+        """Populate ``bundle.robustness_priors`` from recent findings.
+
+        Best-effort: disabled via ``CRITIC_ROBUSTNESS_PRIORS_DISABLED`` and
+        silently skipped when no findings file exists or loading fails. On
+        success, sets the priors and appends a diagnostic note to the bundle.
+
+        Args:
+            bundle (JudgeBundle): The bundle to enrich in place.
+        """
+        if os.environ.get("CRITIC_ROBUSTNESS_PRIORS_DISABLED", "").lower() in {"1", "true", "yes"}:
+            return
+        findings_path = _discover_robustness_findings_path(bundle.session_id)
+        if findings_path is None:
+            return
+        limit = int(os.environ.get("CRITIC_ROBUSTNESS_PRIORS_LIMIT") or 5)
+        # Severity floor: HIGH by default; drop to MEDIUM via the env knob.
+        min_severity = os.environ.get("CRITIC_ROBUSTNESS_PRIORS_MIN_SEVERITY", "high").lower()
+        try:
+            priors = _load_robustness_priors(
+                findings_path,
+                limit=max(1, limit),
+                min_severity=min_severity,
+            )
+        except Exception:  # noqa: BLE001 — best-effort injection
+            log.exception(
+                "critic: failed to load robustness priors from %s",
+                findings_path,
+            )
+            return
+        if priors:
+            bundle.robustness_priors = priors
+            bundle.notes.append(f"robustness_priors_injected count={len(priors)} path={findings_path}")
+
+    # ------------------------------------------------------------------
+    # Phase 2: commit-review
+    # ------------------------------------------------------------------
+    def commit_review(
+        self,
+        raw_request: dict[str, Any],
+        review: dict[str, Any],
+    ) -> CommitOutcome:
+        """Validate and commit a SKILL-produced review (phase 2).
+
+        Dispatches by request kind to persist verdicts, optionally write to
+        KB, and build the Coordinator-compatible intent envelope.
+
+        Args:
+            raw_request (dict[str, Any]): The raw Critic request envelope.
+            review (dict[str, Any]): The review JSON produced by the SKILL.
+
+        Returns:
+            CommitOutcome: The persisted outcome for the request kind.
+
+        Raises:
+            ReviewValidationError: If ``review`` is not a dict or the request
+                kind is not supported by ``commit_review``.
+        """
+        req = parse_request(raw_request)
+        self._populate_inbox(req)
+        if not isinstance(review, dict):
+            raise ReviewValidationError(f"review must be a dict, got {type(review).__name__}")
+
+        outcome = CommitOutcome(
+            kind=req.kind,
+            session_id=req.session_id,
+            decision_id=req.decision_id,
+        )
+        session_ctx = self.session_memory.load_context(req.session_id)
 
         if req.kind == COORDINATOR_INBOX:
             self._commit_coordinator_inbox(req, review, outcome, session_ctx)
