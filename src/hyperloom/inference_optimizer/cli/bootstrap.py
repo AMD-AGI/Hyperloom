@@ -20,6 +20,7 @@ from typing import Any
 
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.orchestrator.state.shared_state import SharedState
+from .backends import _build_robustness_options
 from .parser import (
     DEFAULT_ISL,
     DEFAULT_OSL,
@@ -34,6 +35,24 @@ from .model_gate import _load_model_arch, _load_model_config_tags
 from ..model_config_utils import summarize_model_config
 
 log = logging.getLogger(__name__)
+
+
+def parse_operator_extra_env(args: argparse.Namespace) -> dict[str, str]:
+    """Parse ``--extra-env NAME=VALUE`` pins into a mapping.
+
+    Args:
+        args: Parsed CLI args carrying the repeatable ``extra_env`` list.
+
+    Returns:
+        The pins as a mapping; entries without an ``=`` or with a blank name are
+        dropped.
+    """
+    pins: dict[str, str] = {}
+    for item in getattr(args, "extra_env", None) or []:
+        key, sep, value = str(item).partition("=")
+        if sep and key.strip():
+            pins[key.strip()] = value
+    return pins
 
 
 def resolve_model_display_name(args: argparse.Namespace) -> str:
@@ -261,6 +280,15 @@ def _seed_shared_state(
         reference_envs=_ref_envs,
         reference_model=_ref_model,
         reference_source=_ref_source,
+        # Operator launch shape; the process env carries it for one process only,
+        # so a resume re-exports it from here rather than from argv.
+        operator_server_args=str(getattr(args, "server_args", "") or "").strip(),
+        operator_extra_env=parse_operator_extra_env(args),
+        nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
+        robustness_options=_build_robustness_options(args),
+        warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
+        warm_replay_min_confidence=float(getattr(args, "warm_replay_min_confidence", 0.7)),
+        warm_replay_min_reproduce_pct=float(getattr(args, "warm_replay_min_reproduce_pct", 0.8)),
         max_minutes=int((args.max_hours or 0) * 60),
         research_lane_capacity=research_lane_capacity,
         gpu_specialist_capacity=gpu_specialist_capacity,
