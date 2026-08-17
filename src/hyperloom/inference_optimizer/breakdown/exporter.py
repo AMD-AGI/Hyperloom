@@ -274,19 +274,7 @@ def build(
     baseline = _pick(
         "baseline", _safe_collect("baseline", lambda: collectors.collect_baseline(sd, state, warnings), warnings)
     )
-    final_collector = _safe_collect("final", lambda: collectors.collect_final(sd, state, warnings), warnings)
-    final_frag = assembled.get("final")
-    # Merge: fragment live-scalars win, but collector structural fields (invocation,
-    # action_path, source_layers) are preserved when absent from the fragment.
-    if isinstance(final_frag, dict) and final_frag:
-        merged_final = dict(final_collector or {})
-        merged_final.update(final_frag)
-        for _structural in ("invocation", "action_path", "source_layers"):
-            if _structural in (final_collector or {}):
-                merged_final[_structural] = (final_collector or {})[_structural]
-        final = merged_final
-    else:
-        final = final_collector
+    final = _safe_collect("final", lambda: collectors.collect_final(sd, state, warnings), warnings)
     # Enablement attempt-runtime observability; {} → dashboard hides the block.
     enablement = _pick(
         "enablement",
@@ -548,13 +536,9 @@ def build(
         "phase_timeline": phase_timeline,
         # v1 readers use flat ``phase_timeline``, v2 prefer ``phase_segments``.
         "phase_segments": phase_segments,
-        # v1-reader alias mirroring the flat per-action timeline.
-        "action_timeline": phase_timeline,
         "capability_summary": capability_summary,
         "kernel_lifecycle": kernel_lifecycle,
         "param_search": explore_search,
-        # v2-native name for the merged ledger; mirrors ``param_search``.
-        "explore_search": explore_search,
         "sweep": sweep,
         "critic_robustness": critic_robustness,
         "telemetry": telemetry,
@@ -1620,7 +1604,6 @@ def _v4_compat_projection(
         "final": final,
         "phase_timeline": transitions,
         "phase_segments": phase_segments,
-        "action_timeline": transitions,
         "capability_summary": capability_summary,
         "kernel_route": {
             "strategy_group": "kernel_optimizer",
@@ -1650,7 +1633,6 @@ def _v4_compat_projection(
         "forge_invocations": forge_invocations,
         "kernel_lifecycle": kernel_lifecycle,
         "param_search": explore_search,
-        "explore_search": explore_search,
         "sweep": sweep,
         "geak": {
             "operation_id": geak_operation.get("operation_id"),

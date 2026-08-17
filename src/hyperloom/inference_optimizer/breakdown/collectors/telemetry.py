@@ -814,7 +814,6 @@ def collect_specialist_runs(
             "proposals_kept": int(raw.get("proposals_kept") or 0),
             "proposals_rejected": int(raw.get("proposals_rejected") or 0),
             "proposals_skipped": int(raw.get("proposals_skipped") or 0),
-            "kb_edge_ids": list(raw.get("kb_edge_ids") or []),
             "confidence_avg": _to_float(
                 raw.get("confidence_avg") if raw.get("confidence_avg") is not None else raw.get("confidence")
             ),

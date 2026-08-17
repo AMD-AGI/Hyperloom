@@ -18,7 +18,7 @@ globs:
 
 A single JSON file: **`<session_dir>/session_breakdown.json`**.
 
-- Schema:   `hyperloom.session_breakdown.v3.0` when recorder fragments are present, else `…v2` (collector-only fallback). Same additive wire shape; gate consumers on the major version, not exact-string equality. See `breakdown/schema.py` (`SCHEMA_VERSION` / `SCHEMA_VERSION_V3`).
+- Schema:   `hyperloom.session_breakdown.v5.0` (hardcoded; see `SCHEMA_VERSION` in `breakdown/schema.py`).
 - Producer: `src/hyperloom/inference_optimizer/breakdown/exporter.py`
 - Filename: `BREAKDOWN_FILENAME` (= `session_breakdown.json`)
 

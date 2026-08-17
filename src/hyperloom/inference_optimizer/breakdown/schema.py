@@ -13,20 +13,6 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
-#: Historical collector-only schema retained for archived-reader identification.
-SCHEMA_VERSION_V2 = "hyperloom.session_breakdown.v2"
-
-#: breakdown schema version stamped when the file was assembled from the
-#: author-time recorder fragments. Same wire shape as v2 plus recorder-only
-#: sections; lets consumers tell a recorder-aggregated breakdown apart from a
-#: legacy collector fallback.
-SCHEMA_VERSION_V3 = "hyperloom.session_breakdown.v3.0"
-
-#: Author-time-only canonical schema. Unlike v2/v3, this version is assembled
-#: exclusively from recorder SDK fragments and never reconstructed from session
-#: business files.
-SCHEMA_VERSION_V4 = "hyperloom.session_breakdown.v4.0"
-
 #: Unified optimization schema. This is a breaking wire-shape cutover: adopted
 #: optimizations are emitted only through ``optimizations``.
 SCHEMA_VERSION_V5 = "hyperloom.session_breakdown.v5.0"
@@ -1514,8 +1500,6 @@ class SpecialistRound(TypedDict, total=False):
     proposals_kept: int
     proposals_rejected: int
     proposals_skipped: int
-    # Retired field, kept (always empty) for backward compatibility with existing readers.
-    kb_edge_ids: list[str]
     confidence_avg: float | None
     domain_breakdown: dict[str, SpecialistDomainBreakdown]
     transcripts: list[SpecialistTranscriptRef]
@@ -2658,13 +2642,11 @@ class SessionBreakdown(TypedDict, total=False):
             Empty {} on non-transformers models or pre-field sessions.
         baseline (Baseline): Pre-optimization reference performance.
         final (Final): Final validated optimization state.
-        phase_timeline (list[PhaseEvent]): Flat per-action timeline (v1-reader compat).
+        phase_timeline (list[PhaseEvent]): Flat per-action timeline.
         phase_segments (list[PhaseSegment]): Phase-boundary view.
-        action_timeline (list[PhaseEvent]): v2 canonical flat per-action timeline.
         capability_summary (CapabilitySummary): Per-capability roll-up.
         kernel_lifecycle (KernelLifecycle): Kernels grouped by lifecycle stage.
-        param_search (ParamSearch): v1-reader compat alias for ``explore_search``.
-        explore_search (ParamSearch): Merged explore-search ledger.
+        param_search (ParamSearch): Merged explore-search ledger.
         sweep (Sweep): Concurrency/shape sweep results.
         critic_robustness (CriticRobustness): Critic reviews and robustness signals.
         telemetry (Telemetry): Telemetry artifacts and aggregated metrics.
@@ -2739,9 +2721,6 @@ class SessionBreakdown(TypedDict, total=False):
 
 __all__ = [
     "SCHEMA_VERSION",
-    "SCHEMA_VERSION_V2",
-    "SCHEMA_VERSION_V3",
-    "SCHEMA_VERSION_V4",
     "SCHEMA_VERSION_V5",
     "Adoption",
     "AdoptedKernel",

@@ -40,7 +40,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.recorder import SECTION_SH
 from hyperloom.inference_optimizer.breakdown.schema import (
     ArtifactRef,
     Measurement,
-    SCHEMA_VERSION_V4,
     SCHEMA_VERSION_V5,
     Operation,
     SessionBreakdownV4,
@@ -48,7 +47,6 @@ from hyperloom.inference_optimizer.breakdown.schema import (
 
 
 def test_v4_schema_and_stream_registry_are_optional():
-    assert SCHEMA_VERSION_V4 == "hyperloom.session_breakdown.v4.0"
     assert not Operation.__required_keys__
     assert not Measurement.__required_keys__
     assert not ArtifactRef.__required_keys__
@@ -240,8 +238,7 @@ def test_v4_canonical_streams_and_legacy_aliases_match(tmp_path):
     out = exporter.build_v4_live(tmp_path)
     assert out["session"] == out["run"] == out["compat"]["session"]
     assert out["model_info"] == out["model"]
-    assert out["phase_timeline"] == out["action_timeline"]
-    assert out["param_search"] == out["explore_search"]
+    assert out["phases"]["transitions"] == out["phase_timeline"]
     assert out["phases"]["transitions"] == out["phase_timeline"]
     assert out["trace"]["events"] == [{"event_id": "event-1", "kind": "operation_started"}]
     assert out["integrity"]["status"] == "partial"
@@ -1322,7 +1319,7 @@ def test_v4_compat_major_fields_project_only_from_canonical(tmp_path):
     out = exporter.build_v4_live(tmp_path)
 
     assert out["baseline"]["throughput"] == 100.0
-    assert out["explore_search"]["operations"][0]["operation_id"] == "explore-op"
+    assert out["param_search"]["operations"][0]["operation_id"] == "explore-op"
     assert out["roofline"][0]["outputs"]["within_roofline_pct"] == 80.0
     assert out["capability_summary"]["forge"] is True
     assert out["specialist_runs"][0]["outputs"]["proposals_total"] == 2
