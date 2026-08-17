@@ -2110,10 +2110,8 @@ class IntegratePatchExecutor:
                 f"attribution silently do not run"
             )
             if not params.get("enablement"):
-                # Refuse rather than fall back to the unguarded path for
-                # framework-rewrite rounds where per-lever attribution matters.
-                # Nothing has been applied or stashed at this point so there is
-                # no tree state to unwind.
+                # Refuse before spending a leg: with the manifest absent nothing is
+                # turned on for the measurement and the parity leg never runs.
                 log.warning("integrate_patch: %s", reason)
                 return {
                     "status": "reverted",
@@ -2127,9 +2125,8 @@ class IntegratePatchExecutor:
                     "framework_switch_problems": switch_problems + [reason],
                     "undeclared_switch_gates": undeclared_gates,
                 }
-            # Enablement rounds: runnability is the only gate; per-lever
-            # attribution is not required.  Record the problem and continue
-            # so the boot attempt actually runs.
+            # Enablement is graded on runnability alone, so the lever guarantees
+            # this gate arms do not apply and must not block the boot attempt.
             log.info("integrate_patch(enablement): %s — proceeding to bench", reason)
             switch_problems.append(reason)
         if switch_manifest and not patch_paths:

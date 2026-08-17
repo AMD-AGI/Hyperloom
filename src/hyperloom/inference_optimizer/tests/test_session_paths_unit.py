@@ -95,10 +95,12 @@ def test_trace_paths():
 def test_enablement_paths():
     assert sp.enablement_dir(SD) == SD / "reports" / "enablement"
     assert sp.enablement_round_dir(SD, "abc123") == SD / "reports" / "enablement" / "abc123"
-    # path traversal sanitised
-    assert ".." not in str(sp.enablement_round_dir(SD, "../evil"))
-    # empty task_id uses sentinel
     assert sp.enablement_round_dir(SD, "").name == "unknown"
+
+
+def test_enablement_round_dir_rejects_traversal():
+    with pytest.raises(ValueError):
+        sp.enablement_round_dir(SD, "../evil")
 
 
 def test_research_and_competitor_paths():
