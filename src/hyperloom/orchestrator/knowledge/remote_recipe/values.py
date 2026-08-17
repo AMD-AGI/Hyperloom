@@ -560,7 +560,7 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
         raise RemoteRecipeValidationError(
             f"accepted kernel/fusion patch cannot be materialized: {patch_source!r}"
         )
-    declared_targets = _patch_declared_targets(patch_source)
+    _patch_declared_targets(patch_source)
     integrated_for_publish = dict(integrated)
     for key in (
         "target_file",
@@ -583,12 +583,12 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
         "e2e": e2e_record,
         "phase": str(stack_rows[-1].get("phase") or "KERNEL_AGENT"),
         "patch": patch_ref,
-        "target_files": list(declared_targets),
     }
     # Remove duplicate local-path aliases after establishing canonical refs.
     for key in (
         "patch_path",
         "target_file",
+        "target_files",
         "source_file",
         "source_files",
         "artifact_files",
@@ -683,7 +683,7 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
                 f"integration_id={integration_id!r} patch={patch_source!r} "
                 f"source={source_source!r}"
             )
-        declared_targets = _patch_declared_targets(patch_source)
+        _patch_declared_targets(patch_source)
         e2e_gain = _number(entry.get("gain_pct"))
         optimized_throughput = _number(entry.get("tput"))
         experience = files.write(
@@ -716,7 +716,6 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
                 "experience_document": experience,
                 "patch": patch,
                 "source_files": [source] if source else [],
-                "target_files": list(declared_targets),
             }
         )
     return {"items": rows}

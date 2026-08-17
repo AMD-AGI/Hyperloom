@@ -412,7 +412,7 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
         "candidates_path",
         "patch_path",
         "target_file",
-        "target_files",
+        "resolved_patch_targets",
         "config_path",
         "output_dir",
         "workspace",
@@ -2214,7 +2214,7 @@ class PolicyGate:
                     f"replay_warm_recipe warm_kernel_plan[{index}] must be an object",
                     rule="warm_replay_plan_invalid",
                 )
-            raw_targets = entry.get("target_files") or []
+            raw_targets = entry.get("resolved_patch_targets") or []
             if not raw_targets:
                 continue
             if not isinstance(raw_targets, list) or not all(
@@ -2222,7 +2222,7 @@ class PolicyGate:
                 for target in raw_targets
             ):
                 raise PolicyDenied(
-                    f"replay_warm_recipe warm_kernel_plan[{index}].target_files "
+                    f"replay_warm_recipe warm_kernel_plan[{index}].resolved_patch_targets "
                     "must be a flat non-empty string list",
                     rule="warm_replay_plan_invalid",
                 )
@@ -2230,7 +2230,8 @@ class PolicyGate:
             raw_patch = entry.get("patch_path")
             if not isinstance(raw_patch, str) or not raw_patch.strip():
                 raise PolicyDenied(
-                    f"replay_warm_recipe target_files={raw_targets!r} has no patch_path",
+                    f"replay_warm_recipe resolved_patch_targets={raw_targets!r} "
+                    "has no patch_path",
                     rule="warm_replay_patch_missing",
                 )
             if kb_root is None or not _resolved_within(raw_patch, str(kb_root)):
@@ -2364,7 +2365,7 @@ class PolicyGate:
             if key not in PATH_LIKE_FIELDS:
                 return
             if not self._path_under_session(node):
-                if key in {"target_file", "target_files"} and trusted_framework_targets:
+                if key in {"target_file", "resolved_patch_targets"} and trusted_framework_targets:
                     try:
                         resolved = str(Path(node).resolve())
                     except (OSError, RuntimeError):

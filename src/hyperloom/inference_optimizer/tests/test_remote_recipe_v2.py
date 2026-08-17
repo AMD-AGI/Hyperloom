@@ -239,8 +239,9 @@ def test_fusion_writer_preserves_all_patch_targets(tmp_path: Path) -> None:
     bundle = build_remote_knowledge(state, tmp_path / "files-multi-fusion")
 
     fusion = bundle.knowledge["value"]["kernel"]["fusion"]["items"][0]
-    assert fusion["target_files"] == ["source.cu", "source_fused_ops.cu"]
     assert fusion["patch"].startswith("kernel/fusion/patches/")
+    assert "target_file" not in fusion
+    assert "target_files" not in fusion
     assert "source_file" not in fusion
     assert "source_files" not in fusion
     artifact_paths = {artifact.path for artifact in bundle.artifacts}
@@ -268,8 +269,9 @@ def test_rewrite_writer_preserves_all_patch_targets(tmp_path: Path) -> None:
     bundle = build_remote_knowledge(state, tmp_path / "files-multi-rewrite")
 
     rewrite = bundle.knowledge["value"]["kernel"]["rewrite"]["items"][0]
-    assert rewrite["target_files"] == ["source.cu", "source_helpers.cu"]
     assert rewrite["patch"].startswith("kernel/rewrite/patches/")
+    assert "target_file" not in rewrite
+    assert "target_files" not in rewrite
 
 
 def test_remote_recipe_projects_workload_shape_for_donor_gating(

@@ -1118,10 +1118,6 @@ def test_multi_file_kernel_targets_share_one_framework_root(
     targets = coord.phase_prelude._resolve_kernel_target_paths(
         {
             "patch_path": str(patch),
-            "target_files": [
-                "python/sglang/srt/models/qwen3.py",
-                "python/sglang/srt/models/qwen3_fused_ops.py",
-            ],
         }
     )
 

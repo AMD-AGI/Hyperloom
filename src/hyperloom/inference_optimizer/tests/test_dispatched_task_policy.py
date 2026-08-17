@@ -55,7 +55,7 @@ def _warm_replay_dispatch_params(
         {
             "warm_kernel_plan": [
                 {
-                    "target_files": [str(target)],
+                    "resolved_patch_targets": [str(target)],
                     "patch_path": str(patch_path),
                 }
             ],
@@ -409,7 +409,7 @@ def test_dispatched_warm_replay_accepts_declared_multi_file_targets(
                 ]
             )
         )
-    params["warm_kernel_plan"][0]["target_files"] = [
+    params["warm_kernel_plan"][0]["resolved_patch_targets"] = [
         str(target),
         str(added),
     ]

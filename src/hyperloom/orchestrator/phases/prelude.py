@@ -370,11 +370,6 @@ class PreludePhase(PhaseHandler):
                     if resolved is not None:
                         source_paths.append(str(resolved))
                 entry: dict[str, Any] = {"column": column, "meta": meta}
-                entry["target_files"] = [
-                    str(path)
-                    for path in (row.get("target_files") or [])
-                    if str(path or "").strip()
-                ]
                 # Preserve the exact Recipe row so CLOSE can carry the validated
                 # kernel content and its refs forward on the same inference page.
                 entry["recipe_row"] = dict(row)
@@ -478,18 +473,6 @@ class PreludePhase(PhaseHandler):
         """Resolve every declared target of one kernel patch under one source root."""
         declared = self._parse_diff_targets(entry.get("patch_path"))
         if not declared:
-            return []
-        metadata = [
-            str(path).replace("\\", "/").lstrip("/")
-            for path in (
-                entry.get("target_files")
-                or (entry.get("meta") or {}).get("target_files")
-                or (entry.get("recipe_row") or {}).get("target_files")
-                or []
-            )
-            if str(path or "").strip()
-        ]
-        if metadata and set(metadata) != set(declared):
             return []
         try:
             from ..framework.paths import resolve_patch_target_roots
@@ -968,8 +951,8 @@ class PreludePhase(PhaseHandler):
                 entry["decision"] = "DEFERRED"
                 deferred += 1
                 continue
-            target = targets[0]
-            entry["target_files"] = list(targets)
+            anchor_target = targets[0]
+            entry["resolved_patch_targets"] = list(targets)
             try:
                 for target_path in targets:
                     snapshot = self._snapshot_warm_kernel_target(
@@ -997,9 +980,13 @@ class PreludePhase(PhaseHandler):
                 errors += 1
                 break
             try:
-                apply_result = self._apply_warm_kernel_patch(entry, target)
+                apply_result = self._apply_warm_kernel_patch(entry, anchor_target)
             except Exception as exc:  # noqa: BLE001
-                log.warning("warm-kernel KB: apply failed for %s", target, exc_info=True)
+                log.warning(
+                    "warm-kernel KB: apply failed for %s",
+                    anchor_target,
+                    exc_info=True,
+                )
                 entry["decision"] = "ERROR"
                 entry["apply_result"] = {"exception": f"{type(exc).__name__}: {exc}"[:300]}
                 errors += 1
