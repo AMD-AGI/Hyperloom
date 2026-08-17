@@ -1801,6 +1801,21 @@ class FrameworkPhase(PhaseHandler):
             state.enablement.kept_patches = kept
             _stack_setup_commands()
             _stack_kept_runtime()
+            # Accumulate env/arg changes from config-only rounds so a
+            # subsequent kept round can replay them via accepted_config.
+            adv_envs = res.get("extra_envs_applied") or {}
+            adv_args = str(res.get("extra_server_args_applied") or "").strip()
+            if adv_envs or adv_args:
+                cfg = dict(state.enablement.accepted_config or {})
+                merged = dict(cfg.get("extra_envs") or {})
+                merged.update({str(k): str(v) for k, v in adv_envs.items()})
+                existing_args = str(cfg.get("extra_server_args") or "").strip()
+                if adv_args and adv_args not in existing_args:
+                    existing_args = (existing_args + " " + adv_args).strip()
+                cfg["extra_envs"] = merged
+                cfg["extra_server_args"] = existing_args
+                cfg.setdefault("args_mode", "append")
+                state.enablement.accepted_config = cfg
             new_log = str(res.get("enablement_launch_log") or "").strip()
             if new_log:
                 state.enablement.launch_log = new_log
