@@ -232,7 +232,7 @@ def trace_write(
             found on disk, so the line can name what the write changed.
         error (BaseException | None): the failure, when the write did not land.
     """
-    if not log.isEnabledFor(TRACE):
+    if not trace_enabled():
         return
     try:
         fields = [
@@ -262,6 +262,51 @@ def trace_write(
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
 
 
+def trace_skip(
+    *,
+    reason: str,
+    section: str,
+    producer: str = "",
+    entity: Any = None,
+    error: BaseException | None = None,
+) -> None:
+    """Log a recording that was wanted but never attempted.
+
+    :func:`trace_write` only sees writes that got as far as the disk, so it
+    covers the outcome of recording and none of the reasons recording never
+    started. The gaps this fills are the ones that produce a breakdown with a
+    hole in it and nothing to explain the hole: an entry guard that returns
+    early because an id was empty, and a swallowed exception that keeps a
+    producer running at the cost of the record it was writing.
+
+    Args:
+        reason (str): why nothing was written, in a few words.
+        section (str): the breakdown section that would have been written.
+        producer (str): the producer label, when the caller knows it.
+        entity (Any): the id or name the record would have carried.
+        error (BaseException | None): the exception that was swallowed.
+    """
+    if not trace_enabled():
+        return
+    try:
+        fields = [
+            f"section={section}",
+            "outcome=skipped",
+            f"reason={_short(reason)}",
+        ]
+        if entity:
+            fields.append(f"id={_short(entity, _ID_LIMIT)}")
+        if producer:
+            fields.append(f"producer={producer}")
+        fields.append(_call_site())
+        if error is not None:
+            fields.append(f"error={type(error).__name__}:{_short(error)}")
+        # Same reasoning as trace_write: ids and error text are producer text.
+        log.log(TRACE, "breakdown %s", redact_secret_values(" ".join(fields)))
+    except Exception:  # noqa: BLE001 - a trace must never break a recording
+        log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
+
+
 if env_bool(TRACE_ENV):
     enable_trace()
 
@@ -271,5 +316,6 @@ __all__ = [
     "TRACE_ENV",
     "enable_trace",
     "trace_enabled",
+    "trace_skip",
     "trace_write",
 ]

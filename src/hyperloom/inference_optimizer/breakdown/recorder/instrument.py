@@ -41,6 +41,8 @@ from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import now_iso
 
+from .trace import trace_skip
+
 log = logging.getLogger(__name__)
 
 PRODUCER_COORDINATOR = "coordinator"
@@ -894,6 +896,7 @@ def record_phase_event(
             Coordinator).
     """
     if not session_dir or not isinstance(entry, dict):
+        trace_skip(reason="no session_dir" if not session_dir else "entry is not a dict", section="phase_transitions")
         return
     try:
         task_id = str(entry.get("task_id") or "")
@@ -926,8 +929,9 @@ def record_phase_event(
             tick=tick,
             producer=producer,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_phase_event failed", exc_info=True)
+        trace_skip(reason="writer raised", section="phase_transitions", error=exc)
 
 
 def record_action_operation(
@@ -946,6 +950,7 @@ def record_action_operation(
 ) -> None:
     """Mirror an action into v4 without changing legacy action ledgers."""
     if not session_dir:
+        trace_skip(reason="no session_dir", section="operations")
         return
     try:
         _mirror_action_v4(
@@ -964,8 +969,9 @@ def record_action_operation(
             tick=tick,
             producer=producer,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_action_operation failed", exc_info=True)
+        trace_skip(reason="writer raised", section="operations", error=exc)
 
 
 def snapshot_state_sections(
@@ -988,12 +994,14 @@ def snapshot_state_sections(
             Coordinator).
     """
     if not session_dir or state is None:
+        trace_skip(reason="no session_dir" if not session_dir else "no state", section="run_snapshot")
         return
     rec = None
     try:
         rec = _recorder(session_dir, producer)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("recorder unavailable", exc_info=True)
+        trace_skip(reason="writer raised", section="run_snapshot", error=exc)
         return
 
     for name, fn in (
@@ -1007,12 +1015,14 @@ def snapshot_state_sections(
     ):
         try:
             fn(rec, state)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             log.debug("snapshot section %s failed", name, exc_info=True)
+            trace_skip(reason="writer raised", section=name, error=exc)
     try:
         _snapshot_v4_run(rec, state)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("snapshot v4 run failed", exc_info=True)
+        trace_skip(reason="writer raised", section="run_snapshot", error=exc)
 
 
 def _snapshot_v4_run(rec, st: Any) -> None:
@@ -1465,6 +1475,7 @@ def record_kernel_strategy_selection(
 ) -> None:
     """Record the GEAK/native XOR decision and the selected route only."""
     if not session_dir:
+        trace_skip(reason="no session_dir", section="operations")
         return
     selected = str(selected_strategy or "").strip()
     paths = ["geak", "kernel_agent_forge"]
@@ -1614,6 +1625,7 @@ def record_native_kernel_run_start(
 ) -> None:
     """Upsert the selected native Kernel Agent plus Forge route as running."""
     if not session_dir:
+        trace_skip(reason="no session_dir", section="kernel_journey")
         return
     current_route_id = _KERNEL_ROUTE_CONTEXT.get(
         _kernel_route_context_key(session_dir),
@@ -1664,6 +1676,7 @@ def record_native_kernel_run_result(
 ) -> None:
     """Finalize the native Kernel Agent plus Forge route from its result."""
     if not session_dir:
+        trace_skip(reason="no session_dir", section="kernel_journey")
         return
     value = dict(result or {})
     current_route_id = _KERNEL_ROUTE_CONTEXT.get(
@@ -1761,6 +1774,7 @@ def record_geak_operation(
 ) -> None:
     """Upsert the GEAK route across runner, candidate, rebench, and final validation."""
     if not session_dir:
+        trace_skip(reason="no session_dir", section="operations")
         return
     value = dict(result or {})
     context = _KERNEL_ROUTE_CONTEXT.get(_kernel_route_context_key(session_dir), {})
@@ -2032,6 +2046,7 @@ def record_gemm_tuning_operation(
 ) -> None:
     """Record the independent Kernel-phase GEMM tuning run and KEEP adoption."""
     if not session_dir:
+        trace_skip(reason="no session_dir", section="operations")
         return
     inputs = dict(payload or {})
     value = dict(result or {})
@@ -2229,6 +2244,7 @@ def record_kernel_invocations(
             kernel-agent).
     """
     if not session_dir or not isinstance(result, dict):
+        trace_skip(reason="no session_dir" if not session_dir else "result is not a dict", section="kernel_invocations")
         return
     try:
         rec = _recorder(session_dir, producer)
@@ -2321,8 +2337,9 @@ def record_kernel_invocations(
             "pre_dispatch_failure": True,
         }
         rec.record_item(section, payload, key=f"{kid}-predispatch" if kid else None)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_kernel_invocations failed", exc_info=True)
+        trace_skip(reason="writer raised", section="kernel_invocations", error=exc)
 
 
 def _to_bool(value: Any) -> bool | None:
@@ -2613,6 +2630,7 @@ def record_kernel_discovery(
             kernel-agent).
     """
     if not session_dir:
+        trace_skip(reason="no session_dir", section="kernel_discovery")
         return
     try:
         kernels = [_normalize_hot_kernel(k) for k in (hot_kernels or []) if isinstance(k, dict)]
@@ -2683,8 +2701,9 @@ def record_kernel_discovery(
                     }
                 ],
             )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_kernel_discovery failed", exc_info=True)
+        trace_skip(reason="writer raised", section="kernel_discovery", error=exc)
 
 
 def record_tool_version(
@@ -2715,6 +2734,7 @@ def record_tool_version(
             kernel-agent).
     """
     if not session_dir or not tool:
+        trace_skip(reason="no session_dir" if not session_dir else "no tool", section="versions")
         return
     try:
         meta = _tool_metadata(
@@ -2728,8 +2748,9 @@ def record_tool_version(
             meta,
             key=str(tool).lower(),
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_tool_version failed", exc_info=True)
+        trace_skip(reason="writer raised", section="versions", error=exc)
 
 
 def record_kernel_dispatch(
@@ -2765,6 +2786,7 @@ def record_kernel_dispatch(
             kernel-agent).
     """
     if not session_dir or not kernel_id:
+        trace_skip(reason="no session_dir" if not session_dir else "no kernel_id", section="kernel_dispatch")
         return
     try:
         payload = {
@@ -2836,8 +2858,9 @@ def record_kernel_dispatch(
                 }
             ],
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_kernel_dispatch failed", exc_info=True)
+        trace_skip(reason="writer raised", section="kernel_dispatch", error=exc)
 
 
 def record_kernel_backend_result(
@@ -2863,6 +2886,7 @@ def record_kernel_backend_result(
             kernel-agent).
     """
     if not session_dir or not isinstance(result, dict):
+        trace_skip(reason="no session_dir" if not session_dir else "result is not a dict", section="kernel_backend_result")
         return
     try:
         rec = _recorder(session_dir, producer)
@@ -3168,8 +3192,9 @@ def record_kernel_backend_result(
                 version=str(result_meta.get("version") or "") or None,
                 producer=producer,
             )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_kernel_backend_result failed", exc_info=True)
+        trace_skip(reason="writer raised", section="kernel_backend_result", error=exc)
 
 
 def record_kernel_e2e(
@@ -3217,6 +3242,7 @@ def record_kernel_e2e(
             kernel-agent).
     """
     if not session_dir or not kernel_id:
+        trace_skip(reason="no session_dir" if not session_dir else "no kernel_id", section="kernel_e2e")
         return
     try:
         evidence = dict(result or {})
@@ -3432,8 +3458,9 @@ def record_kernel_e2e(
                 }
             },
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_kernel_e2e failed", exc_info=True)
+        trace_skip(reason="writer raised", section="kernel_e2e", error=exc)
 
 
 def record_specialist_round(
@@ -3453,6 +3480,7 @@ def record_specialist_round(
             Coordinator).
     """
     if not session_dir or not isinstance(entry, dict) or not entry:
+        trace_skip(reason="no session_dir" if not session_dir else "empty entry", section="specialist_rounds")
         return
     try:
         key = str(entry.get("round_id") or "") or None
@@ -3550,8 +3578,9 @@ def record_specialist_round(
             ts=str(entry.get("completed_at") or entry.get("dispatched_at") or ""),
             producer=producer,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_specialist_round failed", exc_info=True)
+        trace_skip(reason="writer raised", section="specialist_rounds", error=exc)
 
 
 def record_critic_iteration(
@@ -3588,6 +3617,7 @@ def record_critic_iteration(
         producer (str): the breakdown producer label (defaults to ``critic``).
     """
     if not session_dir:
+        trace_skip(reason="no session_dir", section="critic_iterations")
         return
     try:
         review = review if isinstance(review, dict) else {}
@@ -3704,8 +3734,9 @@ def record_critic_iteration(
                 ts=str(payload.get("ts") or ""),
                 producer=producer,
             )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_critic_iteration failed", exc_info=True)
+        trace_skip(reason="writer raised", section="critic_iterations", error=exc)
 
 
 def record_robustness_signal(
@@ -3730,6 +3761,7 @@ def record_robustness_signal(
             ``robustness``).
     """
     if not session_dir or not workdir:
+        trace_skip(reason="no session_dir" if not session_dir else "no workdir", section="robustness_signals")
         return
     try:
         wd = Path(workdir)
@@ -3772,8 +3804,9 @@ def record_robustness_signal(
             ts=str(payload.get("ts") or ""),
             producer=producer,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_robustness_signal failed", exc_info=True)
+        trace_skip(reason="writer raised", section="robustness_signals", error=exc)
 
 
 def record_singleton_section(
@@ -3794,6 +3827,7 @@ def record_singleton_section(
         producer (str): the breakdown producer label that owns the section.
     """
     if not session_dir or not isinstance(payload, dict) or not payload:
+        trace_skip(reason="no session_dir" if not session_dir else "empty payload", section=section)
         return
     try:
         _recorder(session_dir, producer).record_singleton(section, payload)
@@ -3826,8 +3860,9 @@ def record_singleton_section(
                 ts=str(payload.get("ts") or ""),
                 producer=producer,
             )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_singleton_section %s failed", section, exc_info=True)
+        trace_skip(reason="writer raised", section=section, error=exc)
 
 
 def _v4_payload(
@@ -3844,9 +3879,25 @@ def _valid_v4_call(
     session_dir: Path | str | None,
     producer: str,
     payload: Mapping[str, Any],
+    *,
+    section: str = "",
 ) -> bool:
-    """Return whether a v4 helper call has usable routing metadata."""
-    return bool(session_dir and payload and _VALID_PRODUCER.fullmatch(str(producer or "")))
+    """Return whether a v4 helper call has usable routing metadata.
+
+    A caller that fails this is asking to record something and getting
+    nothing, which is the shape of gap the export can only report as an
+    absence, so say which of the three requirements was missing.
+    """
+    if not session_dir:
+        reason = "no session_dir"
+    elif not payload:
+        reason = "empty payload"
+    elif not _VALID_PRODUCER.fullmatch(str(producer or "")):
+        reason = f"invalid producer {producer!r}"
+    else:
+        return True
+    trace_skip(reason=reason, section=section, producer=str(producer or ""))
+    return False
 
 
 def _record_v4_entity(
@@ -3864,7 +3915,12 @@ def _record_v4_entity(
     stable_id = str(entity_id or value.get(id_field) or "").strip()
     if stable_id:
         value[id_field] = stable_id
-    if not _valid_v4_call(session_dir, producer, value) or not stable_id:
+    if not _valid_v4_call(session_dir, producer, value, section=section):
+        return
+    if not stable_id:
+        # An entity is merged by its id, so one without an id has nothing to
+        # be merged into and cannot be written at all.
+        trace_skip(reason=f"no {id_field}", section=section, producer=producer)
         return
     try:
         _recorder(session_dir, producer).record_upsert_item(
@@ -3872,8 +3928,15 @@ def _record_v4_entity(
             value,
             key=stable_id,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_%s failed", section, exc_info=True)
+        trace_skip(
+            reason="writer raised",
+            section=section,
+            producer=producer,
+            entity=stable_id,
+            error=exc,
+        )
 
 
 def _record_v4_event(
@@ -3887,7 +3950,7 @@ def _record_v4_event(
 ) -> None:
     """Best-effort writer for a v4 event with an optional stable key."""
     value = _v4_payload(payload, fields)
-    if not _valid_v4_call(session_dir, producer, value):
+    if not _valid_v4_call(session_dir, producer, value, section=section):
         return
     key = next((str(value.get(name) or "").strip() for name in key_fields if value.get(name)), "")
     try:
@@ -3896,8 +3959,15 @@ def _record_v4_event(
             recorder.record_upsert_item(section, value, key=key)
         else:
             recorder.record_item(section, value)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_%s failed", section, exc_info=True)
+        trace_skip(
+            reason="writer raised",
+            section=section,
+            producer=producer,
+            entity=key,
+            error=exc,
+        )
 
 
 def record_run_snapshot(
@@ -3909,12 +3979,18 @@ def record_run_snapshot(
 ) -> None:
     """Record a partial v4 run snapshot using author-time facts only."""
     value = _v4_payload(snapshot, fields)
-    if not _valid_v4_call(session_dir, producer, value):
+    if not _valid_v4_call(session_dir, producer, value, section="run_snapshot"):
         return
     try:
         _recorder(session_dir, producer).record_upsert_singleton("run_snapshot", value)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_run_snapshot failed", exc_info=True)
+        trace_skip(
+            reason="writer raised",
+            section="run_snapshot",
+            producer=producer,
+            error=exc,
+        )
 
 
 def record_phase_transition(

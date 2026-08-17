@@ -174,3 +174,85 @@ def test_the_trace_level_stays_below_debug():
     """A per-write firehose cannot share a level with output read for anything else."""
     assert trace_mod.TRACE < logging.DEBUG
     assert logging.getLevelName(trace_mod.TRACE) == "TRACE"
+
+
+def test_turning_the_trace_off_is_not_the_same_as_leaving_it_unset(tmp_path, caplog):
+    """Clearing the level hands the decision to whatever the root happens to be.
+
+    A root logger at NOTSET enables everything, so a caller that explicitly
+    asked for silence kept getting a firehose.
+    """
+    caplog.set_level(trace_mod.TRACE, logger=trace_mod.log.name)
+    trace_mod.enable_trace(True)
+    trace_mod.enable_trace(False)
+    root = logging.getLogger()
+    restore = root.level
+    root.setLevel(logging.NOTSET)
+    try:
+        record_measurement(tmp_path, measurement_id="m-1", name="throughput", value=1.0)
+    finally:
+        root.setLevel(restore)
+
+    assert not trace_mod.trace_enabled()
+    assert caplog.records == []
+
+
+def test_a_write_that_only_adds_fields_still_admits_what_it_left_out():
+    """Both halves of the line are capped, so both have to be counted."""
+    previous = {"operation_id": "op-1"}
+    merged = {"operation_id": "op-1", **{f"f{index}": index for index in range(20)}}
+
+    summary = trace_mod._changed(previous, merged)
+
+    assert "(+" in summary and "more)" in summary
+
+
+def test_a_record_that_was_never_attempted_says_why(tmp_path, traced):
+    """The gap this fills: nothing written, and nothing said about it either."""
+    record_operation(None, operation_id="op-1", kind="integrate_patch")
+    record_measurement(tmp_path, name="throughput", value=1.0)
+
+    lines = [record.getMessage() for record in traced.records]
+
+    assert any("outcome=skipped" in line and "no session_dir" in line for line in lines)
+    assert any(
+        "outcome=skipped" in line and "no measurement_id" in line for line in lines
+    )
+    assert all("via=instrument.py:" in line for line in lines if "skipped" in line)
+
+
+def test_a_swallowed_writer_failure_is_traced_and_still_swallowed(tmp_path, traced, monkeypatch):
+    """A producer keeps running; the record it lost should not go unmentioned."""
+
+    def explode(*_args, **_kwargs):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.recorder.recorder.atomic_write_text",
+        explode,
+    )
+
+    record_operation(tmp_path, operation_id="op-1", kind="integrate_patch")
+
+    line = list(traced.records)[-1].getMessage()
+
+    assert "outcome=skipped" in line
+    assert "reason=writer raised" in line
+    assert "error=OSError:no space left on device" in line
+
+
+def test_a_credential_in_a_skipped_record_is_masked(tmp_path, traced, monkeypatch):
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("Authorization: Bearer tok-aaaaaaaaaaaa")
+
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.recorder.recorder.atomic_write_text",
+        explode,
+    )
+
+    record_operation(tmp_path, operation_id="op-1", kind="integrate_patch")
+
+    line = list(traced.records)[-1].getMessage()
+
+    assert "tok-aaaaaaaaaaaa" not in line
+    assert "[REDACTED]" in line
