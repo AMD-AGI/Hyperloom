@@ -41,12 +41,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+log = logging.getLogger(__name__)
+
 try:
     from itanium_demangler import parse as _itanium_parse
 except ImportError:
     _itanium_parse = None
-
-log = logging.getLogger(__name__)
+    log.warning(
+        "itanium-demangler is not installed. Kernel classification may be degraded. "
+        "Install it with: pip install itanium-demangler"
+    )
 
 try:  # package import (TraceLens route / tests)
     from . import kernel_source_index, source_env
