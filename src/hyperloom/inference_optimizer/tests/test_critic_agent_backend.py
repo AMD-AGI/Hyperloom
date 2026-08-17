@@ -28,8 +28,10 @@ from hyperloom.orchestrator.roles.critic_agent import (
     CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
     CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
     CRITIC_AGENT_MAX_COMPLETION_TOKENS,
+    CRITIC_AGENT_TRUNCATION_RETRY_FACTOR,
     _REVIEW_OUTPUT_INSTRUCTIONS,
     _extract_review_json,
+    _is_truncated_finish,
     _reviewed_msg_ids_from_bundle,
     _verdict_references_kb,
 )
@@ -301,6 +303,17 @@ async def test_run_omits_options_when_known_actions_empty(
 
 def test_extract_review_json_returns_none_when_key_absent():
     assert _extract_review_json('```json\n{"intents": []}\n```') is None
+
+
+@pytest.mark.parametrize("finish", ["max_tokens", "length", "MAX_TOKENS", " length "])
+def test_is_truncated_finish_covers_both_transport_spellings(finish: str):
+    """OpenAI says ``length`` where Anthropic says ``max_tokens``."""
+    assert _is_truncated_finish(finish) is True
+
+
+@pytest.mark.parametrize("finish", [None, "", "stop", "end_turn", "tool_use"])
+def test_is_truncated_finish_rejects_reasons_that_ended_on_their_own(finish: str | None):
+    assert _is_truncated_finish(finish) is False
 
 
 # Construction
@@ -622,12 +635,18 @@ async def test_empty_proposals_yields_heartbeat_no_llm(
     assert client.completions.calls == []
 
 
-# Case 4: LLM returns garbage -> empty review -> heartbeat
+# Case 4: LLM returns garbage -> the turn fails
 @pytest.mark.asyncio
-async def test_unparseable_llm_reply_falls_back_to_heartbeat(
+async def test_unparseable_llm_reply_fails_the_turn(
     fake_critic_root: Path,
     fake_session_dir: Path,
 ):
+    """Proposals were reviewed and no verdict came back — that is a failure.
+
+    Emitting a heartbeat instead would make it indistinguishable from a critic
+    that ran fine and had nothing to say, leaving the proposals pending while
+    the loop reads the turn as successful.
+    """
     judge_bundle = {
         "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
@@ -653,11 +672,8 @@ async def test_unparseable_llm_reply_falls_back_to_heartbeat(
         codex_replies=["I am thinking… no JSON here."],
         judge_bundle=judge_bundle,
     )
-    res = await backend.run("prompt")
-    # Empty review_verdicts → commit-review fake falls back to heartbeat.
-    assert len(res.intents) == 1
-    assert res.intents[0].type == IntentType.SEND_MESSAGE
-    assert res.intents[0].payload["topic"] == "heartbeat"
+    with pytest.raises(BackendError, match="no parseable review_verdicts"):
+        await backend.run("prompt")
 
 
 # Case 5: required_context non-empty -> needs_review + critic_unavailable
@@ -1766,31 +1782,139 @@ def _minimal_judge_bundle() -> dict[str, Any]:
     }
 
 
+def _truncated_anthropic_result() -> AnthropicMessageResult:
+    """A reply the model stopped writing when it ran out of output budget."""
+    return _anthropic_review_result(
+        '{"review_verdicts": [{"target_proposal',
+        stop_reason="max_tokens",
+        usage={"input_tokens": 9, "output_tokens": CRITIC_AGENT_MAX_COMPLETION_TOKENS},
+    )
+
+
 @pytest.mark.asyncio
-async def test_anthropic_protocol_surfaces_stop_reason_as_finish_reason(
+async def test_truncated_review_is_retried_with_a_bigger_cap(
     fake_critic_root: Path,
     fake_session_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A reply cut off at the token cap must be distinguishable from one the
-    model simply formatted wrong; both otherwise parse to zero verdicts."""
-    truncated = _anthropic_review_result(
-        '{"review_verdicts": [{"target_proposal',
-        stop_reason="max_tokens",
-        usage={"input_tokens": 9, "output_tokens": 4096},
+    """Re-asking under the same cap would truncate at the same byte, so the
+    retry only earns its keep by raising the ceiling."""
+    complete = _anthropic_review_result(
+        '{"review_verdicts": [{"target_proposal_msg_id": "p1", '
+        '"verdict": "approve", "source": "critic", "reasoning": "ok"}]}'
     )
-    backend, _ = _make_anthropic_backend(
+    backend, fake_completion = _make_anthropic_backend(
         fake_critic_root,
         fake_session_dir,
         monkeypatch,
-        results=[truncated],
+        results=[_truncated_anthropic_result(), complete],
         judge_bundle=_minimal_judge_bundle(),
     )
 
     res = await backend.run("prompt", system_prompt="critic system")
 
-    assert [i for i in res.intents if i.type == IntentType.REVIEW_VERDICT] == []
-    assert res.metadata["finish_reason"] == "max_tokens"
+    verdicts = [i for i in res.intents if i.type == IntentType.REVIEW_VERDICT]
+    assert len(verdicts) == 1
+    assert verdicts[0].payload["target_proposal_msg_id"] == "p1"
+    assert len(fake_completion.calls) == 2
+    assert fake_completion.calls[0]["max_tokens"] == CRITIC_AGENT_MAX_COMPLETION_TOKENS
+    assert fake_completion.calls[1]["max_tokens"] == (
+        CRITIC_AGENT_MAX_COMPLETION_TOKENS * CRITIC_AGENT_TRUNCATION_RETRY_FACTOR
+    )
+
+
+@pytest.mark.asyncio
+async def test_review_truncated_twice_fails_the_turn(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Verdicts that never arrive must not be reported as verdicts that say
+    nothing: the loop would keep re-asking the question it already can't
+    answer, and nothing on the record would say why."""
+    backend, fake_completion = _make_anthropic_backend(
+        fake_critic_root,
+        fake_session_dir,
+        monkeypatch,
+        results=[_truncated_anthropic_result(), _truncated_anthropic_result()],
+        judge_bundle=_minimal_judge_bundle(),
+    )
+
+    with pytest.raises(BackendError, match="no parseable review_verdicts") as excinfo:
+        await backend.run("prompt", system_prompt="critic system")
+
+    # The message has to name the cap, or an operator cannot tell a truncated
+    # review from a model that answered in prose.
+    assert "max_tokens" in str(excinfo.value)
+    assert len(fake_completion.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_unparseable_review_is_not_retried(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A reply that ended on its own terms is a formatting failure, not a
+    budget one, so a second call at a bigger cap buys nothing."""
+    backend, fake_completion = _make_anthropic_backend(
+        fake_critic_root,
+        fake_session_dir,
+        monkeypatch,
+        results=[_anthropic_review_result("no JSON here", stop_reason="end_turn")],
+        judge_bundle=_minimal_judge_bundle(),
+    )
+
+    with pytest.raises(BackendError, match="no parseable review_verdicts"):
+        await backend.run("prompt", system_prompt="critic system")
+
+    assert len(fake_completion.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_max_completion_tokens_env_override_raises_the_cap(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A deployment can move the cap to fit its model without a code change —
+    the knob this incident had no way to turn."""
+    monkeypatch.setenv("CRITIC_AGENT_MAX_COMPLETION_TOKENS", "64000")
+    review_json = (
+        '{"review_verdicts": [{"target_proposal_msg_id": "p1", '
+        '"verdict": "approve", "source": "critic", "reasoning": "ok"}]}'
+    )
+    backend, fake_completion = _make_anthropic_backend(
+        fake_critic_root,
+        fake_session_dir,
+        monkeypatch,
+        results=[_anthropic_review_result(review_json)],
+        judge_bundle=_minimal_judge_bundle(),
+    )
+
+    await backend.run("prompt", system_prompt="critic system")
+
+    assert fake_completion.calls[0]["max_tokens"] == 64000
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("not-a-number", CRITIC_AGENT_MAX_COMPLETION_TOKENS),
+        ("0", CRITIC_AGENT_MAX_COMPLETION_TOKENS),
+        ("-5", CRITIC_AGENT_MAX_COMPLETION_TOKENS),
+        ("  ", CRITIC_AGENT_MAX_COMPLETION_TOKENS),
+        ("16000", 16000),
+    ],
+)
+def test_max_completion_tokens_env_is_parsed_leniently(
+    raw: str,
+    expected: int,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A typo in the knob must cost the default, not the turn."""
+    monkeypatch.setenv("CRITIC_AGENT_MAX_COMPLETION_TOKENS", raw)
+    assert CriticAgentBackend._resolve_max_completion_tokens() == expected
 
 
 @pytest.mark.asyncio
