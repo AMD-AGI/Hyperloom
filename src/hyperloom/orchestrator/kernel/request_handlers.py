@@ -4856,6 +4856,17 @@ async def run_collective_handler(payload: dict, *, session_dir: Path) -> Handler
     return result
 
 
+#: Characters of a tuner's error kept in the audit row. Enough to identify the
+#: failure (an argparse rejection, a memory fault, a kill) without copying the
+#: tuner's whole tail into an append-only trace.
+_TRACE_ERROR_CHARS = 400
+
+#: Audit keys emitted even when null. The first three predate the failure fields
+#: and existing readers index on them; the rest are omitted when empty so a
+#: clean run's row stays as compact as it was.
+_TRACE_TUNER_KEEP_NULL = frozenset({"tuner", "best_micro_speedup", "kept"})
+
+
 def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
     """Append one ``gemm_tuning.jsonl`` audit row for a GEMM-tuning run.
 
@@ -4875,16 +4886,27 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
 
     engine = str(result.get("engine") or result.get("backend") or "").strip().lower() or "unknown"
     tuners: list[dict[str, Any]] = []
+    tuner_error_class: str | None = None
     for t in result.get("tuners_run") or []:
         if not isinstance(t, dict):
             continue
-        tuners.append(
-            {
-                "tuner": t.get("tuner") or t.get("name"),
-                "best_micro_speedup": t.get("best_micro_speedup"),
-                "kept": t.get("kept"),
-            }
-        )
+        # A tuner that crashed and a tuner that found nothing both arrive with no
+        # speedup. Carrying only the speedup made them indistinguishable in the
+        # audit, so an environment failure read as a tuning verdict. Keep the
+        # tuner's own outcome, its cost, and the head of its error.
+        error = t.get("error")
+        entry = {
+            "tuner": t.get("tuner") or t.get("name"),
+            "best_micro_speedup": t.get("best_micro_speedup"),
+            "kept": t.get("kept"),
+            "status": t.get("status"),
+            "elapsed_s": t.get("elapsed_s"),
+            "error_class": t.get("error_class"),
+            "error": str(error)[:_TRACE_ERROR_CHARS] if error else None,
+        }
+        tuners.append({k: v for k, v in entry.items() if v is not None or k in _TRACE_TUNER_KEEP_NULL})
+        if tuner_error_class is None and t.get("error_class"):
+            tuner_error_class = str(t.get("error_class"))
     row = {
         "kind": "gemm_tuning",
         "ts": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
@@ -4901,7 +4923,9 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
         "workspace": result.get("workspace"),
         "requires_e2e_validation": result.get("requires_e2e_validation"),
         "tuners_run": tuners,
-        "error_class": result.get("error_class"),
+        # The envelope leaves ``error_class`` unset even when every tuner failed;
+        # promote the first tuner's class so a failed run is greppable.
+        "error_class": result.get("error_class") or tuner_error_class,
     }
     row = {k: v for k, v in row.items() if v is not None}
     try:

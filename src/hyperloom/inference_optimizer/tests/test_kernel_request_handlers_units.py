@@ -5601,3 +5601,101 @@ def test_a_longer_explicit_budget_is_never_shortened(monkeypatch):
     generous = aiter_jit.BASELINE_COLD_START_TIMEOUT_SEC + 1200
 
     assert rh._cold_start_rebaseline_timeout(generous) == generous
+
+
+def _gemm_trace_rows(tmp_path: Path, result: dict) -> list[dict]:
+    """Run the GEMM-tuning audit and return the rows it appended."""
+    krh._trace_gemm_tuning_run(result, session_dir=tmp_path)
+    path = tmp_path / "reports" / "trace" / "gemm_tuning.jsonl"
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_gemm_trace_keeps_tuner_failure(tmp_path: Path) -> None:
+    # A tuner killed by the OS and a tuner that found nothing both arrive with no
+    # speedup. The audit row must keep the tuner's own status, cost and error, or
+    # the two are indistinguishable in the trace.
+    rows = _gemm_trace_rows(
+        tmp_path,
+        {
+            "engine": "forge",
+            "status": "failed",
+            "tuners_run": [
+                {
+                    "tuner": "a8w8",
+                    "status": "failed",
+                    "elapsed_s": 500.42,
+                    "error": "Tuner exited with code -9: " + "x" * 5000,
+                    "error_class": "subprocess_error",
+                }
+            ],
+        },
+    )
+    assert len(rows) == 1
+    tuner = rows[0]["tuners_run"][0]
+    assert tuner["status"] == "failed"
+    assert tuner["elapsed_s"] == 500.42
+    assert tuner["error_class"] == "subprocess_error"
+    assert tuner["error"].startswith("Tuner exited with code -9")
+    assert len(tuner["error"]) == krh._TRACE_ERROR_CHARS
+
+
+def test_gemm_trace_promotes_tuner_error_class_to_envelope(tmp_path: Path) -> None:
+    # The run envelope leaves error_class unset even when the tuner failed, so a
+    # failed run was not greppable by class. Promote the first tuner's class.
+    rows = _gemm_trace_rows(
+        tmp_path,
+        {
+            "engine": "forge",
+            "status": "failed",
+            "error_class": None,
+            "tuners_run": [
+                {"tuner": "fmoe_ck", "status": "failed", "error_class": "subprocess_error", "error": "boom"}
+            ],
+        },
+    )
+    assert rows[0]["error_class"] == "subprocess_error"
+
+
+def test_gemm_trace_envelope_error_class_wins_over_tuner(tmp_path: Path) -> None:
+    rows = _gemm_trace_rows(
+        tmp_path,
+        {
+            "engine": "forge",
+            "status": "failed",
+            "error_class": "global_timeout",
+            "tuners_run": [{"tuner": "a8w8", "status": "failed", "error_class": "subprocess_error"}],
+        },
+    )
+    assert rows[0]["error_class"] == "global_timeout"
+
+
+def test_gemm_trace_clean_run_row_stays_compact(tmp_path: Path) -> None:
+    # A tuner that simply found nothing carries no error, so the new keys are
+    # omitted rather than written as nulls. The legacy keys stay unconditional.
+    rows = _gemm_trace_rows(
+        tmp_path,
+        {
+            "engine": "forge",
+            "status": "ok",
+            "tuners_run": [{"tuner": "sglang_dense_bf16", "status": "no_improvement", "elapsed_s": 11.19}],
+        },
+    )
+    tuner = rows[0]["tuners_run"][0]
+    assert tuner == {
+        "tuner": "sglang_dense_bf16",
+        "best_micro_speedup": None,
+        "kept": None,
+        "status": "no_improvement",
+        "elapsed_s": 11.19,
+    }
+    assert "error_class" not in rows[0]
+
+
+def test_gemm_trace_survives_non_mapping_tuner_entries(tmp_path: Path) -> None:
+    rows = _gemm_trace_rows(
+        tmp_path,
+        {"engine": "forge", "status": "ok", "tuners_run": ["junk", None, {"tuner": "a8w8"}]},
+    )
+    assert [t["tuner"] for t in rows[0]["tuners_run"]] == ["a8w8"]
