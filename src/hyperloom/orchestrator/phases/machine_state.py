@@ -13,6 +13,7 @@ Any phase → CLOSE on terminal/abort; ``recover`` is phase-orthogonal.
 from __future__ import annotations
 
 import math
+import time
 from typing import Any
 
 from hyperloom.common.coerce import to_unix
@@ -1308,11 +1309,16 @@ def session_remaining_seconds(
 ) -> float | None:
     """Total wall-clock seconds remaining for the session (``None`` when ``max_minutes`` 0 or ``start_ts`` unparseable).
 
+    Prefers a stamped ``deadline_unix`` when present so this agrees with
+    admission and the Coordinator loop. Falls back to ``start_ts + max_minutes``
+    for sessions that predate the stamp.
+
     Args:
         state (Any): Frozen SharedState view exposing ``max_minutes`` and
             ``start_ts``.
-        now_unix (float | None): Accepted for signature parity; the deadline is
-            computed against the current UTC time.
+        now_unix (float | None): Override for the current time; the deadline is
+            subtracted from this when stamped, otherwise compared against
+            ``start_ts``.
 
     Returns:
         float | None: Non-negative seconds left in the session, or ``None``
@@ -1321,6 +1327,13 @@ def session_remaining_seconds(
     mm = _max_minutes(state)
     if mm <= 0:
         return None
+    try:
+        deadline = float(getattr(state, "deadline_unix", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        deadline = 0.0
+    if deadline > 0.0:
+        now = float(now_unix) if now_unix is not None else time.time()
+        return max(0.0, deadline - now)
     start_ts = str(getattr(state, "start_ts", "") or "").strip()
     if not start_ts:
         return None
