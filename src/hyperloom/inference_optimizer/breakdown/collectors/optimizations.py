@@ -15,6 +15,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from ..agent_ownership import UNATTRIBUTED, patch_author
+
 
 #: Matches the major version of the breakdown envelope
 #: (``hyperloom.session_breakdown.v5.0``), so one number answers both
@@ -74,17 +76,6 @@ def _parse_ts(value: Any) -> float | None:
         return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
-
-
-def _normalized_phase(value: Any) -> str:
-    phase = str(value or "").strip().upper()
-    return {
-        "FRAMEWORK": "framework_agent",
-        "FRAMEWORK_AGENT": "framework_agent",
-        "EXPLORE": "explore",
-        "KERNEL": "kernel_agent",
-        "KERNEL_AGENT": "kernel_agent",
-    }.get(phase, "")
 
 
 def _empty_summary() -> dict[str, Any]:
@@ -220,15 +211,8 @@ def _attempt_agent(operation: dict[str, Any], adoption: dict[str, Any]) -> str:
 
     if kind == "integrate_patch":
         outputs = operation.get("outputs") if isinstance(operation.get("outputs"), dict) else {}
-        if outputs.get("framework_agent_authoring") or outputs.get(
-            "framework_agent_candidate_id"
-        ):
-            return "framework_agent"
-        provenance = str(outputs.get("provenance") or "").strip().lower()
-        if outputs.get("domain") or provenance.startswith("specialist:"):
-            return "explore"
-        return _normalized_phase(outputs.get("source_phase")) or "unattributed"
-    return "unattributed"
+        return patch_author(outputs)
+    return UNATTRIBUTED
 
 
 def _last_decision(operation: dict[str, Any]) -> dict[str, Any]:
@@ -301,6 +285,28 @@ def _sub_attempt_rows(operation: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _first_recorded(*candidates: tuple[str, Any]) -> tuple[Any, str]:
+    """Return the first candidate a producer actually recorded, and its origin.
+
+    These chains exist because several producers record the same fact in
+    different places. Which place a value came from is what says whether it is
+    the verdict an executor stated or a status inferred from the operation
+    around it, and losing that distinction is how a fallback becomes
+    indistinguishable from the real thing.
+
+    Args:
+        candidates: ``(origin, value)`` pairs, most authoritative first.
+
+    Returns:
+        The first non-empty value with the origin it came from; ``(None, "")``
+        when nothing was recorded.
+    """
+    for origin, value in candidates:
+        if value is not None and value != "":
+            return value, origin
+    return None, ""
 
 
 def _recorded_attempt_row(
@@ -395,14 +401,14 @@ def _recorded_attempt_row(
             continue
         artifacts.append({"kind": str(artifact.get("kind") or ""), "path": path})
 
-    decision = str(
-        adoption.get("decision")
-        or decision_row.get("verdict")
-        or outputs.get("decision")
-        or outputs.get("status")
-        or operation.get("status")
-        or ""
-    ).strip().upper()
+    decision, decision_source = _first_recorded(
+        ("adoption.decision", adoption.get("decision")),
+        ("decision.verdict", decision_row.get("verdict")),
+        ("outputs.decision", outputs.get("decision")),
+        ("outputs.status", outputs.get("status")),
+        ("operation.status", operation.get("status")),
+    )
+    decision = str(decision or "").strip().upper()
     adopted = (
         bool(adoption)
         and adoption.get("validated") is True
@@ -413,13 +419,12 @@ def _recorded_attempt_row(
     # against its own starting point, which is not the session baseline once
     # anything has been adopted. Summing these across attempts is wrong, and a
     # shared field name is all it takes for someone to try.
-    local_gain_pct = _to_float(adoption.get("gain_pct"))
-    if local_gain_pct is None:
-        local_gain_pct = _to_float(evidence.get("gain_pct"))
-    if local_gain_pct is None:
-        local_gain_pct = _to_float(outputs.get("delta_pct"))
-    if local_gain_pct is None:
-        local_gain_pct = measured_gain
+    local_gain_pct, local_gain_source = _first_recorded(
+        ("adoption.gain_pct", _to_float(adoption.get("gain_pct"))),
+        ("decision.evidence.gain_pct", _to_float(evidence.get("gain_pct"))),
+        ("outputs.delta_pct", _to_float(outputs.get("delta_pct"))),
+        ("measurement", measured_gain),
+    )
 
     return {
         "attempt_id": operation_id,
@@ -452,6 +457,10 @@ def _recorded_attempt_row(
         ),
         "status": str(operation.get("status") or ""),
         "decision": decision,
+        # Where each of these came from. A verdict an executor stated and a
+        # status inferred from the operation around it are different claims,
+        # and the value alone cannot tell them apart.
+        "decision_source": decision_source,
         "decision_reason": str(
             adoption.get("reason")
             or decision_row.get("reason")
@@ -467,8 +476,19 @@ def _recorded_attempt_row(
             bool(adoption.get("attribution_eligible", True)) if adoption else None
         ),
         "local_gain_pct": round(local_gain_pct, 6) if local_gain_pct is not None else None,
+        "local_gain_source": local_gain_source,
         "throughput_before": throughput_before,
         "throughput_after": throughput_after,
+        # ``adoption`` means the numbers were frozen when the call was made;
+        # ``measurement`` means they were read back afterwards and could since
+        # have moved.
+        "throughput_source": (
+            "adoption"
+            if frozen_before is not None or frozen_after is not None
+            else "measurement"
+            if measured_before is not None or measured_after is not None
+            else ""
+        ),
         "adoption_id": str(adoption.get("adoption_id") or "") or None,
         "gates": _gate_rows(operation),
         "backend_attempts": _sub_attempt_rows(operation),

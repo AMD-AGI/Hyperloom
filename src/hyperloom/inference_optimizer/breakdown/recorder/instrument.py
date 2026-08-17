@@ -41,6 +41,7 @@ from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import now_iso
 
+from ..agent_ownership import UNATTRIBUTED, agent_from_phase, patch_author
 from .trace import trace_skip
 
 log = logging.getLogger(__name__)
@@ -206,15 +207,6 @@ _AGENT_BY_ACTION = {
     "robustness": "robustness",
 }
 
-_AGENT_BY_PHASE = {
-    "FRAMEWORK": "framework_agent",
-    "FRAMEWORK_AGENT": "framework_agent",
-    "EXPLORE": "explore",
-    "KERNEL": "kernel_agent",
-    "KERNEL_AGENT": "kernel_agent",
-}
-
-
 def _resolve_agent(
     action: str,
     *,
@@ -231,16 +223,8 @@ def _resolve_agent(
     name = str(action or "").strip().lower()
     result = result or {}
 
-    # A patch application carries its author in the result; the phase that
-    # happens to be active when it lands says nothing about who wrote it.
     if name.startswith("integrate_patch") or name == "integrate":
-        if result.get("framework_agent_authoring") or result.get("framework_agent_candidate_id"):
-            return "framework_agent"
-        provenance = str(result.get("provenance") or "").strip().lower()
-        if result.get("domain") or provenance.startswith("specialist:"):
-            return "explore"
-        recorded_phase = _AGENT_BY_PHASE.get(str(result.get("source_phase") or "").strip().upper(), "")
-        return recorded_phase or "unattributed"
+        return patch_author(result)
 
     direct = _AGENT_BY_ACTION.get(name)
     if direct:
@@ -248,10 +232,11 @@ def _resolve_agent(
     if name.startswith("kernel_opt") or name in {"geak_e2e", "gemm_tuning", "fusion", "kernel_optimization"}:
         return "kernel_agent"
 
-    recorded_phase = _AGENT_BY_PHASE.get(str(result.get("source_phase") or "").strip().upper(), "")
-    if recorded_phase:
-        return recorded_phase
-    return _AGENT_BY_PHASE.get(str(phase or "").strip().upper(), "") or "unattributed"
+    return (
+        agent_from_phase(result.get("source_phase"))
+        or agent_from_phase(phase)
+        or UNATTRIBUTED
+    )
 
 
 def _action_operation_id(action: str, entry: Mapping[str, Any]) -> str:

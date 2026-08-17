@@ -696,6 +696,92 @@ def test_a_keep_no_accuracy_gate_ruled_on_is_counted_as_such():
     assert result["validation"]["unscored_keep_count"] == 1
 
 
+def test_both_sides_of_the_record_name_a_patch_author_the_same_way():
+    """The rule used to exist twice, and a copy that drifts moves gain.
+
+    The write side stamps an owner when the patch lands; the read side has to
+    name one for sessions recorded before it did. They answer with the same
+    function or they eventually answer differently.
+    """
+    from hyperloom.inference_optimizer.breakdown.recorder.instrument import _resolve_agent
+
+    cases = [
+        ({"framework_agent_authoring": True, "source_phase": "KERNEL_AGENT"}, "framework_agent"),
+        ({"provenance": "specialist:latency", "source_phase": "KERNEL_AGENT"}, "explore"),
+        ({"domain": "attention"}, "explore"),
+        ({"source_phase": "KERNEL_AGENT"}, "kernel_agent"),
+        ({}, "unattributed"),
+    ]
+    for evidence, expected in cases:
+        write_side = _resolve_agent("integrate_patch", result=evidence)
+        read_side = collect_recorded_optimizations(
+            "s1",
+            [
+                {
+                    "operation_id": "op-patch",
+                    "kind": "integrate_patch",
+                    "name": "integrate_patch",
+                    "outputs": evidence,
+                    "ended_at": "2026-01-01T01:00:00+00:00",
+                }
+            ],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+        )["attempts"][0]["agent"]
+
+        assert write_side == expected, evidence
+        assert read_side == expected, evidence
+
+
+def test_a_value_says_which_of_its_possible_sources_it_came_from():
+    """A stated verdict and an inferred status are different claims."""
+    operations = [
+        {
+            "operation_id": "op-a",
+            "kind": "kernel_optimization",
+            "name": "stated",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+        },
+        {
+            "operation_id": "op-b",
+            "kind": "kernel_optimization",
+            "name": "inferred",
+            "agent": "kernel_agent",
+            "status": "succeeded",
+            "ended_at": "2026-01-01T02:00:00+00:00",
+        },
+    ]
+    adoptions = [
+        {
+            "adoption_id": "ad-a",
+            "operation_id": "op-a",
+            "decision": "KEEP",
+            "validated": True,
+            "gain_pct": 4.0,
+            "throughput_before": 1000.0,
+            "throughput_after": 1040.0,
+        }
+    ]
+
+    attempts = collect_recorded_optimizations(
+        "s1", operations, [], adoptions, [], [], [], []
+    )["attempts"]
+    stated = next(row for row in attempts if row["name"] == "stated")
+    inferred = next(row for row in attempts if row["name"] == "inferred")
+
+    assert stated["decision_source"] == "adoption.decision"
+    assert stated["local_gain_source"] == "adoption.gain_pct"
+    assert stated["throughput_source"] == "adoption"
+    assert inferred["decision_source"] == "operation.status"
+    assert inferred["local_gain_source"] == ""
+    assert inferred["throughput_source"] == ""
+
+
 def test_an_adoption_whose_operation_was_never_recorded_is_reported():
     """The ledger walks operations, so this adoption's gain simply vanishes."""
     operations = [
