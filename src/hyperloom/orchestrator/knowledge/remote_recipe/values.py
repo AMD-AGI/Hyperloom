@@ -41,8 +41,6 @@ _PATH_KEYS = (
     "patch",
     "patch_path",
     "report_path",
-    "source_file",
-    "target_file",
     "tuned_file",
 )
 _PATH_LIST_KEYS = (
@@ -51,7 +49,11 @@ _PATH_LIST_KEYS = (
     "changed_files",
     "patches",
     "patches_applied",
+)
+_SOURCE_METADATA_KEYS = (
+    "source_file",
     "source_files",
+    "target_file",
     "target_files",
 )
 _IGNORED_ACTIONS = {"replay_warm_recipe", "profile", "roofline", "conc_sweep", "sweep"}
@@ -458,6 +460,8 @@ def _externalize_record(
 ) -> dict[str, Any]:
     """Preserve a result record while replacing known local file fields with refs."""
     out = dict(record)
+    for key in _SOURCE_METADATA_KEYS:
+        out.pop(key, None)
     required = required_keys or set()
     for key in _PATH_KEYS:
         if key not in out:
@@ -606,11 +610,6 @@ def match_rewrite_attempt(
             lambda key, raw: str(raw.get("last_artifact_path") or raw.get("artifact_path") or "")
             == str(integrate.get("patch_path") or ""),
         ),
-        (
-            str(integrate.get("target_file") or ""),
-            lambda key, raw: str(raw.get("last_source_file") or raw.get("source_file") or "")
-            == str(integrate.get("target_file") or ""),
-        ),
     )
     for expected, predicate in criteria:
         if not expected:
@@ -649,22 +648,15 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
         # The integrated stack row is authoritative.  A matched micro attempt
         # may only fill a path that older stack rows omitted.
         patch_source = entry.get("patch_path") or raw.get("last_artifact_path") or raw.get("artifact_path")
-        source_source = entry.get("target_file") or raw.get("last_source_file") or raw.get("source_file")
         patch = files.add(
             patch_source,
             category="kernel/rewrite",
             kind="patches",
         )
-        source = files.add(
-            source_source,
-            category="kernel/rewrite",
-            kind="source",
-        )
-        if not patch or not source:
+        if not patch:
             raise RemoteRecipeValidationError(
-                "accepted kernel/rewrite patch or source cannot be materialized: "
-                f"integration_id={integration_id!r} patch={patch_source!r} "
-                f"source={source_source!r}"
+                "accepted kernel/rewrite patch cannot be materialized: "
+                f"integration_id={integration_id!r} patch={patch_source!r}"
             )
         _patch_declared_targets(patch_source)
         e2e_gain = _number(entry.get("gain_pct"))
@@ -680,7 +672,6 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
                     f"- E2E gain: {e2e_gain:g}%",
                     f"- Optimized throughput: {optimized_throughput:g}",
                     f"- Patch: {patch or 'unavailable'}",
-                    f"- Source: {source or 'unavailable'}",
                     "",
                 )
             ),
@@ -698,7 +689,6 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
                 "optimized_throughput": optimized_throughput,
                 "experience_document": experience,
                 "patch": patch,
-                "source_files": [source] if source else [],
             }
         )
     return {"items": rows}
@@ -949,7 +939,8 @@ def _adopt_prior_kernel(
         for source in prior.files
         if source.is_file() and not source.is_symlink()
     }
-    referenced = extract_knowledge_artifact_refs(prior.knowledge, prior_paths)
+    prior_knowledge = sanitize_shared_knowledge(prior.knowledge)
+    referenced = extract_knowledge_artifact_refs(prior_knowledge, prior_paths)
     missing = referenced - prior_paths
     if missing:
         raise RemoteRecipeValidationError(
@@ -966,7 +957,7 @@ def _adopt_prior_kernel(
         "fusion": "items",
         "rewrite": "items",
     }
-    prior_kernel = _mapping(_remap_artifact_refs(prior.knowledge, remapped))
+    prior_kernel = _mapping(_remap_artifact_refs(prior_knowledge, remapped))
     for column, list_key in list_keys.items():
         prior_column = _mapping(prior_kernel.get(column))
         if not prior_column:

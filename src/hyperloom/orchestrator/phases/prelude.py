@@ -332,8 +332,8 @@ class PreludePhase(PhaseHandler):
         Reads the ``gemm``/``fusion``/``rewrite`` sub-columns the warm-start
         download provided, resolves every recorded file ref to its downloaded
         copy via ``KernelAgentKB.prior_file``, and returns one plan entry per
-        item carrying the local ``patch_path`` / ``source_paths`` plus the
-        item's non-file metadata. Refs that do not resolve are dropped.
+        item carrying the local Patch or tuned artifact plus non-file metadata.
+        Refs that do not resolve are dropped.
         """
         readers = (
             ("gemm", kb.read_gemm, "optimizations"),
@@ -356,37 +356,46 @@ class PreludePhase(PhaseHandler):
                 meta = {
                     k: v
                     for k, v in row.items()
-                    if k not in ("patch", "source_file", "source_files", "tuned_file", "files")
+                    if k
+                    not in (
+                        "patch",
+                        "source_file",
+                        "source_files",
+                        "target_file",
+                        "target_files",
+                        "target_path",
+                        "tuned_file",
+                        "files",
+                    )
                 }
-                if column == "rewrite":
-                    source_refs = [str(r) for r in (row.get("source_files") or []) if str(r or "").strip()]
-                elif column == "fusion":
-                    source_refs = []
-                else:  # gemm
-                    source_refs = [str(row.get("tuned_file"))] if row.get("tuned_file") else []
-                source_paths: list[str] = []
-                for ref in source_refs:
-                    resolved = kb.prior_file(ref)
-                    if resolved is not None:
-                        source_paths.append(str(resolved))
                 entry: dict[str, Any] = {"column": column, "meta": meta}
                 # Preserve the exact Recipe row so CLOSE can carry the validated
                 # kernel content and its refs forward on the same inference page.
-                entry["recipe_row"] = dict(row)
+                entry["recipe_row"] = {
+                    key: value
+                    for key, value in row.items()
+                    if key
+                    not in {
+                        "source_file",
+                        "source_files",
+                        "target_file",
+                        "target_files",
+                        "target_path",
+                    }
+                }
                 patch_ref = str(row.get("patch") or "").strip()
                 if patch_ref:
                     patch_local = kb.prior_file(patch_ref)
                     if patch_local is not None:
                         entry["patch_path"] = str(patch_local)
-                if source_paths:
-                    entry["source_paths"] = source_paths
-                # A portable target path is only honoured when it exists on this
-                # host; cross-session records usually omit it, so most entries
-                # are loaded/recorded and their apply is left to the kernel phase.
-                target = str(row.get("target_path") or meta.get("target_path") or "").strip()
-                if target and Path(target).is_file():
-                    entry["target_file"] = target
-                if entry.get("patch_path") or entry.get("source_paths"):
+                tuned_ref = str(row.get("tuned_file") or "").strip()
+                if column == "gemm" and tuned_ref:
+                    tuned_local = kb.prior_file(tuned_ref)
+                    if tuned_local is not None:
+                        entry["source_paths"] = [str(tuned_local)]
+                if entry.get("patch_path") or (
+                    column == "gemm" and entry.get("source_paths")
+                ):
                     plan.append(entry)
         return plan
 
@@ -540,14 +549,12 @@ class PreludePhase(PhaseHandler):
             materialize_unified_patch_snapshot,
         )
 
-        # A rewrite record may carry both a deploy patch and source snapshots
-        # used as authoring context.  The patch is authoritative: copying the
-        # first source snapshot onto the resolved target can replace an
-        # unrelated framework file (for example attention.py over
-        # prefix_prefill.py).  Source-only records retain the legacy fallback.
-        replacement = entry.get("patch_path") or (
-            entry.get("source_paths") or [None]
-        )[0]
+        replacement = entry.get("patch_path")
+        if not replacement:
+            return {
+                "status": "failed",
+                "error": "warm replay kernel source mutation is missing its Patch",
+            }
         kernel_id = str((entry.get("meta") or {}).get("kernel_name") or "warm_kernel")
         payload: dict[str, Any] = {
             "patch_path": replacement,

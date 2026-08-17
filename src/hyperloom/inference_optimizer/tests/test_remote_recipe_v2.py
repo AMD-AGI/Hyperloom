@@ -205,12 +205,16 @@ def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> 
     assert rewrite["optimized_throughput"] == 130.0
     assert rewrite["experience_document"].endswith(".md")
     assert rewrite["patch"].startswith("kernel/rewrite/patches/")
-    assert rewrite["source_files"][0].startswith("kernel/rewrite/source/")
+    assert "source_file" not in rewrite
+    assert "source_files" not in rewrite
+    assert not any("/source/" in item.path for item in bundle.artifacts)
     assert (tmp_path / "files" / rewrite["experience_document"]).is_file()
     serialized = json.dumps(bundle.knowledge)
     assert "object_id" not in serialized
     assert "bucket" not in serialized
     assert '"files": [' not in serialized
+    assert "source_file" not in serialized
+    assert "target_file" not in serialized
 
 
 def test_fusion_writer_preserves_all_patch_targets(tmp_path: Path) -> None:
@@ -369,7 +373,7 @@ def test_shared_knowledge_sanitizer_scrubs_nested_columns_and_paths() -> None:
     rewrite = sanitized["value"]["kernel"]["rewrite"]
     assert "workspace" not in rewrite
     assert "api_token" not in rewrite
-    assert rewrite["source_file"] == "kernel/rewrite/source/kernel.py"
+    assert "source_file" not in rewrite
     assert "[LOCAL_PATH]" in rewrite["note"]
     assert "secret" not in rewrite["note"]
 
@@ -541,7 +545,7 @@ def test_micro_keep_with_e2e_revert_but_no_integrate_stack_is_not_written(
     assert bundle.knowledge["value"]["kernel"]["rewrite"]["items"] == []
 
 
-def test_integrate_stack_is_authoritative_for_rewrite_files(tmp_path: Path) -> None:
+def test_integrate_stack_is_authoritative_for_rewrite_patch(tmp_path: Path) -> None:
     state = _state(tmp_path)
     unintegrated_patch = tmp_path / "micro-only.cu"
     unintegrated_patch.write_text("// micro only", encoding="utf-8")
@@ -553,8 +557,10 @@ def test_integrate_stack_is_authoritative_for_rewrite_files(tmp_path: Path) -> N
     bundle = build_remote_knowledge(state, tmp_path / "files-integrated")
     rewrite = bundle.knowledge["value"]["kernel"]["rewrite"]["items"][0]
     assert rewrite["patch"].endswith("/rewrite.cu")
-    assert rewrite["source_files"][0].endswith("/source.cu")
+    assert "source_file" not in rewrite
+    assert "source_files" not in rewrite
     assert "micro-only.cu" not in json.dumps(rewrite)
+    assert "micro-source.cu" not in json.dumps(rewrite)
     assert rewrite["speedup"] == 1.5
 
 
@@ -1465,7 +1471,9 @@ def test_kernel_reads_same_downloaded_inference_recipe_without_second_get(
 
     kernel = KernelAgentKB.open()
 
-    assert kernel.read_rewrite()["items"][0]["kernel_name"] == "verified"
+    rewrite = kernel.read_rewrite()["items"][0]
+    assert rewrite["kernel_name"] == "verified"
+    assert "source_files" not in rewrite
     assert kernel.prior_file("kernel/rewrite/verified.bin") is not None
     assert [call[0] for call in store.calls].count(
         "get_hyperloom_recipe_view"

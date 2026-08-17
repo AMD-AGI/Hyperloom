@@ -203,6 +203,14 @@ def sanitize_publish_server_args(value: str) -> str:
 
 
 def _sanitize_value(value: Any, *, key: str = "") -> Any:
+    if key in {
+        "source_file",
+        "source_files",
+        "target_file",
+        "target_files",
+        "target_path",
+    }:
+        return _DROP
     if _is_secret_key(key):
         return _DROP
     if key == "extra_server_args":
