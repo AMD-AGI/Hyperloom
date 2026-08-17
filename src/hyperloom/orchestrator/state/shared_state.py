@@ -549,6 +549,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     kb_stage_outbox: list = field(default_factory=list)
     # Owner sections dropped because their persisted artifacts disappeared.
     kb_stage_dead_letter: list = field(default_factory=list)
+    # Idempotent terminal Recipe publication state. Independent from CLOSE
+    # report completion so a failed remote write remains retryable at teardown.
+    recipe_finalize_status: str = ""
+    recipe_finalize_attempts: int = 0
+    recipe_finalize_outcome: dict = field(default_factory=dict)
     # One-shot guard for PRELUDE warm-kernel KB read/apply (resume can't re-fire).
     warm_kernel_kb_attempted: bool = False
     # Resolved prior-champion kernel columns (gemm/fusion/rewrite) loaded at

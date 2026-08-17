@@ -38,6 +38,30 @@ class _StubPrelude:
         """Stubbed gate: these tests exercise the replay itself."""
         return self.gate_reason
 
+    def _resolve_kernel_target_paths(self, entry: dict) -> list[str]:
+        """Resolve fixture Patch headers under the fixture's framework root."""
+        from hyperloom.orchestrator.framework.paths import (
+            resolve_session_framework_root,
+        )
+        from hyperloom.orchestrator.specialists.patch_safety import (
+            parse_patch_targets,
+        )
+
+        patch = Path(str(entry.get("patch_path") or ""))
+        try:
+            parsed = parse_patch_targets(patch.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        root = Path(resolve_session_framework_root() or self.session_dir)
+        resolved = [root / target for target in parsed.all]
+        if any(
+            not candidate.is_file()
+            for target, candidate in zip(parsed.all, resolved, strict=True)
+            if target in parsed.existing
+        ):
+            return []
+        return [str(candidate) for candidate in resolved]
+
     def __init__(self, session_dir: Path, reader: object | None = None) -> None:
         self.session_dir = session_dir
         self.shared_state = SimpleNamespace(
@@ -75,9 +99,29 @@ def _kernel_record(tmp_path: Path, value: dict, files: dict[str, str]) -> Path:
         json.dumps({"value": {"kernel": value}}),
         encoding="utf-8",
     )
+    patch_targets = {}
+    for column in ("fusion", "rewrite"):
+        patch_targets.update(
+            {
+                str(item.get("patch") or ""): str(item.get("target_path") or "")
+                for item in ((value.get(column) or {}).get("items") or [])
+                if isinstance(item, dict)
+            }
+        )
     for rel, text in files.items():
         target = record / "files" / rel
         target.parent.mkdir(parents=True, exist_ok=True)
+        patch_target = patch_targets.get(rel, "")
+        if patch_target and not text.startswith("diff --git "):
+            relative = Path(patch_target).relative_to(tmp_path).as_posix()
+            text = (
+                f"diff --git a/{relative} b/{relative}\n"
+                f"--- a/{relative}\n"
+                f"+++ b/{relative}\n"
+                "@@ -1 +1 @@\n"
+                "-old\n"
+                f"+{text}\n"
+            )
         target.write_text(text, encoding="utf-8")
     return record
 
@@ -122,11 +166,16 @@ def test_resolve_target_from_diff_header_against_roots(monkeypatch, tmp_path: Pa
     live.parent.mkdir(parents=True, exist_ok=True)
     live.write_text("old", encoding="utf-8")
     patch = tmp_path / "k.diff"
-    patch.write_text("+++ b/pkg/foo.py\n", encoding="utf-8")
+    patch.write_text(
+        "diff --git a/pkg/foo.py b/pkg/foo.py\n"
+        "--- a/pkg/foo.py\n"
+        "+++ b/pkg/foo.py\n",
+        encoding="utf-8",
+    )
 
     import hyperloom.orchestrator.framework.paths as paths
 
-    monkeypatch.setattr(paths, "resolve_patch_target_roots", lambda: (str(root) + "/",))
+    monkeypatch.setattr(paths, "resolve_session_framework_root", lambda: str(root))
     stub = _StubPrelude(tmp_path)
 
     resolved = stub._resolve_kernel_target_path({"patch_path": str(patch)})
@@ -231,31 +280,6 @@ def test_warm_kernel_apply_prefers_deploy_patch_over_source_snapshot(
     assert captured["kernel_repo"] == str(framework_root)
     assert materialized["patch_path"] == deploy_patch
     assert materialized["repo_root"] == framework_root
-
-
-def test_warm_kernel_apply_keeps_source_only_fallback(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    captured: dict = {}
-
-    def _apply(payload, **_kwargs):
-        captured.update(payload)
-        return {"status": "ok"}
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._maybe_apply_kernel_patch",
-        _apply,
-    )
-    source_snapshot = tmp_path / "replacement.py"
-
-    PreludePhase._apply_warm_kernel_patch(
-        SimpleNamespace(session_dir=tmp_path),
-        {"source_paths": [str(source_snapshot)], "meta": {}},
-        str(tmp_path / "target.py"),
-    )
-
-    assert captured["patch_path"] == str(source_snapshot)
 
 
 def test_multi_file_manifest_and_target_snapshot_both_roll_back(

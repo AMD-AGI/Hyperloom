@@ -3463,7 +3463,6 @@ class KernelPhase(PhaseHandler):
             "gain_pct": incremental_gain,
             "workspace": integrate_result.get("workspace"),
             "patch_path": patch,
-            "target_file": fusion_result.get("source_file") or integrate_result.get("target_file"),
             "extra_envs": envs,
             "extra_server_args": extra_args,
             "kernel_speedup": fusion_result.get("kernel_speedup"),
@@ -3487,7 +3486,6 @@ class KernelPhase(PhaseHandler):
             "variant_name": "forge_fusion",
             "workspace": integrate_result.get("workspace"),
             "patch_path": patch,
-            "target_file": entry["target_file"],
             "extra_envs": envs,
             "extra_server_args": extra_args,
         }
