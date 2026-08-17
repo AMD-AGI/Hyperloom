@@ -88,15 +88,22 @@ def _last_symbol_segment(value: str) -> str:
 def _role_haystack(candidate: dict[str, Any]) -> str:
     """Return the field(s) a playbook's ``name_any`` (op-role pattern) should match.
 
-    Prefers ``operation`` (already the specific call, e.g. ``"combine"``) over
-    ``name`` (which may be a fully-qualified ``Class::method`` symbol whose
-    class name can itself contain another role's marker); when only ``name``
-    is available, matches its trailing symbol segment rather than the whole
-    qualified string.
+    Prefers ``operation`` (often already the specific call, e.g.
+    ``"combine"``) over ``name`` (which may be a fully-qualified
+    ``Class::method`` symbol whose class name can itself contain another
+    role's marker); either way, only the trailing symbol segment is
+    matched, never the whole qualified string. This repo's own convention
+    (``_task_group_contract.logical_operator_name()``,
+    ``_bypass_report.py``'s task-group builder) is to set ``operation`` to
+    the fully-qualified name too, e.g. ``mori::EpDispatchCombineOp::combine``
+    -- taking ``operation`` verbatim would silently reintroduce the exact
+    dispatch/combine ambiguity this function exists to resolve the moment
+    some producer starts populating that field on a candidate row (PR #1191
+    review finding #6).
     """
     operation = str(candidate.get("operation") or "").strip()
     if operation:
-        return operation.lower()
+        return _last_symbol_segment(operation).lower()
     return _last_symbol_segment(str(candidate.get("name") or "")).lower()
 
 
@@ -155,18 +162,24 @@ def resolve_kernel_anchor_path(playbook: dict[str, Any]) -> str:
     still gates on a non-empty, path-shaped ``source_file`` before it will
     dispatch to a backend at all. Point that field at the task bundle's
     ``kernel_anchor`` file instead of leaving it empty -- resolved to an
-    absolute path under ``$FORGE_PATH`` when that's set and the file exists
-    on this host, else the bare bundle-relative path (still path-shaped, so
-    it survives ``looks_like_source_path`` even when this analysis runs on a
-    host without the KernelForge checkout).
+    absolute path under ``$FORGE_PATH`` when that's set (regardless of
+    whether the file exists on this host yet), else an absolute path under a
+    fixed, obviously-synthetic root so the value is still path-shaped (it
+    survives ``looks_like_source_path`` even when this analysis runs on a
+    host without the KernelForge checkout) without ever being a bare
+    relative string a later ``Path(...).resolve()`` could reinterpret
+    against an unrelated CWD.
 
     Args:
         playbook: A matched playbook entry (as returned by
             ``match_vendor_operator_playbook``).
 
     Returns:
-        An absolute or bundle-relative path string; never empty as long as
-        the playbook declares a ``kernel_anchor``.
+        An absolute path string; never empty as long as the playbook
+        declares a ``kernel_anchor``, and never relative -- a relative
+        string here would later be reinterpreted by ``Path(...).resolve()``
+        against whatever the apply-stage process's CWD happens to be, not
+        against this bundle (PR #1191 review finding #8).
     """
     anchor = str(playbook.get("kernel_anchor") or "").strip()
     bundle = str(playbook.get("task_bundle") or "").strip()
@@ -174,8 +187,15 @@ def resolve_kernel_anchor_path(playbook: dict[str, Any]) -> str:
         return ""
     relative = f"{bundle}/{anchor}" if bundle else anchor
     forge_root = (os.environ.get("FORGE_PATH") or "").strip()
-    if forge_root and bundle:
-        candidate = Path(forge_root) / bundle / anchor
-        if candidate.is_file():
-            return str(candidate)
-    return relative
+    if forge_root:
+        candidate = Path(forge_root) / relative
+        # Returned even when the file isn't there yet: this analysis host
+        # may lack the KernelForge checkout the apply stage will actually
+        # run against, but the path must still be absolute and anchored at
+        # a real, known root rather than silently falling through to a
+        # bare relative string.
+        return str(candidate)
+    # FORGE_PATH unset: still shape-check as path-like (needed to clear
+    # looks_like_source_path) without letting a bare relative string survive
+    # to be misresolved against an unrelated CWD later in the pipeline.
+    return str(Path("/nonexistent-forge-path") / relative)

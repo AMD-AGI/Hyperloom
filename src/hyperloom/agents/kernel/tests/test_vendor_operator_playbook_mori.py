@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -49,7 +51,9 @@ import forge_submit  # noqa: E402
 import kernel_optimization as ko  # noqa: E402
 from _vendor_operator_playbooks import (  # noqa: E402
     match_vendor_operator_playbook,
+    resolve_kernel_anchor_path,
     _reset_vendor_operator_playbooks_cache,
+    _role_haystack,
 )
 
 _MORI_SITE_PACKAGES_FILE = "/opt/venv/lib/python3.12/site-packages/mori/ops/dispatch_combine.py"
@@ -109,6 +113,37 @@ def test_match_vendor_operator_playbook_matches_mori_dispatch_and_combine():
     assert combine_match["role"] == "combine"
 
 
+def test_role_haystack_takes_trailing_segment_of_fully_qualified_operation():
+    """A fully-qualified ``operation`` must not reintroduce the dispatch/
+    combine ambiguity _last_symbol_segment() exists to resolve.
+
+    This repo's own convention (_task_group_contract.logical_operator_name,
+    _bypass_report.py's task-group builder) is to set ``operation`` to a
+    fully-qualified ``Class::method`` symbol. ``EpDispatchCombineOp`` itself
+    contains the substring "dispatch", so taking ``operation`` verbatim
+    would make a *combine* candidate whose operation is
+    ``mori::EpDispatchCombineOp::combine`` match "dispatch" first (registry
+    order), mislabeling it (PR #1191 review finding #6).
+    """
+    combine_candidate = {
+        "name": "mori::EpDispatchCombineOp::combine",
+        "operation": "mori::EpDispatchCombineOp::combine",
+        "library": "mori",
+    }
+    assert _role_haystack(combine_candidate) == "combine"
+
+    dispatch_candidate = {
+        "name": "mori::EpDispatchCombineOp::dispatch",
+        "operation": "mori::EpDispatchCombineOp::dispatch",
+        "library": "mori",
+    }
+    assert _role_haystack(dispatch_candidate) == "dispatch"
+
+    combine_match = match_vendor_operator_playbook(combine_candidate)
+    assert combine_match is not None
+    assert combine_match["role"] == "combine"
+
+
 def test_match_vendor_operator_playbook_ignores_unrelated_kernels():
     gemm_candidate = {
         "name": "aiter::gemm_a8w8",
@@ -163,9 +198,13 @@ def test_finalize_candidates_stamps_vendor_playbook_and_sums_gpu_pct():
 
     assert dispatch["vendor_playbook_role"] == "dispatch"
     assert combine["vendor_playbook_role"] == "combine"
-    assert dispatch["aggregate_gpu_pct"] == pytest.approx(combine["aggregate_gpu_pct"])
-    assert dispatch["aggregate_gpu_pct"] == pytest.approx(dispatch["gpu_pct"] + combine["gpu_pct"])
-    assert dispatch["aggregate_gpu_pct"] == pytest.approx(90.909, abs=0.01)
+    assert dispatch["vendor_playbook_aggregate_gpu_pct"] == pytest.approx(
+        combine["vendor_playbook_aggregate_gpu_pct"]
+    )
+    assert dispatch["vendor_playbook_aggregate_gpu_pct"] == pytest.approx(
+        dispatch["gpu_pct"] + combine["gpu_pct"]
+    )
+    assert dispatch["vendor_playbook_aggregate_gpu_pct"] == pytest.approx(90.909, abs=0.01)
     assert sorted(dispatch["vendor_playbook_group_kernel_ids"]) == sorted(
         [dispatch["kernel_id"], combine["kernel_id"]]
     )
@@ -173,7 +212,7 @@ def test_finalize_candidates_stamps_vendor_playbook_and_sums_gpu_pct():
     # An unrelated candidate must be untouched by the vendor-playbook pass.
     assert "patch_strategy" not in other
     assert "vendor_operator_playbook" not in other
-    assert "aggregate_gpu_pct" not in other
+    assert "vendor_playbook_aggregate_gpu_pct" not in other
 
 
 def test_finalize_candidates_fills_source_file_for_real_vendor_binary_shape():
@@ -423,6 +462,15 @@ def test_submit_vendor_playbook_dedupes_dispatch_and_combine_into_one_session(mo
     assert combine_result["best_ms"] == dispatch_result["best_ms"]
     assert combine_result["vendor_playbook_role"] == "combine"
     assert dispatch_result["vendor_playbook_role"] == "dispatch"
+    # --- regression: one measurement must not be counted twice downstream ---
+    # dispatch and combine are two separate kernel_ids that each produce a
+    # full result dict carrying the identical mean_case_speedup/best_ms from
+    # the one shared forge-loop session; only the role that actually ran it
+    # may be marked as independently counted, or a benefit collector summing
+    # across kernel_ids would double-count one real 1.25x measurement as two
+    # (PR #1191 review finding #4).
+    assert dispatch_result["vendor_playbook_independently_counted"] is True
+    assert combine_result["vendor_playbook_independently_counted"] is False
     # A second forge worktree/workspace copy is never made for the reused role.
     assert not (tmp_path / "forge" / "session1" / "attempt_combine" / "worktree").exists()
 
@@ -580,6 +628,187 @@ def test_submit_vendor_playbook_writes_result_when_bundle_copy_raises(monkeypatc
     )
     assert combine_result["vendor_playbook_reused"] is True
     assert combine_result["skipped"] is True
+
+
+def test_resolve_kernel_anchor_path_is_always_absolute(monkeypatch):
+    """A relative ``source_file`` stand-in is later reinterpreted by
+    ``Path(...).resolve()`` against whatever the apply-stage process's CWD
+    happens to be, not against the KernelForge bundle it was meant to name
+    -- resolve_kernel_anchor_path() must never return a bare relative string,
+    with or without FORGE_PATH set (PR #1191 review finding #8).
+    """
+    playbook = match_vendor_operator_playbook(_mori_dispatch_candidate())
+    assert playbook is not None
+
+    monkeypatch.delenv("FORGE_PATH", raising=False)
+    anchor_no_forge_path = resolve_kernel_anchor_path(playbook)
+    assert anchor_no_forge_path
+    assert Path(anchor_no_forge_path).is_absolute()
+
+    monkeypatch.setenv("FORGE_PATH", "/some/checkout/of/KernelForge")
+    anchor_with_forge_path = resolve_kernel_anchor_path(playbook)
+    assert anchor_with_forge_path
+    assert Path(anchor_with_forge_path).is_absolute()
+    assert anchor_with_forge_path.startswith("/some/checkout/of/KernelForge")
+
+
+def test_submit_vendor_playbook_writes_optimization_report_with_correctness_pass(
+    monkeypatch, tmp_path
+):
+    """The vendor-playbook path reuses one forge-loop run but used to never
+    write ``optimization_report.md``, so ``kernel_optimization.py``'s
+    correctness extraction (which scans ``cli_workspace``/
+    ``optimization_report.md`` for a "[correctness] pass" marker) never
+    found a signal and ``make_proposal()`` could never return KEEP even when
+    SNR validation had already passed inside forge-loop (PR #1191 review
+    finding #5).
+    """
+    forge_path = tmp_path / "KernelForge"
+    _write_fake_mori_bundle(forge_path)
+    monkeypatch.setenv("FORGE_PATH", str(forge_path))
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(forge_submit, "_resolve_gpu_target", lambda _candidate: "gfx942")
+    _stub_run_loop(monkeypatch, [])
+
+    playbook = match_vendor_operator_playbook(_mori_dispatch_candidate())
+    candidate = _mori_dispatch_candidate(
+        patch_strategy="vendor_playbook",
+        vendor_operator_playbook=playbook,
+        vendor_playbook_role="dispatch",
+    )
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("# fallback prompt\n", encoding="utf-8")
+    output_dir = tmp_path / "forge" / "session_report" / "attempt_dispatch"
+
+    result = forge_submit.submit(
+        source_file=_MORI_SITE_PACKAGES_FILE,
+        prompt_file=prompt_file,
+        output_dir=output_dir,
+        candidate=candidate,
+        timeout_s=3600,
+    )
+
+    assert result["vendor_playbook_independently_counted"] is True
+    assert result["cli_workspace"] == str(output_dir)
+    report_path = output_dir / "optimization_report.md"
+    assert report_path.is_file(), "vendor-playbook path must write optimization_report.md"
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "[correctness] pass" in report_text
+
+
+def test_submit_vendor_playbook_stale_failure_cache_allows_retry(monkeypatch, tmp_path):
+    """A cached FAILURE only de-dupes submissions within
+    ``_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S``; once it ages out, a fresh
+    submission must actually retry instead of one transient failure
+    (FORGE_PATH momentarily unset, here) permanently wedging the whole
+    playbook group for the rest of the session (PR #1191 review finding #2).
+    """
+    monkeypatch.delenv("FORGE_PATH", raising=False)
+    playbook = match_vendor_operator_playbook(_mori_dispatch_candidate())
+    candidate = _mori_dispatch_candidate(
+        patch_strategy="vendor_playbook",
+        vendor_operator_playbook=playbook,
+        vendor_playbook_role="dispatch",
+    )
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("# fallback prompt\n", encoding="utf-8")
+    output_dir = tmp_path / "forge" / "session_ttl" / "attempt_dispatch"
+
+    first = forge_submit.submit(
+        source_file=_MORI_SITE_PACKAGES_FILE,
+        prompt_file=prompt_file,
+        output_dir=output_dir,
+        candidate=candidate,
+        timeout_s=3600,
+    )
+    assert first["skipped"] is True  # FORGE_PATH unset -> a real failure
+
+    lock_dir = forge_submit._vendor_playbook_lock_dir(output_dir, "mori_ep_dispatch_combine")
+    result_path = lock_dir / "result.json"
+    assert result_path.is_file()
+
+    # Immediately retrying (still within the TTL window) must reuse the
+    # cached failure rather than re-running -- this is the intended
+    # short-window dedup for a genuinely concurrent dispatch+combine pair.
+    second = forge_submit.submit(
+        source_file=_MORI_SITE_PACKAGES_FILE,
+        prompt_file=prompt_file,
+        output_dir=tmp_path / "forge" / "session_ttl" / "attempt_dispatch_retry_fresh",
+        candidate=candidate,
+        timeout_s=3600,
+    )
+    assert second["vendor_playbook_reused"] is True
+
+    # Age the cached failure past the TTL by rewinding result.json's mtime
+    # (simulates enough wall-clock time passing within the same session).
+    stale_mtime = time.time() - forge_submit._VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S - 1.0
+    os.utime(result_path, (stale_mtime, stale_mtime))
+
+    forge_path = tmp_path / "KernelForge"
+    _write_fake_mori_bundle(forge_path)
+    monkeypatch.setenv("FORGE_PATH", str(forge_path))
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(forge_submit, "_resolve_gpu_target", lambda _candidate: "gfx942")
+    captured: list[dict] = []
+    _stub_run_loop(monkeypatch, captured)
+
+    third = forge_submit.submit(
+        source_file=_MORI_SITE_PACKAGES_FILE,
+        prompt_file=prompt_file,
+        output_dir=tmp_path / "forge" / "session_ttl" / "attempt_dispatch_retry_stale",
+        candidate=candidate,
+        timeout_s=3600,
+    )
+    assert third["vendor_playbook_reused"] is False, "a stale failure must not be reused"
+    assert third["skipped"] is False
+    assert len(captured) == 1, "the retry must actually launch forge-loop"
+
+
+def test_claim_vendor_playbook_run_steals_a_claim_orphaned_by_a_dead_process(tmp_path):
+    """A holder killed by SIGKILL/OOM/node-restart never writes
+    ``result.json`` and never releases ``claimed.lock``; every later
+    submission used to poll ``_wait_for_vendor_playbook_result`` all the way
+    to its deadline (``timeout_s`` + 300s) and still find nothing -- for a
+    60-minute-budget attempt, an hour burned per submission. A claim older
+    than its own attempt budget (plus grace) must instead be treated as
+    abandoned and stolen (PR #1191 review finding #3).
+    """
+    lock_dir = tmp_path / "vendor_playbook_locks" / "mori_ep_dispatch_combine"
+    lock_dir.mkdir(parents=True)
+    claim_path = lock_dir / "claimed.lock"
+    timeout_s = 3600
+    dead_pid_claimed_at = (
+        time.time() - timeout_s - forge_submit._VENDOR_PLAYBOOK_CLAIM_STALE_GRACE_S - 1.0
+    )
+    claim_path.write_text(
+        json.dumps({"pid": 999999, "claimed_at": dead_pid_claimed_at, "nonce": "dead"}),
+        encoding="utf-8",
+    )
+
+    assert forge_submit._claim_is_stale(claim_path, timeout_s) is True
+    assert forge_submit._claim_vendor_playbook_run(lock_dir, timeout_s) is True
+
+    stolen = json.loads(claim_path.read_text(encoding="utf-8"))
+    assert stolen["pid"] == os.getpid()
+    assert stolen["nonce"] != "dead"
+
+
+def test_claim_vendor_playbook_run_does_not_steal_a_live_claim(tmp_path):
+    """A claim well within its holder's own budget must not be stolen out
+    from under a genuinely still-running attempt."""
+    lock_dir = tmp_path / "vendor_playbook_locks" / "mori_ep_dispatch_combine"
+    lock_dir.mkdir(parents=True)
+    claim_path = lock_dir / "claimed.lock"
+    timeout_s = 3600
+    claim_path.write_text(
+        json.dumps({"pid": 123, "claimed_at": time.time() - 5.0, "nonce": "alive"}),
+        encoding="utf-8",
+    )
+
+    assert forge_submit._claim_is_stale(claim_path, timeout_s) is False
+    assert forge_submit._claim_vendor_playbook_run(lock_dir, timeout_s) is False
+    # The live claim must be left untouched.
+    assert json.loads(claim_path.read_text(encoding="utf-8"))["nonce"] == "alive"
 
 
 def test_registry_json_is_valid_and_ships_in_package_data():

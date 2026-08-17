@@ -4697,7 +4697,16 @@ def _apply_vendor_operator_playbook_grouping(top: list[dict[str, Any]]) -> None:
                 break
         for member in members:
             member["vendor_playbook_group_id"] = group_id
-            member["aggregate_gpu_pct"] = aggregate
+            # Namespaced (not bare "aggregate_gpu_pct"): that name is already
+            # an existing task_group-level concept (the sum of GPU% across a
+            # task_group's rows -- see tracelens_skill_runner.py and
+            # _bypass_report.py), stamped on task_group dicts, not candidate
+            # rows. Candidate rows don't carry it today, so reusing the name
+            # here is currently harmless, but any future code that flattens
+            # a task_group onto its candidate rows would silently change
+            # every ordinary group's gating behavior the moment it did (PR
+            # #1191 review finding #7).
+            member["vendor_playbook_aggregate_gpu_pct"] = aggregate
             member["vendor_playbook_group_kernel_ids"] = list(member_ids)
             if floor is not None:
                 # Consumed by effective_hot_kernel_min_gpu_pct() in the
