@@ -932,7 +932,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_inject_warm_recipe_history_into_ledger": "phase_prelude",
         "_filter_warm_patches_with_kg": "phase_prelude",
         "_maybe_enqueue_warm_replay": "phase_prelude",
-        "_maybe_apply_warm_kernel_kb": "phase_prelude",
         "_promote_warm_replay": "phase_prelude",
         "_maybe_enqueue_prelude_initial_analysis_after_baseline": "phase_prelude",
         "_enqueue_internal_analysis_task": "phase_prelude",
@@ -972,6 +971,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_auto_enqueue_pending_integrations": "phase_kernel_stack",
         "_maybe_reprofile_for_kernel": "phase_kernel",
         "_geak_enabled": "phase_kernel",
+        "_collective_required_before_kernel_opt": "phase_kernel",
         "_on_enter_kernel": "phase_kernel",
         "_run_bf16_dense_gemm_fallback": "phase_kernel",
         "_should_run_bf16_dense_gemm_fallback": "phase_kernel",
@@ -1069,7 +1069,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_build_framework_working_memory": "phase_framework",
         "_render_framework_memory_for_prompt": "phase_framework",
         "_framework_agent_discover_repo_urls": "phase_framework",
-        "_write_prs_tested_from_framework_agent": "phase_framework",
+        "_emit_framework_agent_kg_decision": "phase_framework",
         "_emit_kg_decision": "phase_framework",
         "_record_framework_agent_phase_done": "phase_framework",
         "_discover_next_framework_batch": "phase_framework",
@@ -1473,7 +1473,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     # optimization_stack actions warranting a post-opt roofline; pure
     # param-search (explore/sweep) is excluded.
-    _POST_OPT_ROOFLINE_ACTIONS = frozenset({"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
+    _POST_OPT_ROOFLINE_ACTIONS = frozenset(
+        {"collective", "integrate", "integrate_patch", "gemm_tuning", "geak_e2e"}
+    )
 
     async def tick(self, n: int = 1) -> None:
         """Run exactly ``n`` reactor passes for every agent; dispatcher pumps at pass end, lazy resume replay on tick 1.

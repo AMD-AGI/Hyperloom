@@ -96,6 +96,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   previously closed only the robustness-server client, leaking the HTTP client
   the LLM RCA engine owns.
 
+- **Remote Recipe knowledge now uses one current KB Store contract.** Remote
+  mode reads one identity-addressed inference Recipe containing replay config,
+  the ordered patch timeline, and nested kernel columns, then publishes one
+  final CLOSE session with verified artifacts under the same throughput
+  champion. Local Recipe storage and non-Recipe GBrain integrations remain
+  unchanged.
+
+- Degraded configuration donors now require exact precision, and a permanently
+  missing owner patch is dead-lettered without blocking publication of the
+  remaining Recipe sections.
+
 - `_geak_enabled` no longer falls back to the persisted
   `shared_state.kernel_optimizer` field, so `KERNEL_OPT_BACKEND_ORDER` is the
   single source of truth for the kernel backend on a resume as well. The field
@@ -108,12 +119,6 @@ Current packaged version (`pyproject.toml`). See
 for the user-facing summary.
 
 ### Added
-
-- **Remote Recipe knowledge now uses KB Store.** Remote mode reads one
-  identity-addressed best record for T0 Explore config/env replay and publishes
-  one final CLOSE session with verified artifacts. Local Recipe storage and
-  non-Recipe GBrain integrations remain unchanged; agent section staging is an
-  interface surface and is not yet wired by the kernel backends.
 
 - **`--no-eval` turns the accuracy eval off for a whole run.** Setting
   `RUN_EVAL=false` by hand leaves the baseline with no accuracy reference, which

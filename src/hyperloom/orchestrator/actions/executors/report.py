@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import io as _common_io
+from hyperloom.common.platform_probe import platform_fingerprint
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
@@ -381,6 +382,14 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "recipe_kb_t0_failed": "Recipe KB knowledge-plane bootstrap (t0) failed; the run stopped early.",
     "recipe_kb_drain_failed": "Recipe KB knowledge-plane drain failed; the run stopped early.",
     "recipe_kb_commit_failed": "Recipe KB knowledge-plane commit failed; the run stopped early.",
+    "warm_replay_rollback_failed": (
+        "Warm replay rollback could not restore every Recipe/Kernel mutation; "
+        "the run stopped to avoid continuing from an uncertain code state."
+    ),
+    "active_inferencex_checkout_missing": (
+        "The session-authoritative InferenceX checkout is missing during "
+        "resume; the run stopped instead of falling back to a different tree."
+    ),
     # Search / phase plateaus and completions.
     "plateau_explore": "EXPLORE plateaued: no new leverage was found in the search space.",
     "plateau_kernel": "KERNEL_AGENT plateaued: no further validated kernel win was found.",
@@ -411,6 +420,35 @@ def _explain_stop_reason(stop_reason):
     Returns ``""`` for unknown/empty reasons so callers can omit the line.
     """
     return _STOP_REASON_EXPLANATIONS.get(str(stop_reason or "").strip(), "")
+
+
+def _platform_fingerprint(gpu_type: str | None = None) -> dict[str, Any]:
+    """Platform record for the run report, scoped to this session's node count.
+
+    The record itself is built in ``hyperloom.common.platform_probe``; the only
+    thing added here is whether the session spans several nodes, which is
+    orchestrator state and does not belong in ``common``. It matters because
+    this samples the orchestrator's own node, which in a multi-node session is
+    usually not the benchmark node.
+
+    Read at report time rather than plumbed from CLI preflight: the sysfs read
+    is free, it needs no cross-process state, and sampling at both ends means a
+    knob toggled mid-session shows up as a mismatch rather than being silently
+    attributed to the optimizer.
+
+    Args:
+        gpu_type: Session ``--gpu-type``, used to resolve the gfx arch.
+
+    Returns:
+        dict[str, Any]: The platform record, always carrying ``status``.
+    """
+    try:  # local import keeps this free of executor import order
+        from ._multi_node_env import is_multi_node
+
+        multi_node: bool | None = bool(is_multi_node())
+    except Exception:  # noqa: BLE001 - scope marker only; unknown is not False
+        multi_node = None
+    return platform_fingerprint(gpu_type, multi_node=multi_node)
 
 
 def _build_summary_dict(
@@ -466,6 +504,7 @@ def _build_summary_dict(
         "crash_count": state.crash_count,
         "server_boot_failures": _count_server_boot_failures(session_dir),
         "pruned_families": state.pruned_families,
+        "platform": _platform_fingerprint(getattr(state, "gpu_type", None)),
         "max_minutes": state.max_minutes,
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
         "event_counts_by_topic": ev_counts,
@@ -572,6 +611,43 @@ def _format_md(summary: dict[str, Any]) -> str:
     if boot_fail:
         lines.append(f"- server_boot_failures : {boot_fail}  *(warmup_failed variants; excluded from crash_count)*")
     lines.append(f"- pruned_families: {summary['pruned_families'] or '(none)'}")
+    plat = summary.get("platform") or {}
+    if plat.get("status") != "ok":
+        # Always emit the line, with the reason when there is one: a silent
+        # absence is indistinguishable from a host that was never checked, and
+        # the no-reason case is the one that needs saying -- it is a summary
+        # written before this field existed, not a probe that failed.
+        why = str(plat.get("reason") or "").strip()
+        lines.append(f"- platform       : not recorded{f' — {why}' if why else ''}")
+    else:
+        if plat.get("multi_node_session"):
+            lines.append(
+                f"- platform scope : ⚠ multi-node session — sampled on `{plat.get('host')}` "
+                f"(the orchestrator), which may not be the benchmark node"
+            )
+        else:
+            lines.append(f"- host           : {plat.get('host', 'unknown')}")
+
+        def _q(value: Any) -> str:
+            """Render an unresolved field as '?' rather than the word None."""
+            return "?" if value in (None, "") else str(value)
+
+        lines.append(
+            f"- platform       : {_q(plat.get('cpu'))} — SMT {_q(plat.get('smt'))}, "
+            f"{_q(plat.get('nps'))} ({_q(plat.get('numa_nodes'))} NUMA nodes / "
+            f"{_q(plat.get('sockets'))} sockets), governor {_q(plat.get('governor'))}, "
+            f"boost {_q(plat.get('boost'))}"
+        )
+        gpu, stack = plat.get("gpu") or {}, plat.get("stack") or {}
+        lines.append(
+            f"- accelerators   : {gpu.get('host_count') or '?'}× {gpu.get('gfx_arch', 'unknown')} "
+            f"on the host, amdgpu {gpu.get('amdgpu_driver', 'unknown')}"
+        )
+        lines.append(
+            "- stack          : "
+            + ", ".join(f"{k} {v}" for k, v in sorted(stack.items()))
+            + f", kernel {plat.get('kernel', 'unknown')}"
+        )
     lines.append("")
     lines.append("## Event counts")
     lines.append("")

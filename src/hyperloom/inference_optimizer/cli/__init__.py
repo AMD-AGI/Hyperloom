@@ -117,6 +117,7 @@ from .parser import (
     DEFAULT_PRECISION,
 )
 from .preflight import (
+    _check_gfx_arch_resolvable,
     _preflight as _preflight,
 )
 
@@ -1899,6 +1900,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             os.environ.pop("GPU_TYPE", None)
             args.gpu_type = None
             print("GPU type        : <unset> (Magpie will auto-detect)")
+
+        # Runs here, not in _preflight, because the question it asks -- will
+        # provenance be able to name the ISA? -- is unanswerable until
+        # args.gpu_type is final. Asked earlier it sees only the raw hint, so it
+        # warns on the bare-metal hosts the probe resolves correctly moments
+        # later, and a check that cries wolf is one people stop reading.
+        _check_gfx_arch_resolvable(args.gpu_type)
 
         # Resolve workload knobs (flag > default; no resume state on a fresh
         # launch) so ISL/OSL/CONC/TP/EP are authoritative reals before

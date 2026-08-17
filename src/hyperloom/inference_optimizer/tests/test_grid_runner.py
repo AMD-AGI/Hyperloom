@@ -916,6 +916,84 @@ async def test_run_grid_default_result_dir_is_per_variant_slot(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_run_grid_benchmark_runs_inside_the_session_that_owns_it(tmp_path):
+    """Every grid pass runs from the task workspace, so its children are ours.
+
+    A load generator is what tells the robustness reactor that a refused port is
+    a server that died mid-benchmark rather than the idle gap between two
+    variants, and it is only believed when it can be tied to this session —
+    otherwise a co-tenant's client on a shared node vouches for a port it never
+    touched. The tie is the working directory the whole benchmark subtree
+    inherits, which the baseline arm already anchors to its own output dir. A
+    grid variant launched from the system temp directory carries no anchor at
+    all, so the outage it is running through reads as an idle stretch.
+    """
+    from hyperloom.agents.robustness.role.prompt_inputs import (
+        ReactorContext,
+        SharedStateSnapshot,
+    )
+    from hyperloom.agents.robustness.signals.local_health import (
+        LocalHealthConfig,
+        evaluate_local_health_signals,
+    )
+    from hyperloom.agents.robustness.sources.base import SourceData
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+    session_dir = tmp_path / "session"
+    output_root = session_dir / "runs" / "explore" / "task-1"
+    captured_cwds: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        captured_cwds.append(str(kwargs.get("cwd") or ""))
+        _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        await run_grid(
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("vA"), GridVariant("vB")],
+            output_root=output_root,
+            variant_timeout_sec=5,
+        )
+
+    assert captured_cwds
+    for cwd in captured_cwds:
+        assert Path(cwd).is_relative_to(session_dir), f"benchmark cwd {cwd} is outside the session {session_dir}"
+
+    # The reactor's own reading of that cwd: a client inheriting it is ours even
+    # when nothing else on its command line names the session.
+    data = SourceData(
+        local_processes=[
+            {"pid": 8, "rss_mb": 96.0, "cmd": "python benchmark_serving.py --port 30000", "cwd": captured_cwds[0]},
+        ],
+        local_server_health=[
+            {"url": "http://localhost:30000/health", "reachable": False, "status": "error", "error": "connect"},
+        ],
+    )
+    ctx = ReactorContext(
+        tick_index=0,
+        # The session identity the rule matches on comes from LocalHealthConfig
+        # below; the snapshot no longer carries a second copy of it.
+        shared_state=SharedStateSnapshot(),
+        inbox=[],
+        now_unix=1.0,
+    )
+    matched = [
+        s
+        for s in evaluate_local_health_signals(ctx, data, config=LocalHealthConfig(session_dir=session_dir))
+        if s.name == "local_server_unreachable"
+    ]
+    assert matched and matched[0].evidence["benchmark_client_seen"] is True
+
+
+@pytest.mark.asyncio
 async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, monkeypatch):
     base = tmp_path / "base.yaml"
     _write_baseline_yaml_overrides(base)

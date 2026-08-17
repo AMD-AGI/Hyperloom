@@ -108,6 +108,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "token_usage":                 { /* LLM token spend rollup (see below) */ },
   "langfuse":                    { /* Langfuse push receipt */ },
   "kernel_journey":              { /* kernel lifecycle journey */ },
+  "collective":                  { /* §11a collective-lane campaigns */ },
   "versions":                    { /* component/version stamps */ },
   "enablement":                  { /* enablement / targeted-build subsystem summary */ }
 }
@@ -204,6 +205,18 @@ Only validated entries contribute to `summary_by_source` and
 gain; the latter groups the same entries by `optimization_kind`. These
 summaries are alternate views of the same gains and must not be added
 together.
+
+A `kernel_agent` entry's `optimization_kind` records which lane produced it:
+`gemm_tuning`, `kernel_fusion`, `kernel_collective`, or `kernel_patch` for a
+generic source-level rewrite. A `kernel_collective` entry comes from the
+Coordinator-owned collective lane, so it carries `action=collective` with
+`variant_name=forge_collective` and `backend=forge`, and retains
+`collective_op`, `world_size`, `collective_attempt_id`, and `integration_id` as
+optional evidence joining the entry back to its campaign record. Collective
+gain is bucketed into its own `collective` attribution family
+(`collective_pct_of_total`) so multi-rank communication wins get a dedicated
+row instead of falling through to `other`; its phase attribution still
+resolves to `kernel_agent`.
 
 `backend_attempts` retains adopted and non-adopted GEAK/Forge attempts,
 including KEEP, PARTIAL, REVERT, and FAILED outcomes. `sequence` is ordered
@@ -362,6 +375,30 @@ The 4+1-stage kernel pipeline:
 * `rejected`: Kernels considered then dropped, with `reason`.
 
 The same `kernel_id` appears in multiple lists as it progresses.
+
+---
+
+## `collective` — `Collective`
+
+Multi-rank communication campaigns run at KERNEL entry, mirroring the
+`collective_only_mode`, `collective_attempts` and `last_collective` SharedState
+fields. Absent (`{}`) when the lane never ran.
+
+* `only_mode`: mirrors `HYPERLOOM_COLLECTIVE_ONLY`, so a reader can tell a
+  collective-only session from one where the lane merely happened to run.
+* `attempts`: one `CollectiveAttempt` per logical campaign, deduplicated by
+  `collective_attempt_id` so a resumed or salvaged run is not double-counted.
+* `last`: the most recent campaign record, which additionally carries the
+  measurement evidence the ledger rows omit — `bandwidth` (per case: `bytes`,
+  `algbw_gbps`, `busbw_gbps`) and `artifact_files`.
+
+This section is deliberately separate from `optimizations`. Adoption is decided
+by `integration_decision` (the E2E gate), not by `decision` (the
+microbenchmark), so a campaign that wins its micro run and then loses the gate
+never reaches `optimizations` — and without this section would leave no trace
+in the breakdown at all. Read `integration_gain_pct` against
+`integration_base_tput` / `integration_new_tput` for the throughput delta that
+actually decided the outcome; `kernel_speedup` is microbenchmark-only.
 
 ---
 

@@ -25,6 +25,8 @@ Modules:
 * :mod:`langfuse_mapping` — projection of local rows onto Langfuse
   traces / spans / generations / scores.
 * :mod:`trace_env` — the env-var knobs and credential resolution.
+* :mod:`task_progress` — the ambient heartbeat a long composite action reports
+  its internal units through (:func:`progress_scope`, :func:`report_progress`).
 
 The collector that joins this ledger with the decision streams lives in
 ``src/hyperloom/inference_optimizer/breakdown/collectors/decision.py`` (``collect_decision_trace``).
@@ -51,6 +53,7 @@ from .parse_usage import (
     parse_codex_jsonl_error,
     parse_codex_jsonl_usage,
 )
+from .task_progress import progress_scope, report_progress
 from .trace_env import langfuse_live_enabled
 
 __all__ = [
@@ -67,6 +70,8 @@ __all__ = [
     "parse_claude_stream_json_usage",
     "parse_codex_jsonl_error",
     "parse_codex_jsonl_usage",
+    "progress_scope",
     "redact_secrets",
+    "report_progress",
     "write_mcp_setup_once",
 ]

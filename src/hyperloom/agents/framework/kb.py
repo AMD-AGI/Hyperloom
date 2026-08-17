@@ -57,6 +57,18 @@ _LEGACY_WORKSPACE_KB_DIRNAME: str = "kb"
 #: ``session.paths.DEFAULT_SESSION_DIR``, which this package cannot import:
 #: the ``fa`` CLI runs standalone and must not depend on inference_optimizer.
 _DEFAULT_WORKSPACE_ROOT: str = "/workspace/hyperloom"
+_POD_LOCAL_WORKSPACE: str = "/workspace"
+
+
+def _default_workspace_root() -> str:
+    """Container images ship a writable ``/workspace``; bare metal off root has
+    neither it nor permission to create it, so fall back to the caller's dir."""
+    probe = _POD_LOCAL_WORKSPACE
+    while not os.path.exists(probe) and probe != os.path.dirname(probe):
+        probe = os.path.dirname(probe)
+    if os.access(probe, os.W_OK):
+        return _DEFAULT_WORKSPACE_ROOT
+    return os.path.join(os.getcwd(), "session")
 
 #: Withdrawn override. Only the reader honoured it, so setting it split the KB
 #: in two. ``FRAMEWORK_AGENT_ROOT`` is deliberately absent: it means "where
@@ -136,7 +148,7 @@ def migrate_legacy_partition_once() -> Path | None:
     if os.environ.get(KB_ROOT_ENV, "").strip():
         return None
 
-    workspace = Path(os.environ.get("USER_DATA_PATH", "").strip() or _DEFAULT_WORKSPACE_ROOT).expanduser()
+    workspace = Path(os.environ.get("USER_DATA_PATH", "").strip() or _default_workspace_root()).expanduser()
     source = workspace / _LEGACY_WORKSPACE_KB_DIRNAME / _FRAMEWORK_OPTIMIZATION_ROOT
     destination = framework_optimization_root()
 
@@ -289,7 +301,7 @@ def mutable_kb_root() -> Path:
     override = os.environ.get(KB_ROOT_ENV, "").strip()
     if override:
         return Path(override).expanduser()
-    workspace = os.environ.get("USER_DATA_PATH", "").strip() or _DEFAULT_WORKSPACE_ROOT
+    workspace = os.environ.get("USER_DATA_PATH", "").strip() or _default_workspace_root()
     return Path(workspace).expanduser() / _MUTABLE_KB_DIRNAME
 
 

@@ -57,6 +57,21 @@ async def test_factory_config_map_covers_all_registry_entries(tmp_path: Path):
         await bundle.aclose()
 
 
+@pytest.mark.asyncio
+async def test_the_stall_escalation_threshold_reaches_the_signal_from_the_config(tmp_path: Path):
+    """Deployments whose work units differ need the escalation point to move.
+
+    In code: like every other threshold on ``Config`` it is set by whoever
+    constructs it, not by an environment variable ``discover`` reads.
+    """
+    config = Config(session_dir=tmp_path, agent_stall_high_after_s=7200.0)
+    bundle = build_reactor_components(config)
+    try:
+        assert bundle.components.classifier.signal_configs["stall"].severity_high_after_s == 7200.0
+    finally:
+        await bundle.aclose()
+
+
 # LLM RCA wiring
 
 
@@ -385,6 +400,44 @@ async def test_factory_uses_quiet_source_when_local_probe_disabled(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_the_quiet_fallback_does_not_pass_its_empty_process_list_off_as_evidence(tmp_path: Path):
+    """Nothing looked, so "no processes" is ignorance and must not read as "no server".
+
+    The stub probes no health targets of its own, so today the flag only matters
+    if its snapshot is ever merged with one that did probe — which is exactly the
+    consumer asserted here, the guard that suppresses
+    ``local_server_unreachable`` when the process probe saw no server.
+    """
+    from dataclasses import replace
+
+    from hyperloom.agents.robustness.role.prompt_inputs import ReactorContext, SharedStateSnapshot
+    from hyperloom.agents.robustness.signals import evaluate_local_health_signals
+
+    config = Config(session_dir=tmp_path, disable_local_probe=True)
+    bundle = build_reactor_components(config)
+    try:
+        data = await bundle.components.router._primary.fetch(None)  # type: ignore[attr-defined]
+        assert data.local_processes_known is False
+        probed = replace(
+            data,
+            local_server_health=[
+                {"url": "http://localhost:8888/health", "reachable": False, "status": "error", "error": "connect"},
+            ],
+        )
+        ctx = ReactorContext(
+            tick_index=0,
+            shared_state=SharedStateSnapshot(),
+            inbox=[],
+            now_unix=1.0,
+        )
+        matched = [s for s in evaluate_local_health_signals(ctx, probed) if s.name == "local_server_unreachable"]
+        assert len(matched) == 1
+        assert matched[0].evidence["server_process_seen"] is None
+    finally:
+        await bundle.aclose()
+
+
+@pytest.mark.asyncio
 async def test_factory_default_keeps_local_probe_primary(tmp_path: Path):
     from hyperloom.agents.robustness.sources.local_probe import LocalProbeSource
 
@@ -427,5 +480,43 @@ async def test_factory_scriptable_skips_inference_server_probe(tmp_path: Path):
         assert isinstance(primary, LocalProbeSource)
         targets = primary._config.health_probe_targets  # type: ignore[attr-defined]
         assert config.inference_server_health_url not in targets
+    finally:
+        await bundle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_framework_added_to_the_config_knob_is_recognised_as_a_server(tmp_path: Path, monkeypatch):
+    """The documented knob decides ``is_server``, not a second copy of the list.
+
+    A framework named only in ``server_process_patterns`` used to be matched as
+    a process yet flagged ``is_server=False``, which silently disabled
+    ``local_server_unreachable`` for the very deployment that configured it.
+    """
+    import subprocess
+
+    from hyperloom.agents.robustness.sources import local_probe
+
+    config = Config(session_dir=tmp_path)
+    config.server_process_patterns.append("tinyserve.entrypoint")
+    bundle = build_reactor_components(config)
+    try:
+        probe_cfg = bundle.components.router._primary._config  # type: ignore[attr-defined]
+        monkeypatch.setattr(
+            local_probe.subprocess,
+            "run",
+            lambda *a, **k: subprocess.CompletedProcess(
+                a[0], 0, "  9 1048576 python -m tinyserve.entrypoint --port 8888\n", ""
+            ),
+        )
+
+        found = local_probe._sample_processes(
+            probe_cfg.process_patterns,
+            probe_cfg.server_process_patterns,
+        )
+
+        assert found is not None
+        assert [(p["pid"], p["rss_mb"], p["cmd"], p["is_server"]) for p in found] == [
+            (9, 1024.0, "python -m tinyserve.entrypoint --port 8888", True)
+        ]
     finally:
         await bundle.aclose()

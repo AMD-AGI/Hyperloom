@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""KERNEL_AGENT phase handler: bf16-dense-GEMM fallback, GEAK e2e run,
-GEMM-tuning keep/promote, and watermark-roofline gating."""
+"""KERNEL_AGENT phase handler for collective, fusion, GEMM, and GEAK lanes."""
 
 from __future__ import annotations
 import asyncio
 import hashlib
 import json
 import logging as _logging
+import math
 import os
 import signal
 import subprocess
@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from . import machine_state as _phase_state
+from ..kernel import collective_recovery as _collective_recovery
 from ..state.optimization_journal import (
     KIND_GEMM_TUNING,
     OUTCOME_KEEP,
@@ -49,6 +50,61 @@ _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
 # ``geak_pending`` before the task row exists, so the phase guard already sees a
 # pending revalidation while the enqueue is in flight.
 _GEAK_REVALIDATE_IDEMPOTENCY_KEY = "geak-revalidate"
+
+
+def _collective_comm_share(state: Any) -> tuple[float | None, str]:
+    """Return the communication share gating the lane, and its provenance.
+
+    ``current_comm_pct`` reads the roofline snapshot, whose exposed-comm bucket
+    comes from the TraceLens internal extension (``TRACELENS_INTERNAL_ROOT``).
+    A checkout without it has no such value, which would disable the whole lane
+    behind nothing but a log line, so fall back to the hottest source-resolved
+    collective's own GPU-time share. That share is the weaker signal -- it
+    counts one kernel rather than all exposed communication -- but the trace
+    always carries it.
+    """
+    comm_pct = state.current_comm_pct()
+    if comm_pct is not None:
+        return float(comm_pct), "roofline"
+    from ..kernel.request_handlers import select_collective_candidate
+
+    try:
+        candidate = select_collective_candidate(state)
+    except (OSError, TypeError, ValueError) as exc:
+        log.info("KERNEL entry: collective fallback share unavailable: %s", exc)
+        return None, "unavailable"
+    if not candidate:
+        return None, "unavailable"
+    return float(candidate["gpu_pct"]), "candidate_gpu_pct"
+
+
+def _derive_collective_attempt_id(result: dict[str, Any]) -> str:
+    """Compute the stable identity for one logical Collective campaign.
+
+    This mints the value; readers take it off the record instead of recomputing.
+
+    ``workspace`` is deliberately excluded: every attempt gets a fresh
+    ``attempt-<time_ns>`` directory, so hashing it would make the identity a
+    timestamp and a replayed or salvaged campaign would never deduplicate.
+    """
+    identity = {
+        key: result.get(key)
+        for key in (
+            "analysis_key",
+            "experiment_id",
+            "patch",
+            "kernel_id",
+            "status",
+            "error_class",
+        )
+        if result.get(key) not in (None, "")
+    }
+    encoded = json.dumps(
+        identity,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "collective-" + hashlib.sha256(encoded).hexdigest()[:24]
 
 
 class KernelPhase(PhaseHandler):
@@ -238,7 +294,7 @@ class KernelPhase(PhaseHandler):
         return geak_selected()
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
-        """Run deterministic KERNEL-entry setup: FP8 GEMM tuning gate, fusion, re-profile.
+        """Run deterministic KERNEL-entry optimization and re-profile gates.
 
         Args:
             from_phase: The phase being left, used only for logging.
@@ -249,7 +305,8 @@ class KernelPhase(PhaseHandler):
                 from_phase or "<unknown>",
             )
             return
-        geak_enabled = self._geak_enabled()
+        collective_only = self._collective_only_mode()
+        geak_enabled = False if collective_only else self._geak_enabled()
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -271,16 +328,21 @@ class KernelPhase(PhaseHandler):
                 )
         except Exception:  # noqa: BLE001
             log.debug("kernel v4 strategy selection recording failed", exc_info=True)
+        if collective_only:
+            self.shared_state.collective_only_mode = True
+            self.shared_state.save(self.session_dir)
+            await self._maybe_reprofile_for_kernel()
+            await self._maybe_run_collective_before_kernel_opt()
+            return
         if geak_enabled:
             # GEAK owns the whole KERNEL_AGENT phase: one in-process e2e run
             # seeded with the EXPLORE best config, then hand straight to SWEEP.
             await self._run_geak_kernel_phase(from_phase=from_phase)
             return
         if not self._gemm_tuning_required_before_kernel_opt():
-            # GEMM tuning and fusion are independently gated; refresh the
-            # snapshot and run fusion when eligible before GEAK runs.
             await self._maybe_reprofile_for_kernel()
             await self._maybe_run_forge_fusion_before_kernel_opt()
+            await self._maybe_run_collective_before_kernel_opt()
             return
 
         # Refresh the snapshot before GEMM tuning targets the bottleneck.
@@ -355,6 +417,7 @@ class KernelPhase(PhaseHandler):
         # Capture explore + GEMM-tuning gains before inline GEAK.
         await self._maybe_reprofile_for_kernel()
         await self._maybe_run_forge_fusion_before_kernel_opt()
+        await self._maybe_run_collective_before_kernel_opt()
         if self._should_continue_kernel_after_gemm():
             await self._run_kernel_opt_after_gemm()
 
@@ -1903,12 +1966,10 @@ class KernelPhase(PhaseHandler):
         """
         self._sync_profile_state_after_gemm_roofline(result)
         self.shared_state.record_gemm_tuning(result)
+        # Every backend goes through the same per-candidate E2E validator; the
+        # CK block-scale switch that used to gate forge routing is now injected
+        # by ``_gemm_e2e_candidates`` as a candidate of its own.
         await self._validate_gemm_tuning_e2e(result)
-        # Per-round write: promotion/validation is what appends the
-        # ``gemm_tuning`` row to ``optimization_stack``, and the column is built
-        # from that row, so this is the first point where there is anything to
-        # stage. Staging never raises.
-        self.shared_state._stage_kernel_kb_columns()
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -2427,6 +2488,628 @@ class KernelPhase(PhaseHandler):
         await self._run_forge_fusion()
         await self._maybe_reprofile_for_kernel()
 
+    #: Exposed communication below this share of E2E is not worth a tuning round.
+    COLLECTIVE_COMM_PCT_FLOOR = 1.0
+    #: Floor for the fallback share, which counts one kernel's whole GPU time
+    #: rather than the exposed part of all communication. A collective the
+    #: compute overlaps entirely still scores here, so the bar is higher.
+    COLLECTIVE_CANDIDATE_GPU_PCT_FLOOR = 3.0
+
+    def _collective_only_mode(self) -> bool:
+        """Return whether KERNEL should run only the Collective lane."""
+        state_value = getattr(
+            self.shared_state,
+            "collective_only_mode",
+            False,
+        )
+        if not isinstance(state_value, bool):
+            raise ValueError("collective_only_mode must be boolean")
+        return state_value or str(
+            os.environ.get("HYPERLOOM_COLLECTIVE_ONLY", "")
+        ).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    def _collective_required_before_kernel_opt(self) -> bool:
+        """Return whether the current trace warrants a collective campaign."""
+        if str(os.environ.get("HYPERLOOM_SKIP_COLLECTIVE", "")).strip().lower() in ("1", "true", "yes", "on"):
+            return False
+        tp = getattr(self.shared_state, "tp", 0)
+        if isinstance(tp, bool) or not isinstance(tp, int):
+            raise ValueError("Collective TP must be an integer")
+        if tp <= 1:
+            return False
+        analysis = getattr(self.shared_state, "last_trace_analyze", None)
+        if analysis in (None, {}):
+            log.info("KERNEL entry: skip collective (no trace analysis yet)")
+            return False
+        if not isinstance(analysis, dict):
+            raise ValueError("last_trace_analyze must be a mapping")
+        comm_pct, comm_source = _collective_comm_share(self.shared_state)
+        if comm_pct is None:
+            log.info(
+                "KERNEL entry: skip collective (no roofline comm share, and no "
+                "source-resolved collective candidate to fall back on)",
+            )
+            return False
+        floor = (
+            self.COLLECTIVE_CANDIDATE_GPU_PCT_FLOOR
+            if comm_source == "candidate_gpu_pct"
+            else self.COLLECTIVE_COMM_PCT_FLOOR
+        )
+        if comm_pct < floor:
+            log.info(
+                "KERNEL entry: skip collective (comm share %.2f%% from %s < %.2f%% floor)",
+                comm_pct,
+                comm_source,
+                floor,
+            )
+            return False
+        last = getattr(self.shared_state, "last_collective", None)
+        if last is not None and not isinstance(last, dict):
+            raise ValueError("last_collective must be a mapping")
+        if last:
+            status = str(last.get("status") or "").strip()
+            if status in ("ok", "complete", "kept"):
+                return False
+            if status == "skipped":
+                from ..kernel.request_handlers import collective_analysis_key
+
+                if str(last.get("analysis_key") or "") == collective_analysis_key(self.shared_state):
+                    return False
+        return True
+
+    async def _maybe_run_collective_before_kernel_opt(self) -> None:
+        """Run or resume collective optimization before kernel_opt."""
+        if _phase_state.collective_integration_pending(self.shared_state):
+            last = self.shared_state.last_collective
+            await self._integrate_collective(last)
+        elif self._collective_required_before_kernel_opt():
+            await self._run_forge_collective()
+        if self._collective_only_mode() and not (
+            _phase_state.collective_integration_pending(self.shared_state)
+        ):
+            self.shared_state.set_pending_escalate_hint(
+                _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP
+            )
+            self.shared_state.save(self.session_dir)
+
+    async def _run_forge_collective(self) -> None:
+        """Tune the hottest rewritable multi-GPU collective during KERNEL entry."""
+        log.info("KERNEL entry: running collective tuning (multi-GPU comm kernel)")
+        try:
+            from ..kernel.request_handlers import run_collective_handler
+
+            result = await run_collective_handler(
+                {"task_id": "kernel_entry_collective", "reason": "kernel_entry_auto"},
+                session_dir=self.session_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 - preserve a durable lane verdict
+            log.exception("KERNEL entry collective tuning failed")
+            result = {
+                "status": "failed",
+                "decision": "REVERT",
+                "engine": "forge_collective",
+                "error_class": exc.__class__.__name__,
+                "error": repr(exc),
+            }
+        await self._handle_collective_result(result)
+
+    async def _handle_collective_result(self, result: dict | None) -> None:
+        """Record a collective run, publish it, and integrate a validated patch."""
+        if not isinstance(result, dict):
+            raise TypeError("Collective handler result must be a mapping")
+        recorded = dict(result)
+        kept = recorded.setdefault("kept", False)
+        requires_e2e = recorded.setdefault(
+            "requires_e2e_validation",
+            False,
+        )
+        if not isinstance(kept, bool) or not isinstance(requires_e2e, bool):
+            raise ValueError("Collective handler E2E flags must be boolean")
+        if kept != requires_e2e:
+            raise ValueError("Collective handler E2E flags are inconsistent")
+        if not str(recorded.get("collective_attempt_id") or "").strip():
+            recorded["collective_attempt_id"] = (
+                _derive_collective_attempt_id(recorded)
+            )
+        if kept:
+            recorded["integration_status"] = "pending"
+            if not str(recorded.get("integration_id") or "").strip():
+                seed = (
+                    recorded["collective_attempt_id"]
+                    + ":"
+                    + str(recorded.get("patch") or "")
+                )
+                recorded["integration_id"] = (
+                    "collective-integration-"
+                    + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+                )
+        self.shared_state.record_collective(recorded, self.session_dir)
+        log.info(
+            "collective tuning: status=%s decision=%s speedup=%s kernel=%s",
+            result.get("status"),
+            result.get("decision"),
+            result.get("kernel_speedup"),
+            result.get("kernel_name"),
+        )
+        status = str(result.get("status") or "unknown")
+        try:
+            await self.bus.append_and_seq(
+                Message.new(
+                    "kernel_agent",
+                    "orchestration",
+                    "response",
+                    {
+                        "in_reply_to": "",
+                        "kind": "run_collective_done",
+                        "status": status,
+                        "result": recorded,
+                        "source": "kernel_entry_auto",
+                    },
+                    priority=1,
+                )
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("failed to post run_collective_done bus message")
+        if kept:
+            await self._integrate_collective(recorded)
+
+    async def _run_collective_integration(
+        self,
+        result: dict,
+        inputs: "_collective_recovery.IntegrationInputs",
+        *,
+        preapplied: dict,
+        backup_root: Path,
+        apply_checkpoint: Path,
+    ) -> dict:
+        """Run the E2E integrate round, or describe why it could not run.
+
+        Every failure path returns a REVERT result rather than raising, so the
+        caller always has a decision to settle and a patch state to unwind.
+        """
+        from ..kernel.request_handlers import (
+            integrate_handler,
+            materialize_unified_patch_snapshot,
+        )
+
+        patch = inputs.patch
+        target_file = inputs.target_file
+
+        def _failed(error_class: str, error: str) -> dict:
+            return {
+                "status": "failed",
+                "decision": "REVERT",
+                "error_class": error_class,
+                "error": error,
+                "patch_path": patch,
+                "target_file": target_file,
+                "apply_result": preapplied or {},
+            }
+
+        if not patch or not target_file:
+            return _failed(
+                "collective_patch_missing",
+                "collective KEEP is missing patch or target_file",
+            )
+
+        snapshot_dir = str(result.get("snapshot_dir") or "").strip()
+        if not snapshot_dir and patch.endswith(".patch") and inputs.kernel_repo:
+            try:
+                snapshot_dir = await asyncio.to_thread(
+                    materialize_unified_patch_snapshot,
+                    patch_path=patch,
+                    repo_root=inputs.kernel_repo,
+                    snapshot_dir=Path(patch).parent / "collective_snapshot",
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.exception(
+                    "KERNEL entry collective snapshot materialization failed"
+                )
+                return _failed(exc.__class__.__name__, repr(exc))
+
+        try:
+            keep_threshold = float(
+                os.environ.get("HYPERLOOM_COLLECTIVE_KEEP_PCT", "1.0")
+            )
+            if not math.isfinite(keep_threshold) or keep_threshold < 0:
+                raise ValueError(
+                    "HYPERLOOM_COLLECTIVE_KEEP_PCT must be finite and non-negative"
+                )
+            integ = await integrate_handler(
+                {
+                    "task_id": "collective_e2e",
+                    "kernel_id": "forge_collective",
+                    "source": "forge_collective",
+                    "patch_path": patch,
+                    "target_file": target_file,
+                    "kernel_repo": inputs.kernel_repo,
+                    "snapshot_dir": snapshot_dir,
+                    "backup_root": str(backup_root),
+                    "apply_checkpoint_path": str(apply_checkpoint),
+                    "preapplied_apply_result": preapplied,
+                    "extra_envs": inputs.extra_envs,
+                    "defer_patch_finalize": True,
+                    "integration_id": inputs.integration_id,
+                    "keep_threshold_pct": keep_threshold,
+                },
+                session_dir=self.session_dir,
+            )
+            if not isinstance(integ, dict):
+                raise TypeError("Collective integration result must be a mapping")
+            return integ
+        except Exception as exc:  # noqa: BLE001
+            log.exception("KERNEL entry collective integrate failed")
+            return _failed(exc.__class__.__name__, repr(exc))
+
+    async def _settle_collective_integration(
+        self,
+        integ: dict,
+        *,
+        apply_checkpoint: Path,
+        backup_root: Path,
+        integration_id: str,
+        recovery_uncertain: bool,
+    ) -> str:
+        """Resolve the decision and finish the revert a non-KEEP owes.
+
+        Mutates ``integ`` in place and returns the settled decision. A patch the
+        session cannot prove reverted stays flagged ``recovery_required`` so the
+        next run picks it up.
+        """
+        from ..kernel.request_handlers import _maybe_revert_kernel_patch
+
+        apply_result = integ.get("apply_result")
+        manifest_path = (
+            str(apply_result.get("manifest_path") or "").strip()
+            if isinstance(apply_result, dict)
+            else ""
+        )
+        if not manifest_path and apply_checkpoint.is_file():
+            try:
+                apply_result, _manifest_status = _collective_recovery.load_apply_checkpoint(
+                    apply_checkpoint,
+                    backup_root,
+                )
+                integ["apply_result"] = apply_result
+            except Exception as exc:  # noqa: BLE001
+                recovery_uncertain = True
+                integ.update(
+                    {
+                        "status": "failed",
+                        "decision": "NEEDS_REVIEW",
+                        "error_class": "collective_apply_checkpoint_invalid",
+                        "error": repr(exc),
+                    }
+                )
+
+        decision = str(integ.get("decision") or "").strip().upper()
+        if decision not in {"KEEP", "REVERT", "NEEDS_REVIEW"}:
+            integ.update(
+                {
+                    "status": "failed",
+                    "decision": "NEEDS_REVIEW",
+                    "error_class": "collective_integration_decision_invalid",
+                    "error": f"Invalid integration decision: {decision!r}",
+                }
+            )
+            decision = "NEEDS_REVIEW"
+            recovery_uncertain = True
+        integ["integration_id"] = integration_id
+
+        apply_result = integ.get("apply_result")
+        if not isinstance(apply_result, dict):
+            apply_result = {}
+            integ["apply_result"] = apply_result
+        manifest_path = str(apply_result.get("manifest_path") or "").strip()
+        if decision == "KEEP":
+            return decision
+
+        revert_result = integ.get("revert_result")
+        if manifest_path and not _collective_recovery.patch_lifecycle_complete(revert_result):
+            integ["revert_result"] = await asyncio.to_thread(
+                _maybe_revert_kernel_patch,
+                apply_result,
+            )
+        revert_complete = not manifest_path or _collective_recovery.patch_lifecycle_complete(
+            integ.get("revert_result")
+        )
+        integration_complete = revert_complete and not recovery_uncertain
+        integ["integration_status"] = (
+            "complete" if integration_complete else "recovery_required"
+        )
+        integ["integration_recovery_action"] = (
+            "" if integration_complete else "revert"
+        )
+        return decision
+
+    async def _integrate_collective(self, result: dict) -> None:
+        """Apply a collective patch and adopt it only after an E2E KEEP."""
+        from ..kernel.request_handlers import (
+            _maybe_finalize_kernel_patch,
+            _maybe_revert_kernel_patch,
+        )
+        from hyperloom.inference_optimizer.session.session_paths import patches_dir
+
+        inputs = _collective_recovery.validate_integration_inputs(
+            result,
+            self.shared_state,
+        )
+        integration_id = inputs.integration_id
+        current_envs = inputs.extra_envs
+        patch_root = patches_dir(
+            self.session_dir,
+            "forge_collective_"
+            + hashlib.sha256(integration_id.encode("utf-8")).hexdigest()[:16],
+        )
+        backup_root = patch_root / "backup"
+        apply_checkpoint = patch_root / "apply_checkpoint.json"
+        backup_root.parent.mkdir(parents=True, exist_ok=True)
+        recovered = await _collective_recovery.recover_apply_state(
+            result,
+            checkpoint=apply_checkpoint,
+            backup_root=backup_root,
+            patch=inputs.patch,
+            target_file=inputs.target_file,
+        )
+        integ = recovered.integ
+        if integ is None:
+            integ = await self._run_collective_integration(
+                result,
+                inputs,
+                preapplied=recovered.preapplied,
+                backup_root=backup_root,
+                apply_checkpoint=apply_checkpoint,
+            )
+        decision = await self._settle_collective_integration(
+            integ,
+            apply_checkpoint=apply_checkpoint,
+            backup_root=backup_root,
+            integration_id=integration_id,
+            recovery_uncertain=recovered.uncertain,
+        )
+        apply_result = integ["apply_result"]
+
+        state_snapshot = {
+            "optimization_stack": list(
+                self.shared_state.optimization_stack or []
+            ),
+            "gain_per_stack_entry": list(
+                self.shared_state.gain_per_stack_entry or []
+            ),
+            "current_best": dict(self.shared_state.current_best or {}),
+            "cumulative_gain_validated": (
+                self.shared_state.cumulative_gain_validated
+            ),
+            "cumulative_gain_validated_ts": (
+                self.shared_state.cumulative_gain_validated_ts
+            ),
+            "cumulative_gain_validated_stack_len": (
+                self.shared_state.cumulative_gain_validated_stack_len
+            ),
+        }
+        if decision == "KEEP":
+            try:
+                self._promote_collective_integrate_keep(
+                    result,
+                    integ,
+                    extra_envs=current_envs,
+                )
+            except Exception as exc:  # noqa: BLE001
+                for field, value in state_snapshot.items():
+                    setattr(self.shared_state, field, value)
+                revert_result = await asyncio.to_thread(
+                    _maybe_revert_kernel_patch,
+                    apply_result,
+                )
+                revert_complete = _collective_recovery.patch_lifecycle_complete(
+                    revert_result
+                )
+                integ.update(
+                    {
+                        "status": "failed",
+                        "decision": "REVERT",
+                        "error_class": "collective_promotion_invalid",
+                        "error": repr(exc),
+                        "revert_result": revert_result,
+                        "integration_status": (
+                            "complete"
+                            if revert_complete
+                            else "recovery_required"
+                        ),
+                        "integration_recovery_action": (
+                            "" if revert_complete else "revert"
+                        ),
+                    }
+                )
+                decision = "REVERT"
+
+        gain = integ.get("gain_pct")
+        log.info(
+            "KERNEL entry: collective integrate decision=%s gain_pct=%s",
+            decision,
+            gain,
+        )
+        if decision == "KEEP":
+            integ["integration_status"] = "recovery_required"
+            integ["integration_recovery_action"] = "finalize"
+        try:
+            self.shared_state.record_collective_integration(
+                integ,
+                self.session_dir,
+                integration_id=integration_id,
+            )
+        except Exception:
+            if decision == "KEEP":
+                for field, value in state_snapshot.items():
+                    setattr(self.shared_state, field, value)
+            raise
+
+        if decision == "KEEP":
+            finalize_result = integ.get("finalize_result")
+            if not _collective_recovery.patch_lifecycle_complete(finalize_result):
+                finalize_result = await asyncio.to_thread(
+                    _maybe_finalize_kernel_patch,
+                    apply_result,
+                )
+                integ["finalize_result"] = finalize_result
+            finalize_complete = _collective_recovery.patch_lifecycle_complete(
+                finalize_result
+            )
+            integ["integration_status"] = (
+                "complete" if finalize_complete else "recovery_required"
+            )
+            integ["integration_recovery_action"] = (
+                "" if finalize_complete else "finalize"
+            )
+            self.shared_state.record_collective_integration(
+                integ,
+                self.session_dir,
+                integration_id=integration_id,
+            )
+
+        if integ["integration_status"] == "complete":
+            apply_checkpoint.unlink(missing_ok=True)
+        try:
+            await self.bus.append_and_seq(
+                Message.new(
+                    "kernel_agent",
+                    "orchestration",
+                    "response",
+                    {
+                        "in_reply_to": "",
+                        "kind": "collective_integrate_done",
+                        "status": integ.get("status", "failed"),
+                        "decision": decision,
+                        "gain_pct": gain,
+                        "result": integ,
+                        "source": "kernel_entry_auto",
+                    },
+                    priority=1,
+                )
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("failed to post collective_integrate_done bus message")
+
+    def _promote_collective_integrate_keep(
+        self,
+        collective_result: dict,
+        integrate_result: dict,
+        *,
+        extra_envs: dict[str, str] | None = None,
+    ) -> None:
+        """Promote an E2E-validated Collective KEEP into the optimization stack."""
+        if not isinstance(collective_result, dict) or not isinstance(
+            integrate_result, dict
+        ):
+            raise TypeError("Collective promotion inputs must be mappings")
+        if str(integrate_result.get("decision") or "").strip().upper() != "KEEP":
+            return
+        if str(integrate_result.get("status") or "").strip().lower() != "ok":
+            raise ValueError("Collective KEEP requires a successful integration")
+        apply_result = integrate_result.get("apply_result")
+        if (
+            not isinstance(apply_result, dict)
+            or apply_result.get("status") != "ok"
+            or not str(apply_result.get("manifest_path") or "").strip()
+        ):
+            raise ValueError("Collective KEEP is missing an apply manifest")
+        new_tput_raw = integrate_result.get("new_tput")
+        incremental_gain_raw = integrate_result.get("gain_pct")
+        baseline_tput_raw = self.shared_state.baseline_tput
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            for value in (
+                new_tput_raw,
+                incremental_gain_raw,
+                baseline_tput_raw,
+            )
+        ):
+            raise ValueError(
+                "Collective KEEP is missing numeric E2E measurements"
+            )
+        try:
+            new_tput = float(new_tput_raw)
+            incremental_gain = float(incremental_gain_raw)
+            baseline_tput = float(baseline_tput_raw)
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Collective KEEP is missing numeric E2E measurements"
+            ) from exc
+        if not math.isfinite(new_tput) or new_tput <= 0:
+            raise ValueError("Collective KEEP new_tput must be positive")
+        if not math.isfinite(incremental_gain) or incremental_gain <= 0:
+            raise ValueError("Collective KEEP gain_pct must be positive")
+        if not math.isfinite(baseline_tput) or baseline_tput <= 0:
+            raise ValueError("Collective KEEP baseline_tput must be positive")
+
+        patch = str(
+            collective_result.get("patch")
+            or integrate_result.get("patch_path")
+            or ""
+        ).strip()
+        if not patch:
+            raise ValueError("Collective KEEP is missing patch_path")
+        integration_id = str(
+            collective_result.get("integration_id")
+            or integrate_result.get("integration_id")
+            or ""
+        ).strip()
+        if not integration_id:
+            raise ValueError("Collective KEEP is missing integration_id")
+        if not isinstance(self.shared_state.optimization_stack, list):
+            raise ValueError("optimization_stack must be a list")
+        if not isinstance(self.shared_state.gain_per_stack_entry, list):
+            raise ValueError("gain_per_stack_entry must be a list")
+        existing = {
+            str(item.get("patch_path") or "")
+            for item in (self.shared_state.optimization_stack or [])
+            if isinstance(item, dict) and item.get("action") == "collective"
+        }
+        if patch in existing:
+            return
+        envs = dict(extra_envs or integrate_result.get("extra_envs") or {})
+        extra_args = str(integrate_result.get("extra_server_args") or "")
+        # One writer owns current_best and the stack: the lift merges onto the
+        # previous config (so cumulative args and unset_envs stay correct) and
+        # refuses a winner that does not beat the live anchor.
+        lifted = self._lift_to_current_best(
+            "collective",
+            new_tput,
+            {
+                "name": "forge_collective",
+                "candidate_extra_server_args": extra_args,
+                "extra_envs": envs,
+                "source_phase": "KERNEL_AGENT",
+                "provenance": "forge_collective",
+                "workspace": integrate_result.get("workspace"),
+            },
+            entry_extra={
+                "backend": "forge",
+                "engine": "forge_collective",
+                "source": "kernel_entry_auto",
+                "integration_id": integration_id,
+                "kernel_id": str(collective_result.get("kernel_id") or ""),
+                "kernel_name": str(collective_result.get("kernel_name") or ""),
+                "gain_pct": incremental_gain,
+                "patch_path": patch,
+                "target_file": collective_result.get("source_file")
+                or integrate_result.get("target_file"),
+                "kernel_speedup": collective_result.get("kernel_speedup"),
+                "gpu_pct": collective_result.get("gpu_pct"),
+                "collective_op": collective_result.get("collective_op"),
+                "world_size": collective_result.get("world_size"),
+            },
+        )
+        if not lifted:
+            return
+        self._update_cumulative_gain_validated(new_tput)
+
     async def _run_forge_fusion(self) -> None:
         """Run autonomous kernel fusion during KERNEL entry."""
         log.info("KERNEL entry: running forge-fusion (autonomous kernel fusion)")
@@ -2554,9 +3237,6 @@ class KernelPhase(PhaseHandler):
         self._promote_fusion_integrate_keep(result, integ, extra_envs=merged_envs)
         try:
             self.shared_state.last_fusion_integrate = integ
-            # Per-round write: a fusion integrate just completed, so re-stage the
-            # kernel KB columns (fusion integrate bypasses record_kernel_integrate_result).
-            self.shared_state._stage_kernel_kb_columns()
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001
             pass

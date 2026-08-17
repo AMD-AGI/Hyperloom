@@ -246,3 +246,47 @@ def test_classify_root_cause_prefers_kv_cache_oom_over_generic_oom():
         )
         == "kv_cache_oom"
     )
+
+
+# ---- platform line: absence must be stated, not implied ----
+def _summary_without_platform(**extra) -> dict:
+    base = {
+        "session_id": "s",
+        "model_name": "m",
+        "model_path": "/m",
+        "stop_reason": "target_reached",
+        "max_minutes": 60,
+        "report_generated_at": "t0",
+        "framework": "sglang",
+        "current_best": {},
+        "baseline_tput": 100.0,
+        "cumulative_gain": 0.0,
+        "cumulative_gain_validated": 0.0,
+        "cumulative_gain_validated_stack_len": 0,
+        "optimization_stack_len": 0,
+        "crash_count": 0,
+        "pruned_families": [],
+        "event_counts_by_topic": {},
+        "highlights": [],
+    }
+    base.update(extra)
+    return base
+
+
+def test_report_says_platform_is_missing_when_the_summary_predates_the_field():
+    """A summary with no platform key still gets a line.
+
+    This is the case with no ``reason`` to print, and it is the one worth
+    stating: silence reads as a host that was checked and found unremarkable.
+    """
+    md = rp._format_md(_summary_without_platform())
+    assert "- platform       : not recorded" in md
+
+
+def test_report_gives_the_reason_the_platform_is_missing_when_it_has_one():
+    md = rp._format_md(
+        _summary_without_platform(
+            platform={"status": "unavailable", "reason": "no host CPU sysfs"}
+        )
+    )
+    assert "not recorded — no host CPU sysfs" in md

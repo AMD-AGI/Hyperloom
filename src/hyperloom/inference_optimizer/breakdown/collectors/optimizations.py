@@ -211,6 +211,8 @@ def _optimization_kind(
             return "gemm_tuning"
         if action == "fusion":
             return "kernel_fusion"
+        if action == "collective":
+            return "kernel_collective"
         return "kernel_patch"
     if source == "framework_agent":
         patch_evidence = (

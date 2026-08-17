@@ -42,6 +42,10 @@ from ..trace.trace_env import env_flag
 
 log = logging.getLogger(__name__)
 
+#: Collective primitives the dedicated lane can measure. Each needs an
+#: independent reference implementation in the generated driver.
+SUPPORTED_COLLECTIVE_OPS = frozenset({"all_reduce", "reduce_scatter", "all_gather"})
+
 # "Honest E2E" hardening flags. The umbrella flag ``HL_HONEST_E2E`` turns the
 # whole mode on; each fix also has a per-fix override that wins over the umbrella
 # (set it to an explicit falsey value to opt a single fix out of the umbrella).
@@ -263,7 +267,8 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
     integrated_entries = [
         entry
         for entry in (state.optimization_stack or [])
-        if isinstance(entry, dict) and entry.get("action") == "integrate"
+        if isinstance(entry, dict)
+        and entry.get("action") in {"integrate", "collective"}
     ]
     attempted_entries = [
         entry
@@ -355,44 +360,6 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
             claimed_sources.add(source_file)
         result.append(record)
     return result
-
-
-# ===========================================================================
-# Kernel-decision write-owner functions. SharedState is a passive
-# persisted record; the functions that *own kernel decisions* (recording
-# kernel-opt / integrate / gemm-tuning outcomes, kernel-patch identity,
-# pending-keep bookkeeping, hot-kernel reuse) belong to this kernel domain.
-# They take ``state`` as their first argument and read/mutate it; SharedState
-# keeps thin forwarding shims so existing callers
-# (``state.record_kernel_opt(...)`` etc.) keep working.
-#
-# Retry/default settings are intentionally below both SharedState and kernel
-# decision code to keep the dependency graph one-way.
-# ===========================================================================
-def _format_last_kernel_opt(state) -> str:
-    """Single-line repr of last kernel-opt outcome for prompt injection.
-
-    Returns:
-        str: A compact ``kernel_id=... decision=... speedup=...`` line
-            (with optional per-kernel attempts/retired history), or
-            ``"(none)"`` when no kernel_opt has run.
-    """
-    if not state.last_kernel_opt:
-        return "(none)"
-    ko = state.last_kernel_opt
-    kid = str(ko.get("kernel_id") or "")
-    attempts_entry = _entry_by_kernel_id(state, kid) or {}
-    history_tag = ""
-    if attempts_entry:
-        history_tag = (
-            f" history=attempts={attempts_entry.get('attempts', 0)}/partial={attempts_entry.get('partial_count', 0)}"
-        )
-        rej_reason = attempts_entry.get("rejected_reason")
-        if rej_reason:
-            history_tag += f"/retired={rej_reason}"
-    return (
-        f"kernel_id={kid or '?'} decision={ko.get('decision', '?')} speedup={ko.get('micro_speedup', '?')}{history_tag}"
-    )
 
 
 def _resolve_kernel_patch_identity(
@@ -1189,31 +1156,59 @@ def record_gemm_tuning(state, result: dict[str, Any]) -> None:
         pass
 
 
+def is_collective_candidate(candidate: dict[str, Any]) -> bool:
+    """Return whether a trace row requires the dedicated collective lane.
+
+    The contract's ``collective`` kind is a name/path heuristic: it also fires on
+    a single-GPU ``block_reduce`` and on anything whose source sits under a
+    ``dist/`` directory. Withholding those from the other lanes would strand them,
+    because the collective lane is opt-in and only admits an injected
+    nccl-summary row whose primitive it can actually measure. So the ownership
+    test is the lane's own admission test, not the heuristic.
+    """
+    contract = candidate.get("kernel_contract")
+    if not isinstance(contract, dict):
+        return False
+    if str(contract.get("kind") or "") != "collective":
+        return False
+    if str(contract.get("collective_op") or "") not in SUPPORTED_COLLECTIVE_OPS:
+        return False
+    if str(candidate.get("candidate_source") or "").strip() != "nccl_summary":
+        return False
+    return candidate.get("is_multigpu") is True
+
+
 def _kernel_ids_in_optimization_stack(state) -> set[str]:
-    """kernel_ids already absorbed into optimization_stack as integrate entries.
+    """kernel_ids already absorbed into optimization_stack by a kernel lane.
 
     Returns:
         set[str]: The set of ``kernel_id`` values that appear on an
-            ``integrate`` entry of :attr:`optimization_stack`.
+            ``integrate`` or ``collective`` entry of
+            :attr:`optimization_stack`.
     """
     return {
         str(e.get("kernel_id"))
         for e in (state.optimization_stack or [])
-        if isinstance(e, dict) and e.get("action") == "integrate" and e.get("kernel_id")
+        if isinstance(e, dict)
+        and e.get("action") in {"integrate", "collective"}
+        and e.get("kernel_id")
     }
 
 
 def _source_files_in_optimization_stack(state) -> set[str]:
-    """source_file paths already touched by an integrate entry; enforces "same source_file, only strongest KEEP integrated" (apply_kernel_patch is a whole-file overwrite).
+    """source_file paths already touched by an integrating kernel lane; enforces "same source_file, only strongest KEEP integrated" (apply_kernel_patch is a whole-file overwrite).
 
     Returns:
         set[str]: The set of ``target_file`` / ``source_file`` paths
-            referenced by ``integrate`` entries of
+            referenced by ``integrate`` or ``collective`` entries of
             :attr:`optimization_stack`.
     """
     sources: set[str] = set()
     for e in state.optimization_stack or []:
-        if not isinstance(e, dict) or e.get("action") != "integrate":
+        if (
+            not isinstance(e, dict)
+            or e.get("action") not in {"integrate", "collective"}
+        ):
             continue
         src = str(e.get("target_file") or e.get("source_file") or "")
         if src:
@@ -1499,7 +1494,8 @@ def untried_hot_reusable_kernels(
     integrated_entries = [
         entry
         for entry in (state.optimization_stack or [])
-        if isinstance(entry, dict) and entry.get("action") == "integrate"
+        if isinstance(entry, dict)
+        and entry.get("action") in {"integrate", "collective"}
     ]
     rejected = set(state.rejected_kernel_ids or [])
     _ensure_kernel_task_state(state)
@@ -1512,6 +1508,8 @@ def untried_hot_reusable_kernels(
         if not isinstance(k, dict):
             continue
         if k.get("reusable_native_kernel") is not True:
+            continue
+        if is_collective_candidate(k):
             continue
         # Bypass path tags a kernel non-dispatchable when its shape is
         # geometry-only (launch_grid/tile_name) and would fail the kernel-opt

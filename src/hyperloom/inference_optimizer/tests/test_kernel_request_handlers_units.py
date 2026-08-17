@@ -478,13 +478,27 @@ class TestForgeGemmHelperCoverage:
         assert krh._resolve_fusion_decode_trace(state, {}) == str(state_trace)
         assert krh._resolve_fusion_decode_trace(state, {"trace_path": "/missing"}) == str(state_trace)
 
-    def test_forge_fusion_available_by_path_and_import(self, monkeypatch):
-        monkeypatch.setattr(krh.shutil, "which", lambda _name: "/usr/bin/forge-fusion")
+    def test_forge_fusion_available_probes_the_fusion_subpackage(self, monkeypatch):
+        probed: list[str] = []
+
+        def spec(name):
+            probed.append(name)
+            return object()
+
+        monkeypatch.setattr(krh.importlib.util, "find_spec", spec)
         assert krh._forge_fusion_available() is True
-        monkeypatch.setattr(krh.shutil, "which", lambda _name: None)
-        monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: object())
-        assert krh._forge_fusion_available() is True
+        # Probing kernel_agents alone would pass on a KernelForge predating the
+        # fusion absorption and only fail once the subprocess rejected forge-fuse.
+        assert probed == ["kernel_agents.fusion"]
+
         monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: None)
+        assert krh._forge_fusion_available() is False
+
+    def test_forge_fusion_available_survives_an_unimportable_parent(self, monkeypatch):
+        def boom(_name):
+            raise ModuleNotFoundError("kernel_agents")
+
+        monkeypatch.setattr(krh.importlib.util, "find_spec", boom)
         assert krh._forge_fusion_available() is False
 
     def test_materialize_unified_patch_snapshot(self, tmp_path):
@@ -565,6 +579,37 @@ class TestForgeGemmHelperCoverage:
         )
 
         assert (snapshot / "vllm" / "model_executor" / "models" / "qwen3.py").read_text(encoding="utf-8") == "new = 2\n"
+
+    def test_materialize_unified_patch_snapshot_accepts_missing_final_newline(
+        self,
+        tmp_path,
+    ):
+        """Legacy KB patches may omit the final newline but remain valid diffs."""
+        repo = tmp_path / "site-packages"
+        (repo / "vllm").mkdir(parents=True)
+        target = repo / "vllm" / "model.py"
+        target.write_text("old = 1\n", encoding="utf-8")
+        patch = tmp_path / "legacy.patch"
+        patch.write_text(
+            "diff --git a/vllm/model.py b/vllm/model.py\n"
+            "--- a/vllm/model.py\n"
+            "+++ b/vllm/model.py\n"
+            "@@ -1 +1 @@\n"
+            "-old = 1\n"
+            "+new = 2",
+            encoding="utf-8",
+        )
+
+        snapshot = Path(
+            krh.materialize_unified_patch_snapshot(
+                patch_path=patch,
+                repo_root=repo,
+            )
+        )
+
+        assert (snapshot / "vllm" / "model.py").read_text(
+            encoding="utf-8"
+        ) == "new = 2\n"
 
     def test_materialize_unified_patch_snapshot_nongit_new_file_timestamped(self, tmp_path):
         """A created file whose ``+++`` line carries a tab-suffixed timestamp
@@ -1076,11 +1121,148 @@ class TestForgeGemmHelperCoverage:
         assert result["error_class"] == "model_path_missing"
 
     @pytest.mark.asyncio
+    async def test_run_forge_gemm_tuning_resolves_hf_repo_for_subprocess(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from hyperloom.inference_optimizer import model_config_utils
+
+        snapshot = tmp_path / "models--amd--DeepSeek-V4-Pro-MXFP4" / "snapshots" / "abc123"
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text(
+            json.dumps({"model_type": "deepseek_v3"}),
+            encoding="utf-8",
+        )
+        state = SharedState(
+            precision="mxfp4",
+            framework="vllm",
+            model_path="amd/DeepSeek-V4-Pro-MXFP4",
+            gpu_type="mi355x",
+            tp=8,
+            conc=64,
+        )
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(
+            model_config_utils,
+            "resolve_local_model_dir",
+            lambda _model_path: snapshot,
+        )
+        durable = {}
+
+        def _capture_durable_envs(extra_envs, *, model_path, session_dir):
+            durable["model_path"] = model_path
+            return extra_envs, ""
+
+        monkeypatch.setattr(
+            krh,
+            "_persist_forge_gemm_csv_durably",
+            _capture_durable_envs,
+        )
+
+        async def _fake_subprocess(_cmd, *, timeout_sec):
+            sentinel = (
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps(
+                    {
+                        "status": "ok",
+                        "micro_decision": "candidate",
+                        "recommended_env": {
+                            "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tmp/tuned.csv"
+                        },
+                    }
+                )
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+            )
+            return 0, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        payload = {"task_id": "deepseek-gemm"}
+
+        result = await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        written = json.loads(
+            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
+        )
+        assert written["model_path"] == str(snapshot)
+        assert result["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
+        assert durable["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
+
+    @pytest.mark.asyncio
+    async def test_run_forge_gemm_tuning_rejects_uncached_hf_repo(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from hyperloom.inference_optimizer import model_config_utils
+
+        SharedState(
+            precision="mxfp4",
+            framework="vllm",
+            model_path="amd/Unavailable-Model",
+            gpu_type="mi355x",
+        ).save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(
+            model_config_utils,
+            "resolve_local_model_dir",
+            lambda _model_path: None,
+        )
+        subprocess_called = False
+
+        async def _unexpected_subprocess(_cmd, *, timeout_sec):
+            nonlocal subprocess_called
+            subprocess_called = True
+            return 1, "", ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _unexpected_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "model_path_unavailable"
+        assert subprocess_called is False
+
+    @pytest.mark.asyncio
+    async def test_run_forge_gemm_tuning_rejects_missing_absolute_model_path(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        missing_model_dir = tmp_path / "missing-model"
+        SharedState(
+            precision="mxfp4",
+            framework="vllm",
+            model_path=str(missing_model_dir),
+            gpu_type="mi355x",
+        ).save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        subprocess_called = False
+
+        async def _unexpected_subprocess(_cmd, *, timeout_sec):
+            nonlocal subprocess_called
+            subprocess_called = True
+            return 1, "", ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _unexpected_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert missing_model_dir.is_absolute()
+        assert result["status"] == "failed"
+        assert result["error_class"] == "model_path_unavailable"
+        assert subprocess_called is False
+
+    @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_maps_failed_micro_decision(self, tmp_path, monkeypatch):
+        model_dir = tmp_path / "qwen"
+        model_dir.mkdir()
         state = SharedState(
             precision="bf16",
             framework="sglang",
-            model_path="/models/qwen",
+            model_path=str(model_dir),
             gpu_type="mi300x",
             tp=1,
             conc=64,
@@ -1132,10 +1314,12 @@ class TestForgeGemmHelperCoverage:
             ),
             encoding="utf-8",
         )
+        model_dir = tmp_path / "qwen"
+        model_dir.mkdir()
         state = SharedState(
             precision="fp8",
             framework="vllm",
-            model_path="/models/qwen",
+            model_path=str(model_dir),
             gpu_type="mi355x",
             tp=1,
             conc=64,
@@ -1174,10 +1358,12 @@ class TestForgeGemmHelperCoverage:
     @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_tags_engine_forge(self, tmp_path, monkeypatch):
         """Forge runs must carry ``engine='forge'`` so the breakdown attributes them correctly."""
+        model_dir = tmp_path / "qwen"
+        model_dir.mkdir()
         state = SharedState(
             precision="bf16",
             framework="sglang",
-            model_path="/models/qwen",
+            model_path=str(model_dir),
             gpu_type="mi300x",
             tp=1,
             conc=64,
@@ -1315,6 +1501,575 @@ class TestForgeGemmHelperCoverage:
             # forge is that profile re-keyed onto aiter's lookup ladder.
             assert captured["shapes_json"].endswith("forge_shapes.aiter_aligned.json")
             assert json.loads(Path(captured["shapes_json"]).read_text(encoding="utf-8"))
+
+
+def _collective_candidate(**overrides):
+    """Build a valid all-reduce candidate with optional field overrides."""
+    candidate = {
+        "kernel_id": "all-reduce-1",
+        "name": "all_reduce_kernel",
+        "source_file": "/workspace/kernels/all_reduce.py",
+        "source_function": "all_reduce",
+        "input_shapes": [[4, 1024]],
+        "input_dtypes": ["float16"],
+        "gpu_pct": 12.5,
+        "kernel_repo": "/workspace",
+        "reusable_native_kernel": True,
+        "candidate_source": "nccl_summary",
+        "kernel_contract": {
+            "kind": "collective",
+            "collective_op": "all_reduce",
+        },
+    }
+    candidate.update(overrides)
+    return candidate
+
+
+class TestForgeCollectiveCoverage:
+    def test_parse_forge_collective_sentinel(self):
+        """Parse a valid collective wrapper result."""
+        payload = {
+            "engine": "forge_collective",
+            "status": "complete",
+            "decision": "KEEP",
+            "kept": True,
+            "requires_e2e_validation": True,
+        }
+        stdout = (
+            "wrapper noise\nFORGE_COLLECTIVE_RESULT_BEGIN\n"
+            + json.dumps(payload)
+            + "\nFORGE_COLLECTIVE_RESULT_END\ntrailing noise"
+        )
+
+        assert krh._parse_forge_collective_sentinel(stdout) == payload
+
+    @pytest.mark.parametrize(
+        "payload, error",
+        [
+            pytest.param("no-sentinel", "no result sentinel", id="missing-sentinel"),
+            pytest.param("malformed", "malformed result JSON", id="malformed-json"),
+            pytest.param([], "must be a JSON object", id="non-object"),
+            pytest.param(
+                {
+                    "engine": "other",
+                    "status": "complete",
+                    "decision": "REVERT",
+                    "kept": False,
+                    "requires_e2e_validation": False,
+                },
+                "invalid engine",
+                id="engine",
+            ),
+            pytest.param(
+                {
+                    "engine": "forge_collective",
+                    "status": 1,
+                    "decision": "REVERT",
+                    "kept": False,
+                    "requires_e2e_validation": False,
+                },
+                "invalid status",
+                id="status-type",
+            ),
+            pytest.param(
+                {
+                    "engine": "forge_collective",
+                    "status": "",
+                    "decision": "REVERT",
+                    "kept": False,
+                    "requires_e2e_validation": False,
+                },
+                "invalid status",
+                id="status-empty",
+            ),
+            pytest.param(
+                {
+                    "engine": "forge_collective",
+                    "status": "complete",
+                    "decision": "SKIP",
+                    "kept": False,
+                    "requires_e2e_validation": False,
+                },
+                "invalid decision",
+                id="decision",
+            ),
+            pytest.param(
+                {
+                    "engine": "forge_collective",
+                    "status": "complete",
+                    "decision": "KEEP",
+                    "kept": 1,
+                    "requires_e2e_validation": True,
+                },
+                "invalid kept",
+                id="kept",
+            ),
+            pytest.param(
+                {
+                    "engine": "forge_collective",
+                    "status": "complete",
+                    "decision": "REVERT",
+                    "kept": False,
+                    "requires_e2e_validation": None,
+                },
+                "invalid requires_e2e_validation",
+                id="e2e-type",
+            ),
+            pytest.param(
+                {
+                    "engine": "forge_collective",
+                    "status": "complete",
+                    "decision": "KEEP",
+                    "kept": False,
+                    "requires_e2e_validation": False,
+                },
+                "inconsistent decision",
+                id="decision-consistency",
+            ),
+            pytest.param(
+                {
+                    "engine": "forge_collective",
+                    "status": "complete",
+                    "decision": "KEEP",
+                    "kept": True,
+                    "requires_e2e_validation": False,
+                },
+                "inconsistent E2E gate",
+                id="e2e-consistency",
+            ),
+        ],
+    )
+    def test_parse_forge_collective_sentinel_rejects_contract_errors(
+        self,
+        payload,
+        error,
+    ):
+        """Reject every malformed collective sentinel contract."""
+        if payload == "no-sentinel":
+            stdout = "wrapper emitted no markers"
+        elif payload == "malformed":
+            stdout = (
+                "FORGE_COLLECTIVE_RESULT_BEGIN\nnot-json"
+                "\nFORGE_COLLECTIVE_RESULT_END"
+            )
+        else:
+            stdout = (
+                "FORGE_COLLECTIVE_RESULT_BEGIN\n"
+                + json.dumps(payload)
+                + "\nFORGE_COLLECTIVE_RESULT_END"
+            )
+
+        with pytest.raises(ValueError, match=error):
+            krh._parse_forge_collective_sentinel(stdout)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("candidate", [[], {}], ids=["list", "empty"])
+    async def test_run_forge_collective_rejects_invalid_candidate(
+        self,
+        tmp_path,
+        candidate,
+    ):
+        """Reject explicitly supplied empty or non-object candidates."""
+        result = await krh._run_forge_collective(
+            {"candidate": candidate},
+            session_dir=tmp_path,
+        )
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "invalid_collective_candidate"
+        assert result["decision"] == "REVERT"
+        assert result["kept"] is False
+
+    @pytest.mark.asyncio
+    async def test_run_forge_collective_rejects_invalid_candidate_artifact(
+        self,
+        tmp_path,
+    ):
+        """Shape a malformed candidate artifact as a skipped result."""
+        candidates = tmp_path / "collective_candidates.json"
+        candidates.write_text("not-json", encoding="utf-8")
+        SharedState(
+            last_trace_analyze={"candidates_path": str(candidates)}
+        ).save(tmp_path)
+
+        result = await krh._run_forge_collective({}, session_dir=tmp_path)
+
+        assert result["status"] == "skipped"
+        assert result["error_class"] == "invalid_collective_candidate_artifact"
+        assert result["analysis_key"] == str(candidates)
+
+    @pytest.mark.asyncio
+    async def test_run_forge_collective_skips_without_candidate(self, tmp_path):
+        """Skip safely when the latest analysis has no collective candidate."""
+        SharedState().save(tmp_path)
+
+        result = await krh._run_forge_collective({}, session_dir=tmp_path)
+
+        assert result["status"] == "skipped"
+        assert result["error_class"] == "no_collective_candidate"
+        assert result["analysis_key"] == ""
+        assert result["requires_e2e_validation"] is False
+
+    @pytest.mark.asyncio
+    async def test_run_forge_collective_rejects_unsupported_contract(self, tmp_path):
+        """Reject collectives with no distributed reference in the driver."""
+        candidate = _collective_candidate(
+            kernel_contract={"kind": "collective", "collective_op": "all_to_all"}
+        )
+
+        result = await krh._run_forge_collective(
+            {"candidate": candidate},
+            session_dir=tmp_path,
+        )
+
+        assert result["error_class"] == "unsupported_collective_contract"
+        assert result["decision"] == "REVERT"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "field, value",
+        [
+            ("kernel_id", ""),
+            ("source_file", ""),
+            ("source_function", ""),
+            ("input_shapes", []),
+            ("input_dtypes", []),
+            ("gpu_pct", True),
+            ("gpu_pct", float("inf")),
+            ("gpu_pct", -1),
+        ],
+    )
+    async def test_run_forge_collective_rejects_invalid_required_fields(
+        self,
+        tmp_path,
+        field,
+        value,
+    ):
+        """Reject missing and invalid fields required by the driver."""
+        candidate = _collective_candidate(**{field: value})
+
+        result = await krh._run_forge_collective(
+            {"candidate": candidate},
+            session_dir=tmp_path,
+        )
+
+        assert result["error_class"] == "invalid_collective_candidate"
+        assert field in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_run_forge_collective_rejects_non_string_kernel_repo(
+        self,
+        tmp_path,
+    ):
+        """Reject a candidate whose repository root is not a string."""
+        candidate = _collective_candidate(kernel_repo=123)
+
+        result = await krh._run_forge_collective(
+            {"candidate": candidate},
+            session_dir=tmp_path,
+        )
+
+        assert result["error_class"] == "invalid_collective_candidate"
+        assert "kernel_repo must be a string" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_run_forge_collective_requires_resolvable_repo_root(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Reject a source path with no explicit or discoverable repository."""
+        candidate = _collective_candidate(
+            source_file=str(tmp_path / "outside" / "all_reduce.py")
+        )
+        candidate.pop("kernel_repo")
+        monkeypatch.setattr(krh, "_find_repo_root_for_source", lambda _path: "")
+
+        result = await krh._run_forge_collective(
+            {"candidate": candidate},
+            session_dir=tmp_path,
+        )
+
+        assert result["error_class"] == "kernel_repo_missing"
+        assert candidate["source_file"] in result["error"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "tp",
+        [True, 1.5, "invalid", 1],
+        ids=["bool", "float", "non-numeric", "single-rank"],
+    )
+    async def test_run_forge_collective_rejects_invalid_world_size(
+        self,
+        tmp_path,
+        monkeypatch,
+        tp,
+    ):
+        """Reject non-integral and single-rank collective world sizes."""
+        monkeypatch.delenv("TP", raising=False)
+
+        result = await krh._run_forge_collective(
+            {"candidate": _collective_candidate(), "tp": tp},
+            session_dir=tmp_path,
+        )
+
+        assert result["error_class"] == "invalid_collective_world_size"
+        assert result["decision"] == "REVERT"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "budget",
+        [
+            {"timeout": True},
+            {"timeout": 1.5},
+            {"timeout": "invalid"},
+            {"timeout": -1},
+            {"timeout": 10000, "max_hours": True},
+        ],
+        ids=["bool", "float", "non-numeric", "negative", "max-hours"],
+    )
+    async def test_run_forge_collective_rejects_invalid_budget(
+        self,
+        tmp_path,
+        monkeypatch,
+        budget,
+    ):
+        """Reject malformed collective timeout and campaign budgets."""
+        monkeypatch.delenv("FORGE_COLLECTIVE_TIMEOUT", raising=False)
+        payload = {
+            "candidate": _collective_candidate(),
+            "tp": 2,
+            **budget,
+        }
+
+        result = await krh._run_forge_collective(payload, session_dir=tmp_path)
+
+        assert result["error_class"] == "invalid_collective_budget"
+        assert result["decision"] == "REVERT"
+
+    @pytest.mark.asyncio
+    async def test_run_forge_collective_skips_insufficient_budget(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Skip when the wrapper budget cannot fit a minimum campaign."""
+        monkeypatch.delenv("FORGE_COLLECTIVE_TIMEOUT", raising=False)
+
+        result = await krh._run_forge_collective(
+            {
+                "candidate": _collective_candidate(),
+                "tp": 2,
+                "timeout": 100,
+            },
+            session_dir=tmp_path,
+        )
+
+        assert result["status"] == "skipped"
+        assert result["error_class"] == "insufficient_collective_budget"
+        assert result["analysis_key"] == ""
+
+    @pytest.mark.asyncio
+    async def test_run_forge_collective_writes_input_and_applies_defaults(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Run the collective happy path with a fully isolated wrapper."""
+        candidates = tmp_path / "collective_candidates.json"
+        fallback = _collective_candidate(
+            kernel_id="fallback",
+            candidate_source="trace",
+            gpu_pct=90.0,
+        )
+        selected = _collective_candidate(
+            kernel_id="resolved",
+            source_file=str(tmp_path / "kernels" / "all_reduce.py"),
+            kernel_repo=str(tmp_path),
+            gpu_pct=10.0,
+        )
+        candidates.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        _collective_candidate(reusable_native_kernel=False),
+                        _collective_candidate(
+                            kernel_contract={
+                                "kind": "collective",
+                                "collective_op": "all_to_all",
+                            }
+                        ),
+                        fallback,
+                        selected,
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        SharedState(
+            gpu_type="MI300X",
+            tp=8,
+            last_trace_analyze={"candidates_path": str(candidates)},
+        ).save(tmp_path)
+        monkeypatch.setenv("FORGE_COLLECTIVE_AGENT_TIMEOUT", "900")
+        monkeypatch.setenv("CLAUDE_MODEL", "claude-test")
+        monkeypatch.setattr(krh.time, "time_ns", lambda: 123)
+        tool_path = tmp_path / "tools" / "forge_collective.py"
+        monkeypatch.setattr(
+            krh,
+            "_kernel_agent_tool_path",
+            lambda name: tmp_path / "tools" / name,
+        )
+        captured = {}
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            """Capture the wrapper invocation and return a valid sentinel."""
+            captured["cmd"] = cmd
+            captured["timeout_sec"] = timeout_sec
+            input_path = Path(cmd[cmd.index("--input-json") + 1])
+            captured["input"] = json.loads(input_path.read_text(encoding="utf-8"))
+            wrapper_result = {
+                "status": "complete",
+                "engine": "forge_collective",
+                "decision": "REVERT",
+                "kept": False,
+                "requires_e2e_validation": False,
+            }
+            return (
+                0,
+                "FORGE_COLLECTIVE_RESULT_BEGIN\n"
+                + json.dumps(wrapper_result)
+                + "\nFORGE_COLLECTIVE_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_collective(
+            {
+                "task_id": "collective-task",
+                "tp": "4",
+                "timeout": 10000,
+                "max_hours": 1,
+            },
+            session_dir=tmp_path,
+        )
+
+        workspace = (
+            tmp_path
+            / "runs"
+            / "collective"
+            / "collective-task"
+            / "attempt-123"
+        )
+        assert captured["cmd"] == [
+            "python3",
+            str(tool_path),
+            "--input-json",
+            str(workspace / "forge_collective_input.json"),
+        ]
+        assert captured["timeout_sec"] == 7200
+        assert captured["input"] == {
+            "agent_timeout_sec": "900",
+            "candidate": selected,
+            "experience_id": "attempt-123",
+            "finalize_grace_sec": 300,
+            "framework": "",
+            "gpu_target": "MI300X",
+            "kernel_repo": str(tmp_path),
+            "llm_model": "claude-test",
+            "max_hours": 1.0,
+            "operator_name": "all_reduce",
+            "output_dir": str(workspace),
+            "source_file": selected["source_file"],
+            "source_files": [selected["source_file"]],
+            "target_functions": ["all_reduce"],
+            "timeout": 6900,
+            "tp": 4,
+        }
+        assert result["backend"] == "forge"
+        assert result["workspace"] == str(workspace)
+        assert result["kernel_id"] == "resolved"
+        assert result["kernel_name"] == "all_reduce_kernel"
+        assert result["source_file"] == selected["source_file"]
+        assert result["kernel_repo"] == str(tmp_path)
+        assert result["gpu_pct"] == 10.0
+        assert result["collective_op"] == "all_reduce"
+        assert result["world_size"] == 4
+        assert result["source"] == "forge_collective"
+
+    @pytest.mark.asyncio
+    async def test_run_forge_collective_shapes_invalid_sentinel(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Convert an invalid wrapper sentinel into a revert result."""
+        monkeypatch.setattr(krh.time, "time_ns", lambda: 456)
+        monkeypatch.setattr(
+            krh,
+            "_kernel_agent_tool_path",
+            lambda name: tmp_path / name,
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            """Return wrapper output without a result sentinel."""
+            return 9, "wrapper output", "wrapper error"
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_collective(
+            {
+                "candidate": _collective_candidate(),
+                "tp": 2,
+                "timeout": 10000,
+                "max_hours": 1,
+            },
+            session_dir=tmp_path,
+        )
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "invalid_collective_result"
+        assert result["returncode"] == 9
+        assert result["stdout_tail"] == "wrapper output"
+        assert result["stderr_tail"] == "wrapper error"
+        assert result["world_size"] == 2
+
+    @pytest.mark.asyncio
+    async def test_run_forge_collective_shapes_subprocess_timeout(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Convert wrapper timeout into a bounded revert result."""
+        monkeypatch.setattr(
+            krh,
+            "_kernel_agent_tool_path",
+            lambda name: tmp_path / name,
+        )
+
+        async def _timeout(cmd, *, timeout_sec):
+            """Raise the timeout produced by the subprocess wrapper."""
+            raise subprocess.TimeoutExpired(["python3", "collective-worker"], timeout_sec)
+
+        monkeypatch.setattr(krh, "_run_subprocess", _timeout)
+
+        result = await krh._run_forge_collective(
+            {
+                "candidate": _collective_candidate(),
+                "tp": 2,
+                "timeout": 10000,
+                "max_hours": 1,
+            },
+            session_dir=tmp_path,
+        )
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "subprocess_timeout"
+        assert "TimeoutExpired after 7200s" in result["error"]
+        assert "collective-worker" in result["error"]
+        assert result["engine"] == "forge_collective"
+        assert result["requires_e2e_validation"] is False
 
 
 def _ensure_torch_module(monkeypatch):
@@ -3115,10 +3870,12 @@ class TestRunGemmTuningHandler:
     def test_forge_uses_runtime_fp8_blockscale_for_aiter_backend(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        model_dir = tmp_path / "qwen"
+        model_dir.mkdir()
         state = SharedState(
             precision="bf16",
             framework="sglang",
-            model_path="/models/qwen",
+            model_path=str(model_dir),
             gpu_type="mi300x",
             tp=1,
             conc=256,
@@ -3167,10 +3924,12 @@ class TestRunGemmTuningHandler:
 
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        model_dir = tmp_path / "qwen"
+        model_dir.mkdir()
         state = SharedState(
             precision="bf16",
             framework="sglang",
-            model_path="/models/qwen",
+            model_path=str(model_dir),
             gpu_type="mi300x",
             tp=1,
             conc=256,
@@ -3213,10 +3972,12 @@ class TestRunGemmTuningHandler:
     def test_forge_uses_per_token_only_for_explicit_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        model_dir = tmp_path / "qwen"
+        model_dir.mkdir()
         state = SharedState(
             precision="bf16",
             framework="sglang",
-            model_path="/models/qwen",
+            model_path=str(model_dir),
             gpu_type="mi300x",
             tp=1,
             conc=256,
@@ -3259,10 +4020,12 @@ class TestRunGemmTuningHandler:
         """When current_best has no --quantization, fall back to state.precision."""
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        model_dir = tmp_path / "moe"
+        model_dir.mkdir()
         state = SharedState(
             precision="bf16",
             framework="sglang",
-            model_path="/models/moe",
+            model_path=str(model_dir),
             gpu_type="mi300x",
             tp=1,
             conc=256,
@@ -4557,3 +5320,58 @@ class TestBuildTraceAnalyzeCmd:
         assert cmd[cmd.index("--steady-state-mode") + 1] == "median"
         # session-id falls back to the session dir name when payload omits it.
         assert cmd[cmd.index("--session-id") + 1] == session_dir.name
+
+
+def test_forge_loop_budget_bounds_are_read_not_copied():
+    """A local copy of an upstream bound plans against a budget forge-loop ignores."""
+    from hyperloom.orchestrator.kernel import request_handlers as rh
+
+    # Read from a module that is always importable, so the test does not depend
+    # on KernelForge being installed alongside.
+    assert rh._forge_loop_constant("math", "pi", 0.0) == pytest.approx(3.14159, abs=1e-4)
+    assert rh._forge_loop_constant("no.such.module", "X", 7.0) == 7.0
+    assert rh._forge_loop_constant("math", "no_such_name", 7.0) == 7.0
+    assert rh._forge_loop_constant("math", "isfinite", 7.0) == 7.0
+
+
+def test_a_patched_rebaseline_gets_the_cold_start_budget(monkeypatch):
+    """Applying a patch moves the JIT cache aside, so the next boot recompiles."""
+    from hyperloom.orchestrator.actions.executors import _aiter_jit as aiter_jit
+    from hyperloom.orchestrator.kernel import request_handlers as rh
+
+    monkeypatch.setattr(
+        aiter_jit,
+        "probe_aiter_jit_cache",
+        lambda: {"probe_status": "found", "is_cold": True, "kernel_count": 0},
+    )
+
+    assert rh._cold_start_rebaseline_timeout(600) == aiter_jit.BASELINE_COLD_START_TIMEOUT_SEC
+
+
+def test_a_warm_cache_keeps_the_resolved_timeout(monkeypatch):
+    """Only an empty cache justifies the cold cap; a warm boot keeps its budget."""
+    from hyperloom.orchestrator.actions.executors import _aiter_jit as aiter_jit
+    from hyperloom.orchestrator.kernel import request_handlers as rh
+
+    for probe in (
+        {"probe_status": "found", "is_cold": False, "kernel_count": 90},
+        {"probe_status": "not_found", "is_cold": None, "kernel_count": 0},
+        {"probe_status": "error", "is_cold": None, "kernel_count": 0},
+    ):
+        monkeypatch.setattr(aiter_jit, "probe_aiter_jit_cache", lambda p=probe: p)
+        assert rh._cold_start_rebaseline_timeout(600) == 600
+
+
+def test_a_longer_explicit_budget_is_never_shortened(monkeypatch):
+    """The cap is a floor for a cold boot, not a ceiling on the operator's budget."""
+    from hyperloom.orchestrator.actions.executors import _aiter_jit as aiter_jit
+    from hyperloom.orchestrator.kernel import request_handlers as rh
+
+    monkeypatch.setattr(
+        aiter_jit,
+        "probe_aiter_jit_cache",
+        lambda: {"probe_status": "found", "is_cold": True, "kernel_count": 0},
+    )
+    generous = aiter_jit.BASELINE_COLD_START_TIMEOUT_SEC + 1200
+
+    assert rh._cold_start_rebaseline_timeout(generous) == generous

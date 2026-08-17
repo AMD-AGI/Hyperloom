@@ -28,7 +28,7 @@ from typing import Any, Iterable
 
 import httpx
 
-from hyperloom.common.coerce import to_float
+from hyperloom.common.coerce import to_float, to_unix
 from hyperloom.common.llm_config import LLMConfigError, resolve_openai_client_config
 
 from .base import SourceData, SourceUnavailable
@@ -37,8 +37,16 @@ from .base import SourceData, SourceUnavailable
 log = logging.getLogger(__name__)
 
 
-# Process patterns for ``local_processes``: owners that may legitimately hold GPU VRAM.
-_DEFAULT_PROCESS_PATTERNS: tuple[str, ...] = (
+# Inference-server commands, kept apart from the rest because "is a server
+# supposed to be answering right now" is a different question from "what is
+# running": a health probe against a port with no server behind it is an
+# expected refusal, not a wedged server.
+#
+# The single source of truth for that distinction. ``LocalProbeConfig`` and the
+# agent-level ``Config`` knob both default to this tuple rather than restating
+# it, so a framework added in one place cannot show up matched-but-not-a-server
+# in the other and silently disable ``local_server_unreachable``.
+_SERVER_PROCESS_PATTERNS: tuple[str, ...] = (
     # SGLang
     "sglang.srt",
     "sglang.launch_server",
@@ -48,17 +56,25 @@ _DEFAULT_PROCESS_PATTERNS: tuple[str, ...] = (
     "vllm.v1.engine.core",
     "vllm.engine.async_llm_engine",
     "EngineCore",  # covers ``EngineCore-`` child PIDs
+)
+
+_OTHER_PROCESS_PATTERNS: tuple[str, ...] = (
     # Magpie / InferenceX benchmark harness
     "Magpie",
     "inferencex",
-    # Ray + per-task workers
+    # Ray + per-task workers. ``ray::IDLE`` is the parked worker name only;
+    # a worker running a serving actor renames itself after the actor class.
     "ray::IDLE",
+    "ray::ServingActor",
     "raylet",
     # hipcc stuck mid-build holds GPU locks.
     "hipcc",
     # Generic benchmark serving client (Magpie sub-process)
     "benchmark_serving",
 )
+
+# Process patterns for ``local_processes``: owners that may legitimately hold GPU VRAM.
+_DEFAULT_PROCESS_PATTERNS: tuple[str, ...] = _SERVER_PROCESS_PATTERNS + _OTHER_PROCESS_PATTERNS
 
 
 # Log error markers. Order matters: first matching pattern per line wins, so
@@ -114,6 +130,9 @@ class LocalProbeConfig:
     # Surface ``/dev/shm`` alongside ``/`` so signals fire shm_pressure separately.
     disk_mountpoints: tuple[str, ...] = ("/", "/dev/shm")  # nosec B108 - mountpoint probe, not temp file creation.
     process_patterns: tuple[str, ...] = _DEFAULT_PROCESS_PATTERNS
+    # The subset of ``process_patterns`` that names an inference server, i.e.
+    # something a health probe may hold accountable for answering a port.
+    server_process_patterns: tuple[str, ...] = _SERVER_PROCESS_PATTERNS
     coordinator_event_limit: int = 200
     log_error_patterns: tuple[str, ...] = _DEFAULT_LOG_ERROR_PATTERNS
     log_error_window_lines: int = 500
@@ -201,8 +220,17 @@ class LocalProbeSource:
             cfg.coordinator_db_path,
             cfg.coordinator_event_limit,
         )
+        local_task_progress = await asyncio.to_thread(
+            _read_task_progress,
+            cfg.coordinator_db_path,
+        )
         local_disk = await asyncio.to_thread(_sample_disk, cfg.disk_mountpoints)
-        local_processes = await asyncio.to_thread(_sample_processes, cfg.process_patterns)
+        sampled_processes = await asyncio.to_thread(
+            _sample_processes,
+            cfg.process_patterns,
+            cfg.server_process_patterns,
+        )
+        local_processes = sampled_processes or []
         local_gpu = await asyncio.to_thread(_sample_gpu)
         local_log_tail = await asyncio.to_thread(
             _tail_logs,
@@ -273,6 +301,7 @@ class LocalProbeSource:
 
         any_signal = bool(
             coordinator_events
+            or local_task_progress
             or local_disk
             or local_processes
             or local_gpu
@@ -308,6 +337,8 @@ class LocalProbeSource:
             local_state_integrity=local_state_integrity,
             local_external_deps=local_external_deps,
             coordinator_events=coordinator_events,
+            local_task_progress=local_task_progress,
+            local_processes_known=sampled_processes is not None,
             sources_used=[self.name],
         )
 
@@ -315,6 +346,128 @@ class LocalProbeSource:
 # ---------------------------------------------------------------------------
 # Sub-probes (all sync; called via asyncio.to_thread)
 # ---------------------------------------------------------------------------
+
+
+def _read_task_progress(db_path: Path | None) -> dict[str, Any]:
+    """Summarize in-flight task progress from the session SQLite DB.
+
+    Freshness comes from the progress notes ``TaskRegistry.record_progress``
+    appends to a task's ``history``, not from ``updated_at``: that column also
+    moves when a task merely enters ``running``, and a state transition is no
+    evidence that anything is still happening. A note that names no owning
+    agent is counted as running work but vouches for nobody.
+
+    Args:
+        db_path (Path | None): Path to ``coordinator.db``; ``None`` or a
+            missing file short-circuits to ``{}``.
+
+    Returns:
+        dict[str, Any]: ``{running, by_agent}`` where ``by_agent`` maps an
+        owning agent to ``{last_progress_unix, task, oldest_progress_unix,
+        oldest_task}`` — the freshest and the quietest of the units it owns —
+        or ``{}`` when the DB is unreadable or nothing is running.
+    """
+    if db_path is None or not db_path.exists():
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+    except sqlite3.Error as exc:
+        log.debug("local_probe: cannot open %s: %s", db_path, exc)
+        return {}
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = _try_select(
+            conn,
+            # Ordered so the fold below is reproducible: the merge itself is
+            # order-independent, but a snapshot whose row order is SQLite's
+            # discretion cannot be reasoned about or pinned by a test.
+            ["SELECT task_id, kind, history FROM tasks WHERE state='running' ORDER BY task_id"],
+            (),
+        )
+    finally:
+        conn.close()
+    if not rows:
+        return {}
+    out: dict[str, Any] = {"running": len(rows)}
+    by_agent: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        keys = row.keys()
+        note = _latest_progress_note(row["history"] if "history" in keys else None)
+        if note is None:
+            continue
+        ts, agent = note
+        task = str((row["kind"] if "kind" in keys else row["task_id"]) or "")
+        _merge_agent_progress(by_agent, agent=agent, ts=ts, task=task)
+    if by_agent:
+        out["by_agent"] = by_agent
+    return out
+
+
+def _merge_agent_progress(
+    by_agent: dict[str, dict[str, Any]],
+    *,
+    agent: str,
+    ts: float,
+    task: str,
+) -> None:
+    """Fold one unit's heartbeat into ``agent``'s freshest/quietest pair.
+
+    Both ends are kept because the dispatcher runs units concurrently. The
+    freshest answers "is this agent's work progressing"; keeping only that one
+    left a sibling unit that had not reported in hours with no trace in the
+    snapshot at all.
+
+    Args:
+        by_agent (dict[str, dict[str, Any]]): Accumulator, updated in place.
+        agent (str): The agent the note attributed itself to.
+        ts (float): Unix timestamp of the note.
+        task (str): Kind (or id) of the unit that reported it.
+    """
+    known = by_agent.get(agent)
+    if known is None:
+        by_agent[agent] = {
+            "last_progress_unix": ts,
+            "task": task,
+            "oldest_progress_unix": ts,
+            "oldest_task": task,
+        }
+        return
+    if ts > known["last_progress_unix"]:
+        known["last_progress_unix"] = ts
+        known["task"] = task
+    if ts < known["oldest_progress_unix"]:
+        known["oldest_progress_unix"] = ts
+        known["oldest_task"] = task
+
+
+def _latest_progress_note(history_json: Any) -> tuple[float, str] | None:
+    """Extract the newest attributed heartbeat from a task's ``history`` column.
+
+    Args:
+        history_json (Any): Raw ``tasks.history`` JSON text.
+
+    Returns:
+        tuple[float, str] | None: ``(unix_ts, owning_agent)`` for the newest
+        entry carrying a ``progress`` note that names its agent, or ``None``
+        when the task has never reported one.
+    """
+    if not isinstance(history_json, str):
+        return None
+    rows = _json_loads_or_none(history_json)
+    if not isinstance(rows, list):
+        return None
+    for entry in reversed(rows):
+        if not isinstance(entry, dict):
+            continue
+        note = entry.get("progress")
+        if not isinstance(note, dict):
+            continue
+        ts = to_unix(entry.get("ts"))
+        agent = str(note.get("agent") or "").strip()
+        if ts is None or not agent:
+            continue
+        return ts, agent
+    return None
 
 
 def _read_coordinator_events(
@@ -461,23 +614,33 @@ def _sample_disk(mountpoints: tuple[str, ...]) -> dict[str, Any]:
     return out
 
 
-def _sample_processes(patterns: tuple[str, ...]) -> list[dict[str, Any]]:
+def _sample_processes(
+    patterns: tuple[str, ...],
+    server_patterns: tuple[str, ...] = _SERVER_PROCESS_PATTERNS,
+) -> list[dict[str, Any]] | None:
     """List local processes whose command matches any pattern.
 
-    Runs ``ps -eo pid=,rss=,cmd=`` and keeps lines whose command
-    contains one of ``patterns``. Returns ``[]`` when ``ps`` is absent,
-    times out, or exits non-zero.
+    Runs ``ps -eo pid=,rss=,cmd=`` and keeps lines whose command contains one
+    of ``patterns``. An empty list means "nothing matched"; ``None`` means the
+    probe could not answer at all. Consumers must not read the second as the
+    first — an absent ``ps`` would otherwise become evidence that no server is
+    running, and mute a signal that has nothing to do with this probe.
 
     Args:
         patterns (tuple[str, ...]): Substrings matched against each
             process command line; empty disables the probe.
+        server_patterns (tuple[str, ...]): The subset naming an inference
+            server; matches are flagged ``is_server``.
 
     Returns:
-        list[dict[str, Any]]: One ``{pid, rss_mb, cmd}`` entry per
-        matching process.
+        list[dict[str, Any]] | None: One ``{pid, rss_mb, cmd, is_server, cwd}``
+        entry per matching process, where ``is_server`` marks an inference
+        server as opposed to a harness, Ray, or build process and ``cwd`` is
+        what ties a process to a session on a shared node; ``None`` when
+        the probe is disabled, ``ps`` is absent, times out, or exits non-zero.
     """
     if not patterns:
-        return []
+        return None
     try:
         proc = subprocess.run(
             ["ps", "-eo", "pid=,rss=,cmd="],
@@ -488,9 +651,10 @@ def _sample_processes(patterns: tuple[str, ...]) -> list[dict[str, Any]]:
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         log.debug("local_probe: ps failed: %s", exc)
-        return []
+        return None
     if proc.returncode != 0:
-        return []
+        log.debug("local_probe: ps exited %d", proc.returncode)
+        return None
     out: list[dict[str, Any]] = []
     for line in proc.stdout.splitlines():
         line = line.strip()
@@ -507,8 +671,38 @@ def _sample_processes(patterns: tuple[str, ...]) -> list[dict[str, Any]]:
             rss_kb = int(rss_str)
         except ValueError:
             continue
-        out.append({"pid": pid, "rss_mb": round(rss_kb / 1024.0, 1), "cmd": cmd})
+        out.append(
+            {
+                "pid": pid,
+                "rss_mb": round(rss_kb / 1024.0, 1),
+                "cmd": cmd,
+                "is_server": any(pat in cmd for pat in server_patterns),
+                "cwd": _process_cwd(pid),
+            }
+        )
     return out
+
+
+def _process_cwd(pid: int) -> str:
+    """Read a process's working directory from ``/proc/<pid>/cwd``.
+
+    A run's harness is launched with its working directory inside the session
+    and children inherit it, which is what lets a consumer tell one session's
+    processes from another's on a shared node.
+
+    Args:
+        pid (int): The process to inspect.
+
+    Returns:
+        str: The resolved directory, or ``""`` when it cannot be read — another
+        user's process, a process that exited between ``ps`` and this call, or a
+        sandbox with no ``/proc``. Unknown, never "somewhere else".
+    """
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError as exc:
+        log.debug("local_probe: /proc/%d/cwd unreadable: %s", pid, exc)
+        return ""
 
 
 def _sample_gpu() -> dict[str, Any]:
@@ -1401,6 +1595,10 @@ def _load_ci_metrics(
 def _json_loads_or_none(text: str) -> Any:
     """Parse JSON text, returning ``None`` instead of raising on error.
 
+    ``RecursionError`` is caught alongside the decode errors: the probe reads
+    blobs written by other processes, and a deeply nested one would otherwise
+    take down the whole tick rather than just the sub-probe that read it.
+
     Args:
         text (str): The JSON text to parse.
 
@@ -1413,7 +1611,7 @@ def _json_loads_or_none(text: str) -> Any:
 
     try:
         return json.loads(text)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, RecursionError):
         return None
 
 

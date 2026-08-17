@@ -8,6 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from hyperloom.orchestrator.actions.executors._server_patcher import (
+    _patch_set_writes,
+    _patch_target_paths,
     _resolve_versioned_patches_dir,
     _version_accepted,
     _versioned_patches_subdir_name,
@@ -82,3 +84,31 @@ def test_an_operator_pin_wins_over_the_manifest(tmp_path: Path, monkeypatch):
 
     assert _version_accepted("0.5.14", patches_dir=tmp_path) is True
     assert _version_accepted("0.6.0", patches_dir=tmp_path) is False
+
+
+def test_only_the_files_a_patch_set_writes_become_sentinels(tmp_path: Path):
+    """A release that stopped shipping a file must not leave a dead sentinel."""
+    patch = tmp_path / "annotations.patch"
+    patch.write_text(
+        "--- a/python/sglang/srt/managers/scheduler.py\n"
+        "+++ b/python/sglang/srt/managers/scheduler.py\n",
+        encoding="utf-8",
+    )
+    written = _patch_target_paths([patch])
+
+    assert _patch_set_writes(written, ("srt", "managers", "scheduler.py")) is True
+    assert _patch_set_writes(written, ("srt", "managers", "io_struct.py")) is False
+
+
+def test_a_created_file_is_read_from_the_patch_not_the_source_side(tmp_path: Path):
+    """New-file patches carry ``/dev/null`` on the source side."""
+    patch = tmp_path / "new_file.patch"
+    patch.write_text(
+        "--- /dev/null\n"
+        "+++ b/python/sglang/srt/model_executor/step_span_utils.py\n",
+        encoding="utf-8",
+    )
+    written = _patch_target_paths([patch])
+
+    assert "/dev/null" not in written
+    assert _patch_set_writes(written, ("srt", "model_executor", "step_span_utils.py")) is True

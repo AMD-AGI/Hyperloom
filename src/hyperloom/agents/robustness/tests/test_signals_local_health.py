@@ -33,12 +33,18 @@ def _ctx() -> ReactorContext:
     )
 
 
+def _live_server() -> list[dict]:
+    """A server process the probe can hold accountable for answering."""
+    return [{"pid": 4242, "rss_mb": 1024.0, "cmd": "python -m sglang.launch_server", "is_server": True}]
+
+
 def test_one_target_down_emits_medium_alert():
     data = SourceData(
+        local_processes=_live_server(),
         local_server_health=[
             {"url": "http://localhost:30000", "reachable": True, "status": "ok"},
             {"url": "http://localhost:30001", "reachable": False, "status": "error", "error": "connect"},
-        ]
+        ],
     )
     out = evaluate_local_health_signals(_ctx(), data)
     matched = [s for s in out if s.name == "local_server_unreachable"]
@@ -49,15 +55,155 @@ def test_one_target_down_emits_medium_alert():
 
 def test_all_targets_down_promotes_severity_to_high():
     data = SourceData(
+        local_processes=_live_server(),
         local_server_health=[
             {"url": "http://localhost:30000", "reachable": False, "status": "error"},
             {"url": "http://localhost:30001", "reachable": False, "status": "http_error"},
-        ]
+        ],
     )
     out = evaluate_local_health_signals(_ctx(), data)
     matched = [s for s in out if s.name == "local_server_unreachable"]
     assert len(matched) == 2
     assert all(s.severity is SymptomSeverity.HIGH for s in matched)
+
+
+def test_a_refused_port_with_no_server_behind_it_is_not_a_fault():
+    """Preparation, analysis and the gap between variants all run with no server up."""
+    data = SourceData(
+        local_processes=[{"pid": 7, "rss_mb": 12.0, "cmd": "python -m Magpie.bench", "is_server": False}],
+        local_server_health=[
+            {"url": "http://localhost:8888/health", "reachable": False, "status": "error", "error": "connect"},
+        ],
+    )
+    out = evaluate_local_health_signals(_ctx(), data)
+    assert all(s.name != "local_server_unreachable" for s in out)
+
+
+def test_a_server_that_died_under_a_running_benchmark_is_still_a_fault():
+    """A benchmark client hammering the port proves a server was meant to answer it.
+
+    "Probed successfully, saw no server" is the gap between two variants, but it
+    is also a server that crashed while its own client kept sending requests —
+    the one snapshot where suppressing the alert hides the outage.
+
+    No session directory is configured here, so the client check has nothing to
+    attribute against and stays host-wide.
+    """
+    data = SourceData(
+        local_processes=[
+            {"pid": 7, "rss_mb": 12.0, "cmd": "python -m Magpie.bench", "is_server": False},
+            {"pid": 8, "rss_mb": 96.0, "cmd": "python benchmark_serving.py --port 30000", "is_server": False},
+        ],
+        local_server_health=[
+            {"url": "http://localhost:30000/health", "reachable": False, "status": "error", "error": "connect"},
+        ],
+    )
+    out = evaluate_local_health_signals(_ctx(), data)
+    matched = [s for s in out if s.name == "local_server_unreachable"]
+    assert len(matched) == 1
+    assert matched[0].severity is SymptomSeverity.HIGH
+    assert matched[0].evidence["server_process_seen"] is False
+    assert matched[0].evidence["benchmark_client_seen"] is True
+
+
+def _client_snapshot(cmd: str, cwd: str) -> SourceData:
+    """A refused port, no server process, and one benchmark client running."""
+    return SourceData(
+        local_processes=[{"pid": 8, "rss_mb": 96.0, "cmd": cmd, "cwd": cwd, "is_server": False}],
+        local_server_health=[
+            {"url": "http://localhost:30000/health", "reachable": False, "status": "error", "error": "connect"},
+        ],
+    )
+
+
+_OUTSIDE_ANY_SESSION = "/tmp"  # nosec B108 - a path in a fixture, not a temp file.
+_CLIENT = "python benchmark_serving.py --port 30000"
+_CLIENT_RESULT_DIR = "python benchmark_serving.py --result-dir {dir}/runs/v1 --port 30000"
+_CLIENT_RESULT_DIR_EQ = "python benchmark_serving.py --result-dir={dir}/runs/v1 --port 30000"
+
+
+@pytest.mark.parametrize(
+    ("client_dir", "client_cwd", "client_cmd", "vouches"),
+    [
+        pytest.param("ours", "{dir}/runs/v1", _CLIENT, True, id="ours_by_cwd"),
+        pytest.param("ours", "{dir}", _CLIENT, True, id="ours_by_cwd_at_the_session_root"),
+        pytest.param("ours", _OUTSIDE_ANY_SESSION, _CLIENT_RESULT_DIR, True, id="ours_by_result_dir"),
+        pytest.param("ours", _OUTSIDE_ANY_SESSION, _CLIENT_RESULT_DIR_EQ, True, id="ours_by_result_dir_joined_by_="),
+        pytest.param("ours", _OUTSIDE_ANY_SESSION, _CLIENT, False, id="no_anchor_at_all"),
+        pytest.param("theirs", "{dir}/runs/v1", _CLIENT_RESULT_DIR, False, id="unrelated_co_tenant"),
+        pytest.param("sibling", "{dir}/runs/v1", _CLIENT_RESULT_DIR, False, id="co_tenant_one_string_prefix_away"),
+        pytest.param(
+            "sibling",
+            _OUTSIDE_ANY_SESSION,
+            _CLIENT_RESULT_DIR_EQ,
+            False,
+            id="co_tenant_one_string_prefix_away_joined_by_=",
+        ),
+    ],
+)
+def test_only_this_sessions_benchmark_client_vouches_for_a_dead_server(
+    tmp_path,
+    client_dir,
+    client_cwd,
+    client_cmd,
+    vouches,
+):
+    """A client vouches for a refused port only when it belongs to this session.
+
+    The harness runs with its cwd inside the session and children inherit it, so
+    the cwd is the anchor; a launch path that chdirs elsewhere still names a path
+    under the session on its command line, which is the second anchor. Anything
+    else is somebody else's traffic — including the sibling directory whose name
+    merely starts with ours (``<session>-retry``), which a substring test reads
+    as inside the session. The command line is held to that boundary in both
+    spellings of the flag, since the two are read by different code.
+
+    A client with neither anchor is indistinguishable from a co-tenant's and
+    must not vouch either; every launch path in this repo carries one, which is
+    what the grid-runner cwd test holds it to.
+    """
+    ours = tmp_path / "session-a"
+    dirs = {"ours": ours, "theirs": tmp_path / "session-b", "sibling": tmp_path / "session-a-retry"}
+    data = _client_snapshot(
+        cmd=client_cmd.format(dir=dirs[client_dir]),
+        cwd=client_cwd.format(dir=dirs[client_dir]),
+    )
+    matched = [
+        s
+        for s in evaluate_local_health_signals(_ctx(), data, config=LocalHealthConfig(session_dir=ours))
+        if s.name == "local_server_unreachable"
+    ]
+    assert bool(matched) is vouches
+    if vouches:
+        assert matched[0].severity is SymptomSeverity.HIGH
+        assert matched[0].evidence["benchmark_client_seen"] is True
+
+
+def test_a_refused_port_is_still_a_fault_when_nobody_could_look_for_the_server():
+    """A broken ``ps`` must not mute a finding that has nothing to do with it."""
+    data = SourceData(
+        local_processes=[],
+        local_processes_known=False,
+        local_server_health=[
+            {"url": "http://localhost:8888/health", "reachable": False, "status": "error", "error": "connect"},
+        ],
+    )
+    out = evaluate_local_health_signals(_ctx(), data)
+    matched = [s for s in out if s.name == "local_server_unreachable"]
+    assert len(matched) == 1
+    assert matched[0].evidence["server_process_seen"] is None
+    assert matched[0].evidence["benchmark_client_seen"] is None
+
+
+def test_a_seen_server_is_recorded_in_the_evidence():
+    data = SourceData(
+        local_processes=_live_server(),
+        local_server_health=[
+            {"url": "http://localhost:30000", "reachable": False, "status": "error"},
+        ],
+    )
+    matched = [s for s in evaluate_local_health_signals(_ctx(), data) if s.name == "local_server_unreachable"]
+    assert matched and matched[0].evidence["server_process_seen"] is True
 
 
 def test_no_unreachable_targets_is_silent():
@@ -123,6 +269,7 @@ def test_classifier_includes_local_health_rule():
 
     data = SourceData(
         local_log_errors=[{"pattern": "CUDA out of memory", "line": "..."}],
+        local_processes=_live_server(),
         local_server_health=[{"url": "u", "reachable": False, "status": "error"}],
         local_gpu={"gpus": [{"gpu_id": 0, "temperature_c": 99.5}]},
     )

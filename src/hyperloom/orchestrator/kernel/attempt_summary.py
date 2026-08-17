@@ -4,6 +4,7 @@
 """Aggregate kernel-optimization attempts into a single forensic report.
 
 Combines the per-kernel ledger (:attr:`SharedState.kernel_opt_task_attempts`)
+and the collective campaign history (:attr:`SharedState.collective_attempts`)
 with the kernel-agent run results to explain why the kernel-agent did not
 produce an optimized kernel. All public helpers are pure functions over
 ``SharedState`` + ``session_dir`` returning JSON-ready dicts; never raise on
@@ -13,6 +14,7 @@ missing files.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -21,6 +23,8 @@ from typing import Any, NamedTuple
 from hyperloom.common.coerce import to_float
 
 from ..state.kernel_decision_settings import resolve_hot_kernel_min_gpu_pct
+
+log = logging.getLogger(__name__)
 
 
 # Per-kernel outcome bucket (closed set).
@@ -190,6 +194,40 @@ FIELD_GLOSSARY: dict[str, str] = {
         "Per-backend outcome of the kernel-agent dispatch. "
         "``produced_artifact=false`` across all rows is the dominant "
         "signal that the entire ladder failed for this kernel."
+    ),
+    "lane": (
+        "Which optimization lane produced the row. ``collective`` rows come "
+        "from the multi-GPU comm lane and carry no roofline geometry, so "
+        "efficiency_pct / bound_type / arithmetic_intensity stay null."
+    ),
+    "collective_op": (
+        "The collective primitive that was optimized: ``all_reduce``, "
+        "``reduce_scatter`` or ``all_gather``."
+    ),
+    "world_size": ("Rank count the collective was measured across; the lane requires it to match the run's TP width."),
+    "bandwidth": (
+        "Per-case ``bytes`` / ``algbw_gbps`` / ``busbw_gbps`` from the final "
+        "bench. Latency alone cannot separate a faster transfer from a cheaper "
+        "barrier; bus bandwidth against the fabric peak says which one a "
+        "kept kernel bought, and which regime still has headroom."
+    ),
+    "collective_attempt_id": (
+        "Stable identity for one collective campaign, used to deduplicate "
+        "resumed or salvaged attempts across a session."
+    ),
+    "salvaged": (
+        "True when the validated best was recovered from the campaign sidecar "
+        "after the wrapper timed out, rather than returned by a clean exit."
+    ),
+    "e2e_gain_pct": (
+        "End-to-end throughput delta measured by the integrate gate. This, not "
+        "micro_speedup, decides whether a collective KEEP is adopted."
+    ),
+    "speedup_basis": (
+        "Whether the row's headline number was validated end to end (``e2e``) "
+        "or is a microbenchmark ratio only. A collective's microbenchmark "
+        "routinely overstates its end-to-end worth, so treat "
+        "``microbenchmark`` rows as unproven."
     ),
 }
 
@@ -596,6 +634,252 @@ def _summary_one_line(
     return handling.summary(entry, backend_ladder, artifact_error)
 
 
+def _stored_collective_attempt_id(record: dict[str, Any]) -> str:
+    """Read the identity a campaign was already stamped with (``""`` if absent).
+
+    The phase derives that value; this only reports it.
+    """
+    return str(record.get("collective_attempt_id") or "").strip()
+
+
+def _collective_attempt_records(state: Any) -> list[dict[str, Any]]:
+    """Return collective campaign history, dropping unusable records.
+
+    The forensics for every dense kernel share this report, so one malformed
+    collective row is logged and skipped rather than raised: raising here would
+    delete the whole ``kernel_optimization_summary.json`` because both callers
+    swallow the exception.
+    """
+    raw_history = getattr(state, "collective_attempts", None)
+    if raw_history is None:
+        return []
+    if not isinstance(raw_history, list):
+        log.warning(
+            "kernel summary: ignoring collective_attempts of type %s (expected list)",
+            type(raw_history).__name__,
+        )
+        return []
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw_history:
+        if not isinstance(item, dict):
+            log.warning("kernel summary: dropping non-mapping collective campaign")
+            continue
+        identity = _stored_collective_attempt_id(item)
+        if not identity:
+            log.warning(
+                "kernel summary: dropping collective campaign with no collective_attempt_id",
+            )
+            continue
+        if identity in seen:
+            log.warning(
+                "kernel summary: dropping duplicate collective campaign %s",
+                identity,
+            )
+            continue
+        seen.add(identity)
+        records.append(dict(item))
+    return records
+
+
+def _classify_collective_attempt(record: dict[str, Any]) -> str:
+    """Map one Collective campaign to the existing summary categories."""
+    integration_decision = str(
+        record.get("integration_decision") or ""
+    ).strip().upper()
+    integration_status = str(
+        record.get("integration_status") or ""
+    ).strip().lower()
+    run_decision = str(record.get("decision") or "").strip().upper()
+    run_status = str(record.get("status") or "").strip().lower()
+
+    if integration_decision == "KEEP":
+        if integration_status == "complete":
+            return CATEGORY_INTEGRATED
+        return CATEGORY_KEEP_PENDING
+    if integration_status == "complete":
+        return CATEGORY_ATTEMPTED_REJECTED
+    if integration_status == "pending" or (
+        record.get("kept") and record.get("requires_e2e_validation")
+    ):
+        return CATEGORY_KEEP_PENDING
+    if run_status in {"failed", "error", "crashed", "timeout"}:
+        return CATEGORY_ATTEMPTED_REJECTED
+    if run_decision in {"REVERT", "NEEDS_REVIEW"}:
+        return CATEGORY_ATTEMPTED_REJECTED
+    if run_decision == "KEEP" or record.get("kept"):
+        return CATEGORY_KEEP_PENDING
+    if run_status in {"ok", "complete", "succeeded"}:
+        return CATEGORY_ATTEMPTED_REJECTED
+    return CATEGORY_IN_FLIGHT
+
+
+def _render_collective_attempt_row(
+    record: dict[str, Any],
+    category: str,
+) -> dict[str, Any]:
+    """Render one Collective campaign as a kernel-summary row."""
+    run_status = str(record.get("status") or "").strip().lower()
+    integration_decision = str(
+        record.get("integration_decision") or ""
+    ).strip().upper()
+    final_decision = integration_decision or str(
+        record.get("decision") or ""
+    ).strip().upper()
+    micro_speedup = _to_float(record.get("kernel_speedup")) or 0.0
+    e2e_gain_pct = _to_float(record.get("integration_gain_pct"))
+    patch_path = str(
+        record.get("patch_path") or record.get("patch") or ""
+    )
+
+    raw_error_class = str(
+        record.get("integration_error_class")
+        or record.get("error_class")
+        or ""
+    ).lower()
+    if "timeout" in raw_error_class:
+        error_class = ERROR_CLASS_TIMEOUT
+    elif "compile" in raw_error_class or "build" in raw_error_class:
+        error_class = ERROR_CLASS_COMPILE_FAILED
+    elif "correct" in raw_error_class or "mismatch" in raw_error_class:
+        error_class = ERROR_CLASS_CORRECTNESS_FAILED
+    elif raw_error_class:
+        error_class = ERROR_CLASS_AGENT_ERROR
+    else:
+        error_class = ""
+
+    if run_status in {"ok", "complete", "succeeded"}:
+        backend_status = "succeeded"
+    elif run_status in {"failed", "error", "crashed", "timeout"}:
+        backend_status = "failed"
+    else:
+        backend_status = run_status or "unknown"
+    backend_row: dict[str, Any] = {
+        "backend": "forge_collective",
+        "status": backend_status,
+        "attempt_id": str(
+            record.get("experiment_id")
+            or _stored_collective_attempt_id(record)
+        ),
+        "produced_artifact": _is_real_artifact_path(patch_path),
+    }
+    duration_sec = _to_float(record.get("duration_sec"))
+    if duration_sec is not None:
+        backend_row["elapsed_sec"] = duration_sec
+    if error_class:
+        backend_row["error_class"] = error_class
+    error_message = str(
+        record.get("integration_error") or record.get("error") or ""
+    )
+    if error_message:
+        backend_row["error_message"] = error_message[-1200:]
+    backend_ladder = [backend_row]
+
+    if category == CATEGORY_INTEGRATED:
+        summary = "collective E2E KEEP integrated"
+    elif category == CATEGORY_KEEP_PENDING:
+        recovery_action = str(
+            record.get("integration_recovery_action") or ""
+        ).strip()
+        summary = (
+            f"collective integration recovery pending: {recovery_action}"
+            if recovery_action
+            else "collective KEEP awaiting E2E integration"
+        )
+    elif integration_decision:
+        summary = f"collective E2E {integration_decision}"
+    elif error_message:
+        summary = "collective campaign failed"
+    else:
+        summary = f"collective {final_decision or 'campaign'} did not integrate"
+    # A collective's microbenchmark routinely overstates its end-to-end worth
+    # (a 27.8%-of-GPU-time kernel at 1.11x micro landed at +0.39% E2E), so a row
+    # that has no E2E number must not read as a measured gain.
+    speedup_basis = "e2e" if e2e_gain_pct is not None else "microbenchmark"
+    if micro_speedup > 0:
+        summary += f"; micro_speedup={micro_speedup:.3f}x"
+    if e2e_gain_pct is not None:
+        summary += f"; e2e_gain={e2e_gain_pct:.3f}%"
+    elif micro_speedup > 0:
+        summary += " (microbenchmark only, not E2E validated)"
+
+    rejected_reason = ""
+    if category == CATEGORY_ATTEMPTED_REJECTED:
+        if integration_decision:
+            rejected_reason = (
+                f"collective_e2e_{integration_decision.lower()}"
+            )
+        elif error_message:
+            rejected_reason = "collective_run_failed"
+        else:
+            rejected_reason = "collective_no_keep"
+
+    return {
+        "kernel_id": str(
+            record.get("kernel_id")
+            or f"collective:{_stored_collective_attempt_id(record)}"
+        ),
+        "kernel_name": str(record.get("kernel_name") or ""),
+        "kernel_category": "collective",
+        "source_file": str(
+            record.get("source_file") or record.get("target_file") or ""
+        ),
+        "gpu_pct": _to_float(record.get("gpu_pct")),
+        "efficiency_pct": None,
+        "bound_type": "",
+        "arithmetic_intensity": None,
+        "recommended_backends": ["forge_collective"],
+        "lane": "collective",
+        "backend": "forge_collective",
+        "engine": str(record.get("engine") or "forge_collective"),
+        "category": category,
+        "outcome_class": _kernel_outcome_class(category, backend_ladder),
+        "rejected_reason": rejected_reason,
+        "summary": summary,
+        "attempts_total": 1,
+        "partial_count": 0,
+        "failure_count": int(
+            run_status in {"failed", "error", "crashed", "timeout"}
+            or bool(error_class)
+        ),
+        "last_decision": final_decision,
+        "last_status": str(
+            record.get("integration_result_status")
+            or record.get("status")
+            or ""
+        ),
+        "last_micro_speedup": micro_speedup,
+        "last_ts": str(
+            record.get("integration_ts") or record.get("ts") or ""
+        ),
+        "verification": {
+            "compile_passed": None,
+            "correctness_passed": True if record.get("kept") else None,
+            "micro_speedup": micro_speedup,
+            "e2e_gain_pct": e2e_gain_pct,
+            "integration_decision": integration_decision,
+        },
+        "backend_ladder": backend_ladder,
+        "backend_ladder_unavailable_reason": "",
+        "kernel_agent_result_path": "",
+        "collective_attempt_id": _stored_collective_attempt_id(record),
+        "integration_id": str(record.get("integration_id") or ""),
+        "experiment_id": str(record.get("experiment_id") or ""),
+        "collective_op": str(record.get("collective_op") or ""),
+        "world_size": record.get("world_size"),
+        "iterations": record.get("iterations"),
+        "salvaged": bool(record.get("salvaged")),
+        "workspace": str(
+            record.get("integration_workspace")
+            or record.get("workspace")
+            or ""
+        ),
+        "patch_path": patch_path,
+        "e2e_gain_pct": e2e_gain_pct,
+        "speedup_basis": speedup_basis,
+    }
+
+
 def build_kernel_optimization_summary(
     state: Any,
     session_dir: Path | str,
@@ -604,9 +888,9 @@ def build_kernel_optimization_summary(
 ) -> dict[str, Any]:
     """Build the full summary block for one session.
 
-    Combines the kernel ledger / optimization_stack / rejected ids /
-    top15 with the per-kernel kernel-agent ``results/<kid>.json`` files.
-    Returns a JSON-ready dict for atomic write to
+    Combines the kernel ledger / Collective campaign history /
+    optimization_stack / rejected ids / top15 with the per-kernel kernel-agent
+    ``results/<kid>.json`` files. Returns a JSON-ready dict for atomic write to
     ``<session_dir>/reports/kernel_optimization_summary.json``.
 
     Args:
@@ -642,13 +926,24 @@ def build_kernel_optimization_summary(
             previous.get("last_ts") or ""
         ):
             attempts_map[current_kernel_id] = attempt
+    collective_attempts = [
+        record
+        for record in _collective_attempt_records(state)
+        if str(record.get("status") or "").strip().lower() != "skipped"
+        and str(record.get("decision") or "").strip().upper() != "SKIP"
+    ]
+    collective_kernel_ids = {
+        str(record.get("kernel_id") or "").strip()
+        for record in collective_attempts
+        if str(record.get("kernel_id") or "").strip()
+    }
     rejected_ids: set[str] = set(str(x) for x in (getattr(state, "rejected_kernel_ids", []) or []))
     integrated_ids: set[str] = set()
     for entry in getattr(state, "optimization_stack", []) or []:
         if not isinstance(entry, dict):
             continue
         kid = str(entry.get("kernel_id") or "")
-        if kid and entry.get("action") == "integrate":
+        if kid and entry.get("action") in {"collective", "integrate"}:
             integrated_ids.add(kid)
     last_kernel_opt = dict(getattr(state, "last_kernel_opt", {}) or {})
     keep_pending_kid = ""
@@ -688,6 +983,8 @@ def build_kernel_optimization_summary(
         if not kid:
             continue
         processed_kids.add(kid)
+        if kid in collective_kernel_ids:
+            continue
         attempt = attempts_map.get(kid)
         if attempt is None:
             reason_code, reason_detail = _unattempted_reason(
@@ -731,7 +1028,7 @@ def build_kernel_optimization_summary(
 
     # Kernels with a ledger row but not in top15.
     for kid, attempt in attempts_map.items():
-        if kid in processed_kids:
+        if kid in processed_kids or kid in collective_kernel_ids:
             continue
         counts["attempted"] += 1
         category = _classify_attempted(
@@ -750,6 +1047,16 @@ def build_kernel_optimization_summary(
                 session_dir=sd_path,
                 last_kernel_opt=None,
             )
+        )
+
+    for collective_attempt in collective_attempts:
+        counts["attempted"] += 1
+        category = _classify_collective_attempt(collective_attempt)
+        counts[_category_count_key(category)] += 1
+        if category == CATEGORY_ATTEMPTED_REJECTED:
+            rejection_breakdown["other"] += 1
+        by_kernel.append(
+            _render_collective_attempt_row(collective_attempt, category)
         )
 
     failure_reason_breakdown = _aggregate_failure_reasons(by_kernel)

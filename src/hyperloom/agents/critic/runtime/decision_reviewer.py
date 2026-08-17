@@ -916,6 +916,7 @@ class DecisionReviewer:
                     alternative_action=item.get("alternative_action"),
                     advice_text=advice_text,
                     notes=item.get("notes") or [],
+                    failure_reason_code=str(item.get("failure_reason_code") or ""),
                 )
             except IntentEnvelopeValidationError as exc:
                 raise ReviewValidationError(str(exc)) from exc
@@ -929,6 +930,7 @@ class DecisionReviewer:
                     "verdict": verdict,
                     "reasoning": item.get("reasoning"),
                     "source": item.get("source", "critic"),
+                    "failure_reason_code": str(item.get("failure_reason_code") or ""),
                     "kb_evidence": item.get("kb_evidence") or [],
                 },
             )

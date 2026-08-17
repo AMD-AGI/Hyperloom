@@ -25,6 +25,10 @@ _COLLECTIVE_TOKEN_PATTERNS = [
 
 _NORMALISE_DELIMS = re.compile(r"[\W]+")
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+# Itanium mangling prefixes each identifier with its length ("5aiter",
+# "33reduce_scatter_..."), which glues the digit onto the token and defeats the
+# word-start anchor in the patterns below. Split digit->letter as well.
+_DIGIT_LETTER_BOUNDARY = re.compile(r"(?<=\d)(?=[a-z])")
 
 
 def _normalise_kernel_name(name: str) -> str:
@@ -40,8 +44,8 @@ def _normalise_kernel_name(name: str) -> str:
         return ""
     s = _CAMEL_BOUNDARY.sub("_", str(name))
     s = _NORMALISE_DELIMS.sub("_", s)
-    s = s.strip("_").lower()
-    return s
+    s = _DIGIT_LETTER_BOUNDARY.sub("_", s.lower())
+    return s.strip("_")
 
 
 def kernel_name_implies_multigpu(name: str) -> bool:

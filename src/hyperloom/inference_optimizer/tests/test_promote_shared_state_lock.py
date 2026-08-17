@@ -19,6 +19,9 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
+    KnowledgeSections,
+)
 from hyperloom.orchestrator.state.shared_state import _AUDIT_ACTIONS
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.state.task_registry import Task
@@ -517,6 +520,76 @@ async def test_integrate_patch_preserves_proposal_owner_across_phase_change(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_phase", "section"),
+    [("EXPLORE", "explore"), ("FRAMEWORK_AGENT", "framework")],
+)
+async def test_integrate_keep_stages_patch_for_proposal_owner(
+    session_dir, tmp_path, monkeypatch, source_phase, section
+):
+    draft = tmp_path / "kb-draft"
+    monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    patch = tmp_path / f"{section}.diff"
+    patch.write_bytes(f"{section} bytes".encode())
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 100.0
+
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "kept",
+            "output_throughput": 120.0,
+            "specialist_task_id": f"spec-{section}",
+            "source_phase": source_phase,
+            "patches_applied": [str(patch)],
+        },
+        task=_task(
+            "integrate_patch",
+            params={
+                "specialist_task_id": f"spec-{section}",
+                "source_phase": source_phase,
+            },
+        ),
+    )
+
+    staged = KnowledgeSections(draft).staged(section)
+    ref = f"{section}/overlays/000000/00-{section}.patch"
+    assert staged.knowledge["patches"] == [ref]
+    assert (draft / "files" / ref).read_bytes() == patch.read_bytes()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["reverted", "kept_inert"])
+async def test_integrate_nonpromotion_never_stages_patch(
+    session_dir, tmp_path, monkeypatch, status
+):
+    draft = tmp_path / "kb-draft"
+    monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    patch = tmp_path / "not-kept.patch"
+    patch.write_bytes(b"do not stage")
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 100.0
+
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": status,
+            "output_throughput": 90.0,
+            "source_phase": "EXPLORE",
+            "patches_applied": [str(patch)],
+        },
+        task=_task(
+            "integrate_patch",
+            params={"source_phase": "EXPLORE"},
+        ),
+    )
+
+    assert KnowledgeSections(draft).sections() == []
+
+
+@pytest.mark.asyncio
 async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir):
     """A patch required to establish baseline stays reproducible but has no gain."""
     coord = _coord(session_dir)
@@ -612,6 +685,269 @@ async def test_promote_framework_agent_kept_lifts_and_records_progress(session_d
     # resume can reconcile it against the recorded framework_agent KEEP.
     assert s.optimization_stack[-1]["variant_name"] == "https://x/pull/1"
     assert not hasattr(s, "last_framework_agent")
+
+
+@pytest.mark.asyncio
+async def test_framework_agent_keep_stages_returned_raw_patch(
+    session_dir, tmp_path, monkeypatch
+):
+    draft = tmp_path / "kb-draft"
+    monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    patch = tmp_path / "pr-7.patch"
+    patch.write_bytes(b"raw framework diff")
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 100.0
+
+    await coord._promote_to_shared_state(
+        "framework_agent",
+        {
+            "status": "kept",
+            "output_throughput": 130.0,
+            "candidate": {"pr_url": "https://x/pull/7"},
+            "patches_applied": [str(patch)],
+        },
+        task=_task("framework_agent"),
+    )
+
+    staged = KnowledgeSections(draft).staged("framework")
+    ref = "framework/overlays/000000/00-pr-7.patch"
+    assert staged.knowledge["patches"] == [ref]
+    assert (draft / "files" / ref).read_bytes() == patch.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_explicit_empty_patches_applied_never_scans_stale_workspace(
+    session_dir, tmp_path, monkeypatch
+):
+    draft = tmp_path / "kb-draft"
+    monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "rejected.diff").write_bytes(b"rejected stale bytes")
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 100.0
+
+    await coord._promote_to_shared_state(
+        "framework_agent",
+        {
+            "status": "kept",
+            "output_throughput": 130.0,
+            "candidate": {"pr_url": "https://x/pull/8"},
+            "patches_applied": [],
+            "workspace": str(workspace),
+        },
+        task=_task("framework_agent"),
+    )
+
+    # Final config comes from current_best at CLOSE; an explicit empty patch
+    # list neither scans stale workspace files nor creates an owner section.
+    assert KnowledgeSections(draft).staged("framework") is None
+    assert coord.shared_state.kb_stage_outbox == []
+    # A config-only KEEP must not mark a required patch owner; otherwise CLOSE
+    # would reject the record for missing required section staging.
+    assert "kb_required_owner" not in coord.shared_state.optimization_stack[-1]
+
+
+@pytest.mark.asyncio
+async def test_local_mode_without_remote_draft_does_not_enqueue_outbox(
+    session_dir, tmp_path, monkeypatch
+):
+    monkeypatch.delenv("KB_DRAFT_DIR", raising=False)
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "local")
+    patch = tmp_path / "accepted.patch"
+    patch.write_bytes(b"accepted")
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 100.0
+
+    await coord._promote_to_shared_state(
+        "framework_agent",
+        {
+            "status": "kept",
+            "output_throughput": 130.0,
+            "candidate": {"pr_url": "https://x/pull/10"},
+            "patches_applied": [str(patch)],
+        },
+        task=_task("framework_agent"),
+    )
+
+    assert coord.shared_state.kb_stage_outbox == []
+    assert "kb_required_owner" not in coord.shared_state.optimization_stack[0]
+
+
+@pytest.mark.asyncio
+async def test_keep_kb_hook_runs_only_after_authoritative_save(
+    session_dir, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("KB_DRAFT_DIR", str(tmp_path / "draft"))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    patch = tmp_path / "pr.patch"
+    patch.write_bytes(b"raw diff")
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 100.0
+    events: list[str] = []
+    real_save = coord.shared_state.save
+
+    def _save(*args, **kwargs):
+        events.append("save")
+        return real_save(*args, **kwargs)
+
+    monkeypatch.setattr(coord.shared_state, "save", _save)
+    monkeypatch.setattr(
+        coord.writeback,
+        "_stage_agent_keep",
+        lambda **_kwargs: events.append("stage") or True,
+    )
+
+    await coord._promote_to_shared_state(
+        "framework_agent",
+        {
+            "status": "kept",
+            "output_throughput": 130.0,
+            "candidate": {"pr_url": "https://x/pull/9"},
+            "patches_applied": [str(patch)],
+        },
+        task=_task("framework_agent"),
+    )
+
+    assert events[0:2] == ["save", "stage"]
+    assert coord.shared_state.kb_stage_outbox == []
+
+
+def test_outbox_drain_acknowledges_only_confirmed_success(
+    session_dir,
+    monkeypatch,
+):
+    coord = _coord(session_dir)
+    patch = session_dir / "accepted.patch"
+    patch.write_text("patch", encoding="utf-8")
+    row = {
+        "id": "FRAMEWORK_AGENT:0",
+        "owner": "FRAMEWORK_AGENT",
+        "stack_index": 0,
+        "include_patches": True,
+        "patch_sources": [str(patch)],
+        "missing_patch_sources": [],
+    }
+    coord.shared_state.kb_stage_outbox = [row]
+    monkeypatch.setattr(
+        coord.writeback,
+        "_stage_agent_keep",
+        lambda **_kwargs: False,
+    )
+
+    coord.writeback._drain_agent_keep_outbox()
+
+    assert coord.shared_state.kb_stage_outbox == [row]
+
+
+def test_outbox_dead_letters_missing_patch_without_blocking_close(
+    session_dir,
+) -> None:
+    coord = _coord(session_dir)
+    coord.shared_state.optimization_stack = [
+        {
+            "action": "framework",
+            "kb_required_owner": "FRAMEWORK_AGENT",
+        }
+    ]
+    row = {
+        "id": "FRAMEWORK_AGENT:0",
+        "owner": "FRAMEWORK_AGENT",
+        "stack_index": 0,
+        "include_patches": True,
+        "patch_sources": [str(session_dir / "gone.patch")],
+        "missing_patch_sources": [],
+    }
+    coord.shared_state.kb_stage_outbox = [row]
+
+    coord.writeback._drain_agent_keep_outbox()
+
+    assert coord.shared_state.kb_stage_outbox == []
+    assert coord.shared_state.kb_stage_dead_letter[0]["id"] == row["id"]
+    assert coord.shared_state.kb_stage_dead_letter[0]["reason"] == (
+        "patch_source_missing"
+    )
+    assert "kb_required_owner" not in (
+        coord.shared_state.optimization_stack[0]
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_settles_state_before_draining_kb_outbox(
+    session_dir,
+    monkeypatch,
+):
+    """The outbox drains after the recovery pass, from the durable config.
+
+    Resume no longer rebuilds ``current_best`` from an ``optimization_stack``
+    replay: the lift writes both together, so the replay could only ever
+    reintroduce an env a later ablation removed. What still has to hold is the
+    ordering — recovery settles and saves, and only then does the outbox stage
+    whatever ``current_best`` durably holds.
+    """
+    coord = _coord(session_dir)
+    coord._resumed_from = {"is_resume": True}
+    coord.shared_state.optimization_stack = [
+        {
+            "action": "explore",
+            "variant_name": "winner",
+            "candidate_extra_server_args": "--new",
+            "extra_envs": {"NEW_ENV": "1"},
+            "tput": 120.0,
+        }
+    ]
+    coord.shared_state.current_best = {
+        "extra_server_args": "--new",
+        "extra_envs": {"NEW_ENV": "1"},
+        "tput": 120.0,
+    }
+    coord.shared_state.cumulative_gain_validated_stack_len = 1
+    coord.shared_state.kb_stage_outbox = [
+        {
+            "id": "EXPLORE:0",
+            "owner": "EXPLORE",
+            "stack_index": 0,
+            "include_patches": False,
+            "patch_sources": [],
+            "missing_patch_sources": [],
+        }
+    ]
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    for name in (
+        "_resume_recover_pending_integrate",
+        "_resume_recover_pending_targeted_build",
+        "_resume_recover_pending_warm_replay",
+        "_resume_recover_pending_revalidation",
+        "_resume_recover_orphaned_keeps",
+        "_record_observation",
+    ):
+        monkeypatch.setattr(coord.writeback, name, _noop)
+
+    events: list[str] = []
+    staged: list[dict] = []
+
+    def _save(_session_dir):
+        events.append("save")
+
+    def _stage(**_kwargs):
+        events.append("stage")
+        staged.append(dict(coord.shared_state.current_best))
+        return True
+
+    monkeypatch.setattr(coord.shared_state, "save", _save)
+    monkeypatch.setattr(coord.writeback, "_stage_agent_keep", _stage)
+
+    await coord.writeback._resume_consistency_pass()
+
+    assert events.index("save") < events.index("stage")
+    assert staged[0]["extra_server_args"] == "--new"
+    assert staged[0]["extra_envs"] == {"NEW_ENV": "1"}
+    assert coord.shared_state.kb_stage_outbox == []
 
 
 @pytest.mark.asyncio

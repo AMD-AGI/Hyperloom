@@ -449,14 +449,7 @@ class ExplorePhase(PhaseHandler):
             log.exception("cycle soft-restart: conversation reset failed")
         # 2-3) Reap leases, reclaim orphaned running tasks, prune DB.
         await run_lease_and_db_reclaim(self, summary, reason="cycle_soft_restart")
-        # 4) Clear transient knowledge-plane caches for a fresh PR feed.
-        try:
-            if self.knowledge_plane is not None:
-                self.knowledge_plane.reset_round_caches()
-                summary["caches_cleared"] = True
-        except Exception:  # noqa: BLE001
-            log.exception("cycle soft-restart: cache clear failed")
-        # 5) Deep-clean any lingering inference-server processes.
+        # 4) Deep-clean any lingering inference-server processes.
         if getattr(self, "_cycle_restart_servers", False):
             try:
                 self._restart_inference_servers()

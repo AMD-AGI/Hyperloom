@@ -1868,6 +1868,107 @@ class GemmTuning(TypedDict, total=False):
     total_gain_pct: float
 
 
+# Collective — multi-rank communication campaigns run at KERNEL entry. Kept as
+# its own section because the E2E gate, not the microbenchmark, decides
+# adoption: a campaign that wins its micro run and loses the gate is absent
+# from ``optimizations`` and would otherwise leave no trace in the breakdown.
+class CollectiveAttempt(TypedDict, total=False):
+    """One collective campaign, from candidate selection through the E2E gate.
+
+    Attributes:
+        collective_attempt_id (str): Stable campaign identity; deduplicates a
+            resumed or salvaged run so it is not double-counted.
+        experiment_id (str): KernelForge experiment identity for the campaign.
+        kernel_id (str): Roofline ordinal of the targeted kernel (``k038``).
+        kernel_name (str): Mangled device symbol that was optimized.
+        collective_op (str): ``all_reduce`` / ``reduce_scatter`` / ``all_gather``.
+        world_size (int | None): Rank count the campaign benchmarked against.
+        engine (str): Producing engine (``forge_collective``).
+        status (str): Tool status (``ok`` / ``skipped`` / ...).
+        decision (str): Microbenchmark verdict (``KEEP`` / ``REVERT``).
+        kept (bool): Whether the microbenchmark verdict was a KEEP.
+        salvaged (bool): Whether the record was recovered from a partial run.
+        requires_e2e_validation (bool): Whether a KEEP still owes an E2E gate.
+        iterations (int | None): Campaign iterations forge-loop completed.
+        kernel_speedup (float | None): Mean case speedup from the microbenchmark.
+        gpu_pct (float | None): Share of GPU time the targeted collective held.
+        duration_sec (float | None): Campaign wall time.
+        ts (str): ISO UTC timestamp of the campaign record.
+        source_file (str): Source the patch rewrote.
+        kernel_repo (str): Repo root the patch applies to.
+        workspace (str): Campaign workspace directory.
+        patch_path (str): Absolute path to the produced patch.
+        error_class (str): Machine-readable failure class (``""`` when none).
+        error (str): Human-readable failure detail.
+        integration_decision (str): E2E gate verdict — the one that decides
+            adoption (``KEEP`` / ``REVERT`` / ``NEEDS_REVIEW``).
+        integration_gain_pct (float | None): End-to-end throughput delta.
+        integration_base_tput (float | None): Pre-patch throughput reference.
+        integration_new_tput (float | None): Post-patch measured throughput.
+        bandwidth (dict[str, Any]): Per-case measured bandwidth keyed by case
+            name (``bytes`` / ``algbw_gbps`` / ``busbw_gbps``).
+        artifact_files (list[str]): Repo-relative files the patch touched.
+    """
+
+    collective_attempt_id: str
+    experiment_id: str
+    kernel_id: str
+    kernel_name: str
+    collective_op: str
+    world_size: int | None
+    engine: str
+    status: str
+    decision: str
+    kept: bool
+    salvaged: bool
+    requires_e2e_validation: bool
+    iterations: int | None
+    kernel_speedup: float | None
+    gpu_pct: float | None
+    duration_sec: float | None
+    ts: str
+    source_file: str
+    kernel_repo: str
+    workspace: str
+    patch_path: str
+    error_class: str
+    error: str
+    integration_id: str
+    integration_decision: str
+    integration_status: str
+    integration_result_status: str
+    integration_revert_status: str
+    integration_finalize_status: str
+    integration_recovery_action: str
+    integration_error_class: str
+    integration_error: str
+    integration_report_path: str
+    integration_workspace: str
+    integration_ts: str
+    integration_gain_pct: float | None
+    integration_base_tput: float | None
+    integration_new_tput: float | None
+    bandwidth: dict[str, Any]
+    artifact_files: list[str]
+
+
+class Collective(TypedDict, total=False):
+    """Top-level collective-lane section envelope.
+
+    Attributes:
+        only_mode (bool): Mirrors ``HYPERLOOM_COLLECTIVE_ONLY`` — distinguishes
+            a collective-only session from one where the lane merely ran.
+        attempts (list[CollectiveAttempt]): One row per logical campaign,
+            deduplicated by ``collective_attempt_id``, newest-last.
+        last (CollectiveAttempt): The most recent campaign record, carrying the
+            measurement evidence (``bandwidth``) the ledger rows omit.
+    """
+
+    only_mode: bool
+    attempts: list[CollectiveAttempt]
+    last: CollectiveAttempt
+
+
 # Kernel Roofline — hot-kernel table mirroring reports/kernel_roofline.json.
 class KernelRooflineEntry(TypedDict, total=False):
     """One hot-kernel row (on-disk shape passed through verbatim)."""
@@ -2646,6 +2747,8 @@ class SessionBreakdown(TypedDict, total=False):
         phase_segments (list[PhaseSegment]): Phase-boundary view.
         capability_summary (CapabilitySummary): Per-capability roll-up.
         kernel_lifecycle (KernelLifecycle): Kernels grouped by lifecycle stage.
+        collective (Collective): Collective-lane campaigns and their E2E
+            verdicts; empty {} when the lane never ran.
         param_search (ParamSearch): Merged explore-search ledger.
         sweep (Sweep): Concurrency/shape sweep results.
         critic_robustness (CriticRobustness): Critic reviews and robustness signals.
@@ -2682,6 +2785,7 @@ class SessionBreakdown(TypedDict, total=False):
     action_timeline: list[PhaseEvent]
     capability_summary: CapabilitySummary
     kernel_lifecycle: KernelLifecycle
+    collective: Collective
     # explore_search is the native merged ledger; param_search is a v1 alias.
     param_search: ParamSearch
     explore_search: ParamSearch

@@ -7,6 +7,8 @@ git grounding, missing-target detection, and quantitative-claim guards)."""
 from __future__ import annotations
 
 
+import pytest
+
 from hyperloom.orchestrator.specialists import patch_safety as ps
 
 
@@ -163,25 +165,157 @@ def test_patch_safety_report_notes_empty():
     assert ps.PatchSafetyReport().notes() == []
 
 
-# ---- scan_quantitative_claims ---------------------------------------------
-def test_scan_quantitative_claims():
+# ---- scan_numeric_claims ---------------------------------------------------
+def test_scan_numeric_claims():
     payload = {
-        "confidence": 0.9,
         "summary": "gives 20% boost",
         "proposal_set": [
-            {"score": 1, "expected_qualitative_argument": "3x faster"},
+            {"expected_qualitative_argument": "3x faster"},
             "not-a-dict",
         ],
     }
-    forbidden, warnings = ps.scan_quantitative_claims(payload)
-    assert "confidence" in forbidden
-    assert "score" in forbidden
+    warnings = ps.scan_numeric_claims(payload)
     assert any("%" in w for w in warnings)
     assert any("x" in w.lower() for w in warnings)
 
 
-def test_scan_quantitative_claims_empty():
-    assert ps.scan_quantitative_claims({}) == ([], [])
+def test_scan_numeric_claims_empty():
+    assert ps.scan_numeric_claims({}) == []
+
+
+def test_the_numeric_scan_answers_only_the_question_no_one_else_answers():
+    """It used to return the same ``keys & FORBIDDEN_*`` intersection
+    ``strip_forbidden_proposal_fields`` computes, for a caller that discarded
+    it: one question with two implementations, free to drift apart. The numbers
+    in the prose are what this scan alone finds."""
+    payload = {
+        "expected_gain": 12.0,
+        "summary": "gives 20% boost",
+        "proposal_set": [{"score": 1, "confidence": 0.9}],
+    }
+
+    assert ps.scan_numeric_claims(payload) == ["20%"]
+
+
+# ---- strip_forbidden_proposal_fields --------------------------------------
+def test_round_level_confidence_is_not_a_per_proposal_gain_claim():
+    """The output schema asks for a round-level self-assessment and the round
+    audit records it, so stripping it at the top level only made our own
+    template a violation. Per proposal it is the ranking claim the guard is
+    about, and one function now decides both."""
+    payload = {"confidence": 0.6, "proposal_set": [{"confidence": 0.4}]}
+
+    assert ps.strip_forbidden_proposal_fields(payload) == ["confidence"]
+    assert payload["confidence"] == 0.6
+    assert payload["proposal_set"][0] == {}
+
+
+
+def test_forbidden_fields_are_stripped_so_the_critic_cannot_reject_on_format():
+    payload = {
+        "expected_gain": 9.0,
+        "confidence": 0.6,
+        "summary": "keep me",
+        "proposal_set": [
+            {"name": "v1", "confidence": 0.4, "score": 3, "reason": "keep me too"},
+            "not-a-dict",
+        ],
+    }
+
+    removed = ps.strip_forbidden_proposal_fields(payload)
+
+    assert set(removed) == {"expected_gain", "confidence", "score"}
+    assert "expected_gain" not in payload
+    assert payload["confidence"] == 0.6  # round-level self-assessment survives
+    assert payload["summary"] == "keep me"
+    assert payload["proposal_set"][0] == {"name": "v1", "reason": "keep me too"}
+    assert payload["proposal_set"][1] == "not-a-dict"
+
+
+def test_a_gain_claim_under_the_coordinators_own_field_name_is_stripped_too():
+    """``predicted_gain_pct`` is the Coordinator's estimate on a propose_action
+    intent, which is exactly what made it a convenient place for a specialist
+    to put a number the guard was meant to strip."""
+    payload = {"proposal_set": [{"name": "v1", "predicted_gain_pct": 12.0, "reason": "keep me"}]}
+
+    removed = ps.strip_forbidden_proposal_fields(payload)
+
+    assert removed == ["predicted_gain_pct"]
+    assert payload["proposal_set"][0] == {"name": "v1", "reason": "keep me"}
+
+
+def test_stripping_a_clean_payload_changes_nothing():
+    payload = {"proposal_set": [{"name": "v1", "reason": "why"}]}
+
+    assert ps.strip_forbidden_proposal_fields(payload) == []
+    assert payload == {"proposal_set": [{"name": "v1", "reason": "why"}]}
+
+
+@pytest.mark.parametrize("payload", [None, [], "", 0])
+def test_stripping_tolerates_a_payload_that_is_not_a_dict(payload):
+    assert ps.strip_forbidden_proposal_fields(payload) == []
+
+
+# ---- quantitative_claim_rule_descriptor ------------------------------------
+def test_the_rule_the_critic_gets_lists_exactly_what_the_runner_strips():
+    """A hand-copied field list in the prompt is how the Critic came to reject
+    over a field the runner never enforced."""
+    rule = ps.quantitative_claim_rule_descriptor()
+
+    assert set(rule["forbidden_proposal_fields"]) == set(ps.FORBIDDEN_PROPOSAL_FIELDS)
+
+
+def test_a_format_slip_is_advisory_not_a_reject():
+    rule = ps.quantitative_claim_rule_descriptor()
+
+    assert rule["failure_verdict"] == "advise"
+    assert rule["failure_reason_code"] == ps.QUANTITATIVE_CLAIM_REASON_CODE
+
+
+# ---- advisory_only_reason_codes --------------------------------------------
+def test_every_rule_that_asked_for_advice_is_enforceable():
+    codes = ps.advisory_only_reason_codes()
+
+    assert ps.QUANTITATIVE_CLAIM_REASON_CODE in codes
+    for rule in ps.cross_domain_rule_descriptors():
+        if rule["failure_verdict"] == ps.ADVISE_VERDICT:
+            assert rule["failure_reason_code"] in codes
+
+
+def test_a_rule_asking_for_a_reject_is_left_alone(monkeypatch):
+    """The set is derived from the descriptors, so a rule keeping ``reject`` stays out of it."""
+    hard = ps.CrossDomainRule(
+        rule_id="hard_guard",
+        description="a violation here is grounds for refusal",
+        failure_verdict="reject",
+        failure_reason_code="cross_domain_hard_guard",
+    )
+    monkeypatch.setattr(ps, "CROSS_DOMAIN_RULES", ps.CROSS_DOMAIN_RULES + (hard,))
+
+    codes = ps.advisory_only_reason_codes()
+
+    assert "cross_domain_hard_guard" not in codes
+    assert ps.QUANTITATIVE_CLAIM_REASON_CODE in codes
+
+
+def test_the_codes_carry_no_blank_entry():
+    assert "" not in ps.advisory_only_reason_codes()
+
+
+# ---- advisory_rules_govern -------------------------------------------------
+@pytest.mark.parametrize("action_name", ["specialist", "explore", "framework_agent"])
+def test_the_rules_govern_the_proposal_kinds_they_are_written_about(action_name):
+    """``proposal_set[*]`` reaches review as a specialist proposal or the explore
+    grid it is materialised into; the framework candidate is the one the
+    quantitative-claim rule names by exception."""
+    assert ps.advisory_rules_govern(action_name) is True
+
+
+@pytest.mark.parametrize("action_name", ["integrate_patch", "kernel_opt", "sweep", "baseline", "", None])
+def test_integrate_patch_is_never_governed_by_an_advisory_rule(action_name):
+    """None of these carries a specialist ``proposal_set``, and holding an
+    ``integrate_patch`` reject to ``advise`` would land the refused patch."""
+    assert ps.advisory_rules_govern(action_name) is False
 
 
 # ---- vet_patches ----------------------------------------------------------

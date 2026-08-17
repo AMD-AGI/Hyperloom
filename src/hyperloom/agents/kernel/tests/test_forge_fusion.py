@@ -70,7 +70,8 @@ def _sentinel_payload(text: str) -> dict:
 def test_build_cmd_maps_core_options(tmp_path):
     cmd = forge_fusion._build_cmd(_payload(tmp_path))
 
-    assert cmd[:4] == [forge_fusion.sys.executable, "-m", "forge_fusion.cli", "run"]
+    assert cmd[:3] == [forge_fusion.sys.executable, "-m", "kernel_agents.cli"]
+    assert cmd[3] == "forge-fuse"
     assert cmd[cmd.index("--trace") + 1] == "/tmp/decode.trace.json.gz"
     assert cmd[cmd.index("--model-path") + 1] == "/models/zaya"
     assert cmd[cmd.index("--framework") + 1] == "sglang"
@@ -295,7 +296,18 @@ def test_run_with_tree_timeout_reaps_on_timeout():
         )
 
 
-def test_normalize_manifest_kept_writes_keep_result(tmp_path, monkeypatch):
+def _patch_file(output_dir) -> str:
+    """A real patch file, which is what KernelForge's manifest actually names.
+
+    ``artifacts.patch`` is a path, not the diff text, and integrate reads it off
+    disk -- so a fixture holding the text would not exercise what is checked.
+    """
+    path = Path(output_dir) / "fusion.patch"
+    path.write_text("diff --git a/foo.py b/foo.py\n", encoding="utf-8")
+    return str(path)
+
+
+def test_normalize_manifest_kept_writes_keep_result(tmp_path):
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     manifest = {
@@ -307,15 +319,15 @@ def test_normalize_manifest_kept_writes_keep_result(tmp_path, monkeypatch):
         },
         "validation": {"kept": True, "kernel_speedup": 1.12},
         "artifacts": {
-            "patch": "diff --git a/foo.py",
+            "patch": _patch_file(output_dir),
             "changes": [{"path": "foo.py"}],
+            # KernelForge sets repo_root exactly when it sets a patch.
+            "repo_root": "/repo/root",
         },
         "fusion": {"source_file": str(output_dir / "foo.py")},
         "verdict": "keep",
     }
     (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    monkeypatch.setattr(forge_fusion, "_git_toplevel", lambda _path: "/repo/root")
-
     result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
 
     assert result["status"] == "ok"
@@ -325,6 +337,146 @@ def test_normalize_manifest_kept_writes_keep_result(tmp_path, monkeypatch):
     assert result["env_flags"] == {"VLLM_FUSE=1": "1"}
     assert result["kernel_repo"] == "/repo/root"
     assert result["artifact_files"] == ["foo.py"]
+
+
+def test_normalize_manifest_refuses_a_keep_integrate_cannot_apply(tmp_path):
+    """Integrate needs a patch and a target file, and returns without them.
+
+    Reported as ok this is lost twice: nothing adopts it, and the status also
+    satisfies the KERNEL-entry idempotency gate, so it is never retried either.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest = {
+        "fusion_loop": {
+            "kept": True,
+            "best": {"kernel_speedup": 1.12},
+            "best_env_flag": "VLLM_FUSE=1",
+        },
+        "artifacts": {"patch": None, "changes": []},
+        "fusion": {"source_file": str(output_dir / "foo.py")},
+        "verdict": "keep",
+    }
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["status"] == "failed"
+    assert result["decision"] == "REVERT"
+    assert result["kept"] is False
+    assert result["error_class"] == "fusion_artifact_missing"
+    # Anything the gate accepts would stop the session from trying again.
+    assert result["status"] not in ("ok", "complete", "kept")
+
+
+@pytest.mark.parametrize(
+    ("drop", "expected"),
+    [
+        ("patch_file", "the patch file it named"),
+        ("source_file", "a target file"),
+        ("repo_root", "a patch root"),
+    ],
+)
+def test_normalize_manifest_checks_each_artifact_it_hands_to_integrate(
+    tmp_path, drop, expected
+):
+    """Verified rather than assumed: the producer is another repository."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    patch = _patch_file(output_dir)
+    if drop == "patch_file":
+        Path(patch).unlink()
+    manifest = {
+        "fusion_loop": {"kept": True, "best": {"kernel_speedup": 1.12}},
+        "artifacts": {
+            "patch": patch,
+            "changes": [],
+            "repo_root": "" if drop == "repo_root" else "/venv/site-packages",
+        },
+        "fusion": {"source_file": "" if drop == "source_file" else "/fw/foo.py"},
+    }
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["kept"] is False
+    assert result["error_class"] == "fusion_artifact_missing"
+    assert expected in result["error"]
+
+
+def _compile_pass_manifest(output_dir, *, kept: bool) -> dict:
+    """A claimed framework compile pass: no authoring loop, no validation block."""
+    return {
+        "schema_version": 2,
+        "verdict": "candidate",
+        "fusion_loop": None,
+        "validation": None,
+        "compile_pass": {
+            "flag": "VLLM_FUSE_RMSNORM",
+            "config_file": "vllm/config.py",
+            "baseline_tok_s": 1000.0,
+            "enabled_tok_s": 1090.0 if kept else 1005.0,
+            "speedup": 1.09 if kept else 1.005,
+            "pass_activated": True,
+            "validated": kept,
+            "kept": kept,
+        },
+        "artifacts": {
+            "patch": _patch_file(output_dir),
+            "changes": [{"path": "vllm/config.py"}],
+            "repo_root": "/venv/site-packages",
+        }
+        if kept
+        else None,
+        "fusion": {"source_file": str(output_dir / "config.py")},
+    }
+
+
+def test_normalize_manifest_keeps_a_claimed_compile_pass(tmp_path):
+    """A compile-pass claim reports no fusion_loop, and used to be read as a miss.
+
+    The claim is the cheapest win available -- the framework already shipped the
+    kernel, just switched off -- and its patch was being discarded.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_manifest.json").write_text(
+        json.dumps(_compile_pass_manifest(output_dir, kept=True)), encoding="utf-8"
+    )
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["kept"] is True
+    assert result["decision"] == "KEEP"
+    assert result["status"] == "ok"
+    assert result["micro_decision"] == "candidate"
+    assert result["patch"] == str(output_dir / "fusion.patch")
+    assert result["kernel_repo"] == "/venv/site-packages"
+    assert result["requires_e2e_validation"] is True
+    # The edit lives in the framework source, so there is no runtime flag to set.
+    assert result["env_flags"] == {}
+    assert result["baseline_env_flags"] == {}
+    # The number is a serving ratio; say so rather than let it pass for a
+    # microbenchmark one.
+    assert result["kernel_speedup"] == 1.09
+    assert result["serving_speedup"] == 1.09
+    assert result["compile_pass_flag"] == "VLLM_FUSE_RMSNORM"
+
+
+def test_normalize_manifest_reverts_a_compile_pass_that_did_not_pay(tmp_path):
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_manifest.json").write_text(
+        json.dumps(_compile_pass_manifest(output_dir, kept=False)), encoding="utf-8"
+    )
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["kept"] is False
+    assert result["decision"] == "REVERT"
+    assert result["status"] == "complete"
+    assert result["micro_decision"] == "no_improvement"
+    assert result["patch"] is None
+    assert result["requires_e2e_validation"] is False
 
 
 def test_normalize_manifest_reports_an_llm_outage_as_infrastructure(tmp_path):
@@ -404,7 +556,11 @@ def test_an_llm_outage_verdict_never_discards_a_validated_fusion(tmp_path):
         "verdict": "llm_unavailable",
         "fusion_loop": {"kept": True, "best": {"kernel_speedup": 1.2}},
         "validation": {"kept": True, "kernel_speedup": 1.2},
-        "artifacts": {"patch": "diff --git a/foo.py", "changes": [{"path": "foo.py"}]},
+        "artifacts": {
+            "patch": _patch_file(output_dir),
+            "changes": [{"path": "foo.py"}],
+            "repo_root": "/venv/site-packages",
+        },
         "fusion": {"source_file": str(output_dir / "foo.py")},
         "error": {"kind": "api_error", "attempts": 2, "message": "flaky"},
     }
@@ -416,7 +572,7 @@ def test_an_llm_outage_verdict_never_discards_a_validated_fusion(tmp_path):
     assert result["decision"] == "KEEP"
     assert result["status"] == "ok"
     assert result["requires_e2e_validation"] is True
-    assert result["patch"] == "diff --git a/foo.py"
+    assert result["patch"] == str(output_dir / "fusion.patch")
     assert "error_class" not in result
 
 
@@ -446,25 +602,28 @@ def test_main_relays_the_outage_sentinel_despite_a_non_zero_exit(tmp_path, monke
     """
     output_dir = tmp_path / "out"
     output_dir.mkdir()
-    (output_dir / "fusion_manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "verdict": "llm_unavailable",
-                "error": {"kind": "api_error", "attempts": 5, "message": "gateway 400 x5"},
-            }
-        ),
-        encoding="utf-8",
-    )
     input_json = tmp_path / "input.json"
     input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
 
     class Proc:
-        returncode = 3  # forge_fusion.cli.EXIT_LLM_UNAVAILABLE
+        returncode = 3  # kernel_agents.fusion.command.EXIT_LLM_UNAVAILABLE
         stdout = ""
         stderr = ""
 
-    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", lambda _cmd, _timeout: Proc())
+    def fake_run(_cmd, _timeout):
+        (output_dir / "fusion_manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "verdict": "llm_unavailable",
+                    "error": {"kind": "api_error", "attempts": 5, "message": "gateway 400 x5"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return Proc()
+
+    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
 
     rc = forge_fusion.main(["--input-json", str(input_json)])
 
@@ -504,16 +663,13 @@ def test_normalize_manifest_prefers_artifacts_repo_root(tmp_path, monkeypatch):
         "fusion_loop": {"kept": True, "best": {"kernel_speedup": 1.2}},
         "validation": {"kept": True},
         "artifacts": {
-            "patch": "diff --git a/vllm/x.py",
+            "patch": _patch_file(output_dir),
             "changes": [{"path": "vllm/x.py"}],
             "repo_root": "/venv/site-packages",
         },
         "fusion": {"source_file": str(output_dir / "x.py")},
     }
     (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    # even if git would resolve a (wrong) project root, the manifest root wins
-    monkeypatch.setattr(forge_fusion, "_git_toplevel", lambda _path: "/some/git/project")
-
     result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
     assert result["kernel_repo"] == "/venv/site-packages"
 
@@ -545,9 +701,13 @@ def test_main_kept_manifest_emits_keep_result(tmp_path, monkeypatch, capsys):
     manifest = {
         "fusion_loop": {"kept": True, "best": {"kernel_speedup": 1.05}},
         "validation": {},
-        "artifacts": {},
+        "artifacts": {
+            "patch": _patch_file(output_dir),
+            "changes": [{"path": "foo.py"}],
+            "repo_root": "/venv/site-packages",
+        },
+        "fusion": {"source_file": str(output_dir / "foo.py")},
     }
-    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     input_json = tmp_path / "input.json"
     input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
 
@@ -556,7 +716,14 @@ def test_main_kept_manifest_emits_keep_result(tmp_path, monkeypatch, capsys):
         stdout = ""
         stderr = ""
 
-    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", lambda _cmd, _timeout: Proc())
+    def fake_run(_cmd, _timeout):
+        # The run writes its own manifest; main() clears any stale one first.
+        (output_dir / "fusion_manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        return Proc()
+
+    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
 
     rc = forge_fusion.main(["--input-json", str(input_json)])
 
@@ -568,51 +735,36 @@ def test_main_kept_manifest_emits_keep_result(tmp_path, monkeypatch, capsys):
     assert result["requires_e2e_validation"] is True
 
 
-def test_git_toplevel_success(tmp_path):
-    # A git-TRACKED file resolves to its work-tree root.
-    import subprocess as sp
-
-    repo = tmp_path / "repo"
-    (repo / "pkg").mkdir(parents=True)
-    src = repo / "pkg" / "foo.py"
-    src.write_text("x = 1\n", encoding="utf-8")
-    for args in (["init", "-q"], ["add", "-A"], ["-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "b"]):
-        sp.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
-    assert forge_fusion._git_toplevel(str(src)) == str(repo.resolve())
-
-
-def test_git_toplevel_untracked_in_git_uses_package_root(tmp_path):
-    # venv-in-git: an UNTRACKED pip file must resolve to the package root, not the
-    # git project root, so the package-relative patch applies.
-    import subprocess as sp
-
-    project = tmp_path / "proj"
-    site = project / ".venv" / "site-packages"
-    d = site / "vllm" / "models"
-    d.mkdir(parents=True)
-    for p in (site / "vllm", d):
-        (p / "__init__.py").write_text("", encoding="utf-8")
-    src = d / "qwen3.py"
-    src.write_text("x = 1\n", encoding="utf-8")
-    sp.run(["git", "-C", str(project), "init", "-q"], check=True, capture_output=True, text=True)
-    (project / ".gitignore").write_text(".venv/\n", encoding="utf-8")
-    sp.run(["git", "-C", str(project), "add", ".gitignore"], check=True, capture_output=True, text=True)
-    sp.run(
-        ["git", "-C", str(project), "-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "b"],
-        check=True,
-        capture_output=True,
-        text=True,
+def test_main_does_not_report_a_previous_runs_manifest(tmp_path, monkeypatch, capsys):
+    """The output dir is keyed on the task, so the file outlives the run."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_manifest.json").write_text(
+        json.dumps(
+            {
+                "fusion_loop": {"kept": True, "best": {"kernel_speedup": 1.4}},
+                "artifacts": {"patch": _patch_file(output_dir), "changes": []},
+                "fusion": {"source_file": "/fw/foo.py"},
+            }
+        ),
+        encoding="utf-8",
     )
-    assert forge_fusion._git_toplevel(str(src)) == str(site.resolve())
+    input_json = tmp_path / "input.json"
+    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
 
+    class Proc:
+        returncode = 1
+        stdout = ""
+        stderr = ""
 
-def test_git_toplevel_handles_subprocess_errors(monkeypatch):
-    # git unavailable -> fall back to the package root derived from the path.
-    def fake_run(*_args, **_kwargs):
-        raise OSError("git missing")
+    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", lambda _cmd, _timeout: Proc())
 
-    monkeypatch.setattr(forge_fusion.subprocess, "run", fake_run)
-    assert forge_fusion._git_toplevel("/any/path.py") == "/any"
+    forge_fusion.main(["--input-json", str(input_json)])
+
+    result = _sentinel_payload(capsys.readouterr().out)
+    assert result["kept"] is False
+    assert result["decision"] == "REVERT"
+    assert "no fusion_manifest.json" in result["error"]
 
 
 def test_main_invalid_json_returns_2(tmp_path, capsys):
@@ -645,8 +797,6 @@ def test_build_cmd_optional_and_disabled_flags(tmp_path):
             "ab_isl": 64,
             "ab_osl": 128,
             "framework_root": "/fw",
-            "author": False,
-            "validate": False,
             "verbose": True,
             "fuse_all_confirmed": False,
         }
@@ -658,10 +808,19 @@ def test_build_cmd_optional_and_disabled_flags(tmp_path):
     assert "--ab-isl" in cmd
     assert "--ab-osl" in cmd
     assert "--framework-root" in cmd
-    assert "--no-author" in cmd
-    assert "--no-validate" in cmd
     assert "--verbose" in cmd
     assert "--fuse-all-confirmed" not in cmd
+
+
+def test_build_cmd_never_disables_authoring_or_validation(tmp_path):
+    """Both stages are the point of the run; the orchestrator never opts out."""
+    payload = _payload(tmp_path)
+    payload.update({"author": False, "validate": False})
+
+    cmd = forge_fusion._build_cmd(payload)
+
+    assert "--no-author" not in cmd
+    assert "--no-validate" not in cmd
 
 
 def test_timeout_sec_prefers_timeout_sec_key():
@@ -799,19 +958,6 @@ def test_load_input_json_empty_path_returns_empty_dict():
     assert forge_fusion._load_input_json("") == {}
 
 
-def test_git_toplevel_returns_package_root_when_not_git(monkeypatch, tmp_path):
-    # Not a git work tree -> use the package root (matches forge-fusion's export root).
-    def fake_run(cmd, **kwargs):
-        class R:
-            returncode = 1
-            stdout = ""
-
-        return R()
-
-    monkeypatch.setattr(forge_fusion.subprocess, "run", fake_run)
-    assert forge_fusion._git_toplevel(str(tmp_path / "foo.py")) == str(tmp_path.resolve())
-
-
 def test_emit_without_output_dir_only_prints(capsys):
     forge_fusion._emit({"status": "ok"}, "")
     assert forge_fusion.RESULT_BEGIN in capsys.readouterr().out
@@ -856,14 +1002,6 @@ def test_relay_streams_writes_stdout_and_stderr(capsys):
     captured = capsys.readouterr()
     assert captured.out == "hello"
     assert captured.err == "err"
-
-
-def test_git_toplevel_handles_subprocess_error(monkeypatch):
-    def fake_run(*_args, **_kwargs):
-        raise forge_fusion.subprocess.SubprocessError("boom")
-
-    monkeypatch.setattr(forge_fusion.subprocess, "run", fake_run)
-    assert forge_fusion._git_toplevel("/x") == "/"
 
 
 def test_terminate_process_tree_windows_uses_terminate(monkeypatch):

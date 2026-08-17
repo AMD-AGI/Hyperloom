@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping
 from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.io import append_jsonl
@@ -56,6 +57,7 @@ from ..actions.executors._accuracy_gate import (
     EVAL_KIND_ACCURACY_UNAVAILABLE,
     accuracy_meets_floor,
 )
+from ..knowledge.agent_kb import ExploreAgentKB, FrameworkAgentKB
 
 from .coordinator import (
     _AUDIT_ACTIONS,
@@ -223,6 +225,245 @@ class WritebackCollaborator:
             payload (dict): The observation payload.
         """
         await self.bus.append_and_seq(Message.new(source, "*", topic, payload))
+
+    @staticmethod
+    def _keep_patch_sources(
+        result: Mapping[str, Any],
+        task: "Task | None",
+    ) -> tuple[list[Path], list[str]]:
+        """Locate authoritative patch files without reconstructing their diff."""
+        candidates: list[Any] = []
+        params = (getattr(task, "params", None) or {}) if task is not None else {}
+        explicit_present = False
+        # An executor verdict's patches_applied is authoritative, including an
+        # explicit empty list after all candidates were rejected.
+        if "patches_applied" in result:
+            explicit_present = True
+            raw = result.get("patches_applied")
+            if isinstance(raw, (str, Path)):
+                candidates.append(raw)
+            elif isinstance(raw, (list, tuple)):
+                candidates.extend(raw)
+        else:
+            for key in ("patches", "prior_patches", "patch_path", "patch"):
+                if key not in result:
+                    continue
+                explicit_present = True
+                raw = result.get(key)
+                if isinstance(raw, (str, Path)):
+                    candidates.append(raw)
+                elif isinstance(raw, (list, tuple)):
+                    candidates.extend(raw)
+            if "patches" in params:
+                explicit_present = True
+                raw_params = params.get("patches")
+                if isinstance(raw_params, (str, Path)):
+                    candidates.append(raw_params)
+                elif isinstance(raw_params, (list, tuple)):
+                    candidates.extend(raw_params)
+
+        # Raw framework-agent diffs are normally returned in
+        # ``patches_applied``. The shallow workspace scan is a recovery path for
+        # older result envelopes that only persisted ``workspace``.
+        workspace_value = str(result.get("workspace") or "").strip()
+        workspace = Path(workspace_value) if workspace_value else None
+        if not explicit_present and workspace is not None and workspace.is_dir():
+            for base in (workspace, workspace / "patches", workspace / "worktree" / "patches"):
+                if not base.is_dir():
+                    continue
+                candidates.extend(sorted(base.glob("*.patch")))
+                candidates.extend(sorted(base.glob("*.diff")))
+
+        resolved: list[Path] = []
+        missing: list[str] = []
+        seen: set[Path] = set()
+        for raw in candidates:
+            if isinstance(raw, Mapping):
+                raw = (
+                    raw.get("patch_path")
+                    or raw.get("patch_ref")
+                    or raw.get("patch_file")
+                    or ""
+                )
+            raw_text = str(raw or "").strip()
+            if not raw_text:
+                missing.append("<empty-patch-member>")
+                continue
+            path = Path(raw_text)
+            if not path.is_file():
+                missing.append(raw_text)
+                continue
+            try:
+                canonical = path.resolve()
+            except OSError:
+                canonical = path
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            resolved.append(canonical)
+        return resolved, missing
+
+    def _stage_agent_keep(
+        self,
+        *,
+        owner: str,
+        stack_index: int,
+        result: Mapping[str, Any],
+        task: "Task | None",
+        include_patches: bool,
+    ) -> bool:
+        """Stage one KEEP into its owner section.
+
+        Returns ``False`` when patch staging must be retried. Final config is
+        published once from durable ``current_best`` at CLOSE.
+        """
+        normalized = str(owner or "").strip().upper()
+        facade = (
+            ExploreAgentKB.open()
+            if normalized == "EXPLORE"
+            else FrameworkAgentKB.open()
+            if normalized == "FRAMEWORK_AGENT"
+            else None
+        )
+        if facade is None or not facade.active:
+            return False
+        sources, missing = self._keep_patch_sources(result, task)
+        if include_patches and missing:
+            log.warning(
+                "%s kb: KEEP at stack index %d references missing patch members: %s",
+                normalized,
+                stack_index,
+                missing,
+            )
+            return False
+        if include_patches and sources:
+            refs = facade.stage_patches(sources, stack_index=stack_index)
+            if len(refs) != len(sources) or any(not ref for ref in refs):
+                return False
+        return True
+
+    def _enqueue_agent_keep_outbox(
+        self,
+        *,
+        owner: str,
+        stack_index: int,
+        result: Mapping[str, Any],
+        task: "Task | None",
+        include_patches: bool,
+    ) -> None:
+        """Persist an idempotent section handoff to run after state durability."""
+        from ..knowledge.remote_recipe import KnowledgeSections
+
+        if (
+            str(os.environ.get("KNOWLEDGE_STORE_MODE") or "local").strip()
+            != "remote"
+            or KnowledgeSections.from_env() is None
+        ):
+            return
+        normalized = str(owner or "").strip().upper()
+        if normalized not in {"EXPLORE", "FRAMEWORK_AGENT"}:
+            return
+        sources, missing = (
+            self._keep_patch_sources(result, task)
+            if include_patches
+            else ([], [])
+        )
+        row = {
+            "id": f"{normalized}:{int(stack_index)}",
+            "owner": normalized,
+            "stack_index": int(stack_index),
+            "include_patches": bool(include_patches),
+            "patch_sources": [str(path) for path in sources],
+            "missing_patch_sources": missing,
+        }
+        outbox = list(getattr(self.shared_state, "kb_stage_outbox", []) or [])
+        if not any(
+            isinstance(existing, dict) and existing.get("id") == row["id"]
+            for existing in outbox
+        ):
+            outbox.append(row)
+        if include_patches and (sources or missing):
+            stack = list(self.shared_state.optimization_stack or [])
+            if 0 <= int(stack_index) < len(stack) and isinstance(
+                stack[int(stack_index)],
+                dict,
+            ):
+                stack[int(stack_index)]["kb_required_owner"] = normalized
+                self.shared_state.optimization_stack = stack
+        self.shared_state.kb_stage_outbox = outbox
+
+    def _drain_agent_keep_outbox(self) -> None:
+        """Run section writes only after the authoritative state save."""
+        pending = list(getattr(self.shared_state, "kb_stage_outbox", []) or [])
+        if not pending:
+            return
+        retained: list[dict[str, Any]] = []
+        dead_letter = [
+            dict(row)
+            for row in (
+                getattr(self.shared_state, "kb_stage_dead_letter", []) or []
+            )
+            if isinstance(row, dict)
+        ]
+        stack = list(self.shared_state.optimization_stack or [])
+        for row in pending:
+            if not isinstance(row, dict):
+                continue
+            missing = [
+                str(path)
+                for path in (row.get("missing_patch_sources") or [])
+                if str(path).strip()
+            ]
+            if row.get("include_patches"):
+                missing.extend(
+                    str(path)
+                    for path in (row.get("patch_sources") or [])
+                    if str(path).strip()
+                    and not Path(str(path)).is_file()
+                )
+            missing = list(dict.fromkeys(missing))
+            if missing:
+                failed = {
+                    **dict(row),
+                    "missing_patch_sources": missing,
+                    "reason": "patch_source_missing",
+                }
+                dead_letter = [
+                    item
+                    for item in dead_letter
+                    if item.get("id") != failed.get("id")
+                ]
+                dead_letter.append(failed)
+                index = int(row.get("stack_index") or 0)
+                owner = str(row.get("owner") or "").upper()
+                if (
+                    0 <= index < len(stack)
+                    and isinstance(stack[index], dict)
+                    and str(stack[index].get("kb_required_owner") or "").upper()
+                    == owner
+                ):
+                    stack[index].pop("kb_required_owner", None)
+                log.warning(
+                    "%s kb: dropping owner section %s because patch sources "
+                    "are unavailable: %s",
+                    owner,
+                    row.get("id"),
+                    missing,
+                )
+                continue
+            task = SimpleNamespace(params={})
+            if not self._stage_agent_keep(
+                owner=str(row.get("owner") or ""),
+                stack_index=int(row.get("stack_index") or 0),
+                result={"patches": list(row.get("patch_sources") or [])},
+                task=task,
+                include_patches=bool(row.get("include_patches")),
+            ):
+                retained.append(row)
+        self.shared_state.kb_stage_outbox = retained
+        self.shared_state.kb_stage_dead_letter = dead_letter[-200:]
+        self.shared_state.optimization_stack = stack
+        self.shared_state.save(self.session_dir)
 
     def _record_kernel_opt_partial(self, result: dict[str, Any]) -> None:
         """Streaming callback for ``_run_optimization_batch`` sub-attempts: write each per-kernel entry to kernel_opt_task_attempts immediately so the next-tick prompt is accurate mid-batch.
@@ -908,7 +1149,6 @@ class WritebackCollaborator:
         if is_keep and gain_pct is not None and gain_pct > 0:
             statement = self._coord._build_statement(
                 change=change,
-                gain_pct=gain_pct,
                 kind="lesson",
             )
             impact = self._coord._build_measured_impact(
@@ -1032,7 +1272,6 @@ class WritebackCollaborator:
         *,
         change: str,
         kind: str,
-        gain_pct: float | None = None,  # kept for backward call-signature compat
         severity: str | None = None,
     ) -> str:
         """Build the lesson statement / pitfall description hashed into the KB canonical_id; MUST exclude volatile fields (e.g. gain_pct) so N sessions merge instead of producing N rows. Identity = framework + change + model/hw.
@@ -1040,8 +1279,6 @@ class WritebackCollaborator:
         Args:
             change: The summarized change description.
             kind: ``"lesson"`` or ``"pitfall"`` — selects the rendered form.
-            gain_pct: Kept for backward call-signature compat; intentionally not
-                included in the statement.
             severity: The pitfall severity, rendered only when ``kind`` is
                 ``"pitfall"``.
 
@@ -1053,7 +1290,6 @@ class WritebackCollaborator:
         model = self.shared_state.model_name or "?"
         hw = self.shared_state.gpu_type or "?"
         if kind == "lesson":
-            # gain_pct intentionally NOT included — see docstring.
             return f"{fw_tag}{change} on {model}/{hw}"
         # kind == "pitfall"
         return f"{fw_tag}{change} → {severity or '?'} on {model}/{hw}"
@@ -1214,7 +1450,7 @@ class WritebackCollaborator:
         model_class = str(getattr(ss, "model_class", "") or "").strip()
         if model_class:
             out["model_class"] = model_class
-        # model_family (v1 fallback) no longer stamped: v2 uses the exact 5-tuple canonical_id.
+        # model_family is not part of the seven-dimension Recipe identity.
         model_name = str(getattr(ss, "model_name", "") or "").strip()
         if model_name:
             out["model_name"] = model_name
@@ -1570,62 +1806,6 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 - audit cannot break finalization
             log.debug("Remote Recipe KB audit append failed", exc_info=True)
 
-    def _finalize_kernel_agent_kb(
-        self,
-        remote_cid: str,
-        remote_sid: str,
-        source: str,
-    ) -> None:
-        """Publish the independent kernel-agent KB record for this session.
-
-        A separate ``kernel:`` record with its own keep-if-better on kernel
-        gain, so kernel optimizations land even when this run does not win the
-        recipe's end-to-end throughput champion — and even when the recipe write
-        itself failed. Only runs when the session produced a kernel
-        optimization, so a kernel-less CLOSE behaves exactly like the
-        recipe-only path. Best-effort: never raises into the caller.
-        """
-        stack = getattr(self.shared_state, "optimization_stack", []) or []
-        has_kernel_opt = any(
-            isinstance(entry, dict)
-            and str(entry.get("action") or "").lower()
-            in ("gemm_tuning", "integrate", "fusion")
-            for entry in stack
-        )
-        if not has_kernel_opt:
-            return
-        try:
-            from ..knowledge.remote_recipe import (
-                kernel_agent_canonical_id,
-                write_kernel_agent_kb,
-            )
-
-            kernel_cid = kernel_agent_canonical_id(remote_cid)
-            if not kernel_cid:
-                # The recipe write failed before resolving the workload identity.
-                log.info("Kernel-agent KB finalize skipped: no workload identity")
-                return
-            kernel_result = write_kernel_agent_kb(
-                self.shared_state, kernel_cid, remote_sid
-            )
-            log.info(
-                "Kernel-agent KB finalize: status=%s reason=%s cid=%s sid=%s",
-                kernel_result.status,
-                kernel_result.reason,
-                kernel_cid,
-                kernel_result.session_id,
-            )
-            self._record_remote_recipe_audit(
-                source=f"{source}:kernel-agent",
-                status=kernel_result.status,
-                canonical_id=kernel_cid,
-                session_id=kernel_result.session_id,
-                optimized_throughput=kernel_result.optimized_throughput,
-                reason=kernel_result.reason,
-            )
-        except Exception:  # noqa: BLE001 - kernel-agent KB is best-effort
-            log.exception("Kernel-agent KB finalize failed (non-fatal)")
-
     def finalize_recipe_and_journal(
         self,
         *,
@@ -1702,7 +1882,6 @@ class WritebackCollaborator:
                     optimized_throughput=remote_result.optimized_throughput,
                     reason=remote_result.reason,
                 )
-                self._finalize_kernel_agent_kb(remote_cid, remote_sid, source)
                 return {
                     "status": remote_result.status,
                     "reason": remote_result.reason,
@@ -1723,7 +1902,6 @@ class WritebackCollaborator:
                     error_type=type(exc).__name__,
                 )
                 log.exception("Remote Recipe KB finalize failed (non-fatal)")
-                self._finalize_kernel_agent_kb(remote_cid, remote_sid, source)
                 return {
                     "status": "error",
                     "reason": type(exc).__name__,
@@ -2510,6 +2688,7 @@ class WritebackCollaborator:
             outcome.changed = True
         if outcome.changed:
             self.shared_state.save(self.session_dir)
+            self._drain_agent_keep_outbox()
 
     _PROMOTE_HANDLERS: dict[str, str] = {
         "baseline": "_promote_baseline",
@@ -2733,16 +2912,6 @@ class WritebackCollaborator:
             except Exception as exc:  # noqa: BLE001 — defensive
                 log.exception(
                     "PRELUDE: failed to enqueue warm-replay task: %r",
-                    exc,
-                )
-            # Warm-kernel KB: replay this workload's champion kernel set from
-            # the independent kernel: record (remote mode only; skipped when
-            # warm replay is off, the KB is degraded, or none is published).
-            try:
-                await self._maybe_apply_warm_kernel_kb()
-            except Exception as exc:  # noqa: BLE001 — advisory; never block PRELUDE
-                log.exception(
-                    "PRELUDE: warm-kernel KB load/apply failed: %r",
                     exc,
                 )
             # Auto-analysis (roofline / profile); may defer.
@@ -3388,6 +3557,7 @@ class WritebackCollaborator:
     ) -> None:
         """Promote an integrate_patch result: on KEEP lift current_best; clear pending_integrate."""
         changed = False
+        stack_len_before = len(self.shared_state.optimization_stack or [])
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
         status = str(result.get("status") or "")
@@ -3556,6 +3726,20 @@ class WritebackCollaborator:
             "enablement_observed_accuracy": result.get("enablement_observed_accuracy"),
             "provisional": result.get("provisional"),
         }
+        if lifted and len(self.shared_state.optimization_stack or []) > stack_len_before:
+            owner = str(
+                task_params.get("source_phase")
+                or result.get("source_phase")
+                or ""
+            ).strip().upper()
+            if owner in {"EXPLORE", "FRAMEWORK_AGENT"}:
+                self._enqueue_agent_keep_outbox(
+                    owner=owner,
+                    stack_index=len(self.shared_state.optimization_stack) - 1,
+                    result=result,
+                    task=task,
+                    include_patches=True,
+                )
         outcome.changed = changed
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
@@ -3568,6 +3752,7 @@ class WritebackCollaborator:
     ) -> None:
         """Promote a framework_agent candidate: progress row, batch max-gain stat, KEEP lift."""
         changed = False
+        stack_len_before = len(self.shared_state.optimization_stack or [])
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
         # FRAMEWORK per-candidate result: append a progress row, update the batch
@@ -3682,6 +3867,14 @@ class WritebackCollaborator:
             "output_throughput": new_tput,
             "kept": kept_flag,
         }
+        if lifted and len(self.shared_state.optimization_stack or []) > stack_len_before:
+            self._enqueue_agent_keep_outbox(
+                owner="FRAMEWORK_AGENT",
+                stack_index=len(self.shared_state.optimization_stack) - 1,
+                result=result,
+                task=task,
+                include_patches=True,
+            )
         outcome.changed = changed
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
@@ -3949,6 +4142,21 @@ class WritebackCollaborator:
             "fixes": [],
             "warnings": [],
         }
+        active_inferencex = str(
+            getattr(state, "active_inferencex_path", "") or ""
+        ).strip()
+        if active_inferencex:
+            if Path(active_inferencex).is_dir():
+                os.environ["INFERENCEX_PATH"] = active_inferencex
+            else:
+                report["warnings"].append(
+                    {
+                        "kind": "active_inferencex_checkout_missing",
+                        "path": active_inferencex,
+                    }
+                )
+                if hasattr(state, "set_stop_reason"):
+                    state.set_stop_reason("active_inferencex_checkout_missing")
         # (1) Half-applied integrate window: replay the
         # missing stack append or roll back the partial patch BEFORE anything
         # reads the stack, so the rest of the pass sees the recovered truth.
@@ -3957,7 +4165,10 @@ class WritebackCollaborator:
         # coordinator restart, so kill the orphan group, GC its attempt dir,
         # sweep its jit locks, fail the row, and clear the sentinel.
         await self._resume_recover_pending_targeted_build(report)
-        # (1c) Orphaned revalidation tasks: if enablement_validation_pending is set
+        # (1c) Combined PRELUDE replay: no benchmark verdict survived the
+        # restart, so restore both Recipe and Kernel trees before continuing.
+        await self._resume_recover_pending_warm_replay(report)
+        # (1d) Orphaned revalidation tasks: if enablement_validation_pending is set
         # but the tracked revalidation task is already terminal, clear the pending
         # flag and rearm the stall counter so a fresh revalidation can be enqueued.
         await self._resume_recover_pending_revalidation(report)
@@ -3968,6 +4179,39 @@ class WritebackCollaborator:
         # (3) A config with no stack behind it cannot be reproduced.
         if state.current_best and not state.optimization_stack:
             report["warnings"].append({"kind": "current_best_without_stack"})
+
+        # Persist recovered stack/current_best before materializing their KB
+        # sections. The outbox must never publish a config that the state file
+        # has not made authoritative yet.
+        resume_state_durable = True
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            resume_state_durable = False
+            log.exception("Coordinator: pre-outbox resume save failed")
+            report["warnings"].append({"kind": "resume_pre_outbox_save_failed"})
+        pending_kb_before = len(
+            getattr(state, "kb_stage_outbox", []) or []
+        )
+        if pending_kb_before and resume_state_durable:
+            self._drain_agent_keep_outbox()
+            pending_kb_after = len(
+                getattr(state, "kb_stage_outbox", []) or []
+            )
+            if pending_kb_after:
+                report["warnings"].append(
+                    {
+                        "kind": "kb_stage_outbox_incomplete",
+                        "pending": pending_kb_after,
+                    }
+                )
+            else:
+                report["fixes"].append(
+                    {
+                        "kind": "reconciled_kb_stage_outbox",
+                        "count": pending_kb_before,
+                    }
+                )
 
         # (4) Validation-watermark compensation: unvalidated
         # KEEPs (claimed gain not yet end-to-end confirmed) → flag + enqueue ONE
@@ -4197,6 +4441,89 @@ class WritebackCollaborator:
             else:
                 report["fixes"].append({"kind": "cleared_stale_pending_integrate", "task_id": task_id})
         state.pending_integrate = {}
+
+    async def _resume_recover_pending_warm_replay(
+        self,
+        report: dict[str, Any],
+    ) -> None:
+        """Rollback a combined PRELUDE set whose verdict was lost to a crash."""
+        state = self.shared_state
+        pending = getattr(state, "warm_replay_pending", {}) or {}
+        if not isinstance(pending, dict) or not pending:
+            return
+        rollback = self.phase_prelude._rollback_combined_warm({}, None)
+        errors = list(rollback.get("errors") or [])
+        if errors:
+            report["warnings"].append(
+                {
+                    "kind": "resume_warm_rollback_failed",
+                    "task_id": pending.get("task_id"),
+                    "errors": errors,
+                }
+            )
+            if hasattr(state, "set_stop_reason"):
+                state.set_stop_reason("warm_replay_rollback_failed")
+            state.save(self.session_dir)
+            return
+        task_id = str(pending.get("task_id") or "").strip()
+        task_state = ""
+        if task_id:
+            try:
+                from ..state.task_registry import TaskNotFound
+
+                try:
+                    task = await self.tasks.get(task_id)
+                except TaskNotFound:
+                    task = None
+                if task is not None:
+                    task_state = str(task.state or "")
+                    if task_state == "queued":
+                        await self.tasks.transition(
+                            task_id,
+                            "cancelled",
+                            evidence={"reason": "resume_interrupted_warm_replay"},
+                        )
+                        task_state = "cancelled"
+                    elif task_state == "running":
+                        await self.tasks.transition(
+                            task_id,
+                            "failed",
+                            evidence={"failure_class": "resume_interrupted"},
+                        )
+                        task_state = "failed"
+            except Exception as exc:  # noqa: BLE001
+                state.warm_replay_pending = {
+                    **dict(pending),
+                    "status": "task_invalidation_failed",
+                }
+                report["warnings"].append(
+                    {
+                        "kind": "resume_warm_task_invalidation_failed",
+                        "task_id": task_id,
+                        "error": f"{type(exc).__name__}:{exc}",
+                    }
+                )
+                if hasattr(state, "set_stop_reason"):
+                    state.set_stop_reason("warm_replay_rollback_failed")
+                state.save(self.session_dir)
+                return
+        state.warm_replay_outcome = {
+            **dict(getattr(state, "warm_replay_outcome", {}) or {}),
+            "status": "failed",
+            "reason": "interrupted_combined_validation_rolled_back",
+            "kernel": {
+                "status": "reverted",
+                "reason": "interrupted_combined_validation",
+            },
+        }
+        report["fixes"].append(
+            {
+                "kind": "recovered_pending_warm_replay",
+                "task_id": pending.get("task_id"),
+                "task_state": task_state,
+            }
+        )
+        state.save(self.session_dir)
 
     async def _resume_recover_pending_targeted_build(self, report: dict[str, Any]) -> None:
         """Reclaim an off-loop build that was in flight when the coordinator died.
@@ -4687,11 +5014,12 @@ class WritebackCollaborator:
         """Idempotently re-fire the KERNEL_AGENT entry hook on resume.
 
         Phase-entry side effects (the GEAK delegation + its ``result.json``
-        crash-recovery) are bound to a phase *transition* via
-        ``_on_phase_entered``; a resume only restores ``phase`` from state.json
-        and never re-enters the current phase. Without this, a session that
-        crashed mid ``KERNEL_AGENT`` sits idle until the phase budget cap fires,
-        then hands SWEEP an empty result — the whole delegation is silently lost.
+        crash-recovery, and the collective lane's pending integration) are bound
+        to a phase *transition* via ``_on_phase_entered``; a resume only restores
+        ``phase`` from state.json and never re-enters the current phase. Without
+        this, a session that crashed mid ``KERNEL_AGENT`` sits idle until the
+        phase budget cap fires, then hands SWEEP an empty result — the whole
+        delegation is silently lost.
 
         General across every crash timing (not case-by-case): the decision is
         driven purely by whether THIS KERNEL phase's history row already carries
@@ -4705,12 +5033,13 @@ class WritebackCollaborator:
             re-runs the e2e only when there is genuinely nothing to recover
             (run_e2e itself then continues from the pinned eval_dir on disk).
 
-        No-op unless resumed while parked in ``KERNEL_AGENT`` with the GEAK
-        backend selected.
+        No-op unless resumed while parked in ``KERNEL_AGENT`` with a pending
+        collective integration or the GEAK backend selected.
         """
         from ..phases.machine_state import (
             ESCALATE_HINT_SKIP_TO_SWEEP,
             PHASE_KERNEL_AGENT,
+            collective_integration_pending,
         )
 
         if not self._resumed_from.get("is_resume"):
@@ -4718,7 +5047,40 @@ class WritebackCollaborator:
         state = self.shared_state
         if (state.phase or "").strip().upper() != PHASE_KERNEL_AGENT:
             return
-        if not (self._kernel_enabled() and self._geak_enabled()):
+        kernel_enabled = self._kernel_enabled()
+        collective_only = bool(getattr(state, "collective_only_mode", False))
+        # Mirror _on_enter_kernel's precedence: GEAK owns the phase unless
+        # collective-only mode turned it off, and the collective lane is only
+        # reachable when GEAK does not own it. Checking collective state ahead
+        # of an owning GEAK would re-run its whole e2e instead of re-arming the
+        # wind-down hint.
+        geak_enabled = kernel_enabled and not collective_only and self._geak_enabled()
+        if kernel_enabled and not geak_enabled:
+            try:
+                collective_required = bool(
+                    collective_integration_pending(state)
+                    or self._collective_required_before_kernel_opt()
+                )
+            except Exception:  # noqa: BLE001
+                # A malformed collective record must not strand the GEAK
+                # crash-recovery below: without it the session idles to its
+                # phase budget and hands SWEEP an empty result.
+                log.exception(
+                    "resume: Collective state check failed; continuing without it",
+                )
+                collective_required = False
+            if collective_required:
+                log.info("resume: re-entering unfinished Collective work")
+                try:
+                    await self._on_enter_kernel(from_phase="resume")
+                except Exception:  # noqa: BLE001
+                    log.exception("resume: Collective re-entry failed")
+                return
+            if collective_only:
+                state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
+                state.save(self.session_dir)
+                return
+        if not geak_enabled:
             return
         history = state.phase_history or []
         row = history[-1] if history else {}
