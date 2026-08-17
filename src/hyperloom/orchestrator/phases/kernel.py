@@ -1141,7 +1141,6 @@ class KernelPhase(PhaseHandler):
         result: dict[str, Any],
         *,
         measured_tput: float,
-        provenance: str,
     ) -> None:
         """Write the GEAK headline from a MEASURED main-flow rebench.
 
@@ -1174,7 +1173,7 @@ class KernelPhase(PhaseHandler):
                 result,
                 measured_tput=measured,
                 current_best_tput=float(cb_tput),
-                provenance=provenance,
+                provenance="geak_promote_rejected",
             )
             try:
                 from hyperloom.inference_optimizer.breakdown.recorder import instrument
@@ -1196,7 +1195,7 @@ class KernelPhase(PhaseHandler):
                     status="failed",
                     validated=False,
                     measured_tput=measured,
-                    validation_source=provenance,
+                    validation_source="geak_promote_rejected",
                 )
             except Exception:  # noqa: BLE001
                 log.debug(
@@ -1231,7 +1230,6 @@ class KernelPhase(PhaseHandler):
 
         if self.shared_state.baseline_tput > 0:
             self._update_cumulative_gain_validated(measured)
-        self.shared_state.cumulative_gain_provenance = provenance
         self.shared_state.resume_pending_revalidation = False
         self.shared_state.geak_pending = {}
         try:
@@ -1245,7 +1243,7 @@ class KernelPhase(PhaseHandler):
                 status="succeeded",
                 validated=True,
                 measured_tput=measured,
-                validation_source=provenance,
+                validation_source="geak_orch_harness",
             )
         except Exception:  # noqa: BLE001
             log.debug("geak v4 final validation recording failed", exc_info=True)

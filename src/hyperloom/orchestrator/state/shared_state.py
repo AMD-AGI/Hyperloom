@@ -557,9 +557,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # with the whole stack applied; standalone validate_stack denied by PolicyGate.
     cumulative_gain_validated: float = 0.0
     cumulative_gain_validated_ts: str = ""
-    # Provenance/basis of the currently-recorded gain (provisional cross-harness
-    # vs same-harness-validated). Display/audit only; never gates scheduling.
-    cumulative_gain_provenance: str = ""
     # ``optimization_stack`` length at last successful inline rebench; longer => new KEEPs need validation.
     cumulative_gain_validated_stack_len: int = 0
     # Resume sentinels. ``pending_integrate`` is written before a

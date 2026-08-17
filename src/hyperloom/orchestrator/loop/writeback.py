@@ -3142,7 +3142,6 @@ class WritebackCollaborator:
                     self._promote_geak_from_candidate(
                         ps,
                         measured_tput=float(measured),
-                        provenance="geak_orch_harness_validated",
                     )
                 elif decision == "no_material":
                     # No material GEAK product; the rebench beating current_best
@@ -4654,7 +4653,6 @@ class WritebackCollaborator:
             self._promote_geak_from_candidate(
                 ps,
                 measured_tput=measured,
-                provenance="geak_same_harness_geak",
             )
             base = float(self.shared_state.baseline_tput or 0.0)
             gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0
