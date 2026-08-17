@@ -244,6 +244,10 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
         "missing_integration_inputs",
         "patch_not_applied",
         "apply_failed",
+        # The served context cannot host an eval request, so the accuracy gate
+        # can never return a verdict under this configuration. The patch was
+        # never fairly measured, so it must not spend a KEEP attempt.
+        "eval_context_too_small",
         "mn_server_restart_failed_post_patch",
         "rebaseline_exception",
         "cpp_itfs_rebuild_not_verified",
