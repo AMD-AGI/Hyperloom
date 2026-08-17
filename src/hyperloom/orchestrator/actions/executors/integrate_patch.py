@@ -2102,11 +2102,6 @@ class IntegratePatchExecutor:
         )
         undeclared_gates = _switch_manifest.undeclared_switch_gates(patch_paths, switch_manifest)
         if undeclared_gates:
-            # Refuse rather than fall back to the unguarded path. An undeclared gate
-            # means nothing gets turned on for the measurement, no switch-off parity
-            # leg runs and no lever is registered — the deliverable contradicts its
-            # own manifest, and benching it would produce a verdict none of the
-            # guarantees back. Caught before spending a leg on it.
             reason = (
                 f"patch gates on undeclared environment switch(es) "
                 f"{', '.join(undeclared_gates)}: every gate a framework rewrite "
@@ -2114,21 +2109,29 @@ class IntegratePatchExecutor:
                 f"manifest, otherwise the switch-off parity leg and per-lever "
                 f"attribution silently do not run"
             )
-            log.warning("integrate_patch: %s", reason)
-            # Nothing has been applied or stashed at this point, so there is no
-            # tree state to unwind — the deliverable is refused as it arrives.
-            return {
-                "status": "reverted",
-                "error_class": "framework_switch_gates_undeclared",
-                "error": reason,
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "config_changes_applied": {},
-                "reason": reason,
-                "framework_switch_problems": switch_problems + [reason],
-                "undeclared_switch_gates": undeclared_gates,
-            }
+            if not params.get("enablement"):
+                # Refuse rather than fall back to the unguarded path for
+                # framework-rewrite rounds where per-lever attribution matters.
+                # Nothing has been applied or stashed at this point so there is
+                # no tree state to unwind.
+                log.warning("integrate_patch: %s", reason)
+                return {
+                    "status": "reverted",
+                    "error_class": "framework_switch_gates_undeclared",
+                    "error": reason,
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [],
+                    "config_changes_applied": {},
+                    "reason": reason,
+                    "framework_switch_problems": switch_problems + [reason],
+                    "undeclared_switch_gates": undeclared_gates,
+                }
+            # Enablement rounds: runnability is the only gate; per-lever
+            # attribution is not required.  Record the problem and continue
+            # so the boot attempt actually runs.
+            log.info("integrate_patch(enablement): %s — proceeding to bench", reason)
+            switch_problems.append(reason)
         if switch_manifest and not patch_paths:
             # A manifest without a patch describes switches that gate code which
             # was never delivered. Setting them would be a no-op, and registering

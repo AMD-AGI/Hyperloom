@@ -641,6 +641,7 @@ async def _run_rewrite_integrate(
     parity_accuracy_pass: bool | None = True,
     parity_tput_missing: bool = False,
     patch_body: str | None = None,
+    extra_params: "dict[str, Any] | None" = None,
 ):
     """Run integrate_patch on a switch-gated rewrite patch with a faked bench.
 
@@ -719,17 +720,20 @@ async def _run_rewrite_integrate(
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
     monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
 
+    task_params: dict[str, Any] = {
+        "specialist_task_id": "t-spec-rw",
+        "framework_source_root": str(repo),
+        "base_tput": base_tput,
+        "accuracy_baseline": 1.0,
+        "enable_stack_rebench": False,
+    }
+    if extra_params:
+        task_params.update(extra_params)
     task = Task(
         task_id="t-int-rw",
         kind="integrate_patch",
         state="queued",
-        params={
-            "specialist_task_id": "t-spec-rw",
-            "framework_source_root": str(repo),
-            "base_tput": base_tput,
-            "accuracy_baseline": 1.0,
-            "enable_stack_rebench": False,
-        },
+        params=task_params,
         idempotency_key="t-int-rw",
         requires_lanes=tuple(),
     )
@@ -1234,3 +1238,27 @@ async def test_parity_can_be_switched_off_explicitly(tmp_path):
     )
     assert verdict["ran"] is False
     assert verdict["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_env_gated_patch_proceeds_to_bench_on_enablement_round(tmp_path, monkeypatch):
+    """An undeclared env gate must not block an enablement round.
+
+    Enablement's success criterion is runnability, not per-lever attribution.
+    Refusing a patch because it reads an undeclared env variable forces the
+    specialist to rewrite env-type fixes as source patches, which is both harder
+    and wrong in kind.  When params["enablement"] is true the gate check is
+    demoted to an auditable problem entry and the bench proceeds.
+    """
+    result_en, _, _, legs_en = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=8.0,
+        switches=[],
+        patch_body=_ENV_GATED_PATCH_WITHOUT_MANIFEST,
+        extra_params={"enablement": True},
+    )
+    assert result_en.get("error_class") != "framework_switch_gates_undeclared", (
+        "enablement round must not be refused for an undeclared env gate"
+    )
+    assert legs_en, "enablement round must have attempted a bench"
