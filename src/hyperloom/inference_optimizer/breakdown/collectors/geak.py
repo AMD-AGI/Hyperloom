@@ -182,6 +182,93 @@ def _geak_accepted_kernels_from_journey(
     return _collapse_journey_aliases(accepted)
 
 
+def _geak_accepted_kernels_from_integrate_results(
+    exp_root: Path,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Derive the accepted kernels from the per-candidate ``integrate_result.json``.
+
+    ``kernel_journey.json`` is written once, at the end of the run, so a run
+    that was killed never has one. Each candidate's ``integrate_result.json``
+    is written as that candidate finishes, so it survives the kill. Both files
+    record the same event; only the second one is on disk after a crash.
+
+    Admission is the same test the journey backfill applies: ``gate ==
+    "accepted"`` and a positive same-config ``e2e_delta_pct``. That delta is
+    GEAK's own A/B, not an orchestrator rebench, so every row here is
+    ``validated: False``.
+
+    Args:
+        exp_root (Path): The e2e experiment root holding ``overlay/``.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        list[dict[str, Any]]: The accepted-kernel descriptors, or ``[]`` when
+            no candidate qualifies. Never raises.
+    """
+    overlay_root = exp_root / "overlay"
+    try:
+        if not overlay_root.is_dir():
+            return []
+        cand_dirs = sorted(
+            (d for d in overlay_root.iterdir() if d.is_dir()),
+            key=lambda p: p.name,
+        )
+    except OSError as exc:
+        warnings.append(f"geak: integrate_result scan failed: {exc}")
+        return []
+
+    accepted: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for cand in cand_dirs:
+        path = cand / "integrate_result.json"
+        if not path.is_file():
+            continue
+        ir = read_json(
+            path,
+            default=None,
+            on_error=lambda exc: warnings.append(
+                f"geak: integrate_result read failed for {cand.name}: {exc}"
+            ),
+        )
+        if not isinstance(ir, dict):
+            continue
+        if str(ir.get("gate") or "").strip().lower() != "accepted":
+            continue
+        delta = _to_float(ir.get("e2e_delta_pct"))
+        if delta is None or delta <= 0.0:
+            continue
+        # The same acceptance is filed under both spellings — the candidate
+        # directory tag and the kernel's own short name. Keying on the short
+        # name, when there is one, collapses that alias twin into one row.
+        kid = str(ir.get("short_name") or "").strip() or cand.name
+        if kid in seen:
+            continue
+        seen.add(kid)
+        accepted.append(
+            {
+                "kernel_id": kid,
+                "name": kid,
+                "cand_tag": cand.name,
+                "gpu_pct": _to_float(ir.get("pct_gpu_time")),
+                "micro_speedup": _to_float(ir.get("isolated_speedup")),
+                "e2e_gain_pct": delta,
+                # GEAK's own same-config A/B, with no orchestrator rebench
+                # behind it. Never present this as a validated e2e gain.
+                "validated": False,
+                "decision": "KEEP",
+                "backend": "",
+                "target_file": None,
+                "extra_server_args": "",
+                "output_parity": str(ir.get("output_parity") or ""),
+                "engagement_hits": _to_int(ir.get("engagement_hits_cand")),
+                "overlay": str(ir.get("accepted_overlay") or str(cand)),
+                "source": "integrate_result_backfill",
+            }
+        )
+    return accepted
+
+
 def _geak_reconstruct_from_disk(
     session_dir: Path,
     warnings: list[str],
@@ -286,15 +373,28 @@ def _geak_reconstruct_from_disk(
 
     # 4) per-kernel accepted kernels from the journey (reuse the projection so
     #    the recovered section's shape matches the producer-populated one).
+    #    The journey is written last, so a killed run never has one; fall back
+    #    to the per-candidate ``integrate_result.json``, written as each
+    #    candidate finishes. Absence of both stays an empty list — a dead run
+    #    with no accepted candidate must not be given one.
     if exp_root is not None:
         kj = exp_root / "kernel_journey.json"
+        source = ""
         try:
             if kj.is_file():
                 recon["accepted_kernels"] = _geak_accepted_kernels_from_journey(
                     {"kernel_journey_path": str(kj)}, warnings
                 )
+                source = "kernel_journey_backfill"
         except OSError as exc:
             warnings.append(f"geak: accepted kernels journey unreadable: {exc}")
+        if not recon.get("accepted_kernels"):
+            recovered = _geak_accepted_kernels_from_integrate_results(exp_root, warnings)
+            if recovered:
+                recon["accepted_kernels"] = recovered
+                source = "integrate_result_backfill"
+        if source:
+            recon["accepted_kernels_source"] = source
 
     # 5) newest-artifact timestamp (how far the run got in wall-clock). Bounded
     #    to a handful of key paths to avoid a full rglob of the exp_root tree.
@@ -467,7 +567,13 @@ def collect_geak(
             "flushed_result_status": recon.get("flushed_result_status"),
             "last_artifact_ts": recon.get("last_artifact_ts"),
             "accepted_kernels": recovered_kernels,
-            "accepted_kernels_source": ("kernel_journey_backfill" if recovered_kernels else None),
+            # Which survivor the recovery actually read. A crashed run has no
+            # journey, so this is usually ``integrate_result_backfill``.
+            "accepted_kernels_source": (
+                str(recon.get("accepted_kernels_source") or "") or None
+                if recovered_kernels
+                else None
+            ),
             "accepted_heads": [],
             "kernels_optimized": len(recovered_kernels),
         }
