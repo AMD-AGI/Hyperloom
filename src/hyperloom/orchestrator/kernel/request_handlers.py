@@ -1392,11 +1392,24 @@ def _fill_integrate_defaults_from_state(
             }
 
     kernel_id = str(resolved.get("kernel_id") or "")
-    if kernel_id and not resolved.get("task_group_key"):
+    if kernel_id:
         attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
-        task_group_key = str(attempt.get("task_group_key") or "")
-        if task_group_key:
-            resolved["task_group_key"] = task_group_key
+        if not resolved.get("task_group_key"):
+            task_group_key = str(attempt.get("task_group_key") or "")
+            if task_group_key:
+                resolved["task_group_key"] = task_group_key
+        # Defense-in-depth mirror of _queue_kernel_keep()'s refusal to queue
+        # a vendor-playbook KEEP for auto-integration (PR #1191 review
+        # finding #1): this also catches an LLM-initiated integrate request
+        # that names the kernel_id directly, bypassing the pending-queue
+        # lookup above via _resolve_kernel_patch_identity()'s
+        # last_kernel_opt.best_artifact_path backfill.
+        if attempt.get("vendor_playbook_deploy_blocked"):
+            resolved["_vendor_playbook_deploy_blocked"] = True
+        elif isinstance(state.last_kernel_opt, dict) and str(
+            state.last_kernel_opt.get("kernel_id") or ""
+        ) == kernel_id and state.last_kernel_opt.get("vendor_playbook_deploy_blocked"):
+            resolved["_vendor_playbook_deploy_blocked"] = True
 
     return resolved
 
@@ -7288,6 +7301,28 @@ async def integrate_handler(
     # Fill defaults from SharedState before the ``base_tput > 0`` check so a bare
     # {kernel_id} payload isn't failed with a phantom "missing base_tput".
     payload = _fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+
+    if payload.get("_vendor_playbook_deploy_blocked"):
+        # A vendor-playbook KEEP (e.g. mori dispatch/combine launch-config
+        # tuning) has no deployable artifact: best_artifact_path is a copy of
+        # a KernelForge task-bundle config file, not a rewrite of the real
+        # installed operator, and apply_kernel_patch's legacy full-file
+        # replace would happily overwrite the real site-packages module with
+        # it (PR #1191 review finding #1). Refuse before touching the
+        # filesystem rather than letting a config-file copy silently
+        # corrupt a live install.
+        return {
+            "status": "failed",
+            "error_class": "vendor_playbook_not_deployable",
+            "error": (
+                "integrate refused: kernel_id="
+                f"{payload.get('kernel_id')!r} is a vendor-playbook result "
+                "(closed-source operator launch-config tuning); it has no "
+                "deployable artifact and must not be applied as a source patch"
+            ),
+            "decision": "NEEDS_REVIEW",
+            "kernel_id": payload.get("kernel_id"),
+        }
 
     base_tput = float(payload.get("base_tput", 0.0))
     if base_tput <= 0:

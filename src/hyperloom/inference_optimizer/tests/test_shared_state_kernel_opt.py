@@ -200,6 +200,59 @@ def test_record_kernel_opt_nonkeep_overwrites_when_prev_already_integrated(state
     )
 
 
+# Vendor-playbook KEEPs (e.g. mori dispatch/combine) must never auto-deploy.
+def test_record_kernel_opt_vendor_playbook_keep_is_deploy_blocked(state: SharedState):
+    """A vendor-playbook KEEP's best_artifact_path is a copy of a KernelForge
+    task-bundle config file, not a rewrite of the real installed operator
+    source -- apply_kernel_patch's legacy full-file-replace strategy would
+    otherwise happily overwrite the real site-packages module with it
+    (PR #1191 review finding #1). The KEEP itself must still be recorded
+    (the measured speedup is real), but it must never reach the
+    auto-integrate queue.
+    """
+    result = _ok_result(
+        "k010",
+        "KEEP",
+        1.25,
+        source_file="/opt/venv/lib/python3.12/site-packages/mori/ops/dispatch_combine.py",
+        artifact=(
+            "/tmp/forge/session1/attempt_dispatch/optimized_versions/"
+            "mori_ep_dispatch_combine_dispatch.py"
+        ),
+    )
+    result["attempts"] = [
+        {
+            "backend": "forge",
+            "vendor_playbook_id": "mori_ep_dispatch_combine",
+            "vendor_playbook_role": "dispatch",
+        }
+    ]
+    state.record_kernel_opt(result)
+
+    assert state.last_kernel_opt["decision"] == "KEEP"
+    assert state.last_kernel_opt["vendor_playbook_deploy_blocked"] is True
+    assert state.last_kernel_opt["vendor_playbook_id"] == "mori_ep_dispatch_combine"
+    assert state.kernel_opt_attempts["k010"]["vendor_playbook_deploy_blocked"] is True
+    assert state.pending_kernel_integrations == {}, (
+        "a vendor-playbook KEEP must never be auto-queued for integration"
+    )
+
+
+def test_record_kernel_opt_non_vendor_keep_is_not_deploy_blocked(state: SharedState):
+    """A normal (non-vendor-playbook) KEEP must still queue for integration."""
+    result = _ok_result(
+        "k001",
+        "KEEP",
+        2.0,
+        source_file="/path/moe_op.py",
+        artifact="/tmp/k001.py",
+    )
+    state.record_kernel_opt(result)
+
+    assert state.last_kernel_opt["vendor_playbook_deploy_blocked"] is False
+    assert state.pending_kernel_integrations, "a normal KEEP must still be queued"
+
+
 # next_pending_keep_kernel_id queue semantics
 def test_next_pending_keep_drains_in_micro_speedup_order(state: SharedState):
     """KEEPs on different source_files drain highest-micro-first as the stack fills."""
@@ -545,7 +598,7 @@ def test_untried_hot_kernels_vendor_playbook_group_gated_on_aggregate(state: Sha
 
     Neither member clears the 10% default threshold alone, but
     _apply_vendor_operator_playbook_grouping() (tracelens_analysis.py) stamps
-    aggregate_gpu_pct=12.0 on both, since the pair is deliberately dispatched
+    vendor_playbook_aggregate_gpu_pct=12.0 on both, since the pair is deliberately dispatched
     as one forge-loop session (see KernelForge PR #88 / the mori vendor
     playbook). Regression for a real gap: the gate used to compare each row's
     own gpu_pct, so a split load like this was silently dropped as
@@ -557,7 +610,7 @@ def test_untried_hot_kernels_vendor_playbook_group_gated_on_aggregate(state: Sha
             {
                 "kernel_id": "k010",
                 "gpu_pct": 7.0,
-                "aggregate_gpu_pct": 12.0,
+                "vendor_playbook_aggregate_gpu_pct": 12.0,
                 "reusable_native_kernel": True,
                 "source_file": "/opt/venv/.../mori_ep_config.py",
                 "name": "mori::EpDispatchCombineOp::dispatch",
@@ -565,7 +618,7 @@ def test_untried_hot_kernels_vendor_playbook_group_gated_on_aggregate(state: Sha
             {
                 "kernel_id": "k011",
                 "gpu_pct": 5.0,
-                "aggregate_gpu_pct": 12.0,
+                "vendor_playbook_aggregate_gpu_pct": 12.0,
                 "reusable_native_kernel": True,
                 "source_file": "/opt/venv/.../mori_ep_config.py",
                 "name": "mori::EpDispatchCombineOp::combine",
@@ -589,7 +642,7 @@ def test_untried_hot_kernels_vendor_playbook_floor_still_applies(state: SharedSt
             {
                 "kernel_id": "k010",
                 "gpu_pct": 2.0,
-                "aggregate_gpu_pct": 3.0,
+                "vendor_playbook_aggregate_gpu_pct": 3.0,
                 "vendor_playbook_min_gpu_pct_floor": 10.0,
                 "reusable_native_kernel": True,
                 "source_file": "/opt/venv/.../mori_ep_config.py",

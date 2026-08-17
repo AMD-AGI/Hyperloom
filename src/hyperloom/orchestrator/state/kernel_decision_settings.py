@@ -76,23 +76,31 @@ def effective_hot_kernel_gpu_pct(candidate: dict) -> float:
     A vendor-playbook group (e.g. mori's dispatch+combine, deliberately
     submitted as one forge-loop session -- see
     ``agents/kernel/tools/_vendor_operator_playbooks.py``) stamps
-    ``aggregate_gpu_pct`` as the summed share across the whole group, so a
-    split load (7% + 5%) is not silently dropped as below-threshold on
-    either member despite the pair clearing it together. Prefer the
-    aggregate over the per-row ``gpu_pct`` whenever it is present and larger
-    (never smaller, so this can only let a grouped row through a gate it
-    would otherwise fail -- it cannot cause an ungrouped row to fail one it
-    would otherwise pass).
+    ``vendor_playbook_aggregate_gpu_pct`` as the summed share across the
+    whole group, so a split load (7% + 5%) is not silently dropped as
+    below-threshold on either member despite the pair clearing it together.
+    Prefer the aggregate over the per-row ``gpu_pct`` whenever it is present
+    and larger (never smaller, so this can only let a grouped row through a
+    gate it would otherwise fail -- it cannot cause an ungrouped row to fail
+    one it would otherwise pass).
+
+    Namespaced field name deliberately: bare ``aggregate_gpu_pct`` is
+    already an existing task_group-level concept (see
+    ``tracelens_skill_runner.py`` / ``_bypass_report.py``); reading that name
+    off a candidate row here would silently change every ordinary group's
+    gating behavior if a future change ever flattened it onto candidate rows
+    (PR #1191 review finding #7).
 
     Returns:
-        float: The larger of ``gpu_pct`` and ``aggregate_gpu_pct`` (when the
-            latter is present and parses); ``gpu_pct`` alone otherwise.
+        float: The larger of ``gpu_pct`` and
+            ``vendor_playbook_aggregate_gpu_pct`` (when the latter is
+            present and parses); ``gpu_pct`` alone otherwise.
     """
     try:
         row_pct = float(candidate.get("gpu_pct") or 0.0)
     except (TypeError, ValueError):
         row_pct = 0.0
-    aggregate = candidate.get("aggregate_gpu_pct")
+    aggregate = candidate.get("vendor_playbook_aggregate_gpu_pct")
     if aggregate is None:
         return row_pct
     try:

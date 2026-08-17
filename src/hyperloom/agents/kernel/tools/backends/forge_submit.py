@@ -3726,6 +3726,21 @@ def _finalize_forge_workspace(
 
 _VENDOR_PLAYBOOK_CLAIM_POLL_S = 5.0
 
+# A cached FAILURE only de-dupes submissions within this window -- long
+# enough to catch a genuinely concurrent dispatch+combine pair, short enough
+# that Hyperloom's normal "fail -> add budget -> retry" model gets a fresh
+# attempt instead of the whole group being permanently retired for the rest
+# of the session by one transient failure (see PR #1191 review finding #2).
+# A cached SUCCESS has no such expiry: sharing one session's result for the
+# rest of the session is the intended dedup behavior this module implements.
+_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S = 600.0
+
+# Extra time past an attempt's own timeout_s before its claim is presumed
+# abandoned (SIGKILL budget enforcement, OOM, node restart -- anything that
+# kills the holder without a chance to write result.json) rather than merely
+# still finishing up (writing the report, staging the artifact copy, etc).
+_VENDOR_PLAYBOOK_CLAIM_STALE_GRACE_S = 120.0
+
 
 def _vendor_playbook_lock_dir(output_dir: Path, group_id: str) -> Path:
     """Return the session-scoped directory used to de-duplicate a playbook group.
@@ -3738,12 +3753,33 @@ def _vendor_playbook_lock_dir(output_dir: Path, group_id: str) -> Path:
     return output_dir.parent / "vendor_playbook_locks" / safe_group
 
 
-def _read_vendor_playbook_cached_result(lock_dir: Path) -> dict | None:
+def _read_vendor_playbook_cached_result(
+    lock_dir: Path, *, max_failure_age_s: float | None = None
+) -> dict | None:
+    """Read a previously-cached vendor-playbook result, if any.
+
+    A cached SUCCESS (``returncode == 0``) is returned unconditionally --
+    sharing one session's validated result for the rest of the session is
+    the intended dedup behavior. A cached FAILURE is only returned while it
+    is younger than ``max_failure_age_s``; once it ages out it is treated as
+    absent so a fresh submission actually retries instead of one transient
+    failure (FORGE_PATH momentarily unset, a flaky bundle copy, etc.)
+    permanently wedging the whole playbook group for the rest of the session
+    (PR #1191 review finding #2).
+    """
     result_path = lock_dir / "result.json"
     try:
-        return json.loads(result_path.read_text(encoding="utf-8"))
+        result = json.loads(result_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if max_failure_age_s is not None and result.get("returncode") != 0:
+        try:
+            age_s = time.time() - result_path.stat().st_mtime
+        except OSError:
+            age_s = None
+        if age_s is not None and age_s > max_failure_age_s:
+            return None
+    return result
 
 
 def _write_vendor_playbook_result(lock_dir: Path, result: dict) -> None:
@@ -3753,29 +3789,147 @@ def _write_vendor_playbook_result(lock_dir: Path, result: dict) -> None:
     tmp_path.replace(lock_dir / "result.json")
 
 
-def _claim_vendor_playbook_run(lock_dir: Path) -> bool:
+def _write_claim_marker(claim_path: Path, *, nonce: str | None = None) -> str:
+    """Write ``{pid, claimed_at, nonce}`` into an already-created claim file.
+
+    The timestamp lets any waiter compute how long the claim has been held
+    without a result appearing; the nonce lets ``_steal_stale_claim`` verify
+    which of several racing stealers actually won the replace.
+    """
+    nonce = nonce or uuid.uuid4().hex
+    payload = {"pid": os.getpid(), "claimed_at": time.time(), "nonce": nonce}
+    claim_path.write_text(json.dumps(payload), encoding="utf-8")
+    return nonce
+
+
+def _claim_marker_age_s(claim_path: Path) -> float | None:
+    """Return how long ago ``claim_path`` was claimed, or ``None`` if unknown."""
+    try:
+        raw = claim_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    claimed_at: float | None = None
+    if raw.strip():
+        try:
+            claimed_at = float(json.loads(raw).get("claimed_at"))
+        except (ValueError, TypeError):
+            claimed_at = None
+    if claimed_at is None:
+        # Marker predates this format (or failed to write its JSON body) --
+        # fall back to the file's own mtime rather than treating age as
+        # unknown, since os.O_CREAT|O_EXCL always sets one.
+        try:
+            claimed_at = claim_path.stat().st_mtime
+        except OSError:
+            return None
+    return max(0.0, time.time() - claimed_at)
+
+
+def _claim_is_stale(claim_path: Path, timeout_s: int) -> bool:
+    """A claim is stale (its holder is presumed done or dead) when either:
+
+    1. A result already exists but has aged out of the failure-cache TTL
+       (``_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S``) -- the completed attempt's
+       ``claimed.lock`` is never deleted, so without this check a lingering
+       claim from a long-finished, now-expired failure would block every
+       later retry from ever running (PR #1191 review finding #2 combined
+       with #3: the claim and the result cache must age out together).
+    2. The claim is older than its own attempt budget plus grace, with no
+       result at all -- covers SIGKILL budget enforcement, OOM, and node
+       restarts, none of which give the holder a chance to write
+       ``result.json``. Without this check every subsequent submission for
+       the group would poll ``_wait_for_vendor_playbook_result`` all the way
+       to its deadline and still find nothing -- for a 60-minute-budget
+       attempt, that is an hour burned per submission (PR #1191 review
+       finding #3).
+    """
+    lock_dir = claim_path.parent
+    cached = _read_vendor_playbook_cached_result(
+        lock_dir, max_failure_age_s=_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S
+    )
+    if cached is None and (lock_dir / "result.json").is_file():
+        return True
+    age_s = _claim_marker_age_s(claim_path)
+    if age_s is None:
+        return False
+    return age_s > (float(timeout_s) + _VENDOR_PLAYBOOK_CLAIM_STALE_GRACE_S)
+
+
+def _steal_stale_claim(claim_path: Path) -> bool:
+    """Atomically replace a stale claim, verifying this caller actually won it.
+
+    ``os.replace`` never raises when the target already exists, so two
+    waiters racing to steal the same stale claim could both believe they
+    succeeded. Tag the write with a nonce and read it back afterwards: only
+    the caller whose nonce is what's on disk is the new owner.
+    """
+    nonce = uuid.uuid4().hex
+    tmp_path = claim_path.with_name(f".{claim_path.name}.{nonce}.tmp")
+    try:
+        _write_claim_marker(tmp_path, nonce=nonce)
+        os.replace(str(tmp_path), str(claim_path))
+        current = json.loads(claim_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return current.get("nonce") == nonce
+
+
+def _claim_vendor_playbook_run(lock_dir: Path, timeout_s: int) -> bool:
     """Atomically claim the right to run this group's one forge-loop session.
 
     Returns ``True`` for whichever caller wins the race (dispatch or
     combine, whichever the orchestrator happened to submit first); the loser
     waits for the winner's result instead of launching a second session.
+    Also returns ``True`` when the existing claim is stale (its holder is
+    presumed dead) and this caller wins the steal.
     """
     lock_dir.mkdir(parents=True, exist_ok=True)
     claim_path = lock_dir / "claimed.lock"
     try:
         fd = os.open(str(claim_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
     except FileExistsError:
-        return False
-    os.close(fd)
+        if not _claim_is_stale(claim_path, timeout_s):
+            return False
+        return _steal_stale_claim(claim_path)
+    try:
+        _write_claim_marker(claim_path)
+    except OSError:
+        log.warning(
+            "forge: claimed %s but could not write its pid/timestamp marker; "
+            "staleness detection will fall back to file mtime",
+            claim_path,
+        )
     return True
 
 
-def _wait_for_vendor_playbook_result(lock_dir: Path, deadline_unix: float) -> dict | None:
-    """Poll for the winner's result until it appears or ``deadline_unix`` passes."""
+def _wait_for_vendor_playbook_result(
+    lock_dir: Path, deadline_unix: float, timeout_s: int
+) -> dict | None:
+    """Poll for the winner's result until it appears, the claim looks
+    abandoned, or ``deadline_unix`` passes.
+
+    Returns early (well before ``deadline_unix``) the moment the claim looks
+    stale, so a waiter never burns its entire poll window on a holder that
+    was SIGKILLed/OOM-killed and will never write a result (PR #1191 review
+    finding #3). The caller is responsible for then trying to claim (steal)
+    the group itself rather than treating an early ``None`` as a hard
+    failure.
+    """
+    claim_path = lock_dir / "claimed.lock"
     while True:
-        cached = _read_vendor_playbook_cached_result(lock_dir)
+        cached = _read_vendor_playbook_cached_result(
+            lock_dir, max_failure_age_s=_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S
+        )
         if cached is not None:
             return cached
+        if _claim_is_stale(claim_path, timeout_s):
+            return None
         if time.time() >= deadline_unix:
             return None
         time.sleep(min(_VENDOR_PLAYBOOK_CLAIM_POLL_S, max(0.0, deadline_unix - time.time())))
@@ -4208,7 +4362,31 @@ def _run_claimed_vendor_playbook(
             "vendor_playbook_role": role,
             "vendor_playbook_task_bundle": str(task_bundle_root),
             "vendor_playbook_reused": False,
+            # This role is the one that actually ran forge-loop and produced
+            # the measurement; a sibling role that reuses this same result
+            # (see _submit_vendor_playbook's ``_reuse``) marks itself False
+            # so downstream benefit accounting sums this speedup once, not
+            # once per role sharing it (PR #1191 review finding #4).
+            "vendor_playbook_independently_counted": True,
         }
+    )
+    # The ordinary per-file forge path's correctness signal comes from
+    # optimization_report.md's "[correctness] pass" marker (kernel_optimization
+    # .py's _extract_correctness_from_report scans cli_workspace for it). The
+    # vendor-playbook path reused this same forge-loop run but never wrote
+    # that file, so correctness_passed stayed False and make_proposal()
+    # could never return KEEP even when SNR validation had already passed
+    # inside forge-loop (PR #1191 review finding #5). cli_workspace ==
+    # output_dir here (see the NOTE above), so writing it here is exactly
+    # where the correctness scan will look.
+    _write_report(
+        output_dir,
+        loop_outcome.baseline_ms,
+        loop_outcome.best_ms,
+        loop_outcome.total_improved,
+        mean_case_speedup=loop_outcome.mean_case_speedup,
+        search_start_ms=loop_outcome.search_start_ms,
+        improved_during_search=loop_outcome.improved_during_search,
     )
     if loop_outcome.total_improved and kernel_anchor.is_file():
         # There is no separate "deploy" artifact for a vendor launch-config:
@@ -4257,74 +4435,94 @@ def _submit_vendor_playbook(
     role = str(candidate.get("vendor_playbook_role") or playbook.get("role") or "")
     lock_dir = _vendor_playbook_lock_dir(output_dir, group_id)
 
-    cached = _read_vendor_playbook_cached_result(lock_dir)
-    if cached is not None:
-        result = dict(cached)
+    def _reuse(cached_result: dict) -> dict:
+        result = dict(cached_result)
         result["vendor_playbook_reused"] = True
         result["vendor_playbook_role"] = role
-        _stage_vendor_playbook_artifact_for_reuse(cached, output_dir)
+        # This measurement was already counted once, on the role that
+        # actually ran forge-loop; a reused sibling must not add its
+        # identical mean_case_speedup/best_ms again into downstream benefit
+        # totals (PR #1191 review finding #4).
+        result["vendor_playbook_independently_counted"] = False
+        _stage_vendor_playbook_artifact_for_reuse(cached_result, output_dir)
         return result
 
-    if not _claim_vendor_playbook_run(lock_dir):
-        # A sibling role (e.g. this is "combine" and "dispatch" already
-        # claimed the group) is running the one shared session; wait for it
-        # rather than launching a second forge-loop for the same task.
-        deadline = time.time() + max(60.0, float(timeout_s) + 300.0)
-        cached = _wait_for_vendor_playbook_result(lock_dir, deadline)
-        if cached is not None:
-            result = dict(cached)
-            result["vendor_playbook_reused"] = True
-            result["vendor_playbook_role"] = role
-            _stage_vendor_playbook_artifact_for_reuse(cached, output_dir)
-            return result
-        return _normalized(
-            2,
-            "",
-            f"forge: vendor playbook group {group_id!r} was claimed by a "
-            "concurrent submission but never produced a result before the wait "
-            "deadline",
-            time.time() - started,
-            skipped=True,
-        )
-
-    # From here on we hold the claim: any unhandled exception MUST still
-    # produce a result.json, or claimed.lock is orphaned forever and no
-    # sibling/retry for this group can ever run again (see
-    # _run_claimed_vendor_playbook's docstring). _copy_vendor_task_bundle's
-    # git subprocess calls and the forge-loop launch are the known risks,
-    # but this is a deliberate catch-all, not just those two.
-    try:
-        return _run_claimed_vendor_playbook(
-            candidate=candidate,
-            prompt_file=prompt_file,
-            output_dir=output_dir,
-            timeout_s=timeout_s,
-            playbook=playbook,
-            group_id=group_id,
-            role=role,
-            lock_dir=lock_dir,
-            started=started,
-        )
-    except Exception as exc:  # noqa: BLE001
-        result = _normalized(
-            2,
-            "",
-            f"forge: vendor playbook group {group_id!r} raised after claiming "
-            f"the shared session, before producing a result "
-            f"({type(exc).__name__}: {exc})",
-            time.time() - started,
-            skipped=True,
-        )
+    def _run_and_guard() -> dict:
+        # From here on we (believe we) hold the claim: any unhandled
+        # exception MUST still produce a result.json, or claimed.lock is
+        # orphaned forever and no sibling/retry for this group can ever run
+        # again (see _run_claimed_vendor_playbook's docstring).
+        # _copy_vendor_task_bundle's git subprocess calls and the forge-loop
+        # launch are the known risks, but this is a deliberate catch-all,
+        # not just those two.
         try:
-            _write_vendor_playbook_result(lock_dir, result)
-        except OSError:
-            log.exception(
-                "forge: could not write a failure result for vendor playbook "
-                "group %r after claiming it; claimed.lock will remain until "
-                "manually cleared",
-                group_id,
+            return _run_claimed_vendor_playbook(
+                candidate=candidate,
+                prompt_file=prompt_file,
+                output_dir=output_dir,
+                timeout_s=timeout_s,
+                playbook=playbook,
+                group_id=group_id,
+                role=role,
+                lock_dir=lock_dir,
+                started=started,
             )
-        return result
+        except Exception as exc:  # noqa: BLE001
+            result = _normalized(
+                2,
+                "",
+                f"forge: vendor playbook group {group_id!r} raised after claiming "
+                f"the shared session, before producing a result "
+                f"({type(exc).__name__}: {exc})",
+                time.time() - started,
+                skipped=True,
+            )
+            try:
+                _write_vendor_playbook_result(lock_dir, result)
+            except OSError:
+                log.exception(
+                    "forge: could not write a failure result for vendor playbook "
+                    "group %r after claiming it; claimed.lock will remain until "
+                    "manually cleared",
+                    group_id,
+                )
+            return result
+
+    cached = _read_vendor_playbook_cached_result(
+        lock_dir, max_failure_age_s=_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S
+    )
+    if cached is not None:
+        return _reuse(cached)
+
+    if _claim_vendor_playbook_run(lock_dir, timeout_s):
+        return _run_and_guard()
+
+    # A sibling role (e.g. this is "combine" and "dispatch" already claimed
+    # the group) is running the one shared session; wait for it rather than
+    # launching a second forge-loop for the same task.
+    deadline = time.time() + max(60.0, float(timeout_s) + 300.0)
+    cached = _wait_for_vendor_playbook_result(lock_dir, deadline, timeout_s)
+    if cached is not None:
+        return _reuse(cached)
+
+    # The wait ended without a result either because the deadline passed or
+    # because the holder's claim looked abandoned (SIGKILL/OOM/node restart
+    # -- PR #1191 review finding #3). Try once more to claim the group: if
+    # the claim really is stale this steals it and we run for real instead
+    # of failing outright; if the original holder is alive and simply still
+    # running, this correctly fails again.
+    if _claim_vendor_playbook_run(lock_dir, timeout_s):
+        return _run_and_guard()
+
+    return _normalized(
+        2,
+        "",
+        f"forge: vendor playbook group {group_id!r} was claimed by a "
+        "concurrent submission but never produced a result before the wait "
+        "deadline",
+        time.time() - started,
+        skipped=True,
+    )
 
 
 def submit(
