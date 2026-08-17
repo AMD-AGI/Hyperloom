@@ -34,8 +34,13 @@ from .coordinator_helpers import (
     _dedupe_extra_server_args,
     _merge_cumulative_extra_server_args,
     _parse_baseline_workload_extra,
+    _geak_accepted_kernel_specs,
+    _geak_has_accepted_kernel,
+    _geak_overlay_digest,
+    _geak_overlay_is_loadable,
     _geak_result_has_material,
     _geak_revalidation_decision,
+    _geak_spec_name,
     _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
     _scrape_resolved_launch_flags,
@@ -2571,6 +2576,17 @@ class WritebackCollaborator:
                     stack_entry["fingerprint"] = fp_val
                 if prov_val:
                     stack_entry["provenance"] = prov_val
+                # Carry the authored-kernel names onto the stack entry so
+                # attribution can separate a config gain from a gain measured
+                # with a kernel loaded. Absent on every flags-only variant.
+                if isinstance(bv, dict):
+                    _stack_kernels = [
+                        str(k).strip()
+                        for k in (bv.get("accepted_kernels") or [])
+                        if str(k).strip()
+                    ]
+                    if _stack_kernels:
+                        stack_entry["accepted_kernels"] = _stack_kernels
                 if isinstance(bv, dict):
                     for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
                         if bv.get(_ctrl_key):
@@ -3374,6 +3390,30 @@ class WritebackCollaborator:
                     min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
                     current_best=cb_tput,
                 )
+                # ``expected_cfg_hash`` fingerprints (args, envs) only, so it
+                # cannot see the overlay drop out between dispatch and launch —
+                # ``run_grid`` skips an overlay whose dir has gone away and logs
+                # a warning, and the run then measures plain flags while the
+                # credit still reads as a kernel win. Re-check the overlay's own
+                # identity here; a miss is inconclusive, not validated.
+                expected_overlay = str((task.params or {}).get("expected_overlay") or "")
+                overlay_loaded = True
+                if expected_overlay:
+                    expected_digest = str((task.params or {}).get("expected_overlay_digest") or "")
+                    got_digest = _geak_overlay_digest(expected_overlay)
+                    overlay_loaded = _geak_overlay_is_loadable(expected_overlay) and (
+                        got_digest == expected_digest
+                    )
+                    if not overlay_loaded and decision == "validated":
+                        log.warning(
+                            "geak 2b: overlay %r did not survive the run "
+                            "(loadable=%r digest expected=%r got=%r) -> 2a fallback",
+                            expected_overlay,
+                            _geak_overlay_is_loadable(expected_overlay),
+                            expected_digest,
+                            got_digest,
+                        )
+                        decision = "fallback"
                 ps = (
                     self.shared_state.geak_result
                     if isinstance(getattr(self.shared_state, "geak_result", None), dict)
@@ -3418,6 +3458,9 @@ class WritebackCollaborator:
                         ps,
                         measured_tput=float(measured),
                         provenance="geak_orch_harness_validated",
+                        # Only an overlay that was dispatched AND still matches
+                        # its manifest proves a kernel was in the measurement.
+                        overlay_loaded=bool(expected_overlay) and overlay_loaded,
                     )
                 elif decision == "no_material":
                     # No material GEAK product; the rebench beating current_best
@@ -4927,13 +4970,39 @@ class WritebackCollaborator:
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
         ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
-        if str(ps.get("status") or "") == "ok" and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
+        # ``no_gain`` is a verdict on GEAK's headline basis, not on its kernels;
+        # a result carrying an accepted, positive-delta kernel is revalidated
+        # too, so the kernel gets an orchestrator-measured number.
+        ps_admissible = str(ps.get("status") or "") == "ok" or _geak_has_accepted_kernel(ps)
+        if ps_admissible and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
             from ..actions.executors._canonical_fingerprint import canonical_fingerprint
 
             ps_flags = str(ps_cfg.get("flags") or "").strip()
             ps_envs, _ps_extra_flags = _split_env_and_flags(str(ps_cfg.get("env") or ""))
             if _ps_extra_flags:
                 ps_flags = (ps_flags + " " + _ps_extra_flags).strip()
+            # An overlay that cannot load installs nothing: the server launches
+            # as plain baseline and any delta measured against it belongs to the
+            # flags alone. Resolve that BEFORE dispatch so the task never carries
+            # a dead path, and so the row cannot be read as a kernel win.
+            ps_overlay_loadable = _geak_overlay_is_loadable(ps_overlay)
+            if ps_overlay and not ps_overlay_loadable:
+                log.warning(
+                    "geak 2b: overlay %r is not loadable (no sitecustomize.py); "
+                    "revalidating the config WITHOUT the authored kernel",
+                    ps_overlay,
+                )
+                ps_overlay = ""
+            if not (ps_flags or ps_envs or ps_overlay):
+                # The overlay was the only material and it is dead. A rebench
+                # here would measure plain baseline and credit GEAK for the
+                # noise. Hand it to the GEAK harness (2a), which reproduces the
+                # optimized config from result.json and so engages by construction.
+                return {
+                    "skipped": True,
+                    "reason": "geak_overlay_unloadable",
+                    "fallback": "geak_harness",
+                }
             if ps_flags or ps_envs or ps_overlay:
                 # Identity hash uses the SAME (args, envs) contract the grid
                 # executor fingerprints with (overlay is NOT part of the hash,
@@ -4941,11 +5010,21 @@ class WritebackCollaborator:
                 # ran variant's fingerprint by construction, and any executor-side
                 # drop/alter of config is caught downstream.
                 expected_cfg_hash = canonical_fingerprint(ps_flags, ps_envs)
+                # ``expected_cfg_hash`` cannot see the overlay, so carry the
+                # overlay's own identity beside it. The consumer re-checks both
+                # after the run: a dropped or altered overlay then reads as
+                # inconclusive instead of as a validated kernel win.
+                expected_overlay_digest = _geak_overlay_digest(ps_overlay)
+                # Name what ran. Without this the decision row inherits the flag
+                # string as its whole identity and the kernel rides along unnamed.
+                ps_kernels = [_geak_spec_name(k) for k in _geak_accepted_kernel_specs(ps)]
                 params_ps: dict[str, Any] = {
                     "source": "resume_stack_revalidate",
                     "reason": reason,
                     "geak_fallback": True,
                     "expected_cfg_hash": expected_cfg_hash,
+                    "expected_overlay": ps_overlay,
+                    "expected_overlay_digest": expected_overlay_digest,
                     "grid": [
                         {
                             "name": "geak_revalidate",
@@ -4953,6 +5032,9 @@ class WritebackCollaborator:
                             "extra_envs": dict(ps_envs),
                             "overlay_pythonpath": ps_overlay,
                             "provenance": "geak_revalidate",
+                            # Only claim kernels when an overlay is actually
+                            # being loaded; a flags-only rebench carries none.
+                            "accepted_kernels": ps_kernels if ps_overlay else [],
                             "note": "same-harness config-identity revalidation of the geak e2e win",
                         }
                     ],
@@ -5061,7 +5143,7 @@ class WritebackCollaborator:
             A summary dict describing whether validation succeeded.
         """
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
-        if str(ps.get("status") or "") != "ok":
+        if str(ps.get("status") or "") != "ok" and not _geak_has_accepted_kernel(ps):
             return {"validated": False, "skipped": True, "reason": "no_geak_result"}
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
@@ -5147,6 +5229,9 @@ class WritebackCollaborator:
                 ps,
                 measured_tput=measured,
                 provenance="geak_same_harness_geak",
+                # 2a replays GEAK's own launch script, so an authored overlay
+                # engages by construction — a ``succeeded`` replay is the proof.
+                overlay_loaded=bool(str(ps.get("final_overlay") or "").strip()),
             )
             base = float(self.shared_state.baseline_tput or 0.0)
             gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0

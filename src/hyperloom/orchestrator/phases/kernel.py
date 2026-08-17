@@ -30,6 +30,8 @@ from ..bus.message_bus import Message
 from ..loop.coordinator_helpers import (
     _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
     _MAX_ROOFLINE_FAILURE_RETRIES,
+    _geak_accepted_kernel_specs,
+    _geak_has_accepted_kernel,
     _resolve_roofline_watermark_ratio,
     _resolve_serving_fidelity,
     _split_env_and_flags,
@@ -832,6 +834,32 @@ class KernelPhase(PhaseHandler):
                 log.exception("geak: enqueue same-harness revalidation failed")
                 summary = {"skipped": True, "reason": repr(exc)}
 
+            # The dispatcher refuses to launch a rebench whose only material is
+            # an overlay that cannot load — that run would measure plain
+            # baseline and credit GEAK for the noise. GEAK's own harness replays
+            # the optimized config from result.json, so the kernel engages by
+            # construction there; take that route instead of losing the win.
+            if isinstance(summary, dict) and summary.get("fallback") == "geak_harness":
+                log.warning(
+                    "geak: 2b declined (%s); validating through the GEAK harness instead",
+                    summary.get("reason"),
+                )
+                try:
+                    fb = await self._validate_geak_via_geak_harness(reason=str(summary.get("reason") or "2b_declined"))
+                except Exception as exc:  # noqa: BLE001 - defensive
+                    log.exception("geak: GEAK-harness validation failed")
+                    fb = {"validated": False, "reason": repr(exc)}
+                if bool(fb.get("validated")):
+                    # 2a promotes and clears geak_pending itself.
+                    return True
+                pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
+                pending["status"] = "rebench_unavailable"
+                pending.pop("revalidation_task_id", None)
+                pending["revalidation_error"] = str(fb.get("reason") or summary.get("reason") or "")[:500]
+                state.geak_pending = pending
+                state.save(self.session_dir)
+                return False
+
             task_id = str(summary.get("task_id") or "") if isinstance(summary, dict) else ""
             task_state = str(summary.get("task_state") or "queued").strip().lower() if task_id else ""
             pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
@@ -1082,6 +1110,11 @@ class KernelPhase(PhaseHandler):
         # writes the headline. Until it lands the candidate stays pending.
         if str(result.get("status") or "") == "ok":
             await _enqueue_geak_revalidation(reason="geak_e2e_win")
+        elif _geak_has_accepted_kernel(result):
+            # A no_gain headline over an accepted, parity-checked kernel still
+            # deserves the measurement — the rebench is what decides, and
+            # without it the kernel is lost with no number attached to it.
+            await _enqueue_geak_revalidation(reason="geak_e2e_accepted_kernel")
         self._record_phase_entry_evidence(
             geak={
                 "status": result.get("status"),
@@ -1150,7 +1183,15 @@ class KernelPhase(PhaseHandler):
         ``_promote_geak_from_candidate``; the config is captured verbatim as the
         source the rebench launches from.
         """
-        if not isinstance(result, dict) or result.get("status") not in ("ok",):
+        if not isinstance(result, dict):
+            return
+        # ``no_gain`` is GEAK's verdict on its own headline number, not on the
+        # kernels it accepted. A run can report no_gain on the promoted basis
+        # while carrying an accepted kernel with a positive, parity-checked
+        # same-config A/B — and dropping the whole result here means that kernel
+        # never reaches a rebench and never appears anywhere. Admit it as a
+        # candidate; the rebench downstream is still what decides.
+        if result.get("status") not in ("ok",) and not _geak_has_accepted_kernel(result):
             return
         new_tput = float(result.get("final_throughput_tok_s") or 0.0)
         if new_tput <= 0:
@@ -1169,6 +1210,12 @@ class KernelPhase(PhaseHandler):
             # Reproducible config the rebench launches from.
             "accepted_flags": accepted_flags,
             "accepted_envs": dict(parsed_envs),
+            # Carry the kernels and the basis they were judged on into the
+            # pending record, so a later promotion can name what it adopted
+            # without re-reading result.json.
+            "accepted_kernels": result.get("accepted_kernels") or [],
+            "geak_status": str(result.get("status") or ""),
+            "baseline_alignment_status": str((result.get("baseline_alignment") or {}).get("status") or ""),
             "final_overlay": result.get("final_overlay") or "",
             "final_launch_script": result.get("final_launch_script"),
             "bench_script": result.get("bench_script"),
@@ -1206,6 +1253,7 @@ class KernelPhase(PhaseHandler):
         *,
         measured_tput: float,
         provenance: str,
+        overlay_loaded: bool | None = None,
     ) -> None:
         """Write the GEAK headline from a MEASURED main-flow rebench.
 
@@ -1214,6 +1262,16 @@ class KernelPhase(PhaseHandler):
         gain ledger, and stamps ``cumulative_gain`` / ``cumulative_gain_validated``
         as the same-harness total ``(measured - baseline)/baseline``. Clears
         ``geak_pending`` and the revalidation flag.
+
+        Args:
+            result: GEAK's ``result.json`` payload.
+            measured_tput: The rebench-measured throughput (tok/s).
+            provenance: Which validation path measured it.
+            overlay_loaded: Whether the authored-kernel overlay was proven
+                loaded for the measurement. ``None`` means the caller could not
+                tell. Only a ``True`` here lets an accepted kernel be written
+                into the adoption ledger: a flags-only rebench measured no
+                kernel, so crediting one would be an invention.
         """
         if not isinstance(result, dict):
             return
@@ -1330,6 +1388,13 @@ class KernelPhase(PhaseHandler):
             )
 
         base = float(self.shared_state.baseline_tput or 0.0)
+        self._record_geak_adopted_kernels(
+            result,
+            measured_tput=measured,
+            baseline_tput=base,
+            provenance=provenance,
+            overlay_loaded=overlay_loaded,
+        )
         if base > 0:
             gain = (measured - base) / base * 100.0
             self.shared_state.cumulative_gain = gain
@@ -1354,6 +1419,110 @@ class KernelPhase(PhaseHandler):
             )
         except Exception:  # noqa: BLE001
             log.debug("geak v4 final validation recording failed", exc_info=True)
+
+    def _record_geak_adopted_kernels(
+        self,
+        result: dict[str, Any],
+        *,
+        measured_tput: float,
+        baseline_tput: float,
+        provenance: str,
+        overlay_loaded: bool | None,
+    ) -> None:
+        """Write one adoption row per accepted GEAK kernel.
+
+        GEAK's win is recorded in two disjoint places today. The per-ACTION
+        ledger (``optimization_stack`` + ``geak_pending``) carries the headline;
+        the per-KERNEL ledger (``state.kernel_integrate_attempts``) is what
+        ``by_kernel``, ``kernel_lifecycle.adopted``, the attribution split and
+        the timeline all read. GEAK writes only the first, so an adopted kernel
+        exists in the headline and nowhere a report can name it. This writes the
+        second, from the same promotion, so both agree by construction.
+
+        The gain recorded is the ORCHESTRATOR-measured rebench gain over
+        baseline, never GEAK's self-reported ``e2e_delta_pct``. When several
+        kernels rode in on one rebench, or the overlay was not proven loaded,
+        the gain cannot be attributed to any single kernel: the row is written
+        with a null gain and ``validated: False`` rather than an invented share.
+        """
+        if not isinstance(result, dict):
+            return
+        # Both acceptance lanes, ``env`` selections excluded and alias twins
+        # collapsed. See ``_geak_accepted_kernel_specs``.
+        specs = _geak_accepted_kernel_specs(result)
+        if not specs:
+            return
+        rows = [
+            {
+                "kernel_id": str(
+                    k.get("short_name") or k.get("kernel_id") or k.get("cand_tag") or ""
+                ).strip(),
+                "spec": k,
+            }
+            for k in specs
+        ]
+
+        rebench_gain: float | None = None
+        if baseline_tput > 0 and measured_tput > 0:
+            rebench_gain = (measured_tput - baseline_tput) / baseline_tput * 100.0
+        # One kernel, overlay proven loaded, one measured number: the gain is
+        # attributable. Anything else is a joint measurement.
+        attributable = bool(overlay_loaded) and len(rows) == 1
+        am = result.get("alignment_metrics") or {}
+        basis = str(am.get("final_basis") or result.get("final_throughput_basis") or "")
+        alignment_status = str((result.get("baseline_alignment") or {}).get("status") or "")
+        ts = datetime.now(timezone.utc).isoformat()
+        ledger = self.shared_state.kernel_integrate_attempts
+        if not isinstance(ledger, dict):
+            return
+        for row in rows:
+            kid = row["kernel_id"]
+            spec = row["spec"]
+            entry = dict(ledger.get(kid) or {})
+            attempts = list(entry.get("attempts") or [])
+            attempts.append(
+                {
+                    "decision": "KEEP",
+                    "status": "ok",
+                    "new_tput": measured_tput,
+                    "gain_pct": rebench_gain if attributable else None,
+                    "decision_reason": provenance,
+                    "artifact_kind": str(spec.get("kind") or "authored"),
+                    "ts": ts,
+                    "cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                }
+            )
+            entry.update(
+                {
+                    "key": kid,
+                    "kernel_id": kid,
+                    "source": "geak_e2e",
+                    "attempts": attempts,
+                    "attempt_count": len(attempts),
+                    "best_gain_pct": rebench_gain if attributable else None,
+                    "last_decision": "KEEP",
+                    "last_status": "ok",
+                    "validated": attributable,
+                    "overlay_loaded": bool(overlay_loaded),
+                    "basis": basis,
+                    "alignment_status": alignment_status,
+                    # GEAK's own same-config A/B, kept beside the orchestrator
+                    # number so the two are never confused for each other.
+                    "geak_same_config_delta_pct": spec.get("e2e_delta_pct"),
+                    "geak_isolated_speedup": spec.get("isolated"),
+                    "updated_at": ts,
+                }
+            )
+            ledger[kid] = entry
+        self.shared_state.kernel_integrate_attempts = ledger
+        log.info(
+            "geak: recorded %d adopted kernel(s) in the per-kernel ledger "
+            "(overlay_loaded=%r attributable=%r gain=%r)",
+            len(rows),
+            overlay_loaded,
+            attributable,
+            rebench_gain if attributable else None,
+        )
 
     def _record_geak_kernel_journey(self, result: dict[str, Any]) -> None:
         """Replay GEAK-e2e's kernel_journey.json into the breakdown recorder.

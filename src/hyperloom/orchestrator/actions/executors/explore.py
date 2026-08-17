@@ -143,6 +143,7 @@ _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
     "provenance",
     "scope",
     "overlay_pythonpath",
+    "accepted_kernels",
     "kb_evidence",
     "pr_evidence",
     "source_evidence",
@@ -232,6 +233,12 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         # Authored-kernel overlay dir (PYTHONPATH prefix); "" for env/flag
         # variants. Consumed by _grid_runner._build_variant_yaml.
         gv.overlay_pythonpath = str(raw.get("overlay_pythonpath") or "")  # type: ignore[attr-defined]
+        # Authored kernels this variant's overlay installs. Carried so the
+        # decision row names the kernel instead of inheriting the flag string as
+        # its whole identity; empty for every flag/env-only variant.
+        gv.accepted_kernels = [  # type: ignore[attr-defined]
+            str(k).strip() for k in (raw.get("accepted_kernels") or []) if str(k).strip()
+        ]
         gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
         gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]
@@ -1541,6 +1548,13 @@ class ExploreExecutor:
                             **effective_control_fields,
                             "note": gv.note,
                             "provenance": provenance,
+                            # Names of the authored kernels this config carried,
+                            # when an overlay was loaded. Empty for a flags-only
+                            # variant, so a downstream reader can tell a config
+                            # gain from a gain that also had a kernel running.
+                            "accepted_kernels": list(
+                                getattr(gv, "accepted_kernels", []) or []
+                            ),
                             "gain_pct": gain,
                             "tput": decision_tput,
                             "decision_tput": decision_tput,

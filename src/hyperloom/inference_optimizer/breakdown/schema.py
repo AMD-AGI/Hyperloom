@@ -593,6 +593,11 @@ class AdoptedKernel(TypedDict, total=False):
         last_status (str): Last recorded status.
         adopted_at (str): ISO UTC timestamp of adoption.
         attempt_count (int): Number of attempts before adoption.
+        basis (str): Throughput basis the gain was measured on ("hot" / "cold"
+            / "" when the writer did not record one). A gain is meaningless
+            without the baseline it was measured against.
+        alignment_status (str): Whether the producer's baseline agreed with the
+            orchestrator's ("" when not recorded).
     """
 
     kernel_id: str
@@ -604,6 +609,8 @@ class AdoptedKernel(TypedDict, total=False):
     last_status: str
     adopted_at: str
     attempt_count: int
+    basis: str
+    alignment_status: str
 
 
 class RejectedKernel(TypedDict, total=False):
@@ -1309,6 +1316,22 @@ class PhaseBreakdownGemmTuning(TypedDict, total=False):
     by_tuned_file: dict[str, float]
 
 
+class PhaseBreakdownGeak(TypedDict, total=False):
+    """GEAK e2e gain, split by what was actually running when it was measured.
+
+    ``by_contribution`` keys on ``config`` / ``kernel`` / ``joint``. A GEAK
+    revalidation benchmarks server arguments, env and the authored overlay
+    together against one baseline, so a ``joint`` row's gain cannot be divided
+    between them; it is reported whole under ``joint`` rather than split by
+    guess. ``by_kernel_id`` names the authored kernels that were loaded, and is
+    empty for a config-only gain.
+    """
+
+    total_gain_pct: float
+    by_contribution: dict[str, float]
+    by_kernel_id: dict[str, float]
+
+
 class PhaseBreakdown(TypedDict, total=False):
     """Per-phase gain attribution.
 
@@ -1324,6 +1347,8 @@ class PhaseBreakdown(TypedDict, total=False):
             down from ``FRAMEWORK_AGENT``, this bucket keeps the phase name.
         gemm_tuning (PhaseBreakdownGemmTuning): KERNEL-entry GEMM-tuning gain,
             bucketed separately from source-level kernel rewrites.
+        geak (PhaseBreakdownGeak): GEAK e2e gain, split by whether a config, a
+            kernel, or both were running when it was measured.
         sweep (PhaseBreakdownExplore): SWEEP phase gain (usually 0; measurement).
         close (PhaseBreakdownExplore): CLOSE phase gain (usually 0).
         unattributed (PhaseBreakdownExplore): Gain whose phase could not be inferred.
@@ -1334,6 +1359,7 @@ class PhaseBreakdown(TypedDict, total=False):
     explore: PhaseBreakdownExplore
     kernel_agent: PhaseBreakdownKernel
     gemm_tuning: PhaseBreakdownGemmTuning
+    geak: PhaseBreakdownGeak
     sweep: PhaseBreakdownExplore  # usually 0 (sweep is measurement)
     close: PhaseBreakdownExplore  # usually 0
     unattributed: PhaseBreakdownExplore  # gain whose phase couldn't be inferred
