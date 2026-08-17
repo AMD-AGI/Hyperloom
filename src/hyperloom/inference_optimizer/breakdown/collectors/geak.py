@@ -51,18 +51,51 @@ def _geak_accepted_kernels_from_journey(
             kj_path = str(Path(eval_dir) / "kernel_journey.json")
     if not kj_path:
         return []
-    if not Path(kj_path).is_file():
-        return []
-    journey = read_json(
-        Path(kj_path),
-        default=None,
-        on_error=lambda exc: warnings.append(f"geak: kernel_journey read failed for backfill: {exc}"),
-    )
-    if not isinstance(journey, dict):
+
+    # ``kernel_journey_path`` names the *last* e2e cycle only. A run that keeps a
+    # kernel in cycle 0 and then opens an empty cycle 1 would otherwise back-fill
+    # nothing. Read every sibling cycle, newest pointer first, and de-duplicate on
+    # ``kernel_id``. Safe because no kernel is KEEP in one cycle and rejected in a
+    # later one; the cycles partition the kernel set.
+    journey_paths: list[Path] = []
+    pointer = Path(kj_path)
+    if pointer.is_file():
+        journey_paths.append(pointer)
+    try:
+        siblings = sorted(
+            pointer.parent.parent.glob("e2e_cycle*/kernel_journey.json"),
+            key=lambda p: p.parent.name,
+        )
+    except OSError:
+        siblings = []
+    for sib in siblings:
+        if sib.is_file() and sib not in journey_paths:
+            journey_paths.append(sib)
+    if not journey_paths:
         return []
 
+    kernels: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for jp in journey_paths:
+        journey = read_json(
+            Path(jp),
+            default=None,
+            on_error=lambda exc: warnings.append(f"geak: kernel_journey read failed for backfill: {exc}"),
+        )
+        if not isinstance(journey, dict):
+            continue
+        for k in journey.get("kernels") or []:
+            if not isinstance(k, dict):
+                continue
+            kid = str(k.get("kernel_id") or "")
+            if kid and kid in seen_ids:
+                continue
+            if kid:
+                seen_ids.add(kid)
+            kernels.append(k)
+
     accepted: list[dict[str, Any]] = []
-    for k in journey.get("kernels") or []:
+    for k in kernels:
         if not isinstance(k, dict):
             continue
         e2e = k.get("e2e")

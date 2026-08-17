@@ -673,3 +673,58 @@ def test_collect_geak_backfill_still_skipped_on_error(tmp_path: Path) -> None:
         out = collect_geak(tmp_path, state, [])
         assert out["accepted_kernels"] == [], bad
         assert out["kernels_optimized"] == 0, bad
+
+
+def test_collect_geak_backfill_scans_earlier_cycles(tmp_path: Path) -> None:
+    # ``kernel_journey_path`` names the LAST e2e cycle. A run that keeps a kernel
+    # in cycle 0 and then opens a cycle 1 that keeps nothing must still attribute
+    # the cycle-0 kernel. Observed on two campaign runs.
+    geak_dir = tmp_path / "geak"
+    _write_kernel_journey(geak_dir / "e2e_cycle0")
+    last = geak_dir / "e2e_cycle1"
+    last.mkdir(parents=True, exist_ok=True)
+    (last / "kernel_journey.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kernels": [
+                    {
+                        "kernel_id": "paged_attention_decode_sliding_window_c0_triton",
+                        "name": "paged_attention_decode_sliding_window_c0_triton",
+                        "e2e": {"decision": "REJECTED", "integrated": False, "e2e_gain_pct": None},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "no_gain",
+            "accepted_kernels": [],
+            "kernel_journey_path": str(last / "kernel_journey.json"),
+        },
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["accepted_kernels_source"] == "kernel_journey_backfill"
+    assert out["kernels_optimized"] == 1
+    assert out["accepted_kernels"][0]["kernel_id"] == "fused_moe_kernel_gptq_awq"
+
+
+def test_collect_geak_backfill_dedupes_repeated_kernel_across_cycles(tmp_path: Path) -> None:
+    # The same kernel_id present in two cycles must be credited once, and the
+    # pointer (last) cycle wins.
+    geak_dir = tmp_path / "geak"
+    _write_kernel_journey(geak_dir / "e2e_cycle0")
+    _write_kernel_journey(geak_dir / "e2e_cycle1")
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "ok",
+            "accepted_kernels": [],
+            "kernel_journey_path": str(geak_dir / "e2e_cycle1" / "kernel_journey.json"),
+        },
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 1
