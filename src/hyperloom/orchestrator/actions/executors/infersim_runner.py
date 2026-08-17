@@ -85,6 +85,7 @@ def run_benchmark(config_path: Path, output_dir: Path) -> int:
         analysis={
             "backend": "infersim",
             "source": "calibrated" if metrics.calibrated else "simulation",
+            "extrapolation": list(metrics.extras.get("extrapolation") or []),
             "decode_tps_per_gpu": metrics.decode_tps_per_gpu,
             "memory_per_gpu_gb": metrics.memory_per_gpu_gb,
             "max_concurrency": metrics.max_concurrency,
