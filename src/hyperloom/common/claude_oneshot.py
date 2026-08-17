@@ -149,6 +149,9 @@ def message_text(message: Any) -> list[str]:
             block_text = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
             if isinstance(block_text, str):
                 parts.append(block_text)
+    result_text = getattr(message, "result", None)
+    if isinstance(result_text, str) and result_text:
+        parts.append(result_text)
     return parts
 
 

@@ -321,6 +321,34 @@ def _parse_iso_unix(ts: Any) -> float | None:
         return None
 
 
+def phase_at(
+    ts_unix: float,
+    phase_boundaries: list[tuple[float, str]],
+    *,
+    fallback: str = "",
+) -> str:
+    """Return the phase active at ``ts_unix``.
+
+    ``phase_boundaries`` is a list of (boundary_ts_unix, phase_name) sorted
+    ascending; the last boundary with a timestamp <= ts_unix wins.
+
+    Args:
+        ts_unix: The timestamp to classify.
+        phase_boundaries: Sorted list of (unix_ts, phase_name) transition points.
+        fallback: Phase name returned when no boundary is <= ts_unix.
+
+    Returns:
+        The phase name active at ``ts_unix``, or ``fallback``.
+    """
+    current = fallback
+    for boundary, phase in phase_boundaries:
+        if boundary <= ts_unix:
+            current = phase
+        else:
+            break
+    return current
+
+
 def _load_optimization_journal(
     session_dir: Path | None,
     warnings: list[str],

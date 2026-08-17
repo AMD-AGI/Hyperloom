@@ -956,6 +956,9 @@ _VLLM_GEN_TPUT_RE = re.compile(
 # Fraction of the leading warmup samples dropped before averaging so the
 # estimate reflects sustained decode rather than the cold-start climb.
 _DEFAULT_WARMUP_SKIP_FRAC: float = 0.25
+# bypass_analysis.py has a parallel server.log parser with warmup_skip_frac=0.2,
+# a stricter vllm regex, and a different clamp upper bound.  Reconcile before
+# merging the two implementations.
 
 
 def _parse_server_log_gen_throughput(log_path: Path) -> list[float]:

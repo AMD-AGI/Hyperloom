@@ -90,12 +90,9 @@ def _phase_timeline(state: dict[str, Any]) -> list[tuple[float, str]]:
 def _phase_at(ts: float | None, timeline: list[tuple[float, str]]) -> str:
     if ts is None:
         return ""
-    current = ""
-    for boundary, phase in timeline:
-        if boundary > ts:
-            break
-        current = phase
-    return current
+    from ._common import phase_at
+
+    return phase_at(ts, timeline)
 
 
 def _kernel_backend(

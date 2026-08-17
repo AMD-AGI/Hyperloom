@@ -446,33 +446,10 @@ class ExplorePhase(PhaseHandler):
             summary["conversation_reset"] = True
         except Exception:  # noqa: BLE001 — soft restart never aborts the run loop
             log.exception("cycle soft-restart: conversation reset failed")
-        # 2) Reap TTL-expired serving + GPU leases immediately.
-        try:
-            reaped = await self.locks.reap_expired()
-            summary["leases_reaped"] = len(reaped or [])
-        except Exception:  # noqa: BLE001
-            log.exception("cycle soft-restart: serving-lease reap failed")
-        try:
-            summary["gpu_leases_reaped"] = await self.gpu_specialist_pool.reap_expired()
-        except Exception:  # noqa: BLE001
-            log.exception("cycle soft-restart: gpu-lease reap failed")
-        # 2b) Reclaim orphaned running tasks (lease expired) → failed. Idempotent.
-        try:
-            reclaimed = await self.tasks.reclaim_expired_running(
-                reason="cycle_soft_restart",
-            )
-            summary["running_tasks_reclaimed"] = len(reclaimed)
-        except Exception:  # noqa: BLE001
-            log.exception("cycle soft-restart: running-task reclaim failed")
-        # 3) Prune the events/tasks DB (strictly below the resume anchor).
-        try:
-            from ..bus import db_maintenance as _db_maint
+        # 2-3) Reap leases, reclaim orphaned running tasks, prune DB.
+        from ..loop.maintenance import run_lease_and_db_reclaim
 
-            res = await _db_maint.run_db_retention(self.db, self.cursors)
-            summary["events_pruned"] = res.events_deleted
-            summary["tasks_pruned"] = res.tasks_deleted
-        except Exception:  # noqa: BLE001
-            log.exception("cycle soft-restart: DB retention failed")
+        await run_lease_and_db_reclaim(self, summary, reason="cycle_soft_restart")
         # 4) Clear transient knowledge-plane caches for a fresh PR feed.
         try:
             if self.knowledge_plane is not None:

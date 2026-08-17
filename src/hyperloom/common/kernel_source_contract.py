@@ -32,6 +32,8 @@ from typing import Any
 SOURCE_RESOLUTION_SCHEMA_VERSION = "1.0.0"
 
 #: Canonical artifact name, relative to the analysis run directory.
+#: Must match ``tracelens_analysis._SOURCE_RESOLUTION_NAME``; kept separate
+#: because that file cannot import from ``hyperloom.common`` at standalone runtime.
 SOURCE_RESOLUTION_FILENAME = "kernel_source_resolution.json"
 
 #: How a location was decided, best evidence first. ``llm_review`` outranks the

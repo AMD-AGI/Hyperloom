@@ -138,17 +138,11 @@ def _entry_ts(entry: dict[str, Any]) -> float | None:
 
 
 def _phase_at(ts_unix: float | None, timeline: list[tuple[float, str]]) -> str:
-    """Return the phase active at ``ts_unix``, if one can be inferred."""
-
     if ts_unix is None:
         return ""
-    current = ""
-    for ts, phase in timeline:
-        if ts <= ts_unix:
-            current = phase
-        else:
-            break
-    return current
+    from ._common import phase_at
+
+    return phase_at(ts_unix, timeline)
 
 
 def _entry_family(entry: dict[str, Any]) -> str:

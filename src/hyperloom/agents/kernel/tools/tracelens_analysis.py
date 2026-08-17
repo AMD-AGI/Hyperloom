@@ -124,6 +124,9 @@ log = logging.getLogger(__name__)
 
 # Artifact name kept local so the standalone-script path does not need the
 # shared contract module just to know where the file goes.
+# The standalone constraint in this directory prevents importing the constant from
+# hyperloom.common.kernel_source_contract.SOURCE_RESOLUTION_FILENAME; both must
+# stay in sync manually.
 _SOURCE_RESOLUTION_NAME = "kernel_source_resolution.json"
 
 

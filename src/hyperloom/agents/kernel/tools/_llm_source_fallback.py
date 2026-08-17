@@ -383,20 +383,9 @@ def _complete_openai(prompt: str, model: str, timeout_sec: float) -> str:
 
 
 def _message_text(message: Any) -> list[str]:
-    """Extract text fragments from one Claude SDK message."""
-    if isinstance(message, str):
-        return [message]
-    text = getattr(message, "text", None)
-    if isinstance(text, str):
-        return [text]
-    parts: list[str] = []
-    content = getattr(message, "content", None)
-    if isinstance(content, list):
-        for block in content:
-            block_text = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
-            if isinstance(block_text, str):
-                parts.append(block_text)
-    return parts
+    from hyperloom.common.claude_oneshot import message_text  # noqa: PLC0415
+
+    return message_text(message)
 
 
 def _complete_claude_sdk(prompt: str, model: str, timeout_sec: float) -> str:

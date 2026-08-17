@@ -67,26 +67,9 @@ def _import_sdk() -> tuple[Any, Any]:
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:
-    """Yield text fragments from a Claude Agent SDK message.
+    from hyperloom.common.claude_oneshot import message_text  # noqa: PLC0415
 
-    Handles the varying SDK message shapes: ``.content`` blocks exposing
-    ``.text`` (object or dict) and a top-level ``.result`` string.
-
-    Args:
-        message: An SDK message object.
-
-    Yields:
-        Each non-empty text fragment found on the message.
-    """
-    for block in list(getattr(message, "content", None) or []):
-        text = getattr(block, "text", None)
-        if isinstance(text, str) and text:
-            yield text
-        elif isinstance(block, dict) and isinstance(block.get("text"), str):
-            yield block["text"]
-    result_text = getattr(message, "result", None)
-    if isinstance(result_text, str) and result_text:
-        yield result_text
+    yield from (t for t in message_text(message) if t)
 
 
 def resolve_skill_path(package_root: Path | None = None) -> Path:
