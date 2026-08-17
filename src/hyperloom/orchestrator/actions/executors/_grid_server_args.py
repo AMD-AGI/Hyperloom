@@ -769,6 +769,78 @@ def resolve_sglang_context_cap(isl: int, osl: int) -> int:
     return max(int(isl) + int(osl) + headroom, floor)
 
 
+def validate_warm_replay_context_length(
+    server_args: str | None,
+    framework: str | None,
+    isl: int,
+    osl: int,
+    max_model_len: int | str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Validate a replayed SGLang context window without changing its config.
+
+    Exact Recipe identities do not include workload shape. A champion may
+    therefore carry ``--context-length`` from a shorter run even though the
+    current ISL+OSL no longer fits. Compatible or absent pins are preserved
+    byte-for-byte; incompatible pins fail the replay preflight.
+    """
+    args = str(server_args or "")
+    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
+        return args, {"status": "not_sglang"}
+    required = max(0, int(isl or 0)) + max(0, int(osl or 0))
+    if required <= 0:
+        return args, {"status": "target_shape_unknown"}
+    max_len = optional_positive_int(max_model_len)
+    if max_len is not None and max_len < required:
+        raise ValueError(
+            "target workload exceeds MAX_MODEL_LEN: "
+            f"isl+osl={required} > max_model_len={max_len}"
+        )
+    parsed = tokenize_server_args_preserving_json(args)
+    if parsed is None:
+        raise ValueError("warm replay server args are not safely tokenizable")
+    _normalized, tokens = parsed
+    values: list[int] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == _SGLANG_CONTEXT_LENGTH_FLAG:
+            if index + 1 >= len(tokens):
+                raise ValueError("--context-length is missing its value")
+            raw_value = tokens[index + 1]
+            index += 2
+        elif token.startswith(f"{_SGLANG_CONTEXT_LENGTH_FLAG}="):
+            raw_value = token.split("=", 1)[1]
+            index += 1
+        else:
+            index += 1
+            continue
+        try:
+            value = int(raw_value)
+        except ValueError as exc:
+            raise ValueError(
+                f"--context-length must be an integer, got {raw_value!r}"
+            ) from exc
+        if value <= 0:
+            raise ValueError("--context-length must be positive")
+        values.append(value)
+    if not values:
+        return args, {
+            "status": "context_length_absent",
+            "required_context_length": required,
+        }
+    effective = values[-1]
+    if effective >= required:
+        return args, {
+            "status": "compatible",
+            "effective_context_length": effective,
+            "required_context_length": required,
+        }
+    raise ValueError(
+        "warm replay context length is incompatible with target workload: "
+        f"context_length={effective} < isl+osl={required}"
+    )
+
+
 def inject_sglang_context_length(
     server_args: str | None,
     framework: str | None,

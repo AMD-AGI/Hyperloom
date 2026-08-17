@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 import subprocess
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -87,6 +87,62 @@ _P_STRIP_LEVELS: tuple[int, ...] = (1, 0, 2, 3, 4, 5, 6, 7, 8)
 
 # Sentinel the post-/pre-image path takes for a created/deleted file.
 _DEV_NULL = "/dev/null"
+
+
+@dataclass(frozen=True)
+class ParsedPatchTargets:
+    """Safe repo-relative targets split by whether they must already exist."""
+
+    existing: tuple[str, ...]
+    created: tuple[str, ...]
+
+    @property
+    def all(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys((*self.existing, *self.created)))
+
+
+def _safe_patch_path(raw: str) -> str:
+    value = str(raw or "").strip().split("\t", 1)[0]
+    if value in {"", _DEV_NULL}:
+        return value
+    if value.startswith(("a/", "b/")):
+        value = value[2:]
+    parsed = PurePosixPath(value)
+    if parsed.is_absolute() or ".." in parsed.parts or not parsed.parts:
+        raise ValueError(f"unsafe patch target path: {raw!r}")
+    return parsed.as_posix()
+
+
+def parse_patch_targets(patch_text: str) -> ParsedPatchTargets:
+    """Parse unified-diff targets, including create/delete/rename/mode-only.
+
+    Standard ``---``/``+++`` pairs are authoritative. If a patch has no such
+    pairs (for example a mode-only or metadata-only rename), ``diff --git``
+    headers provide the fallback paths.
+    """
+    pairs = patch_file_targets(patch_text)
+    if not pairs:
+        for line in (patch_text or "").splitlines():
+            if not line.startswith("diff --git "):
+                continue
+            parts = line.split()
+            if len(parts) >= 4:
+                pairs.append((parts[2], parts[3]))
+
+    existing: list[str] = []
+    created: list[str] = []
+    for raw_old, raw_new in pairs:
+        old = _safe_patch_path(raw_old)
+        new = _safe_patch_path(raw_new)
+        if old and old != _DEV_NULL and old not in existing:
+            existing.append(old)
+        if new and new != _DEV_NULL and new != old and new not in created:
+            created.append(new)
+        elif old == _DEV_NULL and new and new not in created:
+            created.append(new)
+    if not existing and not created:
+        raise ValueError("patch declares no safe target files")
+    return ParsedPatchTargets(tuple(existing), tuple(created))
 
 
 def _strip_path_prefix(path: str, level: int) -> str:
