@@ -1324,12 +1324,9 @@ async def run_grid(
 
     _mn_ref_envs: dict[str, str] = {}
     if _mn_is_multi_node():
-        try:
-            from .baseline import _resolve_reference_base
+        from ._workload_envs import resolve_reference_base
 
-            _, _mn_ref_envs = _resolve_reference_base(Path("."))
-        except Exception as exc:  # noqa: BLE001 - reference base is additive; never block the grid
-            log.debug("grid_runner: reference env resolve swallowed: %r", exc)
+        _, _mn_ref_envs = resolve_reference_base()
 
     # Reported on entry, not on completion: ``_pulse_after_variant`` only runs once a
     # result has been appended, so a first variant that hangs — or a branch that

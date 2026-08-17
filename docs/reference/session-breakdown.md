@@ -625,12 +625,12 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "pid": 12345,
     "session_dir": "/workspace/hyperloom/GLM-5-FP8/20260517T113000Z",
     "tick_count": 89,
-    "image": "rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x"
+    "image": "rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi300x"
   },
 
   "workload": {
     "framework_name": "sglang",
-    "framework_version": "0.5.11",
+    "framework_version": "0.5.17",
     "model_name": "GLM-5-FP8",
     "model_path": "/models/GLM-5-FP8",
     "model_class": "moe_mla_nsa",

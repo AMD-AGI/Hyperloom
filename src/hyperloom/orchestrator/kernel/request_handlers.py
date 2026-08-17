@@ -4096,6 +4096,14 @@ def _resolve_forge_fusion_agent(
     provider, the request fails instead of silently spawning an unauthenticated
     Claude process.
 
+    Model id precedence (after the backend is chosen):
+
+    1. request ``llm_model``;
+    2. forge-specific env (``FORGE_CLAUDE_MODEL`` / ``FORGE_CODEX_MODEL``), the
+       forge counterpart of ``GEAK_CLAUDE_MODEL``;
+    3. orchestration-side ``CLAUDE_MODEL`` / ``CODEX_MODEL``;
+    4. the built-in defaults.
+
     Args:
         payload: Kernel request payload.
         env: Provider environment to inspect; defaults to ``os.environ``.
@@ -4133,9 +4141,17 @@ def _resolve_forge_fusion_agent(
     if explicit_model:
         llm_model = explicit_model
     elif agent_backend == "codex":
-        llm_model = str(source.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
+        llm_model = (
+            str(source.get("FORGE_CODEX_MODEL") or "").strip()
+            or str(source.get("CODEX_MODEL") or "").strip()
+            or DEFAULT_CODEX_MODEL
+        )
     else:
-        llm_model = str(source.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
+        llm_model = (
+            str(source.get("FORGE_CLAUDE_MODEL") or "").strip()
+            or str(source.get("CLAUDE_MODEL") or "").strip()
+            or DEFAULT_CLAUDE_MODEL
+        )
     return agent_backend, llm_model
 
 

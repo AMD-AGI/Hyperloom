@@ -57,6 +57,16 @@ def _materialize(src, out, **kw):
     return yaml.safe_load(res.read_text())["benchmark"]
 
 
+def _seed_reference_envs(tmp_path, monkeypatch, envs):
+    """Pin a session whose SharedState carries ``reference_envs``."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    sd = tmp_path / "session"
+    sd.mkdir(parents=True, exist_ok=True)
+    SharedState(session_id="ref-test", reference_envs=dict(envs)).save(sd)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(sd))
+
+
 def _stub_server_arg_injectors(monkeypatch):
     monkeypatch.setattr(we, "inject_sglang_context_length", lambda args, *a, **k: args)
     monkeypatch.setattr(we, "inject_sglang_watchdog_timeout", lambda args, *a, **k: args)
@@ -100,6 +110,17 @@ def test_materialize_drops_credentials_but_preserves_workload_env_keys(tmp_path,
     _stub_server_arg_injectors(monkeypatch)
     src = tmp_path / "base.yaml"
     _write(src)
+    _seed_reference_envs(
+        tmp_path,
+        monkeypatch,
+        {
+            "DEEPSEEK_API_KEY": "deepseek-secret",
+            "PYTHONPATH": "/tmp/evil",
+            "REFERENCE_ONLY_KNOB": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "bad key": "dropped",
+        },
+    )
     bench = _materialize(
         src,
         tmp_path / "out",
@@ -112,13 +133,6 @@ def test_materialize_drops_credentials_but_preserves_workload_env_keys(tmp_path,
             "SGLANG_USE_AITER": "1",
             "UNKNOWN_VALID_TUNING_KNOB": "enabled",
             "BAD-NAME": "dropped",
-        },
-        reference_envs={
-            "DEEPSEEK_API_KEY": "deepseek-secret",
-            "PYTHONPATH": "/tmp/evil",
-            "REFERENCE_ONLY_KNOB": "1",
-            "VLLM_ROCM_USE_AITER": "1",
-            "bad key": "dropped",
         },
     )
     envs = bench["envs"]

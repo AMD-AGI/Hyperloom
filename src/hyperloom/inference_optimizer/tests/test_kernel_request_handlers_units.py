@@ -38,6 +38,8 @@ _FUSION_PROVIDER_ENV_KEYS = (
     "OPENAI_BASE_URL",
     "CLAUDE_MODEL",
     "CODEX_MODEL",
+    "FORGE_CLAUDE_MODEL",
+    "FORGE_CODEX_MODEL",
     CODEX_SANDBOX_MODE_ENV,
     CODEX_EXTERNAL_SANDBOX_ENV,
 )
@@ -823,6 +825,77 @@ class TestForgeGemmHelperCoverage:
                 "llm_model": "gpt-explicit",
             }
         ) == ("codex", "gpt-explicit")
+
+    def test_resolve_forge_fusion_agent_prefers_forge_claude_model_over_claude_model(
+        self, monkeypatch
+    ):
+        """FORGE_CLAUDE_MODEL mirrors GEAK_CLAUDE_MODEL for the Claude forge path."""
+        _pin_fusion_provider_env(
+            monkeypatch,
+            {
+                **_ANTHROPIC_ONLY_ENV,
+                "CLAUDE_MODEL": "claude-orchestration",
+                "FORGE_CLAUDE_MODEL": "claude-forge-only",
+            },
+        )
+
+        assert krh._resolve_forge_fusion_agent({}) == (
+            "claude",
+            "claude-forge-only",
+        )
+
+    def test_resolve_forge_fusion_agent_prefers_forge_codex_model_over_codex_model(
+        self, monkeypatch
+    ):
+        """FORGE_CODEX_MODEL overrides CODEX_MODEL when the forge backend is Codex."""
+        _pin_fusion_provider_env(
+            monkeypatch,
+            {
+                **_OPENAI_ONLY_ENV,
+                "CODEX_MODEL": "gpt-orchestration",
+                "FORGE_CODEX_MODEL": "gpt-forge-only",
+            },
+        )
+
+        assert krh._resolve_forge_fusion_agent({}) == (
+            "codex",
+            "gpt-forge-only",
+        )
+
+    def test_resolve_forge_fusion_agent_forge_model_loses_to_payload_llm_model(
+        self, monkeypatch
+    ):
+        """Request ``llm_model`` still outranks the forge-specific env knobs."""
+        _pin_fusion_provider_env(
+            monkeypatch,
+            {
+                **_ANTHROPIC_ONLY_ENV,
+                "CLAUDE_MODEL": "claude-orchestration",
+                "FORGE_CLAUDE_MODEL": "claude-forge-only",
+            },
+        )
+
+        assert krh._resolve_forge_fusion_agent(
+            {"llm_model": "claude-payload"}
+        ) == ("claude", "claude-payload")
+
+    def test_resolve_forge_fusion_agent_ignores_other_backend_forge_model(
+        self, monkeypatch
+    ):
+        """A Codex forge override must not leak onto the Claude forge path."""
+        _pin_fusion_provider_env(
+            monkeypatch,
+            {
+                **_ANTHROPIC_ONLY_ENV,
+                "CLAUDE_MODEL": "claude-orchestration",
+                "FORGE_CODEX_MODEL": "gpt-forge-only",
+            },
+        )
+
+        assert krh._resolve_forge_fusion_agent({}) == (
+            "claude",
+            "claude-orchestration",
+        )
 
     def test_resolve_forge_fusion_agent_rejects_invalid_explicit_backend(self, monkeypatch):
         _pin_fusion_provider_env(
