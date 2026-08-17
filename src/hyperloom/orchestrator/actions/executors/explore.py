@@ -90,8 +90,103 @@ log = logging.getLogger(__name__)
 # rebench is the second gate. Override per-task via ``params['keep_threshold_pct']``.
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 
+# Run-to-run spread on throughput for the same configuration on the same server.
+# Whether a repeat could flip a verdict depends on this and not on the threshold:
+# a variant measured at 0.05% gain against a 1% threshold is only one noise
+# envelope from crossing it, and a repeat of that is a genuine second opinion. A
+# variant at -0.8% is nearly four envelopes away and a repeat only re-derives the
+# same answer. The audited session's warmup and decision rounds of one
+# configuration landed 0.06% apart; 0.5% is the conservative envelope around it.
+REPEAT_NOISE_PCT = 0.5
+
+# How many noise envelopes a prior result must sit clear of the KEEP threshold
+# before a repeat is treated as settled rather than as a second opinion.
+SETTLED_MARGIN = 2.0
+
+
+# The warmup round exists to leave the server hot so the decision round is
+# measured warm, and to run the accuracy gate. Its throughput number is read for
+# success/failure and then discarded. It nevertheless runs a full-length
+# benchmark: ``_workload_envs`` sizes ``NUM_PROMPTS`` at ``CONC`` times a factor
+# of 10/5/3/2 depending on sequence length, so the round Arbor throws away is
+# five to ten waves of the concurrency.
+#
+# One wave is enough to warm. It fills every slot and decodes a full OSL, and
+# measurements taken immediately after a four-token warmup show no ordered
+# difference from ones taken after a full benchmark (see Infera's
+# ``warmup_cost.py``). The accuracy gate is a separate workload and does not
+# read ``NUM_PROMPTS``, so it is unaffected.
+#
+# Set ``INFERENCE_OPTIMIZER_EXPLORE_SHORT_WARMUP=0`` to restore the full-length
+# warmup round.
+WARMUP_WAVES = 1
+
+
+def _short_warmup_enabled() -> bool:
+    raw = os.environ.get("INFERENCE_OPTIMIZER_EXPLORE_SHORT_WARMUP")
+    return (raw if raw is not None else "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _warmup_num_prompts(config_path: Any) -> int | None:
+    """How many prompts a warmup round needs: one wave of the concurrency.
+
+    Returns ``None`` when the concurrency cannot be read, which leaves the
+    warmup round at whatever length ``_workload_envs`` would have chosen. That
+    is the safe direction: the failure mode is the warmup we already run.
+    """
+    try:
+        with Path(config_path).open(encoding="utf-8") as fp:
+            cfg = yaml.safe_load(fp) or {}
+        envs = (cfg.get("benchmark") or {}).get("envs") or {}
+        conc = int(envs.get("CONC", 0) or 0)
+    except Exception:  # noqa: BLE001 — best-effort; fall back to the long warmup
+        return None
+    if conc <= 0:
+        return None
+    return max(conc * WARMUP_WAVES, conc)
+
 
 _now_iso = functools.partial(now_iso, "auto")
+
+
+def _settled_against_same_stack(
+    prior: dict[str, Any],
+    ws_sig: str,
+    base_tput: float,
+    keep_threshold_pct: float,
+) -> bool:
+    """Has this exact variant already been benchmarked against this exact stack?
+
+    Re-running it then costs a server boot and a full benchmark to re-derive a
+    number the ledger already holds. But skipping is only safe while nothing the
+    variant composes with has moved: a flag that loses alone can win once a patch
+    it interacts with has landed, and dropping it for that reason would be the
+    search quietly narrowing itself, which is the one outcome worth more than the
+    GPU time.
+
+    So this asks for an exact match on three things. The workload signature, so a
+    different shape is always re-measured. The baseline the prior run was scored
+    against -- the running baseline only advances when a KEEP changes the stack,
+    so an unchanged number means an unchanged stack. And a conclusive prior
+    outcome sitting at least :data:`SETTLED_MARGIN` noise envelopes clear of the
+    KEEP threshold, because a result that landed near it may have been decided by
+    noise rather than by the variant.
+
+    Every other case returns False and the variant is benchmarked again,
+    including a baseline that merely drifted on re-measurement. The failure mode
+    is a repeated run, never a missed optimization.
+    """
+    if str(prior.get("workload_signature") or "") != ws_sig:
+        return False
+    if str(prior.get("status") or "") != "succeeded":
+        return False
+    prior_base = prior.get("base_tput")
+    gain = prior.get("gain_pct")
+    if prior_base is None or gain is None or base_tput <= 0:
+        return False
+    if float(prior_base) != float(base_tput):
+        return False
+    return abs(float(gain) - keep_threshold_pct) > REPEAT_NOISE_PCT * SETTLED_MARGIN
 
 
 def _initial_explore_search_state() -> dict[str, Any]:
@@ -1016,14 +1111,33 @@ class ExploreExecutor:
                     }
                 )
                 continue
+            prior = (tested_dict or {}).get(fp)
+            if isinstance(prior, dict) and _settled_against_same_stack(
+                prior, ws_sig, base_tput, keep_threshold_pct
+            ):
+                skipped_dup.append(
+                    {
+                        "name": gv.name,
+                        "fingerprint": fp,
+                        "reason": "settled_prior_round",
+                        "detail": (
+                            f"tested in {prior.get('round_id') or 'an earlier round'} "
+                            f"against the same stack: {float(prior.get('gain_pct')):.2f}% "
+                            f"gain, {prior.get('outcome') or 'no outcome'}"
+                        ),
+                    }
+                )
+                continue
             unique_in_round[fp] = gv
 
         runnable: list[GridVariant] = list(unique_in_round.values())
+        _settled = sum(1 for d in skipped_dup if d.get("reason") == "settled_prior_round")
         log.info(
-            "explore dedup: payload=%d → runnable=%d (round_dup=%d)",
+            "explore dedup: payload=%d → runnable=%d (round_dup=%d, settled=%d)",
             len(grid),
             len(runnable),
-            len(skipped_dup),
+            len(skipped_dup) - _settled,
+            _settled,
         )
 
         # Multi-node grid shaping. Both helpers short-circuit in single-node
@@ -1191,10 +1305,33 @@ class ExploreExecutor:
                     if use_warm_decision:
                         warmup_slot = slot / "warmup_round"
                         warmup_slot.mkdir(parents=True, exist_ok=True)
+                        # The warmup's throughput is discarded below, so it only
+                        # has to reach steady state and run the accuracy gate.
+                        # Shorten it to one wave of the concurrency instead of
+                        # the five to ten a measured round would use.
+                        warmup_gv = run_gv
+                        warmup_prompts = (
+                            _warmup_num_prompts(config_path) if _short_warmup_enabled() else None
+                        )
+                        if warmup_prompts is not None:
+                            warmup_envs = dict(run_extra_envs)
+                            warmup_envs["NUM_PROMPTS"] = str(warmup_prompts)
+                            warmup_gv = _carry_variant_metadata(
+                                run_gv,
+                                GridVariant(
+                                    name=gv.name,
+                                    extra_server_args=gv.extra_server_args,
+                                    extra_envs=warmup_envs,
+                                    note=gv.note,
+                                    remove_args=run_remove_args,
+                                    unset_envs=run_unset_envs,
+                                    args_mode=str(getattr(gv, "args_mode", "append") or "append"),
+                                ),
+                            )
                         warmup_results = await run_grid(
                             base_yaml_path=config_path,
                             base_extra_args=stack_extra_args,
-                            grid=[run_gv],
+                            grid=[warmup_gv],
                             output_root=warmup_slot,
                             variant_timeout_sec=timeout_sec,
                             model_path=resolved_model,
