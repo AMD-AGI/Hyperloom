@@ -420,10 +420,18 @@ def collect_geak(
 
     # Back-fill per-kernel attribution from ``kernel_journey.json`` when
     # ``result.json`` shipped the aggregate win but an empty ``accepted_kernels``.
-    # Only fires on a successful run with an empty list; a producer-populated
-    # list is always preserved verbatim.
+    # Fires on any run that completed and returned a workflow result with an
+    # empty list; a producer-populated list is always preserved verbatim.
+    #
+    # ``no_gain`` must be included. ``status`` is derived from
+    # ``throughput_speedup``, which GEAK reports on the run's headline basis --
+    # frequently ``cold``. A run can therefore be stamped ``no_gain`` on the cold
+    # basis while ``alignment_metrics.hot_geak_speedup`` records a large measured
+    # hot win and the journey holds genuine KEEP rows. Gating attribution on
+    # ``status == "ok"`` discarded those rows entirely. ``error`` / ``timeout``
+    # stay excluded: those runs never produced a trustworthy workflow return.
     accepted_kernels_source = "result" if accepted_kernels else None
-    if not accepted_kernels and status == "ok":
+    if not accepted_kernels and status in ("ok", "no_gain"):
         backfilled = _geak_accepted_kernels_from_journey(result, warnings)
         if backfilled:
             accepted_kernels = backfilled

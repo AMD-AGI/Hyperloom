@@ -632,3 +632,44 @@ async def test_sweep_via_geak_requires_existing_bench_script(tmp_path: Path) -> 
 
     assert result["status"] == "failed"
     assert result["error_class"] == "missing_bench_script"
+
+
+def test_collect_geak_backfill_fires_on_no_gain(tmp_path: Path) -> None:
+    # A run stamped ``no_gain`` on the COLD basis can still hold a measured hot
+    # win and genuine KEEP rows in the journey. Attribution must not be dropped.
+    eval_dir = tmp_path / "geak" / "eval"
+    _write_kernel_journey(eval_dir)
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "no_gain",
+            "throughput_speedup": 0.9877,
+            "alignment_metrics": {"hot_geak_speedup": 2.5722, "final_basis": "cold"},
+            "accepted_kernels": [],
+            "accepted_heads": [{"short_name": "fused_moe_kernel_gptq_awq"}],
+            "eval_dir": str(eval_dir),
+        },
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["accepted_kernels_source"] == "kernel_journey_backfill"
+    assert out["kernels_optimized"] == 1
+    assert out["accepted_kernels"][0]["kernel_id"] == "fused_moe_kernel_gptq_awq"
+
+
+def test_collect_geak_backfill_still_skipped_on_error(tmp_path: Path) -> None:
+    # ``error`` / ``timeout`` runs never produced a trustworthy workflow return;
+    # the gate must stay closed for them.
+    eval_dir = tmp_path / "geak" / "eval"
+    _write_kernel_journey(eval_dir)
+    for bad in ("error", "timeout", "missing"):
+        state = {
+            "kernel_optimizer": "geak",
+            "geak_result": {
+                "status": bad,
+                "accepted_kernels": [],
+                "eval_dir": str(eval_dir),
+            },
+        }
+        out = collect_geak(tmp_path, state, [])
+        assert out["accepted_kernels"] == [], bad
+        assert out["kernels_optimized"] == 0, bad
