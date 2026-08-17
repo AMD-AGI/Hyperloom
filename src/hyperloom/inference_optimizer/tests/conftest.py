@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -197,3 +198,138 @@ def patch_integrate_patch_allowlist(monkeypatch, tmp_path: Path) -> None:
         return tuple(merged)
 
     monkeypatch.setattr(ip, "resolve_source_file_allowlist", _merged)
+
+
+# ---------------------------------------------------------------------------
+# Progress cadence: how long a long-running path may go unreported
+# ---------------------------------------------------------------------------
+
+
+# Production seconds per real test second. A heartbeat's honesty is a ratio —
+# notes per suppression window — so the whole timescale is compressed and the
+# assertions keep speaking in the numbers the window is actually configured
+# with (a 60s tick, a 300s window, a benchmark that blocks for ten minutes).
+PROGRESS_TIME_SCALE: float = 600.0
+
+
+class ProgressCadence:
+    """Records when a path reported progress, on a simulated production clock.
+
+    A long-running path is not judged by whether it reports at all — every one
+    of them reports on entry — but by whether the gap between two consecutive
+    notes stays under the window a consumer waits before calling the owning
+    agent silent. That is the property a dropped liveness callback breaks and
+    an "it emitted a note" assertion cannot see.
+
+    The clock is simulated rather than read off the wall: it advances only when
+    the fake child does a chunk of the work it is standing in for
+    (:func:`chatty_child` calls :meth:`sleep`). Reading real elapsed time and
+    scaling it by :data:`PROGRESS_TIME_SCALE` instead would multiply every
+    scheduling delay in the test — a slow import, a loaded runner starving the
+    event loop — by 600 and charge it to the path under test, which turns a 4x
+    headroom into a coin flip on a 2-vCPU CI runner. What the simulated clock
+    gives up is the ability to see a long *non-child* block, which no compressed
+    wall-clock measurement could tell apart from load anyway.
+    """
+
+    def __init__(self, scale: float = PROGRESS_TIME_SCALE) -> None:
+        """Start the clock at zero.
+
+        Args:
+            scale (float): Production seconds per real second.
+        """
+        self.scale = scale
+        self.notes: list[dict] = []
+        self.reported_at: list[float] = []
+        self._elapsed = 0.0
+
+    def now(self) -> float:
+        """Production seconds of simulated work done so far."""
+        return self._elapsed
+
+    def sleep(self, simulated_s: float) -> None:
+        """Charge ``simulated_s`` production seconds, blocking the real time they map to.
+
+        The real block is what gives the heartbeat driver — ticking on the same
+        compressed timescale — its chance to notice the output and report.
+
+        Args:
+            simulated_s (float): Production seconds the simulated child spent.
+        """
+        self._elapsed += simulated_s
+        time.sleep(simulated_s / self.scale)
+
+    def sink(self):
+        """Return the ambient progress sink to pass to ``progress_scope``."""
+
+        async def _sink(**note) -> None:
+            self.notes.append(note)
+            self.reported_at.append(self.now())
+
+        return _sink
+
+    def widest_silence(self) -> float:
+        """Longest unreported stretch, in production seconds.
+
+        Counts the run-up to the first note and the tail after the last one, so
+        a path that reports only on entry is measured over everything it then
+        stayed quiet for.
+        """
+        marks = [0.0, *self.reported_at, self.now()]
+        return max(later - earlier for earlier, later in zip(marks, marks[1:]))
+
+
+@pytest.fixture
+def progress_cadence(monkeypatch) -> "ProgressCadence":
+    """A :class:`ProgressCadence` with the heartbeat tick on the same timescale."""
+    from hyperloom.orchestrator.trace import task_progress
+
+    monkeypatch.setattr(
+        task_progress,
+        "_OUTPUT_HEARTBEAT_INTERVAL_S",
+        task_progress._OUTPUT_HEARTBEAT_INTERVAL_S / PROGRESS_TIME_SCALE,
+    )
+    return ProgressCadence()
+
+
+def chatty_child(cadence: ProgressCadence, inner, *, blocks_for_s: float, line_every_s: float):
+    """Wrap a fake ``run_with_session_kill`` so its child talks while it blocks.
+
+    Args:
+        cadence (ProgressCadence): Advanced by ``line_every_s`` per line, so it
+            is the simulated child's progress that moves the clock.
+        inner: The fake the path already uses; called for the return value once
+            the simulated child stops talking.
+        blocks_for_s (float): Production seconds the child runs for.
+        line_every_s (float): Production seconds between its output lines.
+
+    Returns:
+        A ``run_with_session_kill`` stand-in that drives ``on_output``.
+    """
+
+    def _run(cmd, *args, on_output=None, **kwargs):
+        for _ in range(int(blocks_for_s / line_every_s)):
+            cadence.sleep(line_every_s)
+            if on_output is not None:
+                on_output()
+        return inner(cmd, *args, **kwargs)
+
+    return _run
+
+
+def suppression_window_s() -> float:
+    """The silence past which robustness accuses an agent of stalling."""
+    from hyperloom.agents.robustness.signals.stall import StallConfig
+
+    return StallConfig().stall_timeout_s
+
+
+def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
+    """Put the executors in multi-node mode with a no-op per-round server restart."""
+    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl
+
+    async def _no_restart(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", str(nodes))
+    monkeypatch.setattr(mnl, "restart_server_for_round", _no_restart)

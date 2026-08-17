@@ -13,6 +13,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -310,6 +311,152 @@ def test_run_with_session_kill_streams_child_output_to_parent(capsys):
     assert "child-err" in captured.err
 
 
+def test_run_with_session_kill_reports_each_line_of_child_output():
+    """The liveness callback fires while the child runs, once per line it emits."""
+    code = "import sys, time\nfor i in range(3):\n    print(i, flush=True)\n    time.sleep(0.05)\n"
+    lines: list[float] = []
+
+    cp = run_with_session_kill(
+        [sys.executable, "-c", code],
+        timeout=10,
+        on_output=lambda: lines.append(time.monotonic()),
+    )
+
+    assert cp.returncode == 0
+    assert len(lines) == 3
+
+
+def _appends_until_stopped(path: Path, line: str, stop: threading.Event) -> threading.Thread:
+    """Start a writer that appends ``line`` to ``path`` until ``stop`` is set.
+
+    Stands in for a writer that is provably not the child under test: the
+    inference server, which keeps logging while its benchmark client is wedged.
+
+    Args:
+        path (Path): Log file to append to.
+        line (str): Line written each round, newline included.
+        stop (threading.Event): Set by the caller to end the writer.
+
+    Returns:
+        threading.Thread: The started daemon writer.
+    """
+
+    def _write() -> None:
+        with path.open("a") as fh:
+            while not stop.wait(0.05):
+                fh.write(line)
+                fh.flush()
+
+    writer = threading.Thread(target=_write, daemon=True)
+    writer.start()
+    return writer
+
+
+@pytest.mark.parametrize(
+    ("appended_line", "reports_liveness"),
+    [
+        ('INFO:     127.0.0.1:0 - "GET /health HTTP/1.1" 200 OK\n', False),
+        ("Avg generation throughput: 0.0 tokens/s, Running: 0 reqs\n", False),
+        ("Avg generation throughput: 123.4 tokens/s, Running: 8 reqs\n", True),
+    ],
+    ids=[
+        "an_access_log_line",
+        "an_idle_engines_throughput_line",
+        "a_generation_throughput_line",
+    ],
+)
+def test_run_with_session_kill_reports_a_silent_child_alive_only_on_real_progress(
+    tmp_path,
+    appended_line: str,
+    reports_liveness: bool,
+):
+    """A log that grew is not the child talking; a log that shows tokens flowing is.
+
+    All three lines are written by the same third party, so growth alone cannot
+    tell them apart — and one of them is the access line vLLM and sglang emit
+    per request, including the health probe the robustness agent issues on its
+    own tick. Counting those as the child's output closes a loop where the
+    monitor's probe manufactures the evidence that suppresses its own stall
+    accusation, and turns the heartbeat into the bare timer it documents itself
+    as never being. A throughput line is different in kind — whoever logged it,
+    tokens were being produced during the interval — but only if it carries a
+    rate: some vLLM builds keep printing the stats line at ``0.0 tokens/s`` on
+    an idle engine, and an engine goes idle precisely when the client that was
+    driving it wedges, so the zero-rate line is the shape this failure actually
+    takes in production.
+    """
+    log_path = tmp_path / "server.log"
+    log_path.write_text("Application startup complete\n")
+    stop = threading.Event()
+    writer = _appends_until_stopped(log_path, appended_line, stop)
+    reported: list[int] = []
+    try:
+        cp = run_with_session_kill(
+            [sys.executable, "-c", "import time; time.sleep(2)"],
+            timeout=30,
+            server_log_path=str(log_path),
+            detok_stall_grace_sec=30.0,
+            on_output=lambda: reported.append(1),
+        )
+    finally:
+        stop.set()
+        writer.join(timeout=5.0)
+
+    assert cp.returncode == 0
+    assert bool(reported) is reports_liveness, (
+        f"a child that printed nothing was reported alive {len(reported)} times "
+        f"by {appended_line.strip()!r}"
+    )
+
+
+def test_run_with_session_kill_reports_the_output_a_child_redirected_to_disk(tmp_path):
+    """A round whose body writes only to ``benchmark_stderr.log`` is still working.
+
+    The scriptable and bypass paths run the customer body with its stderr
+    redirected there rather than into the parent's pipe, and a long phase of one
+    — a client that logs its request counter but produces no server throughput
+    line yet — would otherwise have nothing left to report liveness with.
+    """
+    bench = tmp_path / "benchmark_atom_20260731_085850"
+    bench.mkdir(parents=True)
+    (bench / "server.log").write_text("Application startup complete\n")
+    script = (
+        "import sys, time\n"
+        "f = open(sys.argv[1], 'a')\n"
+        "for i in range(6):\n"
+        "    time.sleep(0.2)\n"
+        "    f.write('bench: request %d done\\n' % i); f.flush()\n"
+    )
+    reported: list[int] = []
+
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script, str(bench / "benchmark_stderr.log")],
+        timeout=30,
+        server_log_path=str(tmp_path / "server.log"),
+        detok_stall_grace_sec=30.0,
+        on_output=lambda: reported.append(1),
+    )
+
+    assert cp.returncode == 0
+    assert reported, "a child talking only through its redirected stderr was never reported alive"
+
+
+def test_run_with_session_kill_survives_a_broken_liveness_callback():
+    """Reporting is best-effort; a raising callback must not eat child output."""
+
+    def _boom() -> None:
+        raise RuntimeError("callback is broken")
+
+    cp = run_with_session_kill(
+        [sys.executable, "-c", "print('still-captured', flush=True)"],
+        timeout=10,
+        on_output=_boom,
+    )
+
+    assert cp.returncode == 0
+    assert "still-captured" in (cp.stdout or "")
+
+
 def test_run_with_session_kill_legacy_timeout_still_raises():
     """With ``soft_deadline_sec`` None, a child exceeding the hard ``timeout`` still raises ``TimeoutExpired``."""
     with pytest.raises(subprocess.TimeoutExpired):
@@ -517,6 +664,12 @@ def test_scan_server_log_increment_detects_ready_and_progress(tmp_path):
         f.write("HYPERLOOM_EVAL_START\n")
     off4, ready4, prog4, ev4 = _scan_server_log_increment(str(log_path), off3)
     assert ev4 is True and ready4 is False and prog4 is False and off4 == log_path.stat().st_size
+    # An idle engine keeps printing the same line with no rate on it: the value
+    # is the progress signal, not the marker.
+    with log_path.open("a") as f:
+        f.write("Avg generation throughput: 0.0 tokens/s, Running: 0 reqs\n")
+    off5, _ready5, prog5, _ev5 = _scan_server_log_increment(str(log_path), off4)
+    assert prog5 is False and off5 == log_path.stat().st_size
 
 
 def test_scan_logs_increment_reads_nested_stderr_for_eval_start(tmp_path):
@@ -532,18 +685,48 @@ def test_scan_logs_increment_reads_nested_stderr_for_eval_start(tmp_path):
     assert not Path(passed).exists()
 
     offsets: dict[str, int] = {}
-    ready, _prog, eval_start, grew = _scan_logs_increment(passed, offsets)
-    assert ready is True and eval_start is False and grew is True
+    first = _scan_logs_increment(passed, offsets)
+    assert first.saw_ready is True and first.saw_eval_start is False and first.grew is True
 
     # The marker lands in stderr, never in server.log.
     with (bench / "benchmark_stderr.log").open("a") as f:
         f.write("HYPERLOOM_EVAL_START\n")
-    ready2, _prog2, eval_start2, grew2 = _scan_logs_increment(passed, offsets)
-    assert eval_start2 is True and ready2 is False and grew2 is True
+    second = _scan_logs_increment(passed, offsets)
+    assert second.saw_eval_start is True and second.saw_ready is False and second.grew is True
 
     # Nothing new appended: no re-trigger, offsets stay put.
-    _r3, _p3, eval_start3, grew3 = _scan_logs_increment(passed, offsets)
-    assert eval_start3 is False and grew3 is False
+    third = _scan_logs_increment(passed, offsets)
+    assert third.saw_eval_start is False and third.grew is False
+
+
+def test_scan_logs_increment_tells_the_childs_own_log_from_the_servers(tmp_path):
+    """Only one of the resolved logs is written by the process being waited on.
+
+    ``server.log`` is the inference server's; ``benchmark_stderr.log`` is where
+    Magpie redirects the benchmark body's own stderr, so the parent's pipe stays
+    empty for the whole round and that file is the only place the child's own
+    output shows up. Liveness that cannot tell them apart either vouches for a
+    wedged client or leaves a working one unable to report.
+    """
+    bench = tmp_path / "benchmark_atom_20260731_085850"
+    bench.mkdir(parents=True)
+    server_log = bench / "server.log"
+    child_log = bench / "benchmark_stderr.log"
+    server_log.write_text("Application startup complete\n")
+    child_log.write_text("running benchmark\n")
+    passed = str(tmp_path / "server.log")
+    offsets: dict[str, int] = {}
+    _scan_logs_increment(passed, offsets)
+
+    with server_log.open("a") as f:
+        f.write('INFO:     127.0.0.1:0 - "GET /health HTTP/1.1" 200 OK\n')
+    server_only = _scan_logs_increment(passed, offsets)
+    assert server_only.grew is True and server_only.child_spoke is False
+
+    with child_log.open("a") as f:
+        f.write("bench: 128/2000 requests done\n")
+    child_only = _scan_logs_increment(passed, offsets)
+    assert child_only.grew is True and child_only.child_spoke is True
 
 
 def test_run_with_session_kill_detok_stall_reaps_ready_but_silent_server(tmp_path):

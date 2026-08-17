@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import logging
 
@@ -21,11 +21,20 @@ from hyperloom.inference_optimizer.session.session_paths import _RUNS_ACTIONS, r
 from ..bus.resource_lock import Lease, ResourceLockManager
 from ..policy.gate import PolicyDenied
 from ..state.task_registry import IllegalTransition, Task, TaskNotFound, TaskRegistry
+from ..trace.task_progress import ProgressReporter, progress_scope
 
 if TYPE_CHECKING:
     from ..policy.gate import PolicyGate
 
 log = logging.getLogger(__name__)
+
+
+# Every ``tasks`` row is dispatched and awaited by the Coordinator's
+# orchestration loop, and the table carries no requester column, so a heartbeat
+# can only ever attest to this one agent. Widening that — letting any running
+# task vouch for whoever happens to be quiet — is what allowed a single busy
+# task to silence stall detection for the whole session.
+PROGRESS_OWNER_AGENT = "orchestration"
 
 
 @dataclass
@@ -282,7 +291,8 @@ class SubAgentRunner:
                 extra.update(dict(extra_context))
             ctx = RunnerContext(task=task, lease=lease, extra=extra)
             try:
-                result_payload = await runner(ctx)
+                with progress_scope(self._progress_reporter(task.task_id)):
+                    result_payload = await runner(ctx)
             except Exception as exc:  # noqa: BLE001 — surface to task.history
                 await self._transition_resilient(
                     task.task_id,
@@ -314,5 +324,51 @@ class SubAgentRunner:
             if lease is not None:
                 await self.locks.release(lease)
 
+    def _progress_reporter(self, task_id: str) -> ProgressReporter:
+        """Build the ambient progress sink for one task's executor.
 
-__all__ = ["RunnerContext", "ExecutorFn", "SubAgentResult", "SubAgentRunner"]
+        Composite actions call :func:`~...trace.task_progress.report_progress`
+        as each internal unit lands, which reaches this sink and lands on the
+        task row as a heartbeat instead of the row going dark for the whole
+        run. Each note is stamped with :data:`PROGRESS_OWNER_AGENT` so a
+        consumer can tell whose silence the heartbeat actually excuses.
+
+        Args:
+            task_id (str): Task the returned sink reports for.
+
+        Returns:
+            ProgressReporter: ``async (**note) -> None``.
+        """
+
+        async def sink(**note: Any) -> None:
+            note.setdefault("agent", PROGRESS_OWNER_AGENT)
+            log.info("task_progress: task=%s %s", task_id, _format_progress(note))
+            await self.tasks.record_progress(task_id, note)
+
+        return sink
+
+
+def _format_progress(note: dict[str, Any]) -> str:
+    """Render a progress note as one greppable ``key=value`` log line.
+
+    Args:
+        note (dict[str, Any]): The reported note; ``index``/``total`` collapse
+            into a single ``3/12`` counter and empty values are dropped.
+
+    Returns:
+        str: Space-separated ``key=value`` pairs.
+    """
+    index, total = note.get("index"), note.get("total")
+    parts = [f"{k}={v}" for k, v in note.items() if k not in ("index", "total") and v not in (None, "")]
+    if index is not None:
+        parts.append(f"progress={index}/{total}" if total is not None else f"progress={index}")
+    return " ".join(parts)
+
+
+__all__ = [
+    "PROGRESS_OWNER_AGENT",
+    "RunnerContext",
+    "ExecutorFn",
+    "SubAgentResult",
+    "SubAgentRunner",
+]
