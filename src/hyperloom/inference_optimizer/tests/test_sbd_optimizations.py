@@ -14,6 +14,58 @@ from hyperloom.inference_optimizer.breakdown.collectors import (
 from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, instrument
 
 
+def test_a_promoted_collective_keep_is_credited_to_its_own_family(tmp_path):
+    """The collective lane settles its own verdict, outside the integrate queue.
+
+    No kernel recorder fires for it, so without a record of its own the change
+    is invisible to the read model: the patch lands, the workload moves, and
+    every point it earned reports as belonging to no step.
+    """
+    instrument.record_collective_promotion(
+        tmp_path,
+        integration_id="integration-1",
+        kernel_id="k007",
+        baseline_tput=100.0,
+        new_tput=130.0,
+        gain_pct=30.0,
+        patch_path="/ws/collective.patch",
+        collective_op="all_reduce",
+        world_size=8,
+        ts="2026-01-01T00:00:20+00:00",
+    )
+    parts = assemble_parts(tmp_path)
+    operations = list(parts.get("operations") or [])
+    measurements = list(parts.get("measurements") or [])
+    operations.append(
+        {"operation_id": "op-base", "kind": "baseline", "measurement_refs": ["m-base"]}
+    )
+    measurements.append(
+        {"measurement_id": "m-base", "name": "throughput", "value": 100.0}
+    )
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1",
+        operations,
+        measurements,
+        list(parts.get("adoptions") or []),
+        list(parts.get("artifacts") or []),
+        [],
+        [],
+        warnings,
+    )
+
+    entry = result["entries"][0]
+    assert entry["optimization_kind"] == "kernel_collective"
+    assert entry["source"] == "kernel_agent"
+    assert entry["backend"] == "forge"
+    assert entry["gain_method"] == "baseline_chain"
+    assert result["summary_by_kind"]["kernel_collective"]["total_gain_pct"] == 30.0
+    assert result["validation"]["attributed_total_gain_pct"] == 30.0
+    assert result["validation"]["unattributed_gain_pct"] == 0.0
+    assert warnings == []
+
+
 def test_collective_stack_entry_keeps_campaign_evidence():
     state = {
         "cumulative_gain_validated_stack_len": 1,

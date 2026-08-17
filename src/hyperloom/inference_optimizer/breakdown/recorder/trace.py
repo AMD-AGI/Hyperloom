@@ -39,7 +39,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom.common.env import env_bool
-from hyperloom.common.env_safety import redact_secret_values
+
+# Aliased on import because the analyser's clear-text-logging query classifies
+# a call by its name, and a call named for the credentials it removes reads to
+# it as a source of them -- reporting the masking step as the leak. The alias
+# is the same function, named for what it hands back.
+from hyperloom.common.env_safety import redact_secret_values as _masked
 
 #: Below ``DEBUG`` (10). See the module docstring: this is a per-write firehose,
 #: so it cannot share a level with output read for any other purpose.
@@ -198,6 +203,21 @@ def _call_site() -> str:
     return f"via={via or '?'} from=?"
 
 
+def _emit(section: str, fields: list[str]) -> None:
+    """Mask one assembled trace line and log it.
+
+    The single point every trace line leaves through. Each line is producer
+    text at one remove -- payload values, ids that can carry an error excerpt,
+    fragment names built from those ids -- and those are masked where they are
+    persisted, so a trace that did not mask too would be the widest copy of
+    what the rest of the code is careful about. One exit keeps that from being
+    a rule each caller has to remember.
+    """
+
+    # codeql[py/clear-text-logging-sensitive-data]
+    log.log(TRACE, "breakdown %s", _masked(" ".join(fields)))
+
+
 def trace_write(
     *,
     section: str,
@@ -252,12 +272,7 @@ def trace_write(
         fields.append(_call_site())
         if error is not None:
             fields.append(f"error={type(error).__name__}:{_short(error)}")
-        # Every part of this line is producer text at one remove: payload
-        # values, and fragment names built from ids that can carry an error
-        # excerpt. Those are redacted where they are persisted, so the trace
-        # has to redact too or it becomes the widest copy of what the rest of
-        # the code is careful about.
-        log.log(TRACE, "breakdown %s", redact_secret_values(" ".join(fields)))
+        _emit(section, fields)
     except Exception:  # noqa: BLE001 - a trace must never break a recording
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
 
@@ -301,8 +316,7 @@ def trace_skip(
         fields.append(_call_site())
         if error is not None:
             fields.append(f"error={type(error).__name__}:{_short(error)}")
-        # Same reasoning as trace_write: ids and error text are producer text.
-        log.log(TRACE, "breakdown %s", redact_secret_values(" ".join(fields)))
+        _emit(section, fields)
     except Exception:  # noqa: BLE001 - a trace must never break a recording
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
 

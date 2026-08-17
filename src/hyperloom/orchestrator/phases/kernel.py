@@ -3311,6 +3311,47 @@ class KernelPhase(PhaseHandler):
         self.shared_state.cumulative_gain_validated_stack_len = len(
             self.shared_state.optimization_stack
         )
+        # This lane settles its own verdict instead of going through the kernel
+        # integrate queue, so no kernel recorder fires for it. Without these two
+        # the change is invisible to the read model: the patch lands, the
+        # workload moves, and every point it earned reports as belonging to no
+        # step at all.
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_collective_promotion(
+                self.session_dir,
+                integration_id=integration_id,
+                kernel_id=str(collective_result.get("kernel_id") or ""),
+                baseline_tput=baseline_tput,
+                new_tput=new_tput,
+                gain_pct=incremental_gain,
+                patch_path=patch,
+                target_file=str(entry["target_file"] or ""),
+                collective_op=str(collective_result.get("collective_op") or ""),
+                world_size=collective_result.get("world_size"),
+                kernel_speedup=collective_result.get("kernel_speedup"),
+                configuration=envs,
+                ts=ts,
+            )
+            instrument.record_session_validation(
+                self.session_dir,
+                baseline_tput=baseline_tput,
+                validated_tput=new_tput,
+                validated_gain_pct=total_gain,
+                stack_len=self.shared_state.cumulative_gain_validated_stack_len,
+                source="collective_promote",
+                measurement_basis="e2e_rebench",
+                ts=ts,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("record_collective_promotion failed", exc_info=True)
+            trace_recording_skipped(
+                "kernel_collective",
+                reason="caller raised before the recorder",
+                entity=integration_id,
+                error=exc,
+            )
 
     async def _run_forge_fusion(self) -> None:
         """Run autonomous kernel fusion during KERNEL entry."""

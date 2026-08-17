@@ -2230,6 +2230,171 @@ def record_gemm_tuning_operation(
     record_operation(session_dir, operation_id=operation_id, producer=producer, adoption_refs=[adoption_id])
 
 
+def record_collective_promotion(
+    session_dir: Path | str | None,
+    *,
+    integration_id: str,
+    kernel_id: str = "",
+    baseline_tput: float | None = None,
+    new_tput: float | None = None,
+    gain_pct: float | None = None,
+    patch_path: str = "",
+    target_file: str = "",
+    backend: str = "forge",
+    collective_op: str = "",
+    world_size: Any = None,
+    kernel_speedup: Any = None,
+    configuration: Mapping[str, Any] | None = None,
+    ts: str | None = None,
+    producer: str = PRODUCER_KERNEL_AGENT,
+) -> None:
+    """Record an end-to-end validated collective KEEP as it is promoted.
+
+    The collective lane reaches its verdict through its own recovery path
+    rather than the kernel integrate queue, so none of the kernel recorders
+    fire for it. Left unrecorded, the read model cannot see the change at all:
+    the patch lands, the workload moves, and the whole gain reports as
+    belonging to no step. Recorded here, it is one attempt of kind
+    ``kernel_collective`` with the adoption that credits it.
+
+    Args:
+        session_dir: The session directory; a falsy value is a no-op.
+        integration_id: The integrate this promotion settled, which is what
+            keeps two promotions of the same kernel apart.
+        kernel_id: The kernel the collective change targets.
+        baseline_tput: Session baseline throughput the gain is stated against.
+        new_tput: Throughput measured after the change landed.
+        gain_pct: The end-to-end gain the integrate measured.
+        patch_path: The applied patch.
+        target_file: The file the patch changed.
+        backend: The engine that produced the change.
+        collective_op: The collective operation optimized, for evidence.
+        world_size: The world size it was measured at, for evidence.
+        kernel_speedup: The kernel-time ratio behind the end-to-end figure.
+        configuration: Environment carried by the change.
+        ts: Author-time stamp the caller already minted for this promotion.
+        producer: The breakdown producer label.
+    """
+    if not session_dir or not integration_id:
+        trace_skip(
+            reason="no session_dir" if not session_dir else "no integration_id",
+            section="kernel_collective",
+            entity=kernel_id,
+        )
+        return
+    try:
+        now = str(ts or _now_iso_safe())
+        operation_id = _stable_id(
+            "op",
+            "kernel_collective",
+            _session_key(session_dir),
+            f"integration:{integration_id}",
+        )
+        subject = {
+            "subject_id": _kernel_subject_id(session_dir, str(kernel_id or integration_id)),
+            "subject_type": "kernel",
+            "role": "optimization_target",
+            "name": str(kernel_id or "forge_collective"),
+        }
+        measurement_refs: list[str] = []
+        for name, raw, unit, basis in (
+            ("baseline_throughput", baseline_tput, "tok/s", "output"),
+            ("final_throughput", new_tput, "tok/s", "output"),
+            ("e2e_gain_pct", gain_pct, "percent", "output"),
+            ("best_speedup", kernel_speedup, "ratio", "kernel_time_ratio"),
+        ):
+            numeric = to_float(raw)
+            if numeric is None:
+                continue
+            # Keyed by the integrate these came off, so re-running the lane
+            # measures beside these rather than over them.
+            occurrence = _measurement_occurrence(integration_id, value=numeric)
+            measurement_id = _stable_id("measurement", operation_id, name, occurrence)
+            record_measurement(
+                session_dir,
+                measurement_id=measurement_id,
+                producer=producer,
+                operation_id=operation_id,
+                kind="kernel_collective",
+                name=name,
+                value=numeric,
+                unit=unit,
+                status="validated",
+                measured_at=now,
+                metric_basis=basis,
+                dimensions={"engine": backend, "collective_op": str(collective_op or "")},
+                **_measurement_metadata("collective_integrate_e2e"),
+            )
+            measurement_refs.append(measurement_id)
+        artifact_refs: list[str] = []
+        for kind, path in (("patch", patch_path), ("target_file", target_file)):
+            if not path:
+                continue
+            artifact_id = _stable_id("artifact", operation_id, kind, path)
+            record_artifact(
+                session_dir,
+                artifact_id=artifact_id,
+                producer=producer,
+                operation_id=operation_id,
+                producer_operation_id=operation_id,
+                subject=subject,
+                kind=kind,
+                path=str(path),
+                coverage={"status": "reference_only"},
+            )
+            artifact_refs.append(artifact_id)
+        adoption_id = _stable_id("adoption", operation_id, "collective")
+        _record_adoption_transition(
+            session_dir,
+            adoption_id=adoption_id,
+            producer=producer,
+            operation_id=operation_id,
+            adopted=True,
+            reason="collective_integrate_e2e_passed",
+            transitioned_at=now,
+            subject=subject,
+            measurement_ids=measurement_refs,
+            artifact_ids=artifact_refs,
+            kind="kernel_collective",
+            agent="kernel_agent",
+            gain_pct=to_float(gain_pct),
+            throughput_before=to_float(baseline_tput),
+            throughput_after=to_float(new_tput),
+            configuration=dict(configuration or {}),
+            validation_basis="e2e_validation",
+            metadata={"validation_tier": "collective_integrate_e2e"},
+        )
+        record_operation(
+            session_dir,
+            operation_id=operation_id,
+            producer=producer,
+            kind="kernel_collective",
+            name=str(kernel_id or "forge_collective"),
+            phase="KERNEL_AGENT",
+            scope="kernel",
+            strategy_group="kernel_optimizer",
+            strategy=backend,
+            executor_class="deterministic",
+            status="succeeded",
+            ended_at=now,
+            subject=subject,
+            outputs={
+                "integrated": True,
+                "decision": "KEEP",
+                "validated": True,
+                "collective_op": str(collective_op or ""),
+                "world_size": world_size,
+                "integration_id": str(integration_id),
+            },
+            measurement_refs=measurement_refs,
+            artifact_refs=artifact_refs,
+            adoption_refs=[adoption_id],
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.debug("record_collective_promotion failed", exc_info=True)
+        trace_skip(reason="writer raised", section="kernel_collective", error=exc)
+
+
 def record_kernel_invocations(
     session_dir: Path | str | None,
     result: dict[str, Any],

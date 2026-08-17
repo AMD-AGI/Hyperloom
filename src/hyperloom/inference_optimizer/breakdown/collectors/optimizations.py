@@ -38,6 +38,7 @@ _SOURCES = (
 _ATTEMPT_KINDS = frozenset(
     {
         "kernel_optimization",
+        "kernel_collective",
         "gemm_tuning",
         "integrate_patch",
         "framework_agent",
@@ -186,6 +187,7 @@ def _work_kind(operation: dict[str, Any]) -> str:
 
 _AGENT_BY_RECORDED_KIND = {
     "kernel_optimization": "kernel_agent",
+    "kernel_collective": "kernel_agent",
     "gemm_tuning": "kernel_agent",
     "framework_agent": "framework_agent",
     "explore": "explore",
