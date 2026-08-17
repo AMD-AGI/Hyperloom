@@ -416,6 +416,45 @@ def _verdict_intent_for(intents: list[dict], target: str) -> dict:
     raise AssertionError(f"no review_verdict intent for {target!r}")
 
 
+def test_commit_review_carries_the_cited_rule_into_the_intent(reviewer):
+    """The Coordinator holds a reject to the verdict its rule declared, and it
+    can only do that if the code the Critic cited survives the commit path."""
+    rev, _kb, sm = reviewer
+    rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_code"))
+    review = {
+        "review_verdicts": [
+            {
+                "target_proposal_msg_id": "aaa1",
+                "verdict": "reject",
+                "reasoning": "proposal carried a self-reported gain",
+                "failure_reason_code": "specialist_quantitative_claim_violation",
+            },
+            {
+                "target_proposal_msg_id": "bbb2",
+                "verdict": "approve",
+                "reasoning": "evidence is complete",
+            },
+        ]
+    }
+    outcome = rev.commit_review(
+        _coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_code"),
+        review,
+    )
+    intents = outcome.intent_envelope["intents"]
+
+    cited = _verdict_intent_for(intents, "aaa1")["payload"]
+    assert cited["failure_reason_code"] == "specialist_quantitative_claim_violation"
+    uncited = _verdict_intent_for(intents, "bbb2")["payload"]
+    assert uncited["failure_reason_code"] == ""
+    logged = [
+        json.loads(line)["decision_review"]
+        for line in (sm.session_dir("sess_code") / "decisions.jsonl").read_text("utf-8").splitlines()
+        if line.strip()
+    ]
+    codes = {d["target_proposal_msg_id"]: d["failure_reason_code"] for d in logged}
+    assert codes["aaa1"] == "specialist_quantitative_claim_violation"
+
+
 def test_commit_review_backfills_advice_text_from_advice_entry(reviewer):
     rev, kb, sm = reviewer
     rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_advice"))

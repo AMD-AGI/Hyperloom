@@ -10,8 +10,8 @@ freeform). It provides:
 * unified-diff structural validation (a patch must carry at least one hunk),
 * git-grounding (``git apply --check`` against a clean checkout so a fabricated
   patch that does not apply to real source is flagged),
-* quantitative-claim guards (forbidden numeric fields + numeric-claim regex on
-  the qualitative argument),
+* quantitative-claim guards (forbidden numeric fields, stripped rather than
+  merely reported, + numeric-claim regex on the qualitative argument),
 * the cross-domain Critic rule descriptors, surfaced when ``scope == 'domains'``.
 
 Pure / dependency-light: imports only stdlib + git via subprocess so it can be
@@ -30,10 +30,18 @@ from typing import Any
 # Quantitative / priority fields rejected outright on any patch proposal:
 # throughput / gain numbers are the Coordinator's measured truth, never a
 # self-reported claim from the worker.
+#
+# The ban is scoped to specialist-authored output by where it is applied, not
+# by what it lists: ``strip_forbidden_proposal_fields`` runs on the specialist
+# exit payload alone. ``predicted_gain_pct`` therefore belongs here even though
+# it is a *required* field of a ``propose_action`` intent -- there the number
+# is the Coordinator's estimate, in a specialist's ``proposal_set`` it is the
+# same self-reported claim as ``expected_gain_pct`` under a different name.
 FORBIDDEN_PROPOSAL_FIELDS: frozenset[str] = frozenset(
     {
         "expected_gain",
         "expected_gain_pct",
+        "predicted_gain_pct",
         "bench_evidence",
         "confidence",
         "score",
@@ -41,6 +49,14 @@ FORBIDDEN_PROPOSAL_FIELDS: frozenset[str] = frozenset(
         "force_provenance",
     }
 )
+
+# The same guard at the payload's top level, where ``confidence`` means
+# something else: the output schema asks for a round-level self-assessment and
+# the specialist-round audit rows record it. That is not a per-proposal gain
+# claim and cannot bias which variant gets benched, so banning it here only
+# made the schema contradict itself -- the guard's own scope, per the Critic
+# rules, is ``proposal_set[*]``.
+FORBIDDEN_PAYLOAD_FIELDS: frozenset[str] = FORBIDDEN_PROPOSAL_FIELDS - {"confidence"}
 
 
 # Numeric speedup claims smuggled into a qualitative argument / summary.
@@ -162,6 +178,12 @@ def patch_targets_missing(
 # specialists.profile.SCOPE_DOMAINS to keep this module dependency-light.
 SCOPE_DOMAINS_LITERAL: str = "domains"
 
+# The verdict a rule declares when its violation is advisory: the proposal still
+# reaches the Coordinator, carrying the reason code as a note. Spelled once so a
+# typo in one rule cannot quietly drop it from
+# :func:`advisory_only_reason_codes` and re-arm the reject it asked to avoid.
+ADVISE_VERDICT: str = "advise"
+
 
 @dataclass(frozen=True)
 class CrossDomainRule:
@@ -182,7 +204,7 @@ CROSS_DOMAIN_RULES: tuple[CrossDomainRule, ...] = (
             "domain in scope — why this change is necessary within that "
             "domain's boundary."
         ),
-        failure_verdict="advise",
+        failure_verdict=ADVISE_VERDICT,
         failure_reason_code="cross_domain_rationale_incomplete",
     ),
     CrossDomainRule(
@@ -192,7 +214,7 @@ CROSS_DOMAIN_RULES: tuple[CrossDomainRule, ...] = (
             "(why these changes must happen together) AND at least "
             "one potential side effect of the combination."
         ),
-        failure_verdict="advise",
+        failure_verdict=ADVISE_VERDICT,
         failure_reason_code="cross_domain_coupling_unspecified",
     ),
     CrossDomainRule(
@@ -205,7 +227,7 @@ CROSS_DOMAIN_RULES: tuple[CrossDomainRule, ...] = (
             "the motivation degenerates so the stack rebench + KEEP "
             "threshold can adjudicate."
         ),
-        failure_verdict="advise",
+        failure_verdict=ADVISE_VERDICT,
         failure_reason_code="cross_domain_motivation_invalid",
     ),
 )
@@ -227,6 +249,97 @@ def cross_domain_rule_descriptors() -> list[dict[str, str]]:
         }
         for r in CROSS_DOMAIN_RULES
     ]
+
+
+# Audit code the Critic cites when a self-reported gain field reaches review.
+QUANTITATIVE_CLAIM_REASON_CODE: str = "specialist_quantitative_claim_violation"
+
+
+def quantitative_claim_rule_descriptor() -> dict[str, Any]:
+    """Return the self-reported-gain rule in the shape the Critic bundle uses.
+
+    Single-sources the field list from :data:`FORBIDDEN_PROPOSAL_FIELDS` so the
+    Critic's copy cannot drift from the one the runner enforces, and carries
+    ``advise`` as the verdict: the fields are stripped before review, so one
+    arriving anyway is a format problem, and rejecting over format costs the
+    round every proposal in the set.
+
+    Returns:
+        A ``rule_id`` / ``description`` / ``forbidden_proposal_fields`` /
+        ``failure_verdict`` / ``failure_reason_code`` dict.
+    """
+    return {
+        "rule_id": "no_self_reported_gain",
+        "description": (
+            "proposal_set[*] must not carry a self-reported gain, priority or "
+            "confidence field: measured gain is the Coordinator's, never the "
+            "worker's claim. These fields are stripped from specialist output "
+            "before review, so treat any that still reach you -- including an "
+            "equivalent smuggled under another name -- as advisory: ignore the "
+            "field and judge the proposal on its merits."
+        ),
+        "forbidden_proposal_fields": sorted(FORBIDDEN_PROPOSAL_FIELDS),
+        "failure_verdict": ADVISE_VERDICT,
+        "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+    }
+
+
+def advisory_only_reason_codes() -> frozenset[str]:
+    """Return the reason codes whose owning rule asked for ``advise``, not ``reject``.
+
+    Derived from the descriptors the Critic is actually handed rather than
+    restated, so a rule that changes its ``failure_verdict`` cannot leave a
+    stale entry behind. Lets the verdict path hold a ``reject`` citing one of
+    these to the verdict its own rule declared: every rule here is a format or
+    strategy hint, and a reject costs the round every proposal in the set.
+
+    Returns:
+        The ``failure_reason_code`` of every rule declaring
+        ``failure_verdict == "advise"``.
+    """
+    descriptors: list[dict[str, Any]] = [quantitative_claim_rule_descriptor()]
+    descriptors.extend(cross_domain_rule_descriptors())
+    codes = {
+        str(d.get("failure_reason_code") or "").strip()
+        for d in descriptors
+        if str(d.get("failure_verdict") or "").strip() == ADVISE_VERDICT
+    }
+    codes.discard("")
+    return frozenset(codes)
+
+
+# The proposal kinds the advisory rules speak about. Both rule families are
+# about a specialist-authored payload -- ``proposal_set[*]`` for the
+# quantitative-claim rule, ``scope=domains`` for the cross-domain ones -- which
+# reaches review as a ``specialist`` proposal or as the ``explore`` grid that
+# ``proposal_set`` is materialised into. ``framework_agent`` is here because the
+# quantitative-claim rule names it by exception ("never fire the rule on them",
+# see prompts/critic.md): its payload always carries ``predicted_gain_pct``, so
+# a verdict citing the rule there is a misapplication of the rule itself.
+#
+# Spelled out rather than derived: no ACTION_CATALOGUE field separates these
+# from ``integrate_patch``, which shares their ``exploration`` verdict class,
+# ``shallow`` family and ``workspace_write`` side effect while being the one
+# action whose materialisation lands the patch under review.
+ADVISORY_RULE_PROPOSAL_KINDS: frozenset[str] = frozenset(
+    {
+        "explore",
+        "framework_agent",
+        "specialist",
+    }
+)
+
+
+def advisory_rules_govern(action_name: str) -> bool:
+    """Return whether the advisory review rules speak about ``action_name``.
+
+    Args:
+        action_name: The proposed action's name.
+
+    Returns:
+        True when the action is one of :data:`ADVISORY_RULE_PROPOSAL_KINDS`.
+    """
+    return str(action_name or "").strip() in ADVISORY_RULE_PROPOSAL_KINDS
 
 
 def numeric_claims(text: str) -> list[str]:
@@ -403,37 +516,69 @@ class PatchSafetyReport:
         return out
 
 
-def scan_quantitative_claims(payload: dict[str, Any]) -> tuple[list[str], list[str]]:
-    """Return ``(forbidden_fields_present, numeric_warning_strings)``.
+def scan_numeric_claims(payload: dict[str, Any]) -> list[str]:
+    """Return the numeric speedup claims smuggled into ``payload``'s prose.
 
-    Forbidden quantitative fields are a hard signal; numeric claims in the
-    summary / qualitative argument are advisory warnings (the Coordinator's
-    measured gain is the truth, not the claim).
+    A number in a summary or qualitative argument is advisory: the Coordinator's
+    measured gain is the truth, not the claim, and the audit note this feeds is
+    how a smuggled one stays visible.
+
+    The forbidden *fields* are a different question, and
+    :func:`strip_forbidden_proposal_fields` is the one place that answers it: it
+    removes them and returns what it took. Answering it a second time here would
+    be a copy of that same ``keys & FORBIDDEN_*`` intersection with nothing
+    holding the two in step.
 
     Args:
         payload: The specialist_done payload to scan.
 
     Returns:
-        A ``(forbidden_fields_present, numeric_warning_strings)`` tuple, each
-        de-duped with order preserved.
+        The matched numeric-claim substrings, de-duped with order preserved.
     """
-    forbidden = sorted(set((payload or {}).keys()) & FORBIDDEN_PROPOSAL_FIELDS)
     warnings: list[str] = []
     for key in ("summary", "expected_qualitative_argument", "cross_domain_rationale"):
-        hits = numeric_claims(str((payload or {}).get(key) or ""))
-        if hits:
-            warnings.extend(hits)
+        warnings.extend(numeric_claims(str((payload or {}).get(key) or "")))
     for proposal in (payload or {}).get("proposal_set") or []:
         if not isinstance(proposal, dict):
             continue
-        forbidden.extend(sorted(set(proposal.keys()) & FORBIDDEN_PROPOSAL_FIELDS))
-        hits = numeric_claims(str(proposal.get("expected_qualitative_argument") or ""))
-        if hits:
-            warnings.extend(hits)
-    # de-dupe, preserve order
-    forbidden = list(dict.fromkeys(forbidden))
-    warnings = list(dict.fromkeys(warnings))
-    return forbidden, warnings
+        warnings.extend(numeric_claims(str(proposal.get("expected_qualitative_argument") or "")))
+    return list(dict.fromkeys(warnings))
+
+
+def strip_forbidden_proposal_fields(payload: dict[str, Any]) -> list[str]:
+    """Remove the forbidden quantitative keys from ``payload`` in place.
+
+    Uses :data:`FORBIDDEN_PAYLOAD_FIELDS` at the top level and
+    :data:`FORBIDDEN_PROPOSAL_FIELDS` on each ``proposal_set`` entry.
+
+    Detecting a self-reported gain number and then forwarding it is what turns a
+    format slip into a lost round: the Critic is told to reject the whole
+    ``proposal_set`` over it, so the specialist's ideas never reach a benchmark
+    and there is rarely budget to resubmit. The claim is worthless either way —
+    measured gain is the Coordinator's — so dropping it costs nothing and makes
+    the violation unreachable rather than merely audited. The names returned are
+    what the caller's audit note records.
+
+    Args:
+        payload: The ``specialist_done`` payload, mutated in place. Both the
+            top level and each ``proposal_set`` entry are cleaned.
+
+    Returns:
+        The removed field names, de-duped with first-seen order preserved.
+    """
+    if not isinstance(payload, dict):
+        return []
+    removed: list[str] = []
+    for key in sorted(set(payload.keys()) & FORBIDDEN_PAYLOAD_FIELDS):
+        payload.pop(key, None)
+        removed.append(key)
+    for proposal in payload.get("proposal_set") or []:
+        if not isinstance(proposal, dict):
+            continue
+        for key in sorted(set(proposal.keys()) & FORBIDDEN_PROPOSAL_FIELDS):
+            proposal.pop(key, None)
+            removed.append(key)
+    return list(dict.fromkeys(removed))
 
 
 def vet_patches(
@@ -472,8 +617,11 @@ def vet_patches(
 
 
 __all__ = [
+    "ADVISE_VERDICT",
+    "ADVISORY_RULE_PROPOSAL_KINDS",
     "CROSS_DOMAIN_RULES",
     "CrossDomainRule",
+    "FORBIDDEN_PAYLOAD_FIELDS",
     "FORBIDDEN_PROPOSAL_FIELDS",
     "GROUND_APPLIES",
     "GROUND_MISSING_TARGET",
@@ -483,7 +631,10 @@ __all__ = [
     "GROUND_UNCHECKED",
     "PatchGroundingResult",
     "PatchSafetyReport",
+    "QUANTITATIVE_CLAIM_REASON_CODE",
     "SCOPE_DOMAINS_LITERAL",
+    "advisory_only_reason_codes",
+    "advisory_rules_govern",
     "cross_domain_rule_descriptors",
     "ground_patch_text",
     "is_unified_diff",
@@ -491,6 +642,8 @@ __all__ = [
     "patch_escapes_tree",
     "patch_file_targets",
     "patch_targets_missing",
-    "scan_quantitative_claims",
+    "quantitative_claim_rule_descriptor",
+    "scan_numeric_claims",
+    "strip_forbidden_proposal_fields",
     "vet_patches",
 ]

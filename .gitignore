@@ -3,6 +3,9 @@
 *.env
 !*.env.template
 kernel-agent/env.sh
+# Written by framework-agent/scripts/install.sh, and it bakes in the venv path of
+# whichever machine ran it.
+framework-agent/scripts/env.sh
 
 # Dependency checkout cache (deps_cache_root default: $REPO_ROOT/.cache)
 .cache/

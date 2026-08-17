@@ -43,6 +43,7 @@ from hyperloom.orchestrator.roles.agent_role import (
 )
 
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
+from ..trace.task_progress import heartbeat_while_output_flows
 from ..trace.parse_usage import (
     parse_forge_steps,
     parse_forge_usage,
@@ -1578,6 +1579,22 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     return resolved, None
 
 
+def _tool_label(cmd: list[str]) -> str:
+    """Name the tool a command runs, for the progress note.
+
+    Args:
+        cmd (list[str]): The command and arguments.
+
+    Returns:
+        str: The first ``.py`` argument's stem, else the executable's name.
+    """
+    for arg in cmd:
+        text = str(arg)
+        if text.endswith(".py"):
+            return Path(text).stem
+    return Path(str(cmd[0])).name if cmd else "subprocess"
+
+
 async def _run_subprocess(
     cmd: list[str],
     *,
@@ -1599,7 +1616,8 @@ async def _run_subprocess(
         or timeout_sec <= 0
     ):
         raise ValueError("timeout_sec must be finite and positive")
-    def _run() -> tuple[int, str, str]:
+
+    def _run(on_output: Callable[[], None]) -> tuple[int, str, str]:
         """Run the command synchronously in a worker thread.
 
         Copies the environment, injects the Ray GCS address in multi-node mode,
@@ -1607,6 +1625,9 @@ async def _run_subprocess(
         POSIX session and, on timeout, reaps the whole process group so a hung
         grandchild dies with the wrapper. Mirrors ``subprocess.run``: captures
         stdout/stderr and re-raises ``TimeoutExpired``.
+
+        Args:
+            on_output: Liveness callback invoked per line the child emits.
 
         Returns:
             tuple[int, str, str]: ``(returncode, stdout, stderr)``.
@@ -1633,15 +1654,22 @@ async def _run_subprocess(
             if addr:
                 env.setdefault("RAY_ADDRESS", addr)
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
+        # The heartbeat around this call is only as honest as the child's
+        # flushing: block-buffered on a pipe, it looks dead between flushes.
+        # ``setdefault`` so an operator who set this deliberately still wins.
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        # run_with_session_kill reaps the whole descendant tree on every exit path.
         cp = run_with_session_kill(
             cmd,
             env=env,
             timeout=timeout_sec,
             text=True,
+            on_output=on_output,
         )
         return cp.returncode, cp.stdout or "", cp.stderr or ""
 
-    return await asyncio.to_thread(_run)
+    async with heartbeat_while_output_flows(unit="kernel_tool", label=_tool_label(cmd)) as activity:
+        return await asyncio.to_thread(_run, activity.note)
 
 
 def _normalize_precision(value: Any) -> str:
@@ -3972,11 +4000,15 @@ _FORGE_FUSION_RESULT_RE = re.compile(r"FORGE_FUSION_RESULT_BEGIN\s*\n(.*?)\nFORG
 
 
 def _forge_fusion_available() -> bool:
-    """Check if the forge-fusion CLI is importable or on PATH."""
-    if shutil.which("forge-fusion"):
-        return True
+    """Check that KernelForge's fusion pipeline is importable.
+
+    Probes the subpackage rather than ``kernel_agents``: a KernelForge predating
+    the fusion absorption would satisfy the parent import and only fail once the
+    subprocess rejected ``forge-fuse``. PATH is not consulted because the tool is
+    invoked through ``sys.executable -m``.
+    """
     try:
-        return importlib.util.find_spec("forge_fusion") is not None
+        return importlib.util.find_spec("kernel_agents.fusion") is not None
     except (ModuleNotFoundError, ValueError):
         return False
 
@@ -4180,7 +4212,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "backend": "forge",
             "engine": "forge_fusion",
             "error_class": "forge_fusion_not_found",
-            "error": ("forge-fusion CLI not found. Install via 'pip install -e <KernelForge>/src/forge_fusion'."),
+            "error": ("KernelForge fusion pipeline not found. Install via 'pip install <KernelForge>[claude,codex]'."),
             "decision": "REVERT",
             "kept": False,
         }

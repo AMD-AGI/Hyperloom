@@ -27,6 +27,9 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     run_grid,
 )
+from hyperloom.orchestrator.trace.task_progress import progress_scope
+
+from .conftest import chatty_child, suppression_window_s
 
 
 @pytest.fixture(autouse=True)
@@ -105,15 +108,29 @@ def _invalid_rc0_workspace(slot: Path) -> Path:
 
 
 class TestPulseMatrix:
-    """``_pulse_after_variant`` (delegating to ``_robustness_pulse``) fires on
-    every failure path EXCEPT the multi-node ``mn_server_restart_failed`` path,
-    which returns/continues before the pulse call."""
+    """``_pulse_after_variant`` (progress note plus ``_robustness_pulse``) fires
+    on every variant outcome, including the multi-node
+    ``mn_server_restart_failed`` path that used to leave before reaching it."""
 
-    def _run_with_pulse_capture(self, *, multi_node, run_side_effect, base, out, restart=None, keep_going=True, grid_n=1):
+    def _run_with_pulse_capture(
+        self,
+        *,
+        multi_node,
+        run_side_effect,
+        base,
+        out,
+        restart=None,
+        keep_going=True,
+        grid_n=1,
+        notes=None,
+    ):
         pulse_calls: list = []
 
         async def fake_pulse(**kwargs):
             pulse_calls.append(kwargs)
+
+        async def collect(**note):
+            notes.append(note)
 
         with ExitStack() as st:
             st.enter_context(patch.object(mne, "is_multi_node", lambda: multi_node))
@@ -124,6 +141,8 @@ class TestPulseMatrix:
                     side_effect=run_side_effect,
                 )
             )
+            if notes is not None:
+                st.enter_context(progress_scope(collect))
             if restart is not None:
                 st.enter_context(patch.object(mnsl, "restart_server_for_round", restart))
             grid = [GridVariant(name=f"c{i}") for i in range(grid_n)]
@@ -141,11 +160,19 @@ class TestPulseMatrix:
             )
         return results, pulse_calls
 
-    def test_mn_server_restart_failed_does_not_pulse(self, tmp_path, monkeypatch):
+    def test_mn_server_restart_failed_reaches_the_variant_boundary(self, tmp_path, monkeypatch):
+        """A variant whose remote server never came back still ends its own row.
+
+        This was the one outcome that recorded its result and left, so the row a
+        stall signal reads stayed at ``started`` for the rest of the session
+        while the variant was already over — and unlike a reaped round, nothing
+        else moves the task afterwards to make the stale row harmless.
+        """
         # Warmup must be off so multi-node truly hits the restart path.
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
         base = tmp_path / "base.yaml"
         _write_base_yaml(base)
+        notes: list[dict] = []
 
         async def _restart_fail(**_kwargs):
             raise mnsl.ServerRestartFailed("server /health did not return 200")
@@ -156,15 +183,19 @@ class TestPulseMatrix:
             base=base,
             out=tmp_path / "out",
             restart=_restart_fail,
+            notes=notes,
         )
         assert results[0].status == "failed"
         assert results[0].error_class == "mn_server_restart_failed"
-        assert pulse_calls == [], "mn_server_restart_failed must NOT trigger a robustness pulse"
+        landed = [(n["label"], n["index"], n["status"]) for n in notes if n["unit"] == "variant"]
+        assert landed == [("c0", 1, "failed")]
+        assert [call["tick_index"] for call in pulse_calls] == [0]
 
-    def test_mn_server_restart_failed_no_pulse_even_for_multiple_variants(self, tmp_path, monkeypatch):
+    def test_mn_server_restart_failed_reports_each_variant_it_ends(self, tmp_path, monkeypatch):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
         base = tmp_path / "base.yaml"
         _write_base_yaml(base)
+        notes: list[dict] = []
 
         async def _restart_fail(**_kwargs):
             raise mnsl.ServerRestartFailed("health probe timed out")
@@ -176,12 +207,16 @@ class TestPulseMatrix:
             out=tmp_path / "out",
             restart=_restart_fail,
             grid_n=2,
+            notes=notes,
         )
         assert [r.error_class for r in results] == [
             "mn_server_restart_failed",
             "mn_server_restart_failed",
         ]
-        assert pulse_calls == []
+        # Each variant is named by its own row, not by the tail of the batch.
+        landed = [(n["label"], n["index"]) for n in notes if n["unit"] == "variant"]
+        assert landed == [("c0", 1), ("c1", 2)]
+        assert [call["tick_index"] for call in pulse_calls] == [0, 1]
 
     def test_no_benchmark_workspace_failure_pulses(self, tmp_path, monkeypatch):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
@@ -573,3 +608,170 @@ class TestResolveMnEffectiveServerArgs:
         # replace mode drops the inherited base env args.
         assert "--tp 8" not in out
         assert "--chunked-prefill 2048" in out
+
+
+# ---------------------------------------------------------------------------
+# Per-variant progress heartbeat
+# ---------------------------------------------------------------------------
+
+
+class TestVariantHeartbeat:
+    """A grid that runs for hours must be distinguishable from one that hung."""
+
+    def _run_capture_progress(self, run_side_effect, base, out, *, grid_n=2, notes=None, sink=None):
+        notes = [] if notes is None else notes
+
+        async def _collect(**note):
+            notes.append(note)
+
+        async def _no_pulse(**_kwargs):
+            return None
+
+        with (
+            progress_scope(sink or _collect),
+            patch.object(gr, "_robustness_pulse", side_effect=_no_pulse),
+            patch(
+                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                side_effect=run_side_effect,
+            ),
+        ):
+            results = asyncio.run(
+                run_grid(
+                    base_yaml_path=base,
+                    base_extra_args="",
+                    grid=[GridVariant(name=f"c{i}") for i in range(grid_n)],
+                    output_root=out,
+                    magpie_python=sys.executable,
+                    variant_timeout_sec=10,
+                    gpu_type="mi300x",
+                )
+            )
+        return results, notes
+
+    def test_each_variant_reports_as_it_lands(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+
+        def _ok(cmd, *a, **k):
+            out_idx = cmd.index("--output-dir")
+            _valid_workspace(Path(cmd[out_idx + 1]))
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        results, notes = self._run_capture_progress(_ok, base, tmp_path / "out")
+
+        landed = [n for n in notes if n["unit"] == "variant"]
+        assert [r.status for r in results] == ["succeeded", "succeeded"]
+        assert [(n["label"], n["index"], n["total"]) for n in landed] == [("c0", 1, 2), ("c1", 2, 2)]
+        assert all(n["status"] == "succeeded" for n in landed)
+        assert landed[0]["output_throughput"] == 800.0
+
+    def test_the_note_names_the_variant_that_ran_not_the_last_row(self):
+        """The tail of ``results`` is not always the variant that just reported.
+
+        A stop cause that ends the batch — a session budget spent, an
+        orchestrator cancel — records the round it stopped and then a not-run row
+        for every later variant, so the tail becomes the last variant in the grid
+        while the one that ran is still where it was appended. Taking the note
+        off the tail renames the round in the only durable per-variant artefact
+        the run leaves while it is in flight, and the log line one frame away
+        keeps saying the right thing.
+        """
+        grid = [GridVariant(name=f"c{i}") for i in range(3)]
+        stopped = gr.VariantResult(
+            name="c0",
+            extra_server_args="",
+            extra_envs={},
+            status="skipped",
+            error_class="orchestrator_cancelled",
+        )
+        never_ran = [
+            gr.VariantResult(
+                name=variant.name,
+                extra_server_args="",
+                extra_envs={},
+                status="not_run",
+            )
+            for variant in grid[1:]
+        ]
+
+        assert gr._variant_progress_note(grid, [stopped, *never_ran], 0) == {
+            "unit": "variant",
+            "label": "c0",
+            "index": 1,
+            "total": 3,
+            "status": "skipped",
+            "output_throughput": None,
+        }
+
+    def test_a_failed_variant_reports_too(self, tmp_path, monkeypatch):
+        """Progress means "a unit finished", not "a unit worked"."""
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+
+        _, notes = self._run_capture_progress(
+            lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 1, "stdout", "boom"),
+            base,
+            tmp_path / "out",
+            grid_n=1,
+        )
+
+        assert [n["status"] for n in notes if n["unit"] == "variant"] == ["failed"]
+
+    def test_a_variant_reports_before_it_blocks(self, tmp_path, monkeypatch):
+        """A first variant that hangs inside the benchmark used to emit nothing at all."""
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+        notes: list[dict] = []
+        at_launch: list[dict] = []
+
+        def _capture_then_fail(cmd, *a, **k):
+            at_launch.extend(notes)
+            return subprocess.CompletedProcess(cmd, 1, "", "boom")
+
+        self._run_capture_progress(
+            _capture_then_fail,
+            base,
+            tmp_path / "out",
+            grid_n=1,
+            notes=notes,
+        )
+
+        assert [(n["label"], n["status"]) for n in at_launch] == [
+            ("c0:variant", "started"),
+            ("c0:benchmark", "started"),
+        ]
+
+    def test_a_variant_keeps_reporting_while_its_benchmark_blocks(
+        self,
+        tmp_path,
+        monkeypatch,
+        progress_cadence,
+    ):
+        """Entry markers alone leave the row silent for a whole variant timeout.
+
+        The benchmark is the longest single block in the session; bounding the
+        gap between notes is the only assertion a dropped liveness callback
+        cannot pass.
+        """
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+
+        def _ok(cmd, *_a, **_k):
+            out_idx = cmd.index("--output-dir")
+            _valid_workspace(Path(cmd[out_idx + 1]))
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        results, _notes = self._run_capture_progress(
+            chatty_child(progress_cadence, _ok, blocks_for_s=600.0, line_every_s=30.0),
+            base,
+            tmp_path / "out",
+            grid_n=1,
+            sink=progress_cadence.sink(),
+        )
+
+        assert [r.status for r in results] == ["succeeded"]
+        assert progress_cadence.widest_silence() < suppression_window_s()

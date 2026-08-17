@@ -447,6 +447,8 @@ import subprocess  # noqa: E402
 from typing import Any  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 
+from hyperloom.common.coerce import to_unix  # noqa: E402
+
 from hyperloom.agents.robustness.sources import local_probe  # noqa: E402
 from hyperloom.agents.robustness.sources.local_probe import (  # noqa: E402
     _is_pid_alive,
@@ -1365,3 +1367,244 @@ async def test_fetch_populates_state_and_deps(tmp_path, monkeypatch):
     data = await LocalProbeSource(cfg).fetch(ctx=None)
     assert data.local_state_integrity["state_json"]["valid"] is True
     assert isinstance(data.local_external_deps.get("mounts"), list)
+
+
+# ---------------------------------------------------------------------------
+# In-flight task progress (``_read_task_progress``).
+
+
+def _history(*notes: tuple[str, dict]) -> str:
+    """Render a ``tasks.history`` column from ``(ts, entry)`` pairs."""
+    return json.dumps([{"ts": ts, **entry} for ts, entry in notes])
+
+
+def _tasks_db(path: Path, rows: list[tuple[str, str, str, str]]) -> Path:
+    """Write a ``tasks`` table holding ``(task_id, kind, state, history)`` rows."""
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE tasks (task_id TEXT PRIMARY KEY, kind TEXT, state TEXT, history TEXT)")
+    conn.executemany("INSERT INTO tasks VALUES (?,?,?,?)", rows)
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_task_progress_reports_the_freshest_heartbeat_per_agent(tmp_path):
+    """Attribution is what stops one agent's work from vouching for another."""
+    db = _tasks_db(
+        tmp_path / "coordinator.db",
+        [
+            (
+                "t1",
+                "explore",
+                "running",
+                _history(("2026-08-13T10:00:00+00:00", {"progress": {"agent": "orchestration"}})),
+            ),
+            (
+                "t2",
+                "roofline",
+                "running",
+                _history(("2026-08-13T10:42:00+00:00", {"progress": {"agent": "orchestration"}})),
+            ),
+            (
+                "t3",
+                "baseline",
+                "succeeded",
+                _history(("2026-08-13T11:00:00+00:00", {"progress": {"agent": "orchestration"}})),
+            ),
+        ],
+    )
+    out = local_probe._read_task_progress(db)
+    assert out["running"] == 2
+    assert out["by_agent"] == {
+        "orchestration": {
+            "last_progress_unix": to_unix("2026-08-13T10:42:00+00:00"),
+            "task": "roofline",
+            "oldest_progress_unix": to_unix("2026-08-13T10:00:00+00:00"),
+            "oldest_task": "explore",
+        }
+    }
+
+
+@pytest.mark.parametrize("freshest_first", [False, True])
+def test_task_progress_keeps_the_quietest_unit_a_fresher_sibling_would_hide(tmp_path, freshest_first):
+    """The dispatcher runs units concurrently; only the freshest used to survive.
+
+    Keeping the newest is what answers "is this agent's work progressing", but
+    dropping the others left a unit that has not reported in hours with no trace
+    in the snapshot at all.
+
+    Both visit orders are exercised, because only one of them reaches the branch
+    that records the quiet end: rows arrive ordered by ``task_id``, so which
+    unit's note is folded in first is what the parameter chooses. Seeing the
+    quiet one first makes the freshest note the one that has to overtake it, and
+    a snapshot built that way tells nothing about the other direction.
+    """
+    quiet = ("baseline", "2026-08-13T08:00:00+00:00")
+    fresh = ("explore", "2026-08-13T10:42:00+00:00")
+    first, second = (fresh, quiet) if freshest_first else (quiet, fresh)
+    db = _tasks_db(
+        tmp_path / "coordinator.db",
+        [
+            (f"t{index}", kind, "running", _history((ts, {"progress": {"agent": "orchestration"}})))
+            for index, (kind, ts) in enumerate((first, second))
+        ],
+    )
+    entry = local_probe._read_task_progress(db)["by_agent"]["orchestration"]
+    assert entry["task"] == "explore"
+    assert entry["last_progress_unix"] == to_unix("2026-08-13T10:42:00+00:00")
+    assert entry["oldest_task"] == "baseline"
+    assert entry["oldest_progress_unix"] == to_unix("2026-08-13T08:00:00+00:00")
+
+
+def test_a_bare_state_transition_is_not_a_heartbeat(tmp_path):
+    """``updated_at`` also moves when a task merely enters ``running``."""
+    db = _tasks_db(
+        tmp_path / "coordinator.db",
+        [("t1", "explore", "running", _history(("2026-08-13T10:00:00+00:00", {"to": "running"})))],
+    )
+    out = local_probe._read_task_progress(db)
+    assert out == {"running": 1}
+
+
+def test_an_unattributed_heartbeat_vouches_for_nobody(tmp_path):
+    """A note that names no owner must not silence an accusation against anyone."""
+    db = _tasks_db(
+        tmp_path / "coordinator.db",
+        [("t1", "explore", "running", _history(("2026-08-13T10:00:00+00:00", {"progress": {"unit": "variant"}})))],
+    )
+    assert local_probe._read_task_progress(db) == {"running": 1}
+
+
+def test_task_progress_is_empty_when_nothing_is_running(tmp_path):
+    db = _tasks_db(
+        tmp_path / "coordinator.db",
+        [("t1", "explore", "succeeded", _history(("2026-08-13T10:00:00+00:00", {"progress": {"agent": "x"}})))],
+    )
+    assert local_probe._read_task_progress(db) == {}
+
+
+def test_a_ray_serving_actor_is_a_process_the_probe_can_see(monkeypatch):
+    """``ray::IDLE`` only names a parked worker; a busy one is renamed."""
+    ps_out = (
+        "  1 1048576 ray::ServingActor.__call__\n"
+        "  2 2097152 python -m sglang.launch_server --model x\n"
+    )
+    monkeypatch.setattr(
+        local_probe.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, ps_out, ""),
+    )
+
+    found = local_probe._sample_processes(local_probe._DEFAULT_PROCESS_PATTERNS)
+
+    assert found is not None
+    assert [(p["pid"], p["is_server"]) for p in found] == [(1, False), (2, True)]
+
+
+def test_a_sampled_process_carries_the_directory_it_runs_in(monkeypatch):
+    """On a shared node the cwd is what says which session a process belongs to.
+
+    A pid that is gone by the time ``/proc`` is read — or one owned by another
+    user — reports no directory rather than a wrong one.
+    """
+    ps_out = (
+        f"  {os.getpid()} 1048576 python benchmark_serving.py --port 30000\n"
+        "  999999999 2048 python benchmark_serving.py --port 30001\n"
+    )
+    monkeypatch.setattr(
+        local_probe.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, ps_out, ""),
+    )
+
+    found = local_probe._sample_processes(("benchmark_serving",))
+
+    assert found is not None
+    assert [p["cwd"] for p in found] == [os.getcwd(), ""]
+
+
+def test_the_caller_decides_which_patterns_name_a_server(monkeypatch):
+    """``is_server`` follows the patterns handed in, not a second copy of the list."""
+    ps_out = "  9 1048576 python -m tinyserve.entrypoint --port 8888\n"
+    monkeypatch.setattr(
+        local_probe.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, ps_out, ""),
+    )
+
+    found = local_probe._sample_processes(("tinyserve.entrypoint",), ("tinyserve.entrypoint",))
+
+    assert found is not None
+    assert [(p["pid"], p["is_server"]) for p in found] == [(9, True)]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param(FileNotFoundError("ps"), id="ps-absent"),
+        pytest.param(subprocess.TimeoutExpired(cmd="ps", timeout=2.0), id="ps-timed-out"),
+        pytest.param(subprocess.CompletedProcess(["ps"], 1, "", "boom"), id="ps-failed"),
+    ],
+)
+def test_a_probe_that_could_not_look_says_so_instead_of_reporting_nothing(monkeypatch, outcome):
+    """``None`` (could not find out) must stay distinct from ``[]`` (nothing runs)."""
+
+    def _run(*_a, **_k):
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(local_probe.subprocess, "run", _run)
+
+    assert local_probe._sample_processes(("sglang.srt",)) is None
+
+
+def test_no_pattern_matching_is_an_answer_not_a_failure(monkeypatch):
+    monkeypatch.setattr(
+        local_probe.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "  1 1024 /bin/bash\n", ""),
+    )
+
+    assert local_probe._sample_processes(("sglang.srt",)) == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_process_probe_is_reported_as_unknown_not_as_an_empty_machine(monkeypatch, tmp_path: Path):
+    """One sub-probe failing must not become evidence for an unrelated signal."""
+    monkeypatch.setattr(local_probe, "_sample_processes", lambda *_a, **_k: None)
+    cfg = LocalProbeConfig(session_dir=None, disk_mountpoints=(str(tmp_path),))
+
+    data = await LocalProbeSource(cfg).fetch(ctx=None)
+
+    assert data.local_processes == []
+    assert data.local_processes_known is False
+
+
+@pytest.mark.asyncio
+async def test_a_process_probe_that_found_nothing_is_still_an_answer(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(local_probe, "_sample_processes", lambda *_a, **_k: [])
+    cfg = LocalProbeConfig(session_dir=None, disk_mountpoints=(str(tmp_path),))
+
+    data = await LocalProbeSource(cfg).fetch(ctx=None)
+
+    assert data.local_processes == []
+    assert data.local_processes_known is True
+
+
+def test_a_pathologically_nested_blob_costs_only_its_own_sub_probe():
+    """A blob written by another process must not take down the whole tick."""
+    nested = "[" * 20_000 + "]" * 20_000
+
+    assert local_probe._json_loads_or_none(nested) is None
+    assert local_probe._latest_progress_note(nested) is None
+
+
+def test_task_progress_survives_a_db_without_the_expected_columns(tmp_path):
+    """An older or foreign schema degrades to "no evidence", never to an exception."""
+    conn = sqlite3.connect(str(tmp_path / "coordinator.db"))
+    conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT)")
+    conn.commit()
+    conn.close()
+    assert local_probe._read_task_progress(tmp_path / "coordinator.db") == {}
+    assert local_probe._read_task_progress(tmp_path / "missing.db") == {}
