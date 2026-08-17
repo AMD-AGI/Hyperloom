@@ -454,7 +454,7 @@ def build_candidates(
         finder_patchable: bool | None = None
         finder_status = ""
         finder_reason = ""
-        if not source_file and kname and source_method != "non_patchable":
+        if not source_file and kname and source_method == "unresolved":
             source_file, method = resolve_source(op_name, framework=framework, device_kernel_name=kname)
             if source_file:
                 source_method = method
