@@ -91,6 +91,62 @@ def test_spec_parses_ep_from_server_args(monkeypatch):
     assert spec.ep == 8
 
 
+@pytest.mark.parametrize(
+    "flag,expected",
+    [
+        ("--kv-cache-dtype fp8_e4m3", "fp8"),
+        ("--kv-cache-dtype fp8", "fp8"),
+        ("--kv-cache-dtype=fp8_e5m2", "fp8"),
+        ("--kv-cache-dtype auto", "bf16"),   # auto follows the weights
+        ("--foo 1", "bf16"),                 # absent
+    ],
+)
+def test_spec_parses_kv_cache_dtype_from_server_args(monkeypatch, flag, expected):
+    """An explore grid changes the KV dtype by passing this flag and nothing else.
+
+    The projection prices KV dtype perfectly well, so dropping the flag made a
+    lever the model *can* see look like one it cannot, and scored an fp8
+    candidate as bf16 -- a candidate whose whole point is halving KV traffic.
+    """
+    monkeypatch.delenv(ib.ENV_KV_DTYPE, raising=False)
+    spec = ib.spec_from_benchmark({
+        "framework": "vllm",
+        "model": "/models/gpt-oss-120b",
+        "envs": {"TP": 8, "EXTRA_VLLM_ARGS": flag},
+    })
+    assert spec.kv_cache_dtype == expected
+
+
+def test_kv_dtype_env_overrides_the_server_arg(monkeypatch):
+    monkeypatch.setenv(ib.ENV_KV_DTYPE, "bf16")
+    spec = ib.spec_from_benchmark({
+        "framework": "vllm",
+        "model": "/models/gpt-oss-120b",
+        "envs": {"TP": 8, "EXTRA_VLLM_ARGS": "--kv-cache-dtype fp8_e4m3"},
+    })
+    assert spec.kv_cache_dtype == "bf16"
+
+
+def test_max_num_seqs_caps_the_running_batch(monkeypatch):
+    """A scheduler cap below the offered load is the batch the step actually runs."""
+    spec = ib.spec_from_benchmark({
+        "framework": "vllm",
+        "model": "/models/gpt-oss-120b",
+        "envs": {"TP": 8, "CONC": 64, "EXTRA_VLLM_ARGS": "--max-num-seqs 32"},
+    })
+    assert spec.conc == 32
+
+
+def test_max_num_seqs_above_the_load_changes_nothing(monkeypatch):
+    """Raising a cap nobody reaches is a no-op, and must not be reported as a win."""
+    spec = ib.spec_from_benchmark({
+        "framework": "vllm",
+        "model": "/models/gpt-oss-120b",
+        "envs": {"TP": 8, "CONC": 64, "EXTRA_VLLM_ARGS": "--max-num-seqs 512"},
+    })
+    assert spec.conc == 64
+
+
 def test_resolve_preset_heuristics_and_override(monkeypatch):
     monkeypatch.delenv(ib.ENV_MODEL, raising=False)
     assert ib.resolve_preset("/models/gpt-oss-120b") == "gpt_oss_120B"
