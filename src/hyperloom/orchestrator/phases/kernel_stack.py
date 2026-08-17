@@ -9,6 +9,7 @@ import logging as _logging
 from datetime import datetime, timezone
 from typing import Any
 from ..bus.message_bus import Message
+from ..kernel._kernel_decisions import _entry_by_kernel_id
 from ..state.shared_state import resolve_grading_anchor_tput
 from ..state.task_registry import Task
 from .base import PhaseHandler
@@ -82,9 +83,7 @@ class KernelStackPhase(PhaseHandler):
                     and kid not in state.rejected_kernel_ids
                 ):
                     state.rejected_kernel_ids.append(kid)
-                from ..kernel import _kernel_decisions as _kd
-
-                attempt = _kd._entry_by_kernel_id(state, kid)
+                attempt = _entry_by_kernel_id(state, kid)
                 if isinstance(attempt, dict):
                     attempt["rejected_reason"] = "integrate_dispatch_exception"
                 stable_attempt = (state.kernel_opt_task_attempts or {}).get(

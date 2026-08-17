@@ -18,6 +18,7 @@ from ..bus.message_bus import Message
 from ..policy.gate import (
     SPECIALIST_FROM_AGENT_PREFIX,
 )
+from ..loop.maintenance import run_lease_and_db_reclaim
 from ..loop.sub_agent_runner import SubAgentResult
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
 from ..specialists.runner import SpecialistFailureType
@@ -447,8 +448,6 @@ class ExplorePhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — soft restart never aborts the run loop
             log.exception("cycle soft-restart: conversation reset failed")
         # 2-3) Reap leases, reclaim orphaned running tasks, prune DB.
-        from ..loop.maintenance import run_lease_and_db_reclaim
-
         await run_lease_and_db_reclaim(self, summary, reason="cycle_soft_restart")
         # 4) Clear transient knowledge-plane caches for a fresh PR feed.
         try:
@@ -1074,9 +1073,7 @@ class ExplorePhase(PhaseHandler):
             if _cgv != 0:
                 params["cumulative_gain_validated"] = _cgv
         if "keep_threshold_pct" not in params:
-            from ..phases.machine_state import resolve_keep_threshold
-
-            params["keep_threshold_pct"] = resolve_keep_threshold(state)
+            params["keep_threshold_pct"] = _phase_state.resolve_keep_threshold(state)
         if "applied_stack" not in params:
             _stack = list(getattr(state, "optimization_stack", None) or [])
             if _stack:

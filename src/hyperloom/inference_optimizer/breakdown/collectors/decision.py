@@ -26,6 +26,7 @@ from ._common import (
     _load_optimization_journal,
     _parse_iso_unix,
     _to_float,
+    phase_at,
 )
 
 
@@ -287,11 +288,20 @@ def _build_phase_windows(
 
 
 def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
+    """Return the phase active at ISO-or-numeric ``ts`` per ``windows``.
+
+    Args:
+        ts (Any): An ISO-8601 timestamp (or numeric Unix value).
+        windows (list[tuple[float, str]]): The ``(entered_unix, phase)``
+            timeline from :func:`_build_phase_windows`.
+
+    Returns:
+        str: The latest phase whose boundary is ``<= ts``, or ``""`` when ``ts``
+        is unparseable or the timeline is empty.
+    """
     unix = _parse_iso_unix(ts)
     if unix is None or not windows:
         return ""
-    from ._common import phase_at
-
     return phase_at(unix, windows)
 
 

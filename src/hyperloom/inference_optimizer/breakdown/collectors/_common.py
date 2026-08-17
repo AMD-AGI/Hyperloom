@@ -329,13 +329,11 @@ def phase_at(
 ) -> str:
     """Return the phase active at ``ts_unix``.
 
-    ``phase_boundaries`` is a list of (boundary_ts_unix, phase_name) sorted
-    ascending; the last boundary with a timestamp <= ts_unix wins.
-
     Args:
         ts_unix: The timestamp to classify.
-        phase_boundaries: Sorted list of (unix_ts, phase_name) transition points.
-        fallback: Phase name returned when no boundary is <= ts_unix.
+        phase_boundaries: ``(unix_ts, phase_name)`` transition points sorted
+            ascending; the last one at or before ``ts_unix`` wins.
+        fallback: Phase name returned when every boundary is later.
 
     Returns:
         The phase name active at ``ts_unix``, or ``fallback``.

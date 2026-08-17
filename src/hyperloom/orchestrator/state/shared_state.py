@@ -2133,32 +2133,26 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return _m.pending_kernel_integration_records(self)
 
     @property
-    def kernel_opt_attempts(self) -> dict:
-        """View of kernel_opt_task_attempts indexed by current_kernel_id.
+    def kernel_opt_attempts(self) -> dict[str, Any]:
+        """``kernel_opt_task_attempts`` re-indexed by the trace-local kernel id.
 
-        Reads and writes are translated between ordinal kernel_id keys and the
-        stable task-identity keys used by the authoritative ledger.  When the
-        same kernel_id appears in multiple entries (task-group reuse), the
-        most recently stamped entry wins.
+        Returns:
+            A fresh dict; mutating it does not touch the ledger, but the entry
+            values are the ledger's own dicts.
         """
-        result: dict[str, tuple[str, dict]] = {}  # kid -> (ts, entry)
-        for entry in (self.kernel_opt_task_attempts or {}).values():
-            if not isinstance(entry, dict):
-                continue
-            kid = str(entry.get("current_kernel_id") or "")
-            if not kid:
-                continue
-            ts = str(entry.get("last_ts") or entry.get("ts") or "")
-            existing_ts, _ = result.get(kid, ("", {}))
-            if kid not in result or ts > existing_ts:
-                result[kid] = (ts, entry)
-        return {kid: pair[1] for kid, pair in result.items()}
+        from ..kernel import _kernel_decisions as _m
+
+        return _m.index_attempts_by_kernel_id(self.kernel_opt_task_attempts)
 
     @kernel_opt_attempts.setter
-    def kernel_opt_attempts(self, value: dict | None) -> None:
-        """Populate kernel_opt_task_attempts from an ordinal-keyed dict."""
-        if not isinstance(value, dict):
-            return
+    def kernel_opt_attempts(self, value: dict[str, Any]) -> None:
+        """Seed ``kernel_opt_task_attempts`` from an ordinal-keyed dict.
+
+        Args:
+            value: ``{kernel_id: attempt}``. Each attempt is stamped with its
+                ``current_kernel_id`` / ``stable_task_key`` and filed under the
+                stable key; an entry already filed under that key wins.
+        """
         from ..kernel._kernel_decisions import _stable_kernel_task_key
 
         if not isinstance(self.kernel_opt_task_attempts, dict):
@@ -2166,25 +2160,22 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         for kernel_id, entry in value.items():
             if not isinstance(entry, dict):
                 continue
-            e = dict(entry)
-            e.setdefault("current_kernel_id", str(kernel_id))
-            tgk = str(e.get("task_group_key") or "")
-            src = str(e.get("last_source_file") or "")
-            task_key = e.get("stable_task_key") or _stable_kernel_task_key(
-                task_group_key=tgk,
+            stamped = dict(entry)
+            stamped.setdefault("current_kernel_id", str(kernel_id))
+            task_key = stamped.get("stable_task_key") or _stable_kernel_task_key(
+                task_group_key=str(stamped.get("task_group_key") or ""),
                 kernel_id=str(kernel_id),
-                source_file=src,
+                source_file=str(stamped.get("last_source_file") or ""),
             )
-            e.setdefault("stable_task_key", task_key)
-            self.kernel_opt_task_attempts.setdefault(task_key, e)
+            stamped.setdefault("stable_task_key", task_key)
+            self.kernel_opt_task_attempts.setdefault(task_key, stamped)
 
     @property
     def roofline_snapshot_id(self) -> int:
-        """Current roofline snapshot counter, read from the nested trace-analyze cache.
+        """Counter of the newest roofline snapshot, or 0 before the first one.
 
-        Six clear-points of ``last_trace_analyze`` do not reset this value;
-        they only create a brief window where the top-level read and the nested
-        read disagree.  The next ``record_trace_analyze`` call re-aligns them.
+        Lives inside ``last_trace_analyze`` so clearing that cache resets the
+        counter with it — ``record_trace_analyze`` then restarts from 1.
         """
         raw = (self.last_trace_analyze or {}).get("roofline_snapshot_id")
         return int(raw) if isinstance(raw, int) else 0

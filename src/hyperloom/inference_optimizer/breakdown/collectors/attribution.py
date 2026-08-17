@@ -18,6 +18,7 @@ from typing import Any
 
 from ._common import (
     _to_float,
+    phase_at,
 )
 
 
@@ -138,10 +139,9 @@ def _entry_ts(entry: dict[str, Any]) -> float | None:
 
 
 def _phase_at(ts_unix: float | None, timeline: list[tuple[float, str]]) -> str:
+    """Return the phase active at ``ts_unix``, or ``""`` when it is unknown."""
     if ts_unix is None:
         return ""
-    from ._common import phase_at
-
     return phase_at(ts_unix, timeline)
 
 

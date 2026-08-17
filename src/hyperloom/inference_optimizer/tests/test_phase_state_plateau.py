@@ -349,7 +349,7 @@ def test_exit_normal_kernel_after_gemm_does_not_exit():
         max_minutes=0,
         phase_budget_pct={},
         kernel_integrate_attempts={},
-        kernel_opt_attempts={},
+        kernel_opt_task_attempts={},
         continue_kernel_after_gemm=False,
         rejected_kernel_ids=[],
         last_gemm_tuning={
@@ -443,7 +443,7 @@ def test_kernel_skip_to_sweep_waits_for_pending_keep():
 
 def test_kernel_skip_to_sweep_waits_for_partial_kernel_attempt():
     state = _skip_to_sweep_state("KERNEL_AGENT")
-    state.kernel_opt_attempts = {
+    state.kernel_opt_task_attempts = {
         "k009": {
             "last_decision": "PARTIAL",
             "last_status": "ok",
@@ -481,7 +481,7 @@ def test_geak_terminal_skip_to_sweep_ignores_per_kernel_pending_work():
 
 def test_kernel_skip_to_sweep_waits_for_retryable_failed_kernel():
     state = _skip_to_sweep_state("KERNEL_AGENT")
-    state.kernel_opt_attempts = {
+    state.kernel_opt_task_attempts = {
         "k018": {
             "attempts": 1,
             "failure_count": 1,
@@ -500,7 +500,7 @@ def test_kernel_skip_to_sweep_ignores_rejected_or_integrated_attempts():
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.rejected_kernel_ids = ["k001"]
     state.optimization_stack = [{"action": "integrate", "kernel_id": "k002"}]
-    state.kernel_opt_attempts = {
+    state.kernel_opt_task_attempts = {
         "k001": {
             "last_decision": "REVERT",
             "last_status": "ok",

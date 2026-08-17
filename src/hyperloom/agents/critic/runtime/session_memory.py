@@ -351,9 +351,6 @@ class SessionMemory:
         _common_append_jsonl(self._decisions_path(session_id), record, ensure_ascii=False)
 
     # ------------------------------------------------------------------
-    # Events (free-form audit trail)
-    # ------------------------------------------------------------------
-    # ------------------------------------------------------------------
     # KB priors cache (per-scope+topic)
     # ------------------------------------------------------------------
     def get_cached_priors(

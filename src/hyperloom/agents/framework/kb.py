@@ -622,9 +622,10 @@ def _synthesize_via_llm(
 
 
 def _iter_message_text(message) -> Iterable[str]:
+    """Yield the non-empty text fragments of a claude_agent_sdk message."""
     from hyperloom.common.claude_oneshot import message_text
 
-    yield from (t for t in message_text(message) if t)
+    yield from (fragment for fragment in message_text(message) if fragment)
 
 
 def synthesize_findings(

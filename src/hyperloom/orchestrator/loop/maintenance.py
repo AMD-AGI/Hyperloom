@@ -14,34 +14,42 @@ log = _logging.getLogger(__name__)
 
 
 async def run_lease_and_db_reclaim(
-    coordinator: Any,
+    host: Any,
     summary: dict[str, Any],
     *,
     reason: str,
 ) -> None:
-    """Reap expired leases, reclaim orphaned running tasks, and run DB retention.
+    """Reap expired serving/GPU leases, reclaim orphaned running tasks, prune the DB.
 
-    Used by both the periodic maintenance tick and the cycle soft-restart so the
-    four steps stay in sync.
+    Shared by the periodic maintenance tick and the cycle soft-restart. The
+    task reclaim is the R6 watchdog: a running task whose execution lease
+    expired is failed so a dead worker never wedges a lane indefinitely. Every
+    step is individually best-effort — maintenance never aborts the run loop.
+
+    Args:
+        host: Anything exposing the Coordinator's ``locks``,
+            ``gpu_specialist_pool``, ``tasks``, ``db`` and ``cursors``.
+        summary: Mutated in place with the per-step counts.
+        reason: Reclaim reason recorded on the tasks and used as the log prefix.
     """
     try:
-        reaped = await coordinator.locks.reap_expired()
+        reaped = await host.locks.reap_expired()
         summary["leases_reaped"] = len(reaped or [])
     except Exception:  # noqa: BLE001
         log.exception("%s: serving-lease reap failed", reason)
     try:
-        summary["gpu_leases_reaped"] = await coordinator.gpu_specialist_pool.reap_expired()
+        summary["gpu_leases_reaped"] = await host.gpu_specialist_pool.reap_expired()
     except Exception:  # noqa: BLE001
         log.exception("%s: gpu-lease reap failed", reason)
     try:
-        reclaimed = await coordinator.tasks.reclaim_expired_running(reason=reason)
+        reclaimed = await host.tasks.reclaim_expired_running(reason=reason)
         summary["running_tasks_reclaimed"] = len(reclaimed)
     except Exception:  # noqa: BLE001
         log.exception("%s: running-task reclaim failed", reason)
     try:
         from ..bus import db_maintenance as _db_maint
 
-        res = await _db_maint.run_db_retention(coordinator.db, coordinator.cursors)
+        res = await _db_maint.run_db_retention(host.db, host.cursors)
         summary["events_pruned"] = res.events_deleted
         summary["tasks_pruned"] = res.tasks_deleted
     except Exception:  # noqa: BLE001

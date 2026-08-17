@@ -1882,7 +1882,6 @@ class KernelPhase(PhaseHandler):
             "last_profile_workload",
             "last_profile_workload_action",
             "last_trace_analyze",
-            "roofline_snapshot_id",
             "roofline_snapshots",
             "baseline_eager_fallback",
         ):

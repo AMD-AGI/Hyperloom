@@ -68,8 +68,8 @@ def test_syncs_standard_roofline_fallback_into_live_coordinator_state(tmp_path):
     persisted.last_trace_analyze = {
         "trace_input": persisted.last_profile_trace,
         "steady_state_trace": selected_trace,
+        "roofline_snapshot_id": 3,
     }
-    persisted.roofline_snapshot_id = 3
     persisted.roofline_snapshots = [{"snapshot_id": 3}]
     persisted.baseline_eager_fallback = False
     persisted.save(tmp_path)
@@ -172,8 +172,8 @@ async def test_intent_router_gemm_roofline_survives_terminal_lifecycle_save(
             state.last_trace_analyze = {
                 "trace_input": state.last_profile_trace,
                 "steady_state_trace": selected_trace,
+                "roofline_snapshot_id": 7,
             }
-            state.roofline_snapshot_id = 7
             state.baseline_eager_fallback = False
             state.save(session_dir)
             return {

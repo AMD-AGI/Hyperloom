@@ -32,9 +32,8 @@ class RuntimeAdapterError(RuntimeError):
 def read_json(path: str | Path) -> Any:
     """Read a UTF-8 JSON file, returning ``None`` for a blank file.
 
-    Intentionally does not catch errors: subprocess bridge callers need a
-    non-zero exit code rather than swallowed exceptions.  For tolerant JSON
-    reading see ``hyperloom.common.jsonio.read_json``.
+    Raises rather than degrading so a bridge caller exits non-zero; use
+    ``hyperloom.common.jsonio.read_json`` for the tolerant variant.
 
     Args:
         path: Path to the JSON file to read.

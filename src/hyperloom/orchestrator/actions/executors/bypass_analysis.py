@@ -76,12 +76,9 @@ def parse_server_log_throughput(text: str) -> list[float]:
 def steady_state_mean(samples: list[float], *, warmup_skip_frac: float = 0.2) -> float | None:
     """Average the steady-state portion of throughput samples.
 
-    Uses 0.2 warmup fraction (vs 0.25 in ``benchmark_result._steady_state_mean``).
-    The two implementations have different clamp upper bounds and vllm regex
-    strictness; see ``benchmark_result.py`` before merging.
-
     Drops the leading ``warmup_skip_frac`` of samples before averaging; falls
-    back to the full set when the trim would empty it.
+    back to the full set when the trim would empty it. ``benchmark_result``
+    parses the same log with 0.25 and a different clamp bound.
 
     Args:
         samples: Positive throughput samples in log order.

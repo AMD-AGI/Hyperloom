@@ -236,27 +236,11 @@ def _queue_kernel_keep(
 
 
 def _ensure_kernel_task_state(state) -> None:
-    """Ensure stable ledger and pending-integrations dict are initialised."""
+    """Initialise the stable ledger and re-queue the KEEPs recorded in it."""
     if not isinstance(getattr(state, "kernel_opt_task_attempts", None), dict):
         state.kernel_opt_task_attempts = {}
     if not isinstance(getattr(state, "pending_kernel_integrations", None), dict):
         state.pending_kernel_integrations = {}
-    # For SimpleNamespace-based test doubles or legacy state that carries the old
-    # ordinal dict but not the stable one, seed the stable ledger from it.
-    ordinal = getattr(state, "kernel_opt_attempts", None)
-    if isinstance(ordinal, dict):
-        for kernel_id, raw_entry in ordinal.items():
-            if not isinstance(raw_entry, dict):
-                continue
-            entry = dict(raw_entry)
-            task_key = entry.get("stable_task_key") or _stable_kernel_task_key(
-                task_group_key=str(entry.get("task_group_key") or ""),
-                kernel_id=str(entry.get("kernel_id") or kernel_id),
-                source_file=str(entry.get("last_source_file") or ""),
-            )
-            entry.setdefault("current_kernel_id", str(kernel_id))
-            entry.setdefault("stable_task_key", task_key)
-            state.kernel_opt_task_attempts.setdefault(task_key, entry)
     for task_key, stable_entry in state.kernel_opt_task_attempts.items():
         if not isinstance(stable_entry, dict):
             continue
@@ -1412,15 +1396,35 @@ def has_keep_pending_integrate(state) -> bool:
     return bool(next_pending_keep_kernel_id(state))
 
 
-def _entry_by_kernel_id(state, kernel_id: str) -> dict | None:
-    """Return the attempt entry for ``kernel_id`` from the stable ledger.
+def index_attempts_by_kernel_id(attempts: Any) -> dict[str, dict]:
+    """Re-index a stable-keyed attempt ledger by trace-local ``current_kernel_id``.
 
-    Each entry carries ``current_kernel_id``; the first match wins.
+    The ordinal id is not an identity — reranking moves it between operators, so
+    two stable entries can claim the same one. The latest-stamped entry wins,
+    which is the one currently occupying the ordinal slot.
+
+    Args:
+        attempts: A ``kernel_opt_task_attempts`` mapping, or anything falsy.
+
+    Returns:
+        ``{current_kernel_id: attempt}``, holding the ledger's own entry dicts.
     """
-    for entry in (state.kernel_opt_task_attempts or {}).values():
-        if isinstance(entry, dict) and str(entry.get("current_kernel_id") or "") == kernel_id:
-            return entry
-    return None
+    latest: dict[str, tuple[str, dict]] = {}
+    for entry in (attempts or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        kernel_id = str(entry.get("current_kernel_id") or "")
+        if not kernel_id:
+            continue
+        ts = str(entry.get("last_ts") or entry.get("ts") or "")
+        if ts >= latest.get(kernel_id, ("", {}))[0]:
+            latest[kernel_id] = (ts, entry)
+    return {kernel_id: entry for kernel_id, (_ts, entry) in latest.items()}
+
+
+def _entry_by_kernel_id(state, kernel_id: str) -> dict | None:
+    """The stable-ledger entry currently holding ``kernel_id``, or ``None``."""
+    return index_attempts_by_kernel_id(state.kernel_opt_task_attempts).get(kernel_id)
 
 
 def kernel_opt_attempts_count(state) -> int:

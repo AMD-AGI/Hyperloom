@@ -382,12 +382,6 @@ def _complete_openai(prompt: str, model: str, timeout_sec: float) -> str:
     ).text
 
 
-def _message_text(message: Any) -> list[str]:
-    from hyperloom.common.claude_oneshot import message_text  # noqa: PLC0415
-
-    return message_text(message)
-
-
 def _complete_claude_sdk(prompt: str, model: str, timeout_sec: float) -> str:
     """Run one tool-free completion through the native Claude Agent SDK."""
     try:
@@ -397,6 +391,7 @@ def _complete_claude_sdk(prompt: str, model: str, timeout_sec: float) -> str:
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
         raise RuntimeError("claude_agent_sdk missing query / ClaudeAgentOptions")
 
+    from hyperloom.common.claude_oneshot import message_text  # noqa: PLC0415
     from hyperloom.common.llm_config import claude_sdk_env_options  # noqa: PLC0415
 
     kwargs: dict[str, Any] = dict(claude_sdk_env_options(model=model))
@@ -426,7 +421,7 @@ def _complete_claude_sdk(prompt: str, model: str, timeout_sec: float) -> str:
             if isinstance(result, str) and result.strip():
                 final = result
                 continue
-            chunks.extend(_message_text(message))
+            chunks.extend(message_text(message))
         return final.strip() or "".join(chunks).strip()
 
     try:

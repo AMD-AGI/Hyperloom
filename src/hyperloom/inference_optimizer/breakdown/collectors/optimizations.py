@@ -15,6 +15,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from ._common import phase_at
+
 
 OPTIMIZATIONS_SCHEMA_VERSION = 2
 
@@ -88,10 +90,9 @@ def _phase_timeline(state: dict[str, Any]) -> list[tuple[float, str]]:
 
 
 def _phase_at(ts: float | None, timeline: list[tuple[float, str]]) -> str:
+    """Return the phase active at Unix ``ts``, or ``""`` when it is unknown."""
     if ts is None:
         return ""
-    from ._common import phase_at
-
     return phase_at(ts, timeline)
 
 

@@ -434,11 +434,16 @@ MULTI_NODE_KEEP_THRESHOLD_FACTOR: float = 2.0
 
 
 def resolve_keep_threshold(state: Any) -> float:
-    """Current-cycle KEEP threshold read from SharedState.
+    """Current-cycle KEEP threshold for every path that injects ``keep_threshold_pct``.
 
-    Single call-site for every dispatch path that needs to inject
-    ``keep_threshold_pct``.  Reads ``macro_cycle`` and the multi-node flag
-    from ``state`` so callers don't have to.
+    Reads ``macro_cycle`` off ``state`` and the multi-node flag off the
+    environment so callers pass nothing but the state.
+
+    Args:
+        state: The SharedState (or any object carrying ``macro_cycle``).
+
+    Returns:
+        The gain percentage a variant must clear to be KEPT this cycle.
     """
     from ..actions.executors._multi_node_env import is_multi_node
 

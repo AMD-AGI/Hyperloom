@@ -144,7 +144,6 @@ def _state(tmp_path: Path) -> SimpleNamespace:
                 "last_source_file": str(source),
             }
         },
-        kernel_opt_attempts={},
         last_action_failures=[{"action": "explore", "reason": "OOM"}],
         gaps=[{"description": "attention remains bound"}],
         warm_start_lessons=[{"statement": "use page size 32"}],

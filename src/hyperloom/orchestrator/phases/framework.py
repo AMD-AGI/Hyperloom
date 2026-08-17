@@ -3537,6 +3537,8 @@ class FrameworkPhase(PhaseHandler):
             "candidate": candidate,
             "batch_id": candidate.get("batch_id") or "",
             "base_tput": resolve_grading_anchor_tput(state),
+            # Same decaying bar the explore and integrate_patch dispatch paths inject.
+            "keep_threshold_pct": _phase_state.resolve_keep_threshold(state),
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
             # Source patches require the accuracy gate for KEEP.
             "require_accuracy_for_keep": True,
@@ -3545,7 +3547,6 @@ class FrameworkPhase(PhaseHandler):
             # materializes RUN_EVAL=true and would override the session's choice.
             "disable_run_eval": bool(getattr(state, "eval_disabled", False)),
         }
-        params.setdefault("keep_threshold_pct", _phase_state.resolve_keep_threshold(state))
         cand_id = self._framework_candidate_key(candidate)
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
         lanes, ttl = self._registry_lanes_ttl("framework_agent")

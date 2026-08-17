@@ -128,8 +128,6 @@ class KnowledgeConfig:
         }
 
 
-
-
 __all__ = [
     "KnowledgeConfig",
     "KnowledgeStoreMode",
