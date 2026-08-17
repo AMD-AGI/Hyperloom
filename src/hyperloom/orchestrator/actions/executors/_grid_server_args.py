@@ -769,19 +769,19 @@ def resolve_sglang_context_cap(isl: int, osl: int) -> int:
     return max(int(isl) + int(osl) + headroom, floor)
 
 
-def reconcile_warm_replay_context_length(
+def validate_warm_replay_context_length(
     server_args: str | None,
     framework: str | None,
     isl: int,
     osl: int,
     max_model_len: int | str | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Repair an undersized replayed sglang context window before dispatch.
+    """Validate a replayed SGLang context window without changing its config.
 
     Exact Recipe identities do not include workload shape. A champion may
     therefore carry ``--context-length`` from a shorter run even though the
-    current ISL+OSL no longer fits. Preserve compatible pins; replace every
-    occurrence only when the effective last value is too small.
+    current ISL+OSL no longer fits. Compatible or absent pins are preserved
+    byte-for-byte; incompatible pins fail the replay preflight.
     """
     args = str(server_args or "").strip()
     if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
@@ -835,24 +835,10 @@ def reconcile_warm_replay_context_length(
             "effective_context_length": effective,
             "required_context_length": required,
         }
-    replacement = resolve_sglang_context_cap(isl, osl)
-    if max_len is not None:
-        replacement = min(replacement, max_len)
-    if replacement < required:
-        raise ValueError(
-            "cannot reconcile warm replay context length: "
-            f"replacement={replacement} < required={required}"
-        )
-    repaired = merge_server_args(
-        remove_server_args(args, [_SGLANG_CONTEXT_LENGTH_FLAG]),
-        f"{_SGLANG_CONTEXT_LENGTH_FLAG} {replacement}",
+    raise ValueError(
+        "warm replay context length is incompatible with target workload: "
+        f"context_length={effective} < isl+osl={required}"
     )
-    return repaired, {
-        "status": "adjusted",
-        "previous_context_length": effective,
-        "effective_context_length": replacement,
-        "required_context_length": required,
-    }
 
 
 def inject_sglang_context_length(

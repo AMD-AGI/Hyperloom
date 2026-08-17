@@ -1274,62 +1274,6 @@ class PreludePhase(PhaseHandler):
                 }
                 state.save(self.session_dir)
                 return None
-            try:
-                from ..actions.executors._grid_server_args import (
-                    reconcile_warm_replay_context_length,
-                )
-
-                repaired_args, workload_compatibility = (
-                    reconcile_warm_replay_context_length(
-                        sdk_replay.get("extra_server_args"),
-                        getattr(state, "framework", ""),
-                        int(getattr(state, "isl", 0) or 0),
-                        int(getattr(state, "osl", 0) or 0),
-                        getattr(state, "max_model_len", None),
-                    )
-                )
-                if repaired_args != str(
-                    sdk_replay.get("extra_server_args") or ""
-                ):
-                    sdk_replay["extra_server_args"] = repaired_args
-                    combined_args, combined_envs = (
-                        _merge_named_current_recipe_configs(
-                            [
-                                (
-                                    "config",
-                                    {
-                                        "extra_server_args": repaired_args,
-                                        "extra_envs": dict(
-                                            sdk_replay.get("extra_envs") or {}
-                                        ),
-                                    },
-                                ),
-                                (
-                                    "kernel",
-                                    sdk_replay.get("kernel_config") or {},
-                                ),
-                            ]
-                        )
-                    )
-                    sdk_replay["combined_extra_server_args"] = combined_args
-                    sdk_replay["combined_extra_envs"] = combined_envs
-                sdk_replay["workload_compatibility"] = workload_compatibility
-            except Exception as exc:  # noqa: BLE001 — incompatible config skips
-                state.warm_replay_attempted = True
-                state.warm_replay_outcome = {
-                    "status": "skipped",
-                    "reason": (
-                        "workload_config_incompatible:"
-                        f"{type(exc).__name__}:{exc}"
-                    )[:500],
-                    "target_workload_shape": {
-                        "conc": int(getattr(state, "conc", 0) or 0),
-                        "isl": int(getattr(state, "isl", 0) or 0),
-                        "osl": int(getattr(state, "osl", 0) or 0),
-                    },
-                }
-                state.save(self.session_dir)
-                return None
             if sdk_replay.get("patches"):
                 from ..framework.paths import resolve_session_framework_root
 
@@ -1657,6 +1601,61 @@ class PreludePhase(PhaseHandler):
             )
             combined_envs = dict(bc_envs)
             combined_envs.update(kernel_envs)
+        try:
+            from ..actions.executors._grid_server_args import (
+                validate_warm_replay_context_length,
+            )
+
+            validated_args, workload_compatibility = (
+                validate_warm_replay_context_length(
+                    combined_args,
+                    getattr(state, "framework", ""),
+                    int(getattr(state, "isl", 0) or 0),
+                    int(getattr(state, "osl", 0) or 0),
+                    getattr(state, "max_model_len", None),
+                )
+            )
+            if validated_args != combined_args:
+                raise RuntimeError(
+                    "warm replay context preflight must not mutate config"
+                )
+        except Exception as exc:  # noqa: BLE001 — incompatible config skips
+            rollback = (
+                self._revert_warm_kernel_patches(
+                    kernel_applied,
+                    kernel_snapshots,
+                )
+                if kernel_applied or kernel_snapshots
+                else {"ok": True, "errors": []}
+            )
+            if rollback.get("ok"):
+                state.warm_replay_pending = {}
+            else:
+                state.warm_replay_pending = {
+                    **dict(getattr(state, "warm_replay_pending", {}) or {}),
+                    "status": "rollback_failed",
+                    "rollback_errors": list(rollback.get("errors") or []),
+                }
+                if hasattr(state, "set_stop_reason"):
+                    state.set_stop_reason("warm_replay_rollback_failed")
+            state.warm_replay_attempted = True
+            state.warm_replay_outcome = {
+                "status": (
+                    "skipped" if rollback.get("ok") else "rollback_failed"
+                ),
+                "reason": (
+                    "workload_config_incompatible:"
+                    f"{type(exc).__name__}:{exc}"
+                )[:500],
+                "target_workload_shape": {
+                    "conc": int(getattr(state, "conc", 0) or 0),
+                    "isl": int(getattr(state, "isl", 0) or 0),
+                    "osl": int(getattr(state, "osl", 0) or 0),
+                },
+                "rollback": rollback,
+            }
+            state.save(self.session_dir)
+            return None
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": "warm_replay_prelude",
@@ -1687,11 +1686,8 @@ class PreludePhase(PhaseHandler):
                 current_remote or kernel_pending
             ),
             "combined_keep_threshold_pct": _warm_kernel_keep_threshold_pct(),
+            "workload_compatibility": workload_compatibility,
         }
-        if current_remote:
-            params["workload_compatibility"] = dict(
-                sdk_replay.get("workload_compatibility") or {}
-            )
         try:
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind="replay_warm_recipe",

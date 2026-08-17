@@ -404,7 +404,7 @@ def _patch_current_sdk_readers(
 
 
 @pytest.mark.asyncio
-async def test_current_recipe_repairs_context_for_target_workload(
+async def test_current_recipe_skips_undersized_context_for_target_workload(
     tmp_path,
     monkeypatch,
 ):
@@ -434,14 +434,36 @@ async def test_current_recipe_repairs_context_for_target_workload(
 
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
 
-    assert task is not None
-    assert "--context-length 11264" in task.params["extra_server_args"]
-    assert task.params["workload_compatibility"] == {
-        "status": "adjusted",
-        "previous_context_length": 6144,
-        "effective_context_length": 11264,
-        "required_context_length": 9216,
-    }
+    assert task is None
+    assert coord.tasks.calls == []
+    assert coord.shared_state.warm_replay_outcome["status"] == "skipped"
+    assert "context_length=6144 < isl+osl=9216" in (
+        coord.shared_state.warm_replay_outcome["reason"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_recipe_skips_undersized_context_for_target_workload(
+    tmp_path,
+):
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe=_warm_recipe_t1(
+            extra_server_args="--context-length 6144 --watchdog-timeout 1800"
+        ),
+    )
+    coord.shared_state.isl = 8192
+    coord.shared_state.osl = 1024
+    coord.shared_state.max_model_len = 32768
+
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert task is None
+    assert coord.tasks.calls == []
+    assert coord.shared_state.warm_replay_outcome["status"] == "skipped"
+    assert "context_length=6144 < isl+osl=9216" in (
+        coord.shared_state.warm_replay_outcome["reason"]
+    )
 
 
 @pytest.mark.asyncio
