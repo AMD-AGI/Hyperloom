@@ -456,15 +456,6 @@ def build_manifest(
         # IR-3 soft-degrade audit.
         "kb_degraded_reason": (getattr(args, "kb_degraded_reason", None) if args is not None else None),
         "pr_degraded_reason": (getattr(args, "pr_degraded_reason", None) if args is not None else None),
-        # Warm-recipe replay flags; persisted so resume picks up the same gate
-        # thresholds.
-        "warm_replay_enabled": (not bool(getattr(args, "no_warm_replay", False)) if args is not None else True),
-        "warm_replay_min_confidence": (
-            float(getattr(args, "warm_replay_min_confidence", 0.7) or 0.7) if args is not None else 0.7
-        ),
-        "warm_replay_min_reproduce_pct": (
-            float(getattr(args, "warm_replay_min_reproduce_pct", 0.8) or 0.8) if args is not None else 0.8
-        ),
         # Operator-supplied reference recipe source (audit only); the resolved
         # server_args / envs / model are authoritative in state.json.
         "reference_script": (getattr(args, "reference_script", None) if args is not None else None),

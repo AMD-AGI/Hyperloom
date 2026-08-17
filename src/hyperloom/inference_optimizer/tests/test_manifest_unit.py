@@ -295,7 +295,6 @@ def test_build_manifest_without_args(monkeypatch):
     assert m["schema_version"] == mf.SCHEMA_VERSION
     assert m["framework"] == "sglang"
     assert m["objective"]["kind"] == "time_only"
-    assert m["warm_replay_enabled"] is True
 
 
 def test_build_manifest_with_args(monkeypatch):
@@ -320,9 +319,6 @@ def test_build_manifest_with_args(monkeypatch):
         gpu_specialist_capacity=2,
         kb_degraded_reason=None,
         pr_degraded_reason=None,
-        no_warm_replay=True,
-        warm_replay_min_confidence=0.6,
-        warm_replay_min_reproduce_pct=0.9,
     )
     m = mf.build_manifest(Path("/tmp/sd"), args=args, session_id="sid-1")
     assert m["session_id"] == "sid-1"
@@ -332,7 +328,6 @@ def test_build_manifest_with_args(monkeypatch):
     assert m["objective"]["kind"] == "gain_pct"
     assert m["max_minutes"] == 120
     assert m["research_lane_capacity"] == 3
-    assert m["warm_replay_enabled"] is False
 
 
 def test_build_manifest_shared_provenance_fields(monkeypatch):
