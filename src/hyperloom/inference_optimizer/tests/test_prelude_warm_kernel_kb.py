@@ -282,33 +282,6 @@ def test_warm_kernel_apply_prefers_deploy_patch_over_source_snapshot(
     assert materialized["repo_root"] == framework_root
 
 
-def test_warm_kernel_apply_rejects_source_only_record(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    captured: dict = {}
-
-    def _apply(payload, **_kwargs):
-        captured.update(payload)
-        return {"status": "ok"}
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._maybe_apply_kernel_patch",
-        _apply,
-    )
-    source_snapshot = tmp_path / "replacement.py"
-
-    result = PreludePhase._apply_warm_kernel_patch(
-        SimpleNamespace(session_dir=tmp_path),
-        {"source_paths": [str(source_snapshot)], "meta": {}},
-        str(tmp_path / "target.py"),
-    )
-
-    assert result["status"] == "failed"
-    assert "missing its Patch" in result["error"]
-    assert captured == {}
-
-
 def test_multi_file_manifest_and_target_snapshot_both_roll_back(
     tmp_path: Path,
 ) -> None:

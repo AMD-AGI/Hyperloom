@@ -415,11 +415,11 @@ class PreludePhase(PhaseHandler):
 
     @classmethod
     def _parse_diff_target(cls, patch_path: str | None) -> str:
-        """Extract the first patched file's repo-relative path from a unified diff.
+        """Return the shared parser's first safe repo-relative Patch target.
 
-        Reads the ``+++ b/<path>`` header (falling back to ``diff --git a/x
-        b/y``) so a champion patch can be located in this session's source tree
-        even when the KB record did not persist an absolute target path.
+        Modify/delete/create targets come from paired pre/post-image headers;
+        mode-only and metadata-only rename patches fall back to ``diff --git``.
+        No persisted target metadata participates.
         """
         targets = cls._parse_diff_targets(patch_path)
         return targets[0] if targets else ""
@@ -430,7 +430,13 @@ class PreludePhase(PhaseHandler):
         return targets[0] if targets else ""
 
     def _resolve_kernel_target_paths(self, entry: dict[str, Any]) -> list[str]:
-        """Resolve every Patch target under this Session's one active root."""
+        """Resolve every declared Patch target under the Session active root.
+
+        Existing pre-images must be files, create destinations must be absent,
+        and resolved paths must remain beneath the root. Any read, parse, root,
+        boundary, or file-state failure records ``entry['resolution_error']``
+        and emits a warning before replay is deferred.
+        """
         def reject(reason: str) -> list[str]:
             entry["resolution_error"] = reason
             log.warning("Kernel Patch replay rejected: %s", reason)
@@ -447,8 +453,15 @@ class PreludePhase(PhaseHandler):
             return reject(f"invalid patch targets: {type(exc).__name__}: {exc}")
         if not root_value:
             return reject("Session active framework root is unset")
-        root = Path(root_value).resolve(strict=False)
-        if not root.is_dir():
+        try:
+            root = Path(root_value).resolve(strict=False)
+            root_is_dir = root.is_dir()
+        except (OSError, RuntimeError) as exc:
+            return reject(
+                "active framework root cannot be resolved: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        if not root_is_dir:
             return reject(f"active framework root is invalid: {root}")
 
         resolved: list[str] = []

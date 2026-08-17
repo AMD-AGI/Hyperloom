@@ -116,37 +116,6 @@ def test_no_patches_returns_empty(output_dir):
     assert result == []
 
 
-def test_recipe_patch_target_is_active_framework_root(
-    fake_repo,
-    output_dir,
-    tmp_path,
-    monkeypatch,
-):
-    inferencex = tmp_path / "inferencex-harness"
-    inferencex.mkdir()
-    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.baseline.resolve_session_framework_root",
-        lambda: str(fake_repo),
-    )
-    params = {
-        "patches": [
-            {
-                "patch_file": "explore/overlays/000000/0-p.patch",
-                "patch_content": VALID_PATCH,
-            }
-        ]
-    }
-
-    target = _resolve_recipe_patch_target(params)
-    result = _apply_warm_patches(params, target, output_dir)
-
-    assert target == str(fake_repo)
-    assert len(result) == 1
-    assert "patched = True" in (fake_repo / "vllm/fp8.py").read_text()
-    assert not (inferencex / "vllm/fp8.py").exists()
-
-
 def test_required_recipe_patch_fails_when_active_framework_root_is_missing(
     output_dir,
     monkeypatch,

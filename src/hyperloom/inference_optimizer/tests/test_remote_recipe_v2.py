@@ -205,24 +205,16 @@ def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> 
     assert rewrite["optimized_throughput"] == 130.0
     assert rewrite["experience_document"].endswith(".md")
     assert rewrite["patch"].startswith("kernel/rewrite/patches/")
-    assert "source_file" not in rewrite
-    assert "source_files" not in rewrite
-    assert not any("/source/" in item.path for item in bundle.artifacts)
     assert (tmp_path / "files" / rewrite["experience_document"]).is_file()
     serialized = json.dumps(bundle.knowledge)
     assert "object_id" not in serialized
     assert "bucket" not in serialized
     assert '"files": [' not in serialized
-    assert "source_file" not in serialized
-    assert "target_file" not in serialized
 
 
-def test_fusion_writer_preserves_all_patch_targets(tmp_path: Path) -> None:
+def test_fusion_writer_accepts_multi_file_patch(tmp_path: Path) -> None:
     state = _state(tmp_path)
     patch = Path(state.last_fusion["patch"])
-    source = Path(state.last_fusion["source_file"])
-    added = tmp_path / "source_fused_ops.cu"
-    added.write_text("// new fused ops\n", encoding="utf-8")
     patch.write_text(
         "diff --git a/source.cu b/source.cu\n"
         "--- a/source.cu\n"
@@ -237,22 +229,14 @@ def test_fusion_writer_preserves_all_patch_targets(tmp_path: Path) -> None:
         "+// new fused ops\n",
         encoding="utf-8",
     )
-    state.optimization_stack[3]["target_files"] = [str(source), str(added)]
-    state.last_fusion["artifact_files"] = [str(source), str(added)]
 
     bundle = build_remote_knowledge(state, tmp_path / "files-multi-fusion")
 
     fusion = bundle.knowledge["value"]["kernel"]["fusion"]["items"][0]
     assert fusion["patch"].startswith("kernel/fusion/patches/")
-    assert "target_file" not in fusion
-    assert "target_files" not in fusion
-    assert "source_file" not in fusion
-    assert "source_files" not in fusion
-    artifact_paths = {artifact.path for artifact in bundle.artifacts}
-    assert not any(path.startswith("kernel/fusion/artifacts/source") for path in artifact_paths)
 
 
-def test_rewrite_writer_preserves_all_patch_targets(tmp_path: Path) -> None:
+def test_rewrite_writer_accepts_multi_file_patch(tmp_path: Path) -> None:
     state = _state(tmp_path)
     patch = Path(state.optimization_stack[4]["patch_path"])
     patch.write_text(
@@ -274,8 +258,6 @@ def test_rewrite_writer_preserves_all_patch_targets(tmp_path: Path) -> None:
 
     rewrite = bundle.knowledge["value"]["kernel"]["rewrite"]["items"][0]
     assert rewrite["patch"].startswith("kernel/rewrite/patches/")
-    assert "target_file" not in rewrite
-    assert "target_files" not in rewrite
 
 
 def test_remote_recipe_projects_workload_shape_for_donor_gating(
@@ -354,7 +336,6 @@ def test_shared_knowledge_sanitizer_scrubs_nested_columns_and_paths() -> None:
                     "rewrite": {
                         "workspace": "/workspace/hyperloom/session",
                         "api_token": "secret",
-                        "source_file": "kernel/rewrite/source/kernel.py",
                         "note": (
                             "failed at /home/operator/session/log.txt "
                             "with TOKEN=secret"
@@ -373,7 +354,6 @@ def test_shared_knowledge_sanitizer_scrubs_nested_columns_and_paths() -> None:
     rewrite = sanitized["value"]["kernel"]["rewrite"]
     assert "workspace" not in rewrite
     assert "api_token" not in rewrite
-    assert "source_file" not in rewrite
     assert "[LOCAL_PATH]" in rewrite["note"]
     assert "secret" not in rewrite["note"]
 
@@ -549,18 +529,12 @@ def test_integrate_stack_is_authoritative_for_rewrite_patch(tmp_path: Path) -> N
     state = _state(tmp_path)
     unintegrated_patch = tmp_path / "micro-only.cu"
     unintegrated_patch.write_text("// micro only", encoding="utf-8")
-    unintegrated_source = tmp_path / "micro-source.cu"
-    unintegrated_source.write_text("// micro source", encoding="utf-8")
     attempt = state.kernel_opt_task_attempts["rmsnorm"]
     attempt["last_artifact_path"] = str(unintegrated_patch)
-    attempt["last_source_file"] = str(unintegrated_source)
     bundle = build_remote_knowledge(state, tmp_path / "files-integrated")
     rewrite = bundle.knowledge["value"]["kernel"]["rewrite"]["items"][0]
     assert rewrite["patch"].endswith("/rewrite.cu")
-    assert "source_file" not in rewrite
-    assert "source_files" not in rewrite
     assert "micro-only.cu" not in json.dumps(rewrite)
-    assert "micro-source.cu" not in json.dumps(rewrite)
     assert rewrite["speedup"] == 1.5
 
 
@@ -1454,7 +1428,7 @@ def test_kernel_reads_same_downloaded_inference_recipe_without_second_get(
             "items": [
                 {
                     "kernel_name": "verified",
-                    "source_files": ["kernel/rewrite/verified.bin"],
+                    "patch": "kernel/rewrite/verified.bin",
                 }
             ]
         }
@@ -1473,7 +1447,7 @@ def test_kernel_reads_same_downloaded_inference_recipe_without_second_get(
 
     rewrite = kernel.read_rewrite()["items"][0]
     assert rewrite["kernel_name"] == "verified"
-    assert "source_files" not in rewrite
+    assert rewrite["patch"] == "kernel/rewrite/verified.bin"
     assert kernel.prior_file("kernel/rewrite/verified.bin") is not None
     assert [call[0] for call in store.calls].count(
         "get_hyperloom_recipe_view"

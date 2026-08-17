@@ -443,6 +443,17 @@ that way; absolute otherwise. Consumers that need to pull raw
 artifacts (for example, for a replay) should resolve relative paths against
 `session.session_dir`.
 
+Terminal Recipe publication is reported alongside the artifact paths:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `recipe_finalize` | dict | Secret-free outcome from the latest finalize attempt, including its source, attempt number, timestamp, and write/skip/error details |
+| `recipe_finalize_status` | string | Durable lifecycle state: `pending`, `written`, `skipped`, `disabled`, or `failed` |
+| `recipe_finalize_attempts` | int | Number of idempotent finalize attempts across CLOSE and graceful-teardown fallback paths |
+
+`failed` is retryable during the same process lifetime. Terminal statuses
+(`written`, `skipped`, and `disabled`) suppress duplicate publication.
+
 ### `telemetry.orchestration_context`
 
 Health of the orchestration conversation's compaction loop (`OrchestrationContext`).

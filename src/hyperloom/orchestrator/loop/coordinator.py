@@ -1399,9 +1399,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         """Signal shutdown, cancel reactor tasks, finalize, and close the DB.
 
         Sets the stop event, cancels and awaits every running reactor task,
-        runs the Recipe KB T4 safety-net finalize hook (in case the CLOSE phase
-        sequencer never ran), then closes the SQLite connection. Exceptions
-        raised by reactor tasks during teardown are logged, not propagated.
+        runs the Recipe KB T4 safety-net finalize hook when CLOSE never reached
+        a terminal publication status or its earlier attempt failed, then closes
+        the SQLite connection. Exceptions raised by reactor tasks during
+        teardown are logged, not propagated.
         """
         self._stop.set()
         for t in self._tasks_running:
@@ -1420,7 +1421,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self.db.close()
 
     async def _recipe_kb_t4_hook(self) -> None:
-        """Finalize on graceful teardown/Ctrl-C when CLOSE did not finish.
+        """Finalize or retry on graceful teardown/Ctrl-C.
+
+        Terminal publication statuses are idempotent no-ops. An unfinished
+        CLOSE sequence, a missing status, or a prior retryable failure receives
+        one more in-process attempt before the database closes.
 
         This in-process hook cannot run after SIGKILL, container force-delete,
         host loss, or interpreter failure.

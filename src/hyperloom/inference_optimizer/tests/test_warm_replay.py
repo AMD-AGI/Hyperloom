@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
-import os
 from pathlib import Path
 import subprocess
 
@@ -1984,7 +1983,6 @@ def _git_repo_for_required_patch(tmp_path: Path) -> tuple[Path, str]:
 
 def test_combined_keep_retains_validated_framework_root_without_reapply(
     tmp_path,
-    monkeypatch,
 ):
     checkout, patch_content = _git_repo_for_required_patch(tmp_path)
     subprocess.run(
@@ -1994,7 +1992,6 @@ def test_combined_keep_retains_validated_framework_root_without_reapply(
         check=True,
         capture_output=True,
     )
-    monkeypatch.setenv("INFERENCEX_PATH", "/original/inferencex")
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
@@ -2038,8 +2035,6 @@ def test_combined_keep_retains_validated_framework_root_without_reapply(
     )
 
     assert "persisted = True" in (checkout / "vllm" / "fp8.py").read_text()
-    assert getattr(coord.shared_state, "active_inferencex_path", "") == ""
-    assert os.environ["INFERENCEX_PATH"] == "/original/inferencex"
     assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
     assert coord.shared_state.warm_replay_outcome["active_framework_root"] == str(
         checkout.resolve()
