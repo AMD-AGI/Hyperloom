@@ -262,7 +262,13 @@ async def test_enqueue_internal_session_breakdown_task(coord):
 @pytest.mark.asyncio
 async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     coord,
+    tmp_path,
+    monkeypatch,
 ):
+    monkeypatch.setenv(
+        "HYPERLOOM_SESSION_PACKAGE_DEST",
+        str(tmp_path / "session-packages"),
+    )
     coord.shared_state.phase_history = [_close_phase_history_row()]
     coord.recipe_kb = _StubRecipeKB()
     coord.shared_state.recipe_kb_session_id = "sid-test"
@@ -285,8 +291,9 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     by_step = {r["step"]: r for r in rows}
     assert by_step["report"]["status"] == "done"
     assert by_step["session_breakdown"]["status"] == "done"
-    # No curated artifacts in tmp_path, so packaging records "skipped".
-    assert by_step["artifact_package"]["status"] == "skipped"
+    # fact_finalize now runs first and writes optimization_journal.json, so the
+    # artifact package has a curated file to include.
+    assert by_step["artifact_package"]["status"] == "done"
     assert by_step["fact_finalize"]["status"] == "done"
     assert "status=written" in by_step["fact_finalize"]["detail"]
     assert "backend=local" in by_step["fact_finalize"]["detail"]
