@@ -2,17 +2,18 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run forge-fusion as a Hyperloom kernel-agent tool.
+"""Run KernelForge's kernel fusion as a Hyperloom kernel-agent tool.
 
 The orchestrator writes an input JSON with one validated agent backend, model,
-and sandbox policy and calls this script; the autonomous fusion loop itself
-lives in the standalone ``forge_fusion`` package.
+and sandbox policy and calls this script; the autonomous fusion pipeline itself
+lives in KernelForge and is invoked as ``kernel-agents forge-fuse``.
 
-forge-fusion emits a ``fusion_manifest.json``; this wrapper normalizes that into
-the Hyperloom kernel-result contract (a ``FORGE_FUSION_RESULT_BEGIN/END`` stdout
+It emits a ``fusion_manifest.json``; this wrapper normalizes that into the
+Hyperloom kernel-result contract (a ``FORGE_FUSION_RESULT_BEGIN/END`` stdout
 sentinel + an on-disk ``result.json``) that ``run_fusion_handler`` parses. A KEPT
-fusion already carries kernel-parity AND serving-smoke validation, so
-``requires_e2e_validation`` is set for the orchestrator's integrate/re-baseline
+result already carries validation on the KernelForge side -- kernel parity plus a
+serving smoke for an authored fusion, a serving A/B for a claimed compile pass --
+so ``requires_e2e_validation`` is set for the orchestrator's integrate/re-baseline
 gate to confirm the end-to-end gain and apply the patch + env flags.
 """
 
@@ -40,9 +41,9 @@ sys.path.pop(0)
 RESULT_BEGIN = "FORGE_FUSION_RESULT_BEGIN"
 RESULT_END = "FORGE_FUSION_RESULT_END"
 
-# forge-fusion's manifest verdict for "discovery never reached the model", added in
-# manifest schema v2 alongside the ``error`` block. It is NOT a statement about the
-# kernel, so it must not be normalized into an optimization outcome -- see
+# The manifest verdict for "discovery never reached the model", added in manifest
+# schema v2 alongside the ``error`` block. It is NOT a statement about the kernel,
+# so it must not be normalized into an optimization outcome -- see
 # _normalize_manifest.
 LLM_UNAVAILABLE_VERDICT = "llm_unavailable"
 DEFAULT_TIMEOUT_SEC = 7200
@@ -104,62 +105,6 @@ def _inject_author_gateway_env(agent_backend: str) -> None:
     apply_llm_stability_env(os.environ)
 
 
-def _package_root(source_file: str) -> str:
-    """Install dir above the top package containing ``source_file`` (site-packages).
-
-    Mirrors forge-fusion's export root for a non-git (pip-installed) framework so the
-    patch's package-relative paths apply here. Assumes each package level ships an
-    ``__init__.py`` (true for vLLM/sglang).
-    """
-    if not source_file:
-        return ""
-    d = Path(source_file).resolve().parent
-    while d.parent != d and (d / "__init__.py").is_file():
-        d = d.parent
-    return str(d)
-
-
-def _git_toplevel(path: str) -> str:
-    """Best-effort repo root the patch paths are relative to (for integrate's apply).
-
-    Uses the git work-tree root ONLY when ``path`` is a git-TRACKED file there. A
-    pip-installed framework often lives under a git project's ``.venv`` yet is
-    untracked; returning the project root would make the package-relative patch fail
-    to apply. In that case (and for a plain pip install) use the package root, which
-    matches the root forge-fusion exported the patch against.
-    """
-    if not path:
-        return ""
-    from hyperloom.common.git_safety import safe_directory_args  # noqa: PLC0415 - standalone import-light
-
-    try:
-        parent = str(Path(path).parent)
-        r = subprocess.run(
-            ["git", *safe_directory_args(["-C", parent, "rev-parse", "--show-toplevel"])],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if r.returncode == 0:
-            toplevel = r.stdout.strip()
-            try:
-                rel = str(Path(path).resolve().relative_to(Path(toplevel).resolve()))
-                tracked = subprocess.run(
-                    ["git", *safe_directory_args(["-C", toplevel, "ls-files", "--error-unmatch", "--", rel])],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                if tracked.returncode == 0:
-                    return toplevel
-            except ValueError:
-                pass
-            return _package_root(path) or toplevel
-    except (OSError, subprocess.SubprocessError):
-        return _package_root(path)
-    return _package_root(path)
-
-
 def _load_input_json(path: str) -> dict[str, Any]:
     if not path:
         return {}
@@ -181,7 +126,7 @@ def _add_opt(cmd: list[str], args: dict[str, Any], key: str, flag: str, *, requi
 def _build_cmd(args: dict[str, Any]) -> list[str]:
     agent_backend = _validated_agent_backend(args.get("agent_backend"))
     agent_sandbox_mode = _validated_agent_sandbox_mode(args.get("agent_sandbox_mode"))
-    cmd = [sys.executable, "-m", "forge_fusion.cli", "run"]
+    cmd = [sys.executable, "-m", "kernel_agents.cli", "forge-fuse"]
     _add_opt(cmd, args, "trace_path", "--trace", required=True)
     _add_opt(cmd, args, "model_path", "--model-path", required=True)
     _add_opt(cmd, args, "framework", "--framework", required=True)
@@ -200,10 +145,6 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     # fuse_all_confirmed=false to author only the top recipe.
     if bool(args.get("fuse_all_confirmed", True)):
         cmd.append("--fuse-all-confirmed")
-    if not bool(args.get("author", True)):
-        cmd.append("--no-author")
-    if not bool(args.get("validate", True)):
-        cmd.append("--no-validate")
     if truthy(args.get("verbose", False)):
         cmd.append("--verbose")
     return cmd
@@ -307,8 +248,11 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         return result
 
     loop = m.get("fusion_loop") or {}
-    val = m.get("validation") or {}
-    kept = bool(loop.get("kept") or val.get("kept"))
+    compile_pass = m.get("compile_pass") or {}
+    # KernelForge runs the compile-pass shortcut INSTEAD of the authoring loop, so
+    # exactly one of these is populated. ``validation`` is not consulted: it is the
+    # same object as ``fusion_loop.best``.
+    kept = bool(loop.get("kept") or compile_pass.get("kept"))
 
     if str(m.get("verdict") or "").strip().lower() == LLM_UNAVAILABLE_VERDICT and not kept:
         # forge-fusion never reached the model, so this run holds no opinion about the
@@ -342,12 +286,51 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         )
         return result
 
-    best = loop.get("best") or {}
-    speedup = best.get("kernel_speedup") or val.get("kernel_speedup")
-    best_flags = str(loop.get("best_env_flag") or "").split()
     artifacts = m.get("artifacts") or {}
     changed = [c.get("path") for c in (artifacts.get("changes") or []) if c.get("path")]
     src_file = str((m.get("fusion") or {}).get("source_file") or "")
+
+    if compile_pass:
+        # The win is a flipped default in the framework's own source, so the patch
+        # carries it and there is no runtime flag. The speedup is a serving tok/s
+        # ratio, not a microbenchmark one, hence the fields naming its origin.
+        speedup = compile_pass.get("speedup")
+        result.update(
+            {
+                "compile_pass_flag": compile_pass.get("flag"),
+                "serving_speedup": speedup,
+            }
+        )
+    else:
+        speedup = (loop.get("best") or {}).get("kernel_speedup")
+        best_flags = str(loop.get("best_env_flag") or "").split()
+        result.update(
+            {
+                # Fused arm = all confirmed flags ON; baseline arm = same flags OFF.
+                "env_flags": {f: "1" for f in best_flags},
+                "baseline_env_flags": {f: "0" for f in best_flags},
+                "best_pattern": loop.get("best_pattern"),
+            }
+        )
+
+    # Integrate applies a fusion from a patch file, its root and a target, and
+    # returns without any of them, while ``ok`` satisfies the KERNEL-entry
+    # idempotency gate -- so reported as a success such a run is both dropped
+    # and never retried. Verified rather than assumed: the invariant that the
+    # producer sets them together lives in another repository.
+    patch = artifacts.get("patch")
+    if kept:
+        for name, present in (
+            ("a patch", bool(patch)),
+            ("the patch file it named", bool(patch) and Path(str(patch)).is_file()),
+            ("a target file", bool(src_file)),
+            ("a patch root", bool(artifacts.get("repo_root"))),
+        ):
+            if not present:
+                # The failed/REVERT defaults above are the retryable shape.
+                result["error_class"] = "fusion_artifact_missing"
+                result["error"] = f"forge-fuse kept a fusion but exported no {name}"
+                return result
 
     result.update(
         {
@@ -356,20 +339,18 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
             "decision": "KEEP" if kept else "REVERT",
             "kept": kept,
             "kernel_speedup": speedup,
-            # Fused arm = all confirmed flags ON; baseline arm = same flags OFF.
-            "env_flags": {f: "1" for f in best_flags},
-            "baseline_env_flags": {f: "0" for f in best_flags},
             "artifact_files": changed,
-            "patch": artifacts.get("patch"),
+            "patch": patch,
             # For integrate's patch-apply path.
             "source_file": src_file,
-            # Prefer the root forge-fusion exported the patch against (authoritative,
-            # may be a site-packages dir); fall back to deriving it from src_file.
-            "kernel_repo": str(artifacts.get("repo_root") or "") or (_git_toplevel(src_file) if src_file else ""),
-            "best_pattern": loop.get("best_pattern"),
+            # The root the patch was exported against, which may be a
+            # site-packages dir. KernelForge sets it exactly when it sets a
+            # patch, so it is present whenever integrate needs it.
+            "kernel_repo": str(artifacts.get("repo_root") or ""),
             "verdict": m.get("verdict"),
-            # A KEPT fusion passed kernel parity + serving smoke; the orchestrator
-            # still confirms the real e2e gain via integrate.
+            # KernelForge validated this on its own -- kernel parity plus a serving
+            # smoke for an authored fusion, a serving A/B for a claimed compile pass
+            # -- but integrate is what confirms the real e2e gain here.
             "requires_e2e_validation": kept,
         }
     )
@@ -455,6 +436,9 @@ def main(argv: list[str] | None = None) -> int:
 
     _inject_author_gateway_env(str(payload.get("agent_backend") or ""))
     output_dir = str(payload.get("output_dir") or "")
+    # The output dir is keyed on the task, so a run that dies before writing a
+    # manifest would otherwise have the previous run's KEEP read back as its own.
+    (Path(output_dir or ".") / "fusion_manifest.json").unlink(missing_ok=True)
     timeout_sec = _timeout_sec(payload)
     try:
         proc = _run_with_tree_timeout(cmd, timeout_sec)

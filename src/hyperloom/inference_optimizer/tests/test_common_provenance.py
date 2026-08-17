@@ -96,10 +96,58 @@ def test_missing_degrades_to_none_never_raises():
 def test_gfx_env_normalized_and_fallback():
     # A decorated arch string is normalized to the bare gfx token.
     assert detect_gfx_arch({"HYPERLOOM_GFX_ARCH": "gfx950:sramecc+:xnack-"}, probe=False) == "gfx950"
-    # Priority falls back to PYTORCH_ROCM_ARCH.
-    assert detect_gfx_arch({"PYTORCH_ROCM_ARCH": "gfx942"}, probe=False) == "gfx942"
+    # Priority falls back to GFX_ARCH.
+    assert detect_gfx_arch({"GFX_ARCH": "gfx942"}, probe=False) == "gfx942"
     # No env + no probe -> None (never shells out to rocminfo).
     assert detect_gfx_arch({}, probe=False) is None
+
+
+def test_gfx_ignores_build_target_env():
+    """PYTORCH_ROCM_ARCH names compile targets, not the installed device.
+
+    Both shapes were wrong on an MI355X: the multi-arch list resolved to its
+    first entry (gfx90a, MI200), and a single-valued vendor-image setting was
+    wrong while looking plausible. Either must fall through to the probe.
+    """
+    build_list = {"PYTORCH_ROCM_ARCH": "gfx90a;gfx942;gfx950;gfx1100"}
+    assert detect_gfx_arch(build_list, probe=False) is None
+    assert detect_gfx_arch({"PYTORCH_ROCM_ARCH": "gfx942"}, probe=False) is None
+    # A real override still wins over the build target.
+    assert detect_gfx_arch({**build_list, "HYPERLOOM_GFX_ARCH": "gfx950"}, probe=False) == "gfx950"
+
+
+def test_gfx_resolves_from_gpu_type_without_probing():
+    """--gpu-type answers the question rocminfo would, and is always present.
+
+    Excluding PYTORCH_ROCM_ARCH left detection resting entirely on rocminfo,
+    which is not on PATH after either install script -- so bare-metal nodes went
+    from a wrong arch to no arch. gpu_type is fixed for the session and already
+    the KB's hardware dimension, so it resolves without shelling out at all.
+    """
+    assert detect_gfx_arch({}, gpu_type="mi355x", probe=False) == "gfx950"
+    assert detect_gfx_arch({}, gpu_type="MI300X", probe=False) == "gfx942"
+    # The session env carries it too, when args are not threaded through.
+    assert detect_gfx_arch({"GPU_TYPE": "mi325x"}, probe=False) == "gfx942"
+    # An unrecognised board must not invent an answer.
+    assert detect_gfx_arch({}, gpu_type="h100", probe=False) is None
+
+
+def test_gfx_override_beats_gpu_type():
+    """An explicit operator override outranks the board table."""
+    assert (
+        detect_gfx_arch({"HYPERLOOM_GFX_ARCH": "gfx950"}, gpu_type="mi300x", probe=False)
+        == "gfx950"
+    )
+
+
+def test_gfx_gpu_type_short_circuits_the_probe(monkeypatch):
+    """A resolvable gpu_type must not spawn rocminfo."""
+
+    def _boom(*a, **k):  # pragma: no cover - must never run
+        raise AssertionError("rocminfo probed despite a known gpu_type")
+
+    monkeypatch.setattr("hyperloom.common.provenance.subprocess.run", _boom)
+    assert detect_gfx_arch({}, gpu_type="mi355x", probe=True) == "gfx950"
 
 
 def test_server_args_hash_stable_and_sensitive():

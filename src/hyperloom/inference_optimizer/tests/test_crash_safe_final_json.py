@@ -55,11 +55,23 @@ asyncio.run(main())
 """
 
 
-def _spawn(session_dir: Path, install_handler: bool) -> subprocess.Popen:
+def _child_env() -> dict[str, str]:
+    """Environment whose ``hyperloom`` is this worktree's, not the installed one.
+
+    Both children below assert something about *these* sources, so inheriting a
+    bare environment would quietly test whichever copy is installed -- passing or
+    failing for reasons that have nothing to do with the worktree. ``src`` is what
+    makes the package importable under the src layout; the repo root stays for the
+    top-level helpers the harness reaches for.
+    """
     env = dict(os.environ)
-    # The child imports ``hyperloom`` from the inherited PYTHONPATH, which must
-    # already carry the worktree's ``src/``.
-    env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    roots = (str(_REPO_ROOT / "src"), str(_REPO_ROOT))
+    env["PYTHONPATH"] = os.pathsep.join((*roots, env.get("PYTHONPATH", "")))
+    return env
+
+
+def _spawn(session_dir: Path, install_handler: bool) -> subprocess.Popen:
+    env = _child_env()
     env["USER_DATA_PATH"] = str(session_dir)
     proc = subprocess.Popen(
         [sys.executable, "-c", _HARNESS, str(session_dir), "1" if install_handler else "0"],
@@ -112,3 +124,38 @@ def test_sigkill_cannot_write_final_json(tmp_path):
 
     final_json = tmp_path / "reports" / "final.json"
     assert not final_json.exists(), "SIGKILL bypasses finally; final.json cannot exist"
+
+
+def test_crash_safe_platform_does_not_drag_in_the_orchestrator():
+    """The safety net must not import the subsystems that may have just failed.
+
+    The orchestrator's report renderer imports the message bus and a SQLite
+    connection layer at module level, so reaching it for this record would
+    acquire that dependency after a run has already died -- and if the crash
+    came from that subsystem, the record explaining it is what breaks.
+    Run in a subprocess because the import is global and one test cannot unsee it.
+    """
+    probe = (
+        "import sys;"
+        "from hyperloom.inference_optimizer.breakdown.exporter import _crash_safe_platform;"
+        "import hyperloom;"
+        "rec = _crash_safe_platform('mi355x');"
+        "assert rec.get('status'), rec;"
+        "heavy = [m for m in ("
+        "  'hyperloom.orchestrator.actions.executors.report',"
+        "  'hyperloom.orchestrator.bus.message_bus',"
+        ") if m in sys.modules];"
+        "print('FROM:' + (hyperloom.__file__ or ''));"
+        "print('LEAKED:' + ','.join(heavy) if heavy else 'CLEAN')"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(_REPO_ROOT), env=_child_env(),
+        capture_output=True, text=True, timeout=120,
+    )
+    assert out.returncode == 0, out.stderr
+    # Without this the child imports whichever ``hyperloom`` is installed, and a
+    # green result would say nothing about the sources under test.
+    origin = next(ln[len("FROM:"):] for ln in out.stdout.splitlines() if ln.startswith("FROM:"))
+    assert origin.startswith(str(_REPO_ROOT / "src")), f"child imported {origin}"
+    assert "CLEAN" in out.stdout, out.stdout

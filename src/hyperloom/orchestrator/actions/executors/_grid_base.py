@@ -4,16 +4,15 @@
 """Shared value types and helpers for the ``explore`` executor's grid runs.
 
 Holds :class:`GridVariant` / :class:`VariantResult`, the content-fingerprint
-delegate, ``extra_envs`` coercion, the Pareto filter, and the shared Magpie
-cwd / per-variant timeout defaults. The runner that actually invokes Magpie
-and parses ``benchmark_report.json`` lives in :mod:`._grid_runner`.
+delegate, ``extra_envs`` coercion, the Pareto filter, and the shared
+per-variant timeout default. The runner that actually invokes Magpie and
+parses ``benchmark_report.json`` lives in :mod:`._grid_runner`.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-import tempfile
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -63,8 +62,6 @@ def variant_fingerprint(
         runtime_override=runtime_override,
     )
 
-
-_MAGPIE_CWD_DEFAULT = tempfile.gettempdir()
 
 _VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC
 

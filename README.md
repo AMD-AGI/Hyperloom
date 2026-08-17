@@ -76,7 +76,25 @@ feedback on how to improve Hyperloom by completing the
 - Main agent instructions: [`src/hyperloom/inference_optimizer/SKILL.md`](src/hyperloom/inference_optimizer/SKILL.md)
 - CLI entry point: `python -m hyperloom.inference_optimizer.cli optimize`
 - Operator tools: `python -m hyperloom.inference_optimizer.tools.*`
+- Platform tuning audit: `python3 scripts/platform_audit.py` — checks the host CPU
+  tuning that silently changes benchmark results. Judges Core Performance Boost and
+  the cpufreq governor against [AMD's BIOS & Workload Tuning Guide for EPYC 9004][58011];
+  records determinism, SMT and NPS without a verdict, because chapter 5 varies those
+  by workload or the OS layer can only infer them. Reads `/sys`, `/proc` and — as
+  root — the HWCR MSR; no credentials, nothing written. Exit `0` on target, `1` a
+  knob is wrong, `2` unresolved, which CI should treat as missing coverage rather
+  than as a failure. The BIOS-only knobs are not reachable this way; see below.
+- BIOS audit over the BMC: `sudo python3 scripts/platform_audit_bmc.py --bmc-user <ro>`
+  — covers the three knobs the OS cannot see (High Performance profile, APBDIS, DF
+  C-states), targeted per [58011][58011] §4.2.1, §4.4.3 and §4.4.4. Without
+  `--bmc-user` it refuses to run unless `--allow-account-creation` is passed, because
+  that path **mints a temporary ADMINISTRATOR account on the BMC**; exit `3` means
+  such an account was left enabled or could not be confirmed revoked, and should page
+  someone. The script's docstring has the account lifecycle and the rest of the exit
+  codes.
 - Documentation source: `docs/`
+
+[58011]: https://docs.amd.com/v/u/en-US/58011-epyc-9004-tg-bios-and-workload
 
 For contribution workflow, testing, and linting, see
 [`CONTRIBUTING.md`](CONTRIBUTING.md).

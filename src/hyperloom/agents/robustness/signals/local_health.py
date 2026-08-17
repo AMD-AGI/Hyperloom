@@ -11,12 +11,23 @@ unreachable); silent otherwise since the SourceData fields are empty. Covers
 
 from __future__ import annotations
 
+import os
+from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
+
+
+# Load generators that only run while an inference server is expected to answer,
+# so their presence turns "no server process" from an idle stretch into an
+# outage. Deliberately narrower than the harness patterns the process probe
+# matches: the outer Magpie/InferenceX harness is also up while it launches a
+# server and while it tears one down, when a refused port is the correct reading.
+_BENCHMARK_CLIENT_PATTERNS: tuple[str, ...] = ("benchmark_serving",)
 
 
 @dataclass
@@ -40,6 +51,11 @@ class LocalHealthConfig:
             symptom.
         fd_crit_used_pct (float): File-descriptor used-percent for a HIGH
             symptom.
+        benchmark_client_patterns (tuple[str, ...]): Commands whose presence
+            means a server is supposed to be answering right now.
+        session_dir (Path | None): This session's directory, used to tell its
+            own processes from a co-tenant's. ``None`` leaves the benchmark
+            client check host-wide, which is only safe on a dedicated node.
     """
 
     gpu_temp_warn_c: float = 90.0
@@ -53,6 +69,8 @@ class LocalHealthConfig:
     shm_used_crit_pct: float = 90.0
     fd_warn_used_pct: float = 80.0
     fd_crit_used_pct: float = 95.0
+    benchmark_client_patterns: tuple[str, ...] = _BENCHMARK_CLIENT_PATTERNS
+    session_dir: Path | None = None
 
 
 # HIGH-severity log patterns; anything else from ``local_log_errors`` falls back to MEDIUM.
@@ -111,7 +129,7 @@ def evaluate_local_health_signals(
     """
     cfg = config or LocalHealthConfig()
     out: list[Symptom] = []
-    out.extend(_server_unreachable(data))
+    out.extend(_server_unreachable(data, cfg))
     out.extend(_log_error_symptoms(data))
     out.extend(_gpu_thermal_symptoms(data, cfg))
     out.extend(_disk_pressure_symptoms(data, cfg))
@@ -121,19 +139,44 @@ def evaluate_local_health_signals(
     return out
 
 
-def _server_unreachable(data: SourceData) -> list[Symptom]:
+def _server_unreachable(data: SourceData, cfg: LocalHealthConfig) -> list[Symptom]:
     """Emit ``local_server_unreachable`` for each failed local HTTP probe.
+
+    The probe detects "process is alive but the server is wedged", so a refusal
+    with no server process behind the port is the expected reading, not a
+    fault: a session spends long stretches — preparation, analysis, the gap
+    between two variants — with no server up by design, and alerting there
+    tells an operator to restart something that was never meant to be running.
+
+    That reasoning needs to know there is no server, which is not the same as
+    failing to find one. When the process probe could not answer at all, the
+    symptom is emitted with the uncertainty recorded in its evidence, so a
+    broken ``ps`` cannot mute an unrelated finding.
+
+    "No server process" also does not always mean no server was wanted. A
+    server that died mid-benchmark leaves that exact snapshot while its own
+    load generator keeps sending requests into a closed port, so a benchmark
+    client of *this session* is treated as proof that something was supposed to
+    be answering and the alert stands. A co-tenant's client on a shared node
+    proves nothing about this session's port.
 
     Severity is HIGH when every probed target is unreachable, otherwise MEDIUM.
 
     Args:
         data (SourceData): Collected source data including
-            ``local_server_health``.
+            ``local_server_health``, ``local_processes`` and
+            ``local_processes_known``.
+        cfg (LocalHealthConfig): Thresholds; provides the benchmark-client
+            patterns.
 
     Returns:
         list[Symptom]: One symptom per unreachable probe target, possibly empty.
     """
     if not data.local_server_health:
+        return []
+    server_seen = any(proc.get("is_server") for proc in data.local_processes)
+    client_seen = _benchmark_client_seen(data, cfg)
+    if data.local_processes_known and not server_seen and not client_seen:
         return []
     bad = [entry for entry in data.local_server_health if not entry.get("reachable")]
     if not bad:
@@ -153,6 +196,8 @@ def _server_unreachable(data: SourceData) -> list[Symptom]:
                     "status": status,
                     "status_code": entry.get("status_code"),
                     "error": entry.get("error"),
+                    "server_process_seen": server_seen if data.local_processes_known else None,
+                    "benchmark_client_seen": client_seen if data.local_processes_known else None,
                 },
                 subject={"url": url},
                 source="local",
@@ -164,6 +209,100 @@ def _server_unreachable(data: SourceData) -> list[Symptom]:
             )
         )
     return out
+
+
+def _benchmark_client_seen(data: SourceData, cfg: LocalHealthConfig) -> bool:
+    """Report whether a load generator that needs *this session's* server runs.
+
+    The process probe reads a whole-host ``ps``, so on a shared node another
+    session's load generator is in the snapshot too — and it vouches for a port
+    it has never sent a request to, turning this session's idle stretch back
+    into an outage. Only a client that can be tied to this session counts.
+
+    Args:
+        data (SourceData): Collected source data including ``local_processes``.
+        cfg (LocalHealthConfig): Thresholds; provides the benchmark-client
+            patterns and the session anchor.
+
+    Returns:
+        bool: ``True`` when a probed process matches a configured
+            benchmark-client pattern and belongs to this session.
+    """
+    anchor = os.path.realpath(cfg.session_dir) if cfg.session_dir else ""
+    for proc in data.local_processes:
+        if not isinstance(proc, dict):
+            continue
+        cmd = str(proc.get("cmd") or "")
+        if not any(pattern in cmd for pattern in cfg.benchmark_client_patterns):
+            continue
+        if _in_session(proc, anchor):
+            return True
+    return False
+
+
+def _in_session(proc: dict[str, Any], anchor: str) -> bool:
+    """Report whether a probed process can be tied to the session at ``anchor``.
+
+    The harness is launched with its working directory inside the session and
+    children inherit it, so the cwd is the anchor; a client that names a path
+    under the session on its command line (``--result-dir``) counts too, for the
+    launch paths that chdir elsewhere. Both readings go through
+    :func:`_under_session` so neither can drift into accepting a path that only
+    starts with the session's.
+
+    Args:
+        proc (dict[str, Any]): One ``local_processes`` entry.
+        anchor (str): Resolved session directory, or ``""`` when the session is
+            unknown — nothing to compare against, so every match counts and the
+            check stays host-wide.
+
+    Returns:
+        bool: ``True`` when the process belongs to this session.
+    """
+    if not anchor:
+        return True
+    if _under_session(str(proc.get("cwd") or ""), anchor):
+        return True
+    return any(_under_session(path, anchor) for path in _command_line_paths(str(proc.get("cmd") or "")))
+
+
+def _under_session(path: str, anchor: str) -> bool:
+    """Report whether ``path`` is the session directory or something inside it.
+
+    Compared a path component at a time, never as a string prefix: a co-tenant's
+    ``<session>-retry`` — a retry, a backup, or any sibling an operator names
+    after ours — starts with the session path without being in the session, and
+    a prefix test would let it vouch for its own port.
+
+    Args:
+        path (str): Candidate path; ``""`` belongs to nobody.
+        anchor (str): Resolved session directory.
+
+    Returns:
+        bool: ``True`` when ``path`` lies at or under ``anchor``.
+    """
+    return bool(path) and Path(path).is_relative_to(anchor)
+
+
+def _command_line_paths(cmd: str) -> Iterator[str]:
+    """Yield the path-shaped pieces of a command line.
+
+    Each whitespace-separated token, plus what follows the first ``=`` in it, so
+    ``--result-dir /run/x`` and ``--result-dir=/run/x`` read the same. Tokens are
+    yielded whole rather than searched for a substring, which is what lets the
+    caller apply a directory boundary to them.
+
+    Args:
+        cmd (str): The process command line.
+
+    Yields:
+        str: One candidate path per token, and its ``key=value`` value.
+    """
+    for token in cmd.split():
+        yield token
+        _, sep, value = token.partition("=")
+        if sep:
+            yield value
 
 
 def _log_error_symptoms(data: SourceData) -> list[Symptom]:

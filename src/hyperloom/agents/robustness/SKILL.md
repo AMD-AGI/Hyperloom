@@ -126,12 +126,20 @@ host -> subprocess -> envelope -> upstream PolicyGate path.
 | `LLM_MODEL` | no | provider default | RCA model name. With neither override set the chain is openai: `OPENAI_MODEL` → `CODEX_MODEL` → `gpt-5.6-sol`, else anthropic: `ANTHROPIC_MODEL` → `CLAUDE_MODEL` → `claude-opus-5`. |
 | `ROBUSTNESS_LLM_RCA_DISABLED` | no | unset | Set to `1` to forcibly disable the LlmRcaEngine even when credentials are present. |
 
+`Config.discover()` reads the variables above plus the deployment-shape ones
+(`ROBUSTNESS_DISABLE_LOCAL_PROBE`, `ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS`,
+`ROBUSTNESS_NODES`) and nothing else. Every threshold — stall timeouts, disk and
+shm percentages, GPU temperatures — is a field on `Config` with a default in
+`config.py`, changed in code or by whoever constructs the `Config`, not from the
+environment.
+
 ## Symptom -> intent mapping (M1 / M1.5)
 
 | Symptom | Severity | Intents emitted | Source |
 |---------|----------|-----------------|--------|
 | `agent_stall` (≥ stall_timeout_s) | medium | `alert(medium)` | M1 |
 | `agent_stall` (≥ severity_high_after_s) | high | `alert(high)` | M1 |
+| `agent_quiet_work_progressing` (own dispatched work reported within `stall_timeout_s`) | low | `send_message(observation)` | M1.5 |
 | `crash_count_rising` (≥ 2) | medium | `alert(medium)` | M1 |
 | `crash_count_high` (≥ 5) | high | `alert(high)` | M1 |
 | `crash_count_emergency` (≥ 10) | high | `alert(high)` | M1 |
@@ -141,6 +149,7 @@ host -> subprocess -> envelope -> upstream PolicyGate path.
 | `pod_not_running` (other non-Running) | medium | `alert(medium)` | M1 |
 | `pod_no_metrics` (≥ no_metrics_warn_s) | low | `send_message(observation)` | M1 |
 | `local_server_unreachable` (any target down) | medium / high (all down) | `alert(medium)` / `alert(high)` | M1.5 |
+| `local_server_unreachable`, no server process and no benchmark client of this session | — | suppressed (an idle stretch, not an outage) | M1.5 |
 | `log_error_pattern` (CUDA OOM / NCCL / segfault) | high | `alert(high)` | M1.5 |
 | `log_error_pattern` (RuntimeError / generic) | medium | `alert(medium)` | M1.5 |
 | `gpu_thermal_high` (≥ warn_c) | medium | `alert(medium)` | M1.5 |
