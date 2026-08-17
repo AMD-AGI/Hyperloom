@@ -2952,11 +2952,19 @@ def _run_loop_via_cli(
     # logged in". Pin codex instead, and disable the provider fallback (it
     # defaults to claude) so a missing Codex SDK fails loudly here rather than
     # degrading into an unauthenticated claude run.
+    #
+    # Model id uses the shared Forge ladder (FORGE_* → CLAUDE/CODEX_MODEL) so
+    # rewrite honors the same overrides as fusion and collective. Omit --model
+    # when unset so KernelForge keeps its own provider default.
+    from hyperloom.common.llm_config import resolve_forge_llm_model
+
     if _openai_only_provider():
         cmd += ["--agent-backend", "codex", "--agent-fallback-provider", "none"]
-        codex_model = (os.environ.get("CODEX_MODEL") or "").strip()
-        if codex_model:
-            cmd += ["--model", codex_model]
+        forge_model = resolve_forge_llm_model("codex")
+    else:
+        forge_model = resolve_forge_llm_model("claude")
+    if forge_model:
+        cmd += ["--model", forge_model]
     if program_md_file and Path(program_md_file).exists():
         cmd += ["--program-md-file", str(program_md_file)]
     if invocation_spec_file and Path(invocation_spec_file).is_file():
