@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from hyperloom.common.git_safety import safe_directory_args
 
 from . import machine_state as _phase_state
+from ._enablement_artifacts import snapshot_round
 from ..bus.message_bus import Message
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..state.shared_state import inject_stack_base_params, resolve_grading_anchor_tput
@@ -1801,8 +1802,7 @@ class FrameworkPhase(PhaseHandler):
             state.enablement.kept_patches = kept
             _stack_setup_commands()
             _stack_kept_runtime()
-            # Accumulate env/arg changes from config-only rounds so a
-            # subsequent kept round can replay them via accepted_config.
+            # Accumulated so a later kept round replays every advance, not just patches.
             adv_envs = res.get("extra_envs_applied") or {}
             adv_args = str(res.get("extra_server_args_applied") or "").strip()
             if adv_envs or adv_args:
@@ -1828,9 +1828,8 @@ class FrameworkPhase(PhaseHandler):
                 state.set_stop_reason("enablement_stalled")
                 stop_set = "enablement_stalled"
         try:
-            from ._enablement_artifacts import snapshot_round as _snap
-            _snap(self.session_dir, res)
-        except Exception:  # noqa: BLE001
+            snapshot_round(self.session_dir, res)
+        except Exception:  # noqa: BLE001 — archiving must not break the rearm
             log.debug("enablement: artifact snapshot failed", exc_info=True)
         # A rearm always ends the round.
         state.enablement.inflight_task_id = ""

@@ -1,14 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the enablement round artifact snapshot helper."""
+"""Tests for the enablement round artifact snapshot."""
 
 from __future__ import annotations
 
 import json
 
+import pytest
 
-from hyperloom.orchestrator.phases._enablement_artifacts import snapshot_round
+from hyperloom.orchestrator.phases._enablement_artifacts import (
+    _FILE_SIZE_LIMIT,
+    snapshot_round,
+)
 
 
 def _res(**kw):
@@ -29,63 +33,69 @@ def _res(**kw):
     return base
 
 
-def test_snapshot_creates_round_json(tmp_path):
-    snapshot_round(tmp_path, _res())
-    rj = tmp_path / "reports" / "enablement" / "abc123" / "round.json"
-    assert rj.is_file()
-    data = json.loads(rj.read_text())
+def test_round_json_records_the_result(tmp_path):
+    snapshot_round(
+        tmp_path,
+        _res(extra_envs_applied={"A": "1"}, extra_server_args_applied="--flag"),
+    )
+    data = json.loads((tmp_path / "reports" / "enablement" / "abc123" / "round.json").read_text())
     assert data["status"] == "kept"
-    assert data["specialist_task_id"] == "abc123"
+    assert data["extra_envs_applied"] == {"A": "1"}
+    assert data["extra_server_args_applied"] == "--flag"
 
 
-def test_snapshot_copies_existing_patch(tmp_path):
-    patch_src = tmp_path / "runs" / "specialist" / "abc123" / "patches"
-    patch_src.mkdir(parents=True)
-    (patch_src / "001_fix.patch").write_text("diff --git a/f b/f\n+fix", encoding="utf-8")
-    snapshot_round(tmp_path, _res())
+def test_applied_patch_is_copied(tmp_path):
+    src = tmp_path / "runs" / "specialist" / "abc123" / "patches"
+    src.mkdir(parents=True)
+    (src / "001_fix.patch").write_text("diff --git a/f b/f\n", encoding="utf-8")
+    snapshot_round(tmp_path, _res(patches_applied=[str(src / "001_fix.patch")]))
     dest = tmp_path / "reports" / "enablement" / "abc123" / "patches" / "001_fix.patch"
-    assert dest.is_file()
+    assert dest.read_text() == "diff --git a/f b/f\n"
 
 
-def test_snapshot_noop_on_invalid_input(tmp_path):
-    # None session_dir
-    snapshot_round(None, _res())
-    # non-dict res
-    snapshot_round(tmp_path, "bad")
-    assert not (tmp_path / "reports" / "enablement").exists()
+def test_unapplied_workspace_patch_is_still_copied(tmp_path):
+    """A reverted attempt still explains what was tried."""
+    src = tmp_path / "runs" / "specialist" / "abc123" / "worktree" / "patches"
+    src.mkdir(parents=True)
+    (src / "002_try.diff").write_text("diff\n", encoding="utf-8")
+    snapshot_round(tmp_path, _res())
+    assert (tmp_path / "reports" / "enablement" / "abc123" / "patches" / "002_try.diff").is_file()
 
 
-def test_snapshot_handles_missing_workspace_gracefully(tmp_path):
-    """workspace not found → no crash, round.json still written."""
-    snapshot_round(tmp_path, _res(specialist_task_id="no_ws_tid"))
-    rj = tmp_path / "reports" / "enablement" / "no_ws_tid" / "round.json"
-    assert rj.is_file()
-
-
-def test_snapshot_sanitises_task_id_path_traversal(tmp_path):
-    snapshot_round(tmp_path, _res(specialist_task_id="../evil"))
-    round_dirs = list((tmp_path / "reports" / "enablement").iterdir())
-    assert len(round_dirs) == 1
-    assert ".." not in str(round_dirs[0])
-
-
-def test_snapshot_copies_specialist_done_and_prompt(tmp_path):
-    ws = tmp_path / "runs" / "specialist" / "tid_x"
+def test_specialist_result_and_prompt_are_copied(tmp_path):
+    ws = tmp_path / "runs" / "specialist" / "abc123"
     ws.mkdir(parents=True)
     (ws / "specialist_done.json").write_text('{"summary": "ok"}', encoding="utf-8")
     (ws / "prompt.md").write_text("# prompt", encoding="utf-8")
-    snapshot_round(tmp_path, _res(specialist_task_id="tid_x"))
-    out = tmp_path / "reports" / "enablement" / "tid_x"
+    snapshot_round(tmp_path, _res())
+    out = tmp_path / "reports" / "enablement" / "abc123"
     assert (out / "specialist_done.json").is_file()
     assert (out / "prompt.md").is_file()
 
 
-def test_snapshot_launch_config_copied(tmp_path):
-    cfg = tmp_path / "runs" / "integrate_patch" / "t1" / "launch.yaml"
+def test_launch_config_is_copied(tmp_path):
+    cfg = tmp_path / "runs" / "integrate_patch" / "t1" / "integrate_patch.with_envs.yaml"
     cfg.parent.mkdir(parents=True)
     cfg.write_text("tp: 8\n", encoding="utf-8")
-    snapshot_round(
-        tmp_path,
-        _res(specialist_task_id="t1", enablement_accepted_config_path=str(cfg)),
-    )
-    assert (tmp_path / "reports" / "enablement" / "t1" / "launch_config.yaml").is_file()
+    snapshot_round(tmp_path, _res(enablement_accepted_config_path=str(cfg)))
+    assert (tmp_path / "reports" / "enablement" / "abc123" / "launch_config.yaml").is_file()
+
+
+def test_oversized_artifact_is_skipped(tmp_path):
+    src = tmp_path / "runs" / "specialist" / "abc123" / "patches"
+    src.mkdir(parents=True)
+    big = src / "003_big.patch"
+    big.write_bytes(b"x" * (_FILE_SIZE_LIMIT + 1))
+    snapshot_round(tmp_path, _res(patches_applied=[str(big)]))
+    assert not (tmp_path / "reports" / "enablement" / "abc123" / "patches" / "003_big.patch").exists()
+
+
+def test_launch_log_excerpt_is_bounded(tmp_path):
+    snapshot_round(tmp_path, _res(enablement_launch_log="E" * 5000))
+    data = json.loads((tmp_path / "reports" / "enablement" / "abc123" / "round.json").read_text())
+    assert len(data["launch_log_excerpt"]) == 1200
+
+
+def test_unsafe_task_id_is_refused(tmp_path):
+    with pytest.raises(ValueError):
+        snapshot_round(tmp_path, _res(specialist_task_id="../evil"))

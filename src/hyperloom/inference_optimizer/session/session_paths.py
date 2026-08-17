@@ -258,10 +258,10 @@ def reports_dir(session_dir: Path) -> Path:
 
 
 def enablement_dir(session_dir: Path) -> Path:
-    """``<sd>/reports/enablement/`` — root for archived enablement round artifacts.
+    """``<sd>/reports/enablement/`` — enablement round artifacts.
 
-    The ``reports/`` parent is retained by the archive collector, so everything
-    written here survives session upload without any collector-side change.
+    Lives under ``reports/`` because the archive collector drops ``runs/``
+    wholesale but retains this subtree.
 
     Args:
         session_dir: The session root directory.
@@ -273,20 +273,20 @@ def enablement_dir(session_dir: Path) -> Path:
 
 
 def enablement_round_dir(session_dir: Path, task_id: str) -> Path:
-    """``<sd>/reports/enablement/<task_id>/`` — per-round artifact directory.
-
-    One directory is created per integrate_patch round so concurrent or serial
-    rounds from different specialist dispatches never overwrite each other.
+    """``<sd>/reports/enablement/<task_id>/`` — one directory per round.
 
     Args:
         session_dir: The session root directory.
-        task_id: The specialist task id that drove this round.
+        task_id: The specialist task id that drove the round.
 
     Returns:
         ``<session_dir>/reports/enablement/<task_id>``.
+
+    Raises:
+        ValueError: If ``task_id`` is not a safe single path component.
     """
-    safe = task_id.replace("/", "_").replace("..", "_") if task_id else "unknown"
-    return enablement_dir(session_dir) / safe
+    tid = _validate_id_component(task_id, field="enablement_round_dir.task_id")
+    return enablement_dir(session_dir) / tid
 
 
 # Full-trace artefacts (token + decision timeline) under reports/trace/.
