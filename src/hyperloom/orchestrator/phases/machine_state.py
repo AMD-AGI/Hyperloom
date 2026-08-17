@@ -1657,12 +1657,8 @@ def compute_kernel_progress_fingerprint(
     import json
 
     attempts: list[list[str]] = []
-    for ledger in (
-        getattr(state, "kernel_opt_task_attempts", None),
-        getattr(state, "kernel_opt_attempts", None),
-    ):
-        if not isinstance(ledger, dict):
-            continue
+    ledger = getattr(state, "kernel_opt_task_attempts", None)
+    if isinstance(ledger, dict):
         for ledger_id, attempt in ledger.items():
             if not isinstance(attempt, dict):
                 continue
@@ -1744,11 +1740,7 @@ def kernel_work_pending(state: Any) -> bool:
             if source_file:
                 integrated_sources.add(source_file)
 
-    attempts = (
-        getattr(state, "kernel_opt_task_attempts", None)
-        or getattr(state, "kernel_opt_attempts", None)
-        or {}
-    )
+    attempts = getattr(state, "kernel_opt_task_attempts", None) or {}
     if not isinstance(attempts, dict):
         return False
     for ledger_id, attempt in attempts.items():

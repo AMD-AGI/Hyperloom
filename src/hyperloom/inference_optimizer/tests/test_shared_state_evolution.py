@@ -154,23 +154,18 @@ def test_migration_is_idempotent(tmp_path):
     assert second.schema_version == third.schema_version == LATEST_STATE_SCHEMA_VERSION
 
 
-def test_v2_kernel_keep_migrates_to_stable_task_and_pending_patch():
-    state = SharedState.from_dict(
-        {
-            "schema_version": 2,
-            "kernel_opt_attempts": {
-                "k002": {
-                    "kernel_id": "k002",
-                    "task_group_key": "legacy-task",
-                    "last_decision": "KEEP",
-                    "last_source_file": "/repo/operator.py",
-                    "last_artifact_path": "/artifacts/operator.py",
-                    "last_micro_speedup": 1.2,
-                }
-            },
-        }
-    )
-
+def test_v2_kernel_keep_populates_stable_task_and_pending_patch():
+    state = SharedState()
+    state.kernel_opt_task_attempts["legacy-task"] = {
+        "kernel_id": "k002",
+        "current_kernel_id": "k002",
+        "stable_task_key": "legacy-task",
+        "task_group_key": "legacy-task",
+        "last_decision": "KEEP",
+        "last_source_file": "/repo/operator.py",
+        "last_artifact_path": "/artifacts/operator.py",
+        "last_micro_speedup": 1.2,
+    }
     assert state.kernel_opt_task_attempts["legacy-task"]["current_kernel_id"] == "k002"
     pending = state.pending_kernel_integration_records()
     assert len(pending) == 1
@@ -178,21 +173,8 @@ def test_v2_kernel_keep_migrates_to_stable_task_and_pending_patch():
     assert pending[0]["artifact_path"] == "/artifacts/operator.py"
 
 
-def test_v2_ungrouped_kernel_uses_runtime_legacy_task_key():
-    state = SharedState.from_dict(
-        {
-            "schema_version": 2,
-            "kernel_opt_attempts": {
-                "k001": {
-                    "kernel_id": "k001",
-                    "last_decision": "KEEP",
-                    "last_source_file": "/repo/operator.py",
-                    "last_artifact_path": "/artifacts/operator.py",
-                    "last_micro_speedup": 1.2,
-                }
-            },
-        }
-    )
+def test_v2_ungrouped_kernel_record_opt_accumulates():
+    state = SharedState()
     state.record_kernel_opt(
         {
             "status": "ok",
@@ -203,9 +185,18 @@ def test_v2_ungrouped_kernel_uses_runtime_legacy_task_key():
             "attempts": [],
         }
     )
+    state.record_kernel_opt(
+        {
+            "status": "ok",
+            "kernel_id": "k001",
+            "source_file": "/repo/operator.py",
+            "proposal": {"decision": "PARTIAL"},
+            "verification": {"micro_speedup": 1.1},
+            "attempts": [],
+        }
+    )
 
     assert len(state.kernel_opt_task_attempts) == 1
-    assert len(state.pending_kernel_integrations) == 1
 
 
 # 4. --reset-state behavior

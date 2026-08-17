@@ -225,7 +225,7 @@ class WritebackCollaborator:
         await self.bus.append_and_seq(Message.new(source, "*", topic, payload))
 
     def _record_kernel_opt_partial(self, result: dict[str, Any]) -> None:
-        """Streaming callback for ``_run_optimization_batch`` sub-attempts: write each per-kernel entry to kernel_opt_attempts immediately so the next-tick prompt is accurate mid-batch.
+        """Streaming callback for ``_run_optimization_batch`` sub-attempts: write each per-kernel entry to kernel_opt_task_attempts immediately so the next-tick prompt is accurate mid-batch.
 
         Args:
             result: One sub-attempt's per-kernel result dict.
@@ -1282,18 +1282,14 @@ class WritebackCollaborator:
         return out
 
     def _build_kernel_optimizations_from_state(self) -> list[dict[str, Any]]:
-        """Collect KEEP'd kernel optimizations + their E2E verdict by joining kernel_opt_attempts (micro) and kernel_integrate_attempts (E2E) on kernel_id; non-integrated KEEPs surface integrated=False. Returns KernelOptimization-shaped dicts.
+        """Collect KEEP'd kernel optimizations + their E2E verdict by joining kernel_opt_task_attempts (micro) and kernel_integrate_attempts (E2E) on kernel_id; non-integrated KEEPs surface integrated=False. Returns KernelOptimization-shaped dicts.
 
         Returns:
             A list of KernelOptimization-shaped dicts for each KEEP'd kernel,
             joined with its E2E integrate verdict where available.
         """
         ss = self.shared_state
-        opt_attempts = (
-            getattr(ss, "kernel_opt_task_attempts", {})
-            or getattr(ss, "kernel_opt_attempts", {})
-            or {}
-        )
+        opt_attempts = getattr(ss, "kernel_opt_task_attempts", {}) or {}
         integ_attempts = getattr(ss, "kernel_integrate_attempts", {}) or {}
         if not isinstance(opt_attempts, dict):
             return []

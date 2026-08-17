@@ -770,7 +770,7 @@ rewrite (each with a `skip_reason`); they are off-limits, not targets.
   Backend policy: DO NOT add a `backends` field. Current GEAK owns the
   KERNEL phase by default. Forge per-kernel mode is available only when the
   operator set exactly `KERNEL_OPT_BACKEND_ORDER=forge`.
-  Read `kernel_opt_attempts` +
+  Read `kernel_opt_task_attempts` +
   `pending_keep_kernels` to
   see what's still queueable; the batch handler filters
   rejected/in-flight/exhausted candidates.
@@ -786,7 +786,7 @@ allowed action until the patch lands on `optimization_stack`:
 
   Omit `base_tput` / `patch_path` / `source_file` and the Coordinator
   fills them from `current_best.tput` and the per-kernel
-  `kernel_opt_attempts` ledger (this is what drains a multi-KEEP queue).
+  `kernel_opt_task_attempts` ledger (this is what drains a multi-KEEP queue).
   PARTIAL / REVERT → do NOT integrate; pick the next action normally.
 
   **Multi-KEEP queue:** `pending_keep_kernels` (sorted strongest-first)

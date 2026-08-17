@@ -630,7 +630,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "last_trace_analyze",
         "last_kernel_opt",
         "last_kernel_opt_dispatch_skip",
-        "kernel_opt_attempts",
         "kernel_opt_task_attempts",
         "pending_kernel_integrations",
         # closing_phase and baseline_config_path are Coordinator-only fact

@@ -1317,7 +1317,8 @@ def _fill_integrate_defaults_from_state(
 
     kernel_id = str(resolved.get("kernel_id") or "")
     if kernel_id and not resolved.get("task_group_key"):
-        attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
+        from . import _kernel_decisions as _kd
+        attempt = _kd._entry_by_kernel_id(state, kernel_id) or {}
         task_group_key = str(attempt.get("task_group_key") or "")
         if task_group_key:
             resolved["task_group_key"] = task_group_key
@@ -1458,7 +1459,8 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     # Multi-KEEP queue fallback: pull patch_path/source_file from the per-kernel
     # ledger for KEEPs other than the strongest pending one.
     if kernel_id:
-        attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
+        from . import _kernel_decisions as _kd
+        attempt = _kd._entry_by_kernel_id(state, kernel_id) or {}
         _fill_integrate_snapshot_from_bundle(resolved, attempt.get("last_artifact_bundle"))
         if not resolved.get("snapshot_dir") and attempt.get("last_snapshot_dir"):
             resolved["snapshot_dir"] = str(attempt["last_snapshot_dir"])
@@ -5174,9 +5176,9 @@ def _batch_kernel_candidates(
 
     # Build the "live" exclusion sets up front (empty without session_dir).
     rejected_kernel_ids: set[str] = set()
-    attempts_by_kid: dict[str, dict] = {}
     attempts_by_task: dict[str, dict] = {}
     in_flight: set[str] = set()
+    state = None
     from ..state.shared_state import (
         resolve_hot_kernel_min_gpu_pct,
         resolve_kernel_opt_max_failures,
@@ -5190,7 +5192,6 @@ def _batch_kernel_candidates(
 
             state = SharedState.load_or_init(session_dir)
             rejected_kernel_ids = set(state.rejected_kernel_ids or [])
-            attempts_by_kid = dict(state.kernel_opt_attempts or {})
             attempts_by_task = dict(state.kernel_opt_task_attempts or {})
             in_flight = _in_flight_kernel_ids(session_dir)
         except Exception:
@@ -5237,7 +5238,8 @@ def _batch_kernel_candidates(
         """
         if kid in in_flight:
             return False
-        entry = attempts_by_kid.get(kid) or {}
+        from . import _kernel_decisions as _kd
+        entry = (_kd._entry_by_kernel_id(state, kid) if state is not None else None) or {}
         recorded_group_key = str(entry.get("task_group_key") or "")
         if current_task_group_key and recorded_group_key and recorded_group_key != current_task_group_key:
             return True
@@ -5286,10 +5288,7 @@ def _batch_kernel_candidates(
         recorded_ledger = next(
             (
                 (ledger_id, entry)
-                for ledger_id, entry in {
-                    **attempts_by_kid,
-                    **attempts_by_task,
-                }.items()
+                for ledger_id, entry in attempts_by_task.items()
                 if isinstance(entry, dict)
                 and (
                     (
@@ -5303,9 +5302,9 @@ def _batch_kernel_candidates(
                     )
                     or (
                         not group_key
-                        and ledger_id in member_ids
                         and group_id
                         and str(entry.get("task_group_id") or "") == group_id
+                        and str(entry.get("current_kernel_id") or "") in member_ids
                     )
                 )
             ),

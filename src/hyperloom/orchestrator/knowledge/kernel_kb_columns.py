@@ -162,11 +162,7 @@ def build_fusion(state: Any) -> _Built | None:
 
 def build_rewrite(state: Any) -> _Built | None:
     """Stage E2E-integrated rewrite rows (speedup/gain + patch + source)."""
-    attempts = (
-        getattr(state, "kernel_opt_task_attempts", {})
-        or getattr(state, "kernel_opt_attempts", {})
-        or {}
-    )
+    attempts = getattr(state, "kernel_opt_task_attempts", {}) or {}
     if not isinstance(attempts, Mapping):
         attempts = {}
     integrated = _stack_rows(state, "integrate")

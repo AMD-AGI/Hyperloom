@@ -754,10 +754,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     last_action_failures: list[dict[str, Any]] = field(default_factory=list)
     # Structured per-variant failure evidence, capped and keyed by failure_id (last-wins).
     failures: list[dict[str, Any]] = field(default_factory=list)
-    # Per-kernel run_optimization history by kernel_id; record_kernel_opt retires kernels stuck in PARTIAL (default 2; override via INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL).
-    kernel_opt_attempts: dict[str, Any] = field(default_factory=dict)
-    # Authoritative optimization history keyed by stable operator identity.
-    # ``kernel_opt_attempts`` remains the current ordinal compatibility index.
+    # Authoritative per-kernel optimization history keyed by stable task identity.
     kernel_opt_task_attempts: dict[str, Any] = field(default_factory=dict)
     # Immutable KEEP snapshots awaiting E2E integration, keyed by integration_id.
     # Their lifecycle is independent of trace-local kernel ordinals.
@@ -1267,36 +1264,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             )
         if not isinstance(filtered.get("specialist_patch_verdicts"), dict):
             filtered["specialist_patch_verdicts"] = {}
-        if not isinstance(filtered.get("kernel_opt_attempts"), dict):
-            filtered["kernel_opt_attempts"] = {}
         if not isinstance(filtered.get("kernel_opt_task_attempts"), dict):
             filtered["kernel_opt_task_attempts"] = {}
         if not isinstance(filtered.get("pending_kernel_integrations"), dict):
             filtered["pending_kernel_integrations"] = {}
-        if incoming_version < 3:
-            for ledger_id, entry in filtered["kernel_opt_attempts"].items():
-                if not isinstance(entry, dict):
-                    continue
-                task_key = str(entry.get("task_group_key") or "").strip()
-                if not task_key:
-                    source = str(entry.get("last_source_file") or "")
-                    task_key = json.dumps(
-                        {
-                            "version": 1,
-                            "kind": "legacy-kernel",
-                            "kernel_id": str(ledger_id),
-                            "source_file": source,
-                        },
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                migrated = dict(entry)
-                migrated.setdefault("current_kernel_id", str(ledger_id))
-                migrated.setdefault("stable_task_key", task_key)
-                filtered["kernel_opt_task_attempts"].setdefault(
-                    task_key,
-                    migrated,
-                )
         # Normalize the unified ``explore_search`` ledger at load.
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
@@ -2160,6 +2131,52 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         from ..kernel import _kernel_decisions as _m
 
         return _m.pending_kernel_integration_records(self)
+
+    @property
+    def kernel_opt_attempts(self) -> dict:
+        """View of kernel_opt_task_attempts indexed by current_kernel_id.
+
+        Reads and writes are translated between ordinal kernel_id keys and the
+        stable task-identity keys used by the authoritative ledger.  When the
+        same kernel_id appears in multiple entries (task-group reuse), the
+        most recently stamped entry wins.
+        """
+        result: dict[str, tuple[str, dict]] = {}  # kid -> (ts, entry)
+        for entry in (self.kernel_opt_task_attempts or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            kid = str(entry.get("current_kernel_id") or "")
+            if not kid:
+                continue
+            ts = str(entry.get("last_ts") or entry.get("ts") or "")
+            existing_ts, _ = result.get(kid, ("", {}))
+            if kid not in result or ts > existing_ts:
+                result[kid] = (ts, entry)
+        return {kid: pair[1] for kid, pair in result.items()}
+
+    @kernel_opt_attempts.setter
+    def kernel_opt_attempts(self, value: dict | None) -> None:
+        """Populate kernel_opt_task_attempts from an ordinal-keyed dict."""
+        if not isinstance(value, dict):
+            return
+        from ..kernel._kernel_decisions import _stable_kernel_task_key
+
+        if not isinstance(self.kernel_opt_task_attempts, dict):
+            object.__setattr__(self, "kernel_opt_task_attempts", {})
+        for kernel_id, entry in value.items():
+            if not isinstance(entry, dict):
+                continue
+            e = dict(entry)
+            e.setdefault("current_kernel_id", str(kernel_id))
+            tgk = str(e.get("task_group_key") or "")
+            src = str(e.get("last_source_file") or "")
+            task_key = e.get("stable_task_key") or _stable_kernel_task_key(
+                task_group_key=tgk,
+                kernel_id=str(kernel_id),
+                source_file=src,
+            )
+            e.setdefault("stable_task_key", task_key)
+            self.kernel_opt_task_attempts.setdefault(task_key, e)
 
     @property
     def roofline_snapshot_id(self) -> int:

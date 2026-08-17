@@ -82,7 +82,9 @@ class KernelStackPhase(PhaseHandler):
                     and kid not in state.rejected_kernel_ids
                 ):
                     state.rejected_kernel_ids.append(kid)
-                attempt = (state.kernel_opt_attempts or {}).get(kid)
+                from ..kernel import _kernel_decisions as _kd
+
+                attempt = _kd._entry_by_kernel_id(state, kid)
                 if isinstance(attempt, dict):
                     attempt["rejected_reason"] = "integrate_dispatch_exception"
                 stable_attempt = (state.kernel_opt_task_attempts or {}).get(

@@ -1042,7 +1042,7 @@ def _write_kernel_opt_summary(
     """Build + write ``reports/kernel_optimization_summary.json``.
 
     Best-effort (failure logged, returns ``None`` so the final.json write
-    still happens). Aggregates ``kernel_opt_attempts`` with per-kernel
+    still happens). Aggregates ``kernel_opt_task_attempts`` with per-kernel
     ``results/<kid>.json`` for the "why no optimized kernel?" view.
 
     Args:
