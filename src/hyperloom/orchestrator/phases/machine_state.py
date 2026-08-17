@@ -402,6 +402,9 @@ DEFAULT_PLATEAU_KERNEL_LOOKBACK: int = 5
 
 # EXPLORE hard force-exit thresholds (IR-6 HARD time gate; overrides plateau).
 # Fires when remaining wall-clock < HOURS_REMAINING OR EXPLORE budget fraction < BUDGET_PCT.
+# HOURS_REMAINING is a leave-behind for later phases on long runs. When it is
+# not strictly smaller than the session, the hours gate is ignored so a 3h
+# smoke does not skip EXPLORE the moment the phase starts.
 DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 3.0
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT: float = 0.20
 
@@ -1292,6 +1295,29 @@ def phase_cap_exceeded(
 
 
 # EXPLORE hard force-exit (HARD time gate)
+def _explore_hours_leavebehind_applies(state: Any, *, threshold_hours: float) -> bool:
+    """Whether IR-6's hours-remaining gate can fire for this session.
+
+    Remaining starts at ``max_hours``, so a leave-behind that is not strictly
+    smaller than the session fires the moment EXPLORE starts. The 3h default
+    is for long runs; a 3h session (the CI smoke, the 3h example) must not
+    inherit it.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        threshold_hours (float): Configured hours-remaining leave-behind.
+
+    Returns:
+        bool: ``True`` when the hours gate may fire.
+    """
+    if float(threshold_hours) <= 0.0:
+        return False
+    session_hours = _max_minutes(state) / 60.0
+    if session_hours <= 0.0:
+        return False
+    return float(threshold_hours) < session_hours
+
+
 def session_remaining_seconds(
     state: Any,
     *,
@@ -1344,12 +1370,14 @@ def should_force_exit_explore(
     """Return ``(True, evidence)`` when HARD EXPLORE force-exit fires (IR-6).
 
     Fires when session remaining ≤ hours_threshold*3600 OR phase remaining
-    pct ≤ budget_pct_threshold; ``evidence`` records which fired.
+    pct ≤ budget_pct_threshold; ``evidence`` records which fired. The hours
+    gate is ignored when the leave-behind is not strictly smaller than the
+    session (it would otherwise fire the moment EXPLORE starts).
 
     Args:
         state (Any): Frozen SharedState view.
         hours_remaining_threshold (float): Session-hours-remaining gate;
-            non-positive disables it.
+            non-positive disables it. Also ignored when it covers the session.
         budget_pct_threshold (float): Phase-budget-fraction gate; non-positive
             disables it.
         budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
@@ -1368,8 +1396,16 @@ def should_force_exit_explore(
     fired_reasons: list[str] = []
 
     # Non-positive threshold = disabled; both disabled turns force-exit off.
-    hours_threshold_enabled = float(hours_remaining_threshold) > 0.0
+    # A leave-behind that covers the whole session is also disabled: remaining
+    # starts at max_hours, so it would fire the moment EXPLORE starts.
+    hours_threshold_enabled = _explore_hours_leavebehind_applies(
+        state, threshold_hours=hours_remaining_threshold
+    )
     pct_threshold_enabled = float(budget_pct_threshold) > 0.0
+    if float(hours_remaining_threshold) > 0.0 and not hours_threshold_enabled:
+        session_hours = _max_minutes(state) / 60.0
+        if session_hours > 0.0:
+            evidence["hours_remaining_gate"] = "disabled_leavebehind_covers_session"
 
     session_remaining = session_remaining_seconds(state, now_unix=now_unix)
     if session_remaining is not None and hours_threshold_enabled:
