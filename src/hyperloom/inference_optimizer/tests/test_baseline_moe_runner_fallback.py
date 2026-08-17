@@ -283,7 +283,12 @@ def test_backend_from_other_arg_sources_is_dropped_on_retry(tmp_path, monkeypatc
     if source == "operator_env":
         monkeypatch.setenv("INFERENCE_OPTIMIZER_SERVER_ARGS", "--moe-runner-backend triton")
     else:
-        params["reference_server_args"] = "--moe-runner-backend triton"
+        from hyperloom.orchestrator.state.shared_state import SharedState
+
+        sd = tmp_path / "session"
+        sd.mkdir(parents=True, exist_ok=True)
+        SharedState(session_id="ref", reference_server_args="--moe-runner-backend triton").save(sd)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(sd))
     calls: list[str] = []
 
     def fake_run(cmd, *args, **kwargs):
