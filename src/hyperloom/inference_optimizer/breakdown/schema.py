@@ -22,13 +22,10 @@ SCHEMA_VERSION_V2 = "hyperloom.session_breakdown.v2"
 #: legacy collector fallback.
 SCHEMA_VERSION_V3 = "hyperloom.session_breakdown.v3.0"
 
-#: Author-time-only canonical schema. Unlike v2/v3, this version is assembled
-#: exclusively from recorder SDK fragments and never reconstructed from session
-#: business files.
-SCHEMA_VERSION_V4 = "hyperloom.session_breakdown.v4.0"
-
 #: Unified optimization schema. This is a breaking wire-shape cutover: adopted
-#: optimizations are emitted only through ``optimizations``.
+#: optimizations are emitted only through ``optimizations``, and that section
+#: is built exclusively from recorder fragments -- never reconstructed from
+#: session business files.
 SCHEMA_VERSION_V5 = "hyperloom.session_breakdown.v5.0"
 
 #: Current breakdown schema version.
@@ -2749,30 +2746,6 @@ class Integrity(TypedDict, total=False):
     conflicts: list[dict[str, Any]]
 
 
-class SessionBreakdownV4(TypedDict, total=False):
-    """Top-level v4 canonical shape plus compatibility projections."""
-
-    schema_version: str
-    exported_at_utc: str
-    exporter_version: str
-    run: dict[str, Any]
-    workload: dict[str, Any]
-    model: dict[str, Any]
-    versions: dict[str, Any]
-    phases: dict[str, Any]
-    subjects: list[SubjectRef]
-    operations: list[Operation]
-    measurements: list[Measurement]
-    adoptions: list[Adoption]
-    optimizations: Optimizations
-    outcome: dict[str, Any]
-    artifacts: list[ArtifactRef]
-    trace: dict[str, Any]
-    integrity: Integrity
-    projections: dict[str, Any]
-    compat: dict[str, Any]
-
-
 class SessionBreakdown(TypedDict, total=False):
     """Top-level wire shape of ``session_breakdown.json``.
 
@@ -2876,7 +2849,6 @@ __all__ = [
     "SCHEMA_VERSION",
     "SCHEMA_VERSION_V2",
     "SCHEMA_VERSION_V3",
-    "SCHEMA_VERSION_V4",
     "SCHEMA_VERSION_V5",
     "Adoption",
     "AdoptedKernel",
@@ -2952,7 +2924,6 @@ __all__ = [
     "RejectedKernel",
     "RobustnessSignal",
     "SessionBreakdown",
-    "SessionBreakdownV4",
     "SessionMeta",
     "SpecialistDomainBreakdown",
     "SpecialistRound",

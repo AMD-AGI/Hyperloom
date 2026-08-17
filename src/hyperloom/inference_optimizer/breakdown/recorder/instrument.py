@@ -192,7 +192,6 @@ _AGENT_BY_ACTION = {
     "specialist": "explore",
     "replay_warm_recipe": "warm_replay",
     "warm_replay": "warm_replay",
-    "warm_recipe": "warm_replay",
     "baseline": "coordinator",
     "profile": "coordinator",
     "roofline": "coordinator",

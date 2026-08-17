@@ -30,17 +30,8 @@ from typing import Any
 from hyperloom.common.jsonio import read_json
 
 _UNREADABLE = object()
-V4_STREAMS: tuple[str, ...] = (
-    "run_snapshot",
-    "phase_transitions",
-    "subjects",
-    "operations",
-    "measurements",
-    "adoptions",
-    "artifacts",
-    "trace_events",
-    "versions",
-)
+#: Streams whose records are entities rather than append-only events: several
+#: fragments can describe the same entity and are merged by its id.
 _V4_ENTITY_IDS: dict[str, tuple[str, ...]] = {
     "phase_transitions": ("transition_id", "event_id"),
     "subjects": ("subject_id",),
@@ -272,32 +263,6 @@ def _normalize_kernel_route_operations(out: dict[str, Any]) -> None:
             extensions = dict(route.get("extensions") or {})
             extensions["route_competition"] = competition
             route["extensions"] = extensions
-
-
-def assemble_v4_parts(
-    session_dir: Path | str,
-    *,
-    warnings: list[str] | None = None,
-) -> dict[str, Any]:
-    """Assemble the closed v4 streams and merge authored tool versions.
-
-    The dedicated ``versions`` stream is merged into
-    ``run_snapshot.versions``. Values authored directly in the run snapshot
-    take precedence over the dedicated stream on matching tool keys.
-    """
-    assembled = assemble_parts(session_dir, warnings=warnings)
-    closed = {name: assembled[name] for name in V4_STREAMS if name in assembled}
-    stream_versions = closed.get("versions")
-    if isinstance(stream_versions, dict) and stream_versions:
-        snapshot = dict(closed.get("run_snapshot") or {})
-        snapshot_versions = (
-            dict(snapshot.get("versions") or {})
-            if isinstance(snapshot.get("versions"), dict)
-            else {}
-        )
-        snapshot["versions"] = {**stream_versions, **snapshot_versions}
-        closed["run_snapshot"] = snapshot
-    return closed
 
 
 def _v4_record_sort_key(record: dict[str, Any]) -> tuple[str, int, str]:
@@ -611,9 +576,7 @@ def _kb_writes_summary(critic_iters: list[Any]) -> dict[str, Any]:
 
 
 __all__ = [
-    "V4_STREAMS",
     "assemble_parts",
-    "assemble_v4_parts",
     "has_parts",
     "parts_dir",
 ]

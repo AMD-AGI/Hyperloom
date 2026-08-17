@@ -54,6 +54,12 @@ logging.addLevelName(TRACE, "TRACE")
 
 log = logging.getLogger(__name__)
 
+#: Whether this process asked for the trace. Held separately from the logger's
+#: level because "off" and "not configured" are different answers: clearing the
+#: level would hand the decision to whatever the root logger happens to be set
+#: to, and a root at ``NOTSET`` enables everything.
+_enabled = False
+
 #: Fields that carry a v4 entity's stable identity, most specific first, so a
 #: nested entity is named by its own id rather than its parent's.
 _ID_FIELDS = (
@@ -90,7 +96,10 @@ def enable_trace(enabled: bool = True) -> None:
     Args:
         enabled (bool): whether to emit the write trace.
     """
-    log.setLevel(TRACE if enabled else logging.NOTSET)
+    global _enabled
+    _enabled = bool(enabled)
+    if _enabled:
+        log.setLevel(TRACE)
 
 
 def trace_enabled() -> bool:
@@ -99,7 +108,7 @@ def trace_enabled() -> bool:
     Returns:
         bool: ``True`` when a call to :func:`trace_write` would log.
     """
-    return log.isEnabledFor(TRACE)
+    return _enabled and log.isEnabledFor(TRACE)
 
 
 def _short(value: Any, limit: int = _VALUE_LIMIT) -> str:
@@ -153,9 +162,12 @@ def _changed(previous: Mapping[str, Any], merged: Mapping[str, Any]) -> str:
             changed.append(f"{key}:{_transition(previous[key], new)}")
     if not added and not changed:
         return "changed=none"
-    shown = changed[:_CHANGED_LIMIT]
-    hidden = len(changed) - len(shown)
-    parts = shown + added[:_CHANGED_LIMIT]
+    shown_changed = changed[:_CHANGED_LIMIT]
+    shown_added = added[:_CHANGED_LIMIT]
+    # Both lists are capped, so both have to be counted; a write that only adds
+    # fields is otherwise reported as if nothing had been left out.
+    hidden = (len(changed) - len(shown_changed)) + (len(added) - len(shown_added))
+    parts = shown_changed + shown_added
     if hidden > 0:
         parts.append(f"(+{hidden} more)")
     return "changed=" + ",".join(parts)
