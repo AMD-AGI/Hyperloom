@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from . import machine_state as _phase_state
+from ..kernel._recorder_trace import trace_recording_skipped
 from ..state.optimization_journal import (
     KIND_GEMM_TUNING,
     OUTCOME_KEEP,
@@ -2166,8 +2167,14 @@ class KernelPhase(PhaseHandler):
                 measurement_basis="derived_speedup",
                 ts=ts,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             log.debug("record_session_validation failed", exc_info=True)
+            trace_recording_skipped(
+                "session_validation",
+                reason="caller raised before the recorder",
+                entity="gemm_tuning_promote",
+                error=exc,
+            )
 
     def _replace_latest_gemm_tuning_attempt(self, result: dict[str, Any]) -> None:
         """Sync the latest GEMM history row after forge E2E rewrites ``result``."""

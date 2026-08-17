@@ -44,6 +44,8 @@ from ..trace.parse_usage import (
     parse_forge_usage,
 )
 
+from ._recorder_trace import trace_recording_skipped
+
 # Re-exported: callers patch these at ``request_handlers.<name>``.
 from ._kernel_decisions import (
     _honest_flag as _honest_flag,
@@ -4594,8 +4596,12 @@ async def trace_analyze_handler(
                 duration_sec=_disc_duration_sec,
                 error=(str(result.get("error") or "") or None if str(result.get("status") or "") == "failed" else None),
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            trace_recording_skipped(
+                "kernel_discovery",
+                reason="caller raised before the recorder",
+                error=exc,
+            )
     return result
 
 

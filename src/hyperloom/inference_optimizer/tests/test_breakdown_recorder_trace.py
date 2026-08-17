@@ -11,10 +11,13 @@ import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder import trace as trace_mod
 from hyperloom.inference_optimizer.breakdown.recorder.instrument import (
+    record_gemm_tuning_operation,
     record_measurement,
     record_operation,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.recorder import Recorder
+from hyperloom.orchestrator.kernel._recorder_trace import trace_recording_skipped
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 @pytest.fixture
@@ -256,3 +259,75 @@ def test_a_credential_in_a_skipped_record_is_masked(tmp_path, traced, monkeypatc
 
     assert "tok-aaaaaaaaaaaa" not in line
     assert "[REDACTED]" in line
+
+
+def test_a_call_that_never_reached_the_recorder_says_so(traced):
+    """The recorder can only trace calls that arrive.
+
+    Producers call it from inside ``try`` blocks wider than the call itself, so
+    a failure in the import, the arguments, or a pre-condition means none of
+    the recorder's own guards ever rule and the loss is silent.
+    """
+    trace_recording_skipped(
+        "kernel_e2e",
+        reason="caller raised before the recorder",
+        entity="k001",
+        error=RuntimeError("boom"),
+    )
+
+    line = list(traced.records)[-1].getMessage()
+
+    assert "section=kernel_e2e" in line
+    assert "outcome=skipped" in line
+    assert "id=k001" in line
+    assert "error=RuntimeError:boom" in line
+
+
+def test_an_integrate_the_orchestrator_could_not_record_is_named(traced):
+    """The path a lost adoption actually takes out of the run.
+
+    ``record_kernel_e2e`` is called under a condition checked before the
+    recorder is reached, so on a KEEP with no session directory the adoption
+    that credits the integrate is never written and nothing rules on it.
+    """
+
+    state = SharedState()
+    assert state._session_dir is None
+
+    state.record_kernel_integrate_result(
+        {
+            "decision": "KEEP",
+            "kernel_id": "k001",
+            "patch_path": "/artifacts/k001.py",
+            "target_file": "/repo/k001.py",
+            "gain_pct": 4.0,
+        }
+    )
+
+    lines = [record.getMessage() for record in traced.records]
+
+    assert any(
+        "section=kernel_e2e" in line and "reason=no session_dir" in line
+        for line in lines
+    )
+
+
+def test_a_keep_that_no_e2e_confirmed_is_not_mistaken_for_a_lost_record(tmp_path, traced):
+    """Not every missing adoption is a missing write, and the two must differ.
+
+    A GEMM keep that end-to-end validation never confirmed records its
+    operation and deliberately records no adoption. Downstream that is the same
+    absence a dropped write leaves, so the reason has to be stated here.
+    """
+    record_gemm_tuning_operation(
+        tmp_path,
+        payload={"task_id": "gemm-1"},
+        result={"decision": "KEEP", "e2e_validated": False},
+    )
+
+    lines = [record.getMessage() for record in traced.records]
+
+    assert any(
+        "section=adoptions" in line and "not an e2e-validated keep" in line
+        for line in lines
+    )

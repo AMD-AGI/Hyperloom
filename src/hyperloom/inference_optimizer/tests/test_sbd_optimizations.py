@@ -776,10 +776,12 @@ def test_a_value_says_which_of_its_possible_sources_it_came_from():
 
     assert stated["decision_source"] == "adoption.decision"
     assert stated["local_gain_source"] == "adoption.gain_pct"
-    assert stated["throughput_source"] == "adoption"
+    assert stated["throughput_before_source"] == "adoption"
+    assert stated["throughput_after_source"] == "adoption"
     assert inferred["decision_source"] == "operation.status"
     assert inferred["local_gain_source"] == ""
-    assert inferred["throughput_source"] == ""
+    assert inferred["throughput_before_source"] == ""
+    assert inferred["throughput_after_source"] == ""
 
 
 def test_an_adoption_whose_operation_was_never_recorded_is_reported():
@@ -813,6 +815,177 @@ def test_an_adoption_whose_operation_was_never_recorded_is_reported():
     collect_recorded_optimizations("s1", operations, [], adoptions, [], [], [], warnings)
 
     assert any("never recorded" in warning and "ad-ghost" in warning for warning in warnings)
+
+
+def test_one_producers_singleton_is_not_dropped_for_anothers_without_a_word(tmp_path):
+    """A singleton fragment is named for its producer, so two mean two claims.
+
+    Only the newest survives, and the loser does not merge into it: its whole
+    payload goes. Nothing downstream can see that it was ever written.
+    """
+    for producer, ts in (("coordinator", "2026-01-01T01:00:00+00:00"), ("kernel-agent", "2026-01-01T02:00:00+00:00")):
+        instrument.record_run_snapshot(
+            tmp_path,
+            payload={"run_id": "r1", "recorded_by": producer, "ts": ts},
+            producer=producer,
+        )
+    warnings: list[str] = []
+
+    assemble_parts(tmp_path, warnings=warnings)
+
+    assert any(
+        "more than one producer" in warning and "dropped whole" in warning
+        for warning in warnings
+    )
+
+
+def test_two_producers_disagreeing_on_one_entity_do_not_settle_it_silently(tmp_path):
+    """Merging partial updates is the point; disagreeing on a field is not.
+
+    Repeated updates from one producer merge into its own fragment long before
+    assembly, so two payloads for one id are two producers, and the later
+    timestamp decides the value with nothing said about the one it replaced.
+    """
+    for producer, decision in (("coordinator", "KEEP"), ("kernel-agent", "REVERT")):
+        instrument.record_adoption(
+            tmp_path,
+            adoption_id="ad-1",
+            operation_id="op-1",
+            decision=decision,
+            producer=producer,
+        )
+    warnings: list[str] = []
+
+    assemble_parts(tmp_path, warnings=warnings)
+
+    assert any(
+        "conflicting values" in warning and "ad-1.decision" in warning
+        for warning in warnings
+    )
+
+
+def test_a_change_that_landed_with_nobody_claiming_it_is_reported():
+    """The mirror of an orphan adoption, and the one that moves a number.
+
+    The step is skipped by the gain walk, but the workload still moved, so the
+    next adopted step starts higher than the ledger expects and the difference
+    is booked as gain belonging to nobody. Unreported, that reads as ordinary
+    drift rather than as a record that never arrived.
+    """
+    operations = [
+        {
+            "operation_id": "op-base",
+            "kind": "baseline",
+            "measurement_refs": ["m-base"],
+        },
+        {
+            "operation_id": "op-lost",
+            "kind": "kernel_optimization",
+            "name": "k-lost",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+            "outputs": {"integrated": True, "decision": "KEEP"},
+        },
+        {
+            "operation_id": "op-next",
+            "kind": "kernel_optimization",
+            "name": "k-next",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T02:00:00+00:00",
+        },
+    ]
+    measurements = [{"measurement_id": "m-base", "name": "throughput", "value": 100.0}]
+    adoptions = [
+        {
+            "adoption_id": "ad-next",
+            "operation_id": "op-next",
+            "decision": "KEEP",
+            "validated": True,
+            "throughput_before": 110.0,
+            "throughput_after": 120.0,
+        },
+    ]
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", operations, measurements, adoptions, [], [], [], warnings
+    )
+
+    validation = result["validation"]
+    assert validation["unclaimed_integration_count"] == 1
+    # The 10pp the lost step earned is sitting in the unattributed bucket.
+    assert validation["unattributed_gain_pct"] == 10.0
+    assert any(
+        "no adoption crediting it" in warning and "op-lost" in warning
+        for warning in warnings
+    )
+
+
+def test_a_threshold_says_which_of_its_four_homes_it_came_from():
+    """A bar the gate ruled against and one read off a config are not the same."""
+    operations = [
+        {
+            "operation_id": "op-gated",
+            "kind": "kernel_optimization",
+            "name": "gated",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+            "gates": [{"inputs": {"keep_threshold_pct": 3.0}}],
+            "outputs": {"keep_threshold_pct": 1.0},
+        },
+        {
+            "operation_id": "op-configured",
+            "kind": "kernel_optimization",
+            "name": "configured",
+            "ended_at": "2026-01-01T02:00:00+00:00",
+            "outputs": {"keep_threshold_pct": 1.0},
+        },
+    ]
+
+    attempts = collect_recorded_optimizations(
+        "s1", operations, [], [], [], [], [], []
+    )["attempts"]
+    gated = next(row for row in attempts if row["name"] == "gated")
+    configured = next(row for row in attempts if row["name"] == "configured")
+
+    assert (gated["keep_threshold_pct"], gated["keep_threshold_source"]) == (3.0, "gate.inputs")
+    assert (configured["keep_threshold_pct"], configured["keep_threshold_source"]) == (1.0, "outputs")
+
+
+def test_two_names_for_one_reading_do_not_quietly_pick_one():
+    """Both names fill the same role, and they were taken by different producers."""
+    operations = [
+        {
+            "operation_id": "op-k1",
+            "kind": "kernel_optimization",
+            "name": "k1",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+            "measurement_refs": ["m-final", "m-plain"],
+        },
+    ]
+    measurements = [
+        {
+            "measurement_id": "m-final",
+            "name": "final_throughput",
+            "value": 120.0,
+            "measured_at": "2026-01-01T00:30:00+00:00",
+        },
+        {
+            "measurement_id": "m-plain",
+            "name": "throughput",
+            "value": 118.0,
+            "measured_at": "2026-01-01T00:40:00+00:00",
+        },
+    ]
+    warnings: list[str] = []
+
+    attempts = collect_recorded_optimizations(
+        "s1", operations, measurements, [], [], [], [], warnings
+    )["attempts"]
+
+    assert attempts[0]["throughput_after"] == 120.0
+    assert attempts[0]["throughput_after_source"] == "measurement.final_throughput"
+    assert attempts[0]["alias_conflicts"] == ["throughput_after:final_throughput/throughput"]
+    assert any("the first read won" in warning for warning in warnings)
 
 
 def test_an_adoption_on_a_kind_the_ledger_ignores_is_reported():

@@ -133,6 +133,7 @@ def assemble_parts(
 
     items: dict[str, list[dict[str, Any]]] = {}
     singletons: dict[str, dict[str, Any]] = {}
+    discarded: dict[str, list[str]] = {}
 
     for path in sorted(d.glob("*.json")):
         rec = _load(path, warns)
@@ -145,18 +146,45 @@ def assemble_parts(
         if rec.get("kind") == "singleton":
             prev = singletons.get(section)
             if prev is None or str(rec.get("ts") or "") >= str(prev.get("ts") or ""):
+                if prev is not None:
+                    discarded.setdefault(section, []).append(str(prev.get("producer") or "?"))
                 singletons[section] = rec
+            else:
+                discarded.setdefault(section, []).append(str(rec.get("producer") or "?"))
         else:
             items.setdefault(section, []).append(rec)
+
+    # A singleton fragment is named for its producer, so a section with more
+    # than one is a section two producers both claimed. Only the newest
+    # survives, and the other producer's payload does not merge into it -- it
+    # is dropped whole. Nothing downstream can see that it existed.
+    for section, producers in discarded.items():
+        warns.append(
+            f"recorder: {section} was written as a singleton by more than one "
+            f"producer; only the newest was kept and "
+            f"{sorted(set(producers))} were dropped whole"
+        )
 
     out: dict[str, Any] = {}
     for section, recs in items.items():
         if section in _V4_ENTITY_IDS:
             recs.sort(key=_v4_record_sort_key)
+            conflicts: list[str] = []
             out[section] = _merge_v4_entities(
                 [r.get("payload") for r in recs],
                 id_fields=_V4_ENTITY_IDS[section],
+                conflicts=conflicts,
             )
+            if conflicts:
+                # Repeated updates from one producer merge into one fragment
+                # before they ever reach here, so two payloads for one id came
+                # from two producers. Merging is the point; disagreeing on a
+                # field is not, and the later write wins purely on timestamp.
+                warns.append(
+                    f"recorder: {section} entities were written by more than "
+                    "one producer with conflicting values, and the later write "
+                    f"won: {sorted(set(conflicts))[:5]}"
+                )
         else:
             recs.sort(key=lambda r: (int(r.get("seq") or 0), str(r.get("ts") or "")))
             out[section] = [r.get("payload") for r in recs]
@@ -285,8 +313,17 @@ def _merge_v4_entities(
     payloads: list[Any],
     *,
     id_fields: tuple[str, ...],
+    conflicts: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Merge time-ordered partial entity updates by stable id."""
+    """Merge time-ordered partial entity updates by stable id.
+
+    Args:
+        payloads: Entity payloads in recorder order, oldest first.
+        id_fields: The fields any of which carries the entity's stable id.
+        conflicts: Optional list that ``<id>.<field>`` is appended to whenever
+            a later update replaces a value with a different one, so a caller
+            can report what the merge decided on its own.
+    """
     merged: list[dict[str, Any]] = []
     index_by_id: dict[str, int] = {}
     for payload in payloads:
@@ -301,25 +338,58 @@ def _merge_v4_entities(
             index_by_id[stable_id] = len(merged)
             merged.append(dict(payload))
         else:
-            merged[index] = _deep_merge(merged[index], payload)
+            merged[index] = _deep_merge(
+                merged[index],
+                payload,
+                conflicts=conflicts,
+                path=stable_id,
+            )
     return merged
 
 
-def _deep_merge(current: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
+def _deep_merge(
+    current: dict[str, Any],
+    update: dict[str, Any],
+    *,
+    conflicts: list[str] | None = None,
+    path: str = "",
+) -> dict[str, Any]:
     """Merge partial entity state while preserving nested keyed histories."""
     merged = dict(current)
     for key, value in update.items():
         previous = merged.get(key)
         if isinstance(previous, dict) and isinstance(value, dict):
-            merged[key] = _deep_merge(previous, value)
+            merged[key] = _deep_merge(
+                previous,
+                value,
+                conflicts=conflicts,
+                path=f"{path}.{key}" if path else key,
+            )
         elif isinstance(previous, list) and isinstance(value, list):
-            merged[key] = _merge_lists(previous, value)
+            merged[key] = _merge_lists(previous, value, conflicts=conflicts, path=path)
         else:
+            if (
+                conflicts is not None
+                and previous is not None
+                and value is not None
+                and previous != value
+            ):
+                # A field arriving twice with two values. Filling a gap is what
+                # partial updates are for and says nothing; replacing an answer
+                # with a different one is a disagreement settled by whichever
+                # fragment happened to sort last.
+                conflicts.append(f"{path}.{key}" if path else key)
             merged[key] = value
     return merged
 
 
-def _merge_lists(current: list[Any], update: list[Any]) -> list[Any]:
+def _merge_lists(
+    current: list[Any],
+    update: list[Any],
+    *,
+    conflicts: list[str] | None = None,
+    path: str = "",
+) -> list[Any]:
     """Merge list entries with stable nested ids and append other new values."""
     merged = list(current)
     indexes: dict[tuple[str, str], int] = {}
@@ -346,7 +416,12 @@ def _merge_lists(current: list[Any], update: list[Any]) -> list[Any]:
                 if identity:
                     indexes[identity] = len(merged) - 1
         else:
-            merged[index] = _deep_merge(merged[index], value)
+            merged[index] = _deep_merge(
+                merged[index],
+                value,
+                conflicts=conflicts,
+                path=f"{path}.{identity[1]}" if identity and path else path,
+            )
     return merged
 
 

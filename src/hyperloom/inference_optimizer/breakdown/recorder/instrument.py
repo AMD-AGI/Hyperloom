@@ -1980,6 +1980,15 @@ def record_geak_operation(
             metadata={"validation_tier": "orchestrator_final"},
         )
     else:
+        # A stage that has not reached final validation has nothing to adopt
+        # yet. Traced because "not yet" and "never arrived" produce the same
+        # absence downstream.
+        trace_skip(
+            reason=f"stage {stage!r} has not reached final validation",
+            section="adoptions",
+            entity=adoption_id,
+            producer=producer,
+        )
         return
     record_operation(
         session_dir,
@@ -2179,11 +2188,26 @@ def record_gemm_tuning_operation(
         error=value.get("error") or value.get("error_class"),
         **timing_fields,
     )
-    if result is None:
-        return
     adoption_id = _stable_id("adoption", operation_id, "keep")
+    if result is None:
+        trace_skip(
+            reason="no result to adopt on",
+            section="adoptions",
+            entity=adoption_id,
+            producer=producer,
+        )
+        return
     e2e_keep = decision == "KEEP" and value.get("e2e_validated") is True
     if not e2e_keep and decision not in {"REVERT", "REJECTED"}:
+        # A KEEP that end-to-end validation has not confirmed is not an
+        # adoption. The operation is on the ledger either way, so without this
+        # the missing adoption reads exactly like one that failed to write.
+        trace_skip(
+            reason=f"decision {decision!r} is not an e2e-validated keep or a revert",
+            section="adoptions",
+            entity=adoption_id,
+            producer=producer,
+        )
         return
     _record_adoption_transition(
         session_dir,
@@ -2307,7 +2331,15 @@ def record_kernel_invocations(
         if section is None:
             # The backend could not be determined; do not fabricate a GEAK
             # invocation. The failure stays visible via the kernel_dispatch /
-            # kernel_backend_result journey lanes.
+            # kernel_backend_result journey lanes, and this says which lane to
+            # go looking in rather than leaving the invocation view short by
+            # one with no explanation.
+            trace_skip(
+                reason=f"backend {backend!r} names no invocation stream",
+                section="kernel_invocations",
+                entity=kid,
+                producer=producer,
+            )
             return
         payload = {
             "kernel_id": kid,
@@ -2648,6 +2680,16 @@ def record_kernel_discovery(
         )
         route = str(route_strategy or "kernel_agent_forge")
         if route == "legacy_only":
+            # The legacy route stays out of the canonical streams by design, so
+            # a session run on it has no operations at all. That is the same
+            # shape as a session whose records were lost, and this is what
+            # tells the two apart.
+            trace_skip(
+                reason="legacy_only route is not on the canonical streams",
+                section="operations",
+                entity="kernel_discovery",
+                producer=producer,
+            )
             return
         if route == "geak_internal":
             for kernel in kernels:
@@ -2789,6 +2831,12 @@ def record_kernel_dispatch(
             key=str(kernel_id),
         )
         if str(route_strategy or "") == "legacy_only":
+            trace_skip(
+                reason="legacy_only route is not on the canonical streams",
+                section="operations",
+                entity=str(kernel_id),
+                producer=producer,
+            )
             return
         if str(route_strategy or "") == "geak_internal":
             _record_geak_internal_ref(
@@ -2796,6 +2844,15 @@ def record_kernel_dispatch(
                 kernel_id=str(kernel_id),
                 stage="dispatch",
                 payload=payload,
+                producer=producer,
+            )
+            # Recorded, but on the GEAK-internal reference stream rather than
+            # as an operation, so this kernel is absent from the ledger by
+            # routing rather than by loss.
+            trace_skip(
+                reason="geak_internal route recorded as an internal reference",
+                section="operations",
+                entity=str(kernel_id),
                 producer=producer,
             )
             return
@@ -3278,6 +3335,15 @@ def record_kernel_e2e(
             key=str(kernel_id),
         )
         if str(route_strategy or "") == "legacy_only":
+            # No operation and no adoption for this integrate. On a KEEP that
+            # is a change the workload carries with nothing on the ledger
+            # claiming it, which is precisely the shape a lost write leaves.
+            trace_skip(
+                reason="legacy_only route is not on the canonical streams",
+                section="adoptions",
+                entity=str(kernel_id),
+                producer=producer,
+            )
             return
         if str(route_strategy or "") == "geak_internal":
             _record_geak_internal_ref(
@@ -3285,6 +3351,12 @@ def record_kernel_e2e(
                 kernel_id=str(kernel_id),
                 stage="e2e",
                 payload={**payload, "result": evidence},
+                producer=producer,
+            )
+            trace_skip(
+                reason="geak_internal route recorded as an internal reference",
+                section="adoptions",
+                entity=str(kernel_id),
                 producer=producer,
             )
             return

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.io import append_jsonl
+from ..kernel._recorder_trace import trace_recording_skipped
 from ..state.optimization_journal import (
     Journal,
     JournalEntry,
@@ -284,8 +285,18 @@ class WritebackCollaborator:
                 measurement_basis=measurement_basis,
                 ts=ts,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             log.debug("record_session_validation failed", exc_info=True)
+            # Losing this one costs the export its only independent check on
+            # the ledger: with no promoted figure to compare against, the
+            # session total falls back to the sum of the very steps it is
+            # meant to be checking.
+            trace_recording_skipped(
+                "session_validation",
+                reason="caller raised before the recorder",
+                entity=source,
+                error=exc,
+            )
 
     async def _record_integrate_keep(self, result: dict[str, Any]) -> None:
         """Promote a kernel integrate KEEP into the optimization stack.

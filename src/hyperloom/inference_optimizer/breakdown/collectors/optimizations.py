@@ -220,25 +220,37 @@ def _last_decision(operation: dict[str, Any]) -> dict[str, Any]:
     return decisions[-1] if decisions else {}
 
 
-def _threshold_from_operation(operation: dict[str, Any]) -> float | None:
-    """Pull the keep threshold out of whichever gate or decision recorded it."""
+def _threshold_from_operation(operation: dict[str, Any]) -> tuple[float | None, str]:
+    """Pull the keep threshold out of whichever gate or decision recorded it.
+
+    Which of the four places it came from is part of the answer. A threshold on
+    the gate is the bar that gate actually ruled against; one on the operation's
+    outputs is whatever the executor was configured with, which is not
+    necessarily what ruled. Reporting only the number lets a rejection be
+    explained by a bar that never applied to it.
+
+    Returns:
+        The threshold and the place it was recorded, or ``(None, "")``.
+    """
     for gate in operation.get("gates") or []:
         if not isinstance(gate, dict):
             continue
-        for holder in (gate.get("inputs"), gate.get("evidence")):
+        for origin, holder in (("gate.inputs", gate.get("inputs")), ("gate.evidence", gate.get("evidence"))):
             if isinstance(holder, dict):
                 value = _to_float(holder.get("keep_threshold_pct"))
                 if value is not None:
-                    return value
+                    return value, origin
     evidence = _last_decision(operation).get("evidence")
     if isinstance(evidence, dict):
         value = _to_float(evidence.get("keep_threshold_pct"))
         if value is not None:
-            return value
+            return value, "decision.evidence"
     outputs = operation.get("outputs")
     if isinstance(outputs, dict):
-        return _to_float(outputs.get("keep_threshold_pct"))
-    return None
+        value = _to_float(outputs.get("keep_threshold_pct"))
+        if value is not None:
+            return value, "outputs"
+    return None, ""
 
 
 def _gate_rows(operation: dict[str, Any]) -> list[dict[str, Any]]:
@@ -337,6 +349,20 @@ def _recorded_attempt_row(
     measured_before = None
     measured_after = None
     measured_gain = None
+    # Which measurement name each of the three came off. Every one of them
+    # accepts more than one name because producers stamp them differently, and
+    # the names are not synonyms in every context: a reading taken as
+    # ``final_throughput`` and one taken as ``throughput`` were taken by
+    # different producers under their own conventions. When the chain below
+    # multiplies these together, an alias that meant something slightly
+    # different propagates into the cumulative figure rather than staying on
+    # its own row, so the name is kept beside the value.
+    measured_before_name = ""
+    measured_after_name = ""
+    measured_gain_name = ""
+    # Readings that matched the same role under a different name. Only the
+    # first is used; a second one that disagrees means the role is ambiguous.
+    alias_conflicts: list[str] = []
     measurements: list[dict[str, Any]] = []
     for measurement_id in measurement_ids:
         measurement = measurement_by_id.get(str(measurement_id))
@@ -365,12 +391,21 @@ def _recorded_attempt_row(
         )
         if value is None:
             continue
-        if name in _THROUGHPUT_AFTER_NAMES and measured_after is None:
-            measured_after = value
-        elif name in _THROUGHPUT_BEFORE_NAMES and measured_before is None:
-            measured_before = value
-        elif name in _GAIN_NAMES and measured_gain is None:
-            measured_gain = value
+        if name in _THROUGHPUT_AFTER_NAMES:
+            if measured_after is None:
+                measured_after, measured_after_name = value, name
+            elif name != measured_after_name and _disagrees((measured_after, value)):
+                alias_conflicts.append(f"throughput_after:{measured_after_name}/{name}")
+        elif name in _THROUGHPUT_BEFORE_NAMES:
+            if measured_before is None:
+                measured_before, measured_before_name = value, name
+            elif name != measured_before_name and _disagrees((measured_before, value)):
+                alias_conflicts.append(f"throughput_before:{measured_before_name}/{name}")
+        elif name in _GAIN_NAMES:
+            if measured_gain is None:
+                measured_gain, measured_gain_name = value, name
+            elif name != measured_gain_name and _disagrees((measured_gain, value)):
+                alias_conflicts.append(f"local_gain:{measured_gain_name}/{name}")
 
     # Values frozen on the adoption outrank the referenced measurements, which
     # archives recorded before per-occurrence ids may have since overwritten.
@@ -423,8 +458,9 @@ def _recorded_attempt_row(
         ("adoption.gain_pct", _to_float(adoption.get("gain_pct"))),
         ("decision.evidence.gain_pct", _to_float(evidence.get("gain_pct"))),
         ("outputs.delta_pct", _to_float(outputs.get("delta_pct"))),
-        ("measurement", measured_gain),
+        (f"measurement.{measured_gain_name}" if measured_gain_name else "measurement", measured_gain),
     )
+    keep_threshold_pct, keep_threshold_source = _threshold_from_operation(operation)
 
     return {
         "attempt_id": operation_id,
@@ -467,8 +503,18 @@ def _recorded_attempt_row(
             or outputs.get("reason")
             or ""
         ),
-        "keep_threshold_pct": _threshold_from_operation(operation),
+        "keep_threshold_pct": keep_threshold_pct,
+        # A bar recorded on the gate is the one that gate ruled against; one
+        # recorded on the outputs is the executor's configuration, which need
+        # not be what applied.
+        "keep_threshold_source": keep_threshold_source,
         "adopted": adopted,
+        # What the operation says happened to the workload, as distinct from
+        # what the adoption stream credits. The two are written by one call and
+        # dropped independently, so they can disagree.
+        "integrated": (
+            bool(outputs.get("integrated")) if outputs.get("integrated") is not None else None
+        ),
         # What stood behind the verdict: an accuracy gate that ruled, an
         # end-to-end re-measurement, or a KEEP nothing checked the accuracy of.
         "validation_basis": str(adoption.get("validation_basis") or ""),
@@ -479,16 +525,27 @@ def _recorded_attempt_row(
         "local_gain_source": local_gain_source,
         "throughput_before": throughput_before,
         "throughput_after": throughput_after,
-        # ``adoption`` means the numbers were frozen when the call was made;
-        # ``measurement`` means they were read back afterwards and could since
-        # have moved.
-        "throughput_source": (
+        # ``adoption`` means the number was frozen when the call was made;
+        # ``measurement.<name>`` means it was read back afterwards, off a
+        # reading recorded under that name, and could since have moved.
+        "throughput_before_source": (
             "adoption"
-            if frozen_before is not None or frozen_after is not None
-            else "measurement"
-            if measured_before is not None or measured_after is not None
+            if frozen_before is not None
+            else f"measurement.{measured_before_name}"
+            if measured_before is not None
             else ""
         ),
+        "throughput_after_source": (
+            "adoption"
+            if frozen_after is not None
+            else f"measurement.{measured_after_name}"
+            if measured_after is not None
+            else ""
+        ),
+        # Roles that more than one recorded name laid claim to, with readings
+        # that do not agree. The first name won; this says the choice was not
+        # free.
+        "alias_conflicts": alias_conflicts,
         "adoption_id": str(adoption.get("adoption_id") or "") or None,
         "gates": _gate_rows(operation),
         "backend_attempts": _sub_attempt_rows(operation),
@@ -878,6 +935,43 @@ def collect_recorded_optimizations(
             f"{sorted(set(off_ledger_adoptions))[:5]}"
         )
 
+    # The mirror image of an orphan adoption, and the more damaging of the two.
+    # An operation saying the change was integrated is the workload having
+    # moved; with no adoption to credit it, the gain walk below skips the step
+    # entirely, yet the next adopted step still starts from the higher figure.
+    # The difference lands in ``unattributed_gain_pct``, where it is
+    # indistinguishable from drift nobody caused -- a plausible number in place
+    # of a missing record. Both rows come from one call through a writer that
+    # swallows its own failures, so losing one and keeping the other is
+    # reachable rather than theoretical.
+    unclaimed_integrations = [
+        str(attempt["attempt_id"])
+        for attempt in attempts
+        if attempt.get("integrated") is True and not attempt.get("adoption_id")
+    ]
+    if unclaimed_integrations:
+        warnings.append(
+            f"optimizations: {len(unclaimed_integrations)} operation(s) record "
+            "an integrated change with no adoption crediting it, so their gain "
+            "is booked as unattributed rather than to the step that earned it: "
+            f"{sorted(unclaimed_integrations)[:5]}"
+        )
+
+    alias_conflicts = sorted(
+        {
+            conflict
+            for attempt in attempts
+            for conflict in attempt.get("alias_conflicts") or []
+        }
+    )
+    if alias_conflicts:
+        # Two names for one role, disagreeing. Whichever was read first won,
+        # and the chain arithmetic carries that choice into every later step.
+        warnings.append(
+            "optimizations: measurements recorded under different names for "
+            f"the same role disagree, and the first read won: {alias_conflicts[:5]}"
+        )
+
     # Reported gain is measured against the session baseline, so each adopted
     # step contributes the percentage points it added to the cumulative figure.
     # An executor's own local gain is relative to whatever it started from,
@@ -1160,6 +1254,10 @@ def collect_recorded_optimizations(
             ),
             # Adopted steps whose evidence trail no longer resolves.
             "stale_evidence_count": len(stale_evidence),
+            # Changes the ledger says landed with nothing crediting them. Any
+            # number here means the unattributed figure is overstated by
+            # whatever these steps earned.
+            "unclaimed_integration_count": len(unclaimed_integrations),
             # Adopted on the strength of a KEEP verdict alone, with no
             # accuracy gate having ruled on them.
             "unscored_keep_count": unscored_keeps,

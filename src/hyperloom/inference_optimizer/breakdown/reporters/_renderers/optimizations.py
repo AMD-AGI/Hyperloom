@@ -82,6 +82,16 @@ def _reconciliation_notes(validation: dict[str, Any]) -> list[str]:
             "over. The frozen numbers still stand; the trail back to them "
             "does not."
         )
+    unclaimed = _count(validation.get("unclaimed_integration_count"))
+    if unclaimed:
+        # Placed after the unattributed note on purpose: this is the reason to
+        # doubt that figure rather than another item beside it.
+        notes.append(
+            f"{unclaimed} change(s) are recorded as integrated with nothing "
+            "crediting them. Whatever they earned is inside the unattributed "
+            "figure above, so that figure overstates how much of the session "
+            "genuinely belongs to no step."
+        )
     return notes
 
 

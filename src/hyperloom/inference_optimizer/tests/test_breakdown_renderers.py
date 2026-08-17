@@ -58,6 +58,33 @@ def test_the_table_says_what_it_does_not_add_up_to():
     assert "3 adoption(s) cite measurements" in joined
 
 
+def test_a_gain_with_no_owner_says_whether_it_is_really_ownerless():
+    """The unattributed figure is only trustworthy if nothing went missing.
+
+    A change recorded as integrated with no adoption behind it puts its gain in
+    the same bucket, so the reader has to be told the bucket is overstated
+    rather than left to read it as drift.
+    """
+    out = opt.render(
+        {
+            "optimizations": {
+                "entries": [{"validated": True, "gain_pct": 9.0}],
+                "summary_by_source": {"explore": {"keeps": 1, "total_gain_pct": 9.0}},
+                "validation": {
+                    "validated_total_gain_pct": 19.0,
+                    "attributed_total_gain_pct": 9.0,
+                    "unattributed_gain_pct": 10.0,
+                    "unclaimed_integration_count": 1,
+                },
+            }
+        }
+    )
+
+    joined = " ".join(out.warnings)
+    assert "1 change(s) are recorded as integrated with nothing crediting them" in joined
+    assert "overstates" in joined
+
+
 def test_a_clean_ledger_carries_no_reconciliation_notes():
     out = opt.render(
         {
