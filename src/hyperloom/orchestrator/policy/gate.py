@@ -9,7 +9,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..framework.paths import resolve_session_framework_root, resolve_source_file_allowlist
@@ -47,6 +47,7 @@ from ..specialists.profile import (
     SCOPE_FREEFORM as SPECIALIST_SCOPE_FREEFORM,
     SCOPE_VALUES as SPECIALIST_SCOPE_VALUES,
 )
+from ..specialists.patch_safety import parse_patch_targets
 
 if TYPE_CHECKING:  # pragma: no cover — type-only
     from ..roles.agent_role import AgentRole
@@ -2135,7 +2136,7 @@ class PolicyGate:
 
     @staticmethod
     def _patch_declared_targets(patch_path: Path) -> frozenset[str]:
-        """Read safe relative targets from unified-diff ``+++`` headers."""
+        """Read safe relative targets from unified-diff headers."""
         try:
             if (
                 not patch_path.is_file()
@@ -2146,43 +2147,30 @@ class PolicyGate:
         except OSError:
             return frozenset()
 
-        targets: set[str] = set()
-        for line in text.splitlines():
-            if not line.startswith("+++ "):
-                continue
-            raw = line[4:].split("\t", 1)[0].strip()
-            if raw == "/dev/null":
-                continue
-            if raw.startswith("b/"):
-                raw = raw[2:]
-            parsed = PurePosixPath(raw)
-            if parsed.is_absolute() or ".." in parsed.parts or not parsed.parts:
-                return frozenset()
-            targets.add(parsed.as_posix())
-        return frozenset(targets)
-
-    def _framework_relative_candidates(self, target_file: str) -> frozenset[str]:
-        """Return patch-relative spellings for one trusted framework target."""
         try:
-            target = Path(target_file).resolve()
-        except (OSError, RuntimeError):
+            return frozenset(parse_patch_targets(text).all)
+        except ValueError:
             return frozenset()
 
-        candidates: set[str] = set()
-        for raw_root in resolve_source_file_allowlist():
-            try:
-                root = Path(raw_root).resolve()
-                relative = target.relative_to(root)
-            except (OSError, RuntimeError, ValueError):
-                continue
-            relative_posix = relative.as_posix()
-            if relative_posix and relative_posix != ".":
-                candidates.add(relative_posix)
-                if root.name:
-                    candidates.add(
-                        (PurePosixPath(root.name) / relative_posix).as_posix()
-                    )
-        return frozenset(candidates)
+    def _framework_relative_candidates(self, target_file: str) -> frozenset[str]:
+        """Return the target path relative to this Session's active root."""
+        raw_root = resolve_session_framework_root()
+        if not raw_root:
+            return frozenset()
+        try:
+            target = Path(target_file).resolve()
+            root = Path(raw_root).resolve()
+            relative = target.relative_to(root)
+        except (OSError, RuntimeError):
+            return frozenset()
+        except ValueError:
+            return frozenset()
+        relative_posix = relative.as_posix()
+        return (
+            frozenset({relative_posix})
+            if relative_posix and relative_posix != "."
+            else frozenset()
+        )
 
     def _validate_warm_replay_targets(
         self,
@@ -2190,7 +2178,7 @@ class PolicyGate:
     ) -> frozenset[str]:
         """Validate the sole framework-target exception for warm replay.
 
-        Every admitted target must resolve under a detected framework source
+        Every admitted target must resolve under the Session's active framework
         root, be paired with a patch inside the session's downloaded KB bundle,
         and correspond to a target declared by that patch.  The returned
         realpaths are the only out-of-session ``target_file`` values accepted by
@@ -2259,10 +2247,11 @@ class PolicyGate:
                     rule="warm_replay_patch_target_mismatch",
                 )
             for raw_target in raw_targets:
-                if not self._path_in_source_allowlist(raw_target):
+                active_root = resolve_session_framework_root()
+                if not active_root or not _resolved_within(raw_target, active_root):
                     raise PolicyDenied(
                         f"replay_warm_recipe target_file={raw_target!r} is outside "
-                        "trusted framework source roots",
+                        "the Session active framework root",
                         rule="warm_replay_target_outside_framework_roots",
                     )
                 target_candidates = self._framework_relative_candidates(raw_target)

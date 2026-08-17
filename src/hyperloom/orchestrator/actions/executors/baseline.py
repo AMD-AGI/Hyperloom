@@ -33,6 +33,7 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
+from ...framework.paths import resolve_session_framework_root
 from ...loop.sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
 from ._file_lock import best_effort_file_lock
@@ -1009,6 +1010,13 @@ def _verify_three_way_clean(
         if set(marker_lines) - set(prior.get("markers") or []):
             return False, f"new_conflict_marker:{rel}"
     return True, ""
+
+
+def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
+    """Return the active framework root for Explore/Framework Recipe patches."""
+    if not params.get("patches"):
+        return ""
+    return resolve_session_framework_root()
 
 
 def _apply_warm_patches(
@@ -2577,7 +2585,10 @@ class BaselineExecutor:
 
         # Warm patches are prepared after config/runtime preflight, immediately
         # before the single final benchmark.
-        patch_target = effective_inferencex_path or ix_env
+        # Explore/Framework Recipe patches target the framework checkout, not
+        # the InferenceX benchmark harness. The Session's explicitly selected
+        # root is the sole authority, matching Kernel Recipe replay.
+        patch_target = _resolve_recipe_patch_target(params)
         patch_application: list[dict[str, str]] | dict[str, Any] = []
         applied_patches: list[dict[str, str]] = []
         _pre_patch_sha = ""
@@ -2913,7 +2924,7 @@ class BaselineExecutor:
                     result["warm_patch_snapshot_manifest"] = patch_application.get(
                         "snapshot_manifest"
                     )
-                    result["warm_patch_canonical_target"] = ix_env
+                    result["warm_patch_canonical_target"] = patch_target
                     result["warm_kernel_apply_results"] = list(
                         params.get("warm_kernel_apply_results") or []
                     )
@@ -2982,7 +2993,7 @@ class BaselineExecutor:
                     warmup_result["warm_patch_snapshot_manifest"] = patch_application.get(
                         "snapshot_manifest"
                     )
-                    warmup_result["warm_patch_canonical_target"] = ix_env
+                    warmup_result["warm_patch_canonical_target"] = patch_target
                     warmup_result["warm_kernel_apply_results"] = list(
                         params.get("warm_kernel_apply_results") or []
                     )
@@ -3029,7 +3040,7 @@ class BaselineExecutor:
                 result["warm_patch_snapshot_manifest"] = patch_application.get(
                     "snapshot_manifest"
                 )
-                result["warm_patch_canonical_target"] = ix_env
+                result["warm_patch_canonical_target"] = patch_target
                 result["warm_kernel_apply_results"] = list(
                     params.get("warm_kernel_apply_results") or []
                 )

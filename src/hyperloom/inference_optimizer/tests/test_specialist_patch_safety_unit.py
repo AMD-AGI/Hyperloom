@@ -29,6 +29,53 @@ def test_patch_file_targets():
     assert ps.patch_file_targets(txt) == [("a/x.py", "b/x.py")]
 
 
+def test_parse_patch_targets_classifies_modify_create_and_delete():
+    patch = (
+        _DIFF
+        + "diff --git a/new.py b/new.py\n"
+        "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+new\n"
+        + "diff --git a/old.py b/old.py\n"
+        "--- a/old.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n"
+    )
+
+    parsed = ps.parse_patch_targets(patch)
+
+    assert parsed.existing == ("foo.py", "old.py")
+    assert parsed.created == ("new.py",)
+    assert parsed.all == ("foo.py", "old.py", "new.py")
+
+
+def test_parse_patch_targets_falls_back_for_mode_only_and_rename():
+    mode_only = (
+        "diff --git a/script.py b/script.py\n"
+        "old mode 100644\n"
+        "new mode 100755\n"
+    )
+    rename = (
+        "diff --git a/old.py b/new.py\n"
+        "similarity index 100%\n"
+        "rename from old.py\n"
+        "rename to new.py\n"
+    )
+
+    assert ps.parse_patch_targets(mode_only).existing == ("script.py",)
+    parsed_rename = ps.parse_patch_targets(rename)
+    assert parsed_rename.existing == ("old.py",)
+    assert parsed_rename.created == ("new.py",)
+
+
+def test_parse_patch_targets_rejects_root_escape():
+    try:
+        ps.parse_patch_targets(
+            "diff --git a/good.py b/../../escape.py\n"
+            "--- a/good.py\n+++ b/../../escape.py\n"
+        )
+    except ValueError as exc:
+        assert "unsafe patch target path" in str(exc)
+    else:
+        raise AssertionError("root-escaping patch target was accepted")
+
+
 def test_patch_targets_missing(tmp_path):
     (tmp_path / "foo.py").write_text("x", encoding="utf-8")
     # foo.py exists at strip level 1 -> not missing

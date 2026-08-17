@@ -40,8 +40,10 @@ class _StubPrelude:
 
     def _resolve_kernel_target_paths(self, entry: dict) -> list[str]:
         """Keep legacy single-target fixtures focused on preparation behavior."""
-        target = self._resolve_kernel_target_path(entry)
-        return [target] if target else []
+        target = str(entry.get("target_file") or "")
+        if target:
+            return [target] if Path(target).is_file() else []
+        return PreludePhase._resolve_kernel_target_paths(self, entry)
 
     def __init__(self, session_dir: Path, reader: object | None = None) -> None:
         self.session_dir = session_dir
@@ -127,11 +129,16 @@ def test_resolve_target_from_diff_header_against_roots(monkeypatch, tmp_path: Pa
     live.parent.mkdir(parents=True, exist_ok=True)
     live.write_text("old", encoding="utf-8")
     patch = tmp_path / "k.diff"
-    patch.write_text("+++ b/pkg/foo.py\n", encoding="utf-8")
+    patch.write_text(
+        "diff --git a/pkg/foo.py b/pkg/foo.py\n"
+        "--- a/pkg/foo.py\n"
+        "+++ b/pkg/foo.py\n",
+        encoding="utf-8",
+    )
 
     import hyperloom.orchestrator.framework.paths as paths
 
-    monkeypatch.setattr(paths, "resolve_patch_target_roots", lambda: (str(root) + "/",))
+    monkeypatch.setattr(paths, "resolve_session_framework_root", lambda: str(root))
     stub = _StubPrelude(tmp_path)
 
     resolved = stub._resolve_kernel_target_path({"patch_path": str(patch)})

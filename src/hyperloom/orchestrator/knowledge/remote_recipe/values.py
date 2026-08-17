@@ -12,7 +12,7 @@ import math
 import re
 import shutil
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Collection, Mapping
 
 from .models import (
@@ -28,6 +28,7 @@ from .sanitize import (
     sanitize_publish_server_args,
     sanitize_shared_knowledge,
 )
+from ...specialists.patch_safety import parse_patch_targets
 
 log = logging.getLogger(__name__)
 
@@ -81,28 +82,10 @@ def _patch_declared_targets(path: Any) -> tuple[str, ...]:
         raise RemoteRecipeValidationError(
             f"cannot read accepted patch targets: {patch}"
         ) from exc
-    targets: list[str] = []
-    for line in text.splitlines():
-        if not line.startswith("+++ "):
-            continue
-        raw = line[4:].split("\t", 1)[0].strip()
-        if raw == "/dev/null":
-            continue
-        if raw.startswith("b/"):
-            raw = raw[2:]
-        parsed = PurePosixPath(raw)
-        if parsed.is_absolute() or ".." in parsed.parts or not parsed.parts:
-            raise RemoteRecipeValidationError(
-                f"accepted patch declares unsafe target: {raw!r}"
-            )
-        target = parsed.as_posix()
-        if target not in targets:
-            targets.append(target)
-    if not targets:
-        raise RemoteRecipeValidationError(
-            f"accepted patch declares no target files: {patch}"
-        )
-    return tuple(targets)
+    try:
+        return parse_patch_targets(text).all
+    except ValueError as exc:
+        raise RemoteRecipeValidationError(str(exc)) from exc
 
 
 def _positive_int(value: Any) -> int | None:

@@ -12,7 +12,7 @@ import logging as _logging
 import math
 import os
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from collections.abc import Mapping
 from typing import Any
 from . import machine_state as _phase_state
@@ -398,24 +398,11 @@ class PreludePhase(PhaseHandler):
             return []
         try:
             text = Path(raw).read_text(errors="replace")
-        except OSError:
+            from ..specialists.patch_safety import parse_patch_targets
+
+            return list(parse_patch_targets(text).all)
+        except (OSError, ValueError):
             return []
-        targets: list[str] = []
-        for line in text.splitlines():
-            if not line.startswith("+++ "):
-                continue
-            candidate = line[4:].split("\t", 1)[0].strip()
-            if candidate == "/dev/null":
-                continue
-            if candidate.startswith("b/"):
-                candidate = candidate[2:]
-            parsed = PurePosixPath(candidate)
-            if parsed.is_absolute() or ".." in parsed.parts or not parsed.parts:
-                return []
-            target = parsed.as_posix()
-            if target not in targets:
-                targets.append(target)
-        return targets
 
     @classmethod
     def _parse_diff_target(cls, patch_path: str | None) -> str:
@@ -429,65 +416,46 @@ class PreludePhase(PhaseHandler):
         return targets[0] if targets else ""
 
     def _resolve_kernel_target_path(self, entry: dict[str, Any]) -> str:
-        """Locate the champion patch's target file in this session's source tree.
-
-        Aggressive resolution: an absolute target that exists is used as-is;
-        otherwise the repo-relative path parsed from the diff header is joined
-        against every trusted source root (:func:`resolve_patch_target_roots`)
-        and the first existing file wins. Returns '' when nothing resolves.
-        """
-        target = str(entry.get("target_file") or "").strip()
-        if target and Path(target).is_file():
-            return target
-        rel = self._parse_diff_target(entry.get("patch_path"))
-        if not rel:
-            return ""
-        rel = rel.lstrip("/")
-        try:
-            from ..framework.paths import resolve_patch_target_roots
-
-            roots = resolve_patch_target_roots()
-        except Exception:  # noqa: BLE001 — resolution must never raise
-            roots = ()
-        for root in roots:
-            candidate = Path(root) / rel
-            if candidate.is_file():
-                return str(candidate)
-        # Suffix fallback: the diff path may carry a package prefix the root
-        # already includes (e.g. ``sglang/foo`` under ``.../sglang/``). Only
-        # drop leading components while a package path remains — matching on a
-        # bare filename would happily point a whole-file replacement at an
-        # unrelated same-named module.
-        tail = Path(rel)
-        for root in roots:
-            base = Path(root.rstrip("/"))
-            if not base.is_dir():
-                continue
-            for depth in range(1, max(1, len(tail.parts) - 1)):
-                candidate = base / Path(*tail.parts[depth:])
-                if candidate.is_file():
-                    return str(candidate)
-        return ""
+        """Locate the first Patch target under this Session's active root."""
+        targets = self._resolve_kernel_target_paths(entry)
+        return targets[0] if targets else ""
 
     def _resolve_kernel_target_paths(self, entry: dict[str, Any]) -> list[str]:
-        """Resolve every declared target of one kernel patch under one source root."""
-        declared = self._parse_diff_targets(entry.get("patch_path"))
-        if not declared:
+        """Resolve every Patch target under this Session's one active root."""
+        def reject(reason: str) -> list[str]:
+            entry["resolution_error"] = reason
+            log.warning("Kernel Patch replay rejected: %s", reason)
             return []
-        try:
-            from ..framework.paths import resolve_patch_target_roots
 
-            roots = resolve_patch_target_roots()
-        except Exception:  # noqa: BLE001
-            roots = ()
-        for root in roots:
-            base = Path(root)
-            if not base.is_dir():
-                continue
-            candidates = [base / PurePosixPath(target) for target in declared]
-            if any(candidate.is_file() for candidate in candidates):
-                return [str(candidate) for candidate in candidates]
-        return []
+        patch_path = Path(str(entry.get("patch_path") or "").strip())
+        try:
+            from ..framework.paths import resolve_session_framework_root
+            from ..specialists.patch_safety import parse_patch_targets
+
+            parsed = parse_patch_targets(patch_path.read_text(errors="replace"))
+            root_value = resolve_session_framework_root()
+        except (OSError, ValueError) as exc:
+            return reject(f"invalid patch targets: {type(exc).__name__}: {exc}")
+        if not root_value:
+            return reject("Session active framework root is unset")
+        root = Path(root_value).resolve(strict=False)
+        if not root.is_dir():
+            return reject(f"active framework root is invalid: {root}")
+
+        resolved: list[str] = []
+        for target in parsed.all:
+            candidate = (root / target).resolve(strict=False)
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                return reject(f"target escapes active root: {target}")
+            if target in parsed.existing and not candidate.is_file():
+                return reject(f"existing target is missing: {candidate}")
+            if target in parsed.created and candidate.exists():
+                return reject(f"create target already exists: {candidate}")
+            resolved.append(str(candidate))
+        entry.pop("resolution_error", None)
+        return resolved
 
     @staticmethod
     def _warm_kernel_extra_envs(entry: dict[str, Any]) -> dict[str, str]:
@@ -949,6 +917,11 @@ class PreludePhase(PhaseHandler):
             targets = prepared_targets.get(index, [])
             if not targets:
                 entry["decision"] = "DEFERRED"
+                if entry.get("resolution_error"):
+                    entry["apply_result"] = {
+                        "status": "skipped",
+                        "reason": str(entry["resolution_error"])[:300],
+                    }
                 deferred += 1
                 continue
             anchor_target = targets[0]
@@ -1350,6 +1323,17 @@ class PreludePhase(PhaseHandler):
                 }
                 state.save(self.session_dir)
                 return None
+            if sdk_replay.get("patches"):
+                from ..framework.paths import resolve_session_framework_root
+
+                if not resolve_session_framework_root():
+                    state.warm_replay_attempted = True
+                    state.warm_replay_outcome = {
+                        "status": "skipped",
+                        "reason": "active_framework_root_missing",
+                    }
+                    state.save(self.session_dir)
+                    return None
         try:
             kernel = (
                 await self._prepare_warm_kernel_kb(sdk_replay.get("kernel_kb"))
@@ -1576,6 +1560,38 @@ class PreludePhase(PhaseHandler):
             wsc_patches = self._filter_warm_patches_with_kg(
                 wsc_patches, wsc_advisory, state
             )
+        if wsc_patches:
+            from ..framework.paths import resolve_session_framework_root
+
+            if not resolve_session_framework_root():
+                rollback = (
+                    self._revert_warm_kernel_patches(
+                        kernel_applied,
+                        kernel_snapshots,
+                    )
+                    if kernel_applied or kernel_snapshots
+                    else {"ok": True, "errors": []}
+                )
+                if rollback.get("ok"):
+                    state.warm_replay_pending = {}
+                else:
+                    state.warm_replay_pending = {
+                        **dict(getattr(state, "warm_replay_pending", {}) or {}),
+                        "status": "rollback_failed",
+                        "rollback_errors": list(rollback.get("errors") or []),
+                    }
+                    if hasattr(state, "set_stop_reason"):
+                        state.set_stop_reason("warm_replay_rollback_failed")
+                state.warm_replay_attempted = True
+                state.warm_replay_outcome = {
+                    "status": (
+                        "skipped" if rollback.get("ok") else "rollback_failed"
+                    ),
+                    "reason": "active_framework_root_missing",
+                    "rollback": rollback,
+                }
+                state.save(self.session_dir)
+                return None
 
         if not bc_args and not bc_envs and not wsc_patches and not kernel_pending:
             state.warm_replay_outcome = {
@@ -2060,8 +2076,7 @@ class PreludePhase(PhaseHandler):
                 else ""
             )
             if promoted_checkout:
-                state.active_inferencex_path = promoted_checkout
-                outcome["active_inferencex_path"] = promoted_checkout
+                outcome["active_framework_root"] = promoted_checkout
             warm_args = str(params.get("extra_server_args") or "").strip()
             warm_envs = dict(params.get("extra_envs") or {})
             replayed_patch_refs = [
@@ -2125,7 +2140,7 @@ class PreludePhase(PhaseHandler):
                 "source_confidence": outcome.get("warm_recipe_conf", 0.0),
             }
             if promoted_checkout:
-                stack_entry["inferencex_path"] = promoted_checkout
+                stack_entry["framework_source_root"] = promoted_checkout
             kernel_outcome = self._book_combined_kernel_keep(result, task)
             outcome["kernel"] = dict(kernel_outcome)
             if kernel_outcome.get("kept"):
@@ -2161,8 +2176,6 @@ class PreludePhase(PhaseHandler):
                 state.warm_replay_pending = {}
                 state.warm_replay_outcome = outcome
                 state.save(self.session_dir)
-                if promoted_checkout:
-                    os.environ["INFERENCEX_PATH"] = promoted_checkout
                 return
             state.optimization_stack.append(stack_entry)
             # gain_per_stack_entry runs in lock-step with optimization_stack.
@@ -2185,7 +2198,7 @@ class PreludePhase(PhaseHandler):
                 "extra_envs": warm_envs,
             }
             if promoted_checkout:
-                state.current_best["inferencex_path"] = promoted_checkout
+                state.current_best["framework_source_root"] = promoted_checkout
             if stack_entry.get("kernel_replay"):
                 state.current_best["kernel_replay"] = dict(
                     stack_entry["kernel_replay"]
@@ -2246,8 +2259,6 @@ class PreludePhase(PhaseHandler):
         state.warm_replay_pending = {}
         state.warm_replay_outcome = outcome
         state.save(self.session_dir)
-        if promoted_checkout:
-            os.environ["INFERENCEX_PATH"] = promoted_checkout
 
     async def _maybe_enqueue_prelude_initial_analysis_after_baseline(
         self,

@@ -248,6 +248,12 @@ async def test_current_recipe_replay_uses_sdk_sections_and_global_order(
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KB_DRAFT_DIR", str(tmp_path / "runtime" / "draft"))
     monkeypatch.setenv("KB_WARM_START_DIR", str(warm_dir))
+    framework_root = tmp_path / "framework"
+    framework_root.mkdir()
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
+        lambda: str(framework_root),
+    )
     coord = _make_coord(
         tmp_path,
         warm_start_recipe={
@@ -435,6 +441,52 @@ async def test_current_recipe_repairs_context_for_target_workload(
         "previous_context_length": 6144,
         "effective_context_length": 11264,
         "required_context_length": 9216,
+    }
+
+
+@pytest.mark.asyncio
+async def test_current_recipe_patch_skips_without_active_framework_root(
+    tmp_path,
+    monkeypatch,
+):
+    _patch_current_sdk_readers(
+        monkeypatch,
+        tmp_path,
+        timeline=["explore/p.patch"],
+        explore_refs=["explore/p.patch"],
+        framework_refs=[],
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
+        lambda: "",
+    )
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe={
+            "tier": "exact",
+            "confidence": 1.0,
+            "recipe": {
+                "canonical_id": "inference:test",
+                "record_kind": "hyperloom_recipe",
+            },
+        },
+    )
+    prepared = 0
+
+    async def _prepare(*_args, **_kwargs):
+        nonlocal prepared
+        prepared += 1
+        return {"status": "prepared"}
+
+    coord.phase_prelude._prepare_warm_kernel_kb = _prepare
+
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert task is None
+    assert prepared == 0
+    assert coord.shared_state.warm_replay_outcome == {
+        "status": "skipped",
+        "reason": "active_framework_root_missing",
     }
 
 
@@ -1111,8 +1163,8 @@ def test_multi_file_kernel_targets_share_one_framework_root(
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "hyperloom.orchestrator.framework.paths.resolve_patch_target_roots",
-        lambda: (str(framework_root),),
+        "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
+        lambda: str(framework_root),
     )
 
     targets = coord.phase_prelude._resolve_kernel_target_paths(
@@ -1122,6 +1174,76 @@ def test_multi_file_kernel_targets_share_one_framework_root(
     )
 
     assert targets == [str(existing), str(added)]
+
+
+def test_kernel_targets_do_not_scan_other_framework_roots(tmp_path, monkeypatch):
+    coord = _make_coord(tmp_path)
+    active_root = tmp_path / "active"
+    stale_root = tmp_path / "stale"
+    stale_target = stale_root / "src/kernel.py"
+    active_root.mkdir()
+    stale_target.parent.mkdir(parents=True)
+    stale_target.write_text("old\n", encoding="utf-8")
+    patch = tmp_path / "kernel.patch"
+    patch.write_text(
+        "diff --git a/src/kernel.py b/src/kernel.py\n"
+        "--- a/src/kernel.py\n"
+        "+++ b/src/kernel.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
+        lambda: str(active_root),
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths.resolve_patch_target_roots",
+        lambda: (str(stale_root),),
+    )
+
+    entry = {"patch_path": str(patch)}
+    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
+    assert entry["resolution_error"] == f"existing target is missing: {active_root / 'src/kernel.py'}"
+
+
+def test_kernel_target_resolution_requires_active_framework_root(tmp_path, monkeypatch):
+    coord = _make_coord(tmp_path)
+    patch = tmp_path / "create.patch"
+    patch.write_text(
+        "diff --git a/src/new.py b/src/new.py\n"
+        "--- /dev/null\n"
+        "+++ b/src/new.py\n"
+        "@@ -0,0 +1 @@\n+new\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
+        lambda: "",
+    )
+
+    entry = {"patch_path": str(patch)}
+    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
+    assert entry["resolution_error"] == "Session active framework root is unset"
+
+
+def test_multi_file_kernel_snapshot_restores_modify_and_create(tmp_path):
+    coord = _make_coord(tmp_path)
+    existing = tmp_path / "framework/existing.py"
+    created = tmp_path / "framework/created.py"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("original\n", encoding="utf-8")
+    snapshots = [
+        coord.phase_prelude._snapshot_warm_kernel_target(str(existing), 0),
+        coord.phase_prelude._snapshot_warm_kernel_target(str(created), 1),
+    ]
+    existing.write_text("patched\n", encoding="utf-8")
+    created.write_text("new\n", encoding="utf-8")
+
+    result = coord.phase_prelude._restore_warm_kernel_snapshots(snapshots)
+
+    assert result == {"ok": True, "errors": []}
+    assert existing.read_text(encoding="utf-8") == "original\n"
+    assert not created.exists()
 
 
 @pytest.mark.asyncio
@@ -1838,7 +1960,7 @@ def _git_repo_for_required_patch(tmp_path: Path) -> tuple[Path, str]:
     return repo, patch
 
 
-def test_combined_keep_promotes_validated_checkout_without_reapply(
+def test_combined_keep_retains_validated_framework_root_without_reapply(
     tmp_path,
     monkeypatch,
 ):
@@ -1894,9 +2016,15 @@ def test_combined_keep_promotes_validated_checkout_without_reapply(
     )
 
     assert "persisted = True" in (checkout / "vllm" / "fp8.py").read_text()
-    assert coord.shared_state.active_inferencex_path == str(checkout.resolve())
-    assert os.environ["INFERENCEX_PATH"] == str(checkout.resolve())
+    assert getattr(coord.shared_state, "active_inferencex_path", "") == ""
+    assert os.environ["INFERENCEX_PATH"] == "/original/inferencex"
     assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
+    assert coord.shared_state.warm_replay_outcome["active_framework_root"] == str(
+        checkout.resolve()
+    )
+    assert coord.shared_state.optimization_stack[-1]["framework_source_root"] == str(
+        checkout.resolve()
+    )
     assert coord.shared_state.warm_replay_pending == {}
 
 

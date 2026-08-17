@@ -280,8 +280,8 @@ def test_dispatched_warm_replay_accepts_verified_framework_target(
         framework_root,
     )
     monkeypatch.setattr(
-        "hyperloom.orchestrator.policy.gate.resolve_source_file_allowlist",
-        lambda: (str(framework_root),),
+        "hyperloom.orchestrator.policy.gate.resolve_session_framework_root",
+        lambda: str(framework_root),
     )
 
     gate.validate_dispatched_task("replay_warm_recipe", params)
@@ -298,8 +298,8 @@ def test_warm_replay_target_exception_is_not_shared_with_other_actions(
         framework_root,
     )
     monkeypatch.setattr(
-        "hyperloom.orchestrator.policy.gate.resolve_source_file_allowlist",
-        lambda: (str(framework_root),),
+        "hyperloom.orchestrator.policy.gate.resolve_session_framework_root",
+        lambda: str(framework_root),
     )
 
     with pytest.raises(PolicyDenied) as exc:
@@ -320,8 +320,8 @@ def test_dispatched_warm_replay_rejects_patch_outside_kb_download(
         patch_path=outside_patch,
     )
     monkeypatch.setattr(
-        "hyperloom.orchestrator.policy.gate.resolve_source_file_allowlist",
-        lambda: (str(framework_root),),
+        "hyperloom.orchestrator.policy.gate.resolve_session_framework_root",
+        lambda: str(framework_root),
     )
 
     with pytest.raises(PolicyDenied) as exc:
@@ -341,8 +341,8 @@ def test_dispatched_warm_replay_rejects_patch_target_mismatch(
         patch_target="vllm/v1/attention/ops/different.py",
     )
     monkeypatch.setattr(
-        "hyperloom.orchestrator.policy.gate.resolve_source_file_allowlist",
-        lambda: (str(framework_root),),
+        "hyperloom.orchestrator.policy.gate.resolve_session_framework_root",
+        lambda: str(framework_root),
     )
 
     with pytest.raises(PolicyDenied) as exc:
@@ -375,8 +375,8 @@ def test_dispatched_warm_replay_rejects_undeclared_extra_patch_target(
             )
         )
     monkeypatch.setattr(
-        "hyperloom.orchestrator.policy.gate.resolve_source_file_allowlist",
-        lambda: (str(framework_root),),
+        "hyperloom.orchestrator.policy.gate.resolve_session_framework_root",
+        lambda: str(framework_root),
     )
 
     with pytest.raises(PolicyDenied) as exc:
@@ -414,8 +414,8 @@ def test_dispatched_warm_replay_accepts_declared_multi_file_targets(
         str(added),
     ]
     monkeypatch.setattr(
-        "hyperloom.orchestrator.policy.gate.resolve_source_file_allowlist",
-        lambda: (str(framework_root),),
+        "hyperloom.orchestrator.policy.gate.resolve_session_framework_root",
+        lambda: str(framework_root),
     )
 
     gate.validate_dispatched_task("replay_warm_recipe", params)
@@ -438,8 +438,8 @@ def test_dispatched_warm_replay_rejects_framework_symlink_escape(
         framework_root,
     )
     monkeypatch.setattr(
-        "hyperloom.orchestrator.policy.gate.resolve_source_file_allowlist",
-        lambda: (str(framework_root),),
+        "hyperloom.orchestrator.policy.gate.resolve_session_framework_root",
+        lambda: str(framework_root),
     )
 
     with pytest.raises(PolicyDenied) as exc:
