@@ -119,6 +119,75 @@ def _kernel_integration_id(
     return f"kernel-integration:{digest}"
 
 
+# A kernel that is ``f`` of GPU time and got ``S`` times faster cannot make the
+# whole deployment more than ``1/((1-f) + f/S)`` faster. That is arithmetic, not
+# a model, and it is an upper bound twice over: it assumes the kernel's time is
+# entirely on the critical path, and that nothing else got slower.
+#
+# So when the bound is below the threshold the integrate run has to clear, the
+# run cannot pass, and it is a full end-to-end serving benchmark spent to
+# rediscover that. Skipping it cannot lose an optimization -- there was none to
+# lose.
+#
+# The margin is what makes this safe in practice rather than only on paper. The
+# GPU share comes from a trace and a kernel speedup can relieve second-order
+# pressure the bound does not model, so the share is inflated before the bound
+# is taken and only a comfortable failure is skipped.
+AMDAHL_GPU_PCT_MARGIN = 1.5
+
+# Set to 0 to queue every micro-KEEP for integrate regardless of its ceiling.
+_AMDAHL_GATE_ENV = "HYPERLOOM_KERNEL_AMDAHL_GATE"
+
+
+def amdahl_e2e_ceiling_pct(gpu_pct: float, micro_speedup: float) -> float | None:
+    """Best end-to-end gain a kernel speedup could produce, in percent.
+
+    Args:
+        gpu_pct: The kernel's share of GPU time, in percent.
+        micro_speedup: Measured microbenchmark speedup, as a ratio.
+
+    Returns:
+        The ceiling as a percentage gain, or ``None`` when either input is
+        missing or out of range -- in which case no gate should be applied.
+    """
+    try:
+        f = float(gpu_pct) / 100.0
+        s = float(micro_speedup)
+    except (TypeError, ValueError):
+        return None
+    if not (0.0 < f <= 1.0) or s <= 0.0:
+        return None
+    denom = (1.0 - f) + f / s
+    if denom <= 0.0:
+        return None
+    return (1.0 / denom - 1.0) * 100.0
+
+
+def integrate_cannot_pass(
+    gpu_pct: float,
+    micro_speedup: float,
+    keep_threshold_pct: float,
+    *,
+    margin: float = AMDAHL_GPU_PCT_MARGIN,
+) -> bool:
+    """Is the integrate run arithmetically incapable of clearing its bar?
+
+    Answers ``False`` -- run it -- whenever the inputs do not support a
+    confident answer, so the failure mode is the benchmark we already run.
+    """
+    if keep_threshold_pct <= 0:
+        return False
+    ceiling = amdahl_e2e_ceiling_pct(float(gpu_pct or 0.0) * margin, micro_speedup)
+    if ceiling is None:
+        return False
+    return ceiling < keep_threshold_pct
+
+
+def _amdahl_gate_enabled() -> bool:
+    raw = os.environ.get(_AMDAHL_GATE_ENV)
+    return (raw if raw is not None else "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _queue_kernel_keep(
     state,
     *,
@@ -150,6 +219,31 @@ def _queue_kernel_keep(
         and micro_speedup >= promotion_threshold
     )
     if decision != "KEEP" and not promoted_needs_review:
+        return None
+    # Amdahl gate: a full end-to-end serving benchmark that cannot arithmetically
+    # clear its own bar is GPU time spent to confirm a foregone conclusion.
+    gate_threshold = float(
+        getattr(state, "kernel_integrate_keep_threshold_pct", None) or 1.0
+    )
+    if _amdahl_gate_enabled() and integrate_cannot_pass(
+        entry.get("last_gpu_pct", 0.0), micro_speedup, gate_threshold
+    ):
+        ceiling = amdahl_e2e_ceiling_pct(
+            float(entry.get("last_gpu_pct", 0.0) or 0.0) * AMDAHL_GPU_PCT_MARGIN,
+            micro_speedup,
+        )
+        log.info(
+            "kernel %s: skipping integrate; %.1f%% of GPU time at %.2fx caps the "
+            "end-to-end gain at %.2f%%, under the %.2f%% bar even after a %.1fx "
+            "margin on the share",
+            kernel_id,
+            float(entry.get("last_gpu_pct", 0.0) or 0.0),
+            micro_speedup,
+            ceiling if ceiling is not None else float("nan"),
+            gate_threshold,
+            AMDAHL_GPU_PCT_MARGIN,
+        )
+        entry["last_integrate_skip_reason"] = "amdahl_ceiling_below_threshold"
         return None
     artifact_path = str(entry.get("last_artifact_path") or "")
     artifact_bundle = dict(entry.get("last_artifact_bundle") or {})
