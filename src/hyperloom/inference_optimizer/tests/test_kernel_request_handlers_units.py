@@ -1985,7 +1985,6 @@ class TestForgeCollectiveCoverage:
             last_trace_analyze={"candidates_path": str(candidates)},
         ).save(tmp_path)
         monkeypatch.setenv("FORGE_COLLECTIVE_AGENT_TIMEOUT", "900")
-        monkeypatch.setenv("CLAUDE_MODEL", "claude-test")
         _pin_fusion_provider_env(
             monkeypatch,
             {**_ANTHROPIC_ONLY_ENV, "CLAUDE_MODEL": "claude-test"},
