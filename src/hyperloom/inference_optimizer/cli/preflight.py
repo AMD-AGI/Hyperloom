@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,9 @@ from hyperloom.common.llm_config import (
     has_anthropic_credential,
     provider_model_defaults,
 )
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
+from hyperloom.common.platform_probe import probe_cpu_platform
+from hyperloom.common.provenance import detect_gfx_arch
 
 from .credentials import (
     _is_stale_proxy_url,
@@ -1356,6 +1360,82 @@ def _check_shm_disk() -> None:
         )
 
 
+def _check_gfx_arch_resolvable(gpu_type: str | None = None) -> None:
+    """Warn when the GPU architecture cannot be resolved for provenance.
+
+    ``gfx_arch`` is what tells a reader of an archived report which ISA produced
+    a number. When no source resolves it is recorded as ``null``, which is
+    correct -- and silent. That silence lands on exactly the hosts where it is
+    hardest to notice: bare-metal nodes, where ``rocminfo`` is in ``/opt/rocm/bin``
+    and no install script puts it on ``PATH``.
+
+    Warn-only, and it names the three ways to fix it, because null provenance is
+    only cheap to correct before the run rather than after.
+
+    Called from the CLI after ``--gpu-type`` is resolved rather than from
+    ``_preflight``, which runs first: ``gpu_type`` is the second source in the
+    resolution order, so asking before it is settled turns this into a warning
+    about hosts that are fine.
+    """
+    if detect_gfx_arch(os.environ, gpu_type=gpu_type):
+        return
+    boards = "/".join(sorted(AMD_GPU_DISPATCH_IDENTITIES))
+    print(
+        "Preflight: WARNING — GPU architecture could not be resolved; provenance "
+        "will record gfx_arch as null, so an archived report will not say which "
+        f"ISA produced its numbers. Pass --gpu-type ({boards}), "
+        "set HYPERLOOM_GFX_ARCH, or put rocminfo (/opt/rocm/bin) on PATH."
+    )
+
+
+def _check_platform_tuning() -> None:
+    """Record host CPU tuning state and warn on settings that skew results.
+
+    Within one session every trial runs on this same node, so host tuning
+    applies to baseline and candidates alike and cancels out of the *delta*.
+    The reason to check it anyway is that it does not cancel out of anything the
+    session exports. On a node with the wrong governor or boost disabled the
+    absolute throughput is low, and -- the expensive part -- the optimizer is
+    searching around a CPU-side bottleneck that will not exist on a correctly
+    configured machine, so the configuration it selects can be tuned against a
+    phantom constraint and is then filed in the recipe KB for everyone else.
+    Warning here, before the run, is far cheaper than discovering it after.
+
+    Deliberately sysfs-only and WARN-only. The container sees host sysfs but
+    has neither the MSR access to resolve a BIOS "Auto" nor a route to the
+    BMC, so the knobs reachable here (SMT, NPS, boost, governor) are the ones
+    reported. The remaining BIOS-only knobs -- APBDIS, DF C-states,
+    determinism -- need Redfish; ``scripts/platform_audit.py`` covers those
+    host-side. Their absence here is not worth failing a run over.
+
+    Only genuinely anomalous settings warn. SMT is recorded but never warned
+    about: it is on by default on EPYC, so alerting would fire on nearly every
+    node and train readers to ignore the check entirely. What would merit an
+    alert is a node whose knobs disagree with the others in the same session,
+    which needs the per-node collection this does not yet do.
+    """
+    plat = probe_cpu_platform()
+    if plat is None:
+        return  # Not Linux sysfs, or a container without it; stay silent.
+
+    print(
+        f"Preflight: platform [{socket.gethostname()}] — SMT {plat.smt or '?'}, "
+        f"{plat.nps or 'unknown'} ({plat.numa_nodes or '?'} NUMA nodes / "
+        f"{plat.sockets or '?'} sockets), governor {plat.governor}"
+    )
+
+    if plat.governor not in ("performance", "unknown"):
+        print(
+            f"Preflight: WARNING — cpufreq governor is {plat.governor!r}, not 'performance'; "
+            f"clock ramp can distort latency percentiles and roofline measurements"
+        )
+    if plat.boost == "off":
+        print(
+            "Preflight: WARNING — Core Performance Boost is disabled; CPU-side "
+            "work (sampling, scheduling, tokenization) will run below rated clocks"
+        )
+
+
 _TRACELENS_REQUIRED_CLIS: tuple[str, ...] = ("TraceLens_generate_perf_report_pytorch_inference",)
 
 
@@ -1919,6 +1999,7 @@ def _preflight(
     _unset_hip_visible_devices()
     _check_gpu_visibility()
     _check_shm_disk()
+    _check_platform_tuning()
 
     # --- Runtime dep install ---
     # 1. Ray — used broadly (multi-node scheduling, kernel/profile/recover

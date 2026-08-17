@@ -7,22 +7,30 @@ from __future__ import annotations
 
 import os
 
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 
-_AMD_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x", "mi355x"})
+#: Derived, not typed out again: a board added to the identities table is
+#: accepted by the CLI and resolvable in the same commit. Listing it separately
+#: let a board have a dispatch identity that ``_resolve_amd_gpu_type`` refused.
+_AMD_GPU_TYPES = frozenset(AMD_GPU_DISPATCH_IDENTITIES)
+
+#: rocm-smi product tags, reverse-sorted so a longer tag is tested before any
+#: tag that is a prefix of it -- an "MI300XL" must not be claimed by "MI300X".
+_PRODUCT_TAGS: tuple[str, ...] = tuple(sorted((t.upper() for t in _AMD_GPU_TYPES), reverse=True))
 
 _GFX_TO_RUNNER: dict[str, str] = {
     # gfx arch -> Magpie runner label, so launchers and runtime materializers
-    # agree on the selected benchmark script.
+    # agree on the selected benchmark script. Not derived by inverting the
+    # identities table: that map is many-to-one (mi308x and mi325x are gfx942
+    # too), and this answers "which benchmark script", not "which board", so
+    # the arch a runner is reached by is a deliberate choice, not an inverse.
     "gfx942": "mi300x",
     "gfx950": "mi355x",
 }
 
-_AMD_GPU_DISPATCH_IDENTITIES: dict[str, tuple[str, int]] = {
-    "mi300x": ("gfx942", 304),
-    "mi308x": ("gfx942", 304),
-    "mi325x": ("gfx942", 304),
-    "mi355x": ("gfx950", 256),
-}
+#: Re-exported from ``hyperloom.common`` so provenance and this module cannot
+#: disagree about which arch a board dispatches to.
+_AMD_GPU_DISPATCH_IDENTITIES = AMD_GPU_DISPATCH_IDENTITIES
 
 
 def _gpu_runner_type(gpu_type: str) -> str:
@@ -61,7 +69,7 @@ def _autodetect_gpu_type() -> str | None:
             text=True,
             timeout=5,
         ).stdout.upper()
-        for tag in ("MI355X", "MI325X", "MI308X", "MI300X"):
+        for tag in _PRODUCT_TAGS:
             if tag in out:
                 return tag.lower()
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
