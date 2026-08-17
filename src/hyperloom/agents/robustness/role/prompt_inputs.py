@@ -200,7 +200,7 @@ class SharedStateSnapshot:
             means no budget configured.
         closing_phase (bool): True when the Coordinator signals the
             closing phase.
-        kernel_opt_attempts_count (int): Count of unique kernel ids with at
+        kernel_opt_attempts_count (int): Count of unique kernel task identities with at
             least one recorded kernel_opt attempt.
         has_keep_pending_integrate (bool): True when a multi-KEEP integrate
             queue still has work pending.

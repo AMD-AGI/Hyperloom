@@ -634,9 +634,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # kept or reverted whole.
     authored_framework_levers: list[dict[str, Any]] = field(default_factory=list)
 
-    # Roofline-v2 trace-analyze cache written by record_trace_analyze; ``roofline_snapshot_id`` mirrors the nested value for hot-path access.
+    # Roofline-v2 trace-analyze cache written by record_trace_analyze.
+    # roofline_snapshot_id is a property derived from this dict.
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
-    roofline_snapshot_id: int = 0
     # Append-only compact roofline snapshots for report.py; capped at ``_ROOFLINE_SNAPSHOTS_CAP`` (snapshot #1 always retained as the report's baseline anchor).
     roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
     # Outer roofline failure counter; bumped on fail, reset on success.
@@ -2162,6 +2162,17 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return _m.pending_kernel_integration_records(self)
 
     @property
+    def roofline_snapshot_id(self) -> int:
+        """Current roofline snapshot counter, read from the nested trace-analyze cache.
+
+        Six clear-points of ``last_trace_analyze`` do not reset this value;
+        they only create a brief window where the top-level read and the nested
+        read disagree.  The next ``record_trace_analyze`` call re-aligns them.
+        """
+        raw = (self.last_trace_analyze or {}).get("roofline_snapshot_id")
+        return int(raw) if isinstance(raw, int) else 0
+
+    @property
     def has_keep_pending_integrate(self) -> bool:
         """True when kernel KEEP results still await kernel ``integrate``.
 
@@ -2639,7 +2650,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         payload: dict[str, Any],
         result: dict[str, Any],
     ) -> None:
-        """Write ``last_trace_analyze`` (single writer); ``roofline_snapshot_id`` is previous + 1, resetting when the cache was cleared.
+        """Write ``last_trace_analyze`` (single writer); ``roofline_snapshot_id`` increments from the previous nested value, restarting from 1 when the cache was cleared.
 
         Args:
             payload (dict[str, Any]): The trace_analyze task payload (supplies
@@ -2753,8 +2764,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             ),
             "ts": ts_iso,
         }
-        # Top-level mirror so PolicyGate/Coordinator skip the nested-dict lookup.
-        self.roofline_snapshot_id = snapshot_id
 
         self._append_roofline_snapshot_history(
             payload=payload,
