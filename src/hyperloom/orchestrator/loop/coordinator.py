@@ -864,6 +864,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
         self._run_deadline: float | None = None
         self._run_started_monotonic: float | None = None
+        # Closing-grace bound; used only while ``closing_phase`` is set so CLOSE
+        # work is not skipped just because the session deadline has passed.
+        self._closing_deadline: float | None = None
         # Latest objective wired by run(); refreshes target_gap_pct each tick. None outside a run.
         self._current_objective: Objective | None = None
 
@@ -1519,18 +1522,30 @@ class Coordinator(metaclass=_CoordinatorMeta):
             # hint (for example current GEAK returning no_gain -> skip_to_sweep).
             # Consume that before prompting agents again so stale phase prompts
             # cannot enqueue legacy work.
-            await self._advance_phase_if_needed()
+            await self._await_within_session_bound(
+                self._advance_phase_if_needed,
+                stage="advance_phase_pre_reactor",
+            )
             if str(getattr(self.shared_state, "pending_escalate_hint", "") or "").strip():
-                await self._advance_phase_if_needed()
+                await self._await_within_session_bound(
+                    self._advance_phase_if_needed,
+                    stage="advance_phase_hint",
+                )
             for name in self._tick_roles:
-                await self._reactor_pass(name)
+                await self._await_within_session_bound(
+                    lambda n=name: self._reactor_pass(n),
+                    stage=f"reactor:{name}",
+                )
             await self._pump_dispatcher_once()
             # FRAMEWORK_AGENT phase pump: enqueue next candidate / fetch next batch.
             await self._pump_framework_agent_phase_safely(caller="tick")
             # Phase-independent enablement pump: repair a non-runnable combo.
             await self._pump_enablement_safely(caller="tick")
             # phase machine advance at tick boundary.
-            await self._advance_phase_if_needed()
+            await self._await_within_session_bound(
+                self._advance_phase_if_needed,
+                stage="advance_phase",
+            )
 
     def _record_coordinator_exception(
         self,
@@ -1562,6 +1577,56 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001
             log.exception("failed to persist Coordinator exception metadata")
+
+    def _seconds_until_session_bound(self) -> float | None:
+        """Seconds left on the active run or closing bound; ``None`` if unbounded.
+
+        During CLOSE the session deadline has already passed, so the bound
+        switches to ``_closing_deadline`` and CLOSE work is not skipped.
+
+        Returns:
+            Remaining seconds, or ``None`` when no bound is armed.
+        """
+        if bool(getattr(self.shared_state, "closing_phase", False)):
+            bound = self._closing_deadline
+        else:
+            bound = self._run_deadline
+        if bound is None:
+            return None
+        return float(bound) - time.monotonic()
+
+    async def _await_within_session_bound(
+        self,
+        factory: Callable[[], Awaitable[Any]],
+        *,
+        stage: str,
+    ) -> None:
+        """Run one tick step, cancelling it when the session/closing bound elapses.
+
+        The wall-clock stop lives at the end of each tick. A conversational
+        reactor turn or a long phase-enter await that never returns would skip
+        that stop. Cancelling the step lets the tick finish and enter CLOSE.
+
+        Args:
+            factory: Builds the awaitable so a skipped step is never started.
+            stage: Label for the warning log.
+        """
+        remaining = self._seconds_until_session_bound()
+        if remaining is not None and remaining <= 0.0:
+            log.warning("Coordinator: skipping %s; session bound already elapsed", stage)
+            return
+        awaitable = factory()
+        if remaining is None:
+            await awaitable
+            return
+        try:
+            await asyncio.wait_for(awaitable, timeout=remaining)
+        except asyncio.TimeoutError:
+            log.warning(
+                "Coordinator: %s hit the session bound after %.1fs; cancelled so the tick can close",
+                stage,
+                remaining,
+            )
 
     # Long-run interface
     async def run(
@@ -1649,9 +1714,15 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     # Bump the persistent tick counter — drives phase/plateau math.
                     self.shared_state.increment_tick()
                     try:
-                        await self._advance_phase_if_needed()
+                        await self._await_within_session_bound(
+                            self._advance_phase_if_needed,
+                            stage="advance_phase_pre_reactor",
+                        )
                         if str(getattr(self.shared_state, "pending_escalate_hint", "") or "").strip():
-                            await self._advance_phase_if_needed()
+                            await self._await_within_session_bound(
+                                self._advance_phase_if_needed,
+                                stage="advance_phase_hint",
+                            )
                     except Exception as exc:  # noqa: BLE001
                         log.exception("phase advance before reactors (run) failed")
                         self._record_coordinator_exception(
@@ -1665,7 +1736,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         for name in self._tick_roles:
                             if self._stop.is_set():
                                 break
-                            await self._reactor_pass(name)
+                            await self._await_within_session_bound(
+                                lambda n=name: self._reactor_pass(n),
+                                stage=f"reactor:{name}",
+                            )
                         # Orchestration checkpoint/compaction; cadence-based.
                         if not self._stop.is_set():
                             try:
@@ -1690,7 +1764,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         log.exception("targeted-build tick raised")
                     # phase machine advance; runs even in_closing so CLOSE is recorded.
                     try:
-                        await self._advance_phase_if_needed()
+                        await self._await_within_session_bound(
+                            self._advance_phase_if_needed,
+                            stage="advance_phase",
+                        )
                     except Exception as exc:  # noqa: BLE001
                         log.exception("phase advance (run) failed")
                         self._record_coordinator_exception(
@@ -1731,6 +1808,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     closing_deadline = await self._enter_closing_phase(
                         grace_sec=grace_sec,
                     )
+                    self._closing_deadline = closing_deadline
                     continue
                 if in_closing:
                     report_terminal = await self._closing_report_terminal()

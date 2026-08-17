@@ -3,7 +3,7 @@
 
 """The session wall-clock budget defences that live in the orchestrator loop.
 
-Two of the four layers are here, the ones outside the executors:
+Three of the defences are here, the ones outside the executors:
 
 * Admission -- an action whose expected cost cannot fit the budget that is left
   never starts. Covers the pure fit decision, the SharedState accessor both it
@@ -16,6 +16,9 @@ Two of the four layers are here, the ones outside the executors:
   landing terminal instead of stranding at ``running``, which of those handles
   the pump owns on its way out, and the pump and ``Coordinator.stop`` paths that
   trigger it.
+* Tick bound -- a reactor turn or phase-enter await that never returns is
+  cancelled when the session (or closing) bound elapses, so the tick can still
+  reach the wall-clock stop.
 
 The remaining two layers are enforced inside the executors and tested next to
 them: the timeout clamp in ``test_explore_executor``, and the subprocess session
@@ -1220,3 +1223,89 @@ class TestCoordinatorStop:
 
         assert atask.cancelled()
         assert coord.dispatcher._inflight_actions == {}
+
+
+async def _idle(*_args, **_kwargs) -> None:
+    return None
+
+
+async def _hang_forever(*_args, **_kwargs) -> None:
+    await asyncio.sleep(3600)
+
+
+class TestATickCannotOutliveTheSessionBound:
+    """A step that never returns used to skip the wall-clock stop at tick end."""
+
+    @pytest.mark.asyncio
+    async def test_a_hanging_reactor_still_stops_when_the_budget_ends(
+        self,
+        coord: Coordinator,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(coord, "_advance_phase_if_needed", _idle)
+        monkeypatch.setattr(coord, "_reactor_pass", _hang_forever)
+        monkeypatch.setattr(coord, "_pump_dispatcher_once", _idle)
+        started = time.monotonic()
+        try:
+            reason = await asyncio.wait_for(
+                coord.run(max_minutes=0.05, closing_grace_sec=0.0, tick_interval_sec=0.0),
+                timeout=15.0,
+            )
+        finally:
+            await coord.stop()
+        assert reason == "time_exhausted"
+        assert time.monotonic() - started < 10.0
+
+    @pytest.mark.asyncio
+    async def test_a_hanging_phase_enter_still_stops_when_the_budget_ends(
+        self,
+        coord: Coordinator,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(coord, "_advance_phase_if_needed", _hang_forever)
+        monkeypatch.setattr(coord, "_reactor_pass", _idle)
+        monkeypatch.setattr(coord, "_pump_dispatcher_once", _idle)
+        started = time.monotonic()
+        try:
+            reason = await asyncio.wait_for(
+                coord.run(max_minutes=0.05, closing_grace_sec=0.0, tick_interval_sec=0.0),
+                timeout=15.0,
+            )
+        finally:
+            await coord.stop()
+        assert reason == "time_exhausted"
+        assert time.monotonic() - started < 10.0
+
+    @pytest.mark.asyncio
+    async def test_a_spent_bound_does_not_start_the_next_step(self, coord: Coordinator):
+        coord._run_deadline = time.monotonic() - 1.0
+        started: list[bool] = []
+
+        async def _must_not_run() -> None:
+            started.append(True)
+
+        await coord._await_within_session_bound(_must_not_run, stage="test")
+        assert started == []
+
+    @pytest.mark.asyncio
+    async def test_no_deadline_still_runs_the_step(self, coord: Coordinator):
+        started: list[bool] = []
+
+        async def _ok() -> None:
+            started.append(True)
+
+        await coord._await_within_session_bound(_ok, stage="test")
+        assert started == [True]
+
+    @pytest.mark.asyncio
+    async def test_closing_uses_the_grace_bound_not_the_session_deadline(self, coord: Coordinator):
+        coord._run_deadline = time.monotonic() - 10.0
+        coord._closing_deadline = time.monotonic() + 60.0
+        coord.shared_state.closing_phase = True
+        started: list[bool] = []
+
+        async def _ok() -> None:
+            started.append(True)
+
+        await coord._await_within_session_bound(_ok, stage="close")
+        assert started == [True]
