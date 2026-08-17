@@ -1514,9 +1514,12 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
                     + "prior. Pick the **1–2 most conservative, "
                     + "well-attested defaults** from those bullets that are "
                     + "compatible with the hardware (Section 2) and the "
-                    + "gap symptom (Section 3); flag each as "
-                    + "``confidence: low`` and ``provenance: "
-                    + "domain_focus_default`` in the proposal. Use the "
+                    + "gap symptom (Section 3); flag each with "
+                    + "``provenance: domain_focus_default`` in the proposal "
+                    + "and say it is an unvalidated fallback prior in the "
+                    + "proposal's ``reason``. Do NOT add a ``confidence`` "
+                    + "field: self-reported confidence / gain fields are "
+                    + "stripped from your output before review. Use the "
                     + "``residual_questions`` field to record what RecipeKB, "
                     + "research, or ``mcp__pr_monitor__*`` query a future round should pursue.",
                     "",

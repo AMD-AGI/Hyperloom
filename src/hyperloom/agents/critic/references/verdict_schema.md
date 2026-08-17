@@ -33,7 +33,8 @@ caller explicitly asks for markdown.
   ],
   "alternative_action": null,
   "advice_text": "",
-  "notes": []
+  "notes": [],
+  "failure_reason_code": ""
 }
 ```
 
@@ -61,6 +62,17 @@ Verdict rules:
   blank line).
 - `needs_review`: dispatch must not proceed. Use for high-risk mock, timeout,
   unavailable, or insufficient-evidence cases.
+
+`failure_reason_code` names the review rule a non-`approve` verdict rests on,
+copied verbatim from the `failure_reason_code` of the matching rule in
+`judge_bundle.review_constraints` (the quantitative-claim rule, a cross-domain
+rule, or a safety guard). Leave it empty when the verdict rests on your own
+judgement rather than a rule handed to you in the bundle. Several of those
+rules declare `advise` as their `failure_verdict` because rejecting on them
+costs the round every proposal in the set; naming the rule is how the
+Coordinator can tell such a verdict apart from a substantive rejection, so a
+verdict that cites a rule must carry its code rather than only mentioning it in
+`reasoning`.
 
 Approve example:
 

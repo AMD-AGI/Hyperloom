@@ -1403,9 +1403,11 @@ class SpecialistRunner:
             deduped,
             base_checkout=base_checkout,
         )
-        forbidden_fields, numeric_warnings = _patch_safety.scan_quantitative_claims(
-            done_payload,
-        )
+        numeric_warnings = _patch_safety.scan_numeric_claims(done_payload)
+        # Strip, do not forward: the Critic is instructed to reject the whole
+        # proposal_set over these fields, which costs the round every idea the
+        # specialist produced. The audit note below records what the strip took.
+        forbidden_fields = _patch_safety.strip_forbidden_proposal_fields(done_payload)
         safety = _patch_safety.PatchSafetyReport(
             kept_patches=kept,
             dropped=dropped,
