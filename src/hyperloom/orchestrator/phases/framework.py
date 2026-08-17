@@ -1812,6 +1812,11 @@ class FrameworkPhase(PhaseHandler):
             if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
                 state.set_stop_reason("enablement_stalled")
                 stop_set = "enablement_stalled"
+        try:
+            from ._enablement_artifacts import snapshot_round as _snap
+            _snap(self.session_dir, res)
+        except Exception:  # noqa: BLE001
+            log.debug("enablement: artifact snapshot failed", exc_info=True)
         # A rearm always ends the round.
         state.enablement.inflight_task_id = ""
         try:

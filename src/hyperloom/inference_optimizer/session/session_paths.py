@@ -257,6 +257,38 @@ def reports_dir(session_dir: Path) -> Path:
     return Path(session_dir) / "reports"
 
 
+def enablement_dir(session_dir: Path) -> Path:
+    """``<sd>/reports/enablement/`` — root for archived enablement round artifacts.
+
+    The ``reports/`` parent is retained by the archive collector, so everything
+    written here survives session upload without any collector-side change.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/reports/enablement``.
+    """
+    return reports_dir(session_dir) / "enablement"
+
+
+def enablement_round_dir(session_dir: Path, task_id: str) -> Path:
+    """``<sd>/reports/enablement/<task_id>/`` — per-round artifact directory.
+
+    One directory is created per integrate_patch round so concurrent or serial
+    rounds from different specialist dispatches never overwrite each other.
+
+    Args:
+        session_dir: The session root directory.
+        task_id: The specialist task id that drove this round.
+
+    Returns:
+        ``<session_dir>/reports/enablement/<task_id>``.
+    """
+    safe = task_id.replace("/", "_").replace("..", "_") if task_id else "unknown"
+    return enablement_dir(session_dir) / safe
+
+
 # Full-trace artefacts (token + decision timeline) under reports/trace/.
 # Layout:
 #
@@ -824,6 +856,8 @@ __all__ = [
     "manifest_path",
     "patches_dir",
     "failure_evidence_path",
+    "enablement_dir",
+    "enablement_round_dir",
     "reports_dir",
     "research_hints_json",
     "session_failures_dir",
