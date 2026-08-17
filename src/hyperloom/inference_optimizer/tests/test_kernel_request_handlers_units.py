@@ -781,7 +781,7 @@ class TestForgeGemmHelperCoverage:
             ),
         ],
     )
-    def test_resolve_forge_fusion_agent_follows_provider_shape(
+    def test_resolve_forge_agent_follows_provider_shape(
         self,
         monkeypatch,
         shape,
@@ -791,7 +791,7 @@ class TestForgeGemmHelperCoverage:
         """Provider shape selects one matching backend and its model variable."""
         _pin_fusion_provider_env(monkeypatch, shape)
 
-        assert krh._resolve_forge_fusion_agent({}) == (
+        assert krh._resolve_forge_agent({}) == (
             expected_backend,
             expected_model,
         )
@@ -803,7 +803,7 @@ class TestForgeGemmHelperCoverage:
             (_ANTHROPIC_ONLY_ENV, ("claude", DEFAULT_CLAUDE_MODEL)),
         ],
     )
-    def test_resolve_forge_fusion_agent_uses_established_model_defaults(
+    def test_resolve_forge_agent_uses_established_model_defaults(
         self,
         monkeypatch,
         shape,
@@ -811,22 +811,22 @@ class TestForgeGemmHelperCoverage:
     ):
         _pin_fusion_provider_env(monkeypatch, shape)
 
-        assert krh._resolve_forge_fusion_agent({}) == expected
+        assert krh._resolve_forge_agent({}) == expected
 
-    def test_resolve_forge_fusion_agent_honors_valid_explicit_override(self, monkeypatch):
+    def test_resolve_forge_agent_honors_valid_explicit_override(self, monkeypatch):
         _pin_fusion_provider_env(
             monkeypatch,
             {**_OPENAI_ONLY_ENV, **_ANTHROPIC_ONLY_ENV},
         )
 
-        assert krh._resolve_forge_fusion_agent(
+        assert krh._resolve_forge_agent(
             {
                 "agent_backend": "codex",
                 "llm_model": "gpt-explicit",
             }
         ) == ("codex", "gpt-explicit")
 
-    def test_resolve_forge_fusion_agent_prefers_forge_claude_model_over_claude_model(
+    def test_resolve_forge_agent_prefers_forge_claude_model_over_claude_model(
         self, monkeypatch
     ):
         """FORGE_CLAUDE_MODEL mirrors GEAK_CLAUDE_MODEL for the Claude forge path."""
@@ -839,12 +839,12 @@ class TestForgeGemmHelperCoverage:
             },
         )
 
-        assert krh._resolve_forge_fusion_agent({}) == (
+        assert krh._resolve_forge_agent({}) == (
             "claude",
             "claude-forge-only",
         )
 
-    def test_resolve_forge_fusion_agent_prefers_forge_codex_model_over_codex_model(
+    def test_resolve_forge_agent_prefers_forge_codex_model_over_codex_model(
         self, monkeypatch
     ):
         """FORGE_CODEX_MODEL overrides CODEX_MODEL when the forge backend is Codex."""
@@ -857,12 +857,12 @@ class TestForgeGemmHelperCoverage:
             },
         )
 
-        assert krh._resolve_forge_fusion_agent({}) == (
+        assert krh._resolve_forge_agent({}) == (
             "codex",
             "gpt-forge-only",
         )
 
-    def test_resolve_forge_fusion_agent_forge_model_loses_to_payload_llm_model(
+    def test_resolve_forge_agent_forge_model_loses_to_payload_llm_model(
         self, monkeypatch
     ):
         """Request ``llm_model`` still outranks the forge-specific env knobs."""
@@ -875,11 +875,11 @@ class TestForgeGemmHelperCoverage:
             },
         )
 
-        assert krh._resolve_forge_fusion_agent(
+        assert krh._resolve_forge_agent(
             {"llm_model": "claude-payload"}
         ) == ("claude", "claude-payload")
 
-    def test_resolve_forge_fusion_agent_ignores_other_backend_forge_model(
+    def test_resolve_forge_agent_ignores_other_backend_forge_model(
         self, monkeypatch
     ):
         """A Codex forge override must not leak onto the Claude forge path."""
@@ -892,25 +892,25 @@ class TestForgeGemmHelperCoverage:
             },
         )
 
-        assert krh._resolve_forge_fusion_agent({}) == (
+        assert krh._resolve_forge_agent({}) == (
             "claude",
             "claude-orchestration",
         )
 
-    def test_resolve_forge_fusion_agent_rejects_invalid_explicit_backend(self, monkeypatch):
+    def test_resolve_forge_agent_rejects_invalid_explicit_backend(self, monkeypatch):
         _pin_fusion_provider_env(
             monkeypatch,
             {**_OPENAI_ONLY_ENV, **_ANTHROPIC_ONLY_ENV},
         )
 
         with pytest.raises(ValueError, match="agent_backend"):
-            krh._resolve_forge_fusion_agent({"agent_backend": "anthropic"})
+            krh._resolve_forge_agent({"agent_backend": "anthropic"})
 
-    def test_resolve_forge_fusion_agent_rejects_unconfigured_provider(self, monkeypatch):
+    def test_resolve_forge_agent_rejects_unconfigured_provider(self, monkeypatch):
         _pin_fusion_provider_env(monkeypatch, {})
 
         with pytest.raises(RuntimeError, match="no .*provider.*configured"):
-            krh._resolve_forge_fusion_agent({})
+            krh._resolve_forge_agent({})
 
     def test_resolve_forge_fusion_codex_sandbox_defaults_to_workspace_write(self, monkeypatch):
         _pin_fusion_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
@@ -2265,6 +2265,37 @@ class TestForgeCollectiveCoverage:
         assert result["status"] == "complete"
         assert captured["input"]["agent_backend"] == "codex"
         assert captured["input"]["llm_model"] == "gpt-forge-only"
+
+    @pytest.mark.asyncio
+    async def test_run_forge_collective_unconfigured_provider_fails_before_subprocess(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Collective must fail closed before spawning when no LLM side is set."""
+        SharedState(tp=2).save(tmp_path)
+        _pin_fusion_provider_env(monkeypatch, {})
+
+        async def _should_not_run(*_args, **_kwargs):
+            raise AssertionError("forge-collective must not run without a provider")
+
+        monkeypatch.setattr(krh, "_run_subprocess", _should_not_run)
+
+        result = await krh._run_forge_collective(
+            {
+                "candidate": _collective_candidate(kernel_repo=str(tmp_path)),
+                "tp": 2,
+                "timeout": 10000,
+                "max_hours": 1,
+            },
+            session_dir=tmp_path,
+        )
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "llm_provider_unconfigured"
+        assert result["decision"] == "REVERT"
+        assert result["kept"] is False
+        assert result["engine"] == "forge_collective"
 
 
 def _ensure_torch_module(monkeypatch):

@@ -4144,10 +4144,6 @@ def _resolve_forge_agent(
     return agent_backend, llm_model
 
 
-# Backward-compatible name used by existing forge-fusion call sites and tests.
-_resolve_forge_fusion_agent = _resolve_forge_agent
-
-
 def _resolve_forge_fusion_sandbox_mode(
     payload: Mapping[str, Any],
     *,
