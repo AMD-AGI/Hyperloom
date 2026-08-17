@@ -10,6 +10,7 @@ from hyperloom.inference_optimizer.breakdown.collectors import (
     collect_attribution,
     collect_recorded_optimizations,
 )
+from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, instrument
 
 
 def test_phase_breakdown_schema_declares_every_emitted_bucket():
@@ -542,6 +543,157 @@ def test_a_step_that_recorded_only_a_percentage_is_not_counted_twice():
     assert last["cumulative_gain_pct"] == 25.0
     assert result["validation"]["unattributed_gain_pct"] == 0.0
     assert any("recorded no finishing throughput" in warning for warning in warnings)
+
+
+def test_the_session_total_prefers_what_the_run_measured_over_its_own_sum():
+    """A total summed from the ledger can never be found to disagree with it.
+
+    The run promotes an end-to-end figure of its own when it validates. That
+    figure is the one the section reports, and the ledger's sum is kept beside
+    it so the two can be seen to part company.
+    """
+    operations = [
+        {
+            "operation_id": "op-baseline",
+            "kind": "composite",
+            "name": "baseline",
+            "measurement_refs": ["m-baseline"],
+        },
+        {
+            "operation_id": "op-k1",
+            "kind": "kernel_optimization",
+            "name": "k1",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+        },
+        {
+            "operation_id": "op-validated",
+            "kind": "session_validation",
+            "name": "cumulative_gain_validated",
+            "ended_at": "2026-01-01T01:05:00+00:00",
+            "outputs": {
+                "validated_at_stack_len": 1,
+                "source": "integrate_patch",
+                "measurement_basis": "e2e_rebench",
+                "validated_gain_pct": 14.0,
+            },
+        },
+    ]
+    measurements = [{"measurement_id": "m-baseline", "name": "throughput", "value": 1000.0}]
+    adoptions = [
+        {
+            "adoption_id": "ad-k1",
+            "operation_id": "op-k1",
+            "decision": "KEEP",
+            "validated": True,
+            "throughput_before": 1000.0,
+            "throughput_after": 1100.0,
+        }
+    ]
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", operations, measurements, adoptions, [], [], [], warnings
+    )
+
+    validation = result["validation"]
+    assert validation["method"] == "recorded_session_validation"
+    assert validation["validated_total_gain_pct"] == 14.0
+    assert validation["ledger_total_gain_pct"] == 10.0
+    assert validation["reconciliation_gap_pct"] == 4.0
+    assert validation["validation_basis"] == "e2e_rebench"
+    assert validation["validation_source"] == "integrate_patch"
+    # The session validation is not an attempt and must not become a ledger row.
+    assert len(result["entries"]) == 1
+    assert any("but the run promoted" in warning for warning in warnings)
+
+
+def test_each_promotion_leaves_its_own_checkpoint(tmp_path):
+    """Two checkpoints that measure the same number are still two checkpoints.
+
+    Keying on the value would collapse them, which is the trap an earlier fix
+    already had to dig the measurement ids out of.
+    """
+    for stack_len, ts in ((1, "2026-01-01T01:00:00+00:00"), (2, "2026-01-01T02:00:00+00:00")):
+        instrument.record_session_validation(
+            tmp_path,
+            baseline_tput=1000.0,
+            validated_tput=1100.0,
+            validated_gain_pct=10.0,
+            stack_len=stack_len,
+            source="integrate_patch",
+            measurement_basis="e2e_rebench",
+            ts=ts,
+        )
+
+    operations = [
+        row
+        for row in assemble_parts(tmp_path).get("operations") or []
+        if row.get("kind") == "session_validation"
+    ]
+
+    assert len(operations) == 2
+    # The newest checkpoint is the one the export reports.
+    result = collect_recorded_optimizations("s1", operations, [], [], [], [], [], [])
+    assert result["validation"]["validated_at_stack_len"] == 2
+
+
+def test_a_session_with_no_promoted_figure_falls_back_to_its_own_sum():
+    operations = [
+        {
+            "operation_id": "op-k1",
+            "kind": "kernel_optimization",
+            "name": "k1",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+        },
+    ]
+    adoptions = [
+        {
+            "adoption_id": "ad-k1",
+            "operation_id": "op-k1",
+            "decision": "KEEP",
+            "validated": True,
+            "gain_pct": 5.0,
+        }
+    ]
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", operations, [], adoptions, [], [], [], warnings
+    )
+
+    validation = result["validation"]
+    assert validation["method"] == "ledger_sum"
+    assert validation["validated_total_gain_pct"] == 5.0
+    assert validation["reconciliation_gap_pct"] is None
+
+
+def test_a_keep_no_accuracy_gate_ruled_on_is_counted_as_such():
+    operations = [
+        {
+            "operation_id": "op-fa",
+            "kind": "framework_agent",
+            "name": "framework_agent",
+            "agent": "framework_agent",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+        },
+    ]
+    adoptions = [
+        {
+            "adoption_id": "ad-fa",
+            "operation_id": "op-fa",
+            "decision": "KEEP",
+            "validated": True,
+            "gain_pct": 3.0,
+            "validation_basis": "keep_verdict_unscored",
+        }
+    ]
+
+    result = collect_recorded_optimizations("s1", operations, [], adoptions, [], [], [], [])
+
+    assert result["attempts"][0]["validation_basis"] == "keep_verdict_unscored"
+    assert result["validation"]["unscored_keep_count"] == 1
 
 
 def test_an_adoption_whose_operation_was_never_recorded_is_reported():

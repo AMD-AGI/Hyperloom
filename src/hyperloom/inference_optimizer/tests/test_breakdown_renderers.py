@@ -65,18 +65,64 @@ def test_a_clean_ledger_carries_no_reconciliation_notes():
                 "entries": [{"validated": True, "gain_pct": 10.0}],
                 "summary_by_source": {"explore": {"keeps": 1, "total_gain_pct": 10.0}},
                 "validation": {
+                    "method": "recorded_session_validation",
                     "validated_total_gain_pct": 10.0,
+                    "ledger_total_gain_pct": 10.0,
+                    "reconciliation_gap_pct": 0.0,
                     "attributed_total_gain_pct": 10.0,
                     "unattributed_gain_pct": 0.0,
                     "unmeasured_keep_count": 0,
                     "projected_keep_count": 0,
                     "stale_evidence_count": 0,
+                    "unscored_keep_count": 0,
                 },
             }
         }
     )
 
     assert out.warnings == []
+
+
+def test_a_total_that_only_checks_itself_says_so():
+    """Summing the ledger and calling it the session total proves nothing."""
+    out = opt.render(
+        {
+            "optimizations": {
+                "entries": [{"validated": True, "gain_pct": 10.0}],
+                "summary_by_source": {"explore": {"keeps": 1, "total_gain_pct": 10.0}},
+                "validation": {
+                    "method": "ledger_sum",
+                    "validated_total_gain_pct": 10.0,
+                    "ledger_total_gain_pct": 10.0,
+                    "reconciliation_gap_pct": None,
+                },
+            }
+        }
+    )
+
+    assert any("cannot be checked against each other" in w for w in out.warnings)
+
+
+def test_a_ledger_that_disagrees_with_the_run_is_reported():
+    out = opt.render(
+        {
+            "optimizations": {
+                "entries": [{"validated": True, "gain_pct": 8.0}],
+                "summary_by_source": {"explore": {"keeps": 1, "total_gain_pct": 8.0}},
+                "validation": {
+                    "method": "recorded_session_validation",
+                    "validated_total_gain_pct": 12.0,
+                    "ledger_total_gain_pct": 8.0,
+                    "reconciliation_gap_pct": 4.0,
+                    "unscored_keep_count": 1,
+                },
+            }
+        }
+    )
+
+    joined = " ".join(out.warnings)
+    assert "adopted steps add up to" in joined
+    assert "no accuracy gate having ruled on them" in joined
 
 
 # ---- data_provenance ------------------------------------------------------

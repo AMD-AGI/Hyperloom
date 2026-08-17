@@ -31,6 +31,21 @@ def _reconciliation_notes(validation: dict[str, Any]) -> list[str]:
         Notes to attach to the section, empty when nothing was left out.
     """
     notes: list[str] = []
+    reconciliation = validation.get("reconciliation_gap_pct")
+    if isinstance(reconciliation, (int, float)) and abs(float(reconciliation)) > 0.01:
+        notes.append(
+            f"The run promoted {fmt_pct(validation.get('validated_total_gain_pct'), plus=True)} "
+            "as validated, but the adopted steps add up to "
+            f"{fmt_pct(validation.get('ledger_total_gain_pct'), plus=True)}. Steps are "
+            "missing from the ledger, or their recorded throughputs disagree "
+            "with the end-to-end measurement."
+        )
+    elif validation.get("method") == "ledger_sum":
+        notes.append(
+            "The session total is the sum of the steps below, not an "
+            "independent measurement, so the two cannot be checked against "
+            "each other."
+        )
     unattributed = float(validation.get("unattributed_gain_pct") or 0.0)
     if abs(unattributed) > 0.01:
         validated = float(validation.get("validated_total_gain_pct") or 0.0)
@@ -53,6 +68,12 @@ def _reconciliation_notes(validation: dict[str, Any]) -> list[str]:
             f"{projected} adopted step(s) recorded no finishing throughput; "
             "their contribution was reconstructed from the executor's own "
             "percentage, so any drift across them is invisible."
+        )
+    unscored = _count(validation.get("unscored_keep_count"))
+    if unscored:
+        notes.append(
+            f"{unscored} adopted step(s) were kept on the verdict alone, with "
+            "no accuracy gate having ruled on them."
         )
     stale = _count(validation.get("stale_evidence_count"))
     if stale:

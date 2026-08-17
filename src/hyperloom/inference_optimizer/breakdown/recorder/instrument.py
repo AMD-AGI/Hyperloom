@@ -729,7 +729,13 @@ def _mirror_action_v4(
         "ACCURACY_UNAVAILABLE_REJECT",
     }
     validated = result.get("validated", result.get("accuracy_pass"))
+    # An accuracy gate that ran but returned no verdict is a first-class
+    # outcome, not a failure: a session with no eval configured, or a baseline
+    # accuracy of zero, reaches here with ``None``. Reading that as "did not
+    # pass" would zero out the whole ledger for such a run. The KEEP stands;
+    # what gets recorded alongside it is that nothing checked the accuracy.
     validation_passed = keep_verdict if validated is None else bool(validated)
+    validation_basis = "keep_verdict_unscored" if validated is None else "accuracy_pass"
     if action in adoptable_actions and ((keep_verdict and validation_passed) or revert_verdict):
         adoption_id = _stable_id("adoption", operation_id)
         adoption_ids.append(adoption_id)
@@ -761,6 +767,7 @@ def _mirror_action_v4(
                 result.get("output_throughput") or result.get("tput")
             ),
             configuration=dict(result.get("configuration") or {}),
+            validation_basis=validation_basis,
             producer=producer,
             metadata={
                 "keep_threshold_pct": keep_threshold_pct,
@@ -1970,6 +1977,7 @@ def record_geak_operation(
             artifact_ids=artifact_refs,
             kind="kernel_optimizer",
             configuration=dict(value.get("accepted_config") or {}),
+            validation_basis="e2e_validation",
             metadata={"validation_tier": "orchestrator_final"},
         )
     else:
@@ -2193,6 +2201,7 @@ def record_gemm_tuning_operation(
         kind="gemm_tuning",
         gain_pct=to_float(value.get("e2e_gain_pct")),
         configuration=dict(value.get("recommended_env") or value.get("extra_envs") or {}),
+        validation_basis="e2e_validation",
     )
     record_operation(session_dir, operation_id=operation_id, producer=producer, adoption_refs=[adoption_id])
 
@@ -3387,6 +3396,7 @@ def record_kernel_e2e(
                     "target_file": target_file,
                     "extra_server_args": str(extra_server_args or ""),
                 },
+                validation_basis="e2e_validation",
                 metadata={"validation_tier": validation_tier or "integrate_e2e"},
             )
             adoption_refs.append(adoption_id)
@@ -4101,6 +4111,97 @@ def record_artifact(
     )
 
 
+def record_session_validation(
+    session_dir: Path | str | None,
+    *,
+    baseline_tput: float | None,
+    validated_tput: float | None,
+    validated_gain_pct: float | None,
+    stack_len: int,
+    source: str,
+    measurement_basis: str,
+    ts: str | None = None,
+    producer: str = PRODUCER_COORDINATOR,
+) -> str | None:
+    """Record what the session was measured to have gained, as it was decided.
+
+    Without this the breakdown's session total is the sum of its own ledger,
+    so the ledger can never be found to disagree with the end-to-end
+    measurement the run actually promoted -- the two numbers come from the
+    same addition. Recording the promoted figure at the moment it is promoted
+    gives the export something independent to reconcile against.
+
+    Each promotion is its own record rather than an overwrite of one, so a
+    session leaves behind the checkpoints it passed through. The id is drawn
+    from the stack length and the timestamp, never from the value: two
+    checkpoints that happen to measure the same number are still two
+    checkpoints.
+
+    Args:
+        session_dir: The hyperloom session directory.
+        baseline_tput: Throughput the gain is measured against.
+        validated_tput: Throughput just measured.
+        validated_gain_pct: The promoted gain, in percent of baseline.
+        stack_len: Adopted-stack length this figure was validated at.
+        source: The path that promoted it, e.g. ``integrate_patch``.
+        measurement_basis: ``e2e_rebench`` when the throughput was measured
+            end to end, ``derived_speedup`` when it was inferred from a
+            micro-benchmark's speedup.
+        ts: Author-time stamp; defaults to now.
+        producer: Recorder producer label.
+
+    Returns:
+        The operation id, or ``None`` when nothing could be recorded.
+    """
+    if not session_dir or validated_gain_pct is None:
+        return None
+    stamp = str(ts or _now_iso_safe())
+    operation_id = _stable_id("op", "session_validation", stack_len, stamp)
+    occurrence = _measurement_occurrence(operation_id)
+    measurement_ids: list[str] = []
+    for name, value, unit in (
+        ("baseline_throughput", baseline_tput, "tok/s"),
+        ("throughput", validated_tput, "tok/s"),
+        ("gain", validated_gain_pct, "percent"),
+    ):
+        if value is None:
+            continue
+        measurement_id = _stable_id("measurement", operation_id, name, occurrence)
+        measurement_ids.append(measurement_id)
+        record_measurement(
+            session_dir,
+            measurement_id=measurement_id,
+            operation_id=operation_id,
+            kind=name,
+            name=name,
+            value=float(value),
+            unit=unit,
+            measured_at=stamp,
+            metric_basis=measurement_basis,
+            source={"action": "session_validation", "role": name},
+            producer=producer,
+        )
+    record_operation(
+        session_dir,
+        operation_id=operation_id,
+        kind="session_validation",
+        name="cumulative_gain_validated",
+        agent="coordinator",
+        status="succeeded",
+        started_at=stamp,
+        ended_at=stamp,
+        measurement_refs=measurement_ids,
+        outputs={
+            "validated_at_stack_len": stack_len,
+            "source": source,
+            "measurement_basis": measurement_basis,
+            "validated_gain_pct": float(validated_gain_pct),
+        },
+        producer=producer,
+    )
+    return operation_id
+
+
 def record_trace_event(
     session_dir: Path | str | None,
     event: Mapping[str, Any] | None = None,
@@ -4141,6 +4242,7 @@ __all__ = [
     "record_measurement",
     "record_operation",
     "record_robustness_signal",
+    "record_session_validation",
     "record_singleton_section",
     "record_specialist_round",
     "record_subject",

@@ -1268,11 +1268,12 @@ class KernelPhase(PhaseHandler):
 
         base = float(self.shared_state.baseline_tput or 0.0)
         if base > 0:
-            gain = (measured - base) / base * 100.0
-            self.shared_state.cumulative_gain = gain
-            self.shared_state.cumulative_gain_validated = gain
-            self.shared_state.cumulative_gain_validated_ts = ts
-            self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+            self.shared_state.cumulative_gain = (measured - base) / base * 100.0
+            self._update_cumulative_gain_validated(
+                measured,
+                source="geak_e2e_promote",
+                ts=ts,
+            )
         self.shared_state.cumulative_gain_provenance = provenance
         self.shared_state.resume_pending_revalidation = False
         self.shared_state.geak_pending = {}
@@ -2145,10 +2146,28 @@ class KernelPhase(PhaseHandler):
             "workspace": result.get("workspace"),
             "extra_envs": extra_envs,
         }
+        # Unlike every other promotion this figure is inferred from a
+        # micro-benchmark's speedup, never measured end to end, so it is
+        # recorded as such rather than through the e2e path.
         self.shared_state.cumulative_gain = (speedup - 1.0) * 100.0
         self.shared_state.cumulative_gain_validated = self.shared_state.cumulative_gain
         self.shared_state.cumulative_gain_validated_ts = ts
         self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack or [])
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_session_validation(
+                self.session_dir,
+                baseline_tput=float(self.shared_state.baseline_tput or 0.0) or None,
+                validated_tput=float(tuned_tput) if tuned_tput else None,
+                validated_gain_pct=float(self.shared_state.cumulative_gain),
+                stack_len=self.shared_state.cumulative_gain_validated_stack_len,
+                source="gemm_tuning_promote",
+                measurement_basis="derived_speedup",
+                ts=ts,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("record_session_validation failed", exc_info=True)
 
     def _replace_latest_gemm_tuning_attempt(self, result: dict[str, Any]) -> None:
         """Sync the latest GEMM history row after forge E2E rewrites ``result``."""
@@ -2453,9 +2472,18 @@ class KernelPhase(PhaseHandler):
             }
             total_gain = (running_tput - baseline_tput) / baseline_tput * 100.0 if baseline_tput > 0 else 0.0
             self.shared_state.cumulative_gain = total_gain
-            self.shared_state.cumulative_gain_validated = total_gain
-            self.shared_state.cumulative_gain_validated_ts = ts
-            self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack or [])
+            if baseline_tput > 0:
+                self._update_cumulative_gain_validated(
+                    running_tput,
+                    source="forge_gemm_tuning_e2e",
+                    ts=ts,
+                )
+            else:
+                self.shared_state.cumulative_gain_validated = total_gain
+                self.shared_state.cumulative_gain_validated_ts = ts
+                self.shared_state.cumulative_gain_validated_stack_len = len(
+                    self.shared_state.optimization_stack or []
+                )
             log.info(
                 "forge gemm E2E: %d tuners KEEP (total gain=+%.2f%%), %d REVERT",
                 len(kept),
@@ -2808,12 +2836,11 @@ class KernelPhase(PhaseHandler):
         except (TypeError, ValueError):
             baseline_tput = 0.0
         if baseline_tput > 0:
-            total_gain = (new_tput - baseline_tput) / baseline_tput * 100.0
-            self.shared_state.cumulative_gain = total_gain
-            self.shared_state.cumulative_gain_validated = total_gain
-            self.shared_state.cumulative_gain_validated_ts = ts
-            self.shared_state.cumulative_gain_validated_stack_len = len(
-                self.shared_state.optimization_stack or []
+            self.shared_state.cumulative_gain = (new_tput - baseline_tput) / baseline_tput * 100.0
+            self._update_cumulative_gain_validated(
+                new_tput,
+                source="fusion_promote",
+                ts=ts,
             )
 
     def _current_tput_from_validated_gain(self) -> float:

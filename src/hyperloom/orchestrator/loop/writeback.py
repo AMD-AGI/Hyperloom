@@ -239,7 +239,14 @@ class WritebackCollaborator:
                 (result or {}).get("kernel_id") if isinstance(result, dict) else None,
             )
 
-    def _update_cumulative_gain_validated(self, new_tput: float) -> None:
+    def _update_cumulative_gain_validated(
+        self,
+        new_tput: float,
+        *,
+        source: str = "writeback",
+        measurement_basis: str = "e2e_rebench",
+        ts: str | None = None,
+    ) -> None:
         """Update cumulative_gain_validated, its timestamp, and stack-length watermark.
 
         Call only when ``baseline_tput > 0`` and ``new_tput`` is a positive
@@ -249,11 +256,36 @@ class WritebackCollaborator:
         Args:
             new_tput: The newly measured throughput to promote as the validated
                 gain anchor.
+            source: Which promotion path produced this figure, recorded so the
+                breakdown can name it.
+            measurement_basis: ``e2e_rebench`` when ``new_tput`` was measured
+                end to end, ``derived_speedup`` when it was inferred from a
+                micro-benchmark.
+            ts: Author-time stamp the caller already minted for this
+                promotion; defaults to now.
         """
         validated_gain = (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
+        ts = str(ts or datetime.now(timezone.utc).isoformat())
         self.shared_state.cumulative_gain_validated = float(validated_gain)
-        self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+        self.shared_state.cumulative_gain_validated_ts = ts
         self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+        # The breakdown's own total is the sum of its ledger, so without this
+        # record there is nothing for it to disagree with.
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_session_validation(
+                self.session_dir,
+                baseline_tput=float(self.shared_state.baseline_tput),
+                validated_tput=float(new_tput),
+                validated_gain_pct=float(validated_gain),
+                stack_len=self.shared_state.cumulative_gain_validated_stack_len,
+                source=source,
+                measurement_basis=measurement_basis,
+                ts=ts,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("record_session_validation failed", exc_info=True)
 
     async def _record_integrate_keep(self, result: dict[str, Any]) -> None:
         """Promote a kernel integrate KEEP into the optimization stack.

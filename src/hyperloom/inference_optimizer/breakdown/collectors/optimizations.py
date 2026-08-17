@@ -460,6 +460,9 @@ def _recorded_attempt_row(
         ),
         "keep_threshold_pct": _threshold_from_operation(operation),
         "adopted": adopted,
+        # What stood behind the verdict: an accuracy gate that ruled, an
+        # end-to-end re-measurement, or a KEEP nothing checked the accuracy of.
+        "validation_basis": str(adoption.get("validation_basis") or ""),
         "attribution_eligible": (
             bool(adoption.get("attribution_eligible", True)) if adoption else None
         ),
@@ -571,7 +574,12 @@ def _recorded_baseline_throughput(
             measurement = measurement_by_id.get(str(measurement_id))
             if not measurement:
                 continue
-            if str(measurement.get("name") or "").strip().lower() != "throughput":
+            # Producers differ on which of the two names they stamp on a
+            # baseline run; on a baseline operation both mean the same thing.
+            if str(measurement.get("name") or "").strip().lower() not in {
+                "throughput",
+                "baseline_throughput",
+            }:
                 continue
             value = _to_float(measurement.get("value"))
             if not value:
@@ -580,6 +588,38 @@ def _recorded_baseline_throughput(
             if earliest is None or taken_at < earliest[0]:
                 earliest = (taken_at, value)
     return earliest[1] if earliest else None
+
+
+def _recorded_session_validation(
+    operations: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the last gain the run itself promoted as validated.
+
+    This is the only figure in the section that does not come from the ledger,
+    which is exactly why it is worth having: a total computed by summing the
+    ledger can never be found to disagree with it. Sessions recorded before
+    producers wrote this have none, and the caller falls back to the sum.
+
+    Args:
+        operations: The recorded operation stream.
+
+    Returns:
+        The newest session-validation record's outputs, or ``None``.
+    """
+    latest: tuple[int, float, dict[str, Any]] | None = None
+    for operation in operations:
+        if not isinstance(operation, dict) or _work_kind(operation) != "session_validation":
+            continue
+        outputs = operation.get("outputs") if isinstance(operation.get("outputs"), dict) else {}
+        if _to_float(outputs.get("validated_gain_pct")) is None:
+            continue
+        # Stack length first: it is the run's own ordering of these
+        # checkpoints, and it survives clocks that do not move monotonically.
+        stack_len = int(_to_float(outputs.get("validated_at_stack_len")) or 0)
+        at = _parse_ts(operation.get("ended_at") or operation.get("started_at")) or 0.0
+        if latest is None or (stack_len, at) >= (latest[0], latest[1]):
+            latest = (stack_len, at, outputs)
+    return latest[2] if latest else None
 
 
 def _summarize_by_agent(
@@ -1019,6 +1059,27 @@ def collect_recorded_optimizations(
             "that were later written over, so their evidence cannot be "
             f"re-checked: {sorted(stale_evidence)[:5]}"
         )
+
+    unscored_keeps = sum(
+        1
+        for attempt in attempts
+        if attempt.get("adopted") and attempt.get("validation_basis") == "keep_verdict_unscored"
+    )
+
+    session_validation = _recorded_session_validation(operations)
+    recorded_total = (
+        _to_float(session_validation.get("validated_gain_pct")) if session_validation else None
+    )
+    if recorded_total is not None and abs(recorded_total - cumulative) > 0.01:
+        # The one disagreement this section could never previously surface:
+        # the ledger and the figure the run promoted are now two independent
+        # numbers, so they can be seen to part company.
+        warnings.append(
+            "optimizations: the ledger totals "
+            f"{cumulative:+.6f}pp but the run promoted {recorded_total:+.6f}pp as "
+            "validated; adopted steps are missing from the ledger or their "
+            "recorded throughputs disagree with the end-to-end measurement"
+        )
     return {
         "schema_version": OPTIMIZATIONS_SCHEMA_VERSION,
         "source_of_truth": "recorder",
@@ -1029,15 +1090,43 @@ def collect_recorded_optimizations(
         "summary_by_source": summary_by_source,
         "summary_by_kind": summary_by_kind,
         "validation": {
-            "method": "recorded_adoptions",
-            "validated_at_stack_len": len(entries),
+            "method": (
+                "recorded_session_validation" if recorded_total is not None else "ledger_sum"
+            ),
+            "validated_at_stack_len": (
+                int(_to_float(session_validation.get("validated_at_stack_len")) or 0)
+                if session_validation
+                else len(entries)
+            ),
             # What the session moved end to end, and how much of that any
             # attempt is willing to claim. The difference is the part no
             # adopted step accounts for, and it is stated rather than absorbed.
-            "validated_total_gain_pct": round(cumulative, 6),
+            "validated_total_gain_pct": round(
+                recorded_total if recorded_total is not None else cumulative,
+                6,
+            ),
+            # The same figure the ledger arrives at on its own. Kept beside the
+            # measured one so the two can be seen to differ; when the measured
+            # one is absent they are the same number by construction, and
+            # nothing here can be checked.
+            "ledger_total_gain_pct": round(cumulative, 6),
+            "validation_basis": (
+                str(session_validation.get("measurement_basis") or "")
+                if session_validation
+                else "ledger_sum"
+            ),
+            "validation_source": (
+                str(session_validation.get("source") or "") if session_validation else ""
+            ),
+            "reconciliation_gap_pct": (
+                round(recorded_total - cumulative, 6) if recorded_total is not None else None
+            ),
             "attributed_total_gain_pct": round(attributed, 6),
             "unattributed_gain_pct": round(unattributed, 6),
-            "attribution_gap_pct": round(cumulative - attributed, 6),
+            "attribution_gap_pct": round(
+                (recorded_total if recorded_total is not None else cumulative) - attributed,
+                6,
+            ),
             "attempt_count": len(attempts),
             "keep_count": len(entries),
             "non_attributable_keep_count": len(non_attributable),
@@ -1051,6 +1140,9 @@ def collect_recorded_optimizations(
             ),
             # Adopted steps whose evidence trail no longer resolves.
             "stale_evidence_count": len(stale_evidence),
+            # Adopted on the strength of a KEEP verdict alone, with no
+            # accuracy gate having ruled on them.
+            "unscored_keep_count": unscored_keeps,
             "notes": [
                 "Projected from author-time recorder streams "
                 "(operations/adoptions/measurements/artifacts)."
