@@ -25,7 +25,9 @@ from hyperloom.inference_optimizer.protocol.intent import (
     validate_envelope,
 )
 from hyperloom.orchestrator.loop.coordinator_helpers import (
+    collapse_verdict_map,
     collapse_verdicts,
+    proceedable_variant_names,
     verdict_held_to_its_rule,
     verdict_map_entry_grounds,
     verdict_map_entry_held_to_its_rule,
@@ -350,7 +352,7 @@ async def test_legacy_single_verdict_still_materialises_whole_proposal(coord):
 
 @pytest.mark.asyncio
 async def test_verdict_map_collapses_to_summary_single_verdict(coord):
-    """A ``verdict_map`` collapses to a summary verdict (approve if any variant approved); whole proposal materialised."""
+    """A mixed map proceeds on the approved subset, not the whole grid."""
     pending = _seed_explore_proposal(coord)
     intent = Intent(
         type=IntentType.REVIEW_VERDICT,
@@ -366,9 +368,9 @@ async def test_verdict_map_collapses_to_summary_single_verdict(coord):
     )
     await coord._handle_review_verdict("critic", intent)
     assert pending.decided is True
-    assert pending.verdict == "approve"  # any approve → summary approve
+    assert pending.verdict == "approve"
     assert len(coord._materialise_calls) == 1
-    assert coord._materialise_calls[0][1] is None
+    assert coord._materialise_calls[0][1] == {"v_a"}
     bus_msgs = [m for m in coord.bus.messages if m.topic == "review_verdict"]
     assert len(bus_msgs) == 1
     assert bus_msgs[0].payload["verdict"] == "approve"
@@ -377,9 +379,7 @@ async def test_verdict_map_collapses_to_summary_single_verdict(coord):
 
 @pytest.mark.asyncio
 async def test_verdict_map_mixed_collapse_logs_audit(coord, caplog):
-    # Defensive audit (log-only): a verdict_map that collapses to approve must
-    # STILL materialise the whole proposal (behaviour unchanged) AND emit a
-    # log-only audit record for traceability.
+    """A mixed map still logs the collapse, and materialises only the proceedable names."""
     import logging
 
     pending = _seed_explore_proposal(coord)
@@ -395,10 +395,9 @@ async def test_verdict_map_mixed_collapse_logs_audit(coord, caplog):
     )
     with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.intent_router"):
         await coord._handle_review_verdict("critic", intent)
-    # behaviour unchanged: any approve -> summary approve -> whole proposal materialised
     assert pending.verdict == "approve"
     assert len(coord._materialise_calls) == 1
-    # log-only audit fired
+    assert coord._materialise_calls[0][1] == {"v_a"}
     assert any("review_verdict collapse" in r.getMessage() for r in caplog.records)
 
 
@@ -420,6 +419,27 @@ async def test_verdict_map_all_rejected_collapses_to_reject(coord):
     await coord._handle_review_verdict("critic", intent)
     assert pending.verdict == "reject"
     assert coord._materialise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_genuine_reject_does_not_sink_advised_siblings(coord):
+    """A substantive reject on one variant must not discard siblings the Critic advised through."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-partial", variants=["v_a", "v_b", "v_c"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": pending.proposal_msg_id,
+            "verdict_map": {
+                "v_a": {"verdict": "advise", "rationale": "worth a look"},
+                "v_b": {"verdict": "reject", "rationale": "kb says no"},
+                "v_c": {"verdict": "approve"},
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "approve"
+    assert len(coord._materialise_calls) == 1
+    assert coord._materialise_calls[0][1] == {"v_a", "v_c"}
 
 
 @pytest.mark.asyncio
@@ -1169,6 +1189,7 @@ async def test_one_variant_held_to_advise_does_not_out_rank_its_siblings(coord):
     # Without the per-entry hold, reject out-ranks advise and the set is lost.
     assert pending.verdict == "advise"
     assert len(coord._materialise_calls) == 1
+    assert coord._materialise_calls[0][1] == {"v_a", "v_b"}
 
 
 @pytest.mark.asyncio
@@ -1194,6 +1215,7 @@ async def test_a_variant_citing_its_rule_in_the_key_the_entry_carries_is_held(co
 
     assert pending.verdict == "advise"
     assert len(coord._materialise_calls) == 1
+    assert coord._materialise_calls[0][1] == {"v_b"}
 
 
 @pytest.mark.asyncio
@@ -1211,6 +1233,7 @@ async def test_a_grid_rejected_only_on_advisory_rules_survives(coord):
     await coord._handle_review_verdict("critic", intent)
     assert pending.verdict == "advise"
     assert len(coord._materialise_calls) == 1
+    assert coord._materialise_calls[0][1] == {"v_a", "v_b"}
 
 
 @pytest.mark.asyncio
@@ -1696,6 +1719,30 @@ def test_the_collapse_keeps_its_priority_order(verdicts, expected):
     assert collapse_verdicts(verdicts) == expected
 
 
+def test_proceedable_names_drop_rejects_and_blank_keys():
+    assert proceedable_variant_names(
+        {"v_a": "approve", "v_b": "reject", "": "advise", "v_c": "advise", "v_d": "needs_review"}
+    ) == {"v_a", "v_c"}
+
+
+def test_collapse_verdict_map_keeps_proceedable_siblings():
+    summary, names = collapse_verdict_map({"v_a": "advise", "v_b": "reject", "v_c": "approve"})
+    assert summary == "approve"
+    assert names == {"v_a", "v_c"}
+
+
+def test_collapse_verdict_map_advise_survives_a_sibling_reject():
+    summary, names = collapse_verdict_map({"v_a": "advise", "v_b": "reject"})
+    assert summary == "advise"
+    assert names == {"v_a"}
+
+
+def test_collapse_verdict_map_with_no_proceedable_variant_stays_reject():
+    summary, names = collapse_verdict_map({"v_a": "reject", "v_b": "needs_review"})
+    assert summary == "reject"
+    assert names is None
+
+
 # 4. _materialize_approved_proposal — filter semantics (unit)
 @pytest.mark.asyncio
 async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
@@ -1750,6 +1797,40 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     names = [v["name"] for v in grid]
     assert names == ["v_a", "v_c"]
     assert create_calls[0]["params"]["critic_filtered_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path):
+    """A filter that matches nothing must not enqueue an empty explore grid."""
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.state = CoordinatorState()
+    coord.recipe_kb = _StubRecipeKB()
+    coord.bus = _StubBus()
+    coord._record_observation = AsyncMock()  # type: ignore[method-assign]
+    create_calls: list[dict[str, Any]] = []
+
+    class _StubTaskRegistry:
+        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+            create_calls.append(dict(kwargs))
+            raise AssertionError("empty filtered grid must not create a task")
+
+    coord.tasks = _StubTaskRegistry()
+    pending = _seed_explore_proposal(coord, variants=["v_a", "v_b"])
+
+    class _MoreState(_BareSharedState):
+        baseline_config_path: str = ""
+        baseline_tput: float = 1000.0
+        synergy_attempted: list[str] = field(default_factory=list)
+        backends_search: dict = field(default_factory=dict)
+        params_search: dict = field(default_factory=dict)
+        current_best: dict = field(default_factory=dict)
+
+    coord.shared_state = _MoreState()
+    await coord._materialize_approved_proposal(pending, approved_variant_names={"no-such-variant"})
+    assert create_calls == []
+    kinds = [call.args[2].get("kind") for call in coord._record_observation.await_args_list]
+    assert "proposal_materialize_skipped" in kinds
 
 
 @pytest.mark.asyncio
