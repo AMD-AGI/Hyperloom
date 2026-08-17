@@ -569,6 +569,22 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     reference_envs: dict[str, str] = field(default_factory=dict)
     reference_model: str = ""
     reference_source: str = ""
+    # Operator launch shape, persisted so a bare --resume serves the same contract.
+    # ``--server-args``: merged with per-task extra_server_args, above the reference base.
+    operator_server_args: str = ""
+    # ``--extra-env NAME=VALUE`` pins.
+    operator_extra_env: dict[str, str] = field(default_factory=dict)
+    # ``--nodes``, feeding the robustness defaults and the IR-8 check. NOT the
+    # cluster hand-off, which is resolved from argv before this state loads.
+    nodes: int = 1
+    # Resolved robustness-agent ``request.options``; a resume layers its own flags
+    # on top, per-key. Stored resolved because the resolution folds in
+    # multi-node / scriptable policy that the individual flags do not carry.
+    robustness_options: dict[str, Any] = field(default_factory=dict)
+    # Warm-recipe replay gates (``--no-warm-replay`` / ``--warm-replay-min-*``).
+    warm_replay_enabled: bool = True
+    warm_replay_min_confidence: float = 0.7
+    warm_replay_min_reproduce_pct: float = 0.8
     # Full accepted configuration stack across action families; current_best keeps the materialized full args/env.
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
     # Index-aligned with ``optimization_stack``: per-entry incremental gain pct; missing => None.
